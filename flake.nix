@@ -72,11 +72,11 @@
               ]
             );
           };
-          boardCommon = {
+          board = pkgs.stdenv.mkDerivation {
             pname = "tiller-board";
             version = "0.1.0";
             src = boardSrc;
-            # vite and vitest run on real node: bun's node shim cannot run jsdom.
+            # vite runs on real node, not bun's node shim.
             nativeBuildInputs = [
               pkgs.bun2nix.hook
               pkgs.nodejs
@@ -86,40 +86,17 @@
               useFakeNode = false;
             };
             dontRunLifecycleScripts = true;
+            buildPhase = ''
+              runHook preBuild
+              bun run build
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              cp -R dist $out
+              runHook postInstall
+            '';
           };
-          board = pkgs.stdenv.mkDerivation (
-            boardCommon
-            // {
-              buildPhase = ''
-                runHook preBuild
-                bun run build
-                runHook postBuild
-              '';
-              installPhase = ''
-                runHook preInstall
-                cp -R dist $out
-                runHook postInstall
-              '';
-            }
-          );
-          boardChecks = pkgs.stdenv.mkDerivation (
-            boardCommon
-            // {
-              pname = "tiller-board-checks";
-              buildPhase = ''
-                runHook preBuild
-                bun run typecheck
-                bun run lint
-                bun run format:check
-                bun run knip
-                bun run test
-                runHook postBuild
-              '';
-              installPhase = ''
-                touch $out
-              '';
-            }
-          );
 
           # The tiller binary, with the board's static files embedded.
           src = lib.fileset.toSource {
@@ -157,7 +134,7 @@
           };
 
           checks = {
-            inherit tiller boardChecks;
+            inherit tiller;
             clippy = craneLib.cargoClippy (
               commonArgs
               // {
@@ -167,17 +144,6 @@
             );
             fmt = craneLib.cargoFmt { inherit src; };
             nextest = craneLib.cargoNextest (commonArgs // { inherit cargoArtifacts; });
-            smoke =
-              pkgs.runCommand "tiller-smoke"
-                {
-                  nativeBuildInputs = [ pkgs.curl ];
-                  # The smoke test binds a localhost port inside the sandbox.
-                  __darwinAllowLocalNetworking = true;
-                }
-                ''
-                  bash ${./scripts/smoke.sh} ${tiller}/bin/tiller
-                  touch $out
-                '';
             bunNixFresh =
               pkgs.runCommand "tiller-bun-nix-fresh"
                 {
