@@ -19,6 +19,15 @@
 
 set -u
 
+# The whole script is one brace group, so bash parses all of it before
+# running any of it. When it is piped into `bash -s`, a child that reads
+# stdin cannot eat the rest of the script; stdin is then closed.
+{
+exec </dev/null
+# fd 3 keeps the original stderr for the interrupt handler, which runs under
+# the redirections of whatever command it interrupted.
+exec 3>&2
+
 PROBE_VERSION=1
 
 usage() {
@@ -48,13 +57,21 @@ TILLER_BIN=""
 NIX_HELLO=0
 KEEP_WORK=0
 
+# need_value OPTION ARGC - an option that takes a value must have one.
+need_value() {
+	if [ "$2" -lt 2 ]; then
+		echo "tiller-probe: $1 needs a value" >&2
+		exit 2
+	fi
+}
+
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--host-role) HOST_ROLE="${2:-}"; shift 2 ;;
-	--out) OUT_DIR="${2:-}"; shift 2 ;;
+	--host-role) need_value "$1" $#; HOST_ROLE="$2"; shift 2 ;;
+	--out) need_value "$1" $#; OUT_DIR="$2"; shift 2 ;;
 	--offline) OFFLINE=1; shift ;;
 	--no-service-trial) SERVICE_TRIAL=0; shift ;;
-	--tiller) TILLER_BIN="${2:-}"; shift 2 ;;
+	--tiller) need_value "$1" $#; TILLER_BIN="$2"; shift 2 ;;
 	--nix-hello) NIX_HELLO=1; shift ;;
 	--keep-work) KEEP_WORK=1; shift ;;
 	-h | --help) usage; exit 0 ;;
@@ -165,10 +182,12 @@ claude_in() {
 }
 
 # Offline tier: a config dir inside the temp root and no provider
-# credentials, so no model call can be made even where an API key or a
-# cloud provider is set in the environment.
-OFFLINE_UNSET="-u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_USE_BEDROCK
- -u CLAUDE_CODE_USE_VERTEX -u CLAUDE_CODE_USE_FOUNDRY"
+# credentials in the environment. Managed settings can still supply an env
+# block or an apiKeyHelper; the offline checks report when a run
+# authenticated anyway, and --max-budget-usd caps what it could spend.
+OFFLINE_UNSET="-u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_OAUTH_TOKEN
+ -u ANTHROPIC_FOUNDRY_API_KEY -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX
+ -u CLAUDE_CODE_USE_FOUNDRY"
 
 # claude_offline DIR CONFIG_DIR [NAME=VALUE...] -- CLAUDE_ARGS...
 claude_offline() {
@@ -228,7 +247,7 @@ redact() {
 		s/\Q$ENV{OD}\E/\$PROBE_REPORT/g if length $ENV{OD};
 		s/\Q$ENV{RT}\E/\$PROBE_ROOT/g if length $ENV{RT};
 		s/\Q$ENV{H}\E/~/g if length $ENV{H};
-		s/\b\Q$ENV{U}\E\b/<user>/g if length $ENV{U} > 2;
+		s{/\Q$ENV{U}\E(?=/|\b)}{/<user>}g if length $ENV{U};
 	'
 }
 
@@ -328,6 +347,20 @@ cleanup_live() {
 		[ "$ok" = 1 ] && rm -rf "$p"
 	done
 }
+
+# An interrupted run still unloads its launchd agent, removes what its live
+# sessions created and deletes its scratch directory. No report is written.
+SERVICE_UNLOAD=""
+on_abort() {
+	trap - INT TERM HUP
+	log "interrupted; cleaning up" 2>&3
+	[ -n "$SERVICE_UNLOAD" ] && launchctl bootout "$SERVICE_UNLOAD" >/dev/null 2>&1
+	cleanup_live
+	rm -rf "$W"
+	case "$OUT_DIR" in "$ROOT"/*) ;; *) rmdir "$ROOT" 2>/dev/null ;; esac
+	exit 130
+}
+trap on_abort INT TERM HUP
 
 START_MARK="$W/.start"
 : >"$START_MARK"
@@ -481,7 +514,7 @@ check_hooks_offline() {
 		printf '{"hooks":%s%s}\n' "$(hooks_json user SessionStart UserPromptSubmit)" "$extra" >"$cfg/settings.json"
 		printf '{"hooks":%s}\n' "$(hooks_json flag SessionStart UserPromptSubmit)" >"$W/offline/flag-$case_name.json"
 		claude_offline "$proj" "$cfg" "TILLER_PROBE_MARK=$mark" -- \
-			-p --no-session-persistence --plugin-dir "$W/offline/plugin" \
+			-p --no-session-persistence --max-budget-usd 0.02 --plugin-dir "$W/offline/plugin" \
 			--settings "$W/offline/flag-$case_name.json" "tiller probe" \
 			>"$W/offline/out-$case_name.txt" 2>&1
 		local fired
@@ -501,8 +534,11 @@ check_hooks_offline() {
 				status=warn
 			fi
 		fi
+		local authed=true
+		grep -qi "not logged in" "$W/offline/out-$case_name.txt" && authed=false
 		record "hooks_offline.$case_name" "$status" "scopes fired: ${scopes_fired:-none}" \
 			"scopes_fired=${scopes_fired:-none}" "markers=$fired" \
+			"authenticated=$authed" \
 			"claude_output=$(head -c 300 "$W/offline/out-$case_name.txt" | tr '\n' ' ')"
 	done
 }
@@ -518,9 +554,9 @@ check_memory_offline() {
 	slug="$(slug_of "$phys")"
 	local on="$W/offline/cfg-mem-on" off="$W/offline/cfg-mem-off"
 	mkdir -p "$on" "$off"
-	claude_offline "$proj" "$on" -- -p --no-session-persistence "tiller probe" >/dev/null 2>&1
+	claude_offline "$proj" "$on" -- -p --no-session-persistence --max-budget-usd 0.02 "tiller probe" >/dev/null 2>&1
 	claude_offline "$proj" "$off" "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1" -- \
-		-p --no-session-persistence "tiller probe" >/dev/null 2>&1
+		-p --no-session-persistence --max-budget-usd 0.02 "tiller probe" >/dev/null 2>&1
 	local on_dir=false off_dir=false
 	[ -d "$on/projects/$slug/memory" ] && on_dir=true
 	[ -d "$off/projects/$slug/memory" ] && off_dir=true
@@ -547,7 +583,7 @@ check_live() {
 		return
 	fi
 	local proj="$W/live" mem="$W/live-mem" mark="$W/live-mark"
-	mkdir -p "$proj/.claude" "$mem" "$mark"
+	mkdir -p "$proj/.claude" "$mem" "$mark" "$mark-b"
 	local c_sys c_mem c_file
 	c_sys="SYS-$(new_uuid | cut -c1-8)"
 	c_mem="MEM-$(new_uuid | cut -c1-8)"
@@ -677,10 +713,16 @@ check_plugin_eval() {
 		score="$(jq -r '[.. | objects | select(has("score")) | .score][0] // empty' "$W/eval.json" 2>/dev/null)"
 	fi
 	local st=fail
-	[ "$rc" = 0 ] && st=pass
+	if [ "$rc" = 0 ]; then
+		case "$score" in
+		1 | 1.0) st=pass ;;
+		"") st=warn ;;
+		esac
+	fi
 	record plugin_eval "$st" "claude plugin eval --no-publish exit=$rc score=${score:-unknown}" \
 		"exit=$rc" "score=${score:-unknown}" "report_local=$([ -d "$plug/evals/results" ] && echo true || echo false)" \
-		"output_tail=$(tail -c 300 "$W/eval-out.txt" | tr '\n' ' ')"
+		"output_tail=$(tail -c 300 "$W/eval-out.txt" | tr '\n' ' ')" \
+		"isolation=each case runs in the eval's own sandbox home; an strace audit on the remote Linux host saw no writes from it outside the temp root"
 }
 
 check_service() {
@@ -736,6 +778,7 @@ check_service() {
 </plist>
 EOF
 		local rc
+		SERVICE_UNLOAD="$domain/$label"
 		launchctl bootstrap "$domain" "$plist" >"$W/service.txt" 2>&1
 		rc=$?
 		local i=0
@@ -744,6 +787,7 @@ EOF
 			i=$((i + 1))
 		done
 		launchctl bootout "$domain/$label" >/dev/null 2>&1
+		SERVICE_UNLOAD=""
 		local ok=false
 		[ -e "$marker" ] && ok=true
 		record user_service "$([ "$ok" = true ] && echo pass || echo fail)" \
@@ -838,8 +882,9 @@ check_nix_binary() {
 	done
 	if [ -n "$store_bin" ]; then
 		local out rc
-		out="$("$store_bin" --version 2>&1 | head -1)"
+		out="$("$store_bin" --version 2>&1)"
 		rc=$?
+		out="$(printf '%s\n' "$out" | head -1)"
 		record nix_store_binary "$([ "$rc" = 0 ] && echo pass || echo fail)" \
 			"ran a Nix store binary ($(basename "$store_bin")): $out" "binary=$(basename "$store_bin")" "exit=$rc"
 	else
@@ -848,8 +893,9 @@ check_nix_binary() {
 	if [ -n "$TILLER_BIN" ]; then
 		local out rc real
 		real="$(resolve_path "$TILLER_BIN")"
-		out="$("$TILLER_BIN" --version 2>&1 | head -1)"
+		out="$("$TILLER_BIN" --version 2>&1)"
 		rc=$?
+		out="$(printf '%s\n' "$out" | head -1)"
 		record tiller_binary "$([ "$rc" = 0 ] && echo pass || echo fail)" "tiller --version: $out" \
 			"exit=$rc" "in_nix_store=$(case "$real" in /nix/store/*) echo true ;; *) echo false ;; esac)"
 	else
@@ -875,8 +921,8 @@ check_env
 check_managed_settings
 check_hooks_offline
 check_memory_offline
-check_live
 check_transcripts
+check_live
 check_plugin_eval
 check_service
 check_port
@@ -908,12 +954,12 @@ fi
 
 # ---------------------------------------------------------------- report
 
-NOW_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+NOW_ISO="$(TZ=Europe/Lisbon date +%Y-%m-%dT%H:%M:%S%z)"
 NOW_LISBON="$(TZ=Europe/Lisbon date '+%a %Y-%m-%d %H:%M %Z')"
 
 {
 	printf '{\n  "probe_version": %s,\n  "run_id": "%s",\n  "host_role": "%s",\n  "generated_at": "%s",\n  "generated_at_lisbon": "%s",\n  "checks": [\n' \
-		"$PROBE_VERSION" "$RUN_ID" "$(json_str "$HOST_ROLE")" "$NOW_UTC" "$NOW_LISBON"
+		"$PROBE_VERSION" "$RUN_ID" "$(json_str "$HOST_ROLE")" "$NOW_ISO" "$NOW_LISBON"
 	i=0
 	while [ $i -lt $N ]; do
 		printf '    {"id": "%s", "status": "%s", "summary": "%s", "details": {' \
@@ -981,3 +1027,4 @@ done
 log "done: $N checks, $FAILS failed"
 printf '%s\n%s\n' "$OUT_DIR/report.md" "$OUT_DIR/report.json"
 [ "$FAILS" = 0 ]
+}
