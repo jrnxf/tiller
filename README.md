@@ -10,6 +10,10 @@ This repository is in bootstrap: the workspace, build and CI are in place, and t
 |---|---|
 | `crates/cli` | The `tiller` binary (Rust) |
 | `board/` | The board web app (Vite, React, TanStack Router), built to static files and embedded in the binary |
+| `docs/` | Design docs, the build plan and checklist, and ADRs |
+| `scripts/` | The smoke test and the scrub check |
+| `probe/` | The read-only host capability probe and its reports |
+| `demo/` | The throwaway board demo, deleted at cutover |
 | `nix/` | Home-manager module and Nix patches |
 | `flake.nix` | Package, dev shell and checks |
 

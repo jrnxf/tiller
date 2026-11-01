@@ -45,6 +45,14 @@ jobs:
       - name: Test
         run: nix develop -c bun run --cwd board test
 
+  scrub:
+    name: scrub
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: No private names, paths or hosts
+        run: scripts/scrub-check.sh
+
   nix:
     name: nix
     runs-on: ubuntu-latest
