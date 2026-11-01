@@ -8,7 +8,7 @@ Hosts are named by role:
 - **Host B**: the remote Linux host.
 - **Host C**: the work Mac. It is managed, and its data never leaves it.
 
-Status: **host B is probed. Hosts A and C are pending**: each needs one run of the probe on that machine (see `probe/README.md`). Host B's redacted report is in [`probe/reports/remote-linux.md`](../../probe/reports/remote-linux.md) ([JSON](../../probe/reports/remote-linux.json)). Every row below marks what is still unknown, and the minimum common behavior is written so that it holds whatever hosts A and C report, with a named fallback where a host might fall short.
+Status: **hosts A and B are probed. Host C is pending**: it needs one run of the probe on that machine (see `probe/README.md`). Host B's redacted report is in [`probe/reports/remote-linux.md`](../../probe/reports/remote-linux.md) ([JSON](../../probe/reports/remote-linux.json)). Host A's redacted report is in [`probe/reports/personal-mac/report.md`](../../probe/reports/personal-mac/report.md). Every row below marks what is still unknown, and the minimum common behavior is written so that it holds whatever hosts A and C report, with a named fallback where a host might fall short.
 
 Read-only carve-out: the probe writes only under its temp root, except that the live checks run a real `claude` session under the real login. That session writes its transcript and `session-env/<session id>/` into the real config dir, which the probe removes, and rewrites the body of `.claude.json`, which no run of Claude Code can avoid. The before and after proof covers everything else; `--offline` skips the live checks. See `probe/README.md`.
 
@@ -16,19 +16,19 @@ Read-only carve-out: the probe writes only under its temp root, except that the 
 
 | Capability | Tiller needs it for | Host B | Host A | Host C |
 |---|---|---|---|---|
-| Managed settings | Knowing which hooks may run | None present: no managed settings file, no server-managed cache | pending | pending; managed, so expected to have some |
-| Hooks in user, project, local, plugin and flag scope | `tiller hook <event>` observations (T2.6), intake (T4.4), guards (T4.3) | All five scopes fire | pending | pending |
-| Hook events under the real login | The same | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd` all fire in project, local and flag scope | pending | pending |
-| User or system service | The daemon (T2.8) | systemd `--user` running, lingering on, a transient unit ran | pending (launchd) | pending (launchd; MDM may restrict background items) |
-| Localhost port | The board and its API (T2.8) | Bind and connect on 127.0.0.1 work | pending | pending |
-| herdr CLI and `api snapshot` | The herdr adapter (T2.5) | herdr 0.9.3; `status` and `api snapshot` work; snapshot holds `workspaces`, `tabs`, `panes`, `layouts`, `agents` | pending | pending |
-| Auto memory and `CLAUDE_CODE_DISABLE_AUTO_MEMORY` | Fleet roles load only approved memory (plan default) | Honored in a session launched from a herdr pane: with the variable set, the memory directory is not created and `MEMORY.md` does not load | pending | pending |
-| `claude --append-system-prompt-file` | The worker launch form (plan default) | Works | pending | pending |
-| `claude plugin eval --no-publish` | Skill-trigger evals (T4.6) | Works; the report stays local | pending | pending |
-| `sqlite3` CLI | Manual inspection only | **Missing** from the host's PATH | pending | pending |
-| Running a binary from the Nix store | Shipping `tiller` as a Nix package | Works | pending | pending; endpoint security may block unsigned binaries |
-| `tiller` binary from the Nix store | The same | Not run: T0.1 has not landed. Rerun with `--tiller` once it does | pending | pending |
-| Transcripts | The transcript tailer (T2.6) | `<config dir>/projects/<slug>/<session id>.jsonl`; subagents under `<slug>/<session id>/subagents/` | pending | pending |
+| Managed settings | Knowing which hooks may run | None present: no managed settings file, no server-managed cache | None present: 0 managed file sources, `allowManagedHooksOnly` and `disableAllHooks` unset | pending; managed, so expected to have some |
+| Hooks in user, project, local, plugin and flag scope | `tiller hook <event>` observations (T2.6), intake (T4.4), guards (T4.3) | All five scopes fire | All five scopes fire | pending |
+| Hook events under the real login | The same | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd` all fire in project, local and flag scope | All six fire in project and local scope; flag scope fires `SessionStart` and `Stop` | pending |
+| User or system service | The daemon (T2.8) | systemd `--user` running, lingering on, a transient unit ran | launchd agent loaded and ran (a probe agent from its temp dir) | pending (launchd; MDM may restrict background items) |
+| Localhost port | The board and its API (T2.8) | Bind and connect on 127.0.0.1 work | Bind and connect on 127.0.0.1 work | pending |
+| herdr CLI and `api snapshot` | The herdr adapter (T2.5) | herdr 0.9.3; `status` and `api snapshot` work; snapshot holds `workspaces`, `tabs`, `panes`, `layouts`, `agents` | herdr 0.9.3; `status` and `api snapshot` work; snapshot holds 4 workspaces, 4 panes, 4 agents (protocol 22) | pending |
+| Auto memory and `CLAUDE_CODE_DISABLE_AUTO_MEMORY` | Fleet roles load only approved memory (plan default) | Honored in a session launched from a herdr pane: with the variable set, the memory directory is not created and `MEMORY.md` does not load | Honored offline: with the variable set, the memory directory is not created. `MEMORY.md` loads when auto memory is on. Not run from a herdr pane, so the herdr-launched case is unanswered | pending |
+| `claude --append-system-prompt-file` | The worker launch form (plan default) | Works | Works (canary seen in the session) | pending |
+| `claude plugin eval --no-publish` | Skill-trigger evals (T4.6) | Works; the report stays local | Works (exit 0, score 1); the report stays local | pending |
+| `sqlite3` CLI | Manual inspection only | **Missing** from the host's PATH | Present: sqlite3 3.51.0; WAL and `BEGIN IMMEDIATE` work | pending |
+| Running a binary from the Nix store | Shipping `tiller` as a Nix package | Works | Unanswered: no Nix store binary among `claude`, `herdr`, `jq` on PATH | pending; endpoint security may block unsigned binaries |
+| `tiller` binary from the Nix store | The same | Not run: T0.1 has not landed. Rerun with `--tiller` once it does | Not run: no `--tiller` given (T0.1 has not landed) | pending |
+| Transcripts | The transcript tailer (T2.6) | `<config dir>/projects/<slug>/<session id>.jsonl`; subagents under `<slug>/<session id>/subagents/` | `<config dir>/projects/<slug>/<session id>.jsonl`, written by a live session; 1302 transcripts across 240 project dirs | pending |
 
 ## What the probe learned that the plan did not say
 

@@ -62,7 +62,7 @@ Started Sunday 2026-11-01, Lisbon time.
 `opus` high - 1-1.5 h, plus about 10 min per host - no dependency
 
 - [x] `probe/tiller-probe.sh` checks: hooks under managed settings, launchd or systemd user service, localhost port, herdr CLI and `api snapshot`, auto memory and `CLAUDE_CODE_DISABLE_AUTO_MEMORY`, `--append-system-prompt-file`, `claude plugin eval --no-publish`, sqlite3 and the Nix-store binary, transcript paths
-- [ ] Run on the personal Mac
+- [x] Run on the personal Mac
 - [x] Run on the remote host
 - [ ] One-line work Mac command handed to the developer
 - [x] `docs/design/host-capabilities.md` drafts the minimum common behavior
