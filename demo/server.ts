@@ -132,31 +132,33 @@ function toPanes(snapshot: Json): Pane[] {
 
 async function snapshotHost(name: string, local: boolean) {
   const cmd = local ? ["herdr", "api", "snapshot"] : ["herdr", "--machine", name, "api", "snapshot"]
-  const prev = state.hosts.get(name)
+  const key = local ? "local" : `remote:${name}`
+  const prev = state.hosts.get(key)
   try {
     const out: Json = JSON.parse(await run(cmd, 10_000))
     const panes = toPanes(out.result?.snapshot ?? {})
-    state.hosts.set(name, { name, local, ok: true, error: null, updatedAt: Date.now(), panes })
+    state.hosts.set(key, { name, local, ok: true, error: null, updatedAt: Date.now(), panes })
     if (local) {
       localPaneIds = new Set(panes.map((p) => p.paneId))
       localWorkspaceByPane = new Map(panes.map((p) => [p.paneId, p.workspaceId]))
     }
   } catch (e) {
     // Keep the last good panes so a blip does not blank the column; flag it stale.
-    state.hosts.set(name, { name, local, ok: false, error: String(e), updatedAt: prev?.updatedAt ?? 0, panes: prev?.panes ?? [] })
+    state.hosts.set(key, { name, local, ok: false, error: String(e), updatedAt: prev?.updatedAt ?? 0, panes: prev?.panes ?? [] })
   }
 }
 
 async function pollHerdr() {
-  let machines: string[] = []
+  let machines: string[] | null = null
   try {
     const list: Json = JSON.parse(await run(["herdr", "machine", "list", "--json"], 10_000))
     const rows: Json[] = Array.isArray(list) ? list : (list.machines ?? list.result?.machines ?? [])
     machines = rows.filter((m) => m.enabled !== false).map((m) => m.label ?? m.id).filter(Boolean)
   } catch {
-    // No saved machines (or the command prints text): local only.
+    // Listing failed: keep the known machines and mark them stale below.
   }
-  const wanted = new Set(["local", ...machines])
+  if (machines === null) machines = [...state.hosts.values()].filter((h) => !h.local).map((h) => h.name)
+  const wanted = new Set(machines.map((m) => `remote:${m}`).concat("local"))
   for (const k of [...state.hosts.keys()]) if (!wanted.has(k)) state.hosts.delete(k)
   await Promise.all([snapshotHost("local", true), ...machines.map((m) => snapshotHost(m, false))])
   broadcast()
@@ -167,18 +169,24 @@ async function pollHerdr() {
 // REDACT=1 swaps every project, task and pane name for a generic one, so the
 // page can be screenshotted for a public PR without leaking private names.
 const REDACT = process.env.REDACT === "1"
-const KEEP_PROJECT = "tiller"
 
 function redact(fleet: typeof state.fleet, hosts: HostView[]) {
   const names = new Map<string, string>()
-  const alias = (p: string) => (p === KEEP_PROJECT ? p : (names.get(p) ?? names.set(p, `project-${String.fromCharCode(97 + names.size)}`).get(p)!))
-  const tasks = fleet.tasks.map((t, i) =>
-    t.project === KEEP_PROJECT
-      ? t
-      : { ...t, project: alias(t.project), id: `${alias(t.project)}-${i + 1}`, title: `Example task ${i + 1}`, detail: null, prUrl: null, paneId: null },
-  )
+  const alias = (p: string) => (names.get(p) ?? names.set(p, `project-${String.fromCharCode(97 + names.size)}`).get(p)!)
+  const tasks = fleet.tasks.map((t, i) => ({
+    ...t,
+    project: alias(t.project),
+    id: `${alias(t.project)}-${i + 1}`,
+    title: `Example task ${i + 1}`,
+    detail: null,
+    prUrl: null,
+    paneId: null,
+  }))
   const panes = (h: HostView) => h.panes.map((p, i) => ({ ...p, workspace: `workspace-${p.workspaceId}`, title: `agent session ${i + 1}`, cwd: "/home/user/project" }))
-  return { fleet: { ...fleet, tasks }, hosts: hosts.map((h) => ({ ...h, panes: panes(h), error: h.error ? "unavailable" : null })) }
+  return {
+    fleet: { ...fleet, tasks, error: fleet.error ? "unavailable" : null },
+    hosts: hosts.map((h, i) => ({ ...h, name: h.local ? h.name : `machine-${i}`, panes: panes(h), error: h.error ? "unavailable" : null })),
+  }
 }
 
 function payload() {
@@ -208,11 +216,12 @@ function broadcast() {
 
 // ---- jump to pane --------------------------------------------------------
 
-async function focusPane(paneId: string): Promise<{ ok: boolean; error?: string }> {
+async function focusPane(paneId: string): Promise<{ ok: boolean; error?: string; scope?: "pane" | "workspace" }> {
   // Only panes herdr itself reported on the local host; never pass arbitrary input through.
   if (!localPaneIds.has(paneId)) return { ok: false, error: "unknown local pane" }
   try {
     await run(["herdr", "agent", "focus", paneId], 5_000)
+    return { ok: true, scope: "pane" }
   } catch {
     const ws = localWorkspaceByPane.get(paneId)
     if (!ws) return { ok: false, error: "focus failed" }
@@ -221,8 +230,8 @@ async function focusPane(paneId: string): Promise<{ ok: boolean; error?: string 
     } catch (e) {
       return { ok: false, error: String(e) }
     }
+    return { ok: true, scope: "workspace" }
   }
-  return { ok: true }
 }
 
 // ---- http ----------------------------------------------------------------

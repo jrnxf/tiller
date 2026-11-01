@@ -167,7 +167,7 @@ async function jump(paneId) {
   try {
     const r = await fetch("/api/focus", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ paneId }) });
     const j = await r.json();
-    toast(j.ok ? "Focused " + paneId + " in herdr" : "Could not focus: " + (j.error || r.status));
+    toast(j.ok ? (j.scope === "workspace" ? "Focused the workspace of " : "Focused ") + paneId + " in herdr" : "Could not focus: " + (j.error || r.status));
   } catch (e) {
     toast("Could not focus: " + e.message);
   }
