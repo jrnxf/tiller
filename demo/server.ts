@@ -15,7 +15,7 @@ const FLEET_EVERY_MS = Number(process.env.FLEET_EVERY_MS ?? 15_000)
 const HERDR_EVERY_MS = Number(process.env.HERDR_EVERY_MS ?? 4_000)
 const FM_HOME = process.env.FIRSTMATE_HOME ?? `${process.env.HOME}/firstmate`
 const SNAPSHOT_CMD = process.env.FLEET_SNAPSHOT_CMD ?? `${FM_HOME}/bin/fm-fleet-snapshot.sh`
-const HERDR_SESSION = process.env.HERDR_SESSION ?? "default"
+const HERDR_SESSION = "default"
 const ALLOWED_ORIGINS = new Set(
   [`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`].concat(
     (process.env.DEMO_ALLOWED_ORIGINS ?? "").split(",").map((o) => o.trim()).filter(Boolean),
@@ -143,7 +143,7 @@ function toPanes(snapshot: Json): Pane[] {
 }
 
 async function snapshotHost(name: string, local: boolean) {
-  const cmd = local ? ["herdr", "api", "snapshot", "--session", HERDR_SESSION] :["herdr", "--machine", name, "api", "snapshot"]
+  const cmd = local ? ["herdr", "api", "snapshot", "--session", HERDR_SESSION] : ["herdr", "--machine", name, "api", "snapshot"]
   const key = local ? "local" : `remote:${name}`
   const prev = state.hosts.get(key)
   try {
