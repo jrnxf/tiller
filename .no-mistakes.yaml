@@ -1,0 +1,16 @@
+# Gate-control fields are read from the default branch, so changes here take
+# effect for gated runs once they have merged.
+
+commands:
+  prepare: "nix develop -c bun install --cwd board --frozen-lockfile"
+  lint: "nix develop -c sh -c 'cargo clippy --workspace --all-targets -- -D warnings && bun run --cwd board lint && bun run --cwd board typecheck && bun run --cwd board knip'"
+  format: "nix develop -c sh -c 'cargo fmt --all && bun run --cwd board format'"
+  test: "nix develop -c sh -c 'cargo nextest run --workspace && bun run --cwd board test'"
+
+ignore_patterns:
+  - "board/bun.nix"
+  - "board/bun.lock"
+  - "board/src/routeTree.gen.ts"
+  - "Cargo.lock"
+  - "flake.lock"
+  - "nix/patches/**"
