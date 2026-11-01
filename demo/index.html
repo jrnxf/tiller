@@ -204,8 +204,7 @@ function renderSide() {
     const running = h.panes.filter((p) => p.status === "working").length;
     return el("div", { class: "row", title: h.error || "" },
       el("i", { class: "dot " + (h.ok ? "green" : "amber") }), h.local ? "this machine" : h.name,
-      el("span", { class: "tag" }, h.ok ? running + " running" : "last seen " + (h.updatedAt ? ago(h.updatedAt) : "never")),
-      !h.local && !h.ok ? null : null);
+      el("span", { class: "tag" }, h.ok ? running + " running" : "last seen " + (h.updatedAt ? ago(h.updatedAt) : "never")));
   }));
   if (data.hosts.length === 1) m.append(el("div", { class: "row" }, el("span", { class: "tag", style: "margin-left:8px" }, "No saved remote machine")));
 }
@@ -215,7 +214,8 @@ function renderBoard(root) {
   const local = localPaneIds();
   const projects = [...new Set(all.map((t) => t.project))].sort();
   const shown = filterProject ? [filterProject] : projects;
-  if (!data.fleet.ok) root.append(el("div", { class: "banner" }, "Fleet snapshot unavailable, showing the last good data. ", data.fleet.error || ""));
+  if (!data.fleet.updatedAt) root.append(el("div", { class: "banner" }, "Loading fleet snapshot"));
+  else if (!data.fleet.ok) root.append(el("div", { class: "banner" }, "Fleet snapshot unavailable, showing the last good data. ", data.fleet.error || ""));
   const head = el("div", { class: "cols cols-head" }, ...COLS.map(([k, label, c]) => el("div", {}, el("i", { class: "dot " + c }), label)));
   root.append(head);
   for (const p of shown) {
@@ -263,9 +263,10 @@ function render() {
   (view === "board" ? renderBoard : renderAgents)(root);
   root.scrollTop = y;
   for (const b of document.querySelectorAll("#views button")) b.classList.toggle("on", b.dataset.v === view);
-  const stale = !data.fleet.ok || data.hosts.some((h) => !h.ok);
-  document.getElementById("live").className = "dot " + (stale ? "amber" : "green");
-  document.getElementById("liveText").textContent = stale ? "partial data" : "live";
+  const loading = !data.fleet.updatedAt;
+  const stale = (!loading && !data.fleet.ok) || data.hosts.some((h) => !h.ok);
+  document.getElementById("live").className = "dot " + (loading ? "grey" : stale ? "amber" : "green");
+  document.getElementById("liveText").textContent = loading ? "loading" : stale ? "partial data" : "live";
 }
 
 document.getElementById("views").addEventListener("click", (e) => { const v = e.target.dataset && e.target.dataset.v; if (v) { view = v; render(); } });

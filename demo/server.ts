@@ -15,11 +15,17 @@ const FLEET_EVERY_MS = Number(process.env.FLEET_EVERY_MS ?? 15_000)
 const HERDR_EVERY_MS = Number(process.env.HERDR_EVERY_MS ?? 4_000)
 const FM_HOME = process.env.FIRSTMATE_HOME ?? `${process.env.HOME}/firstmate`
 const SNAPSHOT_CMD = process.env.FLEET_SNAPSHOT_CMD ?? `${FM_HOME}/bin/fm-fleet-snapshot.sh`
+const HERDR_SESSION = process.env.HERDR_SESSION ?? "default"
+const ALLOWED_ORIGINS = new Set(
+  [`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`].concat(
+    (process.env.DEMO_ALLOWED_ORIGINS ?? "").split(",").map((o) => o.trim()).filter(Boolean),
+  ),
+)
 
 type Json = any
 
 async function run(cmd: string[], timeoutMs: number): Promise<string> {
-  const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" })
+  const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore" })
   const timer = setTimeout(() => proc.kill(), timeoutMs)
   try {
     const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
@@ -66,7 +72,7 @@ type HostView = {
 }
 
 const state = {
-  fleet: { ok: false, error: "loading", updatedAt: 0, generated: null as string | null, tasks: [] as Task[] },
+  fleet: { ok: false, error: null as string | null, updatedAt: 0, generated: null as string | null, tasks: [] as Task[] },
   hosts: new Map<string, HostView>(),
 }
 let localPaneIds = new Set<string>()
@@ -81,15 +87,21 @@ function toColumn(rec: Json, live: Json | undefined): Task["column"] {
   return "queued"
 }
 
+// Herdr targets look like "<session>:<pane-id>" (the pane id has its own colon).
+// Only a local herdr task in the session this server reads has a jumpable pane.
+function localPaneId(t: Json | undefined): string | null {
+  const target: string | undefined = t?.endpoint?.target
+  if (!target || t.remote != null || t.backend !== "herdr") return null
+  const i = target.indexOf(":")
+  return i > 0 && target.slice(0, i) === HERDR_SESSION ? target.slice(i + 1) : null
+}
+
 async function pollFleet() {
   try {
     const snap: Json = JSON.parse(await run([SNAPSHOT_CMD, "--json"], 60_000))
     const live = new Map<string, Json>((snap.tasks ?? []).map((t: Json) => [t.id, t]))
     const tasks: Task[] = (snap.backlog?.records ?? []).map((rec: Json): Task => {
       const t = live.get(rec.id)
-      const target: string | undefined = t?.endpoint?.target
-      // Targets look like "<session>:<workspace>:<pane>"; herdr pane ids are the last two parts.
-      const paneId = target ? target.split(":").slice(-2).join(":") : null
       return {
         id: rec.id,
         project: rec.repo ?? "other",
@@ -101,7 +113,7 @@ async function pollFleet() {
         state: t?.current_state?.state ?? null,
         detail: t?.current_state?.detail ?? null,
         freshness: t?.current_state?.freshness ?? null,
-        paneId,
+        paneId: localPaneId(t),
       }
     })
     state.fleet = { ok: true, error: null as any, updatedAt: Date.now(), generated: snap.generated ?? null, tasks }
@@ -131,7 +143,7 @@ function toPanes(snapshot: Json): Pane[] {
 }
 
 async function snapshotHost(name: string, local: boolean) {
-  const cmd = local ? ["herdr", "api", "snapshot"] : ["herdr", "--machine", name, "api", "snapshot"]
+  const cmd = local ? ["herdr", "api", "snapshot", "--session", HERDR_SESSION] :["herdr", "--machine", name, "api", "snapshot"]
   const key = local ? "local" : `remote:${name}`
   const prev = state.hosts.get(key)
   try {
@@ -220,13 +232,13 @@ async function focusPane(paneId: string): Promise<{ ok: boolean; error?: string;
   // Only panes herdr itself reported on the local host; never pass arbitrary input through.
   if (!localPaneIds.has(paneId)) return { ok: false, error: "unknown local pane" }
   try {
-    await run(["herdr", "agent", "focus", paneId], 5_000)
+    await run(["herdr", "agent", "focus", paneId, "--session", HERDR_SESSION], 5_000)
     return { ok: true, scope: "pane" }
   } catch {
     const ws = localWorkspaceByPane.get(paneId)
     if (!ws) return { ok: false, error: "focus failed" }
     try {
-      await run(["herdr", "workspace", "focus", ws], 5_000)
+      await run(["herdr", "workspace", "focus", ws, "--session", HERDR_SESSION], 5_000)
     } catch (e) {
       return { ok: false, error: String(e) }
     }
@@ -265,8 +277,8 @@ const server = Bun.serve({
     if (url.pathname === "/api/focus" && req.method === "POST") {
       // Cross-site pages must not be able to drive this: require same-origin.
       const origin = req.headers.get("origin")
-      if (origin && origin !== `http://127.0.0.1:${PORT}` && origin !== `http://localhost:${PORT}`) {
-        return new Response("forbidden", { status: 403 })
+      if (origin && !ALLOWED_ORIGINS.has(origin)) {
+        return Response.json({ ok: false, error: `origin ${origin} not allowed` }, { status: 403 })
       }
       const body: Json = await req.json().catch(() => ({}))
       const res = await focusPane(String(body.paneId ?? ""))
