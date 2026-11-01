@@ -6,7 +6,8 @@
 # flags, plugin evals, sqlite3, Nix store binaries and transcript paths.
 #
 # Everything it creates lives under one temp root. Claude Code runs either
-# with CLAUDE_CONFIG_DIR inside that root (offline tier, no login, no cost)
+# with CLAUDE_CONFIG_DIR inside that root (offline tier: no login, so no
+# model calls unless managed settings authenticate it)
 # or, for the live tier, with the real login and the memory directory
 # redirected into the root. A before and after manifest of the user's
 # configuration, plus a scan for anything named after this run, proves
@@ -24,9 +25,6 @@ set -u
 # stdin cannot eat the rest of the script; stdin is then closed.
 {
 exec </dev/null
-# fd 3 keeps the original stderr for the interrupt handler, which runs under
-# the redirections of whatever command it interrupted.
-exec 3>&2
 
 PROBE_VERSION=1
 
@@ -37,7 +35,8 @@ Usage: tiller-probe.sh [options]
   --host-role ROLE   label for the report (personal-mac, remote-linux, work-mac)
   --out DIR          write report.json, report.md and proof files to DIR
                      (default: a new directory under $TMPDIR)
-  --offline          skip the live tier (no login, no model calls, no cost)
+  --offline          skip the live tier and the plugin eval (no use of the
+                     real login, no model calls)
   --no-service-trial skip loading a throwaway launchd agent or systemd unit
   --tiller PATH      also run this tiller binary (the T0.1 build)
   --nix-hello        build nixpkgs#hello with nix and run it (adds to the
@@ -45,7 +44,8 @@ Usage: tiller-probe.sh [options]
   --keep-work        keep the scratch directory for debugging
   -h, --help         show this help
 
-The live tier makes three small haiku calls (about USD 0.06).
+The live tier makes two small haiku calls and the plugin eval one more
+(about USD 0.06 in all).
 EOF
 }
 
@@ -92,6 +92,55 @@ esac
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+LIVE_CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+if [ "$PLATFORM" = macos ]; then
+	CLAUDE_CACHE="$HOME/Library/Caches/claude-cli-nodejs"
+else
+	CLAUDE_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/claude-cli-nodejs"
+fi
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+	LIVE_CLAUDE_JSON="$CLAUDE_CONFIG_DIR/.claude.json"
+else
+	LIVE_CLAUDE_JSON="$HOME/.claude.json"
+fi
+
+# An interrupted run still unloads its launchd agent, removes what its live
+# sessions created, and deletes its scratch directory and the unredacted
+# proof files it wrote so far. No report is written. A signal sent to this
+# shell alone waits for the running child (at most 150 s for a claude run).
+ROOT=""
+W=""
+RUN_TAG=""
+PROBE_SIDS=""
+SERVICE_UNLOAD=""
+PROOF_STARTED=0
+on_abort() {
+	trap - INT TERM HUP
+	# The handler runs under the redirections of the command it interrupted,
+	# so the notice goes to the terminal when there is one.
+	{ printf 'tiller-probe: interrupted; cleaning up\n' >/dev/tty; } 2>/dev/null
+	[ -n "$SERVICE_UNLOAD" ] && launchctl bootout "$SERVICE_UNLOAD" >/dev/null 2>&1
+	[ -n "$RUN_TAG" ] && type cleanup_live >/dev/null 2>&1 && cleanup_live
+	if [ "$PROOF_STARTED" = 1 ]; then
+		local f
+		for f in manifest-before.txt manifest-after.txt manifest.diff \
+			leftovers-before.txt leftovers-pre-cleanup.txt leftovers-after.txt; do
+			rm -f "$OUT_DIR/$f"
+		done
+	fi
+	if [ -n "$ROOT" ]; then
+		rm -rf "$W"
+		case "$OUT_DIR" in
+		"$ROOT"/*) rm -rf "$ROOT" ;;
+		*) rmdir "$ROOT" 2>/dev/null ;;
+		esac
+	fi
+	exit "$1"
+}
+trap 'on_abort 130' INT
+trap 'on_abort 143' TERM
+trap 'on_abort 129' HUP
+
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/tiller-probe-XXXXXX")" || {
 	echo "tiller-probe: mktemp failed" >&2
 	exit 1
@@ -106,18 +155,6 @@ if [ -z "$OUT_DIR" ]; then
 fi
 mkdir -p "$OUT_DIR" || exit 1
 OUT_DIR="$(cd "$OUT_DIR" && pwd -P)"
-
-LIVE_CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-if [ "$PLATFORM" = macos ]; then
-	CLAUDE_CACHE="$HOME/Library/Caches/claude-cli-nodejs"
-else
-	CLAUDE_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/claude-cli-nodejs"
-fi
-if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-	LIVE_CLAUDE_JSON="$CLAUDE_CONFIG_DIR/.claude.json"
-else
-	LIVE_CLAUDE_JSON="$HOME/.claude.json"
-fi
 
 log() { printf 'tiller-probe: %s\n' "$*" >&2; }
 
@@ -179,6 +216,11 @@ claude_in() {
 	have perl && timeout=(perl -e 'alarm(shift); exec(@ARGV) or exit(127)' 150)
 	# shellcheck disable=SC2086
 	(cd "$dir" && env $CLEAN_ENV ${CLAUDE_EXTRA_UNSET:-} "TMPDIR=$W/tmp" ${assigns[@]+"${assigns[@]}"} ${timeout[@]+"${timeout[@]}"} claude "$@" </dev/null)
+}
+
+# login_failed FILE - true when claude output says the session has no login.
+login_failed() {
+	grep -qi -E "not logged in|please run /login|invalid api key" "$1"
 }
 
 # Offline tier: a config dir inside the temp root and no provider
@@ -247,7 +289,7 @@ redact() {
 		s/\Q$ENV{OD}\E/\$PROBE_REPORT/g if length $ENV{OD};
 		s/\Q$ENV{RT}\E/\$PROBE_ROOT/g if length $ENV{RT};
 		s/\Q$ENV{H}\E/~/g if length $ENV{H};
-		s{/\Q$ENV{U}\E(?=/|\b)}{/<user>}g if length $ENV{U};
+		s{(/Users|/home|/Library/Managed Preferences)/\Q$ENV{U}\E(?=/|\b)}{$1/<user>}g if length $ENV{U};
 	'
 }
 
@@ -348,22 +390,9 @@ cleanup_live() {
 	done
 }
 
-# An interrupted run still unloads its launchd agent, removes what its live
-# sessions created and deletes its scratch directory. No report is written.
-SERVICE_UNLOAD=""
-on_abort() {
-	trap - INT TERM HUP
-	log "interrupted; cleaning up" 2>&3
-	[ -n "$SERVICE_UNLOAD" ] && launchctl bootout "$SERVICE_UNLOAD" >/dev/null 2>&1
-	cleanup_live
-	rm -rf "$W"
-	case "$OUT_DIR" in "$ROOT"/*) ;; *) rmdir "$ROOT" 2>/dev/null ;; esac
-	exit 130
-}
-trap on_abort INT TERM HUP
-
 START_MARK="$W/.start"
 : >"$START_MARK"
+PROOF_STARTED=1
 manifest >"$OUT_DIR/manifest-before.txt"
 leftovers >"$OUT_DIR/leftovers-before.txt"
 
@@ -489,7 +518,7 @@ fired_list() {
 
 # Offline tier: CLAUDE_CONFIG_DIR points into the temp root, so there is no
 # login. Claude Code runs SessionStart and UserPromptSubmit hooks before it
-# checks the login, which makes this tier free and fully isolated. File and
+# checks the login, so without a login this tier makes no model calls. File and
 # MDM managed settings still apply; server-managed settings need a login
 # and are covered by the live tier.
 check_hooks_offline() {
@@ -534,8 +563,8 @@ check_hooks_offline() {
 				status=warn
 			fi
 		fi
-		local authed=true
-		grep -qi "not logged in" "$W/offline/out-$case_name.txt" && authed=false
+		local authed=unknown
+		login_failed "$W/offline/out-$case_name.txt" && authed=false
 		record "hooks_offline.$case_name" "$status" "scopes fired: ${scopes_fired:-none}" \
 			"scopes_fired=${scopes_fired:-none}" "markers=$fired" \
 			"authenticated=$authed" \
@@ -618,7 +647,7 @@ check_live() {
 		"$prompt_b" >"$W/live-b.txt" 2>&1
 	local rc_b=$?
 
-	if grep -qi -E 'not logged in|please run /login|invalid api key' "$W/live-a.txt"; then
+	if login_failed "$W/live-a.txt"; then
 		record live fail "claude is not logged in; the live tier needs a login" \
 			"output=$(head -c 300 "$W/live-a.txt" | tr '\n' ' ')"
 		return
@@ -653,6 +682,7 @@ check_live() {
 	[ "$mem_on" = true ] && [ "$mem_off" = false ] && mst=pass
 	record memory_live "$mst" "MEMORY.md loaded when enabled=$mem_on, when CLAUDE_CODE_DISABLE_AUTO_MEMORY=1=$mem_off" \
 		"loaded_enabled=$mem_on" "loaded_disabled=$mem_off" "exit_disabled_run=$rc_b" \
+		"hooks_fired_memory_disabled=$(fired_list "$mark-b")" \
 		"launched_from_herdr_pane=$([ -n "${HERDR_PANE_ID:-}" ] && echo true || echo false)" \
 		"mechanism=MEMORY.md in the memory dir is loaded into context at session start; autoMemoryDirectory relocates it"
 	record tool_read "$([ "$file_ok" = true ] && echo pass || echo warn)" "Read tool used in -p mode=$file_ok"
@@ -721,8 +751,7 @@ check_plugin_eval() {
 	fi
 	record plugin_eval "$st" "claude plugin eval --no-publish exit=$rc score=${score:-unknown}" \
 		"exit=$rc" "score=${score:-unknown}" "report_local=$([ -d "$plug/evals/results" ] && echo true || echo false)" \
-		"output_tail=$(tail -c 300 "$W/eval-out.txt" | tr '\n' ' ')" \
-		"isolation=each case runs in the eval's own sandbox home; an strace audit on the remote Linux host saw no writes from it outside the temp root"
+		"output_tail=$(tail -c 300 "$W/eval-out.txt" | tr '\n' ' ')"
 }
 
 check_service() {
@@ -884,7 +913,7 @@ check_nix_binary() {
 		local out rc
 		out="$("$store_bin" --version 2>&1)"
 		rc=$?
-		out="$(printf '%s\n' "$out" | head -1)"
+		out="${out%%$'\n'*}"
 		record nix_store_binary "$([ "$rc" = 0 ] && echo pass || echo fail)" \
 			"ran a Nix store binary ($(basename "$store_bin")): $out" "binary=$(basename "$store_bin")" "exit=$rc"
 	else
@@ -895,7 +924,7 @@ check_nix_binary() {
 		real="$(resolve_path "$TILLER_BIN")"
 		out="$("$TILLER_BIN" --version 2>&1)"
 		rc=$?
-		out="$(printf '%s\n' "$out" | head -1)"
+		out="${out%%$'\n'*}"
 		record tiller_binary "$([ "$rc" = 0 ] && echo pass || echo fail)" "tiller --version: $out" \
 			"exit=$rc" "in_nix_store=$(case "$real" in /nix/store/*) echo true ;; *) echo false ;; esac)"
 	else
@@ -954,7 +983,7 @@ fi
 
 # ---------------------------------------------------------------- report
 
-NOW_ISO="$(TZ=Europe/Lisbon date +%Y-%m-%dT%H:%M:%S%z)"
+NOW_ISO="$(TZ=Europe/Lisbon date +%Y-%m-%dT%H:%M:%S%z | sed 's/\(..\)$/:\1/')"
 NOW_LISBON="$(TZ=Europe/Lisbon date '+%a %Y-%m-%d %H:%M %Z')"
 
 {

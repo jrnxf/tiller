@@ -18,7 +18,7 @@ gh api -H 'Accept: application/vnd.github.raw' 'repos/jrnxf/tiller/contents/prob
 
 If `gh` cannot read the repo there, copy the file over and run `bash tiller-probe.sh --host-role work-mac`.
 
-It takes about 20 seconds and prints the paths of the two reports. Send back `report.md`; it is already redacted (the home directory shows as `~`, the user name as `<user>`, the temp root as `$PROBE_ROOT`).
+It takes about 20 seconds and prints the paths of the two reports. Send back `report.md`; it is already redacted (the home directory shows as `~`, the user name in a home or managed-preferences path as `<user>`, the temp root as `$PROBE_ROOT`).
 
 | Option | Effect |
 |---|---|
@@ -35,11 +35,11 @@ It takes about 20 seconds and prints the paths of the two reports. Send back `re
 | Check | How |
 |---|---|
 | `managed_settings` | Reads only `allowManagedHooksOnly` and `disableAllHooks` from the managed settings files, the MDM plist on macOS, and any cached server-managed settings |
-| `hooks_offline.*` | Runs `claude -p` in a throwaway project with `CLAUDE_CONFIG_DIR` inside the temp root and no provider credentials in the environment. If managed settings authenticate it anyway (an `env` block or `apiKeyHelper`), the report shows `authenticated: true`, and each run is capped at USD 0.02. Hooks in user, project, local, plugin (`--plugin-dir`) and flag (`--settings`) scope only touch marker files. Claude Code runs `SessionStart` and `UserPromptSubmit` hooks before it checks the login, so this tier is free. Three cases: baseline, user-level `disableAllHooks`, and user-level `allowManagedHooksOnly` |
+| `hooks_offline.*` | Runs `claude -p` in a throwaway project with `CLAUDE_CONFIG_DIR` inside the temp root and no provider credentials in the environment. If managed settings authenticate it anyway (an `env` block or `apiKeyHelper`), `authenticated` is not `false` in the report, and each run is capped at USD 0.02. Hooks in user, project, local, plugin (`--plugin-dir`) and flag (`--settings`) scope only touch marker files. Claude Code runs `SessionStart` and `UserPromptSubmit` hooks before it checks the login, so without a login this tier makes no model calls. Three cases: baseline, user-level `disableAllHooks`, and user-level `allowManagedHooksOnly` |
 | `memory_offline` | Whether the default auto-memory directory is created, with and without `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` |
 | `hooks_live` | The same marker hooks under the real login, so server-managed policy applies too. `--setting-sources project,local` keeps the user's own hooks and plugins from running. Covers `PreToolUse`, `PostToolUse`, `Stop` and `SessionEnd` |
 | `append_system_prompt_file` | A canary passed with `--append-system-prompt-file` must reach the model |
-| `memory_live` | A canary in `MEMORY.md` must reach the model, and must not with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. The memory directory is moved into the temp root with `autoMemoryDirectory` |
+| `memory_live` | A canary in `MEMORY.md` must reach the model, and must not with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. The report also lists which hooks fired in that second run. The memory directory is moved into the temp root with `autoMemoryDirectory` |
 | `transcript_live` | Where the live session's transcript lands and which record types it holds; the probe then removes it |
 | `transcripts` | Counts of existing transcripts and their layout; it never reads their contents |
 | `plugin_eval` | `claude plugin eval --no-publish` on a one-case throwaway plugin with a free regex grader. Each case runs in the eval's own sandbox home; on the remote Linux host an strace audit saw no writes from it outside the temp root |
@@ -50,9 +50,9 @@ It takes about 20 seconds and prints the paths of the two reports. Send back `re
 | `nix_store_binary`, `tiller_binary` | Runs a binary that resolves into `/nix/store`, and the `tiller` build when given |
 | `proof` | See below |
 
-The live tier makes three small haiku calls, about USD 0.06 in all.
+The live tier makes two small haiku calls and the plugin eval one more, about USD 0.06 in all.
 
-Interrupting a run (Ctrl-C, or a TERM signal) still unloads the throwaway launchd agent, removes what the live sessions created and deletes the scratch directory. No report is written then.
+Interrupting a run (Ctrl-C, or a TERM or HUP signal) still unloads the throwaway launchd agent, removes what the live sessions created, and deletes the scratch directory and any unredacted proof files. No report is written then. The exit code is 130, 143 or 129 by signal.
 
 ## What it touches, and the proof
 
