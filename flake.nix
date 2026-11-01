@@ -144,7 +144,7 @@
               doCheck = false;
               preBuild = ''
                 mkdir -p board
-                cp -R ${board} board/dist
+                cp -R --no-preserve=mode ${board} board/dist
               '';
               meta.mainProgram = "tiller";
             }
@@ -171,6 +171,8 @@
               pkgs.runCommand "tiller-smoke"
                 {
                   nativeBuildInputs = [ pkgs.curl ];
+                  # The smoke test binds a localhost port inside the sandbox.
+                  __darwinAllowLocalNetworking = true;
                 }
                 ''
                   bash ${./scripts/smoke.sh} ${tiller}/bin/tiller

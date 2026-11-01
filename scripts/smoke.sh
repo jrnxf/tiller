@@ -13,9 +13,10 @@ url=
 for _ in $(seq 1 50); do
   url=$(sed -n 's/^listening on //p' "$log")
   [ -n "$url" ] && break
+  kill -0 "$pid" 2>/dev/null || break
   sleep 0.1
 done
-[ -n "$url" ] || { echo "daemon did not report an address" >&2; exit 1; }
+[ -n "$url" ] || { echo "daemon did not report an address:" >&2; cat "$log" >&2; exit 1; }
 
 page=$(curl -fsS "$url/")
 grep -q '<div id="root">' <<<"$page" || { echo "board shell missing from $url/" >&2; exit 1; }

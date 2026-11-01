@@ -51,8 +51,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
-      - name: Flake checks
-        run: nix flake check --print-build-logs
+      # clippy, fmt, nextest and the board checks run in the rust and board jobs.
+      - name: Generated bun.nix is fresh
+        run: nix build --print-build-logs .#checks.x86_64-linux.bunNixFresh
       - name: Build
         run: nix build --print-build-logs
       - name: Smoke test

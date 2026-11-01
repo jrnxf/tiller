@@ -1,11 +1,16 @@
 //! Placeholder daemon: serves the embedded board on localhost.
 //! The real daemon (pollers, reconcile, API) arrives with its own crate.
 
+use std::borrow::Cow;
+use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr};
 
 use anyhow::Context;
 use axum::Router;
-use axum::http::{StatusCode, Uri, header};
+use axum::body::Body;
+use axum::extract::Request;
+use axum::http::{Method, StatusCode, Uri, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
 
@@ -38,25 +43,66 @@ async fn serve(port: u16) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("bind {addr}"))?;
     let bound = listener.local_addr().context("read bound address")?;
-    println!("listening on http://{bound}");
+    // The address line is the readiness signal for supervisors and the smoke
+    // script. A closed stdout must not take the daemon down.
+    let mut stdout = std::io::stdout();
+    let _ = writeln!(stdout, "listening on http://{bound}").and_then(|()| stdout.flush());
     axum::serve(listener, router::<Board>())
         .with_graceful_shutdown(shutdown())
         .await
         .context("serve")
 }
 
+/// Resolves on SIGINT or SIGTERM, the signal launchd and systemd send on stop.
 async fn shutdown() {
-    // If the signal handler cannot be installed, run until killed.
-    if tokio::signal::ctrl_c().await.is_err() {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let (Ok(mut term), Ok(mut int)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+    ) else {
+        // Without signal handlers, run until killed.
         std::future::pending::<()>().await;
+        return;
+    };
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = int.recv() => {}
     }
 }
 
 fn router<E: RustEmbed + 'static>() -> Router {
-    Router::new().fallback(asset::<E>)
+    Router::new()
+        .fallback(asset::<E>)
+        .layer(middleware::from_fn(local_host_only))
 }
 
-async fn asset<E: RustEmbed>(uri: Uri) -> Response {
+/// Reject requests whose `Host` is not a loopback name, so a page cannot reach
+/// the daemon through DNS rebinding.
+async fn local_host_only(request: Request, next: Next) -> Response {
+    let allowed = request
+        .headers()
+        .get(header::HOST)
+        .is_none_or(|host| host.to_str().is_ok_and(is_loopback_host));
+    if allowed {
+        next.run(request).await
+    } else {
+        StatusCode::FORBIDDEN.into_response()
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let name = match host.strip_prefix('[') {
+        Some(rest) => rest.split_once(']').map_or(rest, |(ip, _)| ip),
+        None => host.split(':').next().unwrap_or(host),
+    };
+    matches!(name, "localhost" | "127.0.0.1" | "::1")
+}
+
+async fn asset<E: RustEmbed>(method: Method, uri: Uri) -> Response {
+    if method != Method::GET && method != Method::HEAD {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
     let requested = uri.path().trim_start_matches('/');
     let path = if requested.is_empty() {
         "index.html"
@@ -71,13 +117,9 @@ async fn asset<E: RustEmbed>(uri: Uri) -> Response {
         };
         return file_response(file, cache);
     }
-    // Paths with a file extension are real asset misses. Anything else is a
+    // A missing hashed asset must not turn into HTML. Anything else is a
     // client-side route, so hand it the app shell.
-    let is_file = requested
-        .rsplit('/')
-        .next()
-        .is_some_and(|name| name.contains('.'));
-    if is_file {
+    if requested.starts_with("assets/") {
         return StatusCode::NOT_FOUND.into_response();
     }
     match E::get("index.html") {
@@ -91,12 +133,17 @@ async fn asset<E: RustEmbed>(uri: Uri) -> Response {
 }
 
 fn file_response(file: rust_embed::EmbeddedFile, cache: &'static str) -> Response {
+    // Embedded release data is `'static`: serve it without copying.
+    let body = match file.data {
+        Cow::Borrowed(bytes) => Body::from(bytes),
+        Cow::Owned(bytes) => Body::from(bytes),
+    };
     (
         [
             (header::CONTENT_TYPE, file.metadata.mimetype().to_owned()),
             (header::CACHE_CONTROL, cache.to_owned()),
         ],
-        file.data.into_owned(),
+        body,
     )
         .into_response()
 }
@@ -120,10 +167,13 @@ mod tests {
     struct Missing;
 
     async fn get<E: RustEmbed + 'static>(path: &str) -> (StatusCode, Option<String>, String) {
-        let response = router::<E>()
-            .oneshot(Request::get(path).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        send::<E>(Request::get(path).body(Body::empty()).unwrap()).await
+    }
+
+    async fn send<E: RustEmbed + 'static>(
+        request: Request<Body>,
+    ) -> (StatusCode, Option<String>, String) {
+        let response = router::<E>().oneshot(request).await.unwrap();
         let status = response.status();
         let cache = response
             .headers()
@@ -157,9 +207,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_routes_with_dots_fall_back_to_the_app_shell() {
+        let (status, _, body) = get::<Fixture>("/projects/example.com").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains(r#"<div id="root">"#));
+    }
+
+    #[tokio::test]
     async fn missing_asset_is_not_found() {
-        let (status, _, _) = get::<Fixture>("/assets/gone.js").await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
+        for path in ["/assets/gone.js", "/assets/gone"] {
+            let (status, _, _) = get::<Fixture>(path).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn only_get_and_head_are_served() {
+        let request = Request::post("/").body(Body::empty()).unwrap();
+        let (status, _, _) = send::<Fixture>(request).await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn foreign_host_is_refused() {
+        for (host, expected) in [
+            ("127.0.0.1:7421", StatusCode::OK),
+            ("localhost:7421", StatusCode::OK),
+            ("[::1]:7421", StatusCode::OK),
+            ("evil.example.com:7421", StatusCode::FORBIDDEN),
+            ("127.0.0.1.evil.example.com", StatusCode::FORBIDDEN),
+        ] {
+            let request = Request::get("/")
+                .header(header::HOST, host)
+                .body(Body::empty())
+                .unwrap();
+            let (status, _, _) = send::<Fixture>(request).await;
+            assert_eq!(status, expected, "{host}");
+        }
     }
 
     #[tokio::test]
