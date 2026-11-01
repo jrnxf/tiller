@@ -4,6 +4,8 @@
 
 ## Run it
 
+Run it from inside a herdr pane. The `memory_live` check answers whether `CLAUDE_CODE_DISABLE_AUTO_MEMORY` is honored in a herdr-launched session only then; from a plain terminal it reports `warn` and says the herdr question is unanswered.
+
 From a checkout:
 
 ```sh
@@ -39,7 +41,7 @@ It takes about 20 seconds and prints the paths of the two reports. Send back `re
 | `memory_offline` | Whether the default auto-memory directory is created, with and without `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` |
 | `hooks_live` | The same marker hooks under the real login, so server-managed policy applies too. `--setting-sources project,local` keeps the user's own hooks and plugins from running. Covers `PreToolUse`, `PostToolUse`, `Stop` and `SessionEnd` |
 | `append_system_prompt_file` | A canary passed with `--append-system-prompt-file` must reach the model |
-| `memory_live` | A canary in `MEMORY.md` must reach the model, and must not with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. The report also lists which hooks fired in that second run. The memory directory is moved into the temp root with `autoMemoryDirectory` |
+| `memory_live` | A canary in `MEMORY.md` must reach the model, and must not with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. It passes only when the probe runs inside a herdr pane (`HERDR_PANE_ID` set); otherwise it warns. The report also lists which hooks fired in that second run. The memory directory is moved into the temp root with `autoMemoryDirectory` |
 | `transcript_live` | Where the live session's transcript lands and which record types it holds; the probe then removes it |
 | `transcripts` | Counts of existing transcripts and their layout; it never reads their contents |
 | `plugin_eval` | `claude plugin eval --no-publish` on a one-case throwaway plugin with a free regex grader. Each case runs in the eval's own sandbox home; on the remote Linux host an strace audit saw no writes from it outside the temp root |
@@ -56,6 +58,8 @@ Interrupting a run (Ctrl-C, or a TERM or HUP signal) still unloads the throwaway
 
 ## What it touches, and the proof
 
+One carve-out, accepted by the owner: the live tier and the plugin eval run a real `claude` session under the real login, so Claude Code itself writes a few files outside the temp root (below). `--offline` skips them and leaves only the temp root.
+
 Every file the probe writes is under its temp root, including Claude Code's own temp files (`TMPDIR` points there for every child `claude`). Live sessions use `--strict-mcp-config`, so no MCP server or connector starts.
 
 Live sessions still make Claude Code write a few things under the real config dir: the session transcript and empty `session-env/<session id>` directories. Their names carry the run id or one of the run's random session ids, and the probe removes exactly those.
@@ -68,3 +72,7 @@ The `proof` check then holds when both of these are true:
 Not tracked: the files Claude Code rewrites on every start whoever runs it (the body of `.claude.json` and its backups, telemetry, plugin in-use markers), the system journal or unified log, and API usage.
 
 On the remote Linux host a run under `strace -f` confirmed this independently: the only file outside the temp root that changed and still existed afterwards was `.claude.json`, with no reference to the run.
+
+## Reports
+
+- [Host B, remote Linux](reports/remote-linux.md) ([JSON](reports/remote-linux.json)), redacted as the probe writes it.

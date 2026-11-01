@@ -8,7 +8,9 @@ Hosts are named by role:
 - **Host B**: the remote Linux host.
 - **Host C**: the work Mac. It is managed, and its data never leaves it.
 
-Status: **host B is probed. Hosts A and C are pending**: each needs one run of the probe on that machine (see `probe/README.md`). Every row below marks what is still unknown, and the minimum common behavior is written so that it holds whatever hosts A and C report, with a named fallback where a host might fall short.
+Status: **host B is probed. Hosts A and C are pending**: each needs one run of the probe on that machine (see `probe/README.md`). Host B's redacted report is in [`probe/reports/remote-linux.md`](../../probe/reports/remote-linux.md) ([JSON](../../probe/reports/remote-linux.json)). Every row below marks what is still unknown, and the minimum common behavior is written so that it holds whatever hosts A and C report, with a named fallback where a host might fall short.
+
+Read-only carve-out: the probe writes only under its temp root, except that the live checks run a real `claude` session under the real login. That session writes its transcript and `session-env/<session id>/` into the real config dir, which the probe removes, and rewrites the body of `.claude.json`, which no run of Claude Code can avoid. The before and after proof covers everything else; `--offline` skips the live checks. See `probe/README.md`.
 
 ## Results
 
@@ -62,3 +64,4 @@ Tiller can assume these on every host. Each row has a fallback for a host that f
 2. Rerun on any host with `--tiller` once T0.1 lands, to confirm the real build runs from the Nix store.
 3. Decide whether a host that needs the "hooks blocked" fallback is acceptable, or blocks cutover on that host.
 4. Note for T2.3: the backup should use the online backup API, since host B has no `sqlite3` CLI.
+5. Accept the read-only carve-out above: the live checks change files in the real config dir while they run and leave `.claude.json` rewritten. The owner accepted it for T0.3; CP1 confirms it holds for host C, or runs host C with `--offline`.

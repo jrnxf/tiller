@@ -678,12 +678,14 @@ check_live() {
 
 	record append_system_prompt_file "$([ "$sys_ok" = true ] && echo pass || echo fail)" \
 		"canary from --append-system-prompt-file seen=$sys_ok" "exit=$rc_a"
-	local mst=warn
-	[ "$mem_on" = true ] && [ "$mem_off" = false ] && mst=pass
-	record memory_live "$mst" "MEMORY.md loaded when enabled=$mem_on, when CLAUDE_CODE_DISABLE_AUTO_MEMORY=1=$mem_off" \
+	local mst=warn in_pane=false mem_sum="MEMORY.md loaded when enabled=$mem_on, when CLAUDE_CODE_DISABLE_AUTO_MEMORY=1=$mem_off"
+	[ -n "${HERDR_PANE_ID:-}" ] && in_pane=true
+	[ "$mem_on" = true ] && [ "$mem_off" = false ] && [ "$in_pane" = true ] && mst=pass
+	[ "$in_pane" = false ] && mem_sum="$mem_sum; not run from a herdr pane, so the herdr-launched question is unanswered"
+	record memory_live "$mst" "$mem_sum" \
 		"loaded_enabled=$mem_on" "loaded_disabled=$mem_off" "exit_disabled_run=$rc_b" \
 		"hooks_fired_memory_disabled=$(fired_list "$mark-b")" \
-		"launched_from_herdr_pane=$([ -n "${HERDR_PANE_ID:-}" ] && echo true || echo false)" \
+		"launched_from_herdr_pane=$in_pane" \
 		"mechanism=MEMORY.md in the memory dir is loaded into context at session start; autoMemoryDirectory relocates it"
 	record tool_read "$([ "$file_ok" = true ] && echo pass || echo warn)" "Read tool used in -p mode=$file_ok"
 
