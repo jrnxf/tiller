@@ -11,7 +11,8 @@
 # or, for the live tier, with the real login and the memory directory
 # redirected into the root. A before and after manifest of the user's
 # configuration, plus a scan for anything named after this run, proves
-# nothing else changed. See probe/README.md.
+# nothing else changed. The one carve-out is what the live claude session
+# itself writes to the real config dir; see probe/README.md.
 #
 # Works with macOS /bin/bash 3.2 and Linux bash. jq is optional.
 
