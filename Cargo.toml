@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = ["crates/cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+repository = "https://github.com/jrnxf/tiller"
+
+[workspace.dependencies]
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+rust-embed = { version = "8", features = ["mime-guess"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true
