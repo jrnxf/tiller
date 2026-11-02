@@ -291,7 +291,7 @@ Notes:
 - "Read-only `Agent`" means the backstop allows the `Agent` tool only with a read-only `subagent_type` (`Explore` or a role's named read-only helper), and never with worktree isolation. Native `isolation: worktree` is not used for workers; treehouse owns worktrees (plan default).
 - The orchestrator's deny on `Agent` is P59. `TaskCreate` and `TaskUpdate` stay available because they write only the session's own todo list (Firstmate's subagent-guard: plan-only tools).
 - A builder on a `no-mistakes` project pushes to the gate remote; on a `direct-pr` project it pushes its own branch and opens the PR with `gh-axi pr create`. The backstop holds the branch rule (G12).
-- Read and Edit deny rules also become sandbox `denyRead` and `denyWrite` entries. That is why the forge credential stores (`~/.config/gh`, `~/.ssh`, git's credential helper) are not denied here: denying them would stop `git push` and `gh-axi` inside the sandbox too. Keeping the token from a worker's own script is CP2 option 2.
+- Read and Edit deny rules also become sandbox `denyRead` and `denyWrite` entries. That is why the forge credential stores (`~/.config/gh`, the SSH key directory, git's credential helper) are not denied here: denying them would stop `git push` and `gh-axi` inside the sandbox too. Keeping the token from a worker's own script is CP2 option 2.
 - Placeholders expand to absolute paths in rule syntax, with the leading `//` (for example `Edit(//home/user/pool/3/repo/**)`); sandbox entries use plain absolute paths.
 
 ## 9. Guarantees
@@ -382,7 +382,7 @@ Each path names its example, the layers that hold it, the expected result, and i
 | Push by a non-builder | a reviewer runs `git push origin HEAD` | deny, backstop | denied `[foreign-branch]` | `agents::guards::non_builder_push_denied` |
 | Push from a written script | `./ship.sh` that runs `git push origin main` | none at push time | not blocked; detected by reconcile | `reconcile::recovery::default_branch_move_without_land_opens_recovery` |
 | Edit tool outside the worktree | `Edit` on `/home/user/other/file` | `dontAsk`, Edit allow scope | denied | live `agents::guards::live::edit_tool_outside_worktree_is_denied` |
-| Shell write outside the worktree | `cp x /home/user/elsewhere/`, `echo x > ~/f`, `python3 -c 'open("/home/user/f","w")'` | sandbox | write fails with a permission error | live `agents::guards::live::write_outside_worktree_fails` |
+| Shell write outside the worktree | `cp x /home/user/elsewhere/`, `echo x > /home/user/f`, `python3 -c 'open("/home/user/f","w")'` | sandbox | write fails with a permission error | live `agents::guards::live::write_outside_worktree_fails` |
 | Symlink out of the worktree | `ln -s ~/.tiller link && echo x > link/state.db` | sandbox (resolved path) | write fails | live `agents::guards::live::write_outside_worktree_fails` |
 | Direct state write | `sqlite3 ~/.tiller/state.db "update approvals set state='accepted'"` | Read and Edit deny, sandbox, backstop | denied `[state-write]`; write fails if run from a script | live `agents::guards::live::sqlite_write_to_state_db_fails` |
 | Disable hooks | write `{"disableAllHooks": true}` to `~/.claude/settings.json`; edit `.claude/settings.local.json` | Edit deny, sandbox protected paths, backstop | denied `[guard-tamper]`; write fails | live `agents::guards::live::user_settings_write_fails` |
