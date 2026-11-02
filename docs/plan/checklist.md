@@ -232,14 +232,14 @@ about 3 min of the developer's time
 ### T3.1 Board app shell
 `sonnet` high - 2.5-3.5 h - after CP2 (fixtures until T2.8)
 
-- [ ] Sidebar: view knob, project toggles
-- [ ] Sidebar Machines section: health dot, running vs free slots, "view only" tag, click filters with a removable header chip, stale state
-- [ ] Sidebar quota footer: dot (green, amber, red), tiny meter, "% week left", reset time; daemon state in tooltip; click opens Health
-- [ ] File-based routing, theme (system default), density, Cmd+K palette
-- [ ] QueryClient with boot-snapshot hydration, SSE cache writer, query option factories over the generated schema
+- [x] Sidebar: view knob, project toggles
+- [x] Sidebar Machines section: health dot, running vs free slots, "view only" tag, click filters with a removable header chip, stale state
+- [x] Sidebar quota footer: dot (green, amber, red), tiny meter, "% week left", reset time; daemon state in tooltip; click opens Health
+- [x] File-based routing, theme (system default), density, Cmd+K palette
+- [x] QueryClient with boot-snapshot hydration, SSE cache writer, query option factories over the generated schema
 - [ ] Check: screenshots match the mocks, both themes, 1440 px and 390 px
-- [ ] Check: cold load is one complete first render under 100 ms, CLS 0, no pending UI
-- [ ] Check: quota dot states from fixtures; no email or account id anywhere
+- [x] Check: cold load is one complete first render under 100 ms, CLS 0, no pending UI
+- [x] Check: quota dot states from fixtures; no email or account id anywhere
 - [ ] Delivered
 
 ### T4.1 Roles (drafting can start here)

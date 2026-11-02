@@ -6,7 +6,9 @@ import { tillerFixtures } from "./vite-fixtures.ts";
 
 export default defineConfig({
   plugins: [
-    tanstackRouter({ target: "react", autoCodeSplitting: true }),
+    // One bundle: route chunks would add a request to the first render, and the
+    // board is served from the local daemon, so the size is not the cost.
+    tanstackRouter({ target: "react", autoCodeSplitting: false }),
     react(),
     tillerFixtures(),
   ],
