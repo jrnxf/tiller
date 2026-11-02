@@ -106,6 +106,12 @@ function apiMiddleware(): Connect.NextHandleFunction {
     }
 
     if (url === "/api/v1/events") {
+      // `?fixture=degraded`: the daemon is unreachable, so the board keeps the
+      // reconnecting banner up.
+      if (scenario === "degraded") {
+        res.statusCode = 503;
+        return res.end();
+      }
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
       res.write("retry: 1000\n\n");
       streams.add(res);

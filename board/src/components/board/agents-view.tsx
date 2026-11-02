@@ -9,7 +9,7 @@ import { agentsQuery, boardQuery, machinesQuery, projectsQuery, runQuery } from 
 import { prefsStore } from "../../lib/prefs";
 import { scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
-import { agentActivity } from "./activity";
+import { hostAwareActivity } from "../states/degraded";
 import { Ago } from "./ago";
 import { agentGroups, findLine } from "./agents-model";
 import type { AgentLine } from "./agents-model";
@@ -56,7 +56,7 @@ function AgentRowView({
   onOpen: () => void;
 }) {
   const { agent, card } = line;
-  const activity = agentActivity(agent);
+  const activity = hostAwareActivity(agent, host);
   const navigate = useNavigate();
   const select = () =>
     void navigate({
@@ -151,7 +151,7 @@ function AgentDetail({
   onOpen: () => void;
 }) {
   const { agent, card } = line;
-  const activity = agentActivity(agent);
+  const activity = hostAwareActivity(agent, host);
   // The loader reads every listed agent's run, so a selection is already cached.
   const run = useQuery({ ...runQuery(agent.run_id ?? ""), enabled: Boolean(agent.run_id) }).data;
   const remote = host?.kind === "remote";

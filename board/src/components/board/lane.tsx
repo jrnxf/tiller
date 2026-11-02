@@ -11,6 +11,8 @@ import type { ColumnId, Tile } from "./model";
 import { MiniTile, TileView } from "./tile";
 import { useHerdrFocus } from "./herdr";
 import { ServerIcon } from "../shell/icons";
+import type { LaneHealth } from "../states/degraded";
+import { LaneNote } from "../states/lane-note";
 
 const COLUMN_MARK: Record<ColumnId, StatusMark> = {
   asked: "asked",
@@ -21,7 +23,31 @@ const COLUMN_MARK: Record<ColumnId, StatusMark> = {
   done: "done",
 };
 
-function OrchestratorMini({ orchestrator }: { orchestrator: AgentRow }) {
+function OrchestratorMini({
+  orchestrator,
+  health,
+}: {
+  orchestrator: AgentRow;
+  health: LaneHealth;
+}) {
+  if (health.kind === "disconnected") {
+    return (
+      <span className="orch">
+        <i className="ld off" />
+        <span className="tx">
+          orchestrator unreachable{health.since ? `, last seen ${health.since}` : ""}
+        </span>
+      </span>
+    );
+  }
+  if (health.kind === "stale") {
+    return (
+      <span className="orch">
+        <i className="ld stale" />
+        <span className="tx">orchestrator silent for {health.ago}</span>
+      </span>
+    );
+  }
   const view = agentActivity(orchestrator);
   return (
     <span className="orch">
@@ -42,6 +68,8 @@ interface LaneProps {
   focusMode: boolean;
   orchestrator: AgentRow | undefined;
   remoteHost: Machine | undefined;
+  health: LaneHealth;
+  hostLabel: string;
   doneFolded: boolean;
   filterName: string | null;
 }
@@ -54,6 +82,8 @@ export function Lane({
   focusMode,
   orchestrator,
   remoteHost,
+  health,
+  hostLabel,
   doneFolded,
   filterName,
 }: LaneProps) {
@@ -80,6 +110,7 @@ export function Lane({
                 <button
                   type="button"
                   className="btn ghost"
+                  disabled={health.kind === "disconnected"}
                   title="Focus this agent's terminal in herdr"
                   onClick={() => focus(orchestrator)}
                 >
@@ -114,7 +145,7 @@ export function Lane({
                 ? items.map((tile) =>
                     tile.row ? <MiniTile key={tile.key} row={tile.row} /> : null,
                   )
-                : items.map((tile) => <TileView key={tile.key} tile={tile} />)}
+                : items.map((tile) => <TileView key={tile.key} tile={tile} lane={health.kind} />)}
             </div>
           );
         })}
@@ -131,7 +162,12 @@ export function Lane({
   }
 
   return (
-    <section className="lane" data-open={open} data-testid={`lane-${project.id}`}>
+    <section
+      className="lane"
+      data-open={open}
+      data-state={health.kind === "ok" ? undefined : health.kind}
+      data-testid={`lane-${project.id}`}
+    >
       <div
         className="lane-h"
         role="button"
@@ -169,8 +205,11 @@ export function Lane({
           ))}
         </span>
         <span className="sp" />
-        {orchestrator ? <OrchestratorMini orchestrator={orchestrator} /> : null}
+        {orchestrator ? <OrchestratorMini orchestrator={orchestrator} health={health} /> : null}
       </div>
+      {health.kind === "ok" ? null : (
+        <LaneNote health={health} projectName={project.name} hostLabel={hostLabel} />
+      )}
       {body}
     </section>
   );

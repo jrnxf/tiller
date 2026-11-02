@@ -43,6 +43,14 @@ export const PrIcon = () => (
   </Glyph>
 );
 
+export const HelpIcon = () => (
+  <Glyph>
+    <circle cx="8" cy="8" r="5.8" {...stroke} />
+    <path d="M6.3 6.3a1.8 1.8 0 1 1 2.6 1.6c-.6.3-.9.7-.9 1.3" {...stroke} {...round} />
+    <circle cx="8" cy="11.2" r=".75" fill="currentColor" />
+  </Glyph>
+);
+
 export const PaneIcon = () => (
   <Glyph>
     <rect x="2" y="3" width="12" height="10" rx="1.5" {...stroke} />

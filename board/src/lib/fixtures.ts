@@ -38,6 +38,7 @@ export type Scenario =
   | "quota-red"
   | "quota-grey"
   | "stale-machine"
+  | "degraded"
   | "stale-approval"
   | "empty"
   | "busy"
@@ -50,6 +51,7 @@ export const SCENARIOS: readonly Scenario[] = [
   "quota-red",
   "quota-grey",
   "stale-machine",
+  "degraded",
   "stale-approval",
   "empty",
   "busy",
@@ -201,12 +203,13 @@ function machinesFor(scenario: Scenario, now: number): MachinesResponse {
     label: "host-c",
     kind: "remote",
     view_only: true,
-    health: scenario === "stale-machine" ? "stale" : "ok",
-    running_agents: scenario === "stale-machine" ? null : 1,
+    health: scenario === "stale-machine" || scenario === "degraded" ? "stale" : "ok",
+    running_agents: scenario === "stale-machine" || scenario === "degraded" ? null : 1,
     capacity: null,
     free_slots: null,
-    last_seen_at: minutes(now, scenario === "stale-machine" ? -17 : -1),
-    stale_reason: scenario === "stale-machine" ? "herdr_link_down" : null,
+    last_seen_at: minutes(now, scenario === "stale-machine" || scenario === "degraded" ? -17 : -1),
+    stale_reason:
+      scenario === "stale-machine" || scenario === "degraded" ? "herdr_link_down" : null,
     rev: 2,
   };
   return { machines: [hostA, hostB, hostC] };
@@ -230,8 +233,78 @@ const BUSY_PROJECTS: ProjectsResponse = {
   ],
 };
 
+// `degraded`: delta runs on the stale host (a disconnected lane), beta's
+// orchestrator has gone quiet (a stale lane), gamma has a card whose state is
+// unknown, and kiln was registered and has no cards.
+const DEGRADED_PROJECTS: ProjectsResponse = {
+  projects: [
+    ...DEFAULT_PROJECTS.projects,
+    { id: "delta", name: "delta", delivery: "direct-pr", capacity: 2, rev: 1 },
+    { id: "kiln", name: "kiln", delivery: "direct-push", capacity: 1, rev: 1 },
+  ],
+};
+
 function projectsFor(scenario: Scenario): ProjectsResponse {
+  if (scenario === "degraded") return DEGRADED_PROJECTS;
   return scenario === "busy" ? BUSY_PROJECTS : DEFAULT_PROJECTS;
+}
+
+const HOST_C = "01JHOSTC00000000000000000C";
+
+function degradedRows(now: number): BoardRow[] {
+  return [
+    ...defaultRows(now),
+    card(
+      30,
+      "gamma",
+      "working",
+      "unknown",
+      "Rotate the staging credentials",
+      {
+        model: "sonnet",
+        observedMinutes: 6.2,
+      },
+      now,
+    ),
+    card(
+      60,
+      "delta",
+      "working",
+      "working",
+      "Port the exporter to the new schema",
+      {
+        host: HOST_C,
+        model: "sonnet",
+        observedMinutes: 13,
+      },
+      now,
+    ),
+    card(
+      61,
+      "delta",
+      "needs_you",
+      "decision",
+      "Choose the retention window",
+      {
+        host: HOST_C,
+        model: "opus",
+        observedMinutes: 14,
+      },
+      now,
+    ),
+    card(
+      62,
+      "delta",
+      "queued",
+      "filed",
+      "Document the exporter flags",
+      {
+        host: HOST_C,
+        kind: "scout",
+      },
+      now,
+    ),
+  ];
 }
 
 interface CardExtras {
@@ -433,6 +506,7 @@ function busyRows(now: number): BoardRow[] {
 
 function boardFor(scenario: Scenario, now: number): BoardResponse {
   if (scenario === "empty") return { rows: [], asked: [] };
+  if (scenario === "degraded") return { rows: degradedRows(now), asked: [] };
   if (scenario === "busy") {
     return {
       rows: busyRows(now),
@@ -608,7 +682,12 @@ function workerFor(row: BoardRow, now: number, index: number): AgentRow {
   };
 }
 
-function agentsFor(board: BoardResponse, projects: ProjectsResponse, now: number): AgentsResponse {
+function agentsFor(
+  board: BoardResponse,
+  projects: ProjectsResponse,
+  now: number,
+  scenario: Scenario,
+): AgentsResponse {
   if (board.rows.length === 0) return { orchestrators: [] };
   return {
     orchestrators: projects.projects.map((project, projectIndex) => {
@@ -618,12 +697,14 @@ function agentsFor(board: BoardResponse, projects: ProjectsResponse, now: number
           (row.column === "working" || row.column === "landing" || row.column === "needs_you"),
       );
       const host = live.find((row) => row.host_id)?.host_id ?? HOST_A;
+      // `degraded`: beta's orchestrator last spoke 41 minutes ago.
+      const quiet = scenario === "degraded" && project.id === "beta";
       return {
         session_id: sessionId(`O${project.id}`),
         role: "orchestrator",
         model: "opus",
         activity: "working",
-        activity_observed_at: minutes(now, -(0.2 + projectIndex)),
+        activity_observed_at: minutes(now, quiet ? -41 : -(0.2 + projectIndex)),
         last_status_line: `Waiting on ${live[0]?.display_id ?? "the next ask"}`,
         herdr_name: `${project.id}-orch`,
         card_id: null,
@@ -905,7 +986,7 @@ export function fixtureResponses(scenario: Scenario = "default", now: number = D
   return {
     [boardPath()]: board,
     [attentionPath]: attentionFor(scenario, board),
-    [agentsPath()]: agentsFor(board, projects, now),
+    [agentsPath()]: agentsFor(board, projects, now, scenario),
     [machinesPath]: machinesFor(scenario, now),
     [quotaPath]: quotaFor(scenario, now),
     [projectsPath]: projects,

@@ -3,14 +3,14 @@ import { Link, useRouterState } from "@tanstack/react-router";
 import type { CSSProperties } from "react";
 
 import { BoardFilterSegment, BoardFilterTabs } from "../board/filter";
-import { connectionStore } from "../../lib/connection";
 import { projectColor } from "../../lib/project-color";
 import { boardQuery, machinesQuery, projectsQuery } from "../../lib/queries";
 import { prefsStore, updatePrefs } from "../../lib/prefs";
 import { scopedProjects } from "../../lib/scope";
 import type { Density, ThemePreference } from "../../lib/prefs";
 import { useStore } from "../../lib/store";
-import { ChevronIcon, CloseIcon, LayersIcon, MenuIcon, RefreshIcon, ServerIcon } from "./icons";
+import { ReconnectingBanner } from "../states/reconnecting-banner";
+import { ChevronIcon, CloseIcon, LayersIcon, MenuIcon, ServerIcon } from "./icons";
 
 const TITLES: Record<string, string> = {
   "/": "Board",
@@ -65,7 +65,6 @@ function ScopeCrumb({ activeHost }: { activeHost: string | undefined }) {
 export function Header({ activeHost, onOpenMenu }: HeaderProps) {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const { data: machines } = useSuspenseQuery(machinesQuery());
-  const connection = useStore(connectionStore);
   const prefs = useStore(prefsStore);
   const { data: projects } = useSuspenseQuery(projectsQuery());
   const host = machines.machines.find((machine) => machine.id === activeHost);
@@ -139,19 +138,7 @@ export function Header({ activeHost, onOpenMenu }: HeaderProps) {
           ))}
         </div>
       </header>
-      <div
-        className="banner warn"
-        role="status"
-        aria-live="polite"
-        hidden={connection !== "reconnecting"}
-        data-testid="degraded-pill"
-      >
-        <RefreshIcon />
-        <div className="tx">
-          <b>Daemon reconnecting.</b> Showing the last known state; answers are queued until it is
-          back.
-        </div>
-      </div>
+      <ReconnectingBanner />
       {pathname === "/" ? <BoardFilterTabs /> : null}
     </>
   );

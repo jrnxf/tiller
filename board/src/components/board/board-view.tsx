@@ -11,6 +11,7 @@ import { scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
 import { boardLookStore, toggleDoneFolded } from "./board-prefs";
 import { ChevronLeftIcon, Status } from "./icons";
+import { laneHealth } from "../states/degraded";
 import { Lane } from "./lane";
 import { COLUMNS, onHost, passesFilter, tilesOf } from "./model";
 import type { ColumnId, Tile } from "./model";
@@ -248,6 +249,8 @@ export function BoardView({ host, filter }: { host: string | undefined; filter: 
               focusMode={focusMode}
               orchestrator={orchestrator}
               remoteHost={hostOfOrchestrator?.kind === "remote" ? hostOfOrchestrator : undefined}
+              health={laneHealth(orchestrator, hostOfOrchestrator)}
+              hostLabel={hostOfOrchestrator?.label ?? "unknown"}
               doneFolded={look.doneFolded}
               filterName={FILTER_NAME[filter]}
             />

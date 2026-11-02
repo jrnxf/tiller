@@ -346,9 +346,9 @@ about 3 min of the developer's time
 ### T3.4 Degraded states
 `sonnet` medium - 1.5-2 h - after T3.2
 
-- [ ] herdr disconnected, stale lanes with last-updated time, stale machine with its reason, unknown agent state, reconnecting banner, empty projects
-- [ ] Check: each state triggers from a fixture and has a screenshot
-- [ ] Delivered
+- [x] herdr disconnected, stale lanes with last-updated time, stale machine with its reason, unknown agent state, reconnecting banner, empty projects
+- [x] Check: each state triggers from a fixture and has a screenshot
+- [x] Delivered
 
 ### T3.5 Health page
 `sonnet` high, `dataviz` skill - 2-3 h - after T3.1

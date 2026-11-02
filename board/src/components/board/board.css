@@ -1599,6 +1599,9 @@ a.card:hover {
 .board[data-fit="2"] .card .c-chips .mchip {
   display: none;
 }
+.board[data-fit="2"] .card .c-chips .lab:last-child svg {
+  display: none;
+}
 .board[data-fit="2"] .card .c-chips .lab:last-child {
   flex: 0 1 auto;
   min-width: 0;

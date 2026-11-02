@@ -2,10 +2,12 @@ import { Link } from "@tanstack/react-router";
 
 import type { BoardRow } from "../../lib/api-types";
 import { cardDot } from "./activity";
+import type { DotKind } from "./activity";
 import { Ago } from "./ago";
 import { badgeText, badgeTone, statusMark } from "./badge";
-import { PrIcon, Status } from "./icons";
+import { HelpIcon, PrIcon, Status } from "./icons";
 import type { Tile } from "./model";
+import type { LaneHealth } from "../states/degraded";
 
 const KIND_COLOR: Record<string, string> = {
   scout: "var(--blue)",
@@ -39,16 +41,25 @@ function PrChip({ number }: { number: number }) {
   );
 }
 
-function CardTile({ row }: { row: BoardRow }) {
+// What a card's live line says when its lane cannot be trusted: the dot and
+// wording drop to the lane's state (mocks, "Board, degraded").
+function laneDot(dot: DotKind | null, lane: LaneHealth["kind"]): DotKind | null {
+  if (!dot || lane === "ok") return dot;
+  return lane === "stale" ? "stale" : "off";
+}
+
+const LANE_PREFIX = { ok: "observed", stale: "stale, observed", disconnected: "last known" };
+
+function CardTile({ row, lane }: { row: BoardRow; lane: LaneHealth["kind"] }) {
   const slim = row.column === "done";
-  const dot = cardDot(row);
+  const dot = laneDot(cardDot(row), lane);
   const tone = badgeTone(row);
   const attention = row.column === "needs_you";
   return (
     <Link
       to="/cards/$cardId"
       params={{ cardId: row.id }}
-      className={`card${slim ? " done slim" : ""}`}
+      className={`card${slim ? " done slim" : ""}${lane === "disconnected" ? " dim" : ""}`}
       data-attn={attention}
       title={`${row.display_id}: ${row.title}`}
     >
@@ -72,12 +83,19 @@ function CardTile({ row }: { row: BoardRow }) {
           <div className="c-chips">
             <ModelChip model={row.model} />
             {row.pr_number ? <PrChip number={row.pr_number} /> : null}
-            <span className={`lab sm ${tone}`}>{badgeText(row)}</span>
+            <span className={`lab sm ${tone}`}>
+              {dot === "unknown" ? <HelpIcon /> : null}
+              {badgeText(row)}
+            </span>
           </div>
           {dot && row.observed_at ? (
             <div className="c-live">
               <i className={`ld ${dot}${dot === "live" ? " pulse" : ""}`} />
-              <Ago at={row.observed_at} prefix="observed" oldAfter={300} />
+              <Ago
+                at={row.observed_at}
+                prefix={dot === "unknown" ? "unknown, seen" : LANE_PREFIX[lane]}
+                oldAfter={300}
+              />
             </div>
           ) : null}
         </>
@@ -104,8 +122,8 @@ function AskTile({ ask }: { ask: NonNullable<Tile["ask"]> }) {
   );
 }
 
-export function TileView({ tile }: { tile: Tile }) {
-  if (tile.row) return <CardTile row={tile.row} />;
+export function TileView({ tile, lane = "ok" }: { tile: Tile; lane?: LaneHealth["kind"] }) {
+  if (tile.row) return <CardTile row={tile.row} lane={lane} />;
   if (tile.ask) return <AskTile ask={tile.ask} />;
   return null;
 }
