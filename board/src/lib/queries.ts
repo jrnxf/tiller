@@ -5,9 +5,12 @@ import type {
   AttentionResponse,
   BoardFilter,
   BoardResponse,
+  CardDetail,
   MachinesResponse,
   ProjectsResponse,
   QuotaResponse,
+  RunDetail,
+  TimelineResponse,
 } from "./api-types.ts";
 
 // A query key is the request path with its query string, exactly as the boot
@@ -71,3 +74,15 @@ export const quotaQuery = () => readQuery<QuotaResponse>(quotaPath);
 
 export const projectsPath: QueryPath = "/api/v1/projects";
 export const projectsQuery = () => readQuery<ProjectsResponse>(projectsPath);
+
+const cardPath = (cardId: string): QueryPath => `/api/v1/cards/${cardId}`;
+export const cardQuery = (cardId: string) => readQuery<CardDetail>(cardPath(cardId));
+
+export const timelinePath = (cardId: string, before?: number): QueryPath =>
+  withParams(`/api/v1/cards/${cardId}/timeline`, {
+    before: before === undefined ? undefined : String(before),
+  });
+export const timelineQuery = (cardId: string) => readQuery<TimelineResponse>(timelinePath(cardId));
+
+const runPath = (runId: string): QueryPath => `/api/v1/runs/${runId}`;
+export const runQuery = (runId: string) => readQuery<RunDetail>(runPath(runId));

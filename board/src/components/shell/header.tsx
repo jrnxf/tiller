@@ -2,6 +2,7 @@ import { useSuspenseQuery } from "@tanstack/react-query";
 import { Link, useRouterState } from "@tanstack/react-router";
 import type { CSSProperties } from "react";
 
+import { BoardFilterSegment, BoardFilterTabs } from "../board/filter";
 import { connectionStore } from "../../lib/connection";
 import { projectColor } from "../../lib/project-color";
 import { boardQuery, machinesQuery, projectsQuery } from "../../lib/queries";
@@ -85,7 +86,7 @@ export function Header({ activeHost, onOpenMenu }: HeaderProps) {
         <div className="crumb">
           <ScopeCrumb activeHost={activeHost} />
           <ChevronIcon />
-          <h1>{TITLES[pathname] ?? "Tiller"}</h1>
+          <h1>{pathname.startsWith("/cards/") ? "Card" : (TITLES[pathname] ?? "Tiller")}</h1>
         </div>
         {activeHost ? (
           <Link
@@ -112,6 +113,7 @@ export function Header({ activeHost, onOpenMenu }: HeaderProps) {
             Show all projects
           </button>
         ) : null}
+        {pathname === "/" ? <BoardFilterSegment /> : null}
         <div className="seg hide-sm" role="group" aria-label="Theme">
           {THEMES.map((theme) => (
             <button
@@ -150,6 +152,7 @@ export function Header({ activeHost, onOpenMenu }: HeaderProps) {
           back.
         </div>
       </div>
+      {pathname === "/" ? <BoardFilterTabs /> : null}
     </>
   );
 }

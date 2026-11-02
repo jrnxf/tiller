@@ -4,8 +4,9 @@ import { resolve } from "node:path";
 
 import type { Connect, Plugin } from "vite";
 
+import type { BoardRow } from "./src/lib/api-types.ts";
 import { fixtureMutation } from "./src/lib/fixture-mutations.ts";
-import { SCENARIOS, bootScript, fixtureSnapshot, serverResponses } from "./src/lib/fixtures.ts";
+import { SCENARIOS, bootScript, fixtureResource, fixtureSnapshot } from "./src/lib/fixtures.ts";
 import type { Scenario } from "./src/lib/fixtures.ts";
 
 // Stands in for the daemon until T2.8 lands: serves the board API from
@@ -52,6 +53,36 @@ function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   });
 }
 
+function startMover(res: ServerResponse) {
+  const board = fixtureResource("/api/v1/board?filter=all", "live") as { rows: BoardRow[] };
+  const row = board.rows.find((candidate) => candidate.display_id === "alpha-42");
+  if (!row) return undefined;
+  let moverSeq = 4181;
+  let landing = false;
+  return setInterval(() => {
+    landing = !landing;
+    moverSeq += 1;
+    const card = {
+      ...row,
+      column: landing ? "landing" : "working",
+      badge: landing ? "checks" : "working",
+    };
+    const change = {
+      seq: moverSeq,
+      at: new Date().toISOString(),
+      kind: "card.changed",
+      txn: "fixture",
+      entity: "card",
+      entity_id: row.id,
+      rev_after: moverSeq,
+      card_id: row.id,
+      entity_state: null,
+      card,
+    };
+    res.write(`id: ${moverSeq}\nevent: change\ndata: ${JSON.stringify(change)}\n\n`);
+  }, 4000);
+}
+
 function apiMiddleware(): Connect.NextHandleFunction {
   return (req: IncomingMessage, res, next) => {
     const url = req.url ?? "";
@@ -79,16 +110,20 @@ function apiMiddleware(): Connect.NextHandleFunction {
       res.write("retry: 1000\n\n");
       streams.add(res);
       const keepalive = setInterval(() => res.write(": keepalive\n\n"), 15_000);
+      // `?fixture=live`: one card moves between Working and Landing every few
+      // seconds, so live updates can be watched without a daemon.
+      const mover = scenario === "live" ? startMover(res) : undefined;
       req.on("close", () => {
         clearInterval(keepalive);
+        clearInterval(mover);
         streams.delete(res);
       });
       return;
     }
     if (url === "/api/v1/snapshot") return sendJson(res, fixtureSnapshot(scenario));
 
-    const responses = serverResponses(scenario) as Record<string, unknown>;
-    if (url in responses) return sendJson(res, responses[url]);
+    const resource = fixtureResource(url, scenario);
+    if (resource !== undefined) return sendJson(res, resource);
     res.statusCode = 404;
     sendJson(res, { ok: false, error: "not found" });
   };

@@ -18,6 +18,7 @@ import { connectionStore } from "./connection";
 import { hydrateFromSnapshot } from "./boot";
 import { recordProgress } from "./receipts";
 import {
+  API_KEY_PREFIX,
   attentionPath,
   fetchJson,
   machinesPath,
@@ -158,7 +159,10 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
       if (REFETCH_ENTITIES.has(event.entity)) {
         queryClient.invalidateQueries({
           queryKey: ["api"],
-          predicate: (query) => String(query.queryKey[1] ?? "").startsWith("/api/v1/agents"),
+          predicate: (query) => {
+            const path = String(query.queryKey[1] ?? "");
+            return path.startsWith("/api/v1/agents") || path.startsWith("/api/v1/runs/");
+          },
           refetchType: "active",
         });
       }
@@ -168,8 +172,16 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
     writeBoard(queryClient, event.card);
   }
   if (event.card_id) {
+    // The detail page and its timeline: both paths start with the card's.
     const detail: QueryPath = `/api/v1/cards/${event.card_id}`;
-    queryClient.invalidateQueries({ queryKey: queryKeyFor(detail), refetchType: "active" });
+    queryClient.invalidateQueries({
+      queryKey: API_KEY_PREFIX,
+      predicate: (query) => {
+        const path = String(query.queryKey[1] ?? "");
+        return path === detail || path.startsWith(`${detail}/`);
+      },
+      refetchType: "active",
+    });
   }
 }
 

@@ -23,6 +23,12 @@ export interface BoardRow {
   blocked_by: string | null;
   closed_at: string | null;
   rev: number;
+  // Display fields the board joins onto the row (T3.2); absent on a card that
+  // has none yet.
+  model?: string | null;
+  pr_number?: number | null;
+  // When the newest observation of the card's active run was made.
+  observed_at?: string | null;
 }
 
 interface AskedRow {
@@ -87,7 +93,7 @@ export interface AttentionResponse {
   permission_prompts: PermissionPrompt[];
 }
 
-interface AgentRow {
+export interface AgentRow {
   session_id: string;
   role: string;
   model: string;
@@ -98,10 +104,131 @@ interface AgentRow {
   card_id: string | null;
   host_id: string;
   workers: AgentRow[];
+  // The project the session works for, the active run (for `GET /runs/{id}`)
+  // and herdr's pane and workspace label (protocol.md section 7.3).
+  project_id?: string;
+  run_id?: string | null;
+  pane_id?: string | null;
+  workspace_label?: string | null;
+  // When the session entered its current state.
+  state_since?: string | null;
 }
 
 export interface AgentsResponse {
   orchestrators: AgentRow[];
+}
+
+// `GET /api/v1/runs/{id}`: run detail with recent events and a pane tail.
+export interface EventLine {
+  at: string;
+  source: string;
+  text: string;
+  tone?: "warn" | "bad";
+}
+
+export interface RunDetail {
+  id: string;
+  card_id: string;
+  branch: string | null;
+  worktree: string | null;
+  started_at: string;
+  ended_at: string | null;
+  events: EventLine[];
+}
+
+// `GET /api/v1/cards/{id}`: the card with everything the detail page shows
+// (protocol.md section 7.3).
+export interface CardRun {
+  id: string;
+  number: number;
+  role: string;
+  model: string;
+  started_at: string;
+  ended_at: string | null;
+  outcome: "passed" | "failed" | "cancelled" | null;
+  note: string | null;
+  session_id: string | null;
+  host_id: string | null;
+  activity: string | null;
+  activity_observed_at: string | null;
+}
+
+export interface CardPr {
+  id: string;
+  number: number;
+  repo: string;
+  title: string;
+  state: "open" | "merged" | "closed";
+  head_sha: string;
+  base: string;
+  checks: "pending" | "passing" | "failing";
+  checks_summary: string | null;
+  diff_summary: string | null;
+}
+
+export interface CardApproval {
+  id: string;
+  kind: string;
+  // requested, accepted, rejected, executing, succeeded, failed, uncertain or
+  // stale (schema.sql, `approvals.state`).
+  state: string;
+  pr_id: string | null;
+  // The commit the approval is bound to.
+  head_sha: string | null;
+  decided_at: string | null;
+  decided_by: string | null;
+  // Commits pushed after the approval was bound, newest first.
+  newer_commits: { sha: string; subject: string; at: string }[];
+}
+
+interface Freshness {
+  source: string;
+  detail: string;
+  observed_at: string | null;
+}
+
+export interface CardDetail {
+  card: {
+    id: string;
+    display_id: string;
+    project_id: string;
+    kind: string;
+    title: string;
+    body: string | null;
+    priority: number;
+    slug: string;
+    state: "open" | "closed";
+    outcome: string | null;
+    model: string | null;
+    branch: string | null;
+    worktree: string | null;
+    rev: number;
+  };
+  column: BoardRow;
+  holds: { id: string; until_at: string | null; reason: string | null }[];
+  deps: { display_id: string; released_at: string | null }[];
+  attention: AttentionItem[];
+  runs: CardRun[];
+  prs: CardPr[];
+  approvals: CardApproval[];
+  artifacts: { id: string; kind: string; title: string }[];
+  reviews: { id: string; verdict: string; at: string }[];
+  obligations: { id: string; summary: string; state: string }[];
+  events: EventLine[];
+  freshness: Freshness[];
+}
+
+// `GET /api/v1/cards/{id}/timeline`: newest first, paged by `before`.
+export interface TimelineEntry {
+  seq: number;
+  at: string;
+  actor: "you" | "orchestrator" | "hook" | "system";
+  text: string;
+}
+
+export interface TimelineResponse {
+  entries: TimelineEntry[];
+  next_before: number | null;
 }
 
 export type MachineHealth = "ok" | "degraded" | "down" | "stale";

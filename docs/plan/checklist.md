@@ -288,13 +288,13 @@ about 3 min of the developer's time
 ### T3.2 Board views
 `sonnet` high - 3-4 h - after T3.1
 
-- [ ] Board: all-projects swimlanes; All / Active / Needs you filter in the header on desktop, tab row on phones
-- [ ] Agents: orchestrators with nested `├`/`└` workers; role, model, status, last output line
-- [ ] Agents: "Open in herdr" button (key O, tooltip), remote agents open herdr on that machine first; detail panel with the `herdr agent focus` command and recent events
-- [ ] Card detail: timeline, runs, PR and head SHA, bound approval, events, freshness
-- [ ] Check: 4 projects and 40 cards fit at 1440x900 without page scroll, both densities
-- [ ] Check: "Open in herdr" focuses the right pane, local and remote
-- [ ] Check: live updates with no reload or flicker; no pending state between views
+- [x] Board: all-projects swimlanes; All / Active / Needs you filter in the header on desktop, tab row on phones
+- [x] Agents: orchestrators with nested `├`/`└` workers; role, model, status, last output line
+- [x] Agents: "Open in herdr" button (key O, tooltip), remote agents open herdr on that machine first; detail panel with the `herdr agent focus` command and recent events
+- [x] Card detail: timeline, runs, PR and head SHA, bound approval, events, freshness
+- [x] Check: 4 projects and 40 cards fit at 1440x900 without page scroll, both densities
+- [x] Check: "Open in herdr" focuses the right pane, local and remote
+- [x] Check: live updates with no reload or flicker; no pending state between views
 - [ ] Delivered
 
 ### T3.3 Attention inbox and actions

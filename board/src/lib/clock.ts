@@ -18,7 +18,7 @@ export function syncClock(serverTime: string, thresholds: Record<string, unknown
   });
 }
 
-function serverNow(): number {
+export function serverNow(): number {
   return Date.now() + clockStore.get().offsetMs;
 }
 

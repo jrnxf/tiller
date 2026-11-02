@@ -270,3 +270,29 @@ test("the connection state follows open and error, and a closed stream reopens a
   );
   stop();
 });
+
+test("a card event marks that card's detail and timeline stale, and no other card's", () => {
+  const queryClient = seededClient();
+  const detail = queryKeyFor("/api/v1/cards/c1");
+  const timeline = queryKeyFor("/api/v1/cards/c1/timeline");
+  const other = queryKeyFor("/api/v1/cards/c10");
+  for (const key of [detail, timeline, other]) queryClient.setQueryData(key, {});
+
+  applyChange(queryClient, event({ entity: "run", card_id: "c1" }));
+
+  expect(queryClient.getQueryState(detail)?.isInvalidated).toBe(true);
+  expect(queryClient.getQueryState(timeline)?.isInvalidated).toBe(true);
+  // "c10" starts with "c1": only an exact card path or its children match.
+  expect(queryClient.getQueryState(other)?.isInvalidated).toBe(false);
+});
+
+test("a session or run event marks the agents and run details stale", () => {
+  const queryClient = seededClient();
+  const run = queryKeyFor("/api/v1/runs/r1");
+  queryClient.setQueryData(run, {});
+
+  applyChange(queryClient, event({ entity: "session" }));
+
+  expect(queryClient.getQueryState(run)?.isInvalidated).toBe(true);
+  expect(queryClient.getQueryState(queryKeyFor("/api/v1/agents"))?.isInvalidated).toBe(true);
+});
