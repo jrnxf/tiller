@@ -1,5 +1,5 @@
 # The hook latency check (T2.6) measures wall-clock time, so it runs with no
 # other test beside it.
 [[profile.default.overrides]]
-filter = 'binary(hook) & test(hook_p95_is_under_ten_ms_with_the_daemon_down)'
+filter = 'binary(hook) & test(hook_is_inside_the_ten_ms_budget_with_the_daemon_down)'
 threads-required = "num-test-threads"
