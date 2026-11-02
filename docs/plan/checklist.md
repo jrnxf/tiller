@@ -262,7 +262,7 @@ about 3 min of the developer's time
 - [x] Real run writes state.db; memory becomes a placement plan for approval, with `legacy-import` provenance
 - [x] Check: importing the dry-run bundle reproduces every card count in its manifest
 - [x] Check: a second import changes nothing
-- [ ] Delivered
+- [x] Delivered
 
 ### T2.7 Reconcile engine
 `fable` high or `opus` xhigh - 4-6 h - after T2.5 and T2.6 - critical path
