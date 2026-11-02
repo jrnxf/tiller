@@ -9,8 +9,15 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
 tiller-core.workspace = true
 tiller-herdr.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tiller-herdr = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

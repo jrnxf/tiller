@@ -1284,15 +1284,26 @@ dependencies = [
 name = "tiller-delivery"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
+ "tempfile",
+ "thiserror",
  "tiller-core",
  "tiller-herdr",
+ "tracing",
 ]
 
 [[package]]
 name = "tiller-herdr"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
  "tiller-core",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
