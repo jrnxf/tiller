@@ -245,11 +245,11 @@ about 3 min of the developer's time
 ### T4.1 Roles (drafting can start here)
 `fable` high for the orchestrator, `opus` high for the rest - 4-6 h - final after CP2
 
-- [ ] `roles/`: orchestrator, scout, builder, reviewer, verifier, each with job, tools, model and effort defaults, done evidence, handoff format
-- [ ] Orchestrator never edits project code; reviewer has no memory tool
-- [ ] Settings fragment with deny rules per role
-- [ ] Check: each role launched through its real launch form; instructions, tools, model and memory verified at startup and on resume
-- [ ] Delivered
+- [x] `roles/`: orchestrator, scout, builder, reviewer, verifier, each with job, tools, model and effort defaults, done evidence, handoff format
+- [x] Orchestrator never edits project code; reviewer has no memory tool
+- [x] Settings fragment with deny rules per role
+- [x] Check: each role launched through its real launch form; instructions, tools, model and memory verified at startup and on resume
+- [x] Delivered
 
 ---
 

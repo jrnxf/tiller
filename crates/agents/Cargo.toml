@@ -1,6 +1,6 @@
 [package]
 name = "tiller-agents"
-description = "Spawn, guards, landing, intake and handoff (T4.2-T4.5)"
+description = "Fleet roles, spawn, guards, landing, intake and handoff (T4.1-T4.5)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,8 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+serde_json.workspace = true
+thiserror.workspace = true
 tiller-core.workspace = true
 
 [lints]

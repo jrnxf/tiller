@@ -106,6 +106,8 @@
               # The core's migrations and test fixtures are SQL that include_str! embeds.
               (lib.fileset.fileFilter (file: file.hasExt "sql") ./crates)
               ./crates/cli/tests/fixtures
+              # Embedded by crates/agents with include_str!.
+              ./roles
             ];
           };
           commonArgs = {

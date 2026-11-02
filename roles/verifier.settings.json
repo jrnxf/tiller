@@ -1,0 +1,372 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "deny": [
+      "Read(~/.tiller/**)",
+      "Edit(~/.tiller/**)",
+      "Edit(~/.claude/**)",
+      "Edit(/<worktree>/.claude/**)",
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(**/.envrc)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Bash(gh pr merge *)",
+      "Bash(gh-axi pr merge *)",
+      "Bash(gh api *)",
+      "Bash(gh-axi api *)",
+      "Bash(gh auth *)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Bash(http *)",
+      "Bash(xh *)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git push * --force*)",
+      "Bash(git push * -f*)",
+      "Bash(git push *:<default>*)",
+      "Bash(git push * <default>)",
+      "Bash(git push --mirror*)",
+      "Bash(git push * --delete *)",
+      "Bash(git worktree add *)",
+      "Bash(git worktree remove *)",
+      "Bash(git worktree move *)",
+      "Bash(git worktree prune*)",
+      "Bash(treehouse *)",
+      "Bash(herdr *)",
+      "Bash(claude *)",
+      "Bash(npx *claude-code*)",
+      "Bash(tiller approve *)",
+      "Bash(tiller grant *)",
+      "Bash(tiller away *)",
+      "Bash(tiller land *)",
+      "Bash(tiller board*)",
+      "Bash(tiller import *)",
+      "Bash(tiller hook *)",
+      "Bash(tiller owner *)",
+      "Bash(crontab *)",
+      "Bash(at *)",
+      "Bash(systemd-run *)",
+      "Bash(systemctl *)",
+      "Bash(launchctl *)",
+      "Bash(pkill *)",
+      "Bash(killall *)",
+      "Bash(script *)",
+      "Bash(expect *)",
+      "Bash(unbuffer *)",
+      "EnterWorktree",
+      "ExitWorktree",
+      "CronCreate",
+      "CronDelete",
+      "ScheduleWakeup",
+      "RemoteTrigger",
+      "Workflow",
+      "PushNotification",
+      "Agent(isolation:*)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(no-mistakes *)"
+    ],
+    "allow": [
+      "Bash",
+      "Edit(/<worktree>/**)",
+      "Edit(/<scratch>/**)",
+      "Read",
+      "WebFetch"
+    ]
+  },
+  "claudeMdExcludes": [
+    "**/CLAUDE.md",
+    "**/CLAUDE.local.md",
+    "**/AGENTS.md",
+    "**/.claude/rules/**"
+  ],
+  "autoMemoryEnabled": false,
+  "disableClaudeAiConnectors": true,
+  "disableRemoteControl": true,
+  "remoteControlAtStartup": false,
+  "env": {
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    "TILLER_ROLE": "verifier"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> guard pretool --role verifier"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook SessionStart"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook UserPromptSubmit"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook PermissionRequest"
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook PermissionDenied"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook PostToolUse"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook PostToolUseFailure"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook Notification"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook SubagentStart"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook SubagentStop"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook Stop"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook StopFailure"
+          }
+        ]
+      }
+    ],
+    "InstructionsLoaded": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook InstructionsLoaded"
+          }
+        ]
+      }
+    ],
+    "ConfigChange": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook ConfigChange"
+          }
+        ]
+      }
+    ],
+    "CwdChanged": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook CwdChanged"
+          }
+        ]
+      }
+    ],
+    "DirectoryAdded": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook DirectoryAdded"
+          }
+        ]
+      }
+    ],
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook WorktreeCreate"
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook WorktreeRemove"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook PreCompact"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook PostCompact"
+          }
+        ]
+      }
+    ],
+    "PostModelSwitch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook PostModelSwitch"
+          }
+        ]
+      }
+    ],
+    "Elicitation": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook Elicitation"
+          }
+        ]
+      }
+    ],
+    "ElicitationResult": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook ElicitationResult"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<tiller> hook SessionEnd"
+          }
+        ]
+      }
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "autoAllowBashIfSandboxed": true,
+    "excludedCommands": [
+      "<tiller>",
+      "<tiller> *"
+    ],
+    "filesystem": {
+      "allowWrite": [
+        "<worktree>",
+        "<scratch>"
+      ],
+      "denyWrite": [
+        "~/.tiller",
+        "~/.claude",
+        "<worktree>/.claude",
+        "<worktree>/.git/hooks"
+      ],
+      "denyRead": [
+        "~/.tiller",
+        "<worktree>/.env",
+        "<worktree>/.envrc"
+      ]
+    },
+    "network": {
+      "allowedDomains": [
+        "<network_allow>"
+      ],
+      "allowUnixSockets": [
+        "<no_mistakes_socket>"
+      ],
+      "allowLocalBinding": false
+    }
+  }
+}
