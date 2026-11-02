@@ -2,9 +2,12 @@
 //! and the board API on `127.0.0.1` (`protocol.md` 6.4 and 7.1).
 //!
 //! A second instance finds the lock held and exits 0 naming the running
-//! pid. Without `state.db` the daemon still serves the board and its health
-//! endpoint, answers every other API call with 503, and starts its workers
-//! once `tiller init` has made the database.
+//! pid. Without `state.db` the daemon makes one itself under the lock, as
+//! `tiller init` would with the host's name and two lanes, so a fresh machine
+//! needs no manual step. It never touches a database that exists, and it
+//! leaves a home whose owner marker names another system alone: that daemon
+//! still serves the board, answers every other API call with 503, and starts
+//! its workers once `tiller init` has made the database.
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -15,6 +18,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tiller_agents::land::{DaemonLock, LandError};
+use tiller_core::domain::Boundary;
+use tiller_core::state::projects::Init;
 use tiller_core::{Actor, Ctx, Store, Timestamp};
 use tiller_herdr::client::Cli;
 use tiller_herdr::poller::Registry;
@@ -129,11 +134,58 @@ pub fn run(config: Config) -> Result<Ended, DaemonError> {
         }
         Err(error) => return Err(DaemonError::Lock(error)),
     };
+    init_if_missing(&config.home)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(DaemonError::Runtime)?;
     runtime.block_on(serve(config, Arc::new(lock)))
+}
+
+/// Lanes a self-initialized host gets; `tiller host edit` changes it.
+const DEFAULT_LANES: i64 = 2;
+
+/// This machine's name, for the host label of a self-initialized database.
+fn host_label() -> String {
+    ["/proc/sys/kernel/hostname", "/etc/hostname"]
+        .iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .chain(
+            std::process::Command::new("hostname")
+                .output()
+                .ok()
+                .and_then(|out| String::from_utf8(out.stdout).ok()),
+        )
+        .map(|name| name.trim().to_owned())
+        .find(|name| !name.is_empty())
+        .unwrap_or_else(|| "local".to_owned())
+}
+
+/// Makes `state.db` on a fresh home. Only the lock holder calls it, so two
+/// daemons never race, and an existing database is never opened here.
+fn init_if_missing(home: &Path) -> Result<(), DaemonError> {
+    let db = home.join("state.db");
+    if db.exists() {
+        return Ok(());
+    }
+    // A marker naming another system makes every mutation refuse (R20).
+    let marker = std::fs::read_to_string(home.join("owner")).unwrap_or_default();
+    if !matches!(marker.trim(), "" | "tiller") {
+        tracing::warn!("owner marker names another system; not creating state.db");
+        return Ok(());
+    }
+    let mut store = Store::open(&db)?;
+    let init = Init {
+        host_label: host_label(),
+        lane_capacity: DEFAULT_LANES,
+        ram_floor_mb: None,
+        disk_floor_mb: None,
+        boundary: Boundary::Personal,
+    };
+    let host = init.host_label.clone();
+    store.init(&Ctx::new(Actor::Owner), init)?;
+    tracing::info!(host, "created state.db on first start");
+    Ok(())
 }
 
 async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonError> {

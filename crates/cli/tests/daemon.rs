@@ -214,3 +214,67 @@ fn a_migration_under_a_running_daemon_stops_it_with_three() {
         .unwrap();
     assert_eq!(stops, 0);
 }
+
+/// `GET <path>` over a plain socket: the status line and the body.
+fn get(port: u16, path: &str) -> (String, String) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+    )
+    .unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    let (head, body) = answer.split_once("\r\n\r\n").unwrap();
+    (head.lines().next().unwrap().to_owned(), body.to_owned())
+}
+
+#[test]
+fn a_daemon_on_an_empty_home_makes_the_database_and_serves_agents() {
+    let world = World::new();
+    assert!(!world.db().exists());
+    let mut daemon = start(&world);
+
+    let (status, _) = get(daemon.port, "/api/v1/agents");
+    assert_eq!(status, "HTTP/1.0 200 OK");
+    assert_eq!(health(daemon.port)["initialized"], true);
+    let hosts: i64 = world
+        .store()
+        .conn()
+        .query_row("SELECT count(*) FROM hosts", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(hosts, 1);
+    assert!(terminate(&mut daemon).success());
+
+    // A restart finds the database and leaves it alone.
+    let host_id: String = world
+        .store()
+        .conn()
+        .query_row("SELECT value FROM meta WHERE key = 'host_id'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let mut again = start(&world);
+    let after: String = world
+        .store()
+        .conn()
+        .query_row("SELECT value FROM meta WHERE key = 'host_id'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(host_id, after);
+    assert!(terminate(&mut again).success());
+}
+
+#[test]
+fn a_daemon_leaves_a_home_owned_by_another_system_uninitialized() {
+    let world = World::new();
+    std::fs::create_dir_all(world.home()).unwrap();
+    std::fs::write(world.home().join("owner"), "firstmate\n").unwrap();
+    let mut daemon = start(&world);
+
+    assert!(!world.db().exists());
+    let (status, _) = get(daemon.port, "/api/v1/agents");
+    assert_eq!(status, "HTTP/1.0 503 Service Unavailable");
+    assert!(terminate(&mut daemon).success());
+}
