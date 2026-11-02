@@ -223,10 +223,10 @@ about 3 min of the developer's time
 ### T2.6 Observations
 `opus` medium - 3-4 h - after the T2.1 interface
 
-- [ ] `tiller hook <event>` writes straight to SQLite, no daemon round trip
-- [ ] Transcript tailer, process liveness checks; hook structs tolerate unknown fields
-- [ ] Check: hook p95 under 10 ms, also with the daemon down
-- [ ] Check: interrupts, `StopFailure`, permission prompts and session end detected in tests
+- [x] `tiller hook <event>` writes straight to SQLite, no daemon round trip
+- [x] Transcript tailer, process liveness checks; hook structs tolerate unknown fields
+- [x] Check: hook p95 under 10 ms, also with the daemon down
+- [x] Check: interrupts, `StopFailure`, permission prompts and session end detected in tests
 - [ ] Delivered
 
 ### T3.1 Board app shell

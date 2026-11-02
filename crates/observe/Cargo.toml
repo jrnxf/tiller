@@ -9,7 +9,15 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 tiller-core.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

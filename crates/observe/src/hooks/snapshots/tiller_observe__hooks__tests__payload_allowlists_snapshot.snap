@@ -1,0 +1,211 @@
+---
+source: crates/observe/src/hooks/tests.rs
+expression: "json!({\"events\": table, \"never_stored\": NEVER_STORED})"
+---
+{
+  "events": {
+    "ConfigChange": {
+      "handler": "config",
+      "keep": [
+        "source",
+        "file_path"
+      ]
+    },
+    "CwdChanged": {
+      "handler": "cwd",
+      "keep": [
+        "old_cwd",
+        "new_cwd"
+      ]
+    },
+    "DirectoryAdded": {
+      "handler": "cwd",
+      "keep": [
+        "directory"
+      ]
+    },
+    "Elicitation": {
+      "handler": "elicitation",
+      "keep": [
+        "mcp_server_name",
+        "mode"
+      ]
+    },
+    "ElicitationResult": {
+      "handler": "elicitation",
+      "keep": [
+        "mcp_server_name",
+        "action"
+      ]
+    },
+    "FileChanged": {
+      "handler": "ignore",
+      "keep": []
+    },
+    "InstructionsLoaded": {
+      "handler": "instructions",
+      "keep": [
+        "memory_type",
+        "load_reason"
+      ]
+    },
+    "MessageDisplay": {
+      "handler": "ignore",
+      "keep": []
+    },
+    "Notification": {
+      "handler": "notify",
+      "keep": [
+        "notification_type"
+      ]
+    },
+    "PermissionDenied": {
+      "handler": "permission_denied",
+      "keep": [
+        "tool_name",
+        "reason"
+      ]
+    },
+    "PermissionRequest": {
+      "handler": "permission_request",
+      "keep": [
+        "tool_name"
+      ]
+    },
+    "PostCompact": {
+      "handler": "compact",
+      "keep": [
+        "trigger"
+      ]
+    },
+    "PostModelSwitch": {
+      "handler": "model",
+      "keep": [
+        "model",
+        "previous_model"
+      ]
+    },
+    "PostToolBatch": {
+      "handler": "ignore",
+      "keep": []
+    },
+    "PostToolUse": {
+      "handler": "tool_done",
+      "keep": [
+        "tool_name",
+        "tool_use_id"
+      ]
+    },
+    "PostToolUseFailure": {
+      "handler": "tool_done",
+      "keep": [
+        "tool_name",
+        "tool_use_id",
+        "is_interrupt"
+      ]
+    },
+    "PreCompact": {
+      "handler": "compact",
+      "keep": [
+        "trigger"
+      ]
+    },
+    "PreModelSwitch": {
+      "handler": "ignore",
+      "keep": []
+    },
+    "PreToolUse": {
+      "handler": "guard",
+      "keep": [
+        "tool_name",
+        "tool_use_id"
+      ]
+    },
+    "SessionEnd": {
+      "handler": "session_end",
+      "keep": [
+        "reason"
+      ]
+    },
+    "SessionStart": {
+      "handler": "session_bind",
+      "keep": [
+        "source",
+        "model",
+        "transcript_path"
+      ]
+    },
+    "Setup": {
+      "handler": "ignore",
+      "keep": []
+    },
+    "Stop": {
+      "handler": "turn_end",
+      "keep": [
+        "stop_hook_active"
+      ]
+    },
+    "StopFailure": {
+      "handler": "turn_failed",
+      "keep": [
+        "error"
+      ]
+    },
+    "SubagentStart": {
+      "handler": "subagent",
+      "keep": [
+        "agent_id",
+        "agent_type"
+      ]
+    },
+    "SubagentStop": {
+      "handler": "subagent",
+      "keep": [
+        "agent_id",
+        "agent_type"
+      ]
+    },
+    "TaskCompleted": {
+      "handler": "ignore",
+      "keep": []
+    },
+    "TaskCreated": {
+      "handler": "ignore",
+      "keep": []
+    },
+    "TeammateIdle": {
+      "handler": "ignore",
+      "keep": []
+    },
+    "UserPromptExpansion": {
+      "handler": "ignore",
+      "keep": []
+    },
+    "UserPromptSubmit": {
+      "handler": "intake",
+      "keep": [
+        "prompt_id"
+      ]
+    },
+    "WorktreeCreate": {
+      "handler": "worktree",
+      "keep": [
+        "name",
+        "worktree_path"
+      ]
+    },
+    "WorktreeRemove": {
+      "handler": "worktree",
+      "keep": [
+        "worktree_path"
+      ]
+    }
+  },
+  "never_stored": [
+    "prompt",
+    "last_assistant_message",
+    "tool_input",
+    "tool_response",
+    "error_details"
+  ]
+}

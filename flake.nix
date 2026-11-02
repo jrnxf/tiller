@@ -105,6 +105,9 @@
               (craneLib.fileset.commonCargoSources ./.)
               # The core's migrations and test fixtures are SQL that include_str! embeds.
               (lib.fileset.fileFilter (file: file.hasExt "sql") ./crates)
+              # insta snapshots, and the nextest overrides the checks run with.
+              (lib.fileset.fileFilter (file: file.hasExt "snap") ./crates)
+              ./.config/nextest.toml
               ./crates/cli/tests/fixtures
               # Embedded by crates/agents with include_str!.
               ./roles

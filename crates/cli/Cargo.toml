@@ -17,9 +17,12 @@ anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
 rust-embed.workspace = true
+tiller-observe.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
+tiller-core.workspace = true
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 

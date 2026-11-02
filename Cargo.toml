@@ -70,3 +70,8 @@ expect_used = "deny"
 codegen-units = 1
 lto = "thin"
 strip = true
+
+# The bundled SQLite at -O0 makes `tiller hook` miss its 10 ms budget in
+# debug builds, the ones tests run (T2.6).
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
