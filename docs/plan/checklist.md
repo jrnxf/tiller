@@ -214,10 +214,10 @@ about 3 min of the developer's time
 ### T2.5 Delivery and herdr adapter
 `opus` high - 3-4 h - after the T2.1 interface
 
-- [ ] Outbox: store, then wake-up line with message id, then delivery states; idempotent retries; target-pane session check
-- [ ] herdr adapter: one poller per source, no overlapping polls, backoff, last-success timestamps
-- [ ] herdr layout rules applied (nested workspaces, glyph repair)
-- [ ] Check: end-to-end tests for a busy pane, a permission dialog, a gone pane, a duplicate send, a crash between store and send
+- [x] Outbox: store, then wake-up line with message id, then delivery states; idempotent retries; target-pane session check
+- [x] herdr adapter: one poller per source, no overlapping polls, backoff, last-success timestamps
+- [x] herdr layout rules applied (nested workspaces, glyph repair)
+- [x] Check: end-to-end tests for a busy pane, a permission dialog, a gone pane, a duplicate send, a crash between store and send
 - [ ] Delivered
 
 ### T2.6 Observations
