@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::bundle::{Bundle, BundleCard, BundleMemory};
+use crate::domain::lifecycle::{allowed_outcomes, outcome_allowed, outcome_satisfies_dependants};
 use crate::domain::*;
 use crate::error::{Error, Result};
 use crate::ids::{self, FLEET_PROJECT};
@@ -101,6 +102,8 @@ pub struct CardPlan {
     pub priority: i64,
     pub state: CardState,
     pub outcome: Option<CardOutcome>,
+    /// The bundle's done outcome, as Firstmate wrote it.
+    pub bundle_outcome: Option<String>,
     pub created_at: Timestamp,
     pub closed_at: Option<Timestamp>,
     pub bundle_column: String,
@@ -188,6 +191,13 @@ impl Plan {
     pub fn ok(&self) -> bool {
         self.checks.iter().all(|check| check.ok)
     }
+
+    /// True when every project, card and memory entry is already in `state.db`.
+    pub fn writes_nothing(&self) -> bool {
+        self.projects.iter().all(|p| p.action == Action::Exists)
+            && self.cards.iter().all(|c| c.action == Action::Exists)
+            && self.memory.iter().all(|m| m.action == Action::Exists)
+    }
 }
 
 /// Works out the plan for `bundle` against the database behind `conn`.
@@ -211,7 +221,7 @@ pub fn plan(conn: &Connection, bundle: &Bundle, now: Timestamp) -> Result<Plan> 
     let already_imported =
         meta(conn, "import_manifest_sha256")?.as_deref() == Some(bundle.manifest_sha256.as_str());
 
-    let slugs = project_slugs(bundle)?;
+    let slugs = project_slugs(conn, bundle)?;
     let mut cards = plan_cards(conn, bundle, &slugs, now)?;
     let projects = plan_projects(conn, bundle, &slugs, &cards)?;
     assign_display_ids(conn, &projects, &mut cards)?;
@@ -305,8 +315,9 @@ fn check(name: &str, manifest: usize, planned: usize) -> Check {
 /// Maps every project id the bundle names (in `projects.json`, on a card or
 /// in a memory scope) to a Tiller slug. A valid slug is kept; any other id is
 /// lowercased, stripped to letters and digits and cut to 16 characters, with
-/// a number added when that collides.
-fn project_slugs(bundle: &Bundle) -> Result<BTreeMap<String, String>> {
+/// a number added when that collides, including with a project in `state.db`
+/// that an earlier import of the same id did not create.
+fn project_slugs(conn: &Connection, bundle: &Bundle) -> Result<BTreeMap<String, String>> {
     let mut named: Vec<String> = bundle.projects.iter().map(|p| p.id.clone()).collect();
     let mut extra = BTreeSet::new();
     for card in &bundle.cards {
@@ -347,9 +358,12 @@ fn project_slugs(bundle: &Bundle) -> Result<BTreeMap<String, String>> {
             base.push('p');
         }
         base.truncate(16);
+        let foreign = |slug: &str| -> Result<bool> {
+            Ok(find::<Project>(conn, "id = ?1", &[&slug])?.is_some_and(|p| p.name != *id))
+        };
         let mut slug = base.clone();
         let mut n = 2;
-        while taken.contains(&slug) {
+        while taken.contains(&slug) || foreign(&slug)? {
             let suffix = n.to_string();
             slug = format!("{}{suffix}", &base[..base.len().min(16 - suffix.len())]);
             n += 1;
@@ -480,6 +494,9 @@ fn plan_card(
     now: Timestamp,
 ) -> Result<CardPlan> {
     let refuse = |fact: String| Error::refused("card", &card.id, fact);
+    if card.title.trim().is_empty() {
+        return Err(refuse("the card has no title".into()));
+    }
     let project_id = slugs
         .get(&card.project)
         .cloned()
@@ -510,7 +527,7 @@ fn plan_card(
 
     let (state, outcome, closed_at) = match (&card.done, card.column.as_str()) {
         (Some(done), _) => {
-            let outcome = match done.outcome.as_str() {
+            let delivered = match done.outcome.as_str() {
                 "merged" => CardOutcome::Landed,
                 "reported" => CardOutcome::Reported,
                 "answered" => CardOutcome::Answered,
@@ -523,6 +540,13 @@ fn plan_card(
                         "done outcome {other:?} has no Tiller outcome"
                     )));
                 }
+            };
+            // Firstmate closed any kind with any outcome; a delivered outcome
+            // another kind owns becomes this kind's own (`allowed_outcomes`).
+            let outcome = if outcome_allowed(kind, delivered) {
+                delivered
+            } else {
+                allowed_outcomes(kind).first().copied().unwrap_or(delivered)
             };
             let at = done
                 .at
@@ -603,12 +627,23 @@ fn plan_card(
     } else {
         Action::Create
     };
+    // Closed history may sit in a retired project; open work may not (`card.create`).
+    if action == Action::Create
+        && state == CardState::Open
+        && find::<Project>(conn, "id = ?1", &[&project_id])?.is_some_and(|p| p.retired_at.is_some())
+    {
+        return Err(refuse(format!("project {project_id} is retired")));
+    }
 
+    let merged = card
+        .done
+        .as_ref()
+        .is_some_and(|done| done.outcome == "merged");
     let pr = card
         .pr
         .as_deref()
         .filter(|url| !url.is_empty())
-        .map(|url| plan_pr(conn, repos, &project_id, url, state, outcome))
+        .map(|url| plan_pr(conn, repos, &project_id, url, state, merged))
         .transpose()?;
 
     let body = match &card.body {
@@ -633,6 +668,7 @@ fn plan_card(
         priority,
         state,
         outcome,
+        bundle_outcome: card.done.as_ref().map(|done| done.outcome.clone()),
         created_at,
         closed_at,
         bundle_column: card.column.clone(),
@@ -673,11 +709,11 @@ fn plan_pr(
     project_id: &str,
     url: &str,
     state: CardState,
-    outcome: Option<CardOutcome>,
+    merged: bool,
 ) -> Result<PrPlan> {
-    let pr_state = match (state, outcome) {
+    let pr_state = match (state, merged) {
         (CardState::Open, _) => PrState::Open,
-        (_, Some(CardOutcome::Landed)) => PrState::Merged,
+        (_, true) => PrState::Merged,
         _ => PrState::Closed,
     };
     let parsed = parse_pr_url(url);
@@ -799,17 +835,22 @@ fn assign_display_ids(
 }
 
 /// Turns each open card's `depends_on` into dependencies on the cards they
-/// name, in the bundle or already in `state.db`.
+/// name, in the bundle or already in `state.db` (whose state there counts for
+/// a card both hold). A dependency on a card that closed undelivered stays
+/// and asks the owner, as `card.close` does; a cycle is refused (`dep.add`).
 fn resolve_dependencies(conn: &Connection, bundle: &Bundle, cards: &mut [CardPlan]) -> Result<()> {
-    let index: HashMap<String, (String, CardState, Option<CardOutcome>)> = cards
-        .iter()
-        .map(|c| {
-            (
-                c.legacy_id.clone(),
-                (c.display_id.clone(), c.state, c.outcome),
-            )
-        })
-        .collect();
+    let mut index: HashMap<String, (String, CardState, Option<CardOutcome>)> = HashMap::new();
+    for card in cards.iter() {
+        let target = match card.action {
+            Action::Create => (card.display_id.clone(), card.state, card.outcome),
+            Action::Exists => conn.query_row(
+                "SELECT display_id, state, outcome FROM cards WHERE display_id = ?1",
+                [&card.display_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?,
+        };
+        index.insert(card.legacy_id.clone(), target);
+    }
     for (card, source) in cards.iter_mut().zip(&bundle.cards) {
         if card.state != CardState::Open {
             continue;
@@ -840,23 +881,85 @@ fn resolve_dependencies(conn: &Connection, bundle: &Bundle, cards: &mut [CardPla
                 ));
             };
             let released = match (state, outcome) {
-                (CardState::Closed, Some(CardOutcome::Landed)) => Some(DepReleaseReason::Landed),
-                (CardState::Closed, Some(CardOutcome::Reported)) => {
-                    Some(DepReleaseReason::Reported)
-                }
-                (CardState::Closed, Some(CardOutcome::Answered)) => {
-                    Some(DepReleaseReason::Answered)
-                }
-                (CardState::Closed, Some(CardOutcome::Completed)) => {
-                    Some(DepReleaseReason::Completed)
+                (CardState::Closed, Some(outcome)) if outcome_satisfies_dependants(outcome) => {
+                    Some(outcome.as_str().parse::<DepReleaseReason>()?)
                 }
                 _ => None,
             };
+            if let (CardState::Closed, Some(outcome), None) = (state, outcome, released) {
+                card.waits.push(Wait::Attention {
+                    kind: AttentionKind::Decision,
+                    question: format!(
+                        "{} waits on {display_id}, which closed {outcome}. Drop the dependency, or cancel {}?",
+                        card.display_id, card.display_id
+                    ),
+                });
+            }
             card.waits.push(Wait::Dependency {
                 on: on.clone(),
                 display_id,
                 released,
             });
+        }
+        card.column = column(card.state, &card.waits);
+    }
+    refuse_cycles(cards)
+}
+
+/// Refuses a cycle among the unreleased dependencies this import writes. An
+/// existing card's dependencies never reach a new card, so only these count.
+fn refuse_cycles(cards: &[CardPlan]) -> Result<()> {
+    let edges: HashMap<&str, Vec<&str>> = cards
+        .iter()
+        .filter(|card| card.action == Action::Create)
+        .map(|card| {
+            let on = card
+                .waits
+                .iter()
+                .filter_map(|wait| match wait {
+                    Wait::Dependency {
+                        on, released: None, ..
+                    } => Some(on.as_str()),
+                    _ => None,
+                })
+                .collect();
+            (card.legacy_id.as_str(), on)
+        })
+        .collect();
+    // Depth-first from each card; `path` is the chain being walked.
+    let mut done: BTreeSet<&str> = BTreeSet::new();
+    for start in edges.keys() {
+        let mut path: Vec<&str> = Vec::new();
+        let mut stack: Vec<(&str, usize)> = vec![(start, 0)];
+        while let Some((node, next)) = stack.pop() {
+            if next == 0 {
+                if let Some(at) = path.iter().position(|seen| *seen == node) {
+                    let mut chain = path[at..].to_vec();
+                    chain.push(node);
+                    return Err(Error::refused(
+                        "card",
+                        node,
+                        format!(
+                            "the bundle's dependencies form a cycle: {}",
+                            chain.join(" -> ")
+                        ),
+                    ));
+                }
+                if done.contains(node) {
+                    continue;
+                }
+                path.push(node);
+            }
+            match edges.get(node).and_then(|on| on.get(next)) {
+                Some(child) => {
+                    stack.push((node, next + 1));
+                    stack.push((child, 0));
+                }
+                None => {
+                    path.pop();
+                    done.insert(node);
+                }
+            }
         }
     }
     Ok(())

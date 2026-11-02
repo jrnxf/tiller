@@ -28,13 +28,14 @@ impl Store {
     }
 
     /// `import.apply`. Natural: a bundle whose manifest is already
-    /// `meta.import_manifest_sha256` writes nothing and returns its plan, and
-    /// any other bundle skips every project, card and memory entry already
-    /// present, so a second import changes nothing.
+    /// `meta.import_manifest_sha256`, or whose every record is already
+    /// present (a re-export), writes nothing and returns its plan; any other
+    /// bundle skips every project, card and memory entry already present, so
+    /// a second import changes nothing.
     pub fn import_apply(&mut self, ctx: &Ctx, bundle: &Bundle) -> Result<Applied<Plan>> {
         self.write(ctx, "import.apply", None, |tx| {
             let plan = plan(tx.conn(), bundle, tx.now())?;
-            if plan.already_imported {
+            if plan.already_imported || plan.writes_nothing() {
                 return Ok(plan);
             }
             if !plan.ok() {
@@ -142,12 +143,14 @@ fn write_plan(tx: &mut Tx<'_>, bundle: &Bundle, plan: &Plan) -> Result<()> {
     }
 
     for project in plan.projects.iter().filter(|p| p.retire) {
-        tx.conn().execute(
-            "UPDATE projects SET retired_at = ?2, rev = rev + 1 WHERE id = ?1",
+        let rev: i64 = tx.conn().query_row(
+            "UPDATE projects SET retired_at = ?2, rev = rev + 1 WHERE id = ?1 RETURNING rev",
             params![project.id, now],
+            |row| row.get(0),
         )?;
         tx.event(
             NewEvent::new("project", &project.id, "project.retired")
+                .rev(rev)
                 .payload(json!({"reason": "named only by imported history"})),
         )?;
     }
@@ -231,6 +234,7 @@ fn insert_card(tx: &mut Tx<'_>, card: &CardPlan) -> Result<String> {
                     "since": card.detail.since,
                     "state": card.state,
                     "outcome": card.outcome,
+                    "bundle_outcome": card.bundle_outcome,
                     "closed_at": card.closed_at,
                     "pr": card.pr.as_ref().map(|pr| &pr.url),
                     "runs": card.detail.runs,

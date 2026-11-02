@@ -305,7 +305,8 @@ fn import_reproduces_every_card_count_in_the_manifest() {
     };
     assert_eq!(outcome("a1").as_deref(), Some("landed"));
     assert_eq!(outcome("b1").as_deref(), Some("cancelled"));
-    assert_eq!(outcome("f1").as_deref(), Some("answered"));
+    // A scout cannot close answered: the delivered outcome becomes its own.
+    assert_eq!(outcome("f1").as_deref(), Some("reported"));
     assert_eq!(column_of(&store, "a5"), "needs_you");
     assert_eq!(column_of(&store, "n1"), "needs_you");
     assert_eq!(column_of(&store, "a6"), "queued");
@@ -556,7 +557,7 @@ fn second_import_changes_nothing() {
         "the second import wrote"
     );
 
-    // A re-export of the same records (a new manifest) adds no rows either:
+    // A re-export of the same records (a new manifest) writes nothing either:
     // every project, card and memory entry is found and kept.
     let other = tempfile::tempdir().unwrap();
     write_bundle(other.path(), &records(), "final");
@@ -576,17 +577,153 @@ fn second_import_changes_nothing() {
             .iter()
             .all(|m| m.action == Action::Exists)
     );
-    let changed: Vec<String> = snapshot(store.conn(), &[])
-        .into_iter()
-        .zip(after_first)
-        .filter(|(now, before)| now != before)
-        .map(|(now, _)| now.0)
-        .collect();
+    assert!(applied.events.is_empty());
     assert_eq!(
-        changed,
-        ["events", "meta"],
-        "only the import.applied event and the manifest hash change"
+        snapshot(store.conn(), &[]),
+        after_first,
+        "the re-export wrote"
     );
+}
+
+/// What `card.create`, `card.close` and `dep.add` refuse, the importer
+/// refuses or maps the same way.
+#[test]
+fn cards_keep_the_lifecycle_rules() {
+    let refused = |extra: Vec<Value>| -> String {
+        let mut records = records();
+        records.cards.extend(extra);
+        let dir = tempfile::tempdir().unwrap();
+        write_bundle(dir.path(), &records, "dry");
+        store()
+            .import_plan(&Bundle::read(dir.path()).unwrap(), Timestamp::now())
+            .unwrap_err()
+            .to_string()
+    };
+    let mut blank = card("x1", "alpha", "ship", "queued");
+    blank["title"] = json!("  ");
+    assert!(refused(vec![blank]).contains("the card has no title"));
+    let mut c1 = card("c1", "alpha", "ship", "queued");
+    c1["depends_on"] = json!(["c2"]);
+    let mut c2 = card("c2", "alpha", "ship", "queued");
+    c2["depends_on"] = json!(["c1"]);
+    let error = refused(vec![c1, c2]);
+    assert!(
+        error.contains("form a cycle: c1 -> c2 -> c1")
+            || error.contains("form a cycle: c2 -> c1 -> c2"),
+        "{error}"
+    );
+
+    // A dependency on a card that closed undelivered stays and asks the owner.
+    let mut records = records();
+    let mut d1 = card("d1", "alpha", "ship", "queued");
+    d1["depends_on"] = json!(["b1"]);
+    records.cards.push(d1);
+    let dir = tempfile::tempdir().unwrap();
+    write_bundle(dir.path(), &records, "dry");
+    let plan = store()
+        .import_plan(&Bundle::read(dir.path()).unwrap(), Timestamp::now())
+        .unwrap();
+    let d1 = plan.cards.iter().find(|c| c.legacy_id == "d1").unwrap();
+    assert_eq!(d1.column, "needs_you");
+    assert!(
+        matches!(
+            d1.waits.as_slice(),
+            [Wait::Attention { kind: AttentionKind::Decision, question }, Wait::Dependency { released: None, .. }]
+                if question.contains("which closed cancelled")
+        ),
+        "{:?}",
+        d1.waits
+    );
+    let f1 = plan.cards.iter().find(|c| c.legacy_id == "f1").unwrap();
+    assert_eq!(
+        (f1.outcome, f1.bundle_outcome.as_deref()),
+        (Some(CardOutcome::Reported), Some("answered"))
+    );
+}
+
+/// A later bundle meets what the first import and the owner left in `state.db`.
+#[test]
+fn a_later_bundle_reads_state_db_as_it_now_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = store();
+    store
+        .import_apply(&import_ctx(), &bundle(dir.path()))
+        .unwrap();
+    // The owner closes a3 after the first import, and adds a project that
+    // a legacy id would otherwise normalize onto.
+    store
+        .conn()
+        .execute(
+            "UPDATE cards SET state = 'closed', outcome = 'landed', closed_at = '2026-10-10T09:00:00.000Z',
+                              closed_by = 'owner' WHERE legacy_id = 'a3'",
+            [],
+        )
+        .unwrap();
+    let host = crate::state::projects::local_host_id(store.conn()).unwrap();
+    store
+        .conn()
+        .execute(
+            "INSERT INTO projects (id, name, delivery, owner_host_id, added_at)
+             VALUES ('gammaapp', 'gammaapp', 'local-only', ?1, '2026-10-10T09:00:00.000Z')",
+            [&host],
+        )
+        .unwrap();
+
+    let mut records = records();
+    let mut d2 = card("d2", "alpha", "ship", "queued");
+    d2["depends_on"] = json!(["a3"]);
+    records.cards.push(d2);
+    records
+        .cards
+        .push(card("e1", "Gamma.App", "ship", "queued"));
+    records.cards.push(done(
+        card("g2", "gone", "ship", "done"),
+        "merged",
+        "2026-10-07",
+    ));
+    let other = tempfile::tempdir().unwrap();
+    write_bundle(other.path(), &records, "final");
+    let plan = store
+        .import_plan(&Bundle::read(other.path()).unwrap(), Timestamp::now())
+        .unwrap();
+    let d2 = plan.cards.iter().find(|c| c.legacy_id == "d2").unwrap();
+    assert!(
+        matches!(
+            d2.waits.as_slice(),
+            [Wait::Dependency {
+                released: Some(DepReleaseReason::Landed),
+                ..
+            }]
+        ),
+        "{:?}",
+        d2.waits
+    );
+    let gamma = plan
+        .projects
+        .iter()
+        .find(|p| p.legacy_id == "Gamma.App")
+        .unwrap();
+    assert_eq!(
+        (gamma.id.as_str(), gamma.action),
+        ("gammaapp2", Action::Create)
+    );
+    // Closed history may join the retired project; open work may not.
+    assert_eq!(
+        plan.cards
+            .iter()
+            .find(|c| c.legacy_id == "g2")
+            .unwrap()
+            .action,
+        Action::Create
+    );
+    records.cards.push(card("g3", "gone", "ship", "queued"));
+    let third = tempfile::tempdir().unwrap();
+    write_bundle(third.path(), &records, "final");
+    let error = store
+        .import_plan(&Bundle::read(third.path()).unwrap(), Timestamp::now())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("project gone is retired"), "{error}");
 }
 
 #[test]
