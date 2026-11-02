@@ -20,7 +20,7 @@ Every other spec builds on this one: recovery (T1.2) repairs these records, the 
 
 ### ULIDs
 
-Every entity's primary key is a ULID: 26 characters of Crockford base32, time-ordered, minted by the writer (`ulid` crate). ULIDs are stored as `TEXT` and sort by creation time. They never change, are never reused, and are the ids the CLI, the API and the SSE stream use. The CLI accepts an unambiguous prefix of a ULID wherever it accepts a ULID (T1.3).
+Every entity's primary key is a ULID: 26 characters of Crockford base32, time-ordered, minted by the writer (`ulid` crate). ULIDs are stored as `TEXT` and sort by creation time. They never change, are never reused, and are the ids the CLI, the API and the SSE stream use. The CLI also accepts an unambiguous short form of a ULID (its last 7 characters) wherever it accepts a ULID (`protocol.md` section 6.1).
 
 ### Display ids
 
@@ -62,6 +62,7 @@ Ownership moves between hosts only through export and import (M6). There is no i
 - `id` (ULID), `claude_session_id` (the harness id, unique when known), `role` (`orchestrator`, `scout`, `builder`, `reviewer`, `verifier`), `project_id`, `run_id` (null for an orchestrator), `host_id`, `pane_id` (cache from herdr), `started_at`, `ended_at`, `end_reason`.
 - `activity`, `activity_observed_at`, `activity_source`: the newest observation's verdict, copied in the same transaction that inserts the observation. These three columns are a projection of `observations` kept for cheap reads; the observation row owns the fact.
 - `transcript_path`: where the tailer reads (host-capabilities, transcript rule).
+- `harness`: which agent harness runs the session, `claude` unless an adapter for another one exists (parity D04, kept at CP1; `protocol.md` section 10).
 - `config_hash`: the configuration that produced this session: role file, skills, settings fragment, memory revision, model, CLI version (plan v2, point 22).
 
 An orchestrator session has no run. Its card-level facts are its project's.
@@ -254,7 +255,7 @@ These tables hold a copy of a fact another system owns. Each row carries `fetche
 
 - `panes` (herdr): `pane_id`, `host_id`, `workspace_label`, `agent_name`, `agent_status`, `session_id` (the Tiller session bound to it), `metadata` (JSON row tokens), `fetched_at`, `gone_at`.
 - `worktrees` (treehouse and git): `path`, `host_id`, `project_id`, `run_id`, `branch`, `head_sha`, `dirty`, `unlanded_commits` (count of commits not on the default branch, or null when unknown), `fetched_at`, `gone_at`.
-- `quota_windows` (quota-axi): `label`, `percent_remaining`, `resets_at`, `pace`, `reserve`, `burn_multiple`, `elapsed_percent`, `projected_exhaustion_at`, `fetched_at`, `fetch_error`. No account id, no email, ever.
+- `quota_windows` (quota-axi): `label`, `percent_remaining`, `resets_at`, `pace`, `reserve`, `burn_multiple`, `elapsed_percent`, `projected_exhaustion_at`, `title` (the window's display label), `kind` (`weekly`, `model`, `credits`, ...), `fetched_at`, `fetch_error`. `label` is `<provider>:<window id>` (`protocol.md` section 8). No account id, no email, ever.
 
 ### Bookkeeping
 
@@ -340,13 +341,14 @@ Every close requires: no open attention item, no active run, and (for `landed`) 
 
 Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks its preconditions inside the transaction, writes its rows, writes its event rows, and commits. The event's `txn` column carries the name. A mutation that composes others (a spawn) runs them in one transaction and writes one event per sub-step.
 
-`rev` is bumped on every write to a row that has one. Edits name `expected_rev`; a mismatch is refused with `conflict: <entity> <id> is at rev <n>, you sent <m>; <field> is now "<value>"`. Transitions check preconditions instead and refuse with the fact that failed.
+`rev` is bumped on every write to a row that has one. Edits name `expected_rev`; a mismatch is refused with `conflict: <entity> <id> is at rev <n>, you sent <m>; <field> is now "<value>"`. Transitions check preconditions instead and refuse with the fact that failed. A transition whose entity is already in the requested state with the same arguments returns that state and writes nothing (`protocol.md` section 6.3).
 
 | Mutation | Caller | Preconditions | Writes | Events |
 |---|---|---|---|---|
-| `ask.record` | `UserPromptSubmit` hook, `tiller ask note`, board | project exists; idempotency key new | `asks` | `ask.recorded` |
-| `ask.resolve` | orchestrator, board (implicit on add) | ask `unresolved`; target card open for `followup` | `asks.disposition`, `ask_cards` | `ask.resolved`, `card.linked` |
-| `card.create` | `ask.resolve new`, board add, import | project not retired; `next_card_seq` read and bumped here | `projects.next_card_seq`, `cards`, `ask_cards` | `card.created` |
+| `ask.record` | `UserPromptSubmit` hook, transcript tailer (hook-less hosts), `tiller ask note`, board | project exists; idempotency key new | `asks` | `ask.recorded` |
+| `ask.resolve` | orchestrator, board (implicit on add), `UserPromptSubmit` hook (a prompt typed in a worker pane is a follow-up on its card) | ask `unresolved`; target card open for `followup` | `asks.disposition`, `ask_cards` | `ask.resolved`, `card.linked` |
+| `ask.link` | orchestrator | ask resolved `new` or `followup`; target card open for `followup` | `ask_cards` (and `card.create` for a new card) | `card.linked`, `card.created` for a new card |
+| `card.create` | `ask.resolve new`, `ask.link new`, board add, `tiller card create`, import | project not retired; `next_card_seq` read and bumped here | `projects.next_card_seq`, `cards`, `ask_cards` | `card.created` |
 | `card.edit` | board, orchestrator | `expected_rev` matches; card open | `cards` fields, `rev` | `card.edited` (fields changed) |
 | `card.hold` | orchestrator, board | card open; no open hold; `until_at` in the future | `holds` | `hold.set` |
 | `hold.release` | reconcile (due), orchestrator, board | hold open | `holds.released_at`; on `due` also `attention` | `hold.released`, `attention.opened` |
@@ -356,13 +358,15 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `attention.answer` | board, `tiller attention answer`, chat intake | item open; key new or identical | `attention` answer fields, `rev`; for a `question` card also `card.close` | `attention.answered`, maybe `card.closed`; `outbox.enqueued` for the owning session |
 | `attention.withdraw` | reconcile, orchestrator | item open; reason given | `attention.withdrawn_at` | `attention.withdrawn` |
 | `run.start` | `tiller spawn` | card open; no active run of this role; reservation fits host and project capacity; floors and quota pass; key new | `reservations`, `runs`, `sessions` (placeholder until the hook binds the Claude id), `events` | `reservation.reserved`, `run.started`, `session.started` |
-| `run.bind_session` | `SessionStart` hook | run active | `sessions.claude_session_id`, `pane_id` | `session.bound` |
-| `run.status` | worker status line (hook or tailer) | run active | `runs.last_status_line`, `observations` | `run.status` |
+| `session.start` | `tiller orchestrator start` | project not retired; no live orchestrator for the project | `sessions` (role `orchestrator`, no run); `outbox` (one note per unresolved ask of the project) | `session.started`, `outbox.enqueued` |
+| `run.bind_session` | `SessionStart` hook | run active, or the session is a live orchestrator session | `sessions.claude_session_id`, `pane_id`; on `clear`, `resume` or `fork` it rebinds to the new Claude id, and the old one goes in the event payload | `session.bound` |
+| `session.end` | `SessionEnd` hook (an ending reason), reconcile (pane gone) | session live | `sessions.ended_at`, `end_reason` | `session.ended` |
+| `run.status` | `tiller status` (or the tailer on a hook-less host) | run active | `runs.last_status_line`, `observations`, `outbox` (one `wake` to the supervisor) | `run.status`, `outbox.enqueued` |
 | `run.pause` | worker status line | run active; date parses | `runs.pause_until` | `run.paused` |
 | `run.reown` | reconcile | orchestrator session for the project is live and differs | `runs.supervisor_session_id` | `run.reowned` |
 | `run.end` | `tiller done`, reconcile, `card.cancel` | run active; for `tiller done`: no unlanded commits unknown (P51) | `runs.ended_at`, `outcome`; `reservations.released_at` | `run.ended`, `reservation.released` |
 | `run.relaunch` | `tiller agent relaunch` | run active or just ended; worktree exists; note given (P24) | `runs` (new attempt with `predecessor_run_id`) or `sessions` (new session on the same run); outbox note | `run.relaunched`, `session.started` |
-| `run.clean` | `tiller done`, cleanup | run ended; `worktrees.unlanded_commits = 0` and fresh; pane process not alive or pane closed | `worktrees.gone_at`, `panes.gone_at` | `run.cleaned` |
+| `run.clean` | daemon cleanup after `tiller done`, `tiller run clean` | run ended; `worktrees.unlanded_commits = 0` and fresh; pane process not alive or pane closed | `worktrees.gone_at`, `panes.gone_at` | `run.cleaned` |
 | `observation.record` | `tiller hook`, tailer, pollers | none (append) | `observations`; `sessions.activity*` when newer | `observation.recorded` (only when the verdict changed; raw rows are not events) |
 | `pr.link` | worker (`tiller pr link`), reconcile | run active or card open | `prs` | `pr.linked` |
 | `pr.refresh` | daemon poller | PR exists | `prs` cache columns; `approvals.state = stale` when `accepted` and the head moved | `pr.changed` (only on a change), `approval.stale` |
@@ -374,19 +378,23 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `grant.revoke` | owner; daemon on expiry or `away.end` | grant not revoked | `grants.revoked_at`, `revoke_reason`; `accepted` approvals from it not yet executing become `stale` | `grant.revoked`, `approval.stale` |
 | `away.start` | owner only (T1.4) | no active `away` approval; scope valid | `approvals` (kind `away`, `accepted`, decided by `owner`); temporary `grants` when the scope asks | `approval.decided`, `grant.created` |
 | `away.end` | owner; reconcile when `until_at` passes | `away` approval `accepted` | `approvals` (`succeeded`); revokes its temporary grants | `approval.finished`, `grant.revoked` |
-| `card.close` | orchestrator, daemon, owner | card open; no open attention; no active run; outcome allowed for the kind (section 7) | `cards.state`, `outcome`; releases holds and dependants | `card.closed`, `hold.released`, `dep.released` |
-| `card.cancel` | owner, orchestrator | card open; reason | ends active runs (`cancelled`), withdraws attention, releases reservations, closes the card | `run.ended`, `attention.withdrawn`, `reservation.released`, `card.closed` |
-| `card.reopen` | owner, orchestrator | card closed; reason | `cards.state = open`; `outcome`, `closed_at`, `closed_by` null | `card.reopened` |
-| `outbox.enqueue` | board, orchestrator, daemon | target session exists; key new | `outbox` (`pending`) | `outbox.enqueued` |
+| `card.close` | orchestrator, daemon, owner, board | card open; no open attention; no active run; outcome allowed for the kind (section 7) | `cards.state`, `outcome`; releases holds and dependants | `card.closed`, `hold.released`, `dep.released` |
+| `card.cancel` | owner, orchestrator, board | card open; reason | ends active runs (`cancelled`), withdraws attention, releases reservations, closes the card | `run.ended`, `attention.withdrawn`, `reservation.released`, `card.closed` |
+| `card.reopen` | owner, orchestrator, board | card closed; reason | `cards.state = open`; `outcome`, `closed_at`, `closed_by` null | `card.reopened` |
+| `outbox.enqueue` | board, orchestrator, daemon, owner, and inside `ask.record`, `run.status` and `session.start` | target session exists; key new | `outbox` (`pending`) | `outbox.enqueued` |
 | `outbox.deliver` | daemon | `pending` or `delivered` (re-ring); pane hosts the target session | `outbox` (`delivered`, `attempts`) | `outbox.delivered` |
-| `outbox.ack` | `tiller inbox <id>` in the target session | `delivered` (or `pending`, when the session found it by polling) | `outbox` (`acked`) | `outbox.acked` |
+| `outbox.ack` | `tiller inbox <id>` in the target session, or its `UserPromptSubmit` hook on the wake-up line | `delivered` (or `pending`, when the session found it by polling) | `outbox` (`acked`) | `outbox.acked` |
 | `outbox.fail` | daemon | attempts exhausted or target gone with no successor | `outbox` (`failed`) | `outbox.failed`; a `recovery` attention item when the message was an answer |
 | `obligation.open` | orchestrator | card open | `obligations` | `obligation.opened` |
+| `obligation.cancel` | orchestrator, owner | obligation `open` | `obligations.state` | `obligation.cancelled` |
 | `obligation.meet` | reconcile | trigger event written in this transaction | `obligations.met*`, `outbox` | `obligation.met`, `outbox.enqueued` |
 | `artifact.add` | worker, orchestrator | card exists | `artifacts` | `artifact.added` |
 | `review.record` | worker, daemon | run exists | `reviews` | `review.recorded` |
 | `handoff.write` | orchestrator | session live | `handoffs` | `handoff.written` |
-| `cache.refresh` | pollers | none | `panes`, `worktrees`, `quota_windows`, `hosts.last_seen_at` | `host.changed`, `pane.changed`, `worktree.changed` only on a change |
+| `cache.refresh` | pollers | none | `panes`, `worktrees`, `quota_windows`, `hosts.last_seen_at` | `host.changed`, `pane.changed`, `worktree.changed`, `quota.changed` only on a change |
+| `project.add`, `project.edit`, `project.retire` | owner | id free (add); `expected_rev` matches (edit); no open card (retire) | `projects` | `project.added`, `project.edited`, `project.retired` |
+| `host.add`, `host.edit` | owner | label free (add); `expected_rev` matches (edit) | `hosts` | `host.added`, `host.edited` |
+| `config.set` | owner | key known; value valid | the config file, outside `state.db` | `config.changed` |
 | `import.apply` | `tiller import` | manifest valid; `meta.import_manifest_sha256` differs (a second import is a no-op) | every table, with `legacy_id` set | one `import.applied` plus the per-row events, all under `actor = import` |
 
 Every row in the events table names its mutation, so a timeline query answers "who changed this, under which transaction, with which preconditions".
@@ -476,7 +484,7 @@ Points 1 to 5, 18, 19, 21, 23, 25 to 33, 37, 39 to 43 are owned by other specs o
 | `captain-hold-lifecycle` | Cleanup never closes an open call; an answer records the exact words and resolves in one act; an exact replay is idempotent and a drifted answer is refused; a dated deferral re-asks on its date; a landed subject retires its decision (withdraw); a question whose state cannot be established is kept | A decision is an `attention` row on a card, not the card itself. A ship card can carry several decisions over its life without changing kind, each one auditable; a `question` card is the case where the answer is the whole work. Snapshot buckets (`blocked`, `dated`, `aged`, `live`) become the derived column plus age |
 | `fleet-ledger` | The five event names map one to one onto event kinds; readers ignore unknown fields | Events have a sequence number, are written in the mutation's transaction, and are never duplicated, so a reader does not need to tolerate repeats |
 | `supervision-host` | One supervisor per run (`runs.supervisor_session_id`); a captain outcome is presented until acknowledged (`attention` stays open until answered); a dated pause silences alarms | The wake path is the outbox, with acknowledgement as a state, not a drain cursor; routine outcomes are events, not notes |
-| `agent-control` | A relaunch is transactional, keeps the worktree, and requires a note for a worker; a harness or model change is an ordinary relaunch | The journal file is replaced by the transaction and the `run.relaunched` event; there is only one harness, so no harness re-resolution |
+| `agent-control` | A relaunch is transactional, keeps the worktree, and requires a note for a worker; a harness or model change is an ordinary relaunch | The journal file is replaced by the transaction and the `run.relaunched` event; Claude Code is the only harness with an adapter at cutover; `sessions.harness` keeps room for others (D04) |
 | `herdr-backend` | Pane identity lives in metadata, not labels; status is cached with a fetch time | Panes are a cache table, not a backend record; the layout rules are in `herdr-layout.md` |
 
 ### Parity rows this spec gives a home

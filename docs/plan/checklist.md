@@ -137,13 +137,13 @@ about 3 min of the developer's time
 ### T1.3 Protocol and CLI
 `opus` high - 2-3 h - after T1.1
 
-- [ ] `docs/spec/protocol.md`: ask intake and `tiller ask resolve`; wake-up line format
-- [ ] Every hook event mapped to an observation (all 13 `notification_type` values, `StopFailure`, transcript-detected interrupts); Stop hook observe mode; transcript tailing
-- [ ] Full `tiller` command surface in AXI style (structured output, stable ids, exit codes, idempotency keys)
-- [ ] Board API: HTTP reads and mutations with `rev`; one SSE stream with `Last-Event-ID` resume; boot snapshot
-- [ ] Quota feed from `quota-axi --full` every 5 min, `accounts` block dropped; machine summary per host
-- [ ] Check: every command is idempotent or says why not; every hook event maps to exactly one handler
-- [ ] Delivered
+- [x] `docs/spec/protocol.md`: ask intake and `tiller ask resolve`; wake-up line format
+- [x] Every hook event mapped to an observation (all 13 `notification_type` values, `StopFailure`, transcript-detected interrupts); Stop hook observe mode; transcript tailing
+- [x] Full `tiller` command surface in AXI style (structured output, stable ids, exit codes, idempotency keys)
+- [x] Board API: HTTP reads and mutations with `rev`; one SSE stream with `Last-Event-ID` resume; boot snapshot
+- [x] Quota feed from `quota-axi --full` every 5 min, `accounts` block dropped; machine summary per host
+- [x] Check: every command is idempotent or says why not; every hook event maps to exactly one handler
+- [x] Delivered (Monday 2026-11-02, landed on main in the commit that adds the spec; CP2 reviews the draft)
 
 ### T1.4 Authority and guards
 `opus` high - 1.5-2 h - after T1.1

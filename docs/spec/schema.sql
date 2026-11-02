@@ -120,6 +120,7 @@ CREATE TABLE sessions (
   host_id               TEXT NOT NULL REFERENCES hosts(id),
   pane_id               TEXT,                -- cache (herdr)
   transcript_path       TEXT,
+  harness               TEXT NOT NULL DEFAULT 'claude',  -- protocol.md section 10
   config_hash           TEXT,
   started_at            TEXT NOT NULL,
   ended_at              TEXT,
@@ -516,6 +517,8 @@ CREATE TABLE quota_windows (              -- owner: quota-axi; never an account 
   burn_multiple            REAL,
   elapsed_percent          REAL,
   projected_exhaustion_at  TEXT,
+  title                    TEXT,             -- display label; label is <provider>:<window id>
+  kind                     TEXT,             -- weekly, model, credits, ... (quota-axi)
   fetched_at               TEXT NOT NULL,
   fetch_error              TEXT
 ) STRICT;
