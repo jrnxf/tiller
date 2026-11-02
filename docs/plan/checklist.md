@@ -227,7 +227,7 @@ about 3 min of the developer's time
 - [x] Transcript tailer, process liveness checks; hook structs tolerate unknown fields
 - [x] Check: hook p95 under 10 ms, also with the daemon down
 - [x] Check: interrupts, `StopFailure`, permission prompts and session end detected in tests
-- [ ] Delivered
+- [x] Delivered
 
 ### T3.1 Board app shell
 `sonnet` high - 2.5-3.5 h - after CP2 (fixtures until T2.8)
