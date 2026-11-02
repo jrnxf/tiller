@@ -1,0 +1,224 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "boundary": "personal",
+    "exported_at": "<time>",
+    "format": "tiller-export/v1",
+    "host_id": "<id1>",
+    "max_seq": 5,
+    "schema_version": 1,
+    "tables": [
+      {
+        "file": "approvals.jsonl",
+        "name": "approvals",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "artifacts.jsonl",
+        "name": "artifacts",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "ask_cards.jsonl",
+        "name": "ask_cards",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "asks.jsonl",
+        "name": "asks",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "attention.jsonl",
+        "name": "attention",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "card_deps.jsonl",
+        "name": "card_deps",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "cards.jsonl",
+        "name": "cards",
+        "rows": 2,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "events.jsonl",
+        "name": "events",
+        "rows": 5,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "evidence.jsonl",
+        "name": "evidence",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "grants.jsonl",
+        "name": "grants",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "handoffs.jsonl",
+        "name": "handoffs",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "holds.jsonl",
+        "name": "holds",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "hosts.jsonl",
+        "name": "hosts",
+        "rows": 1,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "idempotency_keys.jsonl",
+        "name": "idempotency_keys",
+        "rows": 1,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "memories.jsonl",
+        "name": "memories",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "memory_evidence.jsonl",
+        "name": "memory_evidence",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "memory_revisions.jsonl",
+        "name": "memory_revisions",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "memory_sources.jsonl",
+        "name": "memory_sources",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "meta.jsonl",
+        "name": "meta",
+        "rows": 4,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "obligations.jsonl",
+        "name": "obligations",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "observations.jsonl",
+        "name": "observations",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "outbox.jsonl",
+        "name": "outbox",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "panes.jsonl",
+        "name": "panes",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "projects.jsonl",
+        "name": "projects",
+        "rows": 2,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "proposal_evidence.jsonl",
+        "name": "proposal_evidence",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "proposals.jsonl",
+        "name": "proposals",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "prs.jsonl",
+        "name": "prs",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "quota_windows.jsonl",
+        "name": "quota_windows",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "reservations.jsonl",
+        "name": "reservations",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "reviews.jsonl",
+        "name": "reviews",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "runs.jsonl",
+        "name": "runs",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "session_loads.jsonl",
+        "name": "session_loads",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "sessions.jsonl",
+        "name": "sessions",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "worktrees.jsonl",
+        "name": "worktrees",
+        "rows": 0,
+        "sha256": "<sha256>"
+      }
+    ]
+  },
+  "help": [
+    "the export holds work data: keep it on this host and out of git"
+  ],
+  "ok": true
+}

@@ -1,0 +1,13 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 5
+{
+  "error": {
+    "code": "refused",
+    "entity": "state.db",
+    "id": "<home>/state.db",
+    "message": "state.db <home>/state.db: already exists; an export imports only into a new state.db"
+  },
+  "ok": false
+}

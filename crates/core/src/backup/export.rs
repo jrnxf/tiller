@@ -139,6 +139,10 @@ pub fn export_jsonl(conn: &Connection, dir: &Path, now: Timestamp) -> Result<Exp
 /// `boundary`. Nothing is written at `paths.db` unless every row imports and
 /// every foreign key holds.
 pub fn import_jsonl(dir: &Path, paths: &Paths, boundary: Boundary) -> Result<Imported> {
+    // A new host has no home yet; only an import may create it.
+    if !paths.home.as_os_str().is_empty() && !paths.home.exists() {
+        create_private_dir(&paths.home)?;
+    }
     let _lock = DaemonLock::acquire(paths)?;
     if paths.db.exists() {
         return Err(Error::refused(

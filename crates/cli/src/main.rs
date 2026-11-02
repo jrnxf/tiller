@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 use serde_json::Value;
 
 use app::{App, Done, Failure};
-use cmd::{admin, approval, ask, attention, card, later, read, records, run};
+use cmd::{admin, approval, ask, attention, backup, card, later, read, records, run};
 
 #[derive(Parser)]
 #[command(name = "tiller", version, about)]
@@ -123,6 +123,15 @@ enum Command {
     Events(read::EventsArgs),
     /// The version and schema
     Version,
+    /// Take a verified backup of state.db now
+    Backup,
+    /// Restore state.db from a verified backup, or rebuild it from an export
+    Restore(backup::RestoreArgs),
+    /// Export every table as JSONL
+    Export(backup::ExportArgs),
+    /// Migrate the schema up, or roll it back
+    #[command(subcommand)]
+    Migrate(backup::MigrateCmd),
     /// Health checks
     Doctor,
     /// Serve the board on localhost
@@ -175,6 +184,10 @@ fn dispatch(app: &App, command: Command) -> Done {
         Command::Quota => read::quota(app),
         Command::Events(args) => read::events(app, args),
         Command::Version => Ok(read::version()),
+        Command::Backup => backup::backup(app),
+        Command::Restore(args) => backup::restore(app, args),
+        Command::Export(args) => backup::export(app, args),
+        Command::Migrate(cmd) => backup::migrate(app, cmd),
         Command::Doctor => later::doctor(app),
         Command::Daemon(_) | Command::Hook(_) => Err(Failure::new(
             "internal",

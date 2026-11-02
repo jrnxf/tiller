@@ -6,6 +6,7 @@ pub mod admin;
 pub mod approval;
 pub mod ask;
 pub mod attention;
+pub mod backup;
 pub mod card;
 pub mod later;
 pub mod read;

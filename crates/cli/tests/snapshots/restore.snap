@@ -1,0 +1,27 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "dry_run": false,
+    "entry": {
+      "at": "<time>",
+      "boundary": "personal",
+      "file": "backups/<stamp>.db",
+      "host_id": "<id1>",
+      "kind": "manual",
+      "max_seq": 5,
+      "schema_version": 1,
+      "sha256": "<sha256>",
+      "size": "<size>",
+      "superseded": false
+    },
+    "moved_to": "<home>/state.db.pre-restore-<stamp>",
+    "skipped": []
+  },
+  "help": [
+    "tiller daemon, which adopts live panes and asks about merged PRs"
+  ],
+  "ok": true
+}

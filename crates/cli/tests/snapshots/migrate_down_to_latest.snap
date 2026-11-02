@@ -1,0 +1,11 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 2
+{
+  "error": {
+    "code": "usage",
+    "message": "migrate down goes below this tiller's schema 1; use --to <n> with n < 1"
+  },
+  "ok": false
+}

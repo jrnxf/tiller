@@ -157,7 +157,7 @@ fn daemon_running_error() -> Error {
     Error::refused(
         "daemon",
         "local",
-        "the daemon is running; stop it first (restore and migrate refuse while it runs)",
+        "the daemon is running; stop it first (restore, migrate and an export's import refuse while it runs)",
     )
 }
 

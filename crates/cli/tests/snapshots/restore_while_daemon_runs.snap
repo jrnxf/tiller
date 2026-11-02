@@ -1,0 +1,13 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 5
+{
+  "error": {
+    "code": "refused",
+    "entity": "daemon",
+    "id": "local",
+    "message": "daemon local: the daemon is running; stop it first (restore, migrate and an export's import refuse while it runs)"
+  },
+  "ok": false
+}
