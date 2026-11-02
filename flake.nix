@@ -103,6 +103,8 @@
             root = ./.;
             fileset = lib.fileset.unions [
               (craneLib.fileset.commonCargoSources ./.)
+              # The core's migrations and test fixtures are SQL that include_str! embeds.
+              (lib.fileset.fileFilter (file: file.hasExt "sql") ./crates)
               ./crates/cli/tests/fixtures
             ];
           };

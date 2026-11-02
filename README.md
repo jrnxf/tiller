@@ -9,6 +9,8 @@ This repository is in bootstrap: the workspace, build and CI are in place, and t
 | Path | What it is |
 |---|---|
 | `crates/cli` | The `tiller` binary (Rust) |
+| `crates/core` | `state.db`: schema and migrations, ids, domain types, and every state mutation |
+| `crates/daemon`, `herdr`, `delivery`, `observe`, `reconcile`, `agents`, `replay` | The daemon and its parts: board API, herdr client, outbox delivery, observation, reconcile, agent lifecycle, replay |
 | `board/` | The board web app (Vite, React, TanStack Router), built to static files and embedded in the binary |
 | `docs/` | Design docs, the build plan and checklist, and ADRs |
 | `scripts/` | The smoke test and the scrub check |

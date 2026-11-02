@@ -1,0 +1,1074 @@
+//! Runs, sessions and observations: `run.*`, `session.*`,
+//! `observation.record` (`state.md` sections 3 and 8).
+
+use rusqlite::{Connection, params};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use super::cards::landed_evidence;
+use super::outbox::{NewMessage, enqueue, live_orchestrator};
+use super::projects::{local_host_id, require_daemon};
+use super::{find, get, list, refuse, required, resolve_card, resolve_id};
+use crate::domain::*;
+use crate::error::{Error, Result};
+use crate::ids;
+use crate::store::{Actor, Applied, Ctx, NewEvent, Store, Tx};
+use crate::time::Timestamp;
+
+/// The live readings `tiller spawn` takes before `run.start`, checked inside
+/// its transaction and written into the `run.started` payload.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpawnChecks {
+    pub ram_free_mb: Option<i64>,
+    pub disk_free_mb: Option<i64>,
+    /// The weekly quota floor; `None` skips the quota check (no quota feed
+    /// configured on this host).
+    pub quota_floor_percent: Option<f64>,
+    /// How old a quota reading may be before the check fails closed.
+    pub quota_max_age_minutes: i64,
+    /// The dispatch rule that resolved the model and effort (T4.2).
+    pub dispatch: Value,
+}
+
+/// A run to start.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NewRun {
+    /// A card reference.
+    pub card: String,
+    pub role: RunRole,
+    pub model: String,
+    pub effort: Effort,
+    /// The host to run on; the local host when `None`.
+    pub host_id: Option<String>,
+    pub worktree_path: Option<String>,
+    pub branch: Option<String>,
+    pub base_branch: Option<String>,
+    pub base_sha: Option<String>,
+    pub config_hash: Option<String>,
+    pub checks: SpawnChecks,
+}
+
+/// What `run.start` wrote.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Started {
+    pub run: Run,
+    pub session: Session,
+    pub reservation: Reservation,
+}
+
+/// How a run ends.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EndRun {
+    pub outcome: RunOutcome,
+    pub note: Option<String>,
+}
+
+/// An orchestrator session to start (`tiller orchestrator start`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct NewOrchestrator {
+    pub project_id: String,
+    pub pane_id: Option<String>,
+    pub claude_session_id: Option<String>,
+    pub transcript_path: Option<String>,
+    pub harness: Option<String>,
+    pub config_hash: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OrchestratorStarted {
+    pub session: Session,
+    pub notes: Vec<OutboxMessage>,
+}
+
+/// What the `SessionStart` hook binds.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Bind {
+    /// The Tiller session id the spawn handed the pane.
+    pub session_id: String,
+    pub claude_session_id: String,
+    pub pane_id: Option<String>,
+    pub transcript_path: Option<String>,
+    /// `startup`, `resume`, `clear` or `compact`, as the hook reports it.
+    pub source: String,
+}
+
+/// A relaunch (`tiller agent relaunch`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Relaunch {
+    pub note: String,
+    /// A new attempt with a new brief, or a new session on the same run.
+    pub new_attempt: bool,
+    /// How the old session was proven stopped (the ladder's dead verdict or a
+    /// confirmed exit); required when the run has a live session.
+    pub stop_proof: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Relaunched {
+    pub run: Run,
+    pub session: Session,
+    pub ended_session: Option<String>,
+}
+
+/// One observation to append.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NewObservation {
+    pub session_id: Option<String>,
+    pub run_id: Option<String>,
+    pub source: ObservationSource,
+    pub event: String,
+    pub verdict: Option<Activity>,
+    pub observed_at: Timestamp,
+    pub payload: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Recorded {
+    pub observation: Observation,
+    /// The session's activity moved to the observation's verdict.
+    pub verdict_changed: bool,
+}
+
+/// The live session of a run.
+pub fn live_session(conn: &Connection, run_id: &str) -> Result<Option<Session>> {
+    find(conn, "run_id = ?1 AND ended_at IS NULL", &[&run_id])
+}
+
+fn load_run(tx: &Tx<'_>, run: &str) -> Result<Run> {
+    let id = resolve_id(tx.conn(), "runs", "run", run)?;
+    get(tx.conn(), "run", &id)
+}
+
+fn load_session(tx: &Tx<'_>, session: &str) -> Result<Session> {
+    let id = resolve_id(tx.conn(), "sessions", "session", session)?;
+    get(tx.conn(), "session", &id)
+}
+
+fn require_active(run: &Run) -> Result<()> {
+    match run.outcome {
+        None => Ok(()),
+        Some(outcome) => Err(Error::refused(
+            "run",
+            &run.id,
+            format!("run ended {outcome}"),
+        )),
+    }
+}
+
+fn session_role(role: RunRole) -> Role {
+    match role {
+        RunRole::Scout => Role::Scout,
+        RunRole::Builder => Role::Builder,
+        RunRole::Reviewer => Role::Reviewer,
+        RunRole::Verifier => Role::Verifier,
+    }
+}
+
+/// The orchestrator that will supervise a run `actor` starts: the actor
+/// itself when it is the project's live orchestrator, the live orchestrator
+/// when the owner spawns. Workers never spawn (G28).
+fn supervisor(conn: &Connection, actor: &Actor, project_id: &str) -> Result<Session> {
+    let live = live_orchestrator(conn, project_id)?;
+    match actor {
+        Actor::Session(id) => match live {
+            Some(session) if session.id == *id => Ok(session),
+            _ => Err(Error::Forbidden(format!(
+                "session {id} is not the live orchestrator of {project_id}; only the orchestrator or the owner starts a run"
+            ))),
+        },
+        Actor::Owner | Actor::Board => live.ok_or_else(|| {
+            Error::refused(
+                "project",
+                project_id,
+                "no live orchestrator to supervise the run",
+            )
+        }),
+        other => Err(Error::Forbidden(format!("{other} may not start a run"))),
+    }
+}
+
+/// Inserts a placeholder session for a run; the `SessionStart` hook binds it.
+fn insert_run_session(
+    tx: &mut Tx<'_>,
+    run: &Run,
+    project_id: &str,
+    config_hash: Option<&str>,
+) -> Result<Session> {
+    let id = ids::new_ulid();
+    tx.conn().execute(
+        "INSERT INTO sessions (id, role, project_id, run_id, host_id, config_hash, started_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            id,
+            session_role(run.role),
+            project_id,
+            run.id,
+            run.host_id,
+            config_hash,
+            tx.now()
+        ],
+    )?;
+    tx.event(
+        NewEvent::new("session", &id, "session.started")
+            .rev(1)
+            .card(&run.card_id)
+            .payload(json!({"role": session_role(run.role), "run_id": run.id})),
+    )?;
+    get(tx.conn(), "session", &id)
+}
+
+fn end_session(tx: &mut Tx<'_>, session: &Session, reason: &str) -> Result<Session> {
+    tx.conn().execute(
+        "UPDATE sessions SET ended_at = ?2, end_reason = ?3, rev = rev + 1 WHERE id = ?1",
+        params![session.id, tx.now(), reason],
+    )?;
+    let card = match &session.run_id {
+        Some(run) => Some(get::<Run>(tx.conn(), "run", run)?.card_id),
+        None => None,
+    };
+    tx.event(
+        NewEvent::new("session", &session.id, "session.ended")
+            .rev(session.rev + 1)
+            .card_opt(card)
+            .payload(json!({"reason": reason, "run_id": session.run_id})),
+    )?;
+    get(tx.conn(), "session", &session.id)
+}
+
+fn reserve(tx: &mut Tx<'_>, host: &Host, project: &Project, run: &Run) -> Result<Reservation> {
+    let id = ids::new_ulid();
+    tx.conn().execute(
+        "INSERT INTO reservations (id, host_id, project_id, run_id, reserved_at, reserved_by)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            id,
+            host.id,
+            project.id,
+            run.id,
+            tx.now(),
+            tx.actor().to_string()
+        ],
+    )?;
+    tx.event(
+        NewEvent::new("reservation", &id, "reservation.reserved")
+            .card(&run.card_id)
+            .payload(json!({"host_id": host.id, "project_id": project.id, "run_id": run.id})),
+    )?;
+    get(tx.conn(), "reservation", &id)
+}
+
+/// Releases a run's open reservation, if it has one.
+pub(crate) fn release_reservation(
+    tx: &mut Tx<'_>,
+    run: &Run,
+    reason: ReservationRelease,
+) -> Result<Option<String>> {
+    let Some(reservation) =
+        find::<Reservation>(tx.conn(), "run_id = ?1 AND released_at IS NULL", &[&run.id])?
+    else {
+        return Ok(None);
+    };
+    tx.conn().execute(
+        "UPDATE reservations SET released_at = ?2, release_reason = ?3 WHERE id = ?1",
+        params![reservation.id, tx.now(), reason],
+    )?;
+    tx.event(
+        NewEvent::new("reservation", &reservation.id, "reservation.released")
+            .card(&run.card_id)
+            .payload(json!({"reason": reason, "run_id": run.id})),
+    )?;
+    Ok(Some(reservation.id))
+}
+
+/// Counts the open reservations on a host and a project.
+fn reserved(conn: &Connection, column: &str, id: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        &format!("SELECT count(*) FROM reservations WHERE {column} = ?1 AND released_at IS NULL"),
+        [id],
+        |row| row.get(0),
+    )?)
+}
+
+/// Checks capacity, the floors and the quota inside the transaction, and
+/// returns what it saw for the event payload.
+/// Refuses a new reservation on a full host or project; returns the counts.
+fn check_capacity(conn: &Connection, host: &Host, project: &Project) -> Result<(i64, i64)> {
+    let host_reserved = reserved(conn, "host_id", &host.id)?;
+    if let Some(lanes) = host.lane_capacity
+        && host_reserved >= lanes
+    {
+        return Err(Error::refused(
+            "host",
+            &host.label,
+            format!("host is full: {host_reserved} of {lanes} lanes reserved"),
+        ));
+    }
+    let project_reserved = reserved(conn, "project_id", &project.id)?;
+    if project_reserved >= project.capacity {
+        return Err(Error::refused(
+            "project",
+            &project.id,
+            format!(
+                "project is full: {project_reserved} of {} runs reserved",
+                project.capacity
+            ),
+        ));
+    }
+    Ok((host_reserved, project_reserved))
+}
+
+fn check_spawn(
+    conn: &Connection,
+    host: &Host,
+    project: &Project,
+    checks: &SpawnChecks,
+    now: Timestamp,
+) -> Result<Value> {
+    let (host_reserved, project_reserved) = check_capacity(conn, host, project)?;
+    let floor = |name: &str, floor: Option<i64>, free: Option<i64>| -> Result<()> {
+        match (floor, free) {
+            (Some(floor), Some(free)) if free < floor => Err(Error::refused(
+                "host",
+                &host.label,
+                format!("{name} free is {free} MB, under the {floor} MB floor"),
+            )),
+            (Some(floor), None) => Err(Error::refused(
+                "host",
+                &host.label,
+                format!("{name} free is unknown; the {floor} MB floor fails closed"),
+            )),
+            _ => Ok(()),
+        }
+    };
+    floor("RAM", host.ram_floor_mb, checks.ram_free_mb)?;
+    floor("disk", host.disk_floor_mb, checks.disk_free_mb)?;
+
+    let mut quota = Vec::new();
+    if let Some(floor) = checks.quota_floor_percent {
+        let windows: Vec<QuotaWindow> = list(conn, "kind = 'weekly' ORDER BY label", &[])?;
+        if windows.is_empty() {
+            return Err(Error::refused(
+                "quota",
+                "weekly",
+                "no weekly quota reading; the quota floor fails closed",
+            ));
+        }
+        let oldest_allowed = now.plus_minutes(-checks.quota_max_age_minutes);
+        for window in windows {
+            if window.fetch_error.is_some() || window.fetched_at < oldest_allowed {
+                return Err(Error::refused(
+                    "quota",
+                    &window.label,
+                    format!(
+                        "reading from {} is stale; the quota floor fails closed",
+                        window.fetched_at
+                    ),
+                ));
+            }
+            match window.percent_remaining {
+                Some(left) if left > floor => {}
+                left => {
+                    return Err(Error::refused(
+                        "quota",
+                        &window.label,
+                        format!("{left:?} percent left is at or under the {floor} percent floor"),
+                    ));
+                }
+            }
+            quota.push(json!({"label": window.label, "percent_remaining": window.percent_remaining, "fetched_at": window.fetched_at}));
+        }
+    }
+    Ok(json!({
+        "host_reserved": host_reserved,
+        "lane_capacity": host.lane_capacity,
+        "project_reserved": project_reserved,
+        "project_capacity": project.capacity,
+        "ram_free_mb": checks.ram_free_mb,
+        "ram_floor_mb": host.ram_floor_mb,
+        "disk_free_mb": checks.disk_free_mb,
+        "disk_floor_mb": host.disk_floor_mb,
+        "quota_floor_percent": checks.quota_floor_percent,
+        "quota": quota,
+    }))
+}
+
+/// `run.end` inside a mutation: ends the run and releases its reservation.
+pub(crate) fn end_run(tx: &mut Tx<'_>, run: &Run, end: EndRun) -> Result<Run> {
+    RunStatus::from_outcome(run.outcome)
+        .end(end.outcome)
+        .map_err(refuse("run", &run.id))?;
+    tx.conn().execute(
+        "UPDATE runs SET ended_at = ?2, outcome = ?3, outcome_note = ?4, rev = rev + 1 WHERE id = ?1",
+        params![run.id, tx.now(), end.outcome, end.note],
+    )?;
+    tx.event(
+        NewEvent::new("run", &run.id, "run.ended")
+            .rev(run.rev + 1)
+            .card(&run.card_id)
+            .payload(json!({"outcome": end.outcome, "note": end.note, "role": run.role})),
+    )?;
+    release_reservation(tx, run, ReservationRelease::Ended)?;
+    get(tx.conn(), "run", &run.id)
+}
+
+fn next_attempt(conn: &Connection, card_id: &str, role: RunRole) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT coalesce(max(attempt), 0) + 1 FROM runs WHERE card_id = ?1 AND role = ?2",
+        params![card_id, role],
+        |row| row.get(0),
+    )?)
+}
+
+/// The supervisor's live session id, for a wake or a note.
+fn live_supervisor(conn: &Connection, run: &Run) -> Result<Option<String>> {
+    Ok(find::<Session>(
+        conn,
+        "id = ?1 AND ended_at IS NULL",
+        &[&run.supervisor_session_id],
+    )?
+    .map(|s| s.id))
+}
+
+impl Store {
+    /// `run.start` (`tiller spawn`). Keyed. Reserves capacity, inserts the run
+    /// and its placeholder session in one `BEGIN IMMEDIATE` transaction, so
+    /// two spawns on a full host or project cannot both pass (invariant 6).
+    pub fn run_start(
+        &mut self,
+        ctx: &Ctx,
+        key: Option<&str>,
+        new: NewRun,
+    ) -> Result<Applied<Started>> {
+        required("model", &new.model)?;
+        self.write(ctx, "run.start", key, |tx| {
+            let card = resolve_card(tx.conn(), &new.card)?;
+            if card.state != CardState::Open {
+                return Err(Error::refused("card", &card.display_id, "card is closed"));
+            }
+            if let Some(active) = find::<Run>(
+                tx.conn(),
+                "card_id = ?1 AND role = ?2 AND ended_at IS NULL",
+                &[&card.id, &new.role],
+            )? {
+                return Err(Error::refused(
+                    "card",
+                    &card.display_id,
+                    format!("{} run {} is already active", new.role, active.id),
+                ));
+            }
+            let project: Project = get(tx.conn(), "project", &card.project_id)?;
+            if project.retired_at.is_some() {
+                return Err(Error::refused("project", &project.id, "project is retired"));
+            }
+            let supervisor = supervisor(tx.conn(), tx.actor(), &project.id)?;
+            let host_id = match &new.host_id {
+                Some(id) => id.clone(),
+                None => local_host_id(tx.conn())?,
+            };
+            let host: Host = get(tx.conn(), "host", &host_id)?;
+            let seen = check_spawn(tx.conn(), &host, &project, &new.checks, tx.now())?;
+
+            let id = ids::new_ulid();
+            let attempt = next_attempt(tx.conn(), &card.id, new.role)?;
+            tx.conn().execute(
+                "INSERT INTO runs (id, card_id, role, attempt, model, effort, host_id, worktree_path, branch,
+                                   base_branch, base_sha, supervisor_session_id, started_at, config_hash,
+                                   idempotency_key)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    id,
+                    card.id,
+                    new.role,
+                    attempt,
+                    new.model,
+                    new.effort,
+                    host.id,
+                    new.worktree_path,
+                    new.branch,
+                    new.base_branch,
+                    new.base_sha,
+                    supervisor.id,
+                    tx.now(),
+                    new.config_hash,
+                    tx.key(),
+                ],
+            )?;
+            let run: Run = get(tx.conn(), "run", &id)?;
+            let reservation = reserve(tx, &host, &project, &run)?;
+            tx.event(
+                NewEvent::new("run", &id, "run.started")
+                    .rev(1)
+                    .card(&card.id)
+                    .payload(json!({
+                        "role": new.role,
+                        "attempt": attempt,
+                        "model": new.model,
+                        "effort": new.effort,
+                        "host_id": host.id,
+                        "supervisor_session_id": supervisor.id,
+                        "checks": seen,
+                        "dispatch": new.checks.dispatch,
+                        "config_hash": new.config_hash,
+                    })),
+            )?;
+            let session = insert_run_session(tx, &run, &project.id, new.config_hash.as_deref())?;
+            Ok(Started {
+                run,
+                session,
+                reservation,
+            })
+        })
+    }
+
+    /// A spawn that failed after `run.start` (no worktree or pane): releases
+    /// the reservation `spawn_failed`, ends the placeholder session and the
+    /// run `failed`. Natural: a run already ended is returned.
+    pub fn run_spawn_failed(&mut self, ctx: &Ctx, run: &str, reason: &str) -> Result<Applied<Run>> {
+        required("reason", reason)?;
+        self.write(ctx, "run.start", None, |tx| {
+            let run = load_run(tx, run)?;
+            if run.outcome.is_some() {
+                return Ok(run);
+            }
+            release_reservation(tx, &run, ReservationRelease::SpawnFailed)?;
+            if let Some(session) = live_session(tx.conn(), &run.id)? {
+                end_session(tx, &session, "spawn_failed")?;
+            }
+            end_run(
+                tx,
+                &run,
+                EndRun {
+                    outcome: RunOutcome::Failed,
+                    note: Some(format!("spawn failed: {reason}")),
+                },
+            )
+        })
+    }
+
+    /// `run.end` (`tiller done`, reconcile). `landed` needs a succeeded
+    /// approval or a confirmed outside merge; a session ending its own run
+    /// needs a known `unlanded_commits` for its worktree (P51).
+    pub fn run_end(&mut self, ctx: &Ctx, run: &str, end: EndRun) -> Result<Applied<Run>> {
+        self.write(ctx, "run.end", None, |tx| {
+            let run = load_run(tx, run)?;
+            if run.outcome == Some(end.outcome) {
+                return Ok(run);
+            }
+            require_active(&run)?;
+            let card: Card = get(tx.conn(), "card", &run.card_id)?;
+            match end.outcome {
+                RunOutcome::Landed if !landed_evidence(tx.conn(), &card)? => {
+                    return Err(Error::refused(
+                        "run",
+                        &run.id,
+                        "landed comes from a finished merge or an outside merge the owner confirmed",
+                    ));
+                }
+                RunOutcome::Reported if card.kind == CardKind::Ship && run.role == RunRole::Builder => {
+                    return Err(Error::refused(
+                        "run",
+                        &run.id,
+                        "a builder on a ship card ends landed with the merge, or failed or abandoned",
+                    ));
+                }
+                _ => {}
+            }
+            if let (Actor::Session(_), Some(path)) = (tx.actor(), &run.worktree_path) {
+                let known: Option<Option<i64>> = tx
+                    .conn()
+                    .query_row(
+                        "SELECT unlanded_commits FROM worktrees WHERE host_id = ?1 AND path = ?2",
+                        params![run.host_id, path],
+                        |row| row.get(0),
+                    )
+                    .map(Some)
+                    .or_else(|error| match error {
+                        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                        other => Err(other),
+                    })?;
+                if !matches!(known, Some(Some(_))) {
+                    return Err(Error::refused(
+                        "run",
+                        &run.id,
+                        format!("unlanded commits in {path} are unknown; refresh the worktree first"),
+                    ));
+                }
+            }
+            end_run(tx, &run, end)
+        })
+    }
+
+    /// `session.start` for an orchestrator (`tiller orchestrator start`).
+    /// Natural: the live orchestrator with the same Claude session id is
+    /// returned. Enqueues one note per unresolved ask of the project.
+    pub fn session_start(
+        &mut self,
+        ctx: &Ctx,
+        new: NewOrchestrator,
+    ) -> Result<Applied<OrchestratorStarted>> {
+        self.write(ctx, "session.start", None, |tx| {
+            let project: Project = get(tx.conn(), "project", &new.project_id)?;
+            if project.retired_at.is_some() {
+                return Err(Error::refused("project", &project.id, "project is retired"));
+            }
+            if let Some(live) = live_orchestrator(tx.conn(), &project.id)? {
+                if new.claude_session_id.is_some() && live.claude_session_id == new.claude_session_id {
+                    return Ok(OrchestratorStarted {
+                        session: live,
+                        notes: Vec::new(),
+                    });
+                }
+                return Err(Error::refused(
+                    "project",
+                    &project.id,
+                    format!("orchestrator session {} is live", live.id),
+                ));
+            }
+            let id = ids::new_ulid();
+            let host = local_host_id(tx.conn())?;
+            tx.conn().execute(
+                "INSERT INTO sessions (id, claude_session_id, role, project_id, host_id, pane_id, transcript_path,
+                                       harness, config_hash, started_at)
+                 VALUES (?1, ?2, 'orchestrator', ?3, ?4, ?5, ?6, coalesce(?7, 'claude'), ?8, ?9)",
+                params![
+                    id,
+                    new.claude_session_id,
+                    project.id,
+                    host,
+                    new.pane_id,
+                    new.transcript_path,
+                    new.harness,
+                    new.config_hash,
+                    tx.now(),
+                ],
+            )?;
+            tx.event(
+                NewEvent::new("session", &id, "session.started")
+                    .rev(1)
+                    .payload(json!({"role": "orchestrator", "project_id": project.id})),
+            )?;
+            let asks: Vec<Ask> = list(
+                tx.conn(),
+                "project_id = ?1 AND disposition = 'unresolved' ORDER BY received_at, id",
+                &[&project.id],
+            )?;
+            let mut notes = Vec::with_capacity(asks.len());
+            for ask in asks {
+                notes.push(enqueue(
+                    tx,
+                    &NewMessage {
+                        target_session_id: id.clone(),
+                        kind: OutboxKind::Note,
+                        body: format!("unresolved ask {}: {}", ids::short(&ask.id), ask.text),
+                        card_id: None,
+                        reply_to: Some(ask.id),
+                    },
+                )?);
+            }
+            Ok(OrchestratorStarted {
+                session: get(tx.conn(), "session", &id)?,
+                notes,
+            })
+        })
+    }
+
+    /// `run.bind_session` (`SessionStart` hook). Rebinding to a new Claude id
+    /// (`clear`, `resume` with a fork) keeps the row and puts the old id in
+    /// the event. Natural: the same id and pane write nothing.
+    pub fn run_bind_session(&mut self, ctx: &Ctx, bind: Bind) -> Result<Applied<Session>> {
+        required("claude session id", &bind.claude_session_id)?;
+        self.write(ctx, "run.bind_session", None, |tx| {
+            let session = load_session(tx, &bind.session_id)?;
+            if session.ended_at.is_some() {
+                return Err(Error::refused("session", &session.id, "session has ended"));
+            }
+            let card = match &session.run_id {
+                Some(run) => {
+                    let run: Run = get(tx.conn(), "run", run)?;
+                    require_active(&run)?;
+                    Some(run.card_id)
+                }
+                None => None,
+            };
+            let pane = bind.pane_id.clone().or_else(|| session.pane_id.clone());
+            let transcript = bind.transcript_path.clone().or_else(|| session.transcript_path.clone());
+            if session.claude_session_id.as_deref() == Some(bind.claude_session_id.as_str())
+                && session.pane_id == pane
+                && session.transcript_path == transcript
+            {
+                return Ok(session);
+            }
+            tx.conn().execute(
+                "UPDATE sessions SET claude_session_id = ?2, pane_id = ?3, transcript_path = ?4, rev = rev + 1
+                 WHERE id = ?1",
+                params![session.id, bind.claude_session_id, pane, transcript],
+            )?;
+            tx.event(
+                NewEvent::new("session", &session.id, "session.bound")
+                    .rev(session.rev + 1)
+                    .card_opt(card)
+                    .payload(json!({
+                        "claude_session_id": bind.claude_session_id,
+                        "previous_claude_session_id": session.claude_session_id,
+                        "pane_id": pane,
+                        "source": bind.source,
+                    })),
+            )?;
+            get(tx.conn(), "session", &session.id)
+        })
+    }
+
+    /// `session.end` (`SessionEnd` hook, reconcile). Natural: an ended
+    /// session is returned.
+    pub fn session_end(
+        &mut self,
+        ctx: &Ctx,
+        session: &str,
+        reason: &str,
+    ) -> Result<Applied<Session>> {
+        required("reason", reason)?;
+        self.write(ctx, "session.end", None, |tx| {
+            let session = load_session(tx, session)?;
+            if session.ended_at.is_some() {
+                return Ok(session);
+            }
+            end_session(tx, &session, reason)
+        })
+    }
+
+    /// `session.resume`, the attempt half: the daemon is about to launch
+    /// `claude --resume`; the hook's bind or end completes it.
+    pub fn session_resume_attempted(
+        &mut self,
+        ctx: &Ctx,
+        session: &str,
+        readings: Value,
+    ) -> Result<Applied<Session>> {
+        require_daemon(&ctx.actor, "session.resume")?;
+        self.write(ctx, "session.resume", None, |tx| {
+            let session = load_session(tx, session)?;
+            let card = match &session.run_id {
+                Some(run) => Some(get::<Run>(tx.conn(), "run", run)?.card_id),
+                None => None,
+            };
+            tx.event(
+                NewEvent::new("session", &session.id, "session.resume_attempted")
+                    .card_opt(card)
+                    .payload(
+                        json!({"claude_session_id": session.claude_session_id, "checks": readings}),
+                    ),
+            )?;
+            Ok(session)
+        })
+    }
+
+    /// `run.status` (`tiller status`): copies the line onto the run, appends a
+    /// `status_line` observation and wakes the supervisor.
+    pub fn run_status(
+        &mut self,
+        ctx: &Ctx,
+        run: &str,
+        state: StatusState,
+        line: &str,
+    ) -> Result<Applied<Run>> {
+        required("status line", line)?;
+        self.write(ctx, "run.status", None, |tx| {
+            let run = load_run(tx, run)?;
+            require_active(&run)?;
+            let text = format!("{state}: {line}");
+            tx.conn().execute(
+                "UPDATE runs SET last_status_line = ?2, last_status_at = ?3, rev = rev + 1 WHERE id = ?1",
+                params![run.id, text, tx.now()],
+            )?;
+            let session = live_session(tx.conn(), &run.id)?.map(|s| s.id);
+            tx.conn().execute(
+                "INSERT INTO observations (id, session_id, run_id, source, event, observed_at, recorded_at, payload)
+                 VALUES (?1, ?2, ?3, 'status_line', 'status', ?4, ?4, ?5)",
+                params![ids::new_ulid(), session, run.id, tx.now(), json!({"state": state, "line": line})],
+            )?;
+            tx.event(
+                NewEvent::new("run", &run.id, "run.status")
+                    .rev(run.rev + 1)
+                    .card(&run.card_id)
+                    .payload(json!({"state": state, "line": line})),
+            )?;
+            if let Some(supervisor) = live_supervisor(tx.conn(), &run)? {
+                let card: Card = get(tx.conn(), "card", &run.card_id)?;
+                enqueue(
+                    tx,
+                    &NewMessage {
+                        target_session_id: supervisor,
+                        kind: OutboxKind::Wake,
+                        body: format!("[{}] {} {text}", card.display_id, run.role.short_name()),
+                        card_id: Some(card.id),
+                        reply_to: None,
+                    },
+                )?;
+            }
+            get(tx.conn(), "run", &run.id)
+        })
+    }
+
+    /// `run.pause`: a dated worker pause that silences alarms until then.
+    /// Natural: the same date writes nothing.
+    pub fn run_pause(&mut self, ctx: &Ctx, run: &str, until: Timestamp) -> Result<Applied<Run>> {
+        self.write(ctx, "run.pause", None, |tx| {
+            let run = load_run(tx, run)?;
+            require_active(&run)?;
+            if run.pause_until == Some(until) {
+                return Ok(run);
+            }
+            if until <= tx.now() {
+                return Err(Error::refused(
+                    "run",
+                    &run.id,
+                    format!("{until} is not in the future"),
+                ));
+            }
+            tx.conn().execute(
+                "UPDATE runs SET pause_until = ?2, rev = rev + 1 WHERE id = ?1",
+                params![run.id, until],
+            )?;
+            tx.event(
+                NewEvent::new("run", &run.id, "run.paused")
+                    .rev(run.rev + 1)
+                    .card(&run.card_id)
+                    .payload(json!({"until": until})),
+            )?;
+            get(tx.conn(), "run", &run.id)
+        })
+    }
+
+    /// `run.reown` (reconcile): hands the run to the project's live
+    /// orchestrator. Natural: a run it already supervises is returned.
+    pub fn run_reown(&mut self, ctx: &Ctx, run: &str) -> Result<Applied<Run>> {
+        self.write(ctx, "run.reown", None, |tx| {
+            let run = load_run(tx, run)?;
+            require_active(&run)?;
+            let card: Card = get(tx.conn(), "card", &run.card_id)?;
+            let Some(live) = live_orchestrator(tx.conn(), &card.project_id)? else {
+                return Err(Error::refused(
+                    "project",
+                    &card.project_id,
+                    "no live orchestrator",
+                ));
+            };
+            if live.id == run.supervisor_session_id {
+                return Ok(run);
+            }
+            tx.conn().execute(
+                "UPDATE runs SET supervisor_session_id = ?2, rev = rev + 1 WHERE id = ?1",
+                params![run.id, live.id],
+            )?;
+            tx.event(
+                NewEvent::new("run", &run.id, "run.reowned")
+                    .rev(run.rev + 1)
+                    .card(&run.card_id)
+                    .payload(json!({"from": run.supervisor_session_id, "to": live.id})),
+            )?;
+            get(tx.conn(), "run", &run.id)
+        })
+    }
+
+    /// `run.relaunch` (`tiller agent relaunch`): ends the run's live session,
+    /// proven stopped, and starts a new session on the same run or a new
+    /// attempt that names this run as its predecessor.
+    pub fn run_relaunch(
+        &mut self,
+        ctx: &Ctx,
+        run: &str,
+        relaunch: Relaunch,
+    ) -> Result<Applied<Relaunched>> {
+        required("note", &relaunch.note)?;
+        self.write(ctx, "run.relaunch", None, |tx| {
+            let run = load_run(tx, run)?;
+            if run.worktree_path.is_none() {
+                return Err(Error::refused("run", &run.id, "run has no worktree to relaunch in"));
+            }
+            let card: Card = get(tx.conn(), "card", &run.card_id)?;
+            let mut ended_session = None;
+            if let Some(session) = live_session(tx.conn(), &run.id)? {
+                let Some(proof) = &relaunch.stop_proof else {
+                    return Err(Error::refused(
+                        "session",
+                        &session.id,
+                        "the live session is not proven stopped",
+                    ));
+                };
+                end_session(tx, &session, &format!("relaunched ({proof})"))?;
+                ended_session = Some(session.id);
+            }
+            let target = if relaunch.new_attempt {
+                if run.outcome.is_none() {
+                    end_run(
+                        tx,
+                        &run,
+                        EndRun {
+                            outcome: RunOutcome::Relaunched,
+                            note: Some(relaunch.note.clone()),
+                        },
+                    )?;
+                }
+                let host: Host = get(tx.conn(), "host", &run.host_id)?;
+                let project: Project = get(tx.conn(), "project", &card.project_id)?;
+                check_capacity(tx.conn(), &host, &project)?;
+                let id = ids::new_ulid();
+                let attempt = next_attempt(tx.conn(), &card.id, run.role)?;
+                tx.conn().execute(
+                    "INSERT INTO runs (id, card_id, role, attempt, predecessor_run_id, model, effort, host_id,
+                                       worktree_path, branch, base_branch, base_sha, supervisor_session_id,
+                                       started_at, config_hash)
+                     SELECT ?1, card_id, role, ?2, id, model, effort, host_id, worktree_path, branch, base_branch,
+                            base_sha, supervisor_session_id, ?3, config_hash
+                     FROM runs WHERE id = ?4",
+                    params![id, attempt, tx.now(), run.id],
+                )?;
+                let new_run: Run = get(tx.conn(), "run", &id)?;
+                reserve(tx, &host, &project, &new_run)?;
+                new_run
+            } else {
+                require_active(&run)?;
+                run.clone()
+            };
+            tx.event(
+                NewEvent::new("run", &target.id, "run.relaunched")
+                    .rev(target.rev)
+                    .card(&card.id)
+                    .payload(json!({
+                        "note": relaunch.note,
+                        "new_attempt": relaunch.new_attempt,
+                        "predecessor_run_id": target.predecessor_run_id,
+                        "stop_proof": relaunch.stop_proof,
+                    })),
+            )?;
+            let session = insert_run_session(tx, &target, &card.project_id, target.config_hash.as_deref())?;
+            if let Some(supervisor) = live_supervisor(tx.conn(), &target)? {
+                enqueue(
+                    tx,
+                    &NewMessage {
+                        target_session_id: supervisor,
+                        kind: OutboxKind::Note,
+                        body: format!("[{}] {} relaunched: {}", card.display_id, run.role.short_name(), relaunch.note),
+                        card_id: Some(card.id.clone()),
+                        reply_to: None,
+                    },
+                )?;
+            }
+            Ok(Relaunched {
+                run: get(tx.conn(), "run", &target.id)?,
+                session,
+                ended_session,
+            })
+        })
+    }
+
+    /// `run.clean`: the run ended, its worktree has no unlanded commits by a
+    /// reading taken after it ended, and its pane is closed. Marks the cache
+    /// rows gone. Natural: a cleaned worktree is returned unchanged.
+    pub fn run_clean(&mut self, ctx: &Ctx, run: &str, pane_closed: bool) -> Result<Applied<Run>> {
+        self.write(ctx, "run.clean", None, |tx| {
+            let run = load_run(tx, run)?;
+            let Some(ended_at) = run.ended_at else {
+                return Err(Error::refused("run", &run.id, "run is active"));
+            };
+            let Some(path) = run.worktree_path.clone() else {
+                return Err(Error::refused("run", &run.id, "run has no worktree"));
+            };
+            let worktree: Worktree = find(tx.conn(), "host_id = ?1 AND path = ?2", &[&run.host_id, &path])?
+                .ok_or_else(|| Error::refused("worktree", &path, "no reading of the worktree"))?;
+            if worktree.gone_at.is_some() {
+                return Ok(run);
+            }
+            if worktree.fetched_at < ended_at {
+                return Err(Error::refused("worktree", &path, "the reading predates the run's end"));
+            }
+            if worktree.unlanded_commits != Some(0) {
+                return Err(Error::refused(
+                    "worktree",
+                    &path,
+                    format!("unlanded commits: {:?}", worktree.unlanded_commits),
+                ));
+            }
+            if !pane_closed {
+                return Err(Error::refused("run", &run.id, "the run's pane is still alive"));
+            }
+            tx.conn().execute(
+                "UPDATE worktrees SET gone_at = ?3 WHERE host_id = ?1 AND path = ?2",
+                params![run.host_id, path, tx.now()],
+            )?;
+            tx.conn().execute(
+                "UPDATE panes SET gone_at = ?2
+                 WHERE gone_at IS NULL AND session_id IN (SELECT id FROM sessions WHERE run_id = ?1)",
+                params![run.id, tx.now()],
+            )?;
+            tx.event(
+                NewEvent::new("run", &run.id, "run.cleaned")
+                    .card(&run.card_id)
+                    .payload(json!({"worktree_path": path})),
+            )?;
+            Ok(run)
+        })
+    }
+
+    /// `observation.record`: appends the observation and moves the session's
+    /// activity when it is newer. Only a verdict change is an event.
+    pub fn observation_record(
+        &mut self,
+        ctx: &Ctx,
+        new: NewObservation,
+    ) -> Result<Applied<Recorded>> {
+        required("event", &new.event)?;
+        self.write(ctx, "observation.record", None, |tx| {
+            tx.rebuildable();
+            let id = ids::new_ulid();
+            tx.conn().execute(
+                "INSERT INTO observations (id, session_id, run_id, source, event, verdict, observed_at, recorded_at, payload)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    id,
+                    new.session_id,
+                    new.run_id,
+                    new.source,
+                    new.event,
+                    new.verdict,
+                    new.observed_at,
+                    tx.now(),
+                    new.payload,
+                ],
+            )?;
+            let mut verdict_changed = false;
+            if let (Some(session_id), Some(verdict)) = (&new.session_id, new.verdict) {
+                let session: Session = get(tx.conn(), "session", session_id)?;
+                let newer = session.activity_observed_at.is_none_or(|at| new.observed_at > at);
+                if newer {
+                    tx.conn().execute(
+                        "UPDATE sessions SET activity = ?2, activity_observed_at = ?3, activity_source = ?4 WHERE id = ?1",
+                        params![session.id, verdict, new.observed_at, new.source],
+                    )?;
+                    if session.activity != verdict {
+                        verdict_changed = true;
+                        let card = match &session.run_id {
+                            Some(run) => Some(get::<Run>(tx.conn(), "run", run)?.card_id),
+                            None => None,
+                        };
+                        tx.event(
+                            NewEvent::new("session", &session.id, "observation.recorded")
+                                .card_opt(card)
+                                .payload(json!({
+                                    "observation_id": id,
+                                    "from": session.activity,
+                                    "to": verdict,
+                                    "source": new.source,
+                                    "event": new.event,
+                                })),
+                        )?;
+                    }
+                }
+            }
+            Ok(Recorded {
+                observation: get(tx.conn(), "observation", &id)?,
+                verdict_changed,
+            })
+        })
+    }
+}

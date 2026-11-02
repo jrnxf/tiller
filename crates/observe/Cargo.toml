@@ -1,0 +1,15 @@
+[package]
+name = "tiller-observe"
+description = "Hook mapping, transcript tailer and liveness checks (T2.6)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+tiller-core.workspace = true
+
+[lints]
+workspace = true

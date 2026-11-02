@@ -1,6 +1,16 @@
 [workspace]
 resolver = "3"
-members = ["crates/cli"]
+members = [
+    "crates/agents",
+    "crates/cli",
+    "crates/core",
+    "crates/daemon",
+    "crates/delivery",
+    "crates/herdr",
+    "crates/observe",
+    "crates/reconcile",
+    "crates/replay",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,12 +19,45 @@ rust-version = "1.99"
 license = "MIT"
 repository = "https://github.com/jrnxf/tiller"
 
+# Every known dependency is pinned here (build plan, "Stack"), so parallel lanes
+# add `foo.workspace = true` to their own crate and never edit this file.
 [workspace.dependencies]
+# Workspace crates
+tiller-agents = { path = "crates/agents" }
+tiller-core = { path = "crates/core" }
+tiller-daemon = { path = "crates/daemon" }
+tiller-delivery = { path = "crates/delivery" }
+tiller-herdr = { path = "crates/herdr" }
+tiller-observe = { path = "crates/observe" }
+tiller-reconcile = { path = "crates/reconcile" }
+tiller-replay = { path = "crates/replay" }
+
+# Runtime
 anyhow = "1"
 axum = "0.8"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
+jiff = { version = "0.2.38", features = ["serde"] }
+notify = "8"
+rusqlite = { version = "0.40", features = ["bundled", "serde_json"] }
+rusqlite_migration = "2.6"
 rust-embed = { version = "8", features = ["mime-guess"] }
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ulid = { version = "3", features = ["serde"] }
+utoipa = { version = "6", features = ["axum_extras"] }
+
+# Tests
+http-body-util = "0.1"
+insta = { version = "1", features = ["json"] }
+proptest = "1"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

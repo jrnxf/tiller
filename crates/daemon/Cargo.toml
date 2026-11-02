@@ -1,0 +1,15 @@
+[package]
+name = "tiller-daemon"
+description = "The axum server, SSE, OpenAPI contract and board embedding (T2.8)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+tiller-core.workspace = true
+
+[lints]
+workspace = true

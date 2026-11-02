@@ -1,0 +1,16 @@
+[package]
+name = "tiller-delivery"
+description = "The outbox delivery loop and page-answer sources (T2.5)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+tiller-core.workspace = true
+tiller-herdr.workspace = true
+
+[lints]
+workspace = true
