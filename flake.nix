@@ -109,6 +109,8 @@
               (lib.fileset.fileFilter (file: file.hasExt "snap") ./crates)
               ./.config/nextest.toml
               ./crates/cli/tests/fixtures
+              # Claude Code viewport reads the composer classifier is tested on.
+              ./crates/herdr/tests/fixtures
               # Embedded by crates/agents with include_str!.
               ./roles
             ];
