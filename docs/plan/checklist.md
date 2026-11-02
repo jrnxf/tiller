@@ -218,7 +218,7 @@ about 3 min of the developer's time
 - [x] herdr adapter: one poller per source, no overlapping polls, backoff, last-success timestamps
 - [x] herdr layout rules applied (nested workspaces, glyph repair)
 - [x] Check: end-to-end tests for a busy pane, a permission dialog, a gone pane, a duplicate send, a crash between store and send
-- [ ] Delivered
+- [x] Delivered
 
 ### T2.6 Observations
 `opus` medium - 3-4 h - after the T2.1 interface
