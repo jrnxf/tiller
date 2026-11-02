@@ -209,7 +209,7 @@ about 3 min of the developer's time
 - [x] Nightly `sqlite3 .backup` inside each host's boundary
 - [x] `tiller restore`, JSONL export and import, schema migration tool
 - [x] Check: restore drill recovers an acknowledged card with its pending decision
-- [ ] Delivered
+- [x] Delivered
 
 ### T2.5 Delivery and herdr adapter
 `opus` high - 3-4 h - after the T2.1 interface
