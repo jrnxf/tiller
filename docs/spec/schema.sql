@@ -31,7 +31,7 @@ CREATE TABLE meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 ) STRICT;
--- keys: schema_version, host_id, created_at, import_manifest_sha256
+-- keys: schema_version, host_id, created_at, import_manifest_sha256, boundary (memory.md)
 
 CREATE TABLE idempotency_keys (
   key        TEXT PRIMARY KEY,
@@ -520,9 +520,10 @@ CREATE TABLE quota_windows (              -- owner: quota-axi; never an account 
   fetch_error              TEXT
 ) STRICT;
 
--- Reserved for memory.md (T1.5): evidence, proposals, memory_revisions.
--- They are never loaded into an agent's context. Their columns are not
--- defined here.
+-- Memory tables (memory_sources, memory_revisions, memories, evidence,
+-- memory_evidence, proposals, proposal_evidence, session_loads) are defined
+-- in memory.md, section 11, and load after this file. evidence and
+-- proposals are never loaded into an agent's context.
 
 -- ---------------------------------------------------------------------------
 -- Derived views: the only place a board column exists

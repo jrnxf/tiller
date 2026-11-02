@@ -258,9 +258,9 @@ These tables hold a copy of a fact another system owns. Each row carries `fetche
 
 ### Bookkeeping
 
-- `meta`: key-value: `schema_version`, `host_id`, `created_at`, `import_manifest_sha256`.
+- `meta`: key-value: `schema_version`, `host_id`, `created_at`, `import_manifest_sha256`, `boundary` (`personal` or `work`; memory.md).
 - `idempotency_keys`: `key`, `command`, `entity`, `entity_id`, `response` (JSON), `created_at`. A command that carries a key already present returns the stored response and performs nothing. Keys expire after 30 days.
-- `proposals`, `evidence`, `memory_revisions`: owned by T1.5. `schema.sql` reserves the names and says nothing else about them.
+- `memory_sources`, `memory_revisions`, `memories`, `evidence`, `memory_evidence`, `proposals`, `proposal_evidence`, `session_loads`: owned by `memory.md` (T1.5), which defines them in its section 11.
 
 ## 4. Relationships
 

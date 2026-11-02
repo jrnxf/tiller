@@ -157,12 +157,12 @@ about 3 min of the developer's time
 ### T1.5 Memory
 `opus` medium - 1.5-2 h - after T1.1
 
-- [ ] `docs/spec/memory.md`: source map (canonical file per memory, dotfiles-managed files edited at source)
-- [ ] Scope, evidence, validity, review status, provenance including `legacy-import`
-- [ ] `observations` and `proposals` tables never loaded into context; approval bound to diff plus base revision
-- [ ] Retiring, which sessions loaded a revision, scrub hook on memory commits, no promotion across the personal and work boundary
-- [ ] Check: nothing unapproved can reach a fleet role's loaded context
-- [ ] Delivered
+- [x] `docs/spec/memory.md`: source map (canonical file per memory, dotfiles-managed files edited at source)
+- [x] Scope, evidence, validity, review status, provenance including `legacy-import`
+- [x] `observations` and `proposals` tables never loaded into context; approval bound to diff plus base revision
+- [x] Retiring, which sessions loaded a revision, scrub hook on memory commits, no promotion across the personal and work boundary
+- [x] Check: nothing unapproved can reach a fleet role's loaded context
+- [x] Delivered
 
 ### T1.6 Spec review
 `fable` high, fresh session - 1.5-2 h - after T1.2 to T1.5
