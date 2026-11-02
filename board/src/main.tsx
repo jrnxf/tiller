@@ -35,7 +35,10 @@ async function loadSnapshot(): Promise<Snapshot | null> {
 async function fontReady(): Promise<void> {
   const cap = new Promise<void>((resolve) => setTimeout(resolve, 300));
   try {
-    await Promise.race([document.fonts.load('13px "Inter"'), cap]);
+    await Promise.race([
+      Promise.all([document.fonts.load('13px "Geist"'), document.fonts.load('13px "Geist Mono"')]),
+      cap,
+    ]);
   } catch {
     // The fallback font is fine.
   }

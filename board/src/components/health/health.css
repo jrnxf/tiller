@@ -85,7 +85,6 @@
   font-family: var(--font);
   font-size: 11px;
   fill: var(--fg-4);
-  font-feature-settings: "cv01", "ss03";
   paint-order: stroke;
   stroke: var(--bg-card);
   stroke-width: 3px;
@@ -415,7 +414,6 @@
   font-family: var(--font);
   font-size: 10.5px;
   fill: var(--fg-4);
-  font-feature-settings: "cv01", "ss03";
 }
 .spark text.hl {
   fill: var(--fg-2);

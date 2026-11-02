@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tiller Design Basis</title>
 <style>
-@import url("https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,100..900&display=swap");
+/* Geist and Geist Mono come from the board's bundled @fontsource-variable files (run bun install in board/ first), or from the installed fonts. No network. */
+@font-face { font-family:"Geist"; font-weight:100 900; font-display:swap; src:local("Geist"), url("../../board/node_modules/@fontsource-variable/geist/files/geist-latin-wght-normal.woff2") format("woff2-variations"); }
+@font-face { font-family:"Geist Mono"; font-weight:100 900; font-display:swap; src:local("Geist Mono"), url("../../board/node_modules/@fontsource-variable/geist-mono/files/geist-mono-latin-wght-normal.woff2") format("woff2-variations"); }
 
 /* Tokens copied from linear.app's shipped CSS (read Sunday 2026-11-01). Light first, dark below. */
 :root {
@@ -20,8 +22,8 @@
   --shadow-low:0px 1px 4px -1px #00000017; --shadow-med:0px 3px 12px #00000017; --shadow-high:0px 7px 24px #0000000f;
   --shadow-stack:0px 8px 2px 0px #0000, 0px 5px 2px 0px #00000003, 0px 3px 2px 0px #0000000a, 0px 1px 1px 0px #00000012, 0px 0px 1px 0px #00000014;
   --r4:4px; --r6:6px; --r8:8px; --r12:12px; --r16:16px; --round:9999px;
-  --font:"Inter","SF Pro Display",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
-  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --font:"Geist",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+  --mono:"Geist Mono",ui-monospace,"SF Mono",Menlo,monospace;
   --w-normal:400; --w-medium:510; --w-semibold:590; --w-bold:680;
   --fs-micro:11px; --fs-mini:12px; --fs-small:13px; --fs-regular:15px; --fs-large:18px; --fs-t3:20px; --fs-t2:24px; --fs-t1:36px;
   --ease:cubic-bezier(.25,.46,.45,.94); --fast:.1s; --med:.18s;
@@ -54,7 +56,7 @@
 
 * { box-sizing:border-box; }
 html, body { margin:0; background:var(--bg-0); color:var(--fg-2); font-family:var(--font); font-size:15px; line-height:1.6;
-  font-feature-settings:"cv01","ss03"; font-optical-sizing:auto; -webkit-font-smoothing:antialiased; }
+  font-optical-sizing:auto; -webkit-font-smoothing:antialiased; }
 button, input, textarea { font:inherit; color:inherit; }
 button { cursor:pointer; }
 a { color:var(--accent); text-decoration:none; } a:hover { color:var(--accent-hover); }
@@ -482,7 +484,7 @@ form.decide-form textarea:focus { border-color:var(--accent); box-shadow:0 0 0 3
     </div>
 
     <div class="grid g2" style="margin-top:12px">
-      <div class="panel"><h3>Type · Inter, cv01 + ss03, optical sizing</h3>
+      <div class="panel"><h3>Type · Geist and Geist Mono</h3>
         <div class="type-row"><span class="spec">title1 36 / 590</span><span class="ex" style="font-size:36px;font-weight:590;letter-spacing:-.022em;line-height:1.1">Own the fleet</span></div>
         <div class="type-row"><span class="spec">title3 20 / 590</span><span class="ex" style="font-size:20px;font-weight:590;letter-spacing:-.012em">Pick the logo direction</span></div>
         <div class="type-row"><span class="spec">regular 15 / 400</span><span class="ex" style="font-size:15px">Body copy in docs and the peek panel.</span></div>

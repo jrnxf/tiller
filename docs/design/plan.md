@@ -305,7 +305,7 @@ All derived from state; none stored.
 Per the developer's request, the app copies Linear's visual language:
 
 - tokens read from linear.app's production CSS on 2026-11-01: dark surfaces #08090a/#0f1011/#141516/#191a1b, text #f7f8f8/#d0d6e0/#8a8f98/#62666d, borders #23252a/#34343a, accent #7170ff (#5e6ad2 in light), signal colors yellow #f0bf00, orange #fc7840, green #27a644, indigo #5e6ad2;
-- Inter with cv01 and ss03, weights 400/510/590/680;
+- Geist for UI text and Geist Mono for code, bundled (latin subset), weights 400/510/590/680;
 - radii 4/6/8/12;
 - Linear-style status icons, peek panel, command menu, list grouping and inbox.
 

@@ -2,5 +2,5 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "entry": ["src/routes/**/*.tsx"],
   "ignoreBinaries": ["bun2nix"],
-  "ignoreDependencies": ["@fontsource-variable/inter"]
+  "ignoreDependencies": ["@fontsource-variable/geist", "@fontsource-variable/geist-mono"]
 }

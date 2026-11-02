@@ -133,9 +133,13 @@
     url = "https://registry.npmjs.org/@exodus/bytes/-/bytes-1.16.0.tgz";
     hash = "sha512-IcpW84uEn3N7ETtNZMlxKhfl6Pec8rUNGOTBtWbK1FKhJxIFAptZyVrvVRVBimAJxJCgc3PxepxkdWWG4DVzfA==";
   };
-  "@fontsource-variable/inter@5.3.0" = fetchurl {
-    url = "https://registry.npmjs.org/@fontsource-variable/inter/-/inter-5.3.0.tgz";
-    hash = "sha512-OupL48va4JNofb97w6NYeF9S7W/kHNKM0Er8Dem5nqi4jeOLrVJDoE8tZEpnMJmtkvNbB1EIPPwHcdkF6b1oUA==";
+  "@fontsource-variable/geist-mono@5.3.0" = fetchurl {
+    url = "https://registry.npmjs.org/@fontsource-variable/geist-mono/-/geist-mono-5.3.0.tgz";
+    hash = "sha512-vBbuwDEo9AkrqADMXOrlAR3DFcJi4/JxeuU43FoiQERnNwsfXNnvxvReZG02cQKmyk4DZkZdBZX3oTDvy2zBAw==";
+  };
+  "@fontsource-variable/geist@5.3.0" = fetchurl {
+    url = "https://registry.npmjs.org/@fontsource-variable/geist/-/geist-5.3.0.tgz";
+    hash = "sha512-j0m+vLQuG5XAYoHtGCVu0spvlGreR3EzpECUVzkFmI1mTVnAO38l/NEPDCFgZ177JxzYJCLSmTQibIiYPilGrA==";
   };
   "@jridgewell/gen-mapping@0.3.13" = fetchurl {
     url = "https://registry.npmjs.org/@jridgewell/gen-mapping/-/gen-mapping-0.3.13.tgz";

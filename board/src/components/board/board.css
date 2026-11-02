@@ -510,6 +510,16 @@ button.colh:hover {
   flex-wrap: wrap;
   gap: 4px 5px;
 }
+.card .c-chips .lab {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+.card .c-chips .lab:not(:has(*)) {
+  display: block;
+  line-height: 18px;
+  text-overflow: ellipsis;
+}
 .card .c-live {
   display: flex;
   align-items: center;

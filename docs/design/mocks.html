@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tiller UI Mocks</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,100..900&display=swap">
 <style>
+/* Geist and Geist Mono come from the board's bundled @fontsource-variable files (run bun install in board/ first), or from the installed fonts. No network. */
+@font-face { font-family:"Geist"; font-weight:100 900; font-display:swap; src:local("Geist"), url("../../board/node_modules/@fontsource-variable/geist/files/geist-latin-wght-normal.woff2") format("woff2-variations"); }
+@font-face { font-family:"Geist Mono"; font-weight:100 900; font-display:swap; src:local("Geist Mono"), url("../../board/node_modules/@fontsource-variable/geist-mono/files/geist-mono-latin-wght-normal.woff2") format("woff2-variations"); }
 /* Tokens from tiller-design.html (copied from linear.app's shipped CSS). Light first, dark below. */
 :root {
   --bg-0:#ffffff; --bg-1:#f8f8f8; --bg-2:#f4f4f4; --bg-3:#f0f0f0;
@@ -21,8 +21,8 @@
   --shadow-low:0px 1px 4px -1px #00000017; --shadow-med:0px 3px 12px #00000017; --shadow-high:0px 7px 24px #0000000f;
   --shadow-stack:0px 8px 2px 0px #0000, 0px 5px 2px 0px #00000003, 0px 3px 2px 0px #0000000a, 0px 1px 1px 0px #00000012, 0px 0px 1px 0px #00000014;
   --r4:4px; --r6:6px; --r8:8px; --r12:12px; --r16:16px; --round:9999px;
-  --font:"Inter","SF Pro Display",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
-  --mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --font:"Geist",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+  --mono:"Geist Mono",ui-monospace,"SF Mono",Menlo,monospace;
   --w-normal:400; --w-medium:510; --w-semibold:590; --w-bold:680;
   --fs-micro:11px; --fs-mini:12px; --fs-small:13px; --fs-regular:15px; --fs-large:18px; --fs-t3:20px; --fs-t2:24px; --fs-t1:36px;
   --ease:cubic-bezier(.25,.46,.45,.94); --fast:.1s; --med:.18s;
@@ -62,7 +62,7 @@
 
 * { box-sizing:border-box; }
 html, body { margin:0; background:var(--bg-0); color:var(--fg-2); font-family:var(--font); font-size:15px; line-height:1.6;
-  font-feature-settings:"cv01","ss03"; font-optical-sizing:auto; -webkit-font-smoothing:antialiased; }
+  font-optical-sizing:auto; -webkit-font-smoothing:antialiased; }
 body { overflow-x:hidden; }
 button, input, textarea, select { font:inherit; color:inherit; }
 button { cursor:pointer; }
@@ -537,7 +537,7 @@ button.colh:hover { background:var(--bg-hover); }
 .legend i.dash { width:14px; height:0; border-top:2px dashed var(--fg-3); border-radius:0; }
 .chart { width:100%; min-height:200px; }
 .chart svg { display:block; width:100%; height:auto; overflow:visible; }
-.chart text { font-family:var(--font); font-size:11px; fill:var(--fg-4); font-feature-settings:"cv01","ss03"; paint-order:stroke; stroke:var(--bg-card); stroke-width:3px; stroke-linejoin:round; }
+.chart text { font-family:var(--font); font-size:11px; fill:var(--fg-4); paint-order:stroke; stroke:var(--bg-card); stroke-width:3px; stroke-linejoin:round; }
 .chart text.hl { fill:var(--fg-1); font-weight:510; }
 .chart text.bl { fill:var(--fg-3); }
 .chart .gl { stroke:var(--line-1); stroke-width:1; }
@@ -649,7 +649,7 @@ th.r, td.r { text-align:right; }
 .spark .sp-pt.cur { fill:var(--accent); }
 .spark .sp-div { stroke:var(--line-2); stroke-width:1; stroke-dasharray:2 3; }
 .spark .bl-line { stroke:var(--fg-3); stroke-width:1.2; stroke-dasharray:4 4; }
-.spark text { font-family:var(--font); font-size:10.5px; fill:var(--fg-4); font-feature-settings:"cv01","ss03"; }
+.spark text { font-family:var(--font); font-size:10.5px; fill:var(--fg-4); }
 .spark text.hl { fill:var(--fg-2); }
 .disc { display:flex; align-items:center; gap:8px; width:100%; height:42px; padding:0 14px; border:1px solid var(--line-1); border-radius:var(--r8); background:var(--bg-card); color:var(--fg-1); font-weight:var(--w-medium); text-align:left; }
 .disc:hover { background:var(--bg-card-hover); border-color:var(--line-2); }
