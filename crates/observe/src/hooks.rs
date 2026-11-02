@@ -287,23 +287,82 @@ pub enum Outcome {
     Failed(String),
 }
 
+/// What intake adds to one hook call: fields for the observation's payload
+/// and the JSON the hook prints for Claude Code (`protocol.md` 2.3, 2.5, 3.2).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Reply {
+    pub payload: Map<String, Value>,
+    pub output: Option<Value>,
+}
+
+/// The intake protocol (`protocol.md` sections 2 and 3.2). It lives in
+/// `tiller-agents` (T4.4) and plugs into the two hooks that carry it. Each
+/// call gets the raw input, which holds the fields no observation keeps.
+pub trait Intake {
+    /// A `UserPromptSubmit` whose prompt is not a wake-up line.
+    fn prompt(
+        &self,
+        store: &mut Store,
+        session: &Session,
+        prompt: &str,
+        input: &HookInput,
+    ) -> tiller_core::Result<Reply>;
+
+    /// A `UserPromptSubmit` whose prompt is a wake-up line; `mine` is true
+    /// when the outbox row targets this session.
+    fn wake(
+        &self,
+        store: &mut Store,
+        session: Option<&Session>,
+        outbox_id: &str,
+        mine: bool,
+    ) -> tiller_core::Result<Reply>;
+
+    /// A `Stop`.
+    fn stop(
+        &self,
+        store: &mut Store,
+        session: &Session,
+        input: &HookInput,
+    ) -> tiller_core::Result<Reply>;
+}
+
 /// Runs one hook call end to end. Never fails: the caller exits 0 whatever
 /// the outcome.
 pub fn run(event: &str, input: &[u8], env: &Env) -> Outcome {
+    run_with(event, input, env, None).0
+}
+
+/// [`run`], with intake plugged in. Also returns what the hook prints.
+pub fn run_with(
+    event: &str,
+    input: &[u8],
+    env: &Env,
+    intake: Option<&dyn Intake>,
+) -> (Outcome, Option<Value>) {
     if !owner_is_tiller(&env.tiller_home) {
-        return Outcome::NotOwner;
+        return (Outcome::NotOwner, None);
     }
     let observed = match observe(event, input, env, Timestamp::now()) {
         Ok(Some(observed)) => observed,
-        Ok(None) => return Outcome::Ignored,
-        Err(error) => return fail(env, event, &error),
+        Ok(None) => return (Outcome::Ignored, None),
+        Err(error) => return (fail(env, event, &error), None),
     };
     let db = env.tiller_home.join("state.db");
     if !db.exists() {
         // Not initialized: nothing to record into, and nothing to replay
         // later. Spooling is for a database this binary cannot write (R11).
-        return Outcome::NoDatabase;
+        return (Outcome::NoDatabase, None);
     }
+    // Only the two hooks that carry intake need the raw input again; a tool
+    // event's input can be a whole file. `observe` already parsed it, so
+    // this cannot fail.
+    let intake = intake.filter(|_| matches!(handler(event), Handler::Intake | Handler::TurnEnd));
+    let raw: HookInput = match intake {
+        Some(_) => serde_json::from_slice(input).unwrap_or_default(),
+        None => HookInput::default(),
+    };
+    let mut output = None;
     let applied = Store::open_current(&db).and_then(|mut store| {
         // With the daemon down the hook holds the last connection, and SQLite
         // would checkpoint the WAL and fsync on close: most of the budget.
@@ -311,15 +370,17 @@ pub fn run(event: &str, input: &[u8], env: &Env) -> Outcome {
         store
             .conn()
             .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)?;
-        apply(&mut store, env, &observed)
+        let intake = intake.map(|intake| (&raw, intake, &mut output));
+        apply_with(&mut store, env, &observed, intake)
     });
-    match applied {
+    let outcome = match applied {
         Ok(outcome) => outcome,
         Err(error @ (Error::Unavailable(_) | Error::SchemaTooNew { .. })) => {
             spool(env, &observed, &error.to_string())
         }
         Err(error) => fail(env, event, &error.to_string()),
-    }
+    };
+    (outcome, output)
 }
 
 /// Maps a hook call to its observation. `None` for an `ignore` event.
@@ -445,6 +506,20 @@ pub fn observe(
 /// Writes one mapped hook call: binds or ends the session where the event
 /// says so, and appends the observation under its idempotency key.
 pub fn apply(store: &mut Store, env: &Env, observed: &Observed) -> tiller_core::Result<Outcome> {
+    apply_with(store, env, observed, None)
+}
+
+/// The raw input, the intake to run and where its output goes.
+type IntakeCall<'a> = (&'a HookInput, &'a dyn Intake, &'a mut Option<Value>);
+
+/// [`apply`], running intake on the hooks that carry it. A spooled
+/// observation is applied without intake: its raw input is gone.
+fn apply_with(
+    store: &mut Store,
+    env: &Env,
+    observed: &Observed,
+    mut intake: Option<IntakeCall<'_>>,
+) -> tiller_core::Result<Outcome> {
     let handler = handler(&observed.hook_event);
     let ctx = Ctx::new(Actor::Hook);
     let mut session = resolve_session(store, observed)?;
@@ -489,6 +564,21 @@ pub fn apply(store: &mut Store, env: &Env, observed: &Observed) -> tiller_core::
                 let mine = matches!((&target, &session), (Some(t), Some(s)) if *t == s.id);
                 event = if mine { "wake" } else { "wake_mismatch" }.to_owned();
                 insert(&mut payload, "outbox_id", json!(id));
+                if let Some((_, intake, output)) = &mut intake {
+                    let reply = intake.wake(store, session.as_ref(), id, mine);
+                    merge_reply(env, &observed.hook_event, reply, &mut payload, output);
+                }
+            } else if let (Some((raw, intake, output)), Some(found)) = (&mut intake, &session)
+                && let Some(prompt) = raw.extra.get("prompt").and_then(Value::as_str)
+            {
+                let reply = intake.prompt(store, found, prompt, raw);
+                merge_reply(env, &observed.hook_event, reply, &mut payload, output);
+            }
+        }
+        Handler::TurnEnd => {
+            if let (Some((raw, intake, output)), Some(found)) = (&mut intake, &session) {
+                let reply = intake.stop(store, found, raw);
+                merge_reply(env, &observed.hook_event, reply, &mut payload, output);
             }
         }
         Handler::Guard | Handler::ToolDone => {
@@ -662,6 +752,30 @@ fn log(env: &Env, line: &str) {
         .open(dir.join("hook.log"))
     {
         let _ = writeln!(file, "{} {line}", Timestamp::now());
+    }
+}
+
+/// Folds an intake reply into the observation. Intake fails open like the
+/// hook: an error is logged and noted in the payload, and the observation is
+/// still written.
+fn merge_reply(
+    env: &Env,
+    event: &str,
+    reply: tiller_core::Result<Reply>,
+    payload: &mut Value,
+    output: &mut Option<Value>,
+) {
+    match reply {
+        Ok(reply) => {
+            for (name, value) in reply.payload {
+                insert(payload, &name, value);
+            }
+            *output = reply.output;
+        }
+        Err(error) => {
+            log(env, &format!("{event} intake: {error}"));
+            insert(payload, "intake_error", json!(error.to_string()));
+        }
     }
 }
 

@@ -103,10 +103,17 @@ fn hook_p95_is_under_ten_ms_with_the_daemon_down() {
         };
         let (took, output) = hook(dir.path(), event, &input);
         assert!(output.status.success(), "{output:?}");
-        assert!(
-            output.stdout.is_empty() && output.stderr.is_empty(),
-            "{output:?}"
-        );
+        assert!(output.stderr.is_empty(), "{output:?}");
+        if event == "Stop" {
+            assert!(output.stdout.is_empty(), "observe mode prints nothing");
+        } else {
+            // Each prompt is an ask, and the orchestrator is told its id.
+            let printed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let context = printed["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap();
+            assert!(context.starts_with("tiller: ask "), "{context}");
+        }
         times.push(took);
     }
     // The first calls warm the page cache; measure the steady state.
@@ -126,6 +133,15 @@ fn hook_p95_is_under_ten_ms_with_the_daemon_down() {
         )
         .unwrap();
     assert_eq!(rows, 60);
+    let asks: i64 = store
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM asks WHERE source = 'prompt'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(asks, 30);
     let session: Session = tiller_core::state::get(store.conn(), "session", &orchestrator).unwrap();
     assert_eq!(session.activity, Activity::Idle);
 }

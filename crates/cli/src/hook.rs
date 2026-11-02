@@ -1,10 +1,13 @@
 //! `tiller hook <event>` (`protocol.md` section 4): reads the hook input on
-//! stdin and hands it to `tiller-observe`, which writes `state.db` directly.
-//! A hook always exits 0 with no output, so a failure never stops a session.
+//! stdin and hands it to `tiller-observe`, which writes `state.db` directly,
+//! with intake (`tiller-agents`) plugged in. A hook always exits 0, so a
+//! failure never stops a session; it prints only what intake hands back (an
+//! ask's context line, an inbox's messages, a `block-once` decision).
 
 use std::io::Read;
 use std::path::PathBuf;
 
+use tiller_agents::intake::Hooks;
 use tiller_observe::hooks::{self, Env};
 
 #[derive(clap::Args)]
@@ -36,5 +39,13 @@ pub fn run(args: &Args) {
             .ok()
             .filter(|id| !id.is_empty()),
     };
-    hooks::run(&args.event, &input, &env);
+    // Only the two hooks that carry intake read config.toml, so a tool
+    // hook keeps its budget.
+    let intake = matches!(args.event.as_str(), "UserPromptSubmit" | "Stop")
+        .then(|| Hooks::load(&env.tiller_home));
+    let intake = intake.as_ref().map(|hooks| hooks as &dyn hooks::Intake);
+    let (_, output) = hooks::run_with(&args.event, &input, &env, intake);
+    if let Some(output) = output {
+        println!("{output}");
+    }
 }

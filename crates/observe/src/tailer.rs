@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
-use tiller_core::domain::{Activity, ObservationSource, Session};
+use tiller_core::domain::{Activity, AskSource, ObservationSource, Session};
+use tiller_core::state::asks::NewAsk;
+use tiller_core::state::get;
 use tiller_core::state::runs::NewObservation;
 use tiller_core::{Actor, Ctx, Store, Timestamp};
 
@@ -247,6 +249,16 @@ impl Tailer {
             .and_then(Value::as_str)
             .and_then(|text| text.parse::<Timestamp>().ok())
             .unwrap_or_else(Timestamp::now);
+        if event == "transcript:user" {
+            // A busy database retries the line; any other refusal is noted
+            // and the tailer moves on, so one bad entry never stalls it.
+            match self.record_ask(store, &entry, uuid) {
+                Ok(Some(ask_id)) => payload["ask_id"] = json!(ask_id),
+                Ok(None) => {}
+                Err(error @ tiller_core::Error::Unavailable(_)) => return Err(error),
+                Err(error) => payload["ask_error"] = json!(error.to_string()),
+            }
+        }
         store.observation_record(
             &Ctx::new(Actor::Daemon),
             NewObservation {
@@ -260,6 +272,37 @@ impl Tailer {
             },
         )?;
         Ok(true)
+    }
+
+    /// On a hook-less host the tailer is the ask's source (`protocol.md`
+    /// 2.2), keyed by the entry so a re-read never records it twice.
+    fn record_ask(
+        &self,
+        store: &mut Store,
+        entry: &Value,
+        uuid: Option<&str>,
+    ) -> tiller_core::Result<Option<String>> {
+        let Some(uuid) = uuid else {
+            return Ok(None);
+        };
+        let text = texts(entry.pointer("/message/content")).join("\n\n");
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        let session: Session = get(store.conn(), "session", &self.session_id)?;
+        let claude_id = session.claude_session_id.as_deref().unwrap_or(&session.id);
+        let key = format!("transcript:{claude_id}:{uuid}");
+        let recorded = store.ask_record(
+            &Ctx::new(Actor::Daemon),
+            Some(&key),
+            NewAsk {
+                project_id: session.project_id.clone(),
+                session_id: Some(session.id.clone()),
+                source: AskSource::Prompt,
+                text,
+            },
+        )?;
+        Ok(Some(recorded.value.ask.id))
     }
 
     fn already_recorded(&self, store: &Store, uuid: Option<&str>) -> tiller_core::Result<bool> {
@@ -479,6 +522,45 @@ mod tests {
             )],
         );
         assert_eq!(tailer.poll(&mut store).unwrap(), 1, "only u3 is new");
+    }
+
+    #[test]
+    fn transcript_intake_host_records_each_user_entry_as_one_ask() {
+        let mut store = Store::open_in_memory().unwrap();
+        let fleet = fleet(&mut store);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let orchestrator = session(&store, &fleet.orchestrator);
+        let ask = user("u1", "2026-11-02T10:00:00Z", json!("add a dark mode"));
+        let wake = user(
+            "u2",
+            "2026-11-02T10:00:01Z",
+            json!("tiller inbox 01JC2ZB6N0E2K4M6P8R0S2T4V6"),
+        );
+        let blank = user("u3", "2026-11-02T10:00:02Z", json!("  \n"));
+        append(&path, &[ask.clone(), wake, blank]);
+        let mut tailer = Tailer::resume(&store, &orchestrator, &path, true).unwrap();
+        assert_eq!(tailer.poll(&mut store).unwrap(), 3);
+        let asks =
+            "SELECT count(*) FROM asks WHERE source = 'prompt' AND disposition = 'unresolved'";
+        assert_eq!(
+            count(&store, asks),
+            1,
+            "neither the wake-up line nor a blank entry is an ask"
+        );
+
+        // A replaced file that repeats u1 records nothing new, and a fresh
+        // tailer (a daemon restart) on the same entry neither.
+        std::fs::write(&path, "").unwrap();
+        append(&path, std::slice::from_ref(&ask));
+        tailer.poll(&mut store).unwrap();
+        let mut fresh = Tailer::resume(&store, &orchestrator, &path, true).unwrap();
+        let other = dir.path().join("other.jsonl");
+        append(&other, &[ask]);
+        fresh.path = other;
+        fresh.offset = 0;
+        fresh.poll(&mut store).unwrap();
+        assert_eq!(count(&store, asks), 1);
     }
 
     #[test]

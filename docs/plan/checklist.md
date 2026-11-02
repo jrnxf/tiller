@@ -329,10 +329,10 @@ about 3 min of the developer's time
 ### T4.4 Intake wiring
 `opus` medium - 2-3 h - after T2.6 and T1.3
 
-- [ ] UserPromptSubmit hook records the ask; `tiller ask resolve`; Stop hook in observe mode; card tags in replies
-- [ ] Unresolved asks stay visible
-- [ ] Check: three interleaved asks map to the right cards
-- [ ] Check: a board-created card is never created twice
+- [x] UserPromptSubmit hook records the ask; `tiller ask resolve`; Stop hook in observe mode; card tags in replies
+- [x] Unresolved asks stay visible
+- [x] Check: three interleaved asks map to the right cards
+- [x] Check: a board-created card is never created twice
 - [ ] Delivered
 
 ## CP3: Core end to end (developer, 15 min)

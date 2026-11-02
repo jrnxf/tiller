@@ -1229,8 +1229,12 @@ name = "tiller-agents"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror",
  "tiller-core",
+ "tiller-observe",
+ "toml",
 ]
 
 [[package]]
@@ -1249,6 +1253,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tiller-agents",
  "tiller-core",
  "tiller-observe",
  "tokio",
