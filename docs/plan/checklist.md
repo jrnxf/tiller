@@ -148,11 +148,11 @@ about 3 min of the developer's time
 ### T1.4 Authority and guards
 `opus` high - 1.5-2 h - after T1.1
 
-- [ ] `docs/spec/authority.md`: role matrix; each guard labeled enforced or convention; deny rules per role; PreToolUse backstop
-- [ ] Merges only by the daemon after a bound approval; review, execute and merge as three separate decisions
-- [ ] Alternate paths listed for testing (`gh api`, `curl`, raw `git push`, writes outside the worktree, deleting worktrees)
-- [ ] Check: every enforced guarantee has a test name
-- [ ] Delivered
+- [x] `docs/spec/authority.md`: role matrix; each guard labeled enforced or convention; deny rules per role; PreToolUse backstop
+- [x] Merges only by the daemon after a bound approval; review, execute and merge as three separate decisions
+- [x] Alternate paths listed for testing (`gh api`, `curl`, raw `git push`, writes outside the worktree, deleting worktrees)
+- [x] Check: every enforced guarantee has a test name
+- [x] Delivered (Monday 2026-11-02, landed on main in the commit that adds the spec; CP2 reviews the draft)
 
 ### T1.5 Memory
 `opus` medium - 1.5-2 h - after T1.1

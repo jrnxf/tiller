@@ -286,8 +286,8 @@ CREATE INDEX prs_card_open ON prs(card_id) WHERE state = 'open';
 CREATE TABLE grants (
   id          TEXT PRIMARY KEY,
   project_id  TEXT NOT NULL REFERENCES projects(id),
-  kind        TEXT NOT NULL CHECK (kind IN ('merge', 'land_direct', 'away')),
-  conditions  TEXT NOT NULL,            -- JSON; shape owned by authority.md (T1.4)
+  kind        TEXT NOT NULL CHECK (kind IN ('merge', 'land_direct')),
+  conditions  TEXT NOT NULL,            -- JSON; shape in authority.md, section 6
   granted_at  TEXT NOT NULL,
   granted_by  TEXT NOT NULL,
   revoked_at  TEXT,

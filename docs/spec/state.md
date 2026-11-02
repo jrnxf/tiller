@@ -175,7 +175,7 @@ Rules:
 - Only the daemon moves an approval to `executing` and beyond, and only `tiller land` run by the daemon merges (T1.4). Before `executing`, the daemon re-reads the PR head; a mismatch marks the approval `stale` and opens a `merge` attention item with the new SHA.
 - A PR refresh that sees a new head SHA while an approval is `accepted` marks it `stale` in the same transaction (T4.3 acceptance: a push after approval invalidates it).
 - A click that arrives twice with the same `decision_idempotency_key` returns the first outcome and causes no second action.
-- `grants` (standing approvals, P13 and P34) are per project and action with conditions (checks green, PR opened by a fleet run, branch pattern). A matching grant creates an `accepted` approval bound to the head SHA at that moment, so the audit trail is the same as a hand approval. T1.4 defines the conditions and who may create a grant.
+- `grants` (standing approvals, P13) are per project and action with conditions (checks green, PR opened by a fleet run, branch pattern). A matching grant creates an `accepted` approval bound to the head SHA at that moment, so the audit trail is the same as a hand approval. `authority.md` (T1.4, section 6) defines the conditions and who may create a grant; away mode (P34) is an `away` approval whose temporary merge grants are ordinary `merge` grants.
 
 ### Reservation
 
@@ -370,6 +370,10 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `approval.decide` | board, `tiller approve`, grant match | approval `requested`; key new or identical; binding still matches the cache | `approvals` (`accepted` or `rejected`), `attention` answered | `approval.decided`, `attention.answered` |
 | `approval.execute` | daemon only | `accepted`; head re-read from the forge equals `head_sha`; one at a time per PR | `approvals` (`executing`) | `approval.executing` |
 | `approval.finish` | daemon only | `executing` | `approvals` (`succeeded`, `failed`, `uncertain`); on success `card.close landed`, `dep.release` for dependants, `obligations.met` | `approval.finished`, `card.closed`, `dep.released`, `obligation.met` |
+| `grant.create` | owner only (T1.4) | project exists; conditions valid for the kind | `grants` | `grant.created` |
+| `grant.revoke` | owner; daemon on expiry or `away.end` | grant not revoked | `grants.revoked_at`, `revoke_reason`; `accepted` approvals from it not yet executing become `stale` | `grant.revoked`, `approval.stale` |
+| `away.start` | owner only (T1.4) | no active `away` approval; scope valid | `approvals` (kind `away`, `accepted`, decided by `owner`); temporary `grants` when the scope asks | `approval.decided`, `grant.created` |
+| `away.end` | owner; reconcile when `until_at` passes | `away` approval `accepted` | `approvals` (`succeeded`); revokes its temporary grants | `approval.finished`, `grant.revoked` |
 | `card.close` | orchestrator, daemon, owner | card open; no open attention; no active run; outcome allowed for the kind (section 7) | `cards.state`, `outcome`; releases holds and dependants | `card.closed`, `hold.released`, `dep.released` |
 | `card.cancel` | owner, orchestrator | card open; reason | ends active runs (`cancelled`), withdraws attention, releases reservations, closes the card | `run.ended`, `attention.withdrawn`, `reservation.released`, `card.closed` |
 | `card.reopen` | owner, orchestrator | card closed; reason | `cards.state = open`; `outcome`, `closed_at`, `closed_by` null | `card.reopened` |
