@@ -1,0 +1,28 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "card_id": "<id11>",
+    "due_at": null,
+    "id": "<id55>",
+    "met_at": null,
+    "met_by_event_seq": null,
+    "opened_at": "<time>",
+    "opened_by": "owner",
+    "project_id": "alpha",
+    "short": "<id55.short>",
+    "state": "cancelled",
+    "trigger_event": {
+      "kind": "pr.checks"
+    },
+    "trigger_kind": "event",
+    "what": "tell the owner when CI is green"
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

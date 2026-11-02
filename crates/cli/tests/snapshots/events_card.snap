@@ -1,0 +1,70 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "events": [
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "card",
+        "entity_id": "<id11>",
+        "id": "<id77>",
+        "idempotency_key": null,
+        "kind": "card.created",
+        "payload": {
+          "ask_id": "<id5>",
+          "display_id": "alpha-1",
+          "kind": "ship",
+          "legacy_id": null,
+          "project_id": "alpha",
+          "title": "Dark mode"
+        },
+        "rev_after": 1,
+        "seq": "<seq>",
+        "short": "<id77.short>",
+        "txn": "ask.resolve"
+      },
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "card",
+        "entity_id": "<id11>",
+        "id": "<id79>",
+        "idempotency_key": null,
+        "kind": "card.linked",
+        "payload": {
+          "ask_id": "<id5>",
+          "relation": "created"
+        },
+        "rev_after": null,
+        "seq": "<seq>",
+        "short": "<id79.short>",
+        "txn": "ask.resolve"
+      },
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "ask",
+        "entity_id": "<id17>",
+        "id": "<id81>",
+        "idempotency_key": null,
+        "kind": "ask.resolved",
+        "payload": {
+          "disposition": "followup",
+          "reason": null
+        },
+        "rev_after": null,
+        "seq": "<seq>",
+        "short": "<id81.short>",
+        "txn": "ask.resolve"
+      }
+    ],
+    "last_seq": "<seq>"
+  },
+  "ok": true
+}

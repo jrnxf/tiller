@@ -1,0 +1,87 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "card": "alpha-1",
+    "events": [
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "reservation",
+        "entity_id": "<id71>",
+        "id": "<id85>",
+        "idempotency_key": null,
+        "kind": "reservation.released",
+        "payload": {
+          "reason": "ended",
+          "run_id": "<id35>"
+        },
+        "rev_after": null,
+        "seq": "<seq>",
+        "short": "<id85.short>",
+        "txn": "run.end"
+      },
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "run",
+        "entity_id": "<id35>",
+        "id": "<id87>",
+        "idempotency_key": null,
+        "kind": "run.ended",
+        "payload": {
+          "note": null,
+          "outcome": "abandoned",
+          "role": "builder"
+        },
+        "rev_after": 6,
+        "seq": "<seq>",
+        "short": "<id87.short>",
+        "txn": "run.end"
+      },
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "outbox",
+        "entity_id": "<id89>",
+        "id": "<id91>",
+        "idempotency_key": "ok-1",
+        "kind": "outbox.enqueued",
+        "payload": {
+          "kind": "answer",
+          "reply_to": "<id83>",
+          "target_session_id": "<id9>"
+        },
+        "rev_after": 1,
+        "seq": "<seq>",
+        "short": "<id91.short>",
+        "txn": "approval.decide"
+      },
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "attention",
+        "entity_id": "<id83>",
+        "id": "<id93>",
+        "idempotency_key": "ok-1",
+        "kind": "attention.answered",
+        "payload": {
+          "answer": "approve",
+          "still_current": true,
+          "via": "cli"
+        },
+        "rev_after": 2,
+        "seq": "<seq>",
+        "short": "<id93.short>",
+        "txn": "approval.decide"
+      }
+    ]
+  },
+  "ok": true
+}

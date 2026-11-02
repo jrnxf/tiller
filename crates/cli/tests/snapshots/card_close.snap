@@ -1,0 +1,38 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "card": {
+      "acceptance": null,
+      "body": null,
+      "category": null,
+      "closed_at": "<time>",
+      "closed_by": "owner",
+      "created_at": "<time>",
+      "created_by_ask_id": "<id17>",
+      "dispatch_override": null,
+      "display_id": "alpha-2",
+      "fixes_card_id": null,
+      "id": "<id19>",
+      "kind": "scout",
+      "legacy_id": null,
+      "outcome": "reported",
+      "priority": 2,
+      "project_id": "alpha",
+      "rev": 2,
+      "short": "<id19.short>",
+      "size": null,
+      "state": "closed",
+      "title": "Footer survey"
+    },
+    "released_dependants": [],
+    "released_holds": []
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

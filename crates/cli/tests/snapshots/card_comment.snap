@@ -1,0 +1,32 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "acked_at": null,
+    "attempts": 0,
+    "body": "[alpha-1] please keep it small",
+    "card_id": "<id11>",
+    "created_at": "<time>",
+    "created_by": "owner",
+    "delivered_at": null,
+    "failed_at": null,
+    "failure_reason": null,
+    "id": "<id25>",
+    "idempotency_key": null,
+    "kind": "note",
+    "next_attempt_at": "<time>",
+    "reply_to": null,
+    "rev": 1,
+    "short": "<id25.short>",
+    "state": "pending",
+    "target_pane_id": null,
+    "target_session_id": "<id9>"
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

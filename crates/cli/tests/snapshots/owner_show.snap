@@ -1,0 +1,10 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "owner": null
+  },
+  "ok": true
+}

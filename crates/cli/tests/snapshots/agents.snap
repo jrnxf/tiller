@@ -1,0 +1,47 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "agents": [
+      {
+        "orchestrator": {
+          "activity": "unknown",
+          "activity_observed_at": null,
+          "card": null,
+          "effective_activity": "unknown",
+          "effort": null,
+          "herdr_name": null,
+          "last_status_at": null,
+          "last_status_line": null,
+          "model": null,
+          "pane_id": null,
+          "project_id": "alpha",
+          "role": "orchestrator",
+          "session_id": "<id9>",
+          "workspace_label": null
+        },
+        "workers": [
+          {
+            "activity": "unknown",
+            "activity_observed_at": null,
+            "card": "alpha-1",
+            "effective_activity": "unknown",
+            "effort": "medium",
+            "herdr_name": "alpha-1-build",
+            "last_status_at": "<time>",
+            "last_status_line": "paused: waiting for CI",
+            "model": "test-model",
+            "pane_id": null,
+            "project_id": "alpha",
+            "role": "builder",
+            "session_id": "<id39>",
+            "workspace_label": null
+          }
+        ]
+      }
+    ]
+  },
+  "ok": true
+}

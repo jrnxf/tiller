@@ -1,0 +1,121 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "events": [
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "attention",
+        "entity_id": "<id33>",
+        "id": "<id65>",
+        "idempotency_key": "shell:<id67>",
+        "kind": "attention.opened",
+        "payload": {
+          "kind": "report",
+          "question": "Anything else?",
+          "run_id": null
+        },
+        "rev_after": 1,
+        "seq": "<seq>",
+        "short": "<id65.short>",
+        "txn": "attention.open"
+      },
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "attention",
+        "entity_id": "<id33>",
+        "id": "<id69>",
+        "idempotency_key": null,
+        "kind": "attention.withdrawn",
+        "payload": {
+          "reason": "answered elsewhere"
+        },
+        "rev_after": 2,
+        "seq": "<seq>",
+        "short": "<id69.short>",
+        "txn": "attention.withdraw"
+      },
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "reservation",
+        "entity_id": "<id71>",
+        "id": "<id73>",
+        "idempotency_key": null,
+        "kind": "reservation.reserved",
+        "payload": {
+          "host_id": "<id1>",
+          "project_id": "alpha",
+          "run_id": "<id35>"
+        },
+        "rev_after": null,
+        "seq": "<seq>",
+        "short": "<id73.short>",
+        "txn": "run.start"
+      },
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "run",
+        "entity_id": "<id35>",
+        "id": "<id47>",
+        "idempotency_key": null,
+        "kind": "run.started",
+        "payload": {
+          "attempt": 1,
+          "checks": {
+            "disk_floor_mb": null,
+            "disk_free_mb": null,
+            "host_reserved": 0,
+            "lane_capacity": 3,
+            "project_capacity": 3,
+            "project_reserved": 0,
+            "quota": [],
+            "quota_floor_percent": null,
+            "ram_floor_mb": null,
+            "ram_free_mb": null
+          },
+          "config_hash": null,
+          "dispatch": null,
+          "effort": "medium",
+          "host_id": "<id1>",
+          "model": "test-model",
+          "role": "builder",
+          "supervisor_session_id": "<id9>"
+        },
+        "rev_after": 1,
+        "seq": "<seq>",
+        "short": "<id47.short>",
+        "txn": "run.start"
+      },
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "session",
+        "entity_id": "<id39>",
+        "id": "<id75>",
+        "idempotency_key": null,
+        "kind": "session.started",
+        "payload": {
+          "role": "builder",
+          "run_id": "<id35>"
+        },
+        "rev_after": 1,
+        "seq": "<seq>",
+        "short": "<id75.short>",
+        "txn": "run.start"
+      }
+    ],
+    "last_seq": "<seq>"
+  },
+  "ok": true
+}

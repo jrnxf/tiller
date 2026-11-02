@@ -1,0 +1,11 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "asked": [],
+    "cards": []
+  },
+  "ok": true
+}

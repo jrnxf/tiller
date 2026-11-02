@@ -103,18 +103,28 @@ impl<'de> Deserialize<'de> for Actor {
 pub struct Ctx {
     pub actor: Actor,
     pub now: Timestamp,
+    /// The caller's idempotency key, for a mutation whose function takes no
+    /// key argument of its own (`protocol.md` section 6.3). An explicit key
+    /// argument wins.
+    pub key: Option<String>,
 }
 
 impl Ctx {
     pub fn new(actor: Actor) -> Self {
-        Self {
-            actor,
-            now: Timestamp::now(),
-        }
+        Self::at(actor, Timestamp::now())
     }
 
     pub fn at(actor: Actor, now: Timestamp) -> Self {
-        Self { actor, now }
+        Self {
+            actor,
+            now,
+            key: None,
+        }
+    }
+
+    pub fn with_key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
     }
 }
 
@@ -252,6 +262,7 @@ impl Store {
         T: Serialize + DeserializeOwned,
         F: FnOnce(&mut Tx<'_>) -> Result<T>,
     {
+        let key = key.or(ctx.key.as_deref());
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;

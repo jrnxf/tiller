@@ -1,0 +1,17 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "config": {
+      "dispatch": {
+        "default": {
+          "model": "sonnet"
+        }
+      },
+      "stop_hook_mode": "observe"
+    }
+  },
+  "ok": true
+}

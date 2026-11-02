@@ -1,0 +1,50 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "ask": {
+      "disposition": "followup",
+      "id": "<id17>",
+      "project_id": "alpha",
+      "received_at": "<time>",
+      "resolved_at": "<time>",
+      "resolved_by_session_id": null,
+      "session_id": null,
+      "short": "<id17.short>",
+      "source": "script",
+      "text": "also fix the footer"
+    },
+    "card": {
+      "acceptance": null,
+      "body": null,
+      "category": null,
+      "closed_at": null,
+      "closed_by": null,
+      "created_at": "<time>",
+      "created_by_ask_id": "<id17>",
+      "dispatch_override": null,
+      "display_id": "alpha-2",
+      "fixes_card_id": null,
+      "id": "<id19>",
+      "kind": "scout",
+      "legacy_id": null,
+      "outcome": null,
+      "priority": 2,
+      "project_id": "alpha",
+      "rev": 1,
+      "short": "<id19.short>",
+      "size": null,
+      "state": "open",
+      "title": "Footer survey"
+    },
+    "tag": "[alpha-2]"
+  },
+  "events": [
+    "<seq>",
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

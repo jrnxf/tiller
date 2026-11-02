@@ -197,10 +197,10 @@ about 3 min of the developer's time
 ### T2.2 `tiller` CLI
 `sonnet` high - 3-4 h - after the T2.1 interface
 
-- [ ] Every command in `protocol.md`, AXI standard
-- [ ] Check: insta snapshot of each command's JSON output plus an exit code test
-- [ ] Check: same idempotency key twice has no second effect
-- [ ] Check: startup under 10 ms on the personal Mac
+- [x] Every command in `protocol.md`, AXI standard
+- [x] Check: insta snapshot of each command's JSON output plus an exit code test
+- [x] Check: same idempotency key twice has no second effect
+- [x] Check: startup under 10 ms on the personal Mac
 - [ ] Delivered
 
 ### T2.3 Backup, restore and export

@@ -1,0 +1,30 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "added_at": "<time>",
+    "capacity": 3,
+    "checks": [],
+    "default_branch": "main",
+    "delivery": "direct-pr",
+    "deploy_environment": null,
+    "deploy_timeout_minutes": 60,
+    "deploy_workflow": null,
+    "id": "alpha",
+    "merge_gate": "detect",
+    "name": "Alpha",
+    "next_card_seq": 1,
+    "owner_host_id": "<id1>",
+    "remote": null,
+    "repo": "example/alpha",
+    "retired_at": null,
+    "rev": 1
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

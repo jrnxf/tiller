@@ -1,0 +1,11 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "key": "dispatch.default.model",
+    "value": "sonnet"
+  },
+  "ok": true
+}

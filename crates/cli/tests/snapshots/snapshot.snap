@@ -1,0 +1,226 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "last_event_seq": "<seq>",
+    "queries": {
+      "/api/v1/agents": {
+        "agents": [
+          {
+            "orchestrator": {
+              "activity": "unknown",
+              "activity_observed_at": null,
+              "card": null,
+              "effective_activity": "unknown",
+              "effort": null,
+              "herdr_name": null,
+              "last_status_at": null,
+              "last_status_line": null,
+              "model": null,
+              "pane_id": null,
+              "project_id": "alpha",
+              "role": "orchestrator",
+              "session_id": "<id9>",
+              "workspace_label": null
+            },
+            "workers": [
+              {
+                "activity": "unknown",
+                "activity_observed_at": null,
+                "card": "alpha-1",
+                "effective_activity": "unknown",
+                "effort": "medium",
+                "herdr_name": "alpha-1-build",
+                "last_status_at": "<time>",
+                "last_status_line": "paused: waiting for CI",
+                "model": "test-model",
+                "pane_id": null,
+                "project_id": "alpha",
+                "role": "builder",
+                "session_id": "<id39>",
+                "workspace_label": null
+              }
+            ]
+          }
+        ]
+      },
+      "/api/v1/attention?state=open": {
+        "attention": [],
+        "waiting_permission": []
+      },
+      "/api/v1/board?filter=all": {
+        "asked": [],
+        "cards": [
+          {
+            "badge": "merging",
+            "blocked_by": null,
+            "closed_at": null,
+            "column": "landing",
+            "display_id": "alpha-1",
+            "id": "<id11>",
+            "kind": "ship",
+            "outcome": null,
+            "parked_reason": null,
+            "parked_until": null,
+            "priority": 1,
+            "project_id": "alpha",
+            "rev": 3,
+            "short": "<id11.short>",
+            "state": "open",
+            "title": "Dark mode for the board"
+          },
+          {
+            "badge": "reported",
+            "blocked_by": null,
+            "closed_at": "<time>",
+            "column": "done",
+            "display_id": "alpha-2",
+            "id": "<id19>",
+            "kind": "scout",
+            "outcome": "reported",
+            "parked_reason": null,
+            "parked_until": null,
+            "priority": 2,
+            "project_id": "alpha",
+            "rev": 2,
+            "short": "<id19.short>",
+            "state": "closed",
+            "title": "Footer survey"
+          },
+          {
+            "badge": "cancelled",
+            "blocked_by": null,
+            "closed_at": "<time>",
+            "column": "done",
+            "display_id": "alpha-3",
+            "id": "<id21>",
+            "kind": "ops",
+            "outcome": "cancelled",
+            "parked_reason": null,
+            "parked_until": null,
+            "priority": 2,
+            "project_id": "alpha",
+            "rev": 4,
+            "short": "<id21.short>",
+            "state": "closed",
+            "title": "Rotate the deploy token"
+          },
+          {
+            "badge": "filed",
+            "blocked_by": null,
+            "closed_at": null,
+            "column": "queued",
+            "display_id": "fleet-1",
+            "id": "<id3>",
+            "kind": "ops",
+            "outcome": null,
+            "parked_reason": null,
+            "parked_until": null,
+            "priority": 2,
+            "project_id": "fleet",
+            "rev": 1,
+            "short": "<id3.short>",
+            "state": "open",
+            "title": "Host health"
+          }
+        ]
+      },
+      "/api/v1/machines": {
+        "machines": [
+          {
+            "capacity": 3,
+            "free_slots": 3,
+            "health": "ok",
+            "id": "<id1>",
+            "kind": "local",
+            "label": "host-a",
+            "last_seen_at": null,
+            "running_agents": 1,
+            "short": "<id1.short>",
+            "stale_reason": null,
+            "view_only": false
+          }
+        ]
+      },
+      "/api/v1/projects": {
+        "projects": [
+          {
+            "added_at": "<time>",
+            "capacity": 3,
+            "checks": [],
+            "default_branch": "main",
+            "delivery": "direct-pr",
+            "deploy_environment": null,
+            "deploy_timeout_minutes": 60,
+            "deploy_workflow": null,
+            "id": "alpha",
+            "merge_gate": "detect",
+            "name": "Alpha Project",
+            "next_card_seq": 4,
+            "owner_host_id": "<id1>",
+            "remote": null,
+            "repo": "example/alpha",
+            "retired_at": null,
+            "rev": 5
+          },
+          {
+            "added_at": "<time>",
+            "capacity": 2,
+            "checks": [],
+            "default_branch": "main",
+            "delivery": "local-only",
+            "deploy_environment": null,
+            "deploy_timeout_minutes": 60,
+            "deploy_workflow": null,
+            "id": "fleet",
+            "merge_gate": "detect",
+            "name": "Fleet",
+            "next_card_seq": 2,
+            "owner_host_id": "<id1>",
+            "remote": null,
+            "repo": null,
+            "retired_at": null,
+            "rev": 2
+          }
+        ]
+      },
+      "/api/v1/quota": {
+        "providers": [
+          {
+            "dot": "green",
+            "provider": "claude"
+          }
+        ],
+        "windows": [
+          {
+            "burn_multiple": 0.8,
+            "dot": "green",
+            "elapsed_percent": 40.0,
+            "fetch_error": null,
+            "fetched_at": "<time>",
+            "kind": "weekly",
+            "label": "claude:seven_day",
+            "pace": "behind",
+            "percent_remaining": 62.0,
+            "projected_exhaustion_at": null,
+            "reserve": 5.0,
+            "resets_at": "<time>",
+            "resets_at_text": "Sun 2099-01-04 09:00",
+            "stale": false,
+            "title": "Weekly"
+          }
+        ]
+      }
+    },
+    "server_time": "<time>",
+    "thresholds": {
+      "orchestrator_stale_minutes": 30,
+      "quota_stale_minutes": 15,
+      "worker_stale_minutes": 15
+    },
+    "v": 1
+  },
+  "ok": true
+}

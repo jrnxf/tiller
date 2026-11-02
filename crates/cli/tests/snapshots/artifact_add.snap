@@ -1,0 +1,24 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "card_id": "<id11>",
+    "created_at": "<time>",
+    "created_by_session_id": null,
+    "id": "<id51>",
+    "kind": "page",
+    "path": null,
+    "retired_at": null,
+    "run_id": null,
+    "short": "<id51.short>",
+    "title": "Review page",
+    "url": "https://example.com/review"
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

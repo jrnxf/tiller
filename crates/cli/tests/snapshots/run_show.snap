@@ -1,0 +1,153 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "card": "alpha-1",
+    "events": [
+      {
+        "actor": "session:<id39>",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "run",
+        "entity_id": "<id35>",
+        "id": "<id41>",
+        "idempotency_key": null,
+        "kind": "run.paused",
+        "payload": {
+          "until": "<time>"
+        },
+        "rev_after": 4,
+        "seq": "<seq>",
+        "short": "<id41.short>",
+        "txn": "run.pause"
+      },
+      {
+        "actor": "session:<id39>",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "run",
+        "entity_id": "<id35>",
+        "id": "<id43>",
+        "idempotency_key": "auto:<id39>:run.status:668b700aa860e18372bde2a7dd9c536c70c0763fa20243552816dc90ec3780ee:0",
+        "kind": "run.status",
+        "payload": {
+          "line": "waiting for CI",
+          "state": "paused"
+        },
+        "rev_after": 3,
+        "seq": "<seq>",
+        "short": "<id43.short>",
+        "txn": "run.status"
+      },
+      {
+        "actor": "session:<id39>",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "run",
+        "entity_id": "<id35>",
+        "id": "<id45>",
+        "idempotency_key": "auto:<id39>:run.status:f000821af44b1199a8177a5e061e62490611d0621146b0d0739ad9d3298ae147:0",
+        "kind": "run.status",
+        "payload": {
+          "line": "reading the board code",
+          "state": "working"
+        },
+        "rev_after": 2,
+        "seq": "<seq>",
+        "short": "<id45.short>",
+        "txn": "run.status"
+      },
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "run",
+        "entity_id": "<id35>",
+        "id": "<id47>",
+        "idempotency_key": null,
+        "kind": "run.started",
+        "payload": {
+          "attempt": 1,
+          "checks": {
+            "disk_floor_mb": null,
+            "disk_free_mb": null,
+            "host_reserved": 0,
+            "lane_capacity": 3,
+            "project_capacity": 3,
+            "project_reserved": 0,
+            "quota": [],
+            "quota_floor_percent": null,
+            "ram_floor_mb": null,
+            "ram_free_mb": null
+          },
+          "config_hash": null,
+          "dispatch": null,
+          "effort": "medium",
+          "host_id": "<id1>",
+          "model": "test-model",
+          "role": "builder",
+          "supervisor_session_id": "<id9>"
+        },
+        "rev_after": 1,
+        "seq": "<seq>",
+        "short": "<id47.short>",
+        "txn": "run.start"
+      }
+    ],
+    "name": "alpha-1-build",
+    "pane_tail": {
+      "available": false,
+      "lines": null,
+      "requested": 20
+    },
+    "run": {
+      "attempt": 1,
+      "base_branch": "main",
+      "base_sha": null,
+      "branch": "alpha-1-build",
+      "card_id": "<id11>",
+      "config_hash": null,
+      "effort": "medium",
+      "ended_at": null,
+      "host_id": "<id1>",
+      "id": "<id35>",
+      "idempotency_key": null,
+      "last_status_at": "<time>",
+      "last_status_line": "paused: waiting for CI",
+      "model": "test-model",
+      "outcome": null,
+      "outcome_note": null,
+      "pause_until": "<time>",
+      "predecessor_run_id": null,
+      "rev": 4,
+      "role": "builder",
+      "short": "<id35.short>",
+      "started_at": "<time>",
+      "supervisor_session_id": "<id9>",
+      "worktree_path": "/home/user/work/alpha-1"
+    },
+    "session": {
+      "activity": "unknown",
+      "activity_observed_at": null,
+      "activity_source": null,
+      "claude_session_id": null,
+      "config_hash": null,
+      "end_reason": null,
+      "ended_at": null,
+      "harness": "claude",
+      "host_id": "<id1>",
+      "id": "<id39>",
+      "pane_id": null,
+      "project_id": "alpha",
+      "rev": 1,
+      "role": "builder",
+      "run_id": "<id35>",
+      "short": "<id39.short>",
+      "started_at": "<time>",
+      "transcript_path": null
+    }
+  },
+  "ok": true
+}

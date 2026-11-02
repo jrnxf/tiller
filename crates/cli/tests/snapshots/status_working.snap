@@ -1,0 +1,38 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "attempt": 1,
+    "base_branch": "main",
+    "base_sha": null,
+    "branch": "alpha-1-build",
+    "card_id": "<id11>",
+    "config_hash": null,
+    "effort": "medium",
+    "ended_at": null,
+    "host_id": "<id1>",
+    "id": "<id35>",
+    "idempotency_key": null,
+    "last_status_at": "<time>",
+    "last_status_line": "working: reading the board code",
+    "model": "test-model",
+    "outcome": null,
+    "outcome_note": null,
+    "pause_until": null,
+    "predecessor_run_id": null,
+    "rev": 2,
+    "role": "builder",
+    "short": "<id35.short>",
+    "started_at": "<time>",
+    "supervisor_session_id": "<id9>",
+    "worktree_path": "/home/user/work/alpha-1"
+  },
+  "events": [
+    "<seq>",
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

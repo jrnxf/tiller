@@ -1,0 +1,13 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 5
+{
+  "error": {
+    "code": "refused",
+    "entity": "card",
+    "id": "alpha-2",
+    "message": "card alpha-2: no report artifact is recorded on the card"
+  },
+  "ok": false
+}

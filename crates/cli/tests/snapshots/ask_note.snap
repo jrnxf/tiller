@@ -1,0 +1,52 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "ask": {
+      "disposition": "unresolved",
+      "id": "<id5>",
+      "project_id": "alpha",
+      "received_at": "<time>",
+      "resolved_at": null,
+      "resolved_by_session_id": null,
+      "session_id": null,
+      "short": "<id5.short>",
+      "source": "script",
+      "text": "add a dark mode"
+    },
+    "followup": null,
+    "message": {
+      "acked_at": null,
+      "attempts": 0,
+      "body": "ask <id5> (<id5.short>): add a dark mode",
+      "card_id": null,
+      "created_at": "<time>",
+      "created_by": "owner",
+      "delivered_at": null,
+      "failed_at": null,
+      "failure_reason": null,
+      "id": "<id7>",
+      "idempotency_key": null,
+      "kind": "note",
+      "next_attempt_at": "<time>",
+      "reply_to": "<id5>",
+      "rev": 1,
+      "short": "<id7.short>",
+      "state": "pending",
+      "target_pane_id": null,
+      "target_session_id": "<id9>"
+    },
+    "warning": null
+  },
+  "events": [
+    "<seq>",
+    "<seq>"
+  ],
+  "help": [
+    "tiller ask resolve <ask> new|followup:<card>|chat|cancelled"
+  ],
+  "ok": true,
+  "replayed": false
+}

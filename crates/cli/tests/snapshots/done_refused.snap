@@ -1,0 +1,11 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 5
+{
+  "error": {
+    "code": "refused",
+    "message": "PR #7 is not merged; stay on the card"
+  },
+  "ok": false
+}

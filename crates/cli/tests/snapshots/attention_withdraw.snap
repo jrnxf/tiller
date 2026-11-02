@@ -1,0 +1,32 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "answer": null,
+    "answer_idempotency_key": null,
+    "answered_at": null,
+    "answered_via": null,
+    "card_id": "<id11>",
+    "consequence": null,
+    "evidence": null,
+    "id": "<id33>",
+    "kind": "report",
+    "opened_at": "<time>",
+    "opened_by_run_id": null,
+    "opened_by_session_id": null,
+    "options": null,
+    "question": "Anything else?",
+    "recommendation": null,
+    "rev": 2,
+    "short": "<id33.short>",
+    "withdraw_reason": "answered elsewhere",
+    "withdrawn_at": "<time>"
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

@@ -1,0 +1,61 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "runs": [
+      {
+        "card": "alpha-1",
+        "name": "alpha-1-build",
+        "run": {
+          "attempt": 1,
+          "base_branch": "main",
+          "base_sha": null,
+          "branch": "alpha-1-build",
+          "card_id": "<id11>",
+          "config_hash": null,
+          "effort": "medium",
+          "ended_at": null,
+          "host_id": "<id1>",
+          "id": "<id35>",
+          "idempotency_key": null,
+          "last_status_at": "<time>",
+          "last_status_line": "paused: waiting for CI",
+          "model": "test-model",
+          "outcome": null,
+          "outcome_note": null,
+          "pause_until": "<time>",
+          "predecessor_run_id": null,
+          "rev": 4,
+          "role": "builder",
+          "short": "<id35.short>",
+          "started_at": "<time>",
+          "supervisor_session_id": "<id9>",
+          "worktree_path": "/home/user/work/alpha-1"
+        },
+        "session": {
+          "activity": "unknown",
+          "activity_observed_at": null,
+          "activity_source": null,
+          "claude_session_id": null,
+          "config_hash": null,
+          "end_reason": null,
+          "ended_at": null,
+          "harness": "claude",
+          "host_id": "<id1>",
+          "id": "<id39>",
+          "pane_id": null,
+          "project_id": "alpha",
+          "rev": 1,
+          "role": "builder",
+          "run_id": "<id35>",
+          "short": "<id39.short>",
+          "started_at": "<time>",
+          "transcript_path": null
+        }
+      }
+    ]
+  },
+  "ok": true
+}

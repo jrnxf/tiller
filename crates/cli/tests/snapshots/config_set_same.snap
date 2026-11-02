@@ -1,0 +1,12 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "key": "stop_hook_mode"
+  },
+  "events": [],
+  "ok": true,
+  "replayed": true
+}

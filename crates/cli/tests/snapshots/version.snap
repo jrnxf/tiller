@@ -1,0 +1,11 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "schema": 1,
+    "version": "0.1.0"
+  },
+  "ok": true
+}

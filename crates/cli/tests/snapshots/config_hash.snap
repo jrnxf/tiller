@@ -1,0 +1,10 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "hash": "780b26e750ebcefc98f8a45754c9d1bc9cbcbe737039cc32f31fbfca96dbe320"
+  },
+  "ok": true
+}

@@ -1,0 +1,38 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "attention": [
+      {
+        "item": {
+          "answer": null,
+          "answer_idempotency_key": null,
+          "answered_at": null,
+          "answered_via": null,
+          "card_id": "<id11>",
+          "consequence": null,
+          "evidence": null,
+          "id": "<id27>",
+          "kind": "decision",
+          "opened_at": "<time>",
+          "opened_by_run_id": null,
+          "opened_by_session_id": null,
+          "options": [
+            "yes",
+            "no"
+          ],
+          "question": "Follow the system theme?",
+          "recommendation": "yes",
+          "rev": 1,
+          "short": "<id27.short>",
+          "withdraw_reason": null,
+          "withdrawn_at": null
+        },
+        "still_current": true
+      }
+    ]
+  },
+  "ok": true
+}

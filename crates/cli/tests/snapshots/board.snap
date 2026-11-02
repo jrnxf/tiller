@@ -1,0 +1,84 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "asked": [],
+    "cards": [
+      {
+        "badge": "merging",
+        "blocked_by": null,
+        "closed_at": null,
+        "column": "landing",
+        "display_id": "alpha-1",
+        "id": "<id11>",
+        "kind": "ship",
+        "outcome": null,
+        "parked_reason": null,
+        "parked_until": null,
+        "priority": 1,
+        "project_id": "alpha",
+        "rev": 3,
+        "short": "<id11.short>",
+        "state": "open",
+        "title": "Dark mode for the board"
+      },
+      {
+        "badge": "reported",
+        "blocked_by": null,
+        "closed_at": "<time>",
+        "column": "done",
+        "display_id": "alpha-2",
+        "id": "<id19>",
+        "kind": "scout",
+        "outcome": "reported",
+        "parked_reason": null,
+        "parked_until": null,
+        "priority": 2,
+        "project_id": "alpha",
+        "rev": 2,
+        "short": "<id19.short>",
+        "state": "closed",
+        "title": "Footer survey"
+      },
+      {
+        "badge": "cancelled",
+        "blocked_by": null,
+        "closed_at": "<time>",
+        "column": "done",
+        "display_id": "alpha-3",
+        "id": "<id21>",
+        "kind": "ops",
+        "outcome": "cancelled",
+        "parked_reason": null,
+        "parked_until": null,
+        "priority": 2,
+        "project_id": "alpha",
+        "rev": 4,
+        "short": "<id21.short>",
+        "state": "closed",
+        "title": "Rotate the deploy token"
+      },
+      {
+        "badge": "filed",
+        "blocked_by": null,
+        "closed_at": null,
+        "column": "queued",
+        "display_id": "fleet-1",
+        "id": "<id3>",
+        "kind": "ops",
+        "outcome": null,
+        "parked_reason": null,
+        "parked_until": null,
+        "priority": 2,
+        "project_id": "fleet",
+        "rev": 1,
+        "short": "<id3.short>",
+        "state": "open",
+        "title": "Host health"
+      }
+    ]
+  },
+  "ok": true
+}

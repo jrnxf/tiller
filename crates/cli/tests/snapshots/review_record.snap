@@ -1,0 +1,25 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "card_id": "<id11>",
+    "coverage": "diff",
+    "findings_high": 0,
+    "findings_low": 2,
+    "findings_medium": 0,
+    "id": "<id53>",
+    "recorded_at": "<time>",
+    "reviewer": "code-review",
+    "run_id": "<id35>",
+    "short": "<id53.short>",
+    "source_url": null,
+    "verdict": "pass"
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

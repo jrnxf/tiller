@@ -1,0 +1,25 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "disk_floor_mb": null,
+    "herdr_machine": "host-b",
+    "id": "<id95>",
+    "kind": "remote",
+    "label": "host-b",
+    "lane_capacity": null,
+    "last_seen_at": null,
+    "ram_floor_mb": null,
+    "rev": 1,
+    "short": "<id95.short>",
+    "stale_reason": null
+  },
+  "events": [
+    "<seq>",
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

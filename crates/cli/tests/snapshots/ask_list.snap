@@ -1,0 +1,59 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "asks": [
+      {
+        "disposition": "followup",
+        "id": "<id17>",
+        "project_id": "alpha",
+        "received_at": "<time>",
+        "resolved_at": "<time>",
+        "resolved_by_session_id": null,
+        "session_id": null,
+        "short": "<id17.short>",
+        "source": "script",
+        "text": "also fix the footer"
+      },
+      {
+        "disposition": "cancelled",
+        "id": "<id15>",
+        "project_id": "alpha",
+        "received_at": "<time>",
+        "resolved_at": "<time>",
+        "resolved_by_session_id": null,
+        "session_id": null,
+        "short": "<id15.short>",
+        "source": "script",
+        "text": "never mind"
+      },
+      {
+        "disposition": "chat",
+        "id": "<id13>",
+        "project_id": "alpha",
+        "received_at": "<time>",
+        "resolved_at": "<time>",
+        "resolved_by_session_id": null,
+        "session_id": null,
+        "short": "<id13.short>",
+        "source": "script",
+        "text": "just thinking aloud"
+      },
+      {
+        "disposition": "new",
+        "id": "<id5>",
+        "project_id": "alpha",
+        "received_at": "<time>",
+        "resolved_at": "<time>",
+        "resolved_by_session_id": null,
+        "session_id": null,
+        "short": "<id5.short>",
+        "source": "script",
+        "text": "add a dark mode"
+      }
+    ]
+  },
+  "ok": true
+}

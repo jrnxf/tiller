@@ -1,0 +1,24 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "machines": [
+      {
+        "capacity": 3,
+        "free_slots": 3,
+        "health": "ok",
+        "id": "<id1>",
+        "kind": "local",
+        "label": "host-a",
+        "last_seen_at": null,
+        "running_agents": 1,
+        "short": "<id1.short>",
+        "stale_reason": null,
+        "view_only": false
+      }
+    ]
+  },
+  "ok": true
+}

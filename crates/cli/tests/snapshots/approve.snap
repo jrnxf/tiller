@@ -1,0 +1,49 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "approval": {
+      "action": "squash",
+      "base_rev": null,
+      "branch": null,
+      "card_id": "<id11>",
+      "decided_at": "<time>",
+      "decided_by": "owner",
+      "decision_idempotency_key": "ok-1",
+      "diff_sha256": null,
+      "executed_at": null,
+      "finished_at": null,
+      "grant_id": null,
+      "head_sha": "0123456789abcdef0123456789abcdef01234567",
+      "id": "<id59>",
+      "kind": "merge",
+      "linked_approval_id": null,
+      "memory_paths": null,
+      "pr_id": "<id37>",
+      "project_id": "alpha",
+      "repo": "example/alpha",
+      "requested_at": "<time>",
+      "requested_by": "owner",
+      "result": null,
+      "rev": 2,
+      "run_id": "<id35>",
+      "scope": null,
+      "short": "<id59.short>",
+      "state": "accepted"
+    },
+    "memory_approvals": [],
+    "quoted_ask": null
+  },
+  "events": [
+    "<seq>",
+    "<seq>",
+    "<seq>"
+  ],
+  "help": [
+    "land it with: tiller land <approval>"
+  ],
+  "ok": true,
+  "replayed": false
+}

@@ -1,0 +1,51 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "ask": {
+      "disposition": "new",
+      "id": "<id5>",
+      "project_id": "alpha",
+      "received_at": "<time>",
+      "resolved_at": "<time>",
+      "resolved_by_session_id": null,
+      "session_id": null,
+      "short": "<id5.short>",
+      "source": "script",
+      "text": "add a dark mode"
+    },
+    "card": {
+      "acceptance": null,
+      "body": "Add a dark theme",
+      "category": null,
+      "closed_at": null,
+      "closed_by": null,
+      "created_at": "<time>",
+      "created_by_ask_id": "<id5>",
+      "dispatch_override": null,
+      "display_id": "alpha-1",
+      "fixes_card_id": null,
+      "id": "<id11>",
+      "kind": "ship",
+      "legacy_id": null,
+      "outcome": null,
+      "priority": 1,
+      "project_id": "alpha",
+      "rev": 1,
+      "short": "<id11.short>",
+      "size": null,
+      "state": "open",
+      "title": "Dark mode"
+    },
+    "tag": "[alpha-1]"
+  },
+  "events": [
+    "<seq>",
+    "<seq>",
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

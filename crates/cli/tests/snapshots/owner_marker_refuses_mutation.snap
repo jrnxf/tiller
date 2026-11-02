@@ -1,0 +1,12 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 6
+{
+  "error": {
+    "code": "owner_marker",
+    "hint": "tiller owner set tiller",
+    "message": "read only: the owner marker names \"firstmate\", not \"tiller\""
+  },
+  "ok": false
+}

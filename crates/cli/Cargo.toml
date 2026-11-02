@@ -16,14 +16,21 @@ path = "src/main.rs"
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
+jiff.workspace = true
+rusqlite.workspace = true
 rust-embed.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tiller-core.workspace = true
 tiller-observe.workspace = true
 tokio.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
-tiller-core.workspace = true
 http-body-util = "0.1"
+insta.workspace = true
+tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }
 
 [lints]

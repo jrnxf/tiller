@@ -1,0 +1,63 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "attention": {
+      "answer": "yes, follow it",
+      "answer_idempotency_key": "shell:<id29>",
+      "answered_at": "<time>",
+      "answered_via": "cli",
+      "card_id": "<id11>",
+      "consequence": null,
+      "evidence": null,
+      "id": "<id27>",
+      "kind": "decision",
+      "opened_at": "<time>",
+      "opened_by_run_id": null,
+      "opened_by_session_id": null,
+      "options": [
+        "yes",
+        "no"
+      ],
+      "question": "Follow the system theme?",
+      "recommendation": "yes",
+      "rev": 2,
+      "short": "<id27.short>",
+      "withdraw_reason": null,
+      "withdrawn_at": null
+    },
+    "cited_ask": null,
+    "closed_card": null,
+    "message": {
+      "acked_at": null,
+      "attempts": 0,
+      "body": "[alpha-1] Follow the system theme?\nanswer: yes, follow it",
+      "card_id": "<id11>",
+      "created_at": "<time>",
+      "created_by": "owner",
+      "delivered_at": null,
+      "failed_at": null,
+      "failure_reason": null,
+      "id": "<id31>",
+      "idempotency_key": null,
+      "kind": "answer",
+      "next_attempt_at": "<time>",
+      "reply_to": "<id27>",
+      "rev": 1,
+      "short": "<id31.short>",
+      "state": "pending",
+      "target_pane_id": null,
+      "target_session_id": "<id9>"
+    },
+    "still_current": true
+  },
+  "events": [
+    "<seq>",
+    "<seq>"
+  ],
+  "key": "shell:<id29>",
+  "ok": true,
+  "replayed": false
+}

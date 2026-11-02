@@ -1,0 +1,13 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 5
+{
+  "error": {
+    "code": "refused",
+    "entity": "worktree",
+    "id": "/home/user/work/alpha-1",
+    "message": "worktree /home/user/work/alpha-1: no reading of the worktree"
+  },
+  "ok": false
+}

@@ -1,0 +1,67 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "cards": [
+      {
+        "badge": "merging",
+        "column": "landing",
+        "display_id": "alpha-1",
+        "id": "<id11>",
+        "kind": "ship",
+        "outcome": null,
+        "priority": 1,
+        "project_id": "alpha",
+        "rev": 3,
+        "short": "<id11.short>",
+        "state": "open",
+        "title": "Dark mode for the board"
+      },
+      {
+        "badge": "reported",
+        "column": "done",
+        "display_id": "alpha-2",
+        "id": "<id19>",
+        "kind": "scout",
+        "outcome": "reported",
+        "priority": 2,
+        "project_id": "alpha",
+        "rev": 2,
+        "short": "<id19.short>",
+        "state": "closed",
+        "title": "Footer survey"
+      },
+      {
+        "badge": "cancelled",
+        "column": "done",
+        "display_id": "alpha-3",
+        "id": "<id21>",
+        "kind": "ops",
+        "outcome": "cancelled",
+        "priority": 2,
+        "project_id": "alpha",
+        "rev": 4,
+        "short": "<id21.short>",
+        "state": "closed",
+        "title": "Rotate the deploy token"
+      },
+      {
+        "badge": "filed",
+        "column": "queued",
+        "display_id": "fleet-1",
+        "id": "<id3>",
+        "kind": "ops",
+        "outcome": null,
+        "priority": 2,
+        "project_id": "fleet",
+        "rev": 1,
+        "short": "<id3.short>",
+        "state": "open",
+        "title": "Host health"
+      }
+    ]
+  },
+  "ok": true
+}

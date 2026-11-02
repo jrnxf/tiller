@@ -1,0 +1,30 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "active_cards": [
+      "<id11>"
+    ],
+    "conclusions": "dark mode is under way",
+    "id": "<id57>",
+    "next_action": "review the PR",
+    "pending_attention": [],
+    "project_id": "alpha",
+    "session_id": "<id9>",
+    "short": "<id57.short>",
+    "workers": [
+      {
+        "line": "paused: waiting for CI",
+        "run_id": "<id35>"
+      }
+    ],
+    "written_at": "<time>"
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

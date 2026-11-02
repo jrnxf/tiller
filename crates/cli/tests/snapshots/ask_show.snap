@@ -1,0 +1,22 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "ask": {
+      "disposition": "unresolved",
+      "id": "<id5>",
+      "project_id": "alpha",
+      "received_at": "<time>",
+      "resolved_at": null,
+      "resolved_by_session_id": null,
+      "session_id": null,
+      "short": "<id5.short>",
+      "source": "script",
+      "text": "add a dark mode"
+    },
+    "cards": []
+  },
+  "ok": true
+}

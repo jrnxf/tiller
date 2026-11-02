@@ -1,0 +1,38 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "card": {
+      "acceptance": null,
+      "body": null,
+      "category": null,
+      "closed_at": "<time>",
+      "closed_by": "owner",
+      "created_at": "<time>",
+      "created_by_ask_id": null,
+      "dispatch_override": null,
+      "display_id": "alpha-3",
+      "fixes_card_id": null,
+      "id": "<id21>",
+      "kind": "ops",
+      "legacy_id": null,
+      "outcome": "completed",
+      "priority": 2,
+      "project_id": "alpha",
+      "rev": 2,
+      "short": "<id21.short>",
+      "size": null,
+      "state": "closed",
+      "title": "Rotate the deploy token"
+    },
+    "released_dependants": [],
+    "released_holds": []
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

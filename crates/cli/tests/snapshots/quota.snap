@@ -1,0 +1,34 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "providers": [
+      {
+        "dot": "green",
+        "provider": "claude"
+      }
+    ],
+    "windows": [
+      {
+        "burn_multiple": 0.8,
+        "dot": "green",
+        "elapsed_percent": 40.0,
+        "fetch_error": null,
+        "fetched_at": "<time>",
+        "kind": "weekly",
+        "label": "claude:seven_day",
+        "pace": "behind",
+        "percent_remaining": 62.0,
+        "projected_exhaustion_at": null,
+        "reserve": 5.0,
+        "resets_at": "<time>",
+        "resets_at_text": "Sun 2099-01-04 09:00",
+        "stale": false,
+        "title": "Weekly"
+      }
+    ]
+  },
+  "ok": true
+}

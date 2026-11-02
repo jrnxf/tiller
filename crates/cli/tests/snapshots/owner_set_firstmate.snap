@@ -1,0 +1,12 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "owner": "firstmate"
+  },
+  "events": [],
+  "ok": true,
+  "replayed": false
+}

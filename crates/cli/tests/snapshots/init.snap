@@ -1,0 +1,73 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "fleet": {
+      "added_at": "<time>",
+      "capacity": 2,
+      "checks": [],
+      "default_branch": "main",
+      "delivery": "local-only",
+      "deploy_environment": null,
+      "deploy_timeout_minutes": 60,
+      "deploy_workflow": null,
+      "id": "fleet",
+      "merge_gate": "detect",
+      "name": "Fleet",
+      "next_card_seq": 2,
+      "owner_host_id": "<id1>",
+      "remote": null,
+      "repo": null,
+      "retired_at": null,
+      "rev": 2
+    },
+    "health_card": {
+      "acceptance": null,
+      "body": null,
+      "category": null,
+      "closed_at": null,
+      "closed_by": null,
+      "created_at": "<time>",
+      "created_by_ask_id": null,
+      "dispatch_override": null,
+      "display_id": "fleet-1",
+      "fixes_card_id": null,
+      "id": "<id3>",
+      "kind": "ops",
+      "legacy_id": null,
+      "outcome": null,
+      "priority": 2,
+      "project_id": "fleet",
+      "rev": 1,
+      "short": "<id3.short>",
+      "size": null,
+      "state": "open",
+      "title": "Host health"
+    },
+    "host": {
+      "disk_floor_mb": null,
+      "herdr_machine": null,
+      "id": "<id1>",
+      "kind": "local",
+      "label": "host-a",
+      "lane_capacity": 2,
+      "last_seen_at": null,
+      "ram_floor_mb": null,
+      "rev": 1,
+      "short": "<id1.short>",
+      "stale_reason": null
+    }
+  },
+  "events": [
+    "<seq>",
+    "<seq>",
+    "<seq>"
+  ],
+  "help": [
+    "tiller project add <id> --name <n> --delivery <d>"
+  ],
+  "ok": true,
+  "replayed": false
+}

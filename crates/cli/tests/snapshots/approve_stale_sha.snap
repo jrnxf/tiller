@@ -1,0 +1,12 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 5
+{
+  "error": {
+    "code": "refused",
+    "hint": "read the approval again and decide on its current head",
+    "message": "approval <id59> is stale: it binds 0123456789abcdef0123456789abcdef01234567, not ffffffff"
+  },
+  "ok": false
+}

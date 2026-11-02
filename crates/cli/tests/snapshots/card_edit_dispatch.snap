@@ -1,0 +1,37 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "acceptance": null,
+    "body": "Add a dark theme",
+    "category": null,
+    "closed_at": null,
+    "closed_by": null,
+    "created_at": "<time>",
+    "created_by_ask_id": "<id5>",
+    "dispatch_override": {
+      "effort": "high",
+      "model": "opus"
+    },
+    "display_id": "alpha-1",
+    "fixes_card_id": null,
+    "id": "<id11>",
+    "kind": "ship",
+    "legacy_id": null,
+    "outcome": null,
+    "priority": 1,
+    "project_id": "alpha",
+    "rev": 3,
+    "short": "<id11.short>",
+    "size": "M",
+    "state": "open",
+    "title": "Dark mode for the board"
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

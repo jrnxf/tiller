@@ -1,0 +1,32 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "acked_at": null,
+    "attempts": 0,
+    "body": "use the existing theme tokens",
+    "card_id": "<id11>",
+    "created_at": "<time>",
+    "created_by": "owner",
+    "delivered_at": null,
+    "failed_at": null,
+    "failure_reason": null,
+    "id": "<id49>",
+    "idempotency_key": "send-1",
+    "kind": "steer",
+    "next_attempt_at": "<time>",
+    "reply_to": null,
+    "rev": 1,
+    "short": "<id49.short>",
+    "state": "pending",
+    "target_pane_id": null,
+    "target_session_id": "<id39>"
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

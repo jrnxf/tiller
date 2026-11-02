@@ -1,0 +1,28 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "conditions": {
+      "actions": [
+        "squash"
+      ],
+      "expires_at": "<time>",
+      "v": 1
+    },
+    "granted_at": "<time>",
+    "granted_by": "owner",
+    "id": "<id61>",
+    "kind": "merge",
+    "project_id": "alpha",
+    "revoke_reason": "changed my mind",
+    "revoked_at": "<time>",
+    "short": "<id61.short>"
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

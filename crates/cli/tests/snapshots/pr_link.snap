@@ -1,0 +1,33 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "base_ref": null,
+    "card_id": "<id11>",
+    "checks": "none",
+    "fetch_error": null,
+    "fetched_at": null,
+    "head_sha": null,
+    "id": "<id37>",
+    "linked_at": "<time>",
+    "linked_by": "session:<id39>",
+    "merge_sha": null,
+    "mergeable": "unknown",
+    "merged_at": null,
+    "number": 7,
+    "pipeline_state": "none",
+    "project_id": "alpha",
+    "review_decision": "none",
+    "run_id": "<id35>",
+    "short": "<id37.short>",
+    "state": "open",
+    "url": "https://example.com/example/alpha/pull/7"
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

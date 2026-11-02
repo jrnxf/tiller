@@ -1,0 +1,22 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "card_id": "<id21>",
+    "id": "<id23>",
+    "reason": "waiting for the vendor",
+    "release_reason": null,
+    "released_at": null,
+    "set_at": "<time>",
+    "set_by": "owner",
+    "short": "<id23.short>",
+    "until_at": "<time>"
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

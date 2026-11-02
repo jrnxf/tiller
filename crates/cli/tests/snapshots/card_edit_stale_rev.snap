@@ -1,0 +1,22 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 4
+{
+  "error": {
+    "code": "conflict",
+    "current": {
+      "field": {
+        "name": "title",
+        "value": "Dark mode for the board"
+      },
+      "rev": 2,
+      "sent_rev": 1
+    },
+    "entity": "card",
+    "hint": "read the card again and retry with its rev",
+    "id": "<id11>",
+    "message": "conflict: card <id11> is at rev 2, you sent 1; title is now \"Dark mode for the board\""
+  },
+  "ok": false
+}

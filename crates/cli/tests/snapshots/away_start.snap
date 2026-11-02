@@ -1,0 +1,45 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "action": "away",
+    "base_rev": null,
+    "branch": null,
+    "card_id": null,
+    "decided_at": "<time>",
+    "decided_by": "owner",
+    "decision_idempotency_key": null,
+    "diff_sha256": null,
+    "executed_at": null,
+    "finished_at": null,
+    "grant_id": null,
+    "head_sha": null,
+    "id": "<id63>",
+    "kind": "away",
+    "linked_approval_id": null,
+    "memory_paths": null,
+    "pr_id": null,
+    "project_id": "alpha",
+    "repo": null,
+    "requested_at": "<time>",
+    "requested_by": "owner",
+    "result": null,
+    "rev": 1,
+    "run_id": null,
+    "scope": {
+      "projects": [
+        "alpha"
+      ],
+      "until_at": "<time>"
+    },
+    "short": "<id63.short>",
+    "state": "accepted"
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

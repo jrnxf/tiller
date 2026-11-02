@@ -1,0 +1,21 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 5
+{
+  "error": {
+    "code": "refused",
+    "current": {
+      "days": 7,
+      "false_block_rate": null,
+      "false_blocks": 0,
+      "max_false_block_rate": 0.02,
+      "min_stops": 200,
+      "rule_met": false,
+      "stops": 0,
+      "would_block": 0
+    },
+    "message": "block-once needs 200 orchestrator stops in 7 days with a false-block rate under 2%; there are 0 stops and a rate of unknown"
+  },
+  "ok": false
+}

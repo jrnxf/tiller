@@ -1,0 +1,27 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "ask": {
+      "disposition": "cancelled",
+      "id": "<id15>",
+      "project_id": "alpha",
+      "received_at": "<time>",
+      "resolved_at": "<time>",
+      "resolved_by_session_id": null,
+      "session_id": null,
+      "short": "<id15.short>",
+      "source": "script",
+      "text": "never mind"
+    },
+    "card": null,
+    "tag": null
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

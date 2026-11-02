@@ -1,0 +1,21 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "dependency": {
+      "added_at": "<time>",
+      "added_by": "owner",
+      "card_id": "<id21>",
+      "depends_on_card_id": "<id11>",
+      "release_reason": "removed",
+      "released_at": "<time>"
+    }
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

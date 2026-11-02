@@ -1,0 +1,271 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "approvals": [
+      {
+        "action": "squash",
+        "base_rev": null,
+        "branch": null,
+        "card_id": "<id11>",
+        "decided_at": "<time>",
+        "decided_by": "owner",
+        "decision_idempotency_key": "ok-1",
+        "diff_sha256": null,
+        "executed_at": null,
+        "finished_at": null,
+        "grant_id": null,
+        "head_sha": "0123456789abcdef0123456789abcdef01234567",
+        "id": "<id59>",
+        "kind": "merge",
+        "linked_approval_id": null,
+        "memory_paths": null,
+        "pr_id": "<id37>",
+        "project_id": "alpha",
+        "repo": "example/alpha",
+        "requested_at": "<time>",
+        "requested_by": "owner",
+        "result": null,
+        "rev": 2,
+        "run_id": "<id35>",
+        "scope": null,
+        "short": "<id59.short>",
+        "state": "accepted"
+      }
+    ],
+    "artifacts": [
+      {
+        "card_id": "<id11>",
+        "created_at": "<time>",
+        "created_by_session_id": null,
+        "id": "<id51>",
+        "kind": "page",
+        "path": null,
+        "retired_at": null,
+        "run_id": null,
+        "short": "<id51.short>",
+        "title": "Review page",
+        "url": "https://example.com/review"
+      }
+    ],
+    "attention": [
+      {
+        "answer": "yes, follow it",
+        "answer_idempotency_key": "shell:<id29>",
+        "answered_at": "<time>",
+        "answered_via": "cli",
+        "card_id": "<id11>",
+        "consequence": null,
+        "evidence": null,
+        "id": "<id27>",
+        "kind": "decision",
+        "opened_at": "<time>",
+        "opened_by_run_id": null,
+        "opened_by_session_id": null,
+        "options": [
+          "yes",
+          "no"
+        ],
+        "question": "Follow the system theme?",
+        "recommendation": "yes",
+        "rev": 2,
+        "short": "<id27.short>",
+        "withdraw_reason": null,
+        "withdrawn_at": null
+      },
+      {
+        "answer": null,
+        "answer_idempotency_key": null,
+        "answered_at": null,
+        "answered_via": null,
+        "card_id": "<id11>",
+        "consequence": null,
+        "evidence": null,
+        "id": "<id33>",
+        "kind": "report",
+        "opened_at": "<time>",
+        "opened_by_run_id": null,
+        "opened_by_session_id": null,
+        "options": null,
+        "question": "Anything else?",
+        "recommendation": null,
+        "rev": 2,
+        "short": "<id33.short>",
+        "withdraw_reason": "answered elsewhere",
+        "withdrawn_at": "<time>"
+      },
+      {
+        "answer": "approve",
+        "answer_idempotency_key": "ok-1",
+        "answered_at": "<time>",
+        "answered_via": "cli",
+        "card_id": "<id11>",
+        "consequence": null,
+        "evidence": "{\"approval_id\":\"<id59>\",\"head_sha\":\"0123456789abcdef0123456789abcdef01234567\"}",
+        "id": "<id83>",
+        "kind": "merge",
+        "opened_at": "<time>",
+        "opened_by_run_id": "<id35>",
+        "opened_by_session_id": null,
+        "options": null,
+        "question": "Merge alpha-1 at 0123456789ab (squash)?",
+        "recommendation": null,
+        "rev": 2,
+        "short": "<id83.short>",
+        "withdraw_reason": null,
+        "withdrawn_at": null
+      }
+    ],
+    "card": {
+      "acceptance": null,
+      "body": "Add a dark theme",
+      "category": null,
+      "closed_at": null,
+      "closed_by": null,
+      "created_at": "<time>",
+      "created_by_ask_id": "<id5>",
+      "dispatch_override": {
+        "effort": "high",
+        "model": "opus"
+      },
+      "display_id": "alpha-1",
+      "fixes_card_id": null,
+      "id": "<id11>",
+      "kind": "ship",
+      "legacy_id": null,
+      "outcome": null,
+      "priority": 1,
+      "project_id": "alpha",
+      "rev": 3,
+      "short": "<id11.short>",
+      "size": "M",
+      "state": "open",
+      "title": "Dark mode for the board"
+    },
+    "column": {
+      "badge": "merging",
+      "blocked_by": null,
+      "closed_at": null,
+      "column": "landing",
+      "display_id": "alpha-1",
+      "id": "<id11>",
+      "kind": "ship",
+      "parked_reason": null,
+      "parked_until": null,
+      "project_id": "alpha",
+      "short": "<id11.short>"
+    },
+    "dependencies": [
+      {
+        "added_at": "<time>",
+        "added_by": "owner",
+        "card_id": "<id21>",
+        "depends_on_card_id": "<id11>",
+        "release_reason": "removed",
+        "released_at": "<time>"
+      }
+    ],
+    "holds": [],
+    "obligations": [
+      {
+        "card_id": "<id11>",
+        "due_at": null,
+        "id": "<id55>",
+        "met_at": null,
+        "met_by_event_seq": null,
+        "opened_at": "<time>",
+        "opened_by": "owner",
+        "project_id": "alpha",
+        "short": "<id55.short>",
+        "state": "cancelled",
+        "trigger_event": {
+          "kind": "pr.checks"
+        },
+        "trigger_kind": "event",
+        "what": "tell the owner when CI is green"
+      }
+    ],
+    "prs": [
+      {
+        "base_ref": "main",
+        "card_id": "<id11>",
+        "checks": "success",
+        "fetch_error": null,
+        "fetched_at": "<time>",
+        "head_sha": "0123456789abcdef0123456789abcdef01234567",
+        "id": "<id37>",
+        "linked_at": "<time>",
+        "linked_by": "session:<id39>",
+        "merge_sha": null,
+        "mergeable": "clean",
+        "merged_at": null,
+        "number": 7,
+        "pipeline_state": "passed",
+        "project_id": "alpha",
+        "review_decision": "approved",
+        "run_id": "<id35>",
+        "short": "<id37.short>",
+        "state": "open",
+        "url": "https://example.com/example/alpha/pull/7"
+      }
+    ],
+    "reviews": [
+      {
+        "card_id": "<id11>",
+        "coverage": "diff",
+        "findings_high": 0,
+        "findings_low": 2,
+        "findings_medium": 0,
+        "id": "<id53>",
+        "recorded_at": "<time>",
+        "reviewer": "code-review",
+        "run_id": "<id35>",
+        "short": "<id53.short>",
+        "source_url": null,
+        "verdict": "pass"
+      }
+    ],
+    "runs": [
+      {
+        "name": "alpha-1-build",
+        "run": {
+          "attempt": 1,
+          "base_branch": "main",
+          "base_sha": null,
+          "branch": "alpha-1-build",
+          "card_id": "<id11>",
+          "config_hash": null,
+          "effort": "medium",
+          "ended_at": "<time>",
+          "host_id": "<id1>",
+          "id": "<id35>",
+          "idempotency_key": null,
+          "last_status_at": "<time>",
+          "last_status_line": "paused: waiting for CI",
+          "model": "test-model",
+          "outcome": "abandoned",
+          "outcome_note": null,
+          "pause_until": "<time>",
+          "predecessor_run_id": null,
+          "rev": 6,
+          "role": "builder",
+          "short": "<id35.short>",
+          "started_at": "<time>",
+          "supervisor_session_id": "<id9>",
+          "worktree_path": "/home/user/work/alpha-1"
+        },
+        "session": {
+          "activity": "unknown",
+          "activity_observed_at": null,
+          "id": "<id39>",
+          "pane_id": null,
+          "short": "<id39.short>"
+        }
+      }
+    ],
+    "tag": "[alpha-1]"
+  },
+  "ok": true
+}
