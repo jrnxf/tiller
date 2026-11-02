@@ -305,7 +305,7 @@ about 3 min of the developer's time
 - [x] Actions with receipts (recorded, delivered, done): answer, approve bound to head SHA, reprioritize, comment, add card, open in herdr
 - [x] Check: a second click repeats nothing
 - [x] Check: approving a stale SHA is refused with a readable message
-- [ ] Delivered
+- [x] Delivered
 
 ### T4.2 Spawn, capacity and layout
 `opus` high - 3-4 h - after T2.5, T2.7, T4.1 - critical path
