@@ -1,0 +1,460 @@
+# Recovery table
+
+This is the contract for what Tiller does when its records and the world disagree. It names every scenario the reconcile loop (T2.7) has to survive, how each one is detected, the invariants that must hold through it, what is repaired automatically, what goes to the project's orchestrator, what goes to the developer, and the end-to-end test that proves the row.
+
+Written Monday 2026-11-02, Lisbon time (WET). Task T1.2. Status: draft for CP2.
+
+It builds on `state.md` and `schema.sql` (T1.1): every repair below is a mutation from state.md section 8, run in its own `BEGIN IMMEDIATE` transaction with its event, and every "is it still there" question is answered from the tables and caches state.md defines. The protocol (T1.3) fixes the exact command names and the note format that rows here call "a note to the orchestrator"; authority (T1.4, `authority.md`) says who may run each command and owns the guard rows (G-numbers) this spec detects for.
+
+## 1. Principles
+
+1. **Reconcile repairs records, never work.** Section 6 is the exhaustive list of what runs without a person or an orchestrator deciding, and the guard on each. In short, a pass may: open or withdraw attention items; enqueue, retarget, re-ring or fail outbox messages; end a session row that the ladder found dead and resume a session after a crash or a reboot; reown a run to the project's live orchestrator; release a reservation whose run has ended; mark an approval `stale`, resolve an `uncertain` one, accept one through a standing grant and execute an `accepted` one (the daemon's ordinary landing path, `authority.md` section 6); mark a cache row `gone_at` or `stale_reason` from positive evidence; close a herdr pane whose process is dead and whose run has ended; end a run as `cut` when the harness itself reported the cut; fire a timer that passed; return a worktree that provably holds nothing unlanded; rotate verified backups. It may never: remove or reset a worktree that has unlanded or unknown commits or uncommitted changes; close a card as `landed` without the forge showing the merge and either the daemon's own approval or the owner's confirmation; cancel, close or reopen a card on inference; delete a row; merge or push outside an `accepted` approval whose binding was re-read in the same call; type anything into a pane except `tiller inbox <id>`; answer a prompt; relaunch a crashed worker on its own (that is the orchestrator's decision, R03; a reboot is the exception, R04).
+2. **Three handlers.** Each row says what is *automatic* (reconcile does it, with an event), what goes *to the orchestrator* (a `note` in the outbox to the project's live orchestrator session, which decides with its own commands within a deadline) and what goes *to the developer* (a `recovery` attention item, or a `merge`, `credential` or `decision` item when that is what the question is). Only the developer's items count as attention; a note to the orchestrator never appears in Needs you.
+3. **Absence of evidence is `unknown`, never `gone`.** A failed poll, a timeout or a missing source leaves the cache as it was with a `stale_reason`. Only a successful read that positively lacks the pane, worktree or PR marks it gone. Every automatic repair that depends on something being gone first checks with a second source (section 2's ladder).
+4. **Twice means the developer.** A row that would go to the orchestrator goes to the developer instead when the same scenario hits the same run, session or PR a second time within 24 hours, or when the orchestrator does not act within the row's deadline.
+5. **Every pass is idempotent and bounded.** A pass killed halfway leaves only committed single repairs, each a complete mutation. Rerunning the pass repeats nothing: each repair checks its precondition inside its transaction. Launches are rate-limited (one per 10 seconds per host, never above `hosts.lane_capacity`) and pass the same floor checks as `run.start` (quota, RAM, disk). No transaction waits on the network: forge, herdr and git reads happen before the transaction opens, and the transaction re-checks the cache row's `fetched_at`.
+6. **Host-level questions have a card.** `attention.card_id` is required, so each host has one standing `ops` card in the `fleet` project, display id `fleet-1`, titled "Host health" (state.md, Project). Backups, migrations, resource floors and a crashing orchestrator attach their `recovery` items to it. It never closes.
+7. **Clocks start from events.** Every "after N minutes" below counts from the event that first recorded the condition (`host.degraded`, `session.ended`, `outbox.delivered`, ...), never from a pass's memory, so a daemon restart does not reset a deadline and a pass that repairs nothing writes nothing.
+
+## 2. Evidence and staleness
+
+### Sources
+
+| Source | Writes | Cadence | Freshness rule |
+|---|---|---|---|
+| Hooks (`tiller hook <event>`) | `observations` (`source = hook`), `sessions.activity*` | immediate, no daemon needed | authoritative for the moment they fire; mapping in T1.3 |
+| Transcript tailer | `observations` (`source = transcript`): tool calls, interrupts, last assistant text | on file change (`notify`) | authoritative while the file grows; a file that stops growing is not evidence of anything |
+| herdr snapshot | `panes` (agent status verbatim, metadata, `gone_at`), `hosts.last_seen_at` | local every 2 s, each saved machine every 5 s, diffed on `state_change_seq` | a pane missing from a successful snapshot is gone; a failed poll changes nothing but `hosts.stale_reason` |
+| Process liveness | `observations` (`source = liveness`, `event = agent_alive`, `agent_dead` or `pane_gone`; verdict null, `unknown` or `ended`) | only when a session is `stale`, a pane looks gone, or a boot id changed | the probe targets the `claude` process in the pane (herdr's agent status or the pane's child process), never the shell: an agent absent with its shell alive is dead |
+| Forge (`gh-axi`) | `prs` cache; the `pr.changed` event payload carries `merged_by` and `merged_at` | every open PR every 60 s; at once after `pr.link`, `approval.decide` and `approval.execute` | `fetched_at`; a `fetch_error` keeps the old values |
+| Default branch (`git ls-remote` on the project's remote) | the `host.changed` or `pr.changed` event payload: the default branch's head and whether a run's branch head is its ancestor | every 60 s per project with an active `direct-push` or `local-only` run or an `executing` `land_direct` approval | compared with the last `approval.succeeded` SHA (`authority.md`, section 11) |
+| Worktree scan (treehouse list, then `git status --porcelain`, `git for-each-ref`, `git stash list`, `git cherry` against the default branch and the merged PR heads) | `worktrees` cache | every 5 min, and always inside the pass right before `run.clean` or a resume, so the value used is never older than that pass | `unlanded_commits` null means unknown, which blocks cleanup; see "What unlanded means" |
+| Backup manifest | `~/.tiller/backups/manifest.json` (outside the database on purpose) | nightly (T2.3) | verified by `PRAGMA integrity_check` on the copy |
+| Boot id | `meta.boot_id` | at daemon start | Linux `/proc/sys/kernel/random/boot_id`; macOS `kern.bootsessionuuid` (not `kern.boottime`, which moves when the clock is set). A changed id triggers the reboot check (R04); it is never by itself proof that a session died |
+
+### What unlanded means
+
+A commit in a run's worktree is *landed* when it is on the project's default branch, or when a merged PR's head equals it or descends from it (a squash or rebase merge lands commits under new SHAs), or when `git cherry` finds its patch on the default branch. `worktrees.unlanded_commits` counts every commit reachable from any local ref that exists only in this worktree (the run's branch, a detached HEAD, side branches, stash entries) and is not landed. `worktrees.dirty` is 1 when `git status --porcelain` lists anything: a modified, staged or untracked file (ignored files do not count). Either value is null when the scan could not run, and null blocks cleanup.
+
+### Thresholds
+
+These are the values state.md left to this spec (open item 2). They are defaults the owner can tune in the config file; the `session_activity` view carries the same numbers.
+
+| Session | `stale` after (no observation) | Silent: note to the orchestrator | To the developer |
+|---|---|---|---|
+| Worker (`scout`, `builder`, `reviewer`, `verifier`) | 15 min | 30 min, agent process alive | 60 min with no orchestrator action, or the second silence of the same run in 24 h |
+| Worker with `pause_until` set | `pause_until` + 15 min | `pause_until` + 30 min | as above |
+| Orchestrator | 30 min | not applicable | 60 min silent with work in flight (an active run, a pending outbox message or an unresolved ask): `recovery` item on `fleet-1` |
+| Any session in `waiting_permission` or `waiting_input` | never: the view returns the activity itself, so the prompt stays in Needs you from the moment it is observed until a newer observation replaces it | never | one notification (P36) after 30 min, no attention row (state.md, Attention) |
+
+Idle re-ring (R09): a `delivered` message not `acked` while the target's newest observation is `idle` is rung again 2, 5, 15, 30 and 60 minutes after `outbox.delivered`, then escalates. `attempts` grows; the state stays `delivered`.
+
+### The liveness ladder
+
+Reconcile never acts on one source. When a session reads `stale`, a pane is missing, or the boot id changed, it climbs:
+
+1. **Hooks and transcript.** Any observation newer than the threshold ends the ladder: the session is alive and the staleness clears itself.
+2. **herdr.** The pane is in the newest successful snapshot, with metadata naming this session (`$card`, `$role`; the orchestrator's `$project`). Missing from a successful snapshot means the pane is gone. A failed snapshot means unknown: stop here, try again next pass.
+3. **Agent process.** The pane's `claude` process is alive (herdr's agent status, or a signal-0 probe of the pane's child process; never the shell, which outlives a killed agent). Alive means silent, not dead (R12). Dead, or the pane gone, means the session is dead (R02, R03).
+4. **Worktree.** Before any resume or cleanup, a scan from this pass of `runs.worktree_path`: it exists, it is a git worktree on `runs.branch`, `dirty` and `unlanded_commits` are known.
+
+Verdicts the ladder can reach: *alive*, *silent* (alive, no evidence beyond the threshold), *dead* (pane gone or agent process dead, confirmed by a successful snapshot), *unknown* (a source failed). Only *dead* lets a session row be ended; only *unknown* is allowed to persist without an action, and it is shown as `unknown` on the board.
+
+### Resuming a session
+
+Claude Code's `--resume <claude_session_id>` keeps the session id, and `claude_session_id` is unique in `sessions`, so a resume keeps the row (state.md, Run). The sequence, used by R02 and R04:
+
+1. The ladder reached *dead*. Reconcile records the liveness observation (`agent_dead` or `pane_gone`, verdict `unknown`), which makes the session read `unknown`; the row stays open.
+2. `session.resume` (`tiller agent resume <run>` for a worker, the daemon's own call for an orchestrator) launches `claude --resume <claude_session_id>` in the session's working directory (a worker: `runs.worktree_path`; an orchestrator: the project's checkout path from the config file, which is config, not state), after the floor checks, and records `session.resume_attempted`.
+3. `SessionStart` fires with the same id: `run.bind_session` finds the row by `claude_session_id`, updates `pane_id` and `activity`, and writes `session.resumed`. The row never closed.
+4. `SessionStart` fires with a fresh id, or nothing binds within two minutes: `session.end` closes the old row (`end_reason = crash` or `reboot`) in the same transaction that inserts the new row for a fresh id, so the live-orchestrator index and the one-session-per-run rule hold at every instant. A second failed attempt stops the automatic path (R02, R04 say who hears about it).
+
+## 3. The reconcile loop
+
+The daemon runs one pass every 30 seconds, and one at once after any event, any poller change and its own start. A pass runs these steps in order, each repair in its own transaction:
+
+1. **Startup only:** the owner marker (R20), the schema version (R11), the boot id (R04), the `fleet-1` card, and the `daemon.started` event, which records the boot id and the versions of herdr, `gh-axi`, `quota-axi`, the `no-mistakes` CLI and its daemon.
+2. **Host checks, every 5 minutes:** the state directory's permissions (repaired at once), tool version skew, the floors (R16); a new condition writes `host.degraded`, and the pass that sees it cleared writes `host.recovered`.
+3. **Timers:** holds whose `until_at` passed (`hold.release due`, which opens the `decision` item), runs whose `pause_until` passed (the pause simply stops silencing), `date` obligations whose `due_at` passed (`obligation.meet`, where the timer is the trigger and `obligation.met` is the event), outbox rows whose `next_attempt_at` passed.
+4. **Sessions:** the ladder for every live session that reads `stale`, and for every session whose pane left the snapshot (R02, R03, R12).
+5. **Runs and evidence:** every active run has a live or explained session, a known worktree and an open reservation; every pane, worktree and reservation has an active run or is handled as an orphan (R15); runs are owned by the project's live orchestrator (`run.reown`).
+6. **Approvals and PRs, in this order:** resolve `uncertain` executions first (R08), then stale bindings (R08), then PRs merged or closed with no execution of Tiller's own (R07, R19). The order matters: an execution the daemon lost track of is resolved before anything calls it an outside merge.
+7. **Delivery:** retarget, re-ring, defer, fail (R09).
+8. **Layout:** herdr blocks, glyphs and row tokens (`herdr-layout.md`, R18).
+
+Every repair writes its event; the SSE stream carries them, so the board shows a repair the moment it commits. A pass records nothing when it repairs nothing.
+
+## 4. The table
+
+| # | Scenario | Detected by | Automatic | To the orchestrator | To the developer | End-to-end test |
+|---|---|---|---|---|---|---|
+| R01 | Daemon restart | single-instance lock, `daemon.started` gap, startup checks | everything: timers fire once, `executing` becomes `uncertain`, deliveries resume, SSE clients resume from `seq` | nothing | nothing; a restart loop is visible in Health and in every CLI output | `daemon::restart::kill_mid_pass_loses_nothing_and_sends_nothing_twice` |
+| R02 | Orchestrator crash | ladder: `SessionEnd`, pane gone, agent process dead | resume the same session when work is in flight; reown every active run; retarget its outbox | it resumes from the handoff record | third crash in an hour: `recovery` on `fleet-1` | `reconcile::recovery::orchestrator_crash_resumes_and_retargets_outbox` |
+| R03 | Worker crash | ladder for a session with a `run_id` | record the death; keep run, worktree and reservation; note with the evidence | relaunch with a note, or end the run | no action in 30 min, a second crash in 24 h, or a missing worktree: `recovery` on the card | `reconcile::recovery::worker_crash_keeps_run_worktree_and_reservation` |
+| R04 | Host reboot | `meta.boot_id` changed, confirmed by a successful snapshot and dead agent probes | recreate the layout; resume each orchestrator, then each worker in its own worktree, with floor checks; write `boot_id` last | a summary note per project | a run that could not be resumed: `recovery` on the card; one reboot notification | `reconcile::recovery::reboot_resumes_workers_in_own_worktrees` |
+| R05 | Remote disconnect | the saved machine's poller fails 3 polls in a row | `hosts.stale_reason`, backoff, full snapshot on reconnect; no pane marked gone | nothing | nothing is asked; the Machines row shows "last seen" | `herdr::poller::remote_poll_failure_marks_host_stale_not_panes_gone` |
+| R06 | Duplicate events | idempotency keys, unique indexes, monotone projections | the duplicate changes nothing and returns the first result | nothing | nothing, unless the impossible happens: a duplicate dispatch count above 0 is a rollback trigger with a `recovery` item | `core::idempotency::replayed_mutation_returns_stored_response_and_writes_nothing` |
+| R07 | PR merged outside Tiller | `pr.refresh` sees `merged` or `closed`, and no approval for the PR has `executed_at` set | record the fact; stale the approvals; withdraw the `merge` item; rescan the worktree; note | informed; it may not close the card | one `recovery` on the card: was it you; close as landed, keep open, or superseded. "Not me" fires the unauthorized-action trigger | `reconcile::recovery::merged_pr_without_record_closes_card` |
+| R08 | Stale approval | head moved, PR closed, base revision changed, grant revoked, `executing` interrupted | mark `stale`; re-match the grant only on a fast-forward head pushed by the run, else request again; resolve `uncertain` from the forge | nothing | the new `merge` item; `recovery` after a failed or unreadable execution | `reconcile::approvals::push_after_approval_marks_it_stale` |
+| R09 | Failed delivery | `outbox_due`, pane check before typing, idle with unread | defer on busy or dialog; retarget to the successor; re-ring on the schedule | a worker's message unread after 5 rings | an `answer` unread 1 h after delivery or failed: `recovery` on the card | `delivery::outbox::idle_pane_with_unread_message_is_rung_again` |
+| R10 | Truncated backup | manifest sha256 and size, `integrity_check` on the copy, `quick_check` on the live database | refuse the bad backup; keep the previous verified one; read-only mode on a damaged live database | nothing | two failed nights or a damaged live database: `recovery` on `fleet-1` with the restore command; restore is always the owner's command | `core::backup::truncated_backup_is_refused_and_previous_one_restores` |
+| R11 | Schema migration | `meta.schema_version` against the binary at every open and every pass | the daemon migrates up in one transaction after a pre-migration copy; hooks never migrate, they spool; an older binary refuses a newer database; an outdated daemon exits for the service manager | nothing | a migration that rolled back: `recovery` on `fleet-1` with the copy's path | `core::migrate::migrations_run_both_ways_on_fixture` |
+| R12 | Worker silent | `stale`, agent process alive | record the liveness observation; note with the pane tail and the last tool call | interrupt, relaunch, or a dated pause | 60 min with no action, or a second silence in 24 h: `recovery` on the card | `reconcile::liveness::silent_worker_escalates_to_orchestrator_then_owner` |
+| R13 | Done reported without evidence | `tiller done` preconditions; a done status with no merge on a ship card | refuse `run.end landed` and `run.clean`; the column stays Working, Landing or Queued; note | steer the worker to the pipeline or the PR | nothing | `reconcile::columns::ship_card_stays_working_without_pr` |
+| R14 | Run cut by a timeout | the harness's own record of the cut | `run.end cut` with an `outcome_note`; note | relaunch as a new attempt with the note | the same cut twice on one card: `recovery` on the card | `reconcile::runs::cut_fix_agent_reports_partial_work` |
+| R15 | Records and evidence disagree | caches against `runs`, `sessions`, `reservations` on each pass | release leaked reservations; mark gone from positive evidence; close a pane whose run ended and whose agent is dead; return a worktree only when it provably holds nothing | a live pane with no run; an active run with no worktree | lost work, two panes for one session: `recovery` on the card at once | `reconcile::safety::no_automatic_repair_removes_unlanded_work` |
+| R16 | Resource floor breached | floors every 5 min and at every launch; spawn rate; listener count | refuse launches with the measured value; nothing is killed | the refusal, with the numbers | floor breached 30 min after `host.degraded`: `recovery` on `fleet-1` with the biggest consumers | `agents::spawn::respawn_storm_trips_rate_limit_not_host` |
+| R17 | Worker blocked by its environment | `blocked` status, a prompt within 60 s of start, spawn preflight, host checks | refuse a launch whose preflight fails; Health shows version skew | opens the `credential` or `decision` item with one runnable command | that item | `agents::spawn::preflight_refuses_launch_with_missing_env` |
+| R18 | Local herdr unreachable or restarted | the local poller fails, or `state_change_seq` resets with row tokens missing | backoff; on reconnect a full snapshot, tokens re-reported, layout repaired; deliveries defer | nothing | nothing is asked; the board shows the reconnecting banner | `herdr::poller::local_restart_reapplies_layout_and_tokens` |
+| R19 | Guard breach found after the fact | scrub on `pr.link` and `pr.refresh`; a head that is not a descendant of the last one; a default branch moved by anything but `tiller land` | `guard.breach` event; approvals blocked while the scrub fails; no rematch on a force-push; note with the lines | fix the PR body; tell the builder to merge, not rebase | a leak on a public repo, a force-push, a default-branch move: `recovery` on the card at once | `reconcile::pr::force_push_after_approval_is_flagged_and_stale` |
+| R20 | Owner marker names another system | `~/.tiller/owner` at every command and pass | refuse every mutation; serve reads with a banner; on the flip back, a full pass that rebinds live evidence | nothing | nothing is asked; the flip is the owner's command | `core::owner::mutations_refused_when_marker_names_other_system` |
+
+R01 to R11 are the scenarios the build plan names. R12 to R20 are seeded from the bundle's `regressions.md` (section 7) and from Firstmate's hold-lifecycle, supervision and agent-control contracts.
+
+## 5. Rows
+
+Each row has the same six parts. "Note" means an outbox message of kind `note` to the project's live orchestrator session; T1.3 owns its format. Test names are `crate::module::test_name` for Rust, `board/<file>: <name>` for the board and `evals/<name>` for role evals, as in `parity.md`; the owner task may rename a test, but every row keeps at least one that proves it alone. Where `authority.md` already names a test for the same detection, that name is reused.
+
+### R01 Daemon restart
+
+A crash, a kill, an upgrade through the dotfiles, or the service manager restarting it.
+
+- **Detection.** The daemon takes its single-instance lock and writes `daemon.started`. The gap since the previous `daemon.stopped` or the last event tells it what it missed. If the boot id differs from `meta.boot_id`, R04 runs too. Hooks do not need the daemon, so observations kept arriving; what was missed is derived work only: deliveries, polls, timers, layout.
+- **Invariants.** No outbox message is typed twice as a new message: `outbox.state` and `attempts` are in the database, a send is `delivered` only after the pane check passed and herdr accepted the line, and a crash between the store and the send leaves `pending`, which is sent on the first pass. A crash between the send and the record also leaves `pending`; the resend types `tiller inbox <id>` a second time, and the target acks once (R06). Every approval in `executing` becomes `uncertain` in the startup transaction and R08 resolves it from the forge before anything else looks at that PR. A timer that passed while the daemon was down fires exactly once, inside its own transaction, in step 3 of the first pass. SSE clients resume from `Last-Event-ID`; a client behind the retained buffer refetches the snapshot (T3.1). No run, session, reservation, hold or card changes state because the daemon restarted. The state directory and its files are private (`0700` and `0600`, whatever the umask); the host check repairs them and writes `host.degraded` with what it found.
+- **Automatic.** All of the above. `daemon.started` records the versions of herdr, `gh-axi`, `quota-axi`, the `no-mistakes` CLI and its daemon for Health (P43), and the host check repeats the version read every 5 minutes; a skew between the `no-mistakes` daemon and its CLI writes `host.degraded`, shows in Health, and becomes a `recovery` item on `fleet-1` one hour after that event. The daemon never fixes another tool.
+- **To the orchestrator.** Nothing. A pending wake for an idle orchestrator is delivered by step 7 like any other.
+- **To the developer.** Nothing. If the daemon restarts more than three times in ten minutes, the service manager stops restarting it (launchd throttle, systemd start limit); the board is then down, and every `tiller` command prints a `daemon: down since <time>` line until it is back.
+- **Tests.** `daemon::restart::kill_mid_pass_loses_nothing_and_sends_nothing_twice`; `daemon::restart::timers_passed_while_down_fire_once`; `daemon::startup::private_state_dir_is_repaired_under_umask_002` (P57); `daemon::health::reports_missing_and_outdated_tools` (P43); `board/sse.test.ts: stream resumes after a daemon restart with no missed event` (T2.8 acceptance).
+- **Seeds.** Regressions "Validation daemon older than its CLI" and "Group-writable state directory refused listeners"; second opinion 8 and 38.
+
+### R02 Orchestrator crash
+
+The process exits, the pane is closed by hand, the OS kills it, or Claude Code dies on an API failure that `StopFailure` could not report. A context reset (`/clear`) is not a crash; it is the handoff path (T4.5).
+
+- **Detection.** The ladder for a session with `role = orchestrator` and no `run_id`: a `SessionEnd` observation, a pane missing from a successful snapshot, or a dead agent process.
+- **Invariants.** At most one live orchestrator session per project (unique index). Every active run keeps its `supervisor_session_id` until the successor is live, then is reowned (`run.reown`) in the transaction that binds the successor, so there is never a moment with two owners and never one with none while a successor exists. Outbox messages targeted at the dead session wait as `pending`; after a resume with the same id they need no retarget, and after a fresh session they are retargeted (`outbox.retarget`) in a new transaction with an event. They never fail only because the orchestrator died. Unresolved asks stay `unresolved` and visible in Asked. The newest `handoffs` row for the project is the resume record. Cards, runs, approvals, holds and reservations are untouched.
+- **Automatic.** When the project has work in flight (an active run, a `pending` or `delivered` outbox message, or an unresolved ask), fewer than two automatic resumes for this project happened in the last hour, and the floors pass: the resume sequence from section 2, `--resume` first, a fresh session with the handoff record second. After a bind: `run.reown` for every active run, retarget if the id changed, and a `wake`: "resumed after a crash at <time>: N runs active, M messages waiting". With no work in flight the workspace stays closed; the next ask for the project (an `ask.record` with no live orchestrator) triggers the same launch. A floor that fails skips the resume and writes the reason into the event.
+- **To the orchestrator.** It resumes from the handoff record (T4.5 acceptance) and reads each run's state (`tiller card show`, P22).
+- **To the developer.** The third crash within an hour: no further resume; `recovery` on `fleet-1`: "<project> orchestrator crashed 3 times since <time>; last end reason <reason>; relaunch, or hold the project?" A resume skipped for a floor says which floor. Workers keep running meanwhile; their outcomes queue as `pending` messages to the project's last orchestrator session and are retargeted on the next launch.
+- **Tests.** `reconcile::ownership::one_owner_per_run_after_restart` (P21); `reconcile::recovery::orchestrator_crash_resumes_and_retargets_outbox`; `reconcile::recovery::resume_with_same_id_keeps_session_row`; `agents::handoff::fresh_orchestrator_resumes_from_handoff_record` (P41).
+- **Seeds.** Firstmate `supervision-host` (one supervisor per task; outcomes presented until acknowledged); P21, P26, P41; VISION "a restart is a non-event".
+
+### R03 Worker crash
+
+The worker's agent process dies, its pane is closed, or it exits without `tiller done`. A `StopFailure` alone is `errored`, not a crash: the session is still there.
+
+- **Detection.** The ladder for a session with a `run_id`. A clean exit with the run still active (a `SessionEnd` observation, the pane gone) counts as a crash with `end_reason = exited`.
+- **Invariants.** The run stays active: only an explicit `run.end` ends it. The worktree is not touched. The reservation stays open, so the lane is held, until the run ends (state.md, Reservation). The session row is ended by `session.end` (the id will not be resumed automatically), and the card stays in Working with the `unknown` badge; `runs.last_status_line` and the fresh worktree scan are the evidence. The daemon never relaunches a crashed worker on its own, except after a reboot (R04), because a relaunch costs quota and needs a progress note (agent-control, P24; `authority.md` role matrix).
+- **Automatic.** End the session row with its reason; run the worktree scan; send a note: the run, its attempt, the last status line and its age, the time and reason of death, `dirty` and `unlanded_commits`, and a suggested action (relaunch when the worktree holds work or the last status is recent; abandon when the run never got past its first status).
+- **To the orchestrator.** Within 30 minutes of `session.ended`: `tiller agent relaunch <run> --note "<progress>"` (a new session on the same run and worktree; with `--new-attempt --brief-file <f>` attempt n+1 with `predecessor_run_id`), `tiller done --outcome abandoned` for the run (T1.3 lists the orchestrator as a caller), or `tiller card cancel`. The relaunch verifies `runs.worktree_path` exists and has `runs.branch` checked out, and refuses otherwise (R15).
+- **To the developer.** No orchestrator action within 30 minutes, the same run dead twice in 24 hours, or the worktree missing: `recovery` on the card with the same evidence and the options relaunch, abandon, wait.
+- **Tests.** `reconcile::recovery::worker_crash_keeps_run_worktree_and_reservation`; `agents::control::relaunch_resumes_worker_in_own_worktree_with_note` (P24); `observe::session::clean_exit_with_active_run_is_a_crash`.
+- **Seeds.** Firstmate `agent-control` (a relaunch is transactional, keeps the worktree, needs a note); P24; the bundle's `stuck-crewmate-recovery` behavior (P65).
+
+### R04 Host reboot
+
+The machine restarted: every pane, every session process and the herdr server are gone; the disk is intact.
+
+- **Detection.** At daemon start, the boot id differs from `meta.boot_id`. That only opens the check: the pass then waits for one successful herdr snapshot and runs the agent probe for every live session. A session is treated as dead by the reboot only when the snapshot lacks its pane and the probe finds no agent process; a session whose pane and agent are alive (the boot id was wrong, or herdr came back first) is left alone.
+- **Invariants.** Worktrees survive and are never touched. Runs stay active, reservations stay open, outbox messages stay `pending`, holds and approvals are untouched; `executing` approvals become `uncertain` (R08). No worker is launched anywhere but its own `worktree_path`, and no agent ever answers a trust or permission prompt for the owner (mem-46). Each resume keeps its session row when the id is kept (section 2). The restore is idempotent: `meta.boot_id` is written last, and every step checks its precondition (a session that is already alive is not launched again), so a crash during the restore repeats it safely. Every launch passes the floor checks (quota, RAM, disk) that `run.start` makes; below a floor the restore stops launching and says so.
+- **Automatic.** In order, one launch per 10 seconds and never above `lane_capacity`: (1) the herdr layout: each project's orchestrator workspace, then relabel; (2) for each project with work in flight, the orchestrator as in R02; (3) each active run, oldest first: a worktree scan in this pass; `worktree_path` must exist and be a git worktree on `runs.branch`, else the run is skipped with a note; the resume sequence with the worktree as working directory; `run.reown` to the new orchestrator; a `wake`: "resumed after a reboot at <time>; your last status: <line>"; (4) deliveries resume; (5) `meta.boot_id` is written. A paused run is resumed too; its pause keeps silencing alarms. A session that no `SessionStart` binds within two minutes is tried once more, then left: the pane stays for the owner to look at, never closed.
+- **Trust prompts.** If a resumed session shows `waiting_permission` within 60 seconds of its start, the daemon types nothing; the card shows the permission prompt in Needs you and the reboot summary names it. The launch rule above (same path, `--resume`) is what prevents it; this is the backstop.
+- **To the orchestrator.** A summary note per project: which runs resumed, which were skipped and why.
+- **To the developer.** A run skipped or failed twice, or skipped for a floor: `recovery` on its card. One reboot notification (P36): "<host> rebooted at <time>; N of M workers resumed".
+- **Tests.** `reconcile::recovery::reboot_resumes_workers_in_own_worktrees` (P25); `reconcile::recovery::reboot_restore_is_idempotent_when_interrupted`; `reconcile::recovery::changed_boot_id_with_live_agents_ends_nothing`; `reconcile::recovery::resumed_session_at_trust_prompt_is_never_answered`; `daemon::service::daemon_survives_kill_and_reboot` (T2.8 acceptance, live check on hosts A and B).
+- **Seeds.** Regression "Restored workers in the wrong checkout at a trust prompt"; mem-46; P25, P61; `herdr-layout.md` (rebuild after reconnect). Open for CP2: `authority.md`'s role matrix gives the daemon no "relaunch" right; this row and R02 need a narrower "resume after a crash or reboot" right (see Open for CP2).
+
+### R05 Remote disconnect
+
+Host A cannot reach host B's herdr through the saved machine: network, SSH, or herdr down on the remote side. Local herdr trouble is R18.
+
+- **Detection.** The remote poller fails three polls in a row (15 seconds). `hosts.stale_reason` is set; `hosts.last_seen_at` keeps the last success.
+- **Invariants.** Remote hosts are read-only (plan default) and own no card, run or session in this database: the only rows that depend on them are the host's `panes` cache and `hosts.last_seen_at`. A failed poll never marks a remote pane `gone_at`; only a successful snapshot that lacks it does. No attention item, no outbox message, no run changes. The Machines row turns amber with "last seen N min ago" and the reason in its tooltip; Agents rows for that host show `unknown` (T3.4).
+- **Automatic.** Backoff 5 s, 15 s, 60 s, then every 5 minutes; on reconnect one full snapshot replaces the host's pane cache, row tokens are re-reported if the remote herdr restarted, `stale_reason` clears, event `host.changed`.
+- **To the orchestrator.** Nothing: no orchestrator on this host owns anything there.
+- **To the developer.** Nothing is asked. After 24 hours unreachable the Health Safety signal shows the machine offline; the owner retires a host in config, not through an item.
+- **Tests.** `herdr::poller::remote_poll_failure_marks_host_stale_not_panes_gone`; `herdr::poller::reconnect_replaces_pane_cache_in_one_snapshot`; `board/agents.test.ts: stale host shows last seen with reason` (T3.4).
+- **Seeds.** Second opinion 18 and 37; P62; `herdr-layout.md` (remote lanes use the saved machine id).
+
+### R06 Duplicate events
+
+A hook fires twice or Claude Code retries it; a board button is clicked twice or an HTTP mutation is retried; a script retries a `tiller` command after a timeout; the outbox rings again; the SSE stream replays after a reconnect; a poller sees the same PR change twice; an import runs twice.
+
+- **Detection.** Keys and indexes, not heuristics: `idempotency_keys` for every command that carries a key, `attention.answer_idempotency_key`, `approvals.decision_idempotency_key`, `outbox.idempotency_key`, `runs.idempotency_key`, `events.id` unique, `cards_legacy` unique per project, `meta.import_manifest_sha256`. For observations, a repeated row with the same `observed_at` and verdict is stored but moves nothing, and an older `observed_at` never moves `sessions.activity*` backwards.
+- **Invariants.** A mutation with a known key returns the stored response and writes nothing (state.md invariant 10). Two `run.start` calls for one card and role cannot both succeed (unique index). `pr.changed` is written only on a change. A re-ring is the same message id and is acked once; a second `tiller inbox <id>` returns the body with an `already acked` marker and writes nothing. SSE clients ignore an event whose `rev_after` is older than what they hold. A board add records its ask and resolves it in the same transaction as the card, so the wake-up line creates no second card (T4.4).
+- **Automatic.** All of it. Nothing is repaired because nothing was changed.
+- **To the orchestrator.** Nothing.
+- **To the developer.** Nothing, in every case the indexes cover. The Health Safety signal counts duplicate dispatches (two active runs for one card and role, two sessions bound to one pane, a second card from one wake-up line); the count stays at 0 by construction, and any other value is a bug and a rollback trigger: section 8 opens the `recovery` item.
+- **Tests.** `core::idempotency::replayed_mutation_returns_stored_response_and_writes_nothing`; `observe::hooks::duplicate_hook_rows_do_not_move_activity_backwards`; `delivery::outbox::duplicate_send_is_acked_once`; `agents::intake::board_created_card_is_not_created_twice` (T4.4); `core::import::second_import_changes_nothing` (T2.4).
+- **Seeds.** Second opinion 13 and 38; Firstmate `fleet-ledger` (readers tolerate repeats; Tiller writers never produce them).
+
+### R07 PR merged outside Tiller
+
+The owner merged on GitHub by hand, someone else merged, a worker merged through `gh api` despite the guards, the PR was closed without merging, or a `direct-push` or `local-only` project's branch landed on the default branch without a `land_direct` approval.
+
+- **Detection.** After step 6 resolved every `uncertain` execution: `pr.refresh` sees `state = merged` (with `merged_at`, `merge_sha` and `merged_by` in the event payload) or `state = closed`, and no approval for that PR has `executed_at` set (`executing`, `uncertain`, `succeeded` and `failed` all count as Tiller's own attempt; a `failed` one followed by a merge is R08's second request, not an outside merge). For a project without PRs the default-branch source finds the run's branch head as an ancestor of the default branch with no `succeeded` `land_direct` approval covering it (`authority.md`, section 11).
+- **Invariants.** The merge is recorded as a fact (`pr.changed` with who and when). Every `requested` or `accepted` approval for the PR becomes `stale` (`pr.refresh`); the open `merge` item is withdrawn with "merged outside Tiller by <login>". The card is not closed by reconcile, the run is not ended, the worktree is kept (its next scan counts the merged commits as landed), dependants are not released until the card closes. Nothing here calls the merge unauthorized: reconcile cannot tell the owner's hand merge from an agent's, so it asks (`authority.md`, section 11), and the owner's answer records which it was.
+- **Automatic.** The cache and approval updates, the withdrawal, the worktree rescan, and a note.
+- **To the orchestrator.** It is informed. It may not close the card as `landed`: state.md section 7 reserves that for `approval.finish` or the owner's confirmation.
+- **To the developer.** One `recovery` on the card: "PR #n was merged outside Tiller by <login> at <time> (merge <sha>). Was that you? Close <card> as landed?" Options: landed, it was me; landed, not me; keep open (more work follows); superseded. Recommendation: landed when the merged head equals the run's last known head; evidence: the PR url and the event. Either landed answer runs `card.close landed` by the daemon in the transaction that records the answer (`closed_by = daemon`, the answer as evidence; state.md section 7), ends active runs as `landed`, releases dependants and meets obligations. "Not me" also writes `guard.breach` and fires the unauthorized-action trigger (section 8). A PR closed without merging asks instead: "PR #n was closed without merging; cancel the card, or relaunch?"
+- **Tests.** `reconcile::recovery::merged_pr_without_record_closes_card` (P28; the owner's confirmation is a step inside the test); `reconcile::recovery::merge_without_approval_opens_recovery` and `reconcile::recovery::default_branch_move_without_land_opens_recovery` (`authority.md` G10); `reconcile::recovery::uncertain_execution_is_never_read_as_outside_merge`; `reconcile::pr::pr_closed_without_merge_opens_recovery_item`.
+- **Seeds.** Second opinion 14 and 16; P14, P28; Firstmate's inactive-outcome reconcile; `authority.md` section 11.
+
+### R08 Stale approval
+
+A push after approval moved the head; a rebase or force-push moved every SHA; the PR was closed or merged outside (R07); the standing grant was revoked; a memory approval's base revision changed; the daemon died while `executing`.
+
+- **Detection.** `pr.refresh` compares `prs.head_sha` with the `head_sha` of every `requested` or `accepted` approval on that PR, and marks the approval stale when the head moved or the PR closed or merged. `approval.execute` re-reads the head from the forge inside the same call. Startup turns `executing` into `uncertain` (R01). `grant.revoke` (`authority.md`) stales the approvals the grant accepted. The memory applier compares `base_rev` (memory.md, section 7).
+- **Invariants.** An `accepted` approval whose binding differs from reality is `stale` before any execution starts (state.md invariant 7). `tiller land` never merges a head it did not re-read in the same call. One execution per PR at a time (unique index). A stale approval is never reused; the owner's words stay on the old row. `approval.execute` commits with `PRAGMA synchronous = FULL` on its connection, so an OS crash after the forge call cannot lose the `executing` row and make the daemon's own merge look like an outside one. A new head that is not a descendant of the previously bound head is a force-push: no automatic rematch, ever (R19).
+- **Automatic.** Mark `stale`, withdraw the old `merge` item, event `approval.stale`. Then, only when the new head descends from the bound head and the run's own worktree is at that head (the run pushed it), re-run the grant match: a match creates a new `accepted` approval bound to the new SHA (the audit trail is the same as a hand approval) and executes it; no match, or a head the run did not push, runs `approval.request` with a `merge` item that says what changed: "head moved from <a> to <b>: N new commits by <login>; checks: <state>". For `uncertain`, by kind: `merge`: poll the forge every 30 seconds for 10 minutes; merged at the bound head means `succeeded` (`approval.finish` closes the card); anything else means `failed` with the forge's answer in `result`. `land_direct`: the default-branch source shows the bound head as an ancestor of the default branch, or not. `memory`: the canonical file's blob equals the applied result, or not (memory.md). `away`: never `uncertain`; it has no external call. A forge that stays unreadable for the 10 minutes leaves the approval `uncertain` and goes to the developer.
+- **To the orchestrator.** Nothing. It sees the `pr.changed` and `approval.stale` events like the board does.
+- **To the developer.** The new `merge` item when no grant matches. A `failed` execution, or one still `uncertain` after 10 minutes: `recovery` on the card with the error text or the unreadable state (`authority.md`, land sequence step 7); the answer "approve again" creates a fresh approval bound to the current head.
+- **Tests.** `reconcile::approvals::push_after_approval_marks_it_stale` (also the T4.3 acceptance); `reconcile::approvals::uncertain_execution_resolves_from_forge`; `reconcile::approvals::uncertain_land_direct_resolves_from_default_branch`; `reconcile::approvals::rebase_stales_approval_and_blocks_rematch`; `agents::land::land_rechecks_head_sha_before_merge` (P12); `agents::land::standing_grant_merges_only_green_in_scope_prs` (P13).
+- **Seeds.** Regression "Rebased PR blocked the validation gate" (P54); second opinion 16; P12, P13; `authority.md` sections 6 and 11.
+
+### R09 Failed delivery
+
+The pane is busy; a permission dialog is showing; the pane is gone; the session moved to another pane; the target session ended (R02, R03); the doorbell was missed (delivered, not acked, the session idle); attempts ran out; herdr is unreachable (R18).
+
+- **Detection.** The `outbox_due` index; the pane check before typing (the pane in the newest snapshot carries metadata naming `target_session_id`); `delivered_at` set with no `acked_at` while the target's newest observation is `idle` for two minutes or more; `attempts`.
+- **Invariants.** The body is never typed; the only line that reaches a pane is `tiller inbox <id>`. A message is `delivered` only after the pane check passed and herdr accepted the keystrokes, `acked` only by the target session's own `tiller inbox` call. A busy pane or a visible dialog defers (`next_attempt_at`), never fails. A message is never lost because its session died: it waits or is retargeted. An `answer` never fails silently (state.md invariant 8). Re-rings grow `attempts` and keep `delivered`.
+- **Automatic.** Defer: busy 30 seconds, dialog 60 seconds. Retarget (`outbox.retarget`): the successor session of the same run, else the project's live orchestrator, in a new transaction with an event. Re-ring on the idle schedule (section 2). A `pending` message whose target session has ended waits for a successor (R02 and R03 create one); it is marked `failed` only when the run has ended or the project is retired, or when it is an `answer` older than one hour.
+- **To the orchestrator.** A worker's message unread after the fifth ring: a note, which R12 treats as a silent worker.
+- **To the developer.** An `answer` (the owner's words) not acked one hour after `outbox.delivered`, or failed: `recovery` on the card: "your answer to <question> has not reached <session>; the worker is <activity>; relaunch it, or retype?" A failed `wake` or `note` records `outbox.failed` and asks nothing: the condition that produced it (an unresolved ask, an idle orchestrator with pending work) stays visible, and reconcile enqueues a fresh message when a target exists again.
+- **Tests.** `delivery::outbox::idle_pane_with_unread_message_is_rung_again` (P23); `delivery::outbox::crash_between_store_and_send_delivers_once` (T2.5); `delivery::outbox::busy_pane_and_dialog_defer_not_fail` (T2.5); `delivery::outbox::message_to_dead_session_is_retargeted_to_successor`; `delivery::outbox::failed_answer_opens_recovery_item`.
+- **Seeds.** Regression "Missed steering doorbell" (mem-47); second opinion 13; Firstmate `supervision-host` (a captain outcome is presented until acknowledged).
+
+### R10 Truncated backup
+
+The nightly backup file is short or corrupt; the live database was damaged by a disk or OS fault.
+
+- **Detection.** The backup (T2.3, through SQLite's online backup API, since host B has no `sqlite3` CLI) writes `<stamp>.db.tmp`, runs `PRAGMA integrity_check` on the copy, compares its page count with the source, computes a sha256, renames atomically and appends to `~/.tiller/backups/manifest.json`: file, size, sha256, schema version, highest event `seq`, time. A backup whose size or sha256 differs from its manifest line, or that fails `integrity_check`, is truncated or corrupt. The live database is checked with `PRAGMA quick_check` at daemon start and after any SQLite error that names corruption; SQLite's own WAL replay already brings it to the last committed transaction after an OS crash.
+- **Invariants.** A restore never uses a backup that fails verification and always takes the newest verified one. A restore never overwrites the live database: the live file is moved to `state.db.pre-restore-<stamp>` first, and that file is never deleted automatically, because it may hold the only copy of records newer than the backup. Retention keeps 14 daily and 8 weekly verified backups and never fewer than two; it deletes only files its own manifest lists as superseded (section 6). The restore drill proves an acknowledged card and its pending decision survive (ADR 0002). After a restore the world is newer than the records: panes may be alive for runs the restored database knows, approvals may read `accepted` for PRs the forge shows merged, and `SessionStart` will not fire again. Reconcile adopts them: a live pane whose metadata names an active run gets a new session row with `activity = unknown` until its next hook; worktrees are rebound by path; merged PRs go through R07, which asks the owner (the daemon's own merges in the gap look like outside merges, and the owner answers "it was me"); nothing is closed or returned.
+- **Automatic.** Verification, retention, refusing a bad backup, one retry of a failed backup after an hour. A live database that fails its check puts the daemon in read-only mode: reads and the board keep working, every mutation is refused with the reason, hooks spool (R11).
+- **To the orchestrator.** Nothing.
+- **To the developer.** Two failed nights in a row, or a damaged live database: `recovery` on `fleet-1` with what failed, which backups verify, and the commands (stop the daemon, `tiller restore <file> --dry-run`, then without the flag; a restore refuses while the daemon runs). The restore itself is always the owner's command.
+- **Tests.** `core::backup::truncated_backup_is_refused_and_previous_one_restores`; `core::backup::restore_drill_recovers_acknowledged_card_with_pending_decision` (T2.3 acceptance); `core::backup::retention_never_deletes_pre_restore_file`; `core::state::killed_writer_leaves_no_half_state` (T2.1 acceptance); `reconcile::recovery::restore_adopts_live_panes_by_metadata`; `daemon::readonly::damaged_database_refuses_mutations_and_serves_reads`.
+- **Seeds.** Second opinion 8 (a truncated final record, atomic replacement, a restore exercise); ADR 0002; `host-capabilities.md` (online backup API).
+
+### R11 Schema migration
+
+The binary was upgraded and the database is older; the binary was rolled back and the database is newer; a migration fails halfway; the daemon still runs an old binary after a Nix upgrade while hooks and the CLI run the new one.
+
+- **Detection.** Every open compares the database's version (`rusqlite_migration`'s `user_version`, mirrored in `meta.schema_version`) with the binary's. The daemon also checks on every pass, because the CLI from a newer binary may have migrated under it.
+- **Invariants.** Only the daemon and the CLI migrate; a hook never does, since the migration and its verified copy do not fit a 10 ms budget. A migration runs in one transaction. Before it, a verified copy `state.db.pre-<from>-<to>` is written through the online backup API and kept until the next nightly backup verifies (section 6). Every migration has a down, and T2.1 runs both ways on a fixture. An older binary never writes to a newer database: it refuses with `schema <n> is newer than this tiller <version>; upgrade tiller, or run "tiller migrate down" with the newer binary first`. A hook that finds a database it cannot write (older or newer schema, or a read-only daemon: R10, R20) appends its raw observation to `~/.tiller/hook-spool/<ulid>.json` and exits 0, and the daemon imports the spool on its next pass, so no observation is lost in an upgrade window. A daemon that finds a newer database exits with code 3 so the service manager restarts it from the profile's new binary (the home-manager module points the service at the profile path, not the store path; launchd `KeepAlive`, systemd `Restart=on-failure`).
+- **Automatic.** All of the above.
+- **To the orchestrator.** Nothing.
+- **To the developer.** A migration that failed and rolled back: the daemon serves read-only; `recovery` on `fleet-1` with the error and the copy's path; the owner rolls the binary back through Nix or runs `tiller migrate down`.
+- **Tests.** `core::migrate::migrations_run_both_ways_on_fixture` (T2.1 acceptance); `core::migrate::older_binary_refuses_newer_schema_without_writing`; `core::migrate::failed_migration_rolls_back_and_keeps_copy`; `observe::hooks::hook_spools_on_unwritable_schema_and_daemon_imports_spool`; `daemon::version::daemon_exits_for_restart_when_schema_is_newer`.
+- **Seeds.** Second opinion 8; regression "Validation daemon older than its CLI" (the same failure shape between the `no-mistakes` daemon and its CLI; R01 reports that one, this row prevents Tiller's own).
+
+### R12 Worker silent
+
+The worker is alive but nothing has been observed past the threshold: headless Chrome hung inside a tool call, a 40-minute build, a script waiting on input nobody will give.
+
+- **Detection.** `session_activity.effective_activity = stale`, then the ladder: the pane is present, the agent process is alive. The transcript's last line names the tool call and when it started.
+- **Invariants.** `stale` alone changes nothing (state.md section 6). The daemon never interrupts or kills a worker. The run, the reservation and the worktree are untouched. Three `StopFailure` observations in ten minutes are `errored`, not a cut and not a death: they make the note urgent, and nothing ends the run. A session that stopped on `quota_auto_resume_disabled` (protocol.md, 4.4) is `errored` with the quota badge: the daemon never retries it (the quota floor is fail closed); it sends one note at once, and when the quota feed shows the window reset it delivers one `wake` to the session under R09's rules.
+- **Automatic.** At the threshold, a `liveness` observation (`agent_alive`, verdict null) so the evidence is recorded. At twice the threshold, a note with a bounded pane tail (40 lines through herdr, P22) and the last tool call: "Bash: `chrome-devtools-axi screenshot`, started 31 min ago".
+- **To the orchestrator.** `tiller agent interrupt <run>`, `tiller agent relaunch <run> --note`, or acknowledge a legitimate wait with a dated pause on the run (`run.pause`; the worker's form is `tiller status paused --until`, and the orchestrator form is listed under the changes in section 9), which silences the next escalation until then.
+- **To the developer.** 60 minutes after the note with no orchestrator action, or the second silence of the same run in 24 hours: `recovery` on the card with the same evidence and the options interrupt, relaunch, wait. The brief rule that screenshot steps write to files, use a kill timeout and kill only their own browser (P56) is a T4.1 eval, not a repair.
+- **Tests.** `reconcile::liveness::silent_worker_escalates_to_orchestrator_then_owner`; `reconcile::liveness::dated_pause_silences_silent_escalation`; `observe::hooks::repeated_stop_failure_notes_orchestrator_and_ends_nothing`; `evals/screenshot_brief_finishes_inside_timeout` (P56).
+- **Seeds.** Regression "Headless Chrome hung workers past their timeout"; P19, P24, P56; second opinion 11 (stale is explicit, with the last observation time; `StopFailure` is its own event).
+
+### R13 Done reported without evidence
+
+The worker says done but no PR exists, the pipeline never ran, the PR is open but not merged, or `tiller done` is called with commits that are not on the default branch.
+
+- **Detection.** The preconditions of `tiller done`, which is `run.end` followed by `run.clean`: `run.end` refuses only while `worktrees.unlanded_commits` is unknown, and refuses the outcome `landed` unless an approval for the card reached `succeeded` or R07's confirmation closed it (state.md section 8); `run.clean` refuses unless `unlanded_commits = 0` and `dirty = 0` from this pass's scan (P51). A status line that says done on a ship card whose PR is not merged; a session that ended cleanly with the run active (R03).
+- **Invariants.** A ship card closes `landed` only through `approval.finish` or R07's confirmation (state.md section 7), and `approval.finish` ends the card's active runs as `landed` in that transaction, so the builder never has to end its own run to let the card close. A builder on a ship card stays on the card until the merge: it fixes checks and review findings there, and its run ends `landed` with the merge. `tiller done` by a builder before the merge is refused with "PR #n is not merged; stay on the card" (for `direct-push`, until the `land_direct` approval succeeded). Scout, reviewer and verifier runs end with `reported` through `tiller done` as soon as their report or review row exists; the PR rule does not apply to them. The column stays Working, Landing or Queued, never Done. The worker's word is never enough (P08).
+- **Automatic.** The refusal, with the failing precondition in the command's output and an event. A note when the status says done but the record disagrees.
+- **To the orchestrator.** Read the record (`tiller card show`), steer the worker to run the pipeline or open the PR, or relaunch with a note.
+- **To the developer.** Nothing, unless the worker is gone (R03).
+- **Tests.** `reconcile::columns::ship_card_stays_working_without_pr` (P08); `agents::spawn::cleanup_refuses_with_unlanded_commits` (P51); `cli::done::builder_done_before_merge_is_refused`; `core::approvals::finish_ends_card_runs_as_landed`.
+- **Seeds.** Regression "Workers reported done without running the pipeline"; Firstmate's validation-supervision behavior (P08, P65); VISION "unlanded work is never torn down".
+
+### R14 Run cut by a timeout
+
+A pipeline fix agent cut at 30 minutes, a `--max-turns` limit, or an away-mode spend cap.
+
+- **Detection.** The harness's own record of the cut, and only that: the `no-mistakes` run record's failure reason, the transcript's cut marker for a turn limit, or the daemon's own spend-cap event. Repeated `StopFailure` is R12.
+- **Invariants.** Partial work stays in the worktree; nothing resets it. The run ends with `outcome = cut` and an `outcome_note` that says what was done and what remains, built from the last status line and the transcript's last assistant text (P55). The card stays open; the reservation is released with the run.
+- **Automatic.** `run.end cut` with the note, because the harness reported a fact; a silent or dead worker is R12 or R03 instead. A note with the note.
+- **To the orchestrator.** Relaunch as a new attempt with the note (P24), or hand the remaining fix to a builder.
+- **To the developer.** The same cut twice on one card: `recovery` on the card.
+- **Tests.** `reconcile::runs::cut_fix_agent_reports_partial_work` (P55); `reconcile::runs::cut_is_recorded_only_from_harness_evidence`.
+- **Seeds.** Regression "Fix agents cut at 30 minutes"; P55.
+
+### R15 Records and evidence disagree
+
+A pane whose metadata names a run that has ended or does not exist; a worktree treehouse lists with no run; an active run whose worktree is missing; a run whose pane is gone while its agent lives elsewhere; two panes claiming one session; a reservation whose run has ended; a cleanup of a run whose card is gone.
+
+- **Detection.** Step 5 of every pass compares `panes`, `worktrees` and `reservations` with `runs` and `sessions`; the worktree scan runs every five minutes and inside the pass before any `run.clean` or resume.
+- **Invariants.** A pane with a live agent is never closed by reconcile (`herdr-layout.md`, Orphans). A worktree with unlanded or unknown commits, or uncommitted changes, is never returned (`authority.md` G18). A reservation is released only when its run has ended or its row is missing (state.md, Reservation). Cleanup needs no card and leaves no marker file: every marker is a row in `state.db` (P53). A worktree that vanished while its last scan showed unlanded commits or uncommitted changes, or whose commits are gone (`authority.md` G19), is lost work, a rollback trigger (section 8): the cache row gets `gone_at` because the path is gone, and the event that records it is the evidence.
+- **Automatic.** Release leaked reservations (`reservation.release reconciled`). Mark caches `gone_at` from positive evidence only. Close a pane whose run has ended and whose agent is dead, then relabel the block. Return a worktree (`run.clean`) only when all of these hold: the run has ended, the scan ran in this pass, `unlanded_commits = 0`, `dirty = 0`, treehouse lists it, and the pane's agent is dead or the pane is closed. Anything else stays and is reported: an active run keeps it (nothing to report), an ended run with unlanded work goes to the orchestrator, and a worktree still unreturned seven days after its run ended goes to the developer.
+- **To the orchestrator.** A live pane with no active run ("pane <id> runs <agent name>; no active run; adopt it as a run, or close it?"); an active run whose worktree is missing (abandon, or recreate from the branch when the branch exists on the remote); an ended run whose worktree still holds unlanded work.
+- **To the developer.** Lost work, or two panes for one session: `recovery` on the card at once, and the Safety signal counts it. An orchestrator note unanswered for 30 minutes. A worktree unreturned seven days after its run ended.
+- **Tests.** `reconcile::orphans::alive_pane_without_run_is_never_closed`; `reconcile::orphans::leaked_reservation_is_released`; `reconcile::recovery::worktree_gone_with_active_run_opens_recovery` (`authority.md` G19); `agents::spawn::cleanup_without_card_leaves_no_marker` (P53); `reconcile::safety::no_automatic_repair_removes_unlanded_work` (section 6).
+- **Seeds.** Regression "Cleanup without a card left a failing marker" (mem-56); second opinion 14 (conflicting evidence must not trigger duplicate work, lost work or destructive cleanup); `herdr-layout.md` Orphans; `authority.md` G18, G19.
+
+### R16 Resource floor breached
+
+Free disk under the floor, free RAM under the floor, a spawn storm, or stale review-page listeners piling up.
+
+- **Detection.** `hosts.ram_floor_mb` and `hosts.disk_floor_mb` are checked at every launch (`run.start` inside the reservation window, and every resume, with the values written into the event) and by the host check every 5 minutes, which writes `host.degraded` the first time a floor is breached and `host.recovered` when it clears. The spawn rate: more than five spawns in ten minutes for one project, or ten per host. Listener count per run, which T4.2's cleanup retires (P48).
+- **Invariants.** The daemon kills nothing and deletes nothing. A launch below a floor is refused, fail closed, like the quota floor (P04). A storm trips the rate limit, not the host. Reclaiming build output from returned worktrees is the dotfiles' daily sweep and Nix garbage collection (P52), confirmed at each cutover; Tiller only reports.
+- **Automatic.** Refuse launches with the measured value in the event and the command output. The Machines row shows the breached floor. Retire a run's listeners at its cleanup.
+- **To the orchestrator.** The refusal: "spawn refused: 31 GB free, floor 40 GB". It waits or asks.
+- **To the developer.** 30 minutes after `host.degraded` with the floor still breached: `recovery` on `fleet-1` with the biggest consumers from the worktree scan (paths and sizes) and the suggestion to run the sweep. Tiller never deletes.
+- **Tests.** `agents::spawn::spawn_refuses_below_disk_floor` (P03); `agents::spawn::respawn_storm_trips_rate_limit_not_host` (P48); `agents::spawn::cleanup_retires_task_review_listeners` (P48); `daemon::floors::breached_floor_for_30_minutes_opens_recovery_item`.
+- **Seeds.** Regressions "Stale review-page listeners froze the host" and "Disk filled from build output in returned worktrees"; P03, P48, P52; second opinion 35.
+
+### R17 Worker blocked by its environment
+
+Review links answering 403 because the allowed host was not set; a trust prompt for an unknown directory; the session's permission check refusing an action the owner approved; a tool version mismatch; a missing credential.
+
+- **Detection.** A `blocked` status line; `waiting_permission` within 60 seconds of a session's start (a trust or first-permission prompt); the spawn preflight, which checks the launch environment before launching (the review server's allowed hosts, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, an explicit MCP config, the worktree path, the role file) and records what it launched in `config_hash`; the host check's version read (P43).
+- **Invariants.** No agent answers a prompt for the owner. A refused action is not retried by the agent; it hands back one runnable command (P37). The orchestrator never edits code to work around an environment problem (P58).
+- **Automatic.** The preflight refuses a launch whose checks fail, with the failing check in the event and the reservation released as `spawn_failed`. Health shows version skew.
+- **To the orchestrator.** The blocked status. For a credential or a permission it opens a `credential` or `decision` item carrying the one command; for a Tiller bug it files a `fleet` card.
+- **To the developer.** That item, with the command to run (`! <command>` in their own session).
+- **Tests.** `agents::spawn::worker_env_sets_review_allowed_hosts` (P49); `agents::spawn::preflight_refuses_launch_with_missing_env`; `evals/refused_action_hands_back_one_command` (P37); `daemon::health::reports_missing_and_outdated_tools` (P43).
+- **Seeds.** Regressions "Review links answered 403 forbidden host", "Permission check refused approved actions", "Validation daemon older than its CLI", and (with R04) "Restored workers in the wrong checkout at a trust prompt"; `host-capabilities.md` (explicit MCP config, auto-memory variable).
+
+### R18 Local herdr unreachable or restarted
+
+The local herdr server is down, hung, or restarted (which loses row tokens and may change pane ids).
+
+- **Detection.** The local poller fails; or a successful snapshot whose `state_change_seq` reset and whose known panes carry no row tokens.
+- **Invariants.** A failed poll never marks a pane gone. Sessions keep the activity last observed: hooks do not go through herdr. Deliveries defer, never fail. The layout repair (relabel, move, re-report tokens) is idempotent.
+- **Automatic.** Backoff as in R05. On reconnect one full snapshot: panes present get their metadata re-reported and their blocks repaired; panes absent from the successful snapshot are `gone_at`, and their sessions go through the ladder's agent probe before R02 or R03 declares them dead, because a herdr restart may or may not have killed the pane processes.
+- **To the orchestrator.** Nothing.
+- **To the developer.** Nothing is asked. herdr down for ten minutes shows the reconnecting banner and a stale Machines row (T3.4); workers lost to the restart are R03.
+- **Tests.** `herdr::poller::local_restart_reapplies_layout_and_tokens`; `herdr::poller::poll_failure_never_marks_panes_gone`; `board/states.test.ts: reconnecting banner shows while herdr is down` (T3.4).
+- **Seeds.** `herdr-layout.md` (tokens lost on restart, order upkeep after reconnect); second opinion 37 (one poller with backoff, the board shows when each source last updated).
+
+### R19 Guard breach found after the fact
+
+A PR body quoting a raw ask or an internal name; a force-push over published commits; a default branch moved by anything but `tiller land`; a worktree write outside the run's path.
+
+- **Detection.** `pr.link` and `pr.refresh` fetch the body and run the same scrub as `tiller land` step 4 (`authority.md` G30): a quoted ask longer than 40 characters matched against the card's asks, a scrub-list term, a stale pipeline claim. A new head that is not a descendant of the previously cached head (`git merge-base --is-ancestor`) is a force-push (`authority.md` G11). A default branch moved by anything but `tiller land` comes from the default-branch source (`authority.md` section 11). Writes outside the worktree are a T4.3 guard; the reconcile pass only reads their audit events.
+- **Invariants.** Reconcile edits nothing on the forge. A breach is an event (`guard.breach`) that Safety counts as an unauthorized action; it is never hidden. While the newest scrub result on a PR is a failure (carried in the `pr.changed` payload), the grant match and `approval.request` refuse that PR, so a leaking body cannot be merged by Tiller. A force-pushed head is never rematched to a grant (R08). A merge with no execution of Tiller's own is R07, which asks the owner first and fires the trigger only on "not me"; this row never double-files that case.
+- **Automatic.** The event, the refusal, a note with the exact lines (the note lives in `state.db`, which is work data).
+- **To the orchestrator.** Edit the PR body through `gh-axi`; tell the builder to merge the default branch instead of rebasing (P54).
+- **To the developer.** A leak on a public repo: `recovery` on the card at once, with the PR url, what leaked, and that edit history cannot be scrubbed; the merge stays blocked until it is answered. A force-push or a default-branch move by anything but `tiller land`: `recovery` on the card and the unauthorized-action trigger (section 8).
+- **Tests.** `agents::land::pr_body_with_quoted_ask_is_refused` (P17, G30); `reconcile::pr::leaking_body_blocks_grant_match_and_request`; `reconcile::pr::force_push_after_approval_is_flagged_and_stale`; `reconcile::recovery::default_branch_move_without_land_opens_recovery` (G10); `evals/builder_merges_default_branch_instead_of_rebasing` (P54, G40).
+- **Seeds.** Regressions "Public PR body leaked a raw ask" and "Rebased PR blocked the validation gate"; P17, P54; second opinion 17 (layered defense plus audit); `authority.md` sections 10 and 11.
+
+### R20 Owner marker names another system
+
+The host is mid-cutover, or the owner fell back to Firstmate (M6), so `~/.tiller/owner` does not say `tiller`.
+
+- **Detection.** Every `tiller` command and every daemon pass reads the marker first (`authority.md` G26). `meta.host_id` also guards against a database copied from another host.
+- **Invariants.** No mutation while the marker names another system (state.md principle 1). Hooks write nothing and exit 0, because the other system's hooks own the session; nothing is spooled either, since those observations belong to the other system. The daemon keeps serving reads with a "read only: owner is <name>" banner. Nothing is lost by the gap: on the flip back, the first pass treats it like R01 plus R10's adoption of live evidence, and the T6 export and import carry the records.
+- **Automatic.** The refusal and the banner. On the flip back, the full pass.
+- **To the orchestrator.** Nothing.
+- **To the developer.** Nothing is asked. The flip is always the owner's command (`tiller owner set tiller` or `firstmate`; M6).
+- **Tests.** `core::owner::mutations_refused_when_marker_names_other_system` (G26); `reconcile::recovery::marker_flip_back_rebinds_live_evidence`; `core::owner::database_from_another_host_is_refused`.
+- **Seeds.** Second opinion 15; plan v2 point 15; M6 fallback.
+
+## 6. Unlanded work: the check
+
+"No row can destroy unlanded work automatically" is checked by listing every mutation that runs without a person or an orchestrator deciding, and the guard on each. This list and principle 1 are the same list.
+
+| Automatic mutation | Rows | What it could destroy | Guard |
+|---|---|---|---|
+| `session.end` (end a session row) | R02, R03, R04, R18 | nothing: a row, not a process | only on a *dead* ladder verdict confirmed by a successful snapshot, and for a resumable session only in the transaction that starts its successor or after two failed attempts |
+| `session.resume` (`claude --resume`) | R02, R04 | nothing: the worktree is reused as is | `worktree_path` exists on `runs.branch`; floors pass; rate-limited; never past a trust prompt; never for a worker crash (R03) |
+| `run.reown` | R02, R04 | nothing | successor must be live |
+| `reservation.release reconciled` | R15 | nothing | run ended or missing |
+| `approval.stale` | R07, R08 | nothing: the old approval stays as a record | binding compared with the forge in the same transaction window |
+| `approval.finish` from `uncertain` | R08 | nothing: it records what the forge did | merged at the bound head, or not; unreadable goes to the developer |
+| `approval.decide` by a standing grant, then `approval.execute` and `tiller land` | R08, and the ordinary landing path | a merge the owner did not click | the grant's conditions (`authority.md` section 6); the head re-read in the same call; only a fast-forward head the run pushed is rematched; a failing scrub blocks it |
+| `attention.withdraw` | R07, R08 | the question's visibility | only when the subject landed or the binding moved; the new question is opened in the same pass |
+| `outbox.deliver`, `outbox.retarget`, `outbox.fail` | R09 | a message | the payload is the row; a failed answer opens an item |
+| `cache.refresh` with `gone_at` or `stale_reason` | R05, R15, R18 | nothing: a cache | positive evidence from a successful read only; a vanished worktree with unlanded work is recorded as lost work, not hidden |
+| close a herdr pane | R15 | an agent's session | agent dead and run ended |
+| `run.clean` (return the worktree) | R13, R15 | the worktree | run ended; scan from this pass; `unlanded_commits = 0`; `dirty = 0`; treehouse lists it; agent dead |
+| `hold.release due`, `obligation.meet` | R01 | nothing | timer passed |
+| `run.end cut` | R14 | nothing: the worktree stays | the harness reported the cut |
+| `run.end landed` and `card.close landed` through `approval.finish` | R08, R13 | nothing: it records what the forge did | the forge shows the merge at the bound head |
+| backup retention | R10 | an old backup file | only files the manifest lists as superseded, never under two verified, never `state.db.pre-restore-*`; `state.db.pre-<from>-<to>` only after the next nightly backup verifies |
+| `host.degraded` repairs (directory modes) | R01 | nothing | the daemon's own directory |
+
+Nothing in the list removes a worktree with unlanded or unknown commits, closes a card on inference, cancels anything, or deletes a row. The one mutation that returns a worktree, `run.clean`, needs five positive facts. Two tests hold the line: `reconcile::safety::no_automatic_repair_removes_unlanded_work`, a property test that generates random combinations of pane, agent, worktree and run states, runs passes against a fake treehouse and git, and asserts that no `run.clean`, treehouse return or `git worktree remove` is ever called while `unlanded_commits` is non-zero or null or `dirty = 1`; and `agents::spawn::cleanup_refuses_with_unlanded_commits` (P51, G18) for the explicit path.
+
+## 7. Regressions in the bundle
+
+Every regression in the bundle's `regressions.md` (14, as listed in `parity.md`) maps to a row. Where the regression is also a role or guard behavior, the row names that test too.
+
+| Regression | Row | Repair class | Also |
+|---|---|---|---|
+| Stale review-page listeners froze the host | R16 | automatic rate limit; cleanup retires listeners | P48 |
+| Review links answered 403 "forbidden host" | R17 | preflight refuses the launch | P49 |
+| Restored workers in the wrong checkout at a trust prompt | R04 (launch rule), R17 (prompt backstop) | automatic resume in the own worktree; a prompt is never answered | P25, mem-46 |
+| Missed steering doorbell | R09 | automatic re-ring; the owner after an hour for an answer | P19, P23, mem-47 |
+| Disk filled from build output in returned worktrees | R16 | launch refused; the owner after 30 min | P03, P52 |
+| Public PR body leaked a raw ask | R19 | merge blocked; the owner at once on a public repo | P17, G30 |
+| Workers reported done without running the pipeline | R13 | `tiller done` refused; the orchestrator | P08 |
+| Rebased PR blocked the validation gate | R08, R19 | approval stale, no rematch; the builder told to merge | P54, G11, G40 |
+| Validation daemon older than its CLI | R01 (reported), R11 (Tiller's own skew prevented), R17 | Health; `fleet-1` after an hour | P43 |
+| Group-writable state directory refused listeners | R01 | repaired by the host check | P57 |
+| Fix agents cut at 30 minutes | R14 | run ends `cut` with a note; the orchestrator relaunches | P55 |
+| Headless Chrome hung workers past their timeout | R12 | the orchestrator after 30 min; the owner after 60 | P56 |
+| Cleanup without a card left a failing marker | R15 | cleanup needs no card; no marker files | P53, mem-56 |
+| Permission check refused approved actions | R17 | one runnable command to the owner | P37 |
+
+## 8. Rollback triggers
+
+M6 names three triggers that go live at each host's flip. Each is a detection in this table, never an action: the daemon counts it in the Health Safety signal and opens a `recovery` item with the evidence (`authority.md`, section 11); the owner decides whether to fall back (R20).
+
+| Trigger | Detected in | How |
+|---|---|---|
+| Lost work | R15 | a worktree gone, or returned by anything but `run.clean`, while its last scan showed unlanded commits or uncommitted changes; an active run's commits gone (G19); a branch deleted on the remote with no merge |
+| Unauthorized action | R07, R08, R19 | a merge with no execution of Tiller's own that the owner says was not theirs; a force-push; a default branch moved by anything but `tiller land`; a PR body that fails the scrub on a public repo |
+| Duplicate dispatch | R06, R15 | two active runs for one card and role (refused by the index, so a count above 0 means a bug); two panes for one session; a second card created by a wake-up line |
+
+## 9. Coverage
+
+### Second opinion points this spec covers
+
+| Point | How |
+|---|---|
+| 8 | R10 (truncated backup, atomic replacement, the restore drill), R11 (schema migration), retention in R10 and section 6 |
+| 11 | Staleness thresholds and the liveness ladder: `unknown` and `stale` explicit, with the last observation time; interrupts, `StopFailure`, permission prompts and session end each handled in their own row (R12, R17, R02, R03) |
+| 13 | R09: the crash window between the store and the send, busy panes, dialogs, a pane no longer hosting the session, duplicate handling (R06) |
+| 14 | The table itself: every scenario named, automatic against decision, an end-to-end test per row; the four checks named there (acknowledged-card survival R10, duplicate delivery R06 and R09, stale approvals R08, preservation of unlanded work section 6) |
+| 15 | R20: the owner marker, refusal of mutations, the fallback flip, in-flight work after the flip back |
+| 16 | R08: the binding rechecked when it runs; `uncertain` resolved from the forge; a durable `executing` record |
+| 21 | Section 8: the rollback triggers fire on detection, as counts and items, with no automatic fallback |
+| 35 | R16 and principle 5: floors checked inside the reservation window and before every resume; fail closed |
+| 37 | R05 and R18: one poller per source with backoff, the board showing when each source last updated |
+
+Points 6, 7, 9, 10, 12, 17, 18, 22 to 34, 36 and 38 to 43 are owned by the other specs or the build plan.
+
+### Firstmate contracts matched or departed from
+
+| Contract | Matches | Departs, and why |
+|---|---|---|
+| `captain-hold-lifecycle` | Cleanup never closes an open question (R15 closes panes and returns worktrees, never items); a landed subject retires its decision by withdrawal, not deletion (R07, R08); a dated deferral re-asks on its date (step 3); a question whose state cannot be established is kept (`unknown` persists) | Snapshot buckets are replaced by the derived column; reconcile opens `recovery` items instead of editing hold payloads |
+| `supervision-host` | One supervisor per run after a restart (R02, R04); an outcome is presented until acknowledged (R09 re-rings; `acked` is a state); a dated pause silences alarms (R12) | The watcher is the daemon's pass, not a per-task bash loop; liveness comes from the ladder, not a per-backend busy classifier |
+| `agent-control` | A relaunch keeps the worktree and needs a note (R03, R12, R14); it is transactional (`run.relaunch`); relaunching or interrupting a worker is the orchestrator's or the owner's act | The daemon resumes sessions only after a crash of the orchestrator with work in flight or a reboot; every other relaunch is the orchestrator's decision |
+| `herdr-backend` | Pane identity lives in metadata, so a label change or truncation never loses a pane (R15, R18); tokens are re-reported after a server restart | Panes are a cache with `gone_at`, marked only from a successful snapshot |
+| `fleet-ledger` | Every repair is an event readers can consume | No duplicates to tolerate (R06) |
+
+### Parity rows this spec gives a home
+
+P03 and P52 (R16), P08 and P51 (R13), P12 and P13 (R08), P14 and P28 (R07), P17 and P54 (R19), P19 and P23 (R09, R12), P21 (R02), P24 (R03, R12), P25 (R04), P37, P43 and P49 (R17), P48 (R16), P53 (R15), P55 (R14), P56 (R12), P57 (R01), P62 (R05). The matrix's test names are kept where a row reuses them, and `authority.md`'s detection tests (G10, G19, G26, G30) are reused by name; T1.6 checks that each kept capability still has at least one test after any rename.
+
+### Changes this spec needed in state.md and schema.sql
+
+Made in the same commit, as the smallest change each: the `fleet-1` host-health card (Project); the meaning of `unlanded_commits` and `dirty` (Caches); `meta.boot_id` (Bookkeeping); section 8 rows for `session.end`, `session.resume`, `reservation.release`, `outbox.retarget`, `daemon.start`, `daemon.stop` and `guard.breach`; `pr.refresh` staling `requested` approvals and staling on a closed or merged PR; `approval.finish` accepting `uncertain` and ending the card's runs as `landed`; `run.end` refusing the outcome `landed` outside `approval.finish` and R07; the `session_activity` view exempting prompts from staleness and honouring `pause_until`.
+
+Assumed of `protocol.md` (T1.3, written in parallel) and left for T1.6 to reconcile: `tiller migrate up|down`, `tiller owner set <system>`, an orchestrator form of `run.pause` on a run, and that `tiller agent resume` records a `session.resume_attempted` event so the rate limit in R02 and R04 can count attempts.
+
+## Open for CP2
+
+1. **The daemon's resume right.** `authority.md`'s role matrix gives the daemon no right to relaunch, pause or interrupt a run. R02 and R04 need a narrower right: resume a session after a crash or a reboot, with the same id, in the same worktree, under the floor checks, never as a new attempt and never for a worker crash. Proposed: the matrix gains a row "Resume a session after a crash or reboot: daemon yes, orchestrator own runs, owner yes", and "relaunch" keeps meaning a new attempt or a fresh brief. P25 (reboot recovery) depends on this.
+2. **Auto-close on the owner's own merge.** R07 asks the owner to confirm every merge made outside Tiller. If the config records the owner's forge login, a merge by that login could close the card as `landed` without an item, since the merge itself was the owner's word. This draft asks every time, because the login is not recorded anywhere yet (T1.4 may add it).
+3. **Thresholds.** The 15 and 30 minute staleness thresholds, the 2, 5, 15, 30, 60 minute re-ring schedule, and the 30 and 60 minute escalation deadlines are starting values (second opinion 33). They are config, and T7.4's two-week check reports how often each escalation fired and whether it was needed.
+4. **Worker relaunch after a crash.** R03 leaves every relaunch to the orchestrator. The alternative, an automatic resume of a crashed worker when its worktree holds work and the crash was not an error storm, would remove a 30 minute wait at the cost of quota the orchestrator did not decide to spend. This draft keeps the orchestrator in the loop, as Firstmate's `agent-control` and `authority.md` do.
+5. **A `scrub` cache column on `prs`.** R19 keeps the scrub result in the `pr.changed` event payload and re-derives it. If T2.7 finds the lookup awkward, a `scrub_state` cache column with `fetched_at` is the smallest change to `schema.sql`, and `merged_by` could join it.

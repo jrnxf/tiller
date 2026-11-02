@@ -128,11 +128,11 @@ about 3 min of the developer's time
 ### T1.2 Recovery table
 `fable` high - 2-3 h - after a T1.1 draft
 
-- [ ] `docs/spec/recovery.md`, one row per scenario: daemon restart, orchestrator crash, worker crash, host reboot, remote disconnect, duplicate events, PR merged outside Tiller, stale approval, failed delivery, truncated backup, schema migration
-- [ ] Each row: detection, invariants, auto repair vs developer, end-to-end test name
-- [ ] Check: no row can destroy unlanded work automatically
-- [ ] Check: every regression in the bundle maps to a row
-- [ ] Delivered
+- [x] `docs/spec/recovery.md`, one row per scenario: daemon restart, orchestrator crash, worker crash, host reboot, remote disconnect, duplicate events, PR merged outside Tiller, stale approval, failed delivery, truncated backup, schema migration
+- [x] Each row: detection, invariants, auto repair vs developer, end-to-end test name
+- [x] Check: no row can destroy unlanded work automatically
+- [x] Check: every regression in the bundle maps to a row
+- [x] Delivered (Monday 2026-11-02, landed on main in the commit that adds the spec; CP2 reviews the draft)
 
 ### T1.3 Protocol and CLI
 `opus` high - 2-3 h - after T1.1

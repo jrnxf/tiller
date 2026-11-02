@@ -31,7 +31,8 @@ CREATE TABLE meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 ) STRICT;
--- keys: schema_version, host_id, created_at, import_manifest_sha256, boundary (memory.md)
+-- keys: schema_version, host_id, created_at, import_manifest_sha256,
+--       boundary (memory.md), boot_id (recovery.md)
 
 CREATE TABLE idempotency_keys (
   key        TEXT PRIMARY KEY,
@@ -532,8 +533,8 @@ CREATE TABLE quota_windows (              -- owner: quota-axi; never an account 
 -- Derived views: the only place a board column exists
 -- ---------------------------------------------------------------------------
 
--- Activity with staleness derived from age. The thresholds are placeholders
--- until recovery.md fixes them per role.
+-- Activity with staleness derived from age. The thresholds are the defaults
+-- recovery.md section 2 sets per role (orchestrator 30 min, workers 15 min).
 CREATE VIEW session_activity AS
 SELECT
   s.id            AS session_id,
@@ -544,12 +545,18 @@ SELECT
   CASE
     WHEN s.ended_at IS NOT NULL THEN 'ended'
     WHEN s.activity_observed_at IS NULL THEN 'unknown'
+    -- a prompt is never stale: it stays in Needs you until a newer observation
+    WHEN s.activity IN ('waiting_permission', 'waiting_input') THEN s.activity
+    -- a dated pause silences staleness until 15 min after it ends
+    WHEN r.pause_until IS NOT NULL
+         AND julianday('now') - julianday(r.pause_until) <= 15.0 / 1440 THEN s.activity
     WHEN julianday('now') - julianday(s.activity_observed_at) >
          CASE s.role WHEN 'orchestrator' THEN 30.0 / 1440 ELSE 15.0 / 1440 END
       THEN 'stale'
     ELSE s.activity
   END             AS effective_activity
-FROM sessions s;
+FROM sessions s
+LEFT JOIN runs r ON r.id = s.run_id;
 
 -- One row per open or recently closed card: its column and badge.
 -- Precedence follows state.md, section 6.

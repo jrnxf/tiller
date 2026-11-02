@@ -52,6 +52,7 @@ The owner marker is a file, `~/.tiller/owner`, not a row (plan v2, point 15). `t
 
 - `id` (the slug, primary key), `name`, `repo` (`owner/name` or null for local-only), `remote` (git remote URL), `default_branch`, `delivery` (`no-mistakes`, `no-mistakes-prod-only`, `direct-pr`, `direct-push`, `local-only`; P10 and P11), `checks` (JSON: which project checks a direct push must run), `capacity` (max active runs for this project), `owner_host_id`, `added_at`, `next_card_seq`, `rev`, `retired_at`.
 - The project's own checkout path is not stored; treehouse and the dotfiles own it.
+- `tiller init` creates one `ops` card in `fleet` per host, display id `fleet-1`, titled "Host health". Host-level recovery items (T1.2: backups, migrations, resource floors, a crashing orchestrator) attach to it, so `attention.card_id` stays required. It never closes: `card.close` and `card.cancel` refuse it.
 
 Ownership moves between hosts only through export and import (M6). There is no in-place reassignment in v1.
 
@@ -254,12 +255,12 @@ Rules:
 These tables hold a copy of a fact another system owns. Each row carries `fetched_at`; a stale cache is shown as stale, never trusted as current.
 
 - `panes` (herdr): `pane_id`, `host_id`, `workspace_label`, `agent_name`, `agent_status`, `session_id` (the Tiller session bound to it), `metadata` (JSON row tokens), `fetched_at`, `gone_at`.
-- `worktrees` (treehouse and git): `path`, `host_id`, `project_id`, `run_id`, `branch`, `head_sha`, `dirty`, `unlanded_commits` (count of commits not on the default branch, or null when unknown), `fetched_at`, `gone_at`.
+- `worktrees` (treehouse and git): `path`, `host_id`, `project_id`, `run_id`, `branch`, `head_sha`, `dirty`, `unlanded_commits` (commits reachable from any local ref that exists only in this worktree and are not landed: not on the default branch, not covered by a merged PR's head, not patch-equivalent by `git cherry`; null when unknown; recovery.md, section 2), `dirty` (1 when `git status --porcelain` lists anything, ignored files excluded), `fetched_at`, `gone_at`.
 - `quota_windows` (quota-axi): `label`, `percent_remaining`, `resets_at`, `pace`, `reserve`, `burn_multiple`, `elapsed_percent`, `projected_exhaustion_at`, `title` (the window's display label), `kind` (`weekly`, `model`, `credits`, ...), `fetched_at`, `fetch_error`. `label` is `<provider>:<window id>` (`protocol.md` section 8). No account id, no email, ever.
 
 ### Bookkeeping
 
-- `meta`: key-value: `schema_version`, `host_id`, `created_at`, `import_manifest_sha256`, `boundary` (`personal` or `work`; memory.md).
+- `meta`: key-value: `schema_version`, `host_id`, `created_at`, `import_manifest_sha256`, `boundary` (`personal` or `work`; memory.md), `boot_id` (the boot the daemon last reconciled against; recovery.md).
 - `idempotency_keys`: `key`, `command`, `entity`, `entity_id`, `response` (JSON), `created_at`. A command that carries a key already present returns the stored response and performs nothing. Keys expire after 30 days.
 - `memory_sources`, `memory_revisions`, `memories`, `evidence`, `memory_evidence`, `proposals`, `proposal_evidence`, `session_loads`: owned by `memory.md` (T1.5), which defines them in its section 11.
 
@@ -364,16 +365,17 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `run.status` | `tiller status` (or the tailer on a hook-less host) | run active | `runs.last_status_line`, `observations`, `outbox` (one `wake` to the supervisor) | `run.status`, `outbox.enqueued` |
 | `run.pause` | worker status line | run active; date parses | `runs.pause_until` | `run.paused` |
 | `run.reown` | reconcile | orchestrator session for the project is live and differs | `runs.supervisor_session_id` | `run.reowned` |
-| `run.end` | `tiller done`, reconcile, `card.cancel` | run active; for `tiller done`: no unlanded commits unknown (P51) | `runs.ended_at`, `outcome`; `reservations.released_at` | `run.ended`, `reservation.released` |
+| `session.resume` | daemon (reconcile) | session dead or host rebooted; worktree or checkout exists; floors pass; rate limit | launches `claude --resume`; on a `SessionStart` with the same id the row continues, with a fresh id the old row is ended in the transaction that inserts the new one | `session.resume_attempted`, then `session.resumed` or `session.ended` plus `session.started` |
+| `run.end` | `tiller done`, reconcile, `card.cancel`, `approval.finish` | run active; for `tiller done`: `unlanded_commits` not unknown (P51); outcome `landed` only from `approval.finish` or a confirmed outside merge (recovery.md R07, R13) | `runs.ended_at`, `outcome`; `reservations.released_at` | `run.ended`, `reservation.released` |
 | `run.relaunch` | `tiller agent relaunch` | run active or just ended; worktree exists; note given (P24) | `runs` (new attempt with `predecessor_run_id`) or `sessions` (new session on the same run); outbox note | `run.relaunched`, `session.started` |
 | `run.clean` | daemon cleanup after `tiller done`, `tiller run clean` | run ended; `worktrees.unlanded_commits = 0` and fresh; pane process not alive or pane closed | `worktrees.gone_at`, `panes.gone_at` | `run.cleaned` |
 | `observation.record` | `tiller hook`, tailer, pollers | none (append) | `observations`; `sessions.activity*` when newer | `observation.recorded` (only when the verdict changed; raw rows are not events) |
 | `pr.link` | worker (`tiller pr link`), reconcile | run active or card open | `prs` | `pr.linked` |
-| `pr.refresh` | daemon poller | PR exists | `prs` cache columns; `approvals.state = stale` when `accepted` and the head moved | `pr.changed` (only on a change), `approval.stale` |
+| `pr.refresh` | daemon poller | PR exists | `prs` cache columns; `approvals.state = stale` for every `requested` or `accepted` approval on the PR when the head moved or the PR closed or merged | `pr.changed` (only on a change), `approval.stale` |
 | `approval.request` | orchestrator, daemon (PR green, no grant) | card open; binding complete; no open approval with the same binding | `approvals` (`requested`), `attention` (`merge`) | `approval.requested`, `attention.opened` |
 | `approval.decide` | board, `tiller approve`, grant match | approval `requested`; key new or identical; binding still matches the cache | `approvals` (`accepted` or `rejected`), `attention` answered | `approval.decided`, `attention.answered` |
 | `approval.execute` | daemon only | `accepted`; head re-read from the forge equals `head_sha`; one at a time per PR | `approvals` (`executing`) | `approval.executing` |
-| `approval.finish` | daemon only | `executing` | `approvals` (`succeeded`, `failed`, `uncertain`); on success `card.close landed`, `dep.release` for dependants, `obligations.met` | `approval.finished`, `card.closed`, `dep.released`, `obligation.met` |
+| `approval.finish` | daemon only | `executing`, or `uncertain` resolved by reconcile (recovery.md R08) | `approvals` (`succeeded`, `failed`, `uncertain`); on success `run.end landed` for the card's active runs, `card.close landed`, `dep.release` for dependants, `obligations.met` | `approval.finished`, `run.ended`, `card.closed`, `dep.released`, `obligation.met` |
 | `grant.create` | owner only (T1.4) | project exists; conditions valid for the kind | `grants` | `grant.created` |
 | `grant.revoke` | owner; daemon on expiry or `away.end` | grant not revoked | `grants.revoked_at`, `revoke_reason`; `accepted` approvals from it not yet executing become `stale` | `grant.revoked`, `approval.stale` |
 | `away.start` | owner only (T1.4) | no active `away` approval; scope valid | `approvals` (kind `away`, `accepted`, decided by `owner`); temporary `grants` when the scope asks | `approval.decided`, `grant.created` |
@@ -385,6 +387,7 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `outbox.deliver` | daemon | `pending` or `delivered` (re-ring); pane hosts the target session | `outbox` (`delivered`, `attempts`) | `outbox.delivered` |
 | `outbox.ack` | `tiller inbox <id>` in the target session, or its `UserPromptSubmit` hook on the wake-up line | `delivered` (or `pending`, when the session found it by polling) | `outbox` (`acked`) | `outbox.acked` |
 | `outbox.fail` | daemon | attempts exhausted or target gone with no successor | `outbox` (`failed`) | `outbox.failed`; a `recovery` attention item when the message was an answer |
+| `outbox.retarget` | daemon | target session ended; a successor session exists for the same run or project | `outbox.target_session_id`, `target_pane_id` | `outbox.retargeted` |
 | `obligation.open` | orchestrator | card open | `obligations` | `obligation.opened` |
 | `obligation.cancel` | orchestrator, owner | obligation `open` | `obligations.state` | `obligation.cancelled` |
 | `obligation.meet` | reconcile | trigger event written in this transaction | `obligations.met*`, `outbox` | `obligation.met`, `outbox.enqueued` |
@@ -392,6 +395,9 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `review.record` | worker, daemon | run exists | `reviews` | `review.recorded` |
 | `handoff.write` | orchestrator | session live | `handoffs` | `handoff.written` |
 | `cache.refresh` | pollers | none | `panes`, `worktrees`, `quota_windows`, `hosts.last_seen_at` | `host.changed`, `pane.changed`, `worktree.changed`, `quota.changed` only on a change |
+| `reservation.release` | reconcile | reservation open; its run ended or missing | `reservations.released_at` (`reconciled`) | `reservation.released` |
+| `daemon.start`, `daemon.stop` | daemon | single-instance lock held | `meta.boot_id` (written last in a reboot restore); `approvals` `executing` to `uncertain` at start | `daemon.started` (with tool versions), `daemon.stopped`; `host.degraded` and `host.recovered` from the host checks |
+| `guard.breach` | reconcile, `tiller land` | a breach detected per authority.md section 11 or recovery.md R19 | nothing but the event | `guard.breached` |
 | `project.add`, `project.edit`, `project.retire` | owner | id free (add); `expected_rev` matches (edit); no open card (retire) | `projects` | `project.added`, `project.edited`, `project.retired` |
 | `host.add`, `host.edit` | owner | label free (add); `expected_rev` matches (edit) | `hosts` | `host.added`, `host.edited` |
 | `config.set` | owner | key known; value valid | the config file, outside `state.db` | `config.changed` |
