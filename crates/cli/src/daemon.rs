@@ -1,9 +1,13 @@
-//! Placeholder daemon: serves the embedded board on localhost.
-//! The real daemon (pollers, reconcile, API) arrives with its own crate.
+//! Placeholder daemon: serves the embedded board on localhost and runs the
+//! land loop under the single-instance lock. The real daemon (pollers,
+//! reconcile, API) arrives with its own crate.
 
 use std::borrow::Cow;
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr};
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Context;
 use axum::Router;
@@ -13,6 +17,10 @@ use axum::http::{Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
+use tiller_agents::land::forge::{GhForge, NoApp};
+use tiller_agents::land::scrub::ScrubList;
+use tiller_agents::land::{DaemonLock, Landed, Lander};
+use tiller_core::Store;
 
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 
@@ -30,6 +38,13 @@ pub struct Args {
 struct Board;
 
 pub fn run(args: &Args) -> anyhow::Result<()> {
+    let home = crate::app::App::from_env(None).home;
+    // Only the holder of the single-instance lock lands (G01). A home with no
+    // `state.db` has nothing to land, and the daemon does not create one.
+    if home.join("state.db").exists() {
+        let lock = DaemonLock::acquire(&home).context("take the daemon lock")?;
+        spawn_lander(home, lock);
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -51,6 +66,64 @@ async fn serve(port: u16) -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown())
         .await
         .context("serve")
+}
+
+/// How often the daemon matches grants and lands accepted approvals.
+const LAND_EVERY: Duration = Duration::from_secs(15);
+
+/// The land loop (`authority.md` section 6): each pass matches standing
+/// grants, then lands every accepted approval. A pass that fails is logged
+/// and the next one tries again.
+fn spawn_lander(home: PathBuf, lock: DaemonLock) {
+    std::thread::spawn(move || {
+        let forge = GhForge::default();
+        loop {
+            if let Err(error) = land_pass(&home, &lock, &forge) {
+                eprintln!("tiller daemon: land pass: {error:#}");
+            }
+            std::thread::sleep(LAND_EVERY);
+        }
+    });
+}
+
+fn land_pass(home: &Path, lock: &DaemonLock, forge: &GhForge) -> anyhow::Result<()> {
+    let mut store = Store::open(home.join("state.db"))?;
+    // The host's private names as SHA-256 hashes, plus the optional
+    // plain-text extra list `scripts/scrub-check.sh` also reads, kept outside
+    // any repo (`memory.md` section 8).
+    let mut terms = std::fs::read_to_string(home.join("scrub-terms.sha256")).unwrap_or_default();
+    if let Some(extra) = std::env::var_os("TILLER_SCRUB_TERMS") {
+        terms.push('\n');
+        terms.push_str(&std::fs::read_to_string(extra).unwrap_or_default());
+    }
+    let scrub = ScrubList::parse(&terms);
+    let lander = Lander {
+        forge,
+        app: &NoApp,
+        scrub,
+    };
+    // One PR or approval that errors is logged and skipped; the rest of the
+    // pass goes on, and a grant pass that fails does not hold up landing.
+    match lander.match_grants(lock, &mut store) {
+        Ok(matched) => {
+            for (pr, error) in matched.errors {
+                eprintln!("tiller daemon: grant match on PR {pr}: {error}");
+            }
+        }
+        Err(error) => eprintln!("tiller daemon: grant pass: {error}"),
+    }
+    for landed in lander.land_ready(lock, &mut store)? {
+        match &landed {
+            Landed::Waiting { approval, why } => {
+                eprintln!("tiller daemon: approval {} waits: {why}", approval.id);
+            }
+            Landed::Errored { approval, error } => {
+                eprintln!("tiller daemon: approval {}: {error}", approval.id);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Resolves on SIGINT or SIGTERM, the signal launchd and systemd send on stop.

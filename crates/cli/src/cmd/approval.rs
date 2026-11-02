@@ -3,12 +3,14 @@
 
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
+use tiller_agents::land::DaemonLock;
 use tiller_core::domain::{
-    AnsweredVia, Approval, ApprovalAction, ApprovalKind, GrantKind, Pr, Role, Run, Worktree,
+    AnsweredVia, Approval, ApprovalAction, ApprovalKind, ApprovalState, GrantKind, Pr, Role, Run,
+    Worktree,
 };
 use tiller_core::state::approvals::{Decision, NewApproval, NewGrant};
 use tiller_core::state::{find, get, list, resolve_card, resolve_id};
-use tiller_core::{Actor, Ctx};
+use tiller_core::{Actor, Ctx, Store};
 
 use super::KeyArg;
 use super::attention::chat_ask;
@@ -53,6 +55,10 @@ pub struct Approve {
 #[derive(Args, Debug)]
 pub struct Land {
     pub approval: String,
+    /// Seconds to wait for the daemon before giving up (the approval stays
+    /// accepted and the daemon keeps trying)
+    #[arg(long, hide = true, default_value_t = LAND_WAIT_SECS)]
+    pub wait: u64,
 }
 
 #[derive(Subcommand, Debug)]
@@ -229,6 +235,7 @@ pub fn approve(app: &App, args: Approve) -> Done {
             AnsweredVia::Cli
         },
         memory: Vec::new(),
+        ask_id: None,
     };
     let (ctx, cited) = match &args.ask {
         None => {
@@ -260,6 +267,10 @@ pub fn approve(app: &App, args: Approve) -> Done {
             (Ctx::new(Actor::Owner), Some(ask))
         }
     };
+    let decision = Decision {
+        ask_id: cited.as_ref().map(|ask| ask.id.clone()),
+        ..decision
+    };
     let applied = store.approval_decide(&ctx, Some(&keyed.key), &id, decision)?;
     Ok(Outcome::applied_as(applied, |decided| {
         json!({
@@ -272,12 +283,119 @@ pub fn approve(app: &App, args: Approve) -> Done {
     .with_help("land it with: tiller land <approval>"))
 }
 
-pub fn land(_app: &App, args: Land) -> Done {
-    Err(Failure::unavailable(format!(
-        "tiller land {} needs the daemon, and the daemon is not running",
-        args.approval
-    ))
-    .hint("the owner asks the daemon to land; start it with: tiller daemon"))
+/// `tiller land`: the owner asks the daemon to land and waits for the result.
+/// It never merges in this process; the daemon lands every `accepted`
+/// approval on its own, so asking is waiting while the daemon holds its lock
+/// (`authority.md` section 6, G01).
+pub fn land(app: &App, args: Land) -> Done {
+    app.require_owner("tiller land")?;
+    let store = app.read()?;
+    let id = resolve_id(store.conn(), "approvals", "approval", &args.approval)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(args.wait);
+    let mut shown = std::collections::HashSet::new();
+    loop {
+        let approval: Approval = get(store.conn(), "approval", &id)?;
+        match approval.state {
+            ApprovalState::Succeeded => {
+                return Ok(Outcome::read(json!({"approval": approval})));
+            }
+            ApprovalState::Accepted | ApprovalState::Executing => {
+                if !DaemonLock::held(&app.home) {
+                    return Err(Failure::unavailable(format!(
+                        "tiller land {} needs the daemon, and the daemon is not running",
+                        approval.id
+                    ))
+                    .hint("start it with: tiller daemon; the approval stays accepted"));
+                }
+                // What the daemon waits on, said once each on stderr (stdout
+                // carries only the response).
+                let notices = land_notices(&store, &approval.id)?;
+                for (attention, question) in &notices {
+                    if shown.insert(attention.clone()) {
+                        eprintln!("tiller land: waiting: {question} (attention {attention})");
+                    }
+                }
+                if std::time::Instant::now() >= deadline {
+                    let mut failure = Failure::unavailable(format!(
+                        "approval {} is still {} after {} s; the daemon keeps trying",
+                        approval.id, approval.state, args.wait
+                    ))
+                    .hint(if notices.is_empty() {
+                        format!("run tiller land {} again later", approval.id)
+                    } else {
+                        "answer the open attention notices; the daemon lands it after".to_owned()
+                    });
+                    failure.current = Some(json!({
+                        "approval": approval,
+                        "waiting_on": notices
+                            .iter()
+                            .map(|(id, question)| json!({"attention": id, "question": question}))
+                            .collect::<Vec<_>>(),
+                    }));
+                    return Err(failure);
+                }
+                std::thread::sleep(LAND_POLL);
+            }
+            ApprovalState::Uncertain => {
+                return Err(Failure::new(
+                    "uncertain",
+                    8,
+                    format!(
+                        "the land of {} was sent and its result could not be read",
+                        approval.id
+                    ),
+                )
+                .hint("reconcile resolves it from the forge; it is never retried blind"));
+            }
+            ApprovalState::Requested => {
+                return Err(Failure::refused(format!(
+                    "approval {} is requested; approve it first",
+                    approval.id
+                ))
+                .hint(format!("tiller approve {}", approval.id)));
+            }
+            other => {
+                let why = approval
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.get("error"))
+                    .and_then(Value::as_str)
+                    .map(|error| format!(": {error}"))
+                    .unwrap_or_default();
+                return Err(Failure::refused(format!(
+                    "approval {} is {other}{why}",
+                    approval.id
+                )));
+            }
+        }
+    }
+}
+
+/// How often `tiller land` re-reads the approval while the daemon works.
+const LAND_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How long `tiller land` waits for the daemon: CI on a large PR, but not
+/// forever on a notice only the owner can answer.
+const LAND_WAIT_SECS: u64 = 30 * 60;
+
+/// The open notices the land sequence raised for `approval` (the scrub, a
+/// missing App, failed checks): what the daemon waits on.
+fn land_notices(store: &Store, approval: &str) -> Result<Vec<(String, String)>, Failure> {
+    let mut statement = store
+        .conn()
+        .prepare(
+            "SELECT id, question FROM attention
+             WHERE kind = 'merge' AND answered_at IS NULL AND withdrawn_at IS NULL
+               AND json_valid(evidence) AND json_extract(evidence, '$.approval_id') = ?1
+             ORDER BY opened_at, id",
+        )
+        .map_err(tiller_core::Error::from)?;
+    let rows = statement
+        .query_map([approval], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(tiller_core::Error::from)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(tiller_core::Error::from)?;
+    Ok(rows)
 }
 
 pub fn run_grant(app: &App, cmd: Grant) -> Done {

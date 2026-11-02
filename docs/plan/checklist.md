@@ -320,10 +320,10 @@ about 3 min of the developer's time
 ### T4.3 Guards and landing
 `opus` high - 3-4 h - after T1.4 and T2.1
 
-- [ ] PreToolUse backstop hooks and deny rules from `authority.md`
-- [ ] `tiller land`, daemon only, merges after a bound approval, rechecks the head SHA just before merging
-- [ ] Check: every alternate path tested, blocked or documented as convention
-- [ ] Check: a push after approval invalidates the approval
+- [x] PreToolUse backstop hooks and deny rules from `authority.md`
+- [x] `tiller land`, daemon only, merges after a bound approval, rechecks the head SHA just before merging
+- [x] Check: every alternate path tested, blocked or documented as convention
+- [x] Check: a push after approval invalidates the approval
 - [ ] Delivered
 
 ### T4.4 Intake wiring

@@ -77,6 +77,9 @@ pub struct Decision {
     pub via: AnsweredVia,
     /// Required to accept an approval with `memory_paths`, one per source.
     pub memory: Vec<MemoryBinding>,
+    /// The hook-recorded ask a chat decision cites (G06), recorded in the
+    /// `approval.decided` event.
+    pub ask_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -654,7 +657,12 @@ impl Store {
                 NewEvent::new("approval", &approval.id, "approval.decided")
                     .rev(approval.rev + 1)
                     .card_opt(approval.card_id.clone())
-                    .payload(json!({"accepted": decision.accept, "decided_by": "owner", "via": by})),
+                    .payload(json!({
+                        "accepted": decision.accept,
+                        "decided_by": "owner",
+                        "via": by,
+                        "ask_id": decision.ask_id,
+                    })),
             )?;
             let mut memory_approvals = Vec::new();
             if decision.accept {
@@ -746,6 +754,28 @@ impl Store {
                     .payload(json!({"head_sha": forge_head})),
             )?;
             Ok(Execution::Executing(get(tx.conn(), "approval", &approval.id)?))
+        })
+    }
+
+    /// `approval.stale` (daemon only): the land sequence re-read the forge and
+    /// the binding no longer holds for a reason `pr.refresh` does not see:
+    /// checks failed, the PR closed, a grant condition stopped holding
+    /// (`authority.md` section 6, steps 2 and 3). Natural: a stale approval
+    /// is returned.
+    pub fn approval_stale(
+        &mut self,
+        ctx: &Ctx,
+        approval: &str,
+        why: &str,
+    ) -> Result<Applied<Approval>> {
+        require_daemon(&ctx.actor, "approval.stale")?;
+        required("reason", why)?;
+        self.write(ctx, "approval.stale", None, |tx| {
+            let approval = load(tx, approval)?;
+            if approval.state == ApprovalState::Stale {
+                return Ok(approval);
+            }
+            mark_stale(tx, &approval, why)
         })
     }
 

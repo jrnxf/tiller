@@ -37,7 +37,6 @@
       "Bash(herdr *)",
       "Bash(claude *)",
       "Bash(npx *claude-code*)",
-      "Bash(tiller approve *)",
       "Bash(tiller grant *)",
       "Bash(tiller away *)",
       "Bash(tiller land *)",
@@ -110,7 +109,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "<tiller> guard pretool --role orchestrator"
+            "command": "<tiller> guard pretool --role orchestrator --checkouts '<checkouts>' --pool '<pool>'"
           }
         ]
       }

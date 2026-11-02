@@ -1,6 +1,7 @@
 mod app;
 mod cmd;
 mod daemon;
+mod guard;
 mod hook;
 mod lisbon;
 mod toon;
@@ -140,6 +141,9 @@ enum Command {
     Daemon(daemon::Args),
     /// Record a Claude Code hook event (reads the hook input on stdin)
     Hook(hook::Args),
+    /// The PreToolUse backstop for fleet sessions
+    #[command(subcommand)]
+    Guard(guard::Cmd),
 }
 
 #[derive(Subcommand)]
@@ -192,10 +196,10 @@ fn dispatch(app: &App, command: Command) -> Done {
         Command::Migrate(cmd) => backup::migrate(app, cmd),
         Command::Import(args) => import::import(app, args),
         Command::Doctor => later::doctor(app),
-        Command::Daemon(_) | Command::Hook(_) => Err(Failure::new(
+        Command::Daemon(_) | Command::Hook(_) | Command::Guard(_) => Err(Failure::new(
             "internal",
             1,
-            "daemon and hook are run before dispatch",
+            "daemon, hook and guard are run before dispatch",
         )),
     }
 }
@@ -222,6 +226,13 @@ fn main() -> ExitCode {
             ) {
                 error.exit();
             }
+            // Claude Code reads exit 2 from a hook as a deny, so a broken
+            // hook or guard command line must not block every tool call: it
+            // allows, as a broken hook does, and the deny rules and the
+            // sandbox still hold (`authority.md` section 9).
+            if matches!(std::env::args().nth(1).as_deref(), Some("hook" | "guard")) {
+                return ExitCode::SUCCESS;
+            }
             let json = std::env::args().any(|arg| arg == "--json");
             let rendered = error.render().to_string();
             eprint!("{rendered}");
@@ -240,6 +251,10 @@ fn main() -> ExitCode {
     if let Command::Hook(args) = &cli.command {
         hook::run(args);
         return ExitCode::SUCCESS;
+    }
+    // The guard answers in the hook transport, never the response path.
+    if let Command::Guard(cmd) = &cli.command {
+        return guard::run(cmd);
     }
     if let Command::Daemon(args) = &cli.command {
         return match daemon::run(args) {

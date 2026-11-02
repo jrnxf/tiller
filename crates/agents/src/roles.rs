@@ -259,7 +259,12 @@ impl Placeholders {
             let ok = if placeholder == "<default>" {
                 !value.is_empty() && !value.contains(char::is_whitespace)
             } else {
-                value.starts_with('/') && value.len() > 1 && !value.ends_with('/')
+                // The guard command quotes the orchestrator's roots, so a
+                // path may hold a space but not a quote.
+                value.starts_with('/')
+                    && value.len() > 1
+                    && !value.ends_with('/')
+                    && !value.contains(['\'', '"', '\\'])
             };
             if !ok {
                 return Err(RoleError::InvalidPlaceholder {
@@ -268,7 +273,7 @@ impl Placeholders {
                     requirement: if placeholder == "<default>" {
                         "a branch name"
                     } else {
-                        "an absolute path without a trailing slash"
+                        "an absolute path without a trailing slash or a quote"
                     },
                     value: value.to_string(),
                 });
@@ -566,6 +571,31 @@ mod tests {
     /// body gets a third of it, at the usual four bytes per token.
     const ROLE_TOKEN_BUDGET: usize = 2_500;
 
+    /// The common deny list as `role` carries it: the orchestrator alone may
+    /// run the chat approval form `tiller approve <id> --ask <ask>`, so its
+    /// list leaves out `Bash(tiller approve *)` and the backstop denies every
+    /// other approve form (CP2 decision on G06, `authority.md` section 8).
+    fn common_deny(role: Role) -> Vec<&'static str> {
+        COMMON_DENY
+            .iter()
+            .copied()
+            .filter(|rule| role != Role::Orchestrator || *rule != "Bash(tiller approve *)")
+            .collect()
+    }
+
+    /// The PreToolUse command; the orchestrator's guard also gets the roots
+    /// its persistent-cd rule protects.
+    fn guard_command(tiller: &str, role: Role, checkouts: &str, pool: &str) -> String {
+        match role {
+            Role::Orchestrator => {
+                format!(
+                    "{tiller} guard pretool --role {role} --checkouts '{checkouts}' --pool '{pool}'"
+                )
+            }
+            _ => format!("{tiller} guard pretool --role {role}"),
+        }
+    }
+
     fn template(role: Role) -> Value {
         serde_json::from_str(role.settings_template()).unwrap()
     }
@@ -788,17 +818,14 @@ mod tests {
         for role in Role::ALL {
             let t = template(role);
             let deny = strings(&t["permissions"]["deny"]);
+            let common = common_deny(role);
             assert!(
-                deny.len() >= COMMON_DENY.len(),
+                deny.len() >= common.len(),
                 "{role}: {} deny rules, common list has {}",
                 deny.len(),
-                COMMON_DENY.len()
+                common.len()
             );
-            assert_eq!(
-                &deny[..COMMON_DENY.len()],
-                COMMON_DENY,
-                "{role}: common deny list"
-            );
+            assert_eq!(&deny[..common.len()], common, "{role}: common deny list");
         }
     }
 
@@ -818,7 +845,7 @@ mod tests {
             );
             let deny = strings(&t["permissions"]["deny"]);
             assert_eq!(
-                &deny[COMMON_DENY.len()..],
+                &deny[common_deny(role).len()..],
                 row.extra_deny,
                 "{role}: extra deny"
             );
@@ -941,7 +968,7 @@ mod tests {
             assert_eq!(guard["matcher"], ".*", "{role}: guard matcher");
             assert_eq!(
                 guard["hooks"][0]["command"],
-                format!("<tiller> guard pretool --role {role}"),
+                guard_command("<tiller>", role, "<checkouts>", "<pool>"),
                 "{role}: guard command"
             );
         }
@@ -967,7 +994,12 @@ mod tests {
             let hooks = &rendered["hooks"];
             assert_eq!(
                 hooks["PreToolUse"][0]["hooks"][0]["command"],
-                format!("/nix/store/abc-tiller-0.1.0/bin/tiller guard pretool --role {role}")
+                guard_command(
+                    "/nix/store/abc-tiller-0.1.0/bin/tiller",
+                    role,
+                    "/home/user/checkouts",
+                    "/home/user/pool"
+                )
             );
             assert_eq!(
                 strings(&rendered["sandbox"]["network"]["allowedDomains"]),
@@ -1064,10 +1096,32 @@ mod tests {
             Err(RoleError::InvalidPlaceholder {
                 role: Role::Orchestrator,
                 placeholder: "<home>",
-                requirement: "an absolute path without a trailing slash",
+                requirement: "an absolute path without a trailing slash or a quote",
                 value: String::new(),
             })
         );
+        // The guard command quotes the roots: a space renders, a quote not.
+        let mut spaced = sample_fill(Role::Orchestrator);
+        spaced.checkouts = "/home/user/my checkouts".into();
+        let rendered = render_settings(Role::Orchestrator, &spaced).unwrap();
+        assert_eq!(
+            rendered["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            guard_command(
+                "/nix/store/abc-tiller-0.1.0/bin/tiller",
+                Role::Orchestrator,
+                "/home/user/my checkouts",
+                "/home/user/pool"
+            )
+        );
+        let mut quoted = sample_fill(Role::Orchestrator);
+        quoted.pool = "/home/user/it's".into();
+        assert!(matches!(
+            render_settings(Role::Orchestrator, &quoted),
+            Err(RoleError::InvalidPlaceholder {
+                placeholder: "<pool>",
+                ..
+            })
+        ));
         let mut relative = sample_fill(Role::Builder);
         relative.worktree = "pool/3/alpha".into();
         assert!(matches!(

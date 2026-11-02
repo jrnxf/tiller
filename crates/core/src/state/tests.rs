@@ -899,6 +899,7 @@ fn accept() -> Decision {
         accept: true,
         via: AnsweredVia::Board,
         memory: Vec::new(),
+        ask_id: None,
     }
 }
 

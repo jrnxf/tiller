@@ -5,7 +5,7 @@ exit: 7
 {
   "error": {
     "code": "unavailable",
-    "hint": "the owner asks the daemon to land; start it with: tiller daemon",
+    "hint": "start it with: tiller daemon; the approval stays accepted",
     "message": "tiller land <id59> needs the daemon, and the daemon is not running"
   },
   "ok": false

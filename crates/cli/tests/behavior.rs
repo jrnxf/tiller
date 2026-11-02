@@ -116,8 +116,22 @@ fn chat_approval_needs_a_newer_prompt_from_the_calling_orchestrator() {
     assert_eq!(out.data()["approval"]["state"], "accepted");
     assert_eq!(out.data()["approval"]["decided_by"], "owner");
     assert_eq!(out.data()["quoted_ask"]["text"], "yes, merge alpha-1");
+    // The decided event names the ask it cites.
+    let cited: String = world
+        .store()
+        .conn()
+        .query_row(
+            "SELECT json_extract(payload, '$.ask_id') FROM events
+             WHERE kind = 'approval.decided' ORDER BY seq DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cited, newer);
 
-    // Without --ask, a session is not the owner.
+    // Without --ask, a session is not the owner. The backstop denies this
+    // form before it runs (`agents::guards` test
+    // `orchestrator_bare_approve_is_denied`); this is the second layer.
     let again = world.run_as(&orchestrator, &["approve", &approval]);
     assert_eq!((again.code, again.error_code()), (6, "forbidden"));
 }
