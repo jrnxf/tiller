@@ -177,6 +177,14 @@ test("a project with no cards says so", async () => {
   expect(screen.getAllByText("No cards yet")).toHaveLength(3);
 });
 
+test("with no agents running the Agents screen says so, not that projects are hidden", async () => {
+  stubApi("empty");
+  await renderApp("empty", "/agents");
+  const empty = screen.getByTestId("agents-empty");
+  expect(empty.textContent).toContain("No agents running");
+  expect(screen.queryByText("No projects shown")).toBeNull();
+});
+
 test("with every project hidden the board says why and one click brings them back", async () => {
   stubApi("default");
   updatePrefs({ hiddenProjects: ["alpha", "beta", "gamma"] });

@@ -1,4 +1,4 @@
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import type { CSSProperties } from "react";
 
 import { projectColor } from "../../lib/project-color";
@@ -17,7 +17,9 @@ const VIEWS: { value: ViewKnob; label: string }[] = [
 export function ProjectsSection({ activeHost }: { activeHost: string | undefined }) {
   const { data: projects } = useSuspenseQuery(projectsQuery());
   const { data: board } = useSuspenseQuery(boardQuery());
-  const { data: attention } = useSuspenseQuery(attentionQuery());
+  // Attention only marks the projects that need you; the Inbox says when it
+  // failed.
+  const attention = useQuery(attentionQuery()).data;
   const prefs = useStore(prefsStore);
 
   const shown = visibleProjects(prefs, projects.projects);
@@ -28,7 +30,7 @@ export function ProjectsSection({ activeHost }: { activeHost: string | undefined
   const onHost = projectsOnHost(board.rows, activeHost);
   const projectOfCard = new Map(board.rows.map((row) => [row.id, row.project_id]));
   const needsYou = new Set<string>();
-  for (const item of attention.items) {
+  for (const item of attention?.items ?? []) {
     const project = projectOfCard.get(item.card_id);
     if (project) needsYou.add(project);
   }
@@ -39,7 +41,9 @@ export function ProjectsSection({ activeHost }: { activeHost: string | undefined
       : "No projects yet."
     : subset
       ? `Showing ${shown.length} of ${projects.projects.length} projects. Hidden ones keep running.`
-      : `Showing all ${projects.projects.length} projects at once.`;
+      : projects.projects.length === 1
+        ? "Showing the one project."
+        : `Showing all ${projects.projects.length} projects at once.`;
 
   return (
     <>

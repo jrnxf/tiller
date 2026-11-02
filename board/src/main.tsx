@@ -4,28 +4,15 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import "./styles.css";
-import type { Snapshot } from "./lib/api-types";
-import { hydrateFromSnapshot, readBootSnapshot } from "./lib/boot";
-import { fetchJson } from "./lib/queries";
+import { SetupScreen } from "./components/states/setup-screen";
+import { hydrateFromSnapshot, loadBoot } from "./lib/boot";
 import { createQueryClient } from "./lib/query-client";
 import { createAppRouter } from "./lib/router";
-import { SNAPSHOT_PATH, connectEvents } from "./lib/sse";
+import { connectEvents } from "./lib/sse";
 
 const root = document.getElementById("root");
 if (!root) {
   throw new Error("missing #root element");
-}
-
-// The daemon inlines the snapshot, so this is synchronous. Without it (a dev
-// server that is not the daemon) fetch one before the first render.
-async function loadSnapshot(): Promise<Snapshot | null> {
-  const inlined = readBootSnapshot();
-  if (inlined) return inlined;
-  try {
-    return await fetchJson<Snapshot>(SNAPSHOT_PATH);
-  } catch {
-    return null;
-  }
 }
 
 // The first paint has to use the real font, or the text re-flows when it
@@ -44,21 +31,34 @@ async function fontReady(): Promise<void> {
   }
 }
 
-const queryClient = createQueryClient();
-const snapshot = await loadSnapshot();
-const lastEventSeq = snapshot ? hydrateFromSnapshot(queryClient, snapshot) : null;
+// The daemon inlines the snapshot, so this is synchronous. Without it (a dev
+// server that is not the daemon, or a machine nobody has set up) it asks.
+const [boot] = await Promise.all([loadBoot(), fontReady()]);
 
-const router = createAppRouter(queryClient);
-// Load the first route before rendering, so the first paint is the finished
-// screen and not a frame of nothing.
-await Promise.all([router.load(), fontReady()]);
+if (boot.kind === "setup") {
+  // Once `tiller init` has run, the daemon inlines a snapshot: a reload is the
+  // ordinary first load.
+  createRoot(root).render(
+    <StrictMode>
+      <SetupScreen command={boot.command} onReady={() => window.location.reload()} />
+    </StrictMode>,
+  );
+} else {
+  const queryClient = createQueryClient();
+  const lastEventSeq = boot.snapshot ? hydrateFromSnapshot(queryClient, boot.snapshot) : null;
 
-createRoot(root).render(
-  <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
-    </QueryClientProvider>
-  </StrictMode>,
-);
+  const router = createAppRouter(queryClient);
+  // Load the first route before rendering, so the first paint is the finished
+  // screen and not a frame of nothing.
+  await router.load();
 
-connectEvents({ queryClient, lastEventSeq });
+  createRoot(root).render(
+    <StrictMode>
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>
+    </StrictMode>,
+  );
+
+  connectEvents({ queryClient, lastEventSeq });
+}

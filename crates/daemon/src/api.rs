@@ -188,8 +188,15 @@ impl IntoResponse for ApiError {
 
 type ApiResult<T> = Result<Json<T>, ApiError>;
 
-fn uninitialized() -> Error {
-    Error::Unavailable("state.db is not initialized; run tiller init".into())
+/// The command that makes `state.db`, named in every answer before it exists.
+pub const INIT_HINT: &str = "tiller init --host-label <label> --lane-capacity <n>";
+
+/// The 503 every read and write answers before `tiller init`.
+fn uninitialized() -> ApiError {
+    ApiError::from(Error::Unavailable(
+        "state.db is not initialized; run tiller init".into(),
+    ))
+    .hint(INIT_HINT)
 }
 
 /// Runs `read` on the blocking pool against a fresh read connection.
@@ -203,11 +210,11 @@ async fn read<T: Send + 'static>(
             return Err(uninitialized());
         }
         let store = Store::open_current(&db)?;
-        read(&store)
+        Ok(read(&store)?)
     })
     .await;
     match joined {
-        Ok(result) => result.map_err(ApiError::from),
+        Ok(result) => result,
         Err(error) => Err(Error::Internal(error.to_string()).into()),
     }
 }
@@ -312,7 +319,7 @@ async fn mutate(
         }
         let mut store = Store::open_current(&db)?;
         let ctx = Ctx::new(Actor::Board).with_key(key.clone());
-        mutation(&mut store, &ctx, &key)
+        Ok(mutation(&mut store, &ctx, &key)?)
     })
     .await;
     let done = match joined {
@@ -647,7 +654,7 @@ async fn events(
     Query(query): Query<EventsQuery>,
 ) -> Response {
     if !state.db().exists() {
-        return ApiError::from(uninitialized()).into_response();
+        return uninitialized().into_response();
     }
     let last = headers.get("last-event-id").and_then(|v| v.to_str().ok());
     let after = sse::start(last, query.since);
@@ -1369,10 +1376,15 @@ mod tests {
         let health: Value = serde_json::from_str(&health.body).unwrap();
         assert_eq!(health["initialized"], false);
         assert_eq!(health["ok"], false);
-        assert_eq!(
-            get(&app, "/api/v1/board").await.status,
-            StatusCode::SERVICE_UNAVAILABLE
-        );
+        // Every read says how to make the database, so whoever meets the 503
+        // (the board's setup screen, a curl) knows the next step.
+        for path in ["/api/v1/board", "/api/v1/agents", "/api/v1/events"] {
+            let read = get(&app, path).await;
+            assert_eq!(read.status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            let body: Value = serde_json::from_str(&read.body).unwrap();
+            assert_eq!(body["error"]["code"], "unavailable", "{path}");
+            assert_eq!(body["error"]["hint"], INIT_HINT, "{path}");
+        }
         // The shell still boots, without a snapshot.
         let root = get(&app, "/").await;
         assert_eq!(root.status, StatusCode::OK);

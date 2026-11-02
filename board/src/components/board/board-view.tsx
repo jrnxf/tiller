@@ -1,4 +1,4 @@
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, RefObject } from "react";
@@ -12,6 +12,7 @@ import { useStore } from "../../lib/store";
 import { boardLookStore, toggleDoneFolded } from "./board-prefs";
 import { ChevronLeftIcon, Status } from "./icons";
 import { laneHealth } from "../states/degraded";
+import { SECTION_RETRY_MS, SectionNote, failureReason } from "../states/section";
 import { Lane } from "./lane";
 import { COLUMNS, onHost, passesFilter, tilesOf } from "./model";
 import type { ColumnId, Tile } from "./model";
@@ -133,7 +134,13 @@ export function BoardView({ host, filter }: { host: string | undefined; filter: 
   const frame = useRef<HTMLDivElement>(null);
   const { data: board } = useSuspenseQuery(boardQuery());
   const { data: projects } = useSuspenseQuery(projectsQuery());
-  const { data: agents } = useSuspenseQuery(agentsQuery());
+  // Agents only add each lane's orchestrator and its health: when they cannot
+  // be read the cards still show, with a note, and the read retries.
+  const agentsRead = useQuery({
+    ...agentsQuery(),
+    refetchInterval: (query) => (query.state.status === "error" ? SECTION_RETRY_MS : false),
+  });
+  const orchestrators = agentsRead.data?.orchestrators ?? [];
   const { data: machines } = useSuspenseQuery(machinesQuery());
   const prefs = useStore(prefsStore);
   const look = useStore(boardLookStore);
@@ -184,6 +191,13 @@ export function BoardView({ host, filter }: { host: string | undefined; filter: 
 
   return (
     <div className="board-view" ref={frame}>
+      {agentsRead.isError && !agentsRead.data ? (
+        <SectionNote
+          label="Agents"
+          reason={`${failureReason(agentsRead.error)} Lanes show no orchestrator until it answers.`}
+          retry={() => void agentsRead.refetch()}
+        />
+      ) : null}
       <div
         className="board"
         style={{ "--cols": widths, "--minw": `${minWidth}px` } as CSSProperties}
@@ -233,9 +247,7 @@ export function BoardView({ host, filter }: { host: string | undefined; filter: 
           })}
         </div>
         {lanes.map((project) => {
-          const orchestrator = agents.orchestrators.find(
-            (agent) => agent.project_id === project.id,
-          );
+          const orchestrator = orchestrators.find((agent) => agent.project_id === project.id);
           const hostOfOrchestrator = machines.machines.find(
             (machine) => machine.id === orchestrator?.host_id,
           );

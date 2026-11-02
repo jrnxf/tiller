@@ -34,10 +34,47 @@ function withParams(path: QueryPath, params: Record<string, string | undefined>)
   return text ? (`${path}?${text}` as QueryPath) : path;
 }
 
+// A read the daemon refused, with its error body's message and hint when it
+// sent them (protocol.md section 7.3), so the screen can say why and what next.
+export class ReadError extends Error {
+  readonly path: string;
+  readonly status: number;
+  readonly reason: string | null;
+  readonly hint: string | null;
+
+  constructor(path: string, status: number, reason: string | null, hint: string | null = null) {
+    super(`${path} answered ${status}${reason ? `: ${reason}` : ""}`);
+    this.name = "ReadError";
+    this.path = path;
+    this.status = status;
+    this.reason = reason;
+    this.hint = hint;
+  }
+}
+
+const text = (value: unknown) => (typeof value === "string" ? value : null);
+
+async function readError(path: string, response: Response): Promise<ReadError> {
+  try {
+    const body = (await response.json()) as {
+      error?: { code?: unknown; message?: unknown; hint?: unknown };
+    };
+    // The daemon's message repeats its code ("unavailable: ..."); the reason
+    // is what follows.
+    const code = text(body.error?.code);
+    const message = text(body.error?.message);
+    const reason =
+      code && message?.startsWith(`${code}: `) ? message.slice(code.length + 2) : message;
+    return new ReadError(path, response.status, reason, text(body.error?.hint));
+  } catch {
+    return new ReadError(path, response.status, null);
+  }
+}
+
 export async function fetchJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(path, { headers: { accept: "application/json" }, signal });
   if (!response.ok) {
-    throw new Error(`${path} answered ${response.status}`);
+    throw await readError(path, response);
   }
   return (await response.json()) as T;
 }

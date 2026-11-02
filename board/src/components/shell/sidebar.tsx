@@ -6,10 +6,11 @@ import { agentsQuery, attentionQuery, boardQuery, projectsQuery } from "../../li
 import { prefsStore } from "../../lib/prefs";
 import { attentionCount, scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
+import { Section } from "../states/section";
 import { AgentsIcon, BoardIcon, InboxIcon, MemoryIcon, PulseIcon, SearchIcon } from "./icons";
 import { MachinesSection } from "./machines-section";
 import { ProjectsSection } from "./projects-section";
-import { QuotaFooter } from "./quota-footer";
+import { QuotaFooter, QuotaUnavailable } from "./quota-footer";
 
 const NAV: {
   to: "/" | "/agents" | "/inbox" | "/memory" | "/health";
@@ -23,6 +24,72 @@ const NAV: {
   { to: "/health", label: "Health", icon: <PulseIcon /> },
 ];
 
+// The ids of the projects the current view and machine filter show.
+function useShownIds(activeHost: string | undefined): Set<string> {
+  const { data: board } = useSuspenseQuery(boardQuery());
+  const { data: projects } = useSuspenseQuery(projectsQuery());
+  const prefs = useStore(prefsStore);
+  return new Set(
+    scopedProjects(prefs, projects.projects, board.rows, activeHost).map((project) => project.id),
+  );
+}
+
+// The counts beside the screen names read their own queries: one that cannot
+// be read is left out, and the screen it belongs to says why.
+function OpenCount({ activeHost }: { activeHost: string | undefined }) {
+  const { data: board } = useSuspenseQuery(boardQuery());
+  const shownIds = useShownIds(activeHost);
+  const open = board.rows.filter(
+    (row) =>
+      shownIds.has(row.project_id) &&
+      row.column !== "done" &&
+      (!activeHost || row.host_id === activeHost),
+  ).length;
+  return <span className="count">{open}</span>;
+}
+
+function RunningCount({ activeHost }: { activeHost: string | undefined }) {
+  const { data: agents } = useSuspenseQuery(agentsQuery());
+  const running = agents.orchestrators
+    .flatMap((orchestrator) => [orchestrator, ...orchestrator.workers])
+    .filter((agent) => !activeHost || agent.host_id === activeHost).length;
+  return <span className="count">{running}</span>;
+}
+
+function WaitingBadge({ activeHost }: { activeHost: string | undefined }) {
+  const { data: attention } = useSuspenseQuery(attentionQuery());
+  const { data: board } = useSuspenseQuery(boardQuery());
+  const shownIds = useShownIds(activeHost);
+  const waiting = attentionCount(attention, board.rows, shownIds, activeHost);
+  return waiting > 0 ? <span className="badge warn">{waiting}</span> : null;
+}
+
+const COUNTS: Partial<Record<string, (props: { activeHost: string | undefined }) => ReactNode>> = {
+  "/": OpenCount,
+  "/agents": RunningCount,
+  "/inbox": WaitingBadge,
+};
+
+const noCount = () => null;
+
+function NavCount({
+  to,
+  label,
+  activeHost,
+}: {
+  to: string;
+  label: string;
+  activeHost: string | undefined;
+}) {
+  const Count = COUNTS[to];
+  if (!Count) return null;
+  return (
+    <Section label={label} fallback={noCount}>
+      <Count activeHost={activeHost} />
+    </Section>
+  );
+}
+
 export function Sidebar({
   activeHost,
   onNavigate,
@@ -32,23 +99,6 @@ export function Sidebar({
   onNavigate: () => void;
   onOpenPalette: () => void;
 }) {
-  const { data: attention } = useSuspenseQuery(attentionQuery());
-  const { data: board } = useSuspenseQuery(boardQuery());
-  const { data: projects } = useSuspenseQuery(projectsQuery());
-  const { data: agents } = useSuspenseQuery(agentsQuery());
-  const prefs = useStore(prefsStore);
-  const shownIds = new Set(
-    scopedProjects(prefs, projects.projects, board.rows, activeHost).map((project) => project.id),
-  );
-  const waiting = attentionCount(attention, board.rows, shownIds, activeHost);
-  const onHost = (hostId: string | null) => !activeHost || hostId === activeHost;
-  const open = board.rows.filter(
-    (row) => shownIds.has(row.project_id) && row.column !== "done" && onHost(row.host_id),
-  ).length;
-  const running = agents.orchestrators
-    .flatMap((orchestrator) => [orchestrator, ...orchestrator.workers])
-    .filter((agent) => onHost(agent.host_id)).length;
-
   return (
     <aside className="side" aria-label="Sidebar">
       <div className="ws">
@@ -80,18 +130,20 @@ export function Sidebar({
           >
             {item.icon}
             <span className="lbl">{item.label}</span>
-            {item.to === "/" ? <span className="count">{open}</span> : null}
-            {item.to === "/agents" ? <span className="count">{running}</span> : null}
-            {item.to === "/inbox" && waiting > 0 ? (
-              <span className="badge warn">{waiting}</span>
-            ) : null}
+            <NavCount to={item.to} label={item.label} activeHost={activeHost} />
           </Link>
         ))}
       </nav>
-      <ProjectsSection activeHost={activeHost} />
-      <MachinesSection activeHost={activeHost} />
+      <Section label="Projects">
+        <ProjectsSection activeHost={activeHost} />
+      </Section>
+      <Section label="Machines">
+        <MachinesSection activeHost={activeHost} />
+      </Section>
       <div onClick={onNavigate} className="foot-q">
-        <QuotaFooter />
+        <Section label="Quota" fallback={QuotaUnavailable}>
+          <QuotaFooter />
+        </Section>
       </div>
     </aside>
   );

@@ -26,8 +26,10 @@ export const Route = createRootRouteWithContext<RouterContext>()({
   }),
   loader: async ({ context }) => {
     // Everything the shell draws is read before the first render, so no
-    // pending state is ever visible (it is in the boot snapshot anyway).
-    await Promise.all([
+    // pending state is ever visible (it is in the boot snapshot anyway). A
+    // read that fails stays failed in the cache and only its own section
+    // shows it, so one endpoint can never take the whole board down.
+    await Promise.allSettled([
       context.queryClient.ensureQueryData(projectsQuery()),
       context.queryClient.ensureQueryData(agentsQuery()),
       context.queryClient.ensureQueryData(machinesQuery()),

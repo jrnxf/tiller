@@ -1,4 +1,4 @@
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { Link, useRouterState } from "@tanstack/react-router";
 import type { CSSProperties } from "react";
 
@@ -10,6 +10,7 @@ import { scopedProjects } from "../../lib/scope";
 import type { Density, ThemePreference } from "../../lib/prefs";
 import { useStore } from "../../lib/store";
 import { ReconnectingBanner } from "../states/reconnecting-banner";
+import { Section } from "../states/section";
 import { ChevronIcon, CloseIcon, LayersIcon, MenuIcon, ServerIcon } from "./icons";
 
 const TITLES: Record<string, string> = {
@@ -36,6 +37,8 @@ interface HeaderProps {
   menuOpen: boolean;
   onOpenMenu: () => void;
 }
+
+const nothing = () => null;
 
 // "All projects 4" or "2 of 4 projects", or the focused project's name.
 function ScopeCrumb({ activeHost }: { activeHost: string | undefined }) {
@@ -65,12 +68,18 @@ function ScopeCrumb({ activeHost }: { activeHost: string | undefined }) {
 
 export function Header({ activeHost, menuOpen, onOpenMenu }: HeaderProps) {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const { data: machines } = useSuspenseQuery(machinesQuery());
+  // The header only decorates with these, so a failed read leaves it working:
+  // the machine chip still clears and the view can still be reset.
+  const machines = useQuery(machinesQuery()).data?.machines ?? [];
+  const projects = useQuery(projectsQuery()).data?.projects;
   const prefs = useStore(prefsStore);
-  const { data: projects } = useSuspenseQuery(projectsQuery());
-  const host = machines.machines.find((machine) => machine.id === activeHost);
+  const host = machines.find((machine) => machine.id === activeHost);
+  // Without the project list, any hidden project may still narrow the view.
   const narrowed =
-    prefs.view === "focus" || projects.projects.some((p) => prefs.hiddenProjects.includes(p.id));
+    prefs.view === "focus" ||
+    (projects
+      ? projects.some((p) => prefs.hiddenProjects.includes(p.id))
+      : prefs.hiddenProjects.length > 0);
 
   return (
     <>
@@ -85,7 +94,9 @@ export function Header({ activeHost, menuOpen, onOpenMenu }: HeaderProps) {
           <MenuIcon />
         </button>
         <div className="crumb">
-          <ScopeCrumb activeHost={activeHost} />
+          <Section label="Projects" fallback={nothing}>
+            <ScopeCrumb activeHost={activeHost} />
+          </Section>
           <ChevronIcon />
           <h1>{pathname.startsWith("/cards/") ? "Card" : (TITLES[pathname] ?? "Tiller")}</h1>
         </div>
@@ -114,7 +125,11 @@ export function Header({ activeHost, menuOpen, onOpenMenu }: HeaderProps) {
             Show all projects
           </button>
         ) : null}
-        {pathname === "/" ? <BoardFilterSegment /> : null}
+        {pathname === "/" ? (
+          <Section label="Board filter" fallback={nothing}>
+            <BoardFilterSegment />
+          </Section>
+        ) : null}
         <div className="seg hide-sm" role="group" aria-label="Theme">
           {THEMES.map((theme) => (
             <button
@@ -141,7 +156,11 @@ export function Header({ activeHost, menuOpen, onOpenMenu }: HeaderProps) {
         </div>
       </header>
       <ReconnectingBanner />
-      {pathname === "/" ? <BoardFilterTabs /> : null}
+      {pathname === "/" ? (
+        <Section label="Board filter" fallback={nothing}>
+          <BoardFilterTabs />
+        </Section>
+      ) : null}
     </>
   );
 }

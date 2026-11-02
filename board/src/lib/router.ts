@@ -2,6 +2,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import type { RouterHistory } from "@tanstack/react-router";
 import { createRouter } from "@tanstack/react-router";
 
+import { ScreenUnavailable } from "../components/states/screen-unavailable";
 import { routeTree } from "../routeTree.gen";
 
 export function createAppRouter(queryClient: QueryClient, history?: RouterHistory) {
@@ -17,6 +18,11 @@ export function createAppRouter(queryClient: QueryClient, history?: RouterHistor
     // until the next one is ready.
     defaultPendingMs: Number.POSITIVE_INFINITY,
     defaultStructuralSharing: true,
+    // A screen that cannot read its data says so inside the shell; the
+    // sidebar and header keep whatever they could read. The root route's
+    // loader never fails (__root.tsx), so the root shows this only when the
+    // shell itself cannot render, and then without the shell.
+    defaultErrorComponent: ScreenUnavailable,
   });
 }
 

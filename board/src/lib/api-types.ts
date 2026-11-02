@@ -371,3 +371,12 @@ export interface SignalsResponse {
   machines_live: number;
   machines_total: number;
 }
+
+// `GET /api/v1/health`: the daemon's own state, answered before `tiller init`
+// too. Only what the board reads.
+export interface DaemonHealth {
+  ok: boolean;
+  version: string;
+  // False until `tiller init` has made state.db.
+  initialized: boolean;
+}

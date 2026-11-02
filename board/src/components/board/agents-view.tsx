@@ -327,10 +327,23 @@ export function AgentsView({
     }
   }, [selected, current, navigate]);
 
-  if (groups.length === 0 || !current) {
+  if (shownProjects.length === 0) {
     return (
       <div className="agents-view">
         <EmptyScope host={host} what="agents" />
+      </div>
+    );
+  }
+  if (groups.length === 0 || !current) {
+    const label = machines.machines.find((machine) => machine.id === host)?.label;
+    return (
+      <div className="agents-view">
+        <div className="empty" data-testid="agents-empty">
+          <div>
+            <b>{host ? `No agents on ${label ?? "that machine"}` : "No agents running"}</b>
+            Agents show here once a card is dispatched to one.
+          </div>
+        </div>
       </div>
     );
   }

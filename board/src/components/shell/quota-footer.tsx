@@ -6,6 +6,7 @@ import { useStore } from "../../lib/store";
 import { connectionStore } from "../../lib/connection";
 import { quotaQuery } from "../../lib/queries";
 import { daemonTooltip, quotaFooterView, weeklyWindow } from "../../lib/quota";
+import type { SectionFailure } from "../states/section";
 
 const DOT_CLASS: Record<QuotaDot, string> = {
   green: "",
@@ -58,6 +59,26 @@ export function QuotaFooter() {
           {view.elapsedPercent === null ? null : <u style={{ left: `${view.elapsedPercent}%` }} />}
         </span>
         {view.resets ? <span>{view.resets}</span> : null}
+      </span>
+    </Link>
+  );
+}
+
+// The footer when the quota read itself failed: the same box, grey, with the
+// reason in the tooltip, so the sidebar keeps its shape.
+export function QuotaUnavailable({ reason }: SectionFailure) {
+  const tooltip = `Quota unavailable. ${reason}`;
+  return (
+    <Link
+      to="/health"
+      className="qfoot"
+      title={tooltip}
+      aria-label={tooltip}
+      data-testid="quota-footer"
+    >
+      <span className="qf-1">
+        <i className="qdot unk" data-dot="grey" />
+        <b>Quota unavailable</b>
       </span>
     </Link>
   );

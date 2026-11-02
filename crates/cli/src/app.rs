@@ -310,7 +310,7 @@ impl App {
                 id: String::new(),
                 fact: "state.db is not initialized; run tiller init".into(),
             })
-            .hint("tiller init --host-label <label> --lane-capacity <n>"));
+            .hint(tiller_daemon::api::INIT_HINT));
         }
         Ok(Store::open(&self.db)?)
     }

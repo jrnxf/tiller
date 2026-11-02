@@ -1,4 +1,4 @@
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 
 import { machineRowView } from "../../lib/machines";
@@ -22,8 +22,9 @@ function Pips({ machine }: { machine: Machine }) {
 // `host` search param, which also shows the removable chip in the header.
 export function MachinesSection({ activeHost }: { activeHost: string | undefined }) {
   const { data } = useSuspenseQuery(machinesQuery());
-  const { data: quota } = useSuspenseQuery(quotaQuery());
-  const quotaView = quotaFooterView(quota);
+  // Quota only adds a line to the tooltips; the footer says when it failed.
+  const quota = useQuery(quotaQuery()).data;
+  const quotaView = quota ? quotaFooterView(quota) : null;
   const quotaLine =
     quotaView?.percentLeft != null
       ? `Claude: ${Math.round(quotaView.percentLeft)}% of this week left${quotaView.resets ? `, ${quotaView.resets}` : ""}.`

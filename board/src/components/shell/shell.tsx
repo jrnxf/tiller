@@ -9,7 +9,7 @@ import { Sidebar } from "./sidebar";
 
 // Keeps <html> in step with the theme and density preferences, and with the
 // system theme while the preference is "system".
-function useAppearance() {
+export function useAppearance() {
   const prefs = useStore(prefsStore);
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");

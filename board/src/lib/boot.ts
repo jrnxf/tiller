@@ -1,8 +1,8 @@
 import type { QueryClient } from "@tanstack/react-query";
 
-import type { Snapshot } from "./api-types";
+import type { DaemonHealth, Snapshot } from "./api-types";
 import { syncClock } from "./clock";
-import { API_KEY_PREFIX } from "./queries";
+import { API_KEY_PREFIX, ReadError, fetchJson } from "./queries";
 
 export const BOOT_ELEMENT_ID = "tiller-boot";
 
@@ -35,4 +35,35 @@ export function hydrateFromSnapshot(queryClient: QueryClient, snapshot: Snapshot
   }
   syncClock(snapshot.server_time, snapshot.thresholds);
   return snapshot.last_event_seq;
+}
+
+export const SNAPSHOT_PATH = "/api/v1/snapshot";
+const HEALTH_PATH = "/api/v1/health";
+
+// What the page opens with: the board, with the snapshot when there is one,
+// or the setup screen when the daemon runs on a machine nobody has set up yet
+// (no state.db: every read answers 503, with the command to run, until
+// `tiller init`).
+export type Boot =
+  | { kind: "board"; snapshot: Snapshot | null }
+  | { kind: "setup"; command: string };
+
+type Fetch = <T>(path: string) => Promise<T>;
+
+export async function loadBoot(
+  doc: Document = document,
+  fetch: Fetch = (path) => fetchJson(path),
+): Promise<Boot> {
+  const inlined = readBootSnapshot(doc);
+  if (inlined) return { kind: "board", snapshot: inlined };
+  // A dev server that is not the daemon has no inlined snapshot either.
+  try {
+    return { kind: "board", snapshot: await fetch<Snapshot>(SNAPSHOT_PATH) };
+  } catch (error) {
+    if (error instanceof ReadError && error.status === 503 && error.hint) {
+      const health = await fetch<DaemonHealth>(HEALTH_PATH).catch(() => null);
+      if (health?.initialized === false) return { kind: "setup", command: error.hint };
+    }
+    return { kind: "board", snapshot: null };
+  }
 }

@@ -1275,6 +1275,12 @@ button.colh:hover {
   height: 100%;
   overflow: auto;
 }
+.board-view > .sec-note {
+  position: sticky;
+  left: 16px;
+  max-width: calc(100% - 32px);
+  margin: 6px 16px 8px;
+}
 .agents-view {
   position: relative;
   height: 100%;

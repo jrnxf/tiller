@@ -1250,3 +1250,142 @@ kbd {
     transition-duration: 0s !important;
   }
 }
+
+/* A part of the screen whose read failed (states/section.tsx) */
+
+.sec-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 14px 0 4px;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--yellow) 30%, var(--line-1));
+  border-radius: var(--r8);
+  background: color-mix(in srgb, var(--yellow) 8%, var(--bg-1));
+  font-size: var(--fs-mini);
+  color: var(--fg-2);
+}
+
+.sec-note .icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--yellow);
+}
+
+.sec-note .tx {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sec-note b {
+  color: var(--fg-1);
+  font-weight: var(--w-medium);
+}
+
+.sec-note .lnk {
+  flex: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.sec-note .lnk:hover {
+  color: var(--fg-1);
+}
+
+/* The first-run screen before `tiller init` (states/setup-screen.tsx) */
+
+.setup {
+  min-height: 100dvh;
+  display: grid;
+  grid-template-columns: minmax(0, 520px);
+  place-content: center;
+  padding: 24px 16px;
+}
+
+.setup-card {
+  min-width: 0;
+  padding: 22px 24px 20px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r12);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-high);
+}
+
+.setup-card .ws {
+  padding: 0 0 16px;
+}
+
+.setup-card h1 {
+  margin: 0 0 8px;
+  font-size: var(--fs-regular);
+  font-weight: var(--w-semibold);
+  color: var(--fg-1);
+}
+
+.setup-card p {
+  margin: 0;
+  color: var(--fg-2);
+}
+
+.setup-card pre {
+  margin: 14px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r8);
+  background: var(--bg-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: var(--fs-mini);
+  color: var(--fg-1);
+  user-select: all;
+}
+
+.setup-card pre .word {
+  white-space: nowrap;
+}
+
+.setup-card p code {
+  font-family: var(--mono);
+  font-size: var(--fs-mini);
+  color: var(--fg-1);
+}
+
+.setup-card .sub {
+  color: var(--fg-3);
+}
+
+.setup-card .wait {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-1);
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.setup-card .wait i {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--round);
+  background: var(--yellow);
+  animation: setup-pulse 1.6s var(--ease) infinite;
+}
+
+@keyframes setup-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .setup-card .wait i {
+    animation: none;
+  }
+}

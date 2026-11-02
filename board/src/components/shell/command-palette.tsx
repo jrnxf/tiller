@@ -1,4 +1,4 @@
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
 
@@ -55,8 +55,10 @@ function iconFor(command: Command) {
 
 function useCommands(activeHost: string | undefined, close: () => void): Command[] {
   const navigate = useNavigate();
-  const { data: projects } = useSuspenseQuery(projectsQuery());
-  const { data: machines } = useSuspenseQuery(machinesQuery());
+  // A read that failed only drops its own commands; going to a screen and
+  // changing the look always work.
+  const projects = useQuery(projectsQuery()).data;
+  const machines = useQuery(machinesQuery()).data;
   const prefs = useStore(prefsStore);
 
   return useMemo(() => {
@@ -117,7 +119,7 @@ function useCommands(activeHost: string | undefined, close: () => void): Command
         run: () => updatePrefs({ view: "focus" }),
       },
     ];
-    for (const project of projects.projects) {
+    for (const project of projects?.projects ?? []) {
       commands.push({
         id: `focus-${project.id}`,
         group: "View",
@@ -131,7 +133,7 @@ function useCommands(activeHost: string | undefined, close: () => void): Command
         run: () => toggleProjectHidden(project.id),
       });
     }
-    for (const machine of machines.machines) {
+    for (const machine of machines?.machines ?? []) {
       commands.push({
         id: `host-${machine.id}`,
         group: "Machines",

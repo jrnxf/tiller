@@ -212,6 +212,15 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
     let mut stdout = std::io::stdout();
     let _ = writeln!(stdout, "listening on http://{bound}").and_then(|()| stdout.flush());
     tracing::info!(%bound, pid = std::process::id(), "daemon started");
+    if !db.exists() {
+        // A fresh install: the service runs before anyone has set it up, and
+        // this log is where the owner looks first.
+        tracing::warn!(
+            home = %config.home.display(),
+            "state.db is not initialized; the API answers 503 until `{}` runs",
+            api::INIT_HINT,
+        );
+    }
 
     let stopping = stop_tx.clone();
     let mut stopped_early = stop.clone();

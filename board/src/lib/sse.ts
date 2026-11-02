@@ -15,7 +15,7 @@ import type {
   Snapshot,
 } from "./api-types";
 import { connectionStore } from "./connection";
-import { hydrateFromSnapshot } from "./boot";
+import { SNAPSHOT_PATH, hydrateFromSnapshot } from "./boot";
 import { recordProgress } from "./receipts";
 import {
   API_KEY_PREFIX,
@@ -29,7 +29,6 @@ import {
 import type { QueryPath } from "./queries";
 
 const EVENTS_PATH = "/api/v1/events";
-export const SNAPSHOT_PATH = "/api/v1/snapshot";
 
 const attentionKey = queryKeyFor("/api/v1/attention?state=open");
 

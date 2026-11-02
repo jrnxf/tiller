@@ -1,4 +1,4 @@
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 
 import { connectionStore } from "../../lib/connection";
 import { machinesQuery } from "../../lib/queries";
@@ -11,8 +11,9 @@ import { machineUnreachable } from "./degraded";
 // screen and queue answers.
 export function ReconnectingBanner() {
   const connection = useStore(connectionStore);
-  const { data } = useSuspenseQuery(machinesQuery());
-  const herdrDown = data.machines.some(
+  // The daemon half needs no read, so a failed machines read must not hide it.
+  const machines = useQuery(machinesQuery()).data?.machines ?? [];
+  const herdrDown = machines.some(
     (machine) => machine.kind === "local" && machineUnreachable(machine),
   );
   const daemonDown = connection === "reconnecting";
