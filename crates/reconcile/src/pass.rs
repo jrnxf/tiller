@@ -1,0 +1,586 @@
+//! The reconcile loop (`recovery.md` section 3): one pass every 30 seconds,
+//! and one at once after any event, any poller change and the daemon's
+//! start. The pass runs its steps in order, each repair in its own
+//! transaction, and records nothing when it repairs nothing.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use rusqlite::{Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use tiller_core::domain::{Card, OutboxKind, Project, Session};
+use tiller_core::ids::HOST_HEALTH_CARD;
+use tiller_core::state::attention::NewAttention;
+use tiller_core::state::caches::WorktreeReading;
+use tiller_core::state::outbox::{NewMessage, live_orchestrator};
+use tiller_core::state::{find, get, list};
+use tiller_core::{Actor, Ctx, Result, Store, Timestamp};
+use tiller_herdr::client::{Herdr, Snapshot};
+use tiller_herdr::layout;
+
+use crate::sources::{AgentProbe, Forge, Harness, Launcher, Readings, Scanner, WorktreeScan};
+use crate::thresholds::Thresholds;
+
+/// What the daemon tells the engine about this host.
+#[derive(Clone, Debug)]
+pub struct Config {
+    /// The local host's id (`hosts.id`).
+    pub host_id: String,
+    /// `~/.tiller`: the owner marker, the hook spool, the state directory.
+    pub tiller_home: PathBuf,
+    /// The current boot id, when the host reports one. `None` never opens
+    /// the reboot check (R04).
+    pub boot_id: Option<String>,
+    /// Each project's checkout path, from the config file: where an
+    /// orchestrator resumes (R02). Workers resume in their own worktree.
+    pub project_paths: HashMap<String, PathBuf>,
+    /// The owner's forge login (CP2, C08), named on an outside merge.
+    pub forge_login: Option<String>,
+    pub thresholds: Thresholds,
+}
+
+impl Config {
+    pub fn new(host_id: impl Into<String>, tiller_home: impl Into<PathBuf>) -> Self {
+        Self {
+            host_id: host_id.into(),
+            tiller_home: tiller_home.into(),
+            boot_id: None,
+            project_paths: HashMap::new(),
+            forge_login: None,
+            thresholds: Thresholds::default(),
+        }
+    }
+}
+
+/// The world the engine reads through (`crate::sources`).
+pub struct Sources {
+    pub herdr: Box<dyn Herdr + Send>,
+    pub probe: Box<dyn AgentProbe>,
+    pub scanner: Box<dyn Scanner>,
+    pub forge: Box<dyn Forge>,
+    pub launcher: Box<dyn Launcher>,
+    pub readings: Box<dyn Readings>,
+    pub harness: Box<dyn Harness>,
+}
+
+/// What one pass did. Every line names the row and the entity, for the
+/// daemon's log and for tests.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Report {
+    /// The owner marker names another system: nothing was written (R20).
+    pub read_only: bool,
+    /// This pass had a successful herdr snapshot.
+    pub snapshot_ok: bool,
+    /// Repairs, one line each.
+    pub repairs: Vec<String>,
+    /// Errors from single repairs; the pass went on past each.
+    pub errors: Vec<String>,
+}
+
+impl Report {
+    pub(crate) fn repair(&mut self, line: impl Into<String>) {
+        let line = line.into();
+        tracing::info!(%line, "reconcile repair");
+        self.repairs.push(line);
+    }
+
+    pub(crate) fn error(&mut self, what: &str, error: &dyn std::fmt::Display) {
+        let line = format!("{what}: {error}");
+        tracing::warn!(%line, "reconcile step failed");
+        self.errors.push(line);
+    }
+
+    /// Whether any repair line contains `needle`.
+    pub fn did(&self, needle: &str) -> bool {
+        self.repairs.iter().any(|line| line.contains(needle))
+    }
+}
+
+/// The engine: one `state.db` connection, the sources, and the little the
+/// pass remembers between runs (cadences, never deadlines).
+pub struct Reconciler {
+    pub(crate) store: Store,
+    pub(crate) config: Config,
+    pub(crate) sources: Sources,
+    pub(crate) started_at: Option<Timestamp>,
+    pub(crate) last_host_check: Option<Timestamp>,
+    pub(crate) last_scan: Option<Timestamp>,
+    pub(crate) last_launch: Option<Timestamp>,
+    /// Passes refused by the owner marker since the last full pass, so the
+    /// flip back runs a full pass (R20).
+    pub(crate) was_read_only: bool,
+    /// This pass's herdr snapshot and worktree scans.
+    pub(crate) snapshot: Option<Snapshot>,
+    pub(crate) scans: HashMap<PathBuf, WorktreeScan>,
+}
+
+impl Reconciler {
+    pub fn new(store: Store, config: Config, sources: Sources) -> Self {
+        Self {
+            store,
+            config,
+            sources,
+            started_at: None,
+            last_host_check: None,
+            last_scan: None,
+            last_launch: None,
+            was_read_only: false,
+            snapshot: None,
+            scans: HashMap::new(),
+        }
+    }
+
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    pub(crate) fn ctx(&self, now: Timestamp) -> Ctx {
+        Ctx::at(Actor::Daemon, now)
+    }
+
+    /// The owner marker, when it names a system other than Tiller (R20).
+    pub fn other_owner(&self) -> Option<String> {
+        let text = std::fs::read_to_string(self.config.tiller_home.join("owner")).ok()?;
+        let name = text.trim();
+        (!name.is_empty() && name != "tiller").then(|| name.to_owned())
+    }
+
+    /// One pass, every step in order.
+    pub fn pass(&mut self, now: Timestamp) -> Result<Report> {
+        let mut report = Report::default();
+        if let Some(other) = self.other_owner() {
+            tracing::info!(owner = %other, "read only: the owner marker names another system");
+            report.read_only = true;
+            self.was_read_only = true;
+            return Ok(report);
+        }
+        let flipped_back = std::mem::take(&mut self.was_read_only);
+        self.snapshot = match self.sources.herdr.snapshot() {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                tracing::debug!(%error, "herdr snapshot failed; the ladder stops at unknown");
+                None
+            }
+        };
+        report.snapshot_ok = self.snapshot.is_some();
+        self.scans.clear();
+
+        // Step 1: startup, once.
+        if self.started_at.is_none() {
+            if let Err(error) = self.startup(now, &mut report) {
+                report.error("startup", &error);
+                return Ok(report);
+            }
+            self.started_at = Some(now);
+        }
+        if flipped_back {
+            report.repair(
+                "R20 owner marker names tiller again: full pass with live evidence rebound",
+            );
+        }
+        if let Some(snapshot) = self.snapshot.clone() {
+            // The pane cache the pass reads is the one it just saw.
+            match layout::bindings(self.store.conn(), &self.config.host_id) {
+                Ok(bindings) => {
+                    let readings = crate::recovery::evidence::pane_readings(&snapshot, &bindings);
+                    if let Err(error) =
+                        self.store
+                            .cache_panes(&self.ctx(now), &self.config.host_id, readings)
+                    {
+                        report.error("pane cache", &error);
+                    }
+                }
+                Err(error) => report.error("pane bindings", &error),
+            }
+        }
+        if let Err(error) = self.import_spool() {
+            report.error("hook spool", &error);
+        }
+
+        // Step 2: host checks, every five minutes.
+        if self
+            .last_host_check
+            .is_none_or(|at| at.plus_minutes(self.config.thresholds.host_check) <= now)
+        {
+            self.last_host_check = Some(now);
+            if let Err(error) = self.host_checks(now, &mut report) {
+                report.error("host checks", &error);
+            }
+        }
+        // Step 3: timers.
+        if let Err(error) = self.timers(now, &mut report) {
+            report.error("timers", &error);
+        }
+        // The worktree scan, every five minutes and whenever a resume or a
+        // cleanup may happen this pass (they re-check from the scan taken
+        // in this pass).
+        if self
+            .last_scan
+            .is_none_or(|at| at.plus_minutes(self.config.thresholds.worktree_scan) <= now)
+            || self.restore_pending()?
+        {
+            self.last_scan = Some(now);
+            if let Err(error) = self.scan_worktrees(now) {
+                report.error("worktree scan", &error);
+            }
+        }
+        // Step 4: sessions.
+        if let Err(error) = self.sessions(now, &mut report) {
+            report.error("sessions", &error);
+        }
+        // Step 5: runs and evidence.
+        if let Err(error) = self.evidence(now, &mut report) {
+            report.error("evidence", &error);
+        }
+        // Step 6: approvals and PRs.
+        if let Err(error) = self.approvals(now, &mut report) {
+            report.error("approvals", &error);
+        }
+        // Step 7, delivery, is the delivery poller's pass (`tiller_delivery`),
+        // which runs every two seconds beside this loop and owns R09.
+        // Step 8: layout.
+        if let Some(snapshot) = &self.snapshot {
+            match layout::bindings(self.store.conn(), &self.config.host_id) {
+                Ok(bindings) => {
+                    match layout::repair(self.sources.herdr.as_ref(), snapshot, &bindings) {
+                        Ok(repair) if repair != layout::Repair::default() => {
+                            report.repair(format!("R18 layout repaired: {repair:?}"));
+                        }
+                        Ok(_) => {}
+                        Err(error) => report.error("layout", &error),
+                    }
+                }
+                Err(error) => report.error("layout bindings", &error),
+            }
+        }
+        Ok(report)
+    }
+
+    fn import_spool(&mut self) -> Result<()> {
+        let env = tiller_observe::hooks::Env {
+            tiller_home: self.config.tiller_home.clone(),
+            user_home: None,
+            tiller_session_id: None,
+        };
+        if !self.config.tiller_home.join("hook-spool").is_dir() {
+            return Ok(());
+        }
+        tiller_observe::hooks::import_spool(&mut self.store, &env).map(drop)
+    }
+
+    // ----- shared helpers the row modules use -----
+
+    pub(crate) fn conn(&self) -> &Connection {
+        self.store.conn()
+    }
+
+    pub(crate) fn health_card(&self) -> Result<Card> {
+        find(self.conn(), "display_id = ?1", &[&HOST_HEALTH_CARD])?.ok_or_else(|| {
+            tiller_core::Error::NotFound {
+                entity: "card",
+                id: HOST_HEALTH_CARD.to_owned(),
+                candidates: Vec::new(),
+            }
+        })
+    }
+
+    /// A keyed note to the project's live orchestrator. Returns whether one
+    /// was written now (false: no orchestrator, or already sent).
+    pub(crate) fn note(
+        &mut self,
+        now: Timestamp,
+        project_id: &str,
+        key: &str,
+        body: String,
+        card_id: Option<String>,
+    ) -> Result<bool> {
+        let Some(orchestrator) = live_orchestrator(self.conn(), project_id)? else {
+            return Ok(false);
+        };
+        let applied = self.store.outbox_enqueue(
+            &self.ctx(now),
+            Some(key),
+            NewMessage {
+                target_session_id: orchestrator.id,
+                kind: OutboxKind::Note,
+                body,
+                card_id,
+                reply_to: None,
+            },
+        )?;
+        Ok(!applied.replayed)
+    }
+
+    /// A keyed `wake` to one live session.
+    pub(crate) fn wake(
+        &mut self,
+        now: Timestamp,
+        session: &str,
+        key: &str,
+        body: String,
+    ) -> Result<bool> {
+        let applied = self.store.outbox_enqueue(
+            &self.ctx(now),
+            Some(key),
+            NewMessage {
+                target_session_id: session.to_owned(),
+                kind: OutboxKind::Wake,
+                body,
+                card_id: None,
+                reply_to: None,
+            },
+        )?;
+        Ok(!applied.replayed)
+    }
+
+    /// A keyed `recovery` item on a card (or on `fleet-1`). Returns whether
+    /// it was opened now.
+    pub(crate) fn recovery(
+        &mut self,
+        now: Timestamp,
+        key: &str,
+        mut item: NewAttention,
+    ) -> Result<bool> {
+        item.kind = tiller_core::domain::AttentionKind::Recovery;
+        if item.card.is_empty() {
+            item.card = HOST_HEALTH_CARD.to_owned();
+        }
+        let card = tiller_core::state::resolve_card(self.conn(), &item.card)?;
+        if card.state != tiller_core::domain::CardState::Open {
+            return Ok(false);
+        }
+        let applied = self.store.attention_open(&self.ctx(now), Some(key), item)?;
+        Ok(!applied.replayed)
+    }
+
+    /// When the keyed message was first stored, if it was.
+    pub(crate) fn message_at(&self, key: &str) -> Result<Option<Timestamp>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT created_at FROM outbox WHERE idempotency_key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Whether a mutation under `key` already ran (its key is remembered).
+    pub(crate) fn key_used(&self, key: &str) -> Result<bool> {
+        Ok(self.conn().query_row(
+            "SELECT EXISTS (SELECT 1 FROM idempotency_keys WHERE key = ?1)",
+            [key],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// The newest event of `kind` on `entity`/`entity_id`, as `(at, payload)`.
+    pub(crate) fn last_event(
+        &self,
+        entity: &str,
+        entity_id: &str,
+        kind: &str,
+    ) -> Result<Option<(Timestamp, Value)>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT at, payload FROM events WHERE entity = ?1 AND entity_id = ?2 AND kind = ?3
+                 ORDER BY seq DESC LIMIT 1",
+                [entity, entity_id, kind],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// Whether a hook observation for the session was recorded after `since`:
+    /// the proof of life a resume waits for.
+    pub(crate) fn hook_seen_after(&self, session: &str, since: Timestamp) -> Result<bool> {
+        Ok(self.conn().query_row(
+            "SELECT EXISTS (SELECT 1 FROM observations WHERE session_id = ?1 AND source = 'hook' AND recorded_at > ?2)",
+            rusqlite::params![session, since],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub(crate) fn project(&self, id: &str) -> Result<Project> {
+        get(self.conn(), "project", id)
+    }
+
+    /// Live sessions on the local host, orchestrators first, then oldest.
+    pub(crate) fn live_sessions(&self) -> Result<Vec<Session>> {
+        list(
+            self.conn(),
+            "host_id = ?1 AND ended_at IS NULL
+             ORDER BY CASE role WHEN 'orchestrator' THEN 0 ELSE 1 END, started_at, id",
+            &[&self.config.host_id],
+        )
+    }
+
+    /// Whether the reboot restore is still open: a known boot id that
+    /// `meta.boot_id` does not match yet (R04).
+    pub(crate) fn restore_pending(&self) -> Result<bool> {
+        let Some(current) = &self.config.boot_id else {
+            return Ok(false);
+        };
+        let recorded = tiller_core::state::projects::meta(self.conn(), "boot_id")?;
+        Ok(recorded.is_some_and(|recorded| recorded != *current))
+    }
+
+    /// The bounded pane tail a note carries (P22): the last 40 visible lines.
+    pub(crate) fn pane_tail(&self, pane_id: &str) -> String {
+        match self.sources.herdr.read_visible(pane_id) {
+            Ok(screen) => {
+                let lines: Vec<&str> = screen.lines().collect();
+                let start = lines.len().saturating_sub(40);
+                lines[start..].join("\n")
+            }
+            Err(error) => format!("(pane unreadable: {error})"),
+        }
+    }
+
+    // ----- the worktree scan -----
+
+    /// Scans every worktree the records or treehouse name and refreshes the
+    /// cache in one snapshot: a path that no longer exists is positively
+    /// gone, an unreadable one keeps unknowns, and a lister that failed
+    /// drops nothing.
+    pub(crate) fn scan_worktrees(&mut self, now: Timestamp) -> Result<()> {
+        let host = self.config.host_id.clone();
+        let mut paths: Vec<(PathBuf, Option<String>, Option<String>)> = Vec::new();
+        let rows: Vec<(String, Option<String>, String)> = {
+            let mut stmt = self.conn().prepare(
+                "SELECT r.worktree_path, r.id, c.project_id FROM runs r JOIN cards c ON c.id = r.card_id
+                 WHERE r.host_id = ?1 AND r.worktree_path IS NOT NULL ORDER BY r.started_at",
+            )?;
+            let rows =
+                stmt.query_map([&host], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for (path, run_id, project_id) in rows {
+            paths.push((PathBuf::from(path), run_id, Some(project_id)));
+        }
+        let cached: Vec<(String, Option<String>, Option<String>)> = {
+            let mut stmt = self
+                .conn()
+                .prepare("SELECT path, run_id, project_id FROM worktrees WHERE host_id = ?1 AND gone_at IS NULL")?;
+            let rows =
+                stmt.query_map([&host], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for (path, run_id, project_id) in cached {
+            let path = PathBuf::from(path);
+            if !paths.iter().any(|(p, _, _)| *p == path) {
+                paths.push((path, run_id, project_id));
+            }
+        }
+        if let Ok(listed) = self.sources.scanner.listed() {
+            for path in listed {
+                if !paths.iter().any(|(p, _, _)| *p == path) {
+                    paths.push((path, None, None));
+                }
+            }
+        }
+        let projects: Vec<Project> = list(self.conn(), "1 = 1", &[])?;
+        let mut readings = Vec::with_capacity(paths.len());
+        for (path, run_id, project_id) in paths {
+            // Resolve the run from the latest active run on the path, so a
+            // treehouse-listed path still maps to its run.
+            let run_id = match run_id {
+                Some(id) => Some(id),
+                None => self
+                    .conn()
+                    .query_row(
+                        "SELECT id FROM runs WHERE host_id = ?1 AND worktree_path = ?2 ORDER BY ended_at IS NOT NULL, started_at DESC LIMIT 1",
+                        rusqlite::params![host, path.to_string_lossy()],
+                        |row| row.get(0),
+                    )
+                    .optional()?,
+            };
+            let project = project_id
+                .as_deref()
+                .and_then(|id| projects.iter().find(|p| p.id == id))
+                .cloned();
+            let merged_heads: Vec<String> = match &run_id {
+                Some(run) => {
+                    let mut stmt = self
+                        .conn()
+                        .prepare("SELECT head_sha FROM prs WHERE run_id = ?1 AND state = 'merged' AND head_sha IS NOT NULL")?;
+                    let heads = stmt.query_map([run], |row| row.get(0))?;
+                    heads.collect::<rusqlite::Result<_>>()?
+                }
+                None => Vec::new(),
+            };
+            let scan = match &project {
+                Some(project) => self.sources.scanner.scan(&path, project, &merged_heads),
+                None => WorktreeScan {
+                    exists: path.exists(),
+                    ..WorktreeScan::missing(&path)
+                },
+            };
+            if scan.exists {
+                readings.push(WorktreeReading {
+                    path: path.to_string_lossy().into_owned(),
+                    project_id: project.map(|p| p.id),
+                    run_id,
+                    branch: scan.branch.clone(),
+                    head_sha: scan.head_sha.clone(),
+                    dirty: scan.dirty,
+                    unlanded_commits: scan.unlanded_commits,
+                });
+            }
+            self.scans.insert(path, scan);
+        }
+        self.store
+            .cache_worktrees(&self.ctx(now), &host, readings)?;
+        Ok(())
+    }
+
+    /// This pass's scan of one path, scanning it now when the pass has not.
+    pub(crate) fn scan_of(&mut self, path: &Path, project: &Project) -> WorktreeScan {
+        if let Some(scan) = self.scans.get(path) {
+            return scan.clone();
+        }
+        let merged = self.merged_heads_at(path).unwrap_or_default();
+        let scan = self.sources.scanner.scan(path, project, &merged);
+        self.scans.insert(path.to_owned(), scan.clone());
+        scan
+    }
+
+    /// The heads of merged PRs of every run that used `path`: a squash or
+    /// rebase merge lands the worktree's commits under new SHAs, and only
+    /// these tell the scan so.
+    pub(crate) fn merged_heads_at(&self, path: &Path) -> Result<Vec<String>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT p.head_sha FROM prs p JOIN runs r ON r.id = p.run_id
+             WHERE r.host_id = ?1 AND r.worktree_path = ?2 AND p.state = 'merged' AND p.head_sha IS NOT NULL",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![self.config.host_id, path.to_string_lossy()],
+            |row| row.get(0),
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Evidence JSON for an item or a note.
+    pub(crate) fn json_text(value: Value) -> Option<String> {
+        Some(value.to_string())
+    }
+}
+
+/// The age of `at` in whole minutes at `now`.
+pub(crate) fn minutes_since(at: Timestamp, now: Timestamp) -> i64 {
+    (now.as_millis() - at.as_millis()) / 60_000
+}
+
+/// `json!` with a timestamp rendered as text.
+pub(crate) fn ts(at: Option<Timestamp>) -> Value {
+    match at {
+        Some(at) => json!(at.to_string()),
+        None => Value::Null,
+    }
+}

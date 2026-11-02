@@ -378,8 +378,9 @@ pub const MARK_LANDED: &str = "Mark landed";
 /// Whether the card has the evidence a `landed` outcome needs.
 pub(crate) fn landed_evidence(conn: &rusqlite::Connection, card: &Card) -> Result<bool> {
     // An approval reached `succeeded`, or the owner confirmed an outside merge
-    // by answering a `recovery` item on the card with "Mark landed"
-    // (`state.md` section 7). Any other answer is not evidence.
+    // by answering a `recovery` item on the card with "Mark landed", alone or
+    // qualified ("Mark landed, not me"; `recovery.md` R07). Any other answer
+    // is not evidence.
     let approved: bool = conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM approvals WHERE card_id = ?1 AND kind IN ('merge', 'land_direct') AND state = 'succeeded')",
         [&card.id],
@@ -390,7 +391,7 @@ pub(crate) fn landed_evidence(conn: &rusqlite::Connection, card: &Card) -> Resul
     }
     Ok(conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM attention WHERE card_id = ?1 AND kind = 'recovery'
-                        AND lower(trim(answer)) = lower(?2))",
+                        AND lower(trim(answer)) LIKE lower(?2) || '%')",
         params![card.id, MARK_LANDED],
         |row| row.get(0),
     )?)

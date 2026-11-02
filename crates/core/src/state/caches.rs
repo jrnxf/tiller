@@ -433,6 +433,31 @@ impl Store {
         })
     }
 
+    /// `meta.boot_id`, written last in a reboot restore (`recovery.md` R04)
+    /// so a daemon that dies mid-restore repeats it. Natural: the recorded
+    /// id is returned unchanged.
+    pub fn daemon_boot_id(&mut self, ctx: &Ctx, boot_id: &str) -> Result<Applied<String>> {
+        require_daemon(&ctx.actor, "daemon.start")?;
+        required("boot id", boot_id)?;
+        self.write(ctx, "daemon.start", None, |tx| {
+            let host = local_host_id(tx.conn())?;
+            let recorded = super::projects::meta(tx.conn(), "boot_id")?;
+            if recorded.as_deref() == Some(boot_id) {
+                return Ok(boot_id.to_owned());
+            }
+            tx.conn().execute(
+                "INSERT INTO meta (key, value) VALUES ('boot_id', ?1)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                [boot_id],
+            )?;
+            tx.event(
+                NewEvent::new("host", &host, "host.changed")
+                    .payload(json!({"boot_id": boot_id, "was": recorded, "restore": "complete"})),
+            )?;
+            Ok(boot_id.to_owned())
+        })
+    }
+
     /// `daemon.stop`.
     pub fn daemon_stop(&mut self, ctx: &Ctx, reason: &str) -> Result<Applied<()>> {
         require_daemon(&ctx.actor, "daemon.stop")?;
