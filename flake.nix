@@ -108,7 +108,9 @@
               # insta snapshots, and the nextest overrides the checks run with.
               (lib.fileset.fileFilter (file: file.hasExt "snap") ./crates)
               ./.config/nextest.toml
-              ./crates/cli/tests/fixtures
+              ./crates/daemon/tests/fixtures
+              # The committed OpenAPI contract a daemon test compares against.
+              ./contract
               # Claude Code viewport reads the composer classifier is tested on.
               ./crates/herdr/tests/fixtures
               # Embedded by crates/agents with include_str!.
@@ -152,7 +154,14 @@
               }
             );
             fmt = craneLib.cargoFmt { inherit src; };
-            nextest = craneLib.cargoNextest (commonArgs // { inherit cargoArtifacts; });
+            nextest = craneLib.cargoNextest (
+              commonArgs
+              // {
+                inherit cargoArtifacts;
+                # The landing tests drive real git repositories.
+                nativeCheckInputs = [ pkgs.git ];
+              }
+            );
             bunNixFresh =
               pkgs.runCommand "tiller-bun-nix-fresh"
                 {

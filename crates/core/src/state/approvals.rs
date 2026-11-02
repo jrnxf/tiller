@@ -605,9 +605,43 @@ impl Store {
         approval: &str,
         decision: Decision,
     ) -> Result<Applied<Decided>> {
+        self.decide_inner(ctx, key, approval, decision, None)
+    }
+
+    /// [`Store::approval_decide`] for a decision made on a shown head (the
+    /// board): refused, in the same transaction, when the approval binds
+    /// another head by now.
+    pub fn approval_decide_shown(
+        &mut self,
+        ctx: &Ctx,
+        key: Option<&str>,
+        approval: &str,
+        decision: Decision,
+        shown_head: &str,
+    ) -> Result<Applied<Decided>> {
+        self.decide_inner(ctx, key, approval, decision, Some(shown_head))
+    }
+
+    fn decide_inner(
+        &mut self,
+        ctx: &Ctx,
+        key: Option<&str>,
+        approval: &str,
+        decision: Decision,
+        shown_head: Option<&str>,
+    ) -> Result<Applied<Decided>> {
         require_owner(&ctx.actor, "approval.decide")?;
         self.write(ctx, "approval.decide", key, |tx| {
             let approval = load(tx, approval)?;
+            if let Some(shown) = shown_head
+                && approval.head_sha.as_deref().is_some_and(|head| head != shown)
+            {
+                return Err(Error::refused(
+                    "approval",
+                    &approval.id,
+                    "the head moved since it was shown",
+                ));
+            }
             let to = approval.state.decide(decision.accept).map_err(refuse("approval", &approval.id))?;
             if let Some(pr_id) = &approval.pr_id {
                 let pr: Pr = get(tx.conn(), "pr", pr_id)?;

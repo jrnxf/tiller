@@ -260,7 +260,7 @@ fn main() -> ExitCode {
     }
     if let Command::Daemon(args) = &cli.command {
         return match daemon::run(args) {
-            Ok(()) => ExitCode::SUCCESS,
+            Ok(code) => code,
             Err(error) => {
                 eprintln!("tiller daemon: {error:#}");
                 ExitCode::from(1)

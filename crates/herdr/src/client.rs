@@ -158,6 +158,12 @@ impl Cli {
         }
     }
 
+    /// The same CLI aimed at a saved machine, keeping its program.
+    pub fn on_machine(mut self, id: impl Into<String>) -> Self {
+        self.machine = Some(id.into());
+        self
+    }
+
     /// A named local session; every call carries `--session <name>`.
     pub fn session(mut self, name: impl Into<String>) -> Self {
         self.session = Some(name.into());
@@ -180,6 +186,13 @@ impl Cli {
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+
+    /// Focuses an agent's pane in the herdr client (`herdr agent focus`),
+    /// on the saved machine first for a remote agent. The board's "Open in
+    /// herdr" button calls this through the daemon.
+    pub fn focus_agent(&self, pane_id: &str) -> Result<()> {
+        self.run(&["agent", "focus", pane_id]).map(|_| ())
     }
 
     fn command(&self, args: &[&str]) -> Command {

@@ -152,13 +152,32 @@ fn card_on_host(store: &Store, card: &Card, label: &str) -> Result<bool, Failure
 
 pub fn board(app: &App, args: BoardArgs) -> Done {
     if args.login {
+        return login(app);
+    }
+    let store = app.read()?;
+    Ok(Outcome::read(board_data(&store, &args)?))
+}
+
+/// `tiller board --login`: a one-time link that signs this browser in as the
+/// owner (`protocol.md` 7.1). It needs the running daemon, whose port it
+/// names; a used link stops working, so each call mints a new one.
+fn login(app: &App) -> Done {
+    app.require_owner("tiller board --login")?;
+    let running = tiller_agents::land::DaemonLock::held(&app.home)
+        .then(|| tiller_daemon::running(&app.home))
+        .flatten();
+    let Some((_, port)) = running else {
         return Err(Failure::unavailable(
             "tiller board --login mints the owner cookie link, and that needs the daemon, which is not running",
         )
         .hint("start the daemon with: tiller daemon"));
-    }
-    let store = app.read()?;
-    Ok(Outcome::read(board_data(&store, &args)?))
+    };
+    let token = tiller_daemon::auth::mint_login(&app.home, tiller_core::Timestamp::now())
+        .map_err(|error| Failure::from(tiller_core::Error::Internal(error.to_string())))?;
+    Ok(Outcome::read(json!({
+        "url": format!("http://127.0.0.1:{port}/login/{token}"),
+        "expires_in_minutes": tiller_daemon::auth::LOGIN_MINUTES,
+    })))
 }
 
 // -- agents -----------------------------------------------------------------

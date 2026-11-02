@@ -43,7 +43,7 @@ async function fontReady(): Promise<void> {
 
 const queryClient = createQueryClient();
 const snapshot = await loadSnapshot();
-const lastEventSeq = snapshot ? hydrateFromSnapshot(queryClient, snapshot) : 0;
+const lastEventSeq = snapshot ? hydrateFromSnapshot(queryClient, snapshot) : null;
 
 const router = createAppRouter(queryClient);
 // Load the first route before rendering, so the first paint is the finished

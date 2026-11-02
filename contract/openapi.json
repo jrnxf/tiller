@@ -1,0 +1,2940 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Tiller board API",
+    "description": "The daemon's board API (docs/spec/protocol.md section 7). Every path answers only on 127.0.0.1 or localhost; mutations need the owner cookie.",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    },
+    "version": "1"
+  },
+  "paths": {
+    "/api/v1/agents": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "agents",
+        "parameters": [
+          {
+            "name": "host",
+            "in": "query",
+            "description": "A host id or label.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{session}/focus": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "focus",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FocusBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/approvals/{id}/decide": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "decide",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecideBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "the head moved: `current.head_sha` is the bound head",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/attention": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "attention",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Only `open` is served.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttentionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/attention/{id}/answer": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "answer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnswerBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/board": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "board",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "description": "`all` (default), `active` or `needs`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "host",
+            "in": "query",
+            "description": "A host id or label.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BoardResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cards": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "create_card",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCard"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cards/{id}": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "card",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "ULID, short form or display id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CardDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "edit_card",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditCard"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cards/{id}/cancel": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "cancel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Transition"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cards/{id}/close": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "close",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Transition"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cards/{id}/comment": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "comment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Comment"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cards/{id}/hold": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "hold",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HoldBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "release_hold",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Transition"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cards/{id}/reopen": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "reopen",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Transition"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cards/{id}/timeline": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "timeline",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Only events older than this `seq`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimelineResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "tags": [
+          "stream"
+        ],
+        "summary": "The change stream: `event: change` with a [`ChangeEvent`] per `events`\nrow, `event: reset` with a [`ResetEvent`] when a resume is impossible.",
+        "operationId": "events",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Resume after this `seq` when the request has no `Last-Event-ID`:\nthe boot snapshot's `last_event_seq` on the first connect.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "description": "the last seq the client applied",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`change` messages carry a ChangeEvent; `reset` messages a ResetEvent",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeEvent"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/health": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "summary": "The daemon's own health: versions, pollers and tools, no work data. It\nanswers before `tiller init` too.",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "machines",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MachinesResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "projects",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/quota": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "quota",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuotaResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runs/{id}": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "run",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/signals": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "signals",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignalsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/snapshot": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "summary": "The boot snapshot, also served alone for a silent refetch after `reset`.",
+        "operationId": "snapshot",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AgentRow": {
+        "type": "object",
+        "description": "A live session: an orchestrator with its workers nested, or a worker.",
+        "required": [
+          "session_id",
+          "role",
+          "model",
+          "activity",
+          "host_id",
+          "workers",
+          "project_id"
+        ],
+        "properties": {
+          "activity": {
+            "type": "string",
+            "description": "The effective activity (`session_activity`), staleness included."
+          },
+          "activity_observed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "card_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "herdr_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host_id": {
+            "type": "string"
+          },
+          "last_status_line": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "pane_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "description": "The short role name: `orchestrator`, `scout`, `build`, `review` or\n`verify`."
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "state_since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the session entered its current activity."
+          },
+          "workers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentRow"
+            }
+          },
+          "workspace_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "AgentsResponse": {
+        "type": "object",
+        "required": [
+          "orchestrators"
+        ],
+        "properties": {
+          "orchestrators": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentRow"
+            },
+            "description": "Orchestrators with their workers; workers whose orchestrator has ended\nare listed at the top level."
+          }
+        }
+      },
+      "AnswerBody": {
+        "type": "object",
+        "description": "`POST /api/v1/attention/{id}/answer`.",
+        "required": [
+          "idempotency_key",
+          "answer"
+        ],
+        "properties": {
+          "answer": {
+            "type": "string",
+            "description": "The owner's exact words."
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "rev": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ApprovalBinding": {
+        "type": "object",
+        "description": "The approval a `merge` item asks for, bound to the head the board shows.",
+        "required": [
+          "id",
+          "kind",
+          "head_sha",
+          "state"
+        ],
+        "properties": {
+          "head_sha": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`merge` or `land_direct`."
+          },
+          "pr_number": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "state": {
+            "type": "string"
+          }
+        }
+      },
+      "ArtifactRow": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "title"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "AskedRow": {
+        "type": "object",
+        "description": "An unresolved ask, from the `asked` view.",
+        "required": [
+          "id",
+          "project_id",
+          "received_at",
+          "age_seconds"
+        ],
+        "properties": {
+          "age_seconds": {
+            "type": "number",
+            "format": "double"
+          },
+          "id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "received_at": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "AttentionItem": {
+        "type": "object",
+        "required": [
+          "id",
+          "card_id",
+          "kind",
+          "question",
+          "opened_at",
+          "still_current",
+          "rev"
+        ],
+        "properties": {
+          "answered_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "approval": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalBinding"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "card_id": {
+            "type": "string"
+          },
+          "consequence": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "evidence": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Text, or a JSON list of pointers (event ids, artifact ids, PR urls)."
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`decision`, `credential`, `merge`, `review`, `recovery` or `report`."
+          },
+          "opened_at": {
+            "type": "string"
+          },
+          "opened_by_session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "options": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AttentionOption"
+            }
+          },
+          "question": {
+            "type": "string"
+          },
+          "recommendation": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rev": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "still_current": {
+            "type": "boolean"
+          },
+          "withdrawn_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "AttentionOption": {
+        "type": "object",
+        "description": "One answer the asker offers, with what it sets in motion.",
+        "required": [
+          "label",
+          "recommended"
+        ],
+        "properties": {
+          "consequence": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "recommended": {
+            "type": "boolean"
+          }
+        }
+      },
+      "AttentionResponse": {
+        "type": "object",
+        "required": [
+          "items",
+          "permission_prompts"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttentionItem"
+            }
+          },
+          "permission_prompts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PermissionPrompt"
+            }
+          }
+        }
+      },
+      "BoardResponse": {
+        "type": "object",
+        "required": [
+          "rows",
+          "asked"
+        ],
+        "properties": {
+          "asked": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AskedRow"
+            }
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BoardRow"
+            }
+          }
+        }
+      },
+      "BoardRow": {
+        "type": "object",
+        "description": "One `card_column` row plus the card's own display fields.",
+        "required": [
+          "id",
+          "display_id",
+          "project_id",
+          "kind",
+          "title",
+          "priority",
+          "column",
+          "badge",
+          "rev"
+        ],
+        "properties": {
+          "badge": {
+            "type": "string"
+          },
+          "blocked_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "closed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "column": {
+            "type": "string",
+            "description": "`needs_you`, `asked`, `working`, `landing`, `queued` or `done`."
+          },
+          "display_id": {
+            "type": "string"
+          },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The host of the card's newest run; null for a card with no run."
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model of the card's newest run."
+          },
+          "observed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the newest observation of the card's active run was made."
+          },
+          "parked_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parked_until": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pr_number": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The newest PR linked to the card."
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int64",
+            "description": "0 is the most urgent, 4 the least."
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "rev": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "CardApproval": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "state",
+          "newer_commits"
+        ],
+        "properties": {
+          "decided_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "decided_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "head_sha": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The commit the approval is bound to."
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "newer_commits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NewerCommit"
+            },
+            "description": "Commits pushed after the approval was bound, newest first."
+          },
+          "pr_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string"
+          }
+        }
+      },
+      "CardDetail": {
+        "type": "object",
+        "description": "`GET /api/v1/cards/{id}`.",
+        "required": [
+          "card",
+          "column",
+          "holds",
+          "deps",
+          "attention",
+          "runs",
+          "prs",
+          "approvals",
+          "artifacts",
+          "reviews",
+          "obligations",
+          "events",
+          "freshness"
+        ],
+        "properties": {
+          "approvals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CardApproval"
+            }
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArtifactRow"
+            }
+          },
+          "attention": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttentionItem"
+            }
+          },
+          "card": {
+            "$ref": "#/components/schemas/CardFields"
+          },
+          "column": {
+            "$ref": "#/components/schemas/BoardRow"
+          },
+          "deps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DepRow"
+            }
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventLine"
+            }
+          },
+          "freshness": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Freshness"
+            }
+          },
+          "holds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HoldRow"
+            }
+          },
+          "obligations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ObligationRow"
+            }
+          },
+          "prs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CardPr"
+            }
+          },
+          "reviews": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReviewRow"
+            }
+          },
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CardRun"
+            }
+          }
+        }
+      },
+      "CardFields": {
+        "type": "object",
+        "required": [
+          "id",
+          "display_id",
+          "project_id",
+          "kind",
+          "title",
+          "priority",
+          "slug",
+          "state",
+          "rev"
+        ],
+        "properties": {
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "display_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outcome": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "rev": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "description": "`open` or `closed`."
+          },
+          "title": {
+            "type": "string"
+          },
+          "worktree": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "CardPr": {
+        "type": "object",
+        "required": [
+          "id",
+          "number",
+          "repo",
+          "title",
+          "state",
+          "head_sha",
+          "base",
+          "checks"
+        ],
+        "properties": {
+          "base": {
+            "type": "string"
+          },
+          "checks": {
+            "type": "string",
+            "description": "`pending`, `passing` or `failing`."
+          },
+          "checks_summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "diff_summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "head_sha": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "number": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "description": "`open`, `merged` or `closed`."
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "CardRun": {
+        "type": "object",
+        "required": [
+          "id",
+          "number",
+          "role",
+          "model",
+          "started_at"
+        ],
+        "properties": {
+          "activity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "activity_observed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ended_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "number": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "outcome": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`passed` (landed or reported), `failed` (failed or cut) or `cancelled`\n(cancelled, abandoned or relaunched); null while the run is active."
+          },
+          "role": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "type": "string"
+          }
+        }
+      },
+      "ChangeEvent": {
+        "type": "object",
+        "description": "One `event: change` message on `GET /api/v1/events`.",
+        "required": [
+          "seq",
+          "at",
+          "kind",
+          "txn",
+          "entity",
+          "entity_id",
+          "entity_state"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "card": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BoardRow",
+                "description": "The card's recomputed `card_column` row, when `card_id` is set and the\ncard is still on the board."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "card_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "entity": {
+            "type": "string"
+          },
+          "entity_id": {
+            "type": "string"
+          },
+          "entity_state": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The entity's API shape when the event was sent, with its current\n`rev`: an attention item, a machine, a quota window, a project, or\n`{\"state\": ...}` for an outbox message or an approval. Null for an\nentity the board refetches instead."
+          },
+          "kind": {
+            "type": "string"
+          },
+          "rev_after": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "txn": {
+            "type": "string"
+          }
+        }
+      },
+      "Comment": {
+        "type": "object",
+        "description": "`POST /api/v1/cards/{id}/comment`.",
+        "required": [
+          "idempotency_key",
+          "text"
+        ],
+        "properties": {
+          "idempotency_key": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateCard": {
+        "type": "object",
+        "description": "`POST /api/v1/cards`.",
+        "required": [
+          "idempotency_key",
+          "project",
+          "kind",
+          "title"
+        ],
+        "properties": {
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "project": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DecideBody": {
+        "type": "object",
+        "description": "`POST /api/v1/approvals/{id}/decide`.",
+        "required": [
+          "idempotency_key",
+          "decision",
+          "head_sha"
+        ],
+        "properties": {
+          "decision": {
+            "type": "string",
+            "description": "`accept` or `reject`."
+          },
+          "head_sha": {
+            "type": "string",
+            "description": "The head the board showed; a mismatch is 422 with the bound head."
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "rev": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DepRow": {
+        "type": "object",
+        "required": [
+          "display_id"
+        ],
+        "properties": {
+          "display_id": {
+            "type": "string"
+          },
+          "released_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "EditCard": {
+        "type": "object",
+        "description": "`PATCH /api/v1/cards/{id}`: `rev` plus the changed fields.",
+        "required": [
+          "idempotency_key",
+          "rev"
+        ],
+        "properties": {
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "rev": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ErrorBody": {
+        "type": "object",
+        "required": [
+          "ok",
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "Always false."
+          }
+        }
+      },
+      "ErrorDetail": {
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "current": {
+            "type": "object"
+          },
+          "entity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "EventLine": {
+        "type": "object",
+        "description": "One line of an event list, as the detail pages show it.",
+        "required": [
+          "at",
+          "source",
+          "text"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "description": "`tiller`, `hook`, `herdr`, `transcript`, `liveness`, `status_line` or\n`gh`."
+          },
+          "text": {
+            "type": "string"
+          },
+          "tone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`warn` or `bad`, for a line the page colors."
+          }
+        }
+      },
+      "FocusBody": {
+        "type": "object",
+        "description": "`POST /api/v1/agents/{session}/focus`.",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "idempotency_key": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Freshness": {
+        "type": "object",
+        "description": "How fresh one source of the card's facts is.",
+        "required": [
+          "source",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "observed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string"
+          }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "description": "`GET /api/v1/health`: the daemon's own state. No work data.",
+        "required": [
+          "ok",
+          "version",
+          "schema",
+          "initialized",
+          "pid",
+          "started_at",
+          "server_time",
+          "last_event_seq",
+          "pollers",
+          "tools"
+        ],
+        "properties": {
+          "initialized": {
+            "type": "boolean",
+            "description": "False until `tiller init` has made `state.db`."
+          },
+          "last_event_seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "pid": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "pollers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PollerHealth"
+            }
+          },
+          "schema": {
+            "type": "integer",
+            "description": "The schema this binary migrates to.",
+            "minimum": 0
+          },
+          "server_time": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "tools": {
+            "type": "object",
+            "description": "Tool versions read at start, by tool name; null when not found."
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "HoldBody": {
+        "type": "object",
+        "description": "`POST /api/v1/cards/{id}/hold`.",
+        "required": [
+          "idempotency_key",
+          "until",
+          "reason"
+        ],
+        "properties": {
+          "idempotency_key": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "rev": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The rev the board showed, for the conflict message only."
+          },
+          "until": {
+            "type": "string",
+            "description": "RFC 3339."
+          }
+        },
+        "additionalProperties": false
+      },
+      "HoldRow": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "until_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "Machine": {
+        "type": "object",
+        "description": "One host the board shows (`protocol.md` section 9).",
+        "required": [
+          "id",
+          "label",
+          "kind",
+          "view_only",
+          "health",
+          "rev"
+        ],
+        "properties": {
+          "capacity": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "free_slots": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "health": {
+            "type": "string",
+            "description": "`ok`, `degraded` or `down` for this host; `ok` or `stale` for a\nremote one."
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`local` or `remote`."
+          },
+          "label": {
+            "type": "string"
+          },
+          "last_seen_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rev": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "running_agents": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "stale_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`herdr_link_down`, `host_asleep`, `poll_failed` or `never_seen`."
+          },
+          "view_only": {
+            "type": "boolean"
+          }
+        }
+      },
+      "MachinesResponse": {
+        "type": "object",
+        "required": [
+          "machines"
+        ],
+        "properties": {
+          "machines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Machine"
+            }
+          }
+        }
+      },
+      "MutationResponse": {
+        "type": "object",
+        "required": [
+          "ok",
+          "replayed",
+          "events",
+          "receipt",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "The changed entity."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "Always true."
+          },
+          "receipt": {
+            "$ref": "#/components/schemas/Receipt"
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "NewerCommit": {
+        "type": "object",
+        "required": [
+          "sha",
+          "subject",
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "sha": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          }
+        }
+      },
+      "ObligationRow": {
+        "type": "object",
+        "required": [
+          "id",
+          "summary",
+          "state"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      },
+      "PermissionPrompt": {
+        "type": "object",
+        "description": "A session waiting on a permission prompt.",
+        "required": [
+          "session_id",
+          "card_id",
+          "tool",
+          "since"
+        ],
+        "properties": {
+          "card_id": {
+            "type": "string"
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the tool wants to run, from the session's newest observation."
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "since": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string"
+          }
+        }
+      },
+      "PollerHealth": {
+        "type": "object",
+        "description": "One poller's record.",
+        "required": [
+          "source",
+          "consecutive_failures"
+        ],
+        "properties": {
+          "consecutive_failures": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "last_attempt_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_success_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string"
+          }
+        }
+      },
+      "Project": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "delivery",
+          "capacity",
+          "rev"
+        ],
+        "properties": {
+          "capacity": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "delivery": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "rev": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "ProjectsResponse": {
+        "type": "object",
+        "required": [
+          "projects"
+        ],
+        "properties": {
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Project"
+            }
+          }
+        }
+      },
+      "QuotaResponse": {
+        "type": "object",
+        "required": [
+          "windows"
+        ],
+        "properties": {
+          "windows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QuotaWindow"
+            }
+          }
+        }
+      },
+      "QuotaWindow": {
+        "type": "object",
+        "description": "One quota window (`protocol.md` section 8).",
+        "required": [
+          "label",
+          "title",
+          "kind",
+          "fetched_at",
+          "stale",
+          "dot"
+        ],
+        "properties": {
+          "burn_multiple": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "dot": {
+            "type": "string",
+            "description": "`green`, `amber`, `red` or `grey`, read from the weekly window."
+          },
+          "elapsed_percent": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "fetch_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A short code for the last failed run, never quota-axi's stderr."
+          },
+          "fetched_at": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string",
+            "description": "`<provider>:<window id>`, for example `claude:seven_day`."
+          },
+          "pace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "percent_remaining": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "projected_exhaustion_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reserve": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "resets_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stale": {
+            "type": "boolean",
+            "description": "Older than 15 minutes."
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "Receipt": {
+        "type": "object",
+        "description": "The receipt every mutation returns (`protocol.md` section 7.2).",
+        "required": [
+          "recorded_at"
+        ],
+        "properties": {
+          "approval_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outbox_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recorded_at": {
+            "type": "string"
+          }
+        }
+      },
+      "ResetEvent": {
+        "type": "object",
+        "description": "One `event: reset` message: the client refetches the snapshot.",
+        "required": [
+          "seq",
+          "server_time"
+        ],
+        "properties": {
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "server_time": {
+            "type": "string"
+          }
+        }
+      },
+      "ReviewRow": {
+        "type": "object",
+        "required": [
+          "id",
+          "verdict",
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "verdict": {
+            "type": "string"
+          }
+        }
+      },
+      "RunDetail": {
+        "type": "object",
+        "description": "`GET /api/v1/runs/{id}`.",
+        "required": [
+          "id",
+          "card_id",
+          "started_at",
+          "events",
+          "pane_tail"
+        ],
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "card_id": {
+            "type": "string"
+          },
+          "ended_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventLine"
+            }
+          },
+          "id": {
+            "type": "string"
+          },
+          "pane_tail": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The last lines of the run's live herdr pane, at most 200; empty when\nthe run has no live pane or herdr did not answer."
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "worktree": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "SignalsProject": {
+        "type": "object",
+        "required": [
+          "project_id",
+          "accepted",
+          "needed",
+          "escaped"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "escaped": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "median_answer_minutes": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "needed": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "project_id": {
+            "type": "string"
+          }
+        }
+      },
+      "SignalsResponse": {
+        "type": "object",
+        "description": "`GET /api/v1/signals`: the last 8 Lisbon weeks, oldest first, the last\nbeing the week in progress.",
+        "required": [
+          "weeks",
+          "by_project",
+          "machines_live",
+          "machines_total"
+        ],
+        "properties": {
+          "by_project": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SignalsProject"
+            }
+          },
+          "machines_live": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "machines_total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "weeks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SignalsWeek"
+            }
+          }
+        }
+      },
+      "SignalsWeek": {
+        "type": "object",
+        "description": "One Lisbon week of the Health page's counts.",
+        "required": [
+          "start",
+          "end",
+          "landed",
+          "reported",
+          "merged_prs",
+          "needed",
+          "reverts",
+          "escaped",
+          "rework",
+          "lost_work",
+          "duplicate_dispatches",
+          "unauthorized"
+        ],
+        "properties": {
+          "duplicate_dispatches": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "end": {
+            "type": "string"
+          },
+          "escaped": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "landed": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "lost_work": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "median_answer_minutes": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "merged_prs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "needed": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "reported": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "reverts": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "rework": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "start": {
+            "type": "string"
+          },
+          "unauthorized": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "Snapshot": {
+        "type": "object",
+        "description": "The inlined `<script id=\"tiller-boot\">` body and `GET /api/v1/snapshot`.",
+        "required": [
+          "v",
+          "server_time",
+          "last_event_seq",
+          "thresholds",
+          "queries"
+        ],
+        "properties": {
+          "last_event_seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "queries": {
+            "type": "object",
+            "description": "Each entry is exactly the response of that GET, keyed by its path\nand query string."
+          },
+          "server_time": {
+            "type": "string"
+          },
+          "thresholds": {
+            "type": "object",
+            "description": "Staleness thresholds in minutes, by name."
+          },
+          "v": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Always 1.",
+            "minimum": 0
+          }
+        }
+      },
+      "TimelineEntry": {
+        "type": "object",
+        "required": [
+          "seq",
+          "at",
+          "actor",
+          "text"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "description": "`you`, `orchestrator`, `hook` or `system`."
+          },
+          "at": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "TimelineResponse": {
+        "type": "object",
+        "description": "`GET /api/v1/cards/{id}/timeline`: newest first, paged by `before`.",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TimelineEntry"
+            }
+          },
+          "next_before": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "Transition": {
+        "type": "object",
+        "description": "A transition's body: `DELETE .../hold`, `close`, `cancel`, `reopen`.",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "idempotency_key": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`close` only: the outcome, `completed` when omitted."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required by `cancel` and `reopen`."
+          },
+          "rev": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "reads",
+      "description": "Reads, served to any request that passes the Host check"
+    },
+    {
+      "name": "mutations",
+      "description": "Mutations: owner cookie, JSON body, same origin"
+    },
+    {
+      "name": "stream",
+      "description": "The one SSE stream"
+    }
+  ]
+}

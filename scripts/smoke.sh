@@ -23,6 +23,10 @@ grep -q '<div id="root">' <<<"$page" || { echo "board shell missing from $url/" 
 
 asset=$(grep -o '/assets/[^"]*\.js' <<<"$page" | head -n 1)
 [ -n "$asset" ] || { echo "no script asset referenced by the board shell" >&2; exit 1; }
-curl -fsS -o /dev/null "$url$asset"
+headers=$(curl -fsS -D - -o /dev/null "$url$asset")
+grep -qi '^cache-control: .*immutable' <<<"$headers" || { echo "$asset is not served immutable" >&2; exit 1; }
 
-echo "ok: $url serves the board"
+health=$(curl -fsS "$url/api/v1/health")
+grep -q '"version"' <<<"$health" || { echo "no health answer from $url/api/v1/health" >&2; exit 1; }
+
+echo "ok: $url serves the board and its health"

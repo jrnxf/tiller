@@ -136,7 +136,7 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
     case "host":
       if (state) writeMachine(queryClient, state as Machine);
       break;
-    case "quota_window":
+    case "quota":
       if (state) writeQuota(queryClient, state as QuotaWindow);
       break;
     case "project":
@@ -194,7 +194,8 @@ export interface EventSourceLike {
 
 export interface EventsOptions {
   queryClient: QueryClient;
-  lastEventSeq: number;
+  // The boot snapshot's seq, or null when the page booted without one.
+  lastEventSeq: number | null;
   createEventSource?: (url: string) => EventSourceLike;
   fetchSnapshot?: () => Promise<Snapshot>;
 }
@@ -203,7 +204,10 @@ const CLOSED = 2;
 
 // Connects the stream and writes each event into the Query cache. Returns a
 // function that stops it. The browser reconnects by itself and sends
-// `Last-Event-ID`, so a short gap replays; a long one arrives as `reset`.
+// `Last-Event-ID`; a stream it gave up on reopens after the last applied
+// seq. Either way a short gap replays and a long one arrives as `reset`.
+// Without a boot snapshot the stream starts live and the snapshot is fetched
+// once it opens, so nothing is replayed from the start of the log.
 export function connectEvents(options: EventsOptions): () => void {
   const { queryClient } = options;
   const createEventSource =
@@ -213,7 +217,6 @@ export function connectEvents(options: EventsOptions): () => void {
   let lastSeq = options.lastEventSeq;
   let source: EventSourceLike | null = null;
   let stopped = false;
-  let needsResync = false;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
   // Refresh every query from a new snapshot while the UI stays put: only the
@@ -231,33 +234,35 @@ export function connectEvents(options: EventsOptions): () => void {
 
   function open() {
     if (stopped) return;
-    const next = createEventSource(EVENTS_PATH);
+    // `since` resumes after the last applied event. The browser's own
+    // reconnects send `Last-Event-ID`, which the daemon prefers, so a stale
+    // `since` in the URL never replays twice.
+    const next = createEventSource(
+      lastSeq === null ? EVENTS_PATH : `${EVENTS_PATH}?since=${lastSeq}`,
+    );
     source = next;
 
     next.addEventListener("open", () => {
       connectionStore.set("live");
-      // After the browser gave up and we opened a new stream there is no
-      // `Last-Event-ID`; the snapshot taken after this open covers the gap.
-      if (needsResync) {
-        needsResync = false;
-        void resync();
-      }
+      if (lastSeq === null) void resync();
     });
     next.addEventListener("error", () => {
       connectionStore.set("reconnecting");
       if (next.readyState === CLOSED && !stopped) {
         next.close();
-        needsResync = true;
         retryTimer = setTimeout(open, 1000);
       }
     });
     next.addEventListener("change", (message) => {
       const event = JSON.parse(message.data) as ChangeEvent;
-      if (event.seq <= lastSeq) return;
+      if (lastSeq !== null && event.seq <= lastSeq) return;
       lastSeq = event.seq;
       applyChange(queryClient, event);
     });
-    next.addEventListener("reset", () => {
+    next.addEventListener("reset", (message) => {
+      // Follow the daemon's newest seq at once, so a change that arrives
+      // before the new snapshot lands is applied and not dropped as old.
+      lastSeq = (JSON.parse(message.data) as { seq: number }).seq;
       void resync();
     });
   }

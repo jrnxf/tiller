@@ -1046,6 +1046,31 @@ fn a_moved_head_asks_again_on_a_new_approval() {
     assert!(matches!(execution, Execution::Executing(_)));
 }
 
+/// The board decides on the head it showed: another bound head refuses in
+/// the decision's own transaction, and nothing changes.
+#[test]
+fn a_decision_on_a_shown_head_refuses_a_different_bound_head() {
+    let (mut store, _) = memory_store();
+    let (_, approval) = requested_merge(&mut store, 1, "aaaaaaaaaaaa1111");
+    let error = store
+        .approval_decide_shown(&owner(), None, &approval.id, accept(), "bbbbbbbbbbbb2222")
+        .unwrap_err();
+    assert_eq!(error.code(), "refused");
+    assert!(
+        error
+            .to_string()
+            .contains("the head moved since it was shown")
+    );
+    let still: Approval = super::get(store.conn(), "approval", &approval.id).unwrap();
+    assert_eq!(still.state, ApprovalState::Requested);
+
+    store
+        .approval_decide_shown(&owner(), None, &approval.id, accept(), "aaaaaaaaaaaa1111")
+        .unwrap();
+    let accepted: Approval = super::get(store.conn(), "approval", &approval.id).unwrap();
+    assert_eq!(accepted.state, ApprovalState::Accepted);
+}
+
 /// A head sha that is not hex is a usage error, never a slicing panic.
 #[test]
 fn a_malformed_head_sha_is_refused() {

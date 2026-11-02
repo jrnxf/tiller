@@ -131,7 +131,7 @@ test("a quota window event updates the window by label", () => {
   applyChange(
     queryClient,
     event({
-      entity: "quota_window",
+      entity: "quota",
       entity_id: weekly.label,
       entity_state: { ...weekly, percent_remaining: 12, dot: "amber" },
     }),
@@ -245,14 +245,104 @@ test("a reset refetches the snapshot into the cache without clearing it first", 
   stop();
 });
 
-test("the connection state follows open and error, and a closed stream reopens and resyncs", async () => {
+test("after a reset to a restored database, a newer change is applied before the snapshot lands", () => {
+  const queryClient = seededClient();
+  const stop = connectEvents({
+    queryClient,
+    lastEventSeq: 4181,
+    createEventSource: (url) => new FakeSource(url),
+    fetchSnapshot: () => new Promise<never>(() => {}),
+  });
+  const source = FakeSource.all[0] as FakeSource;
+  const hostA = queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath))?.machines[0];
+  if (!hostA) throw new Error("fixture has no machine");
+
+  // The restored log ends at 100, below the 4181 this page had seen.
+  source.emit("reset", { seq: 100 });
+  source.emit(
+    "change",
+    event({
+      seq: 100,
+      entity: "host",
+      entity_id: hostA.id,
+      entity_state: { ...hostA, rev: hostA.rev + 1, running_agents: 7 },
+    }),
+  );
+  expect(
+    queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath))?.machines[0]
+      ?.running_agents,
+  ).toBe(hostA.running_agents);
+  source.emit(
+    "change",
+    event({
+      seq: 101,
+      entity: "host",
+      entity_id: hostA.id,
+      entity_state: { ...hostA, rev: hostA.rev + 2, running_agents: 5 },
+    }),
+  );
+  expect(
+    queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath))?.machines[0]
+      ?.running_agents,
+  ).toBe(5);
+  stop();
+});
+
+test("without a boot snapshot the stream starts live and fetches the snapshot once open", async () => {
   vi.useFakeTimers();
   const queryClient = seededClient();
-  const stop = connect(queryClient, 4181, fixtureSnapshot("quota-amber", NOW));
+  const snapshot = fixtureSnapshot("quota-red", NOW);
+  const fetchSnapshot = vi.fn(() => Promise.resolve(snapshot));
+  const stop = connectEvents({
+    queryClient,
+    lastEventSeq: null,
+    createEventSource: (url) => new FakeSource(url),
+    fetchSnapshot,
+  });
+  const first = FakeSource.all[0] as FakeSource;
+  // No `since=0`: that would replay the whole log.
+  expect(first.url).toBe("/api/v1/events");
+
+  first.emit("open");
+  expect(fetchSnapshot).toHaveBeenCalledTimes(1);
+  await vi.waitFor(() => {
+    expect(queryClient.getQueryData<QuotaResponse>(queryKeyFor(quotaPath))?.windows[0]?.dot).toBe(
+      "red",
+    );
+  });
+
+  // A reopen resumes after the snapshot's seq and does not fetch again.
+  first.readyState = 2;
+  first.emit("error");
+  await vi.advanceTimersByTimeAsync(1000);
+  const second = FakeSource.all[1] as FakeSource;
+  expect(second.url).toBe(`/api/v1/events?since=${snapshot.last_event_seq}`);
+  second.emit("open");
+  expect(fetchSnapshot).toHaveBeenCalledTimes(1);
+  stop();
+});
+
+test("the stream starts after the boot snapshot's seq", () => {
+  const stop = connect(seededClient(), 4181);
+  expect((FakeSource.all[0] as FakeSource).url).toBe("/api/v1/events?since=4181");
+  stop();
+});
+
+test("the connection state follows open and error, and a closed stream reopens after the last applied seq", async () => {
+  vi.useFakeTimers();
+  const queryClient = seededClient();
+  const fetchSnapshot = vi.fn(() => Promise.resolve(fixtureSnapshot("quota-amber", NOW)));
+  const stop = connectEvents({
+    queryClient,
+    lastEventSeq: 4181,
+    createEventSource: (url) => new FakeSource(url),
+    fetchSnapshot,
+  });
   const first = FakeSource.all[0] as FakeSource;
 
   first.emit("open");
   expect(connectionStore.get()).toBe("live");
+  first.emit("change", event({ seq: 4185, entity: "session" }));
 
   first.readyState = 2;
   first.emit("error");
@@ -261,13 +351,11 @@ test("the connection state follows open and error, and a closed stream reopens a
 
   await vi.advanceTimersByTimeAsync(1000);
   const second = FakeSource.all[1] as FakeSource;
-  expect(second).toBeDefined();
+  expect(second?.url).toBe("/api/v1/events?since=4185");
   second.emit("open");
   expect(connectionStore.get()).toBe("live");
-  await vi.advanceTimersByTimeAsync(0);
-  expect(queryClient.getQueryData<QuotaResponse>(queryKeyFor(quotaPath))?.windows[0]?.dot).toBe(
-    "amber",
-  );
+  // The replay covers the gap: no snapshot refetch, no flash.
+  expect(fetchSnapshot).not.toHaveBeenCalled();
   stop();
 });
 

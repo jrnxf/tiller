@@ -349,6 +349,39 @@ impl Store {
         })
     }
 
+    /// `cache.refresh` after a failed quota read for `provider`: its rows
+    /// keep their values and `fetched_at`, so they age into stale, and carry
+    /// `fetch_error` (a short code, `protocol.md` section 8). An event only
+    /// for a row whose error changed.
+    pub fn cache_quota_failed(
+        &mut self,
+        ctx: &Ctx,
+        provider: &str,
+        code: &str,
+    ) -> Result<Applied<usize>> {
+        required("fetch error", code)?;
+        self.write(ctx, "cache.refresh", None, |tx| {
+            tx.rebuildable();
+            let prefix = format!("{provider}:");
+            let rows: Vec<QuotaWindow> = list(
+                tx.conn(),
+                "substr(label, 1, length(?1)) = ?1 AND coalesce(fetch_error, '') != ?2 ORDER BY label",
+                &[&prefix, &code],
+            )?;
+            for row in &rows {
+                tx.conn().execute(
+                    "UPDATE quota_windows SET fetch_error = ?2 WHERE label = ?1",
+                    params![row.label, code],
+                )?;
+                tx.event(
+                    NewEvent::new("quota", &row.label, "quota.changed")
+                        .payload(json!({"label": row.label, "fetch_error": code})),
+                )?;
+            }
+            Ok(rows.len())
+        })
+    }
+
     /// `cache.refresh` of `hosts.last_seen_at`; `stale_reason` set means the
     /// host could not be reached. An event only when reachability changes.
     pub fn host_seen(
