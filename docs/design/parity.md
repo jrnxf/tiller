@@ -139,7 +139,7 @@ Project names are replaced with what each project is, so this file stays public-
 
 Each row waited for the developer's approval at CP1. A drop sends the capability nowhere: Tiller does not build it.
 
-**CP1 outcome (Monday 2026-11-02, Lisbon time):** D01, D04 and D11 are kept; the other twelve are dropped. T1.6 recorded the outcome in the Decision column. The three kept rows have their spec home in `docs/spec/protocol.md` section 10 (remote homes as read-only peers, `tiller hook --harness`, `tiller config diff`) and `docs/spec/authority.md` (G25, G35); the design that is still open for them is in `docs/spec/cp2-open.md`.
+**CP1 outcome (Monday 2026-11-02, Lisbon time):** D01, D04 and D11 are kept; the other twelve are dropped. T1.6 recorded the outcome in the Decision column. The three kept rows have their spec home in `docs/spec/protocol.md` section 10 (remote homes as read-only peers, `tiller hook --harness`, `tiller config diff`) and `docs/spec/authority.md` (G25, G35); CP2 (Monday 2026-11-02) decided their open design: remote homes stay read-only in v1 and no other harness gets an adapter before cutover (`docs/spec/cp2-open.md`, items 12 and 13).
 
 | # | Capability | Evidence | Reason to drop | Decision |
 |---|---|---|---|---|

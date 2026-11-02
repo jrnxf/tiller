@@ -1,6 +1,6 @@
 # Host capabilities
 
-Draft, Sunday 2026-11-01, 21:25 Lisbon time (WET). Written from the capability probe (`probe/tiller-probe.sh`, task T0.3). It is decided at checkpoint CP1.
+Drafted Sunday 2026-11-01, 21:25 Lisbon time (WET), from the capability probe (`probe/tiller-probe.sh`, task T0.3). The minimum common behavior below was approved as the baseline at CP2, Monday 2026-11-02 (`docs/spec/cp2-open.md`, H01); host C's probe is still pending.
 
 Hosts are named by role:
 
@@ -41,9 +41,11 @@ Read-only carve-out: the probe writes only under its temp root, except that the 
 - **Each session creates `<config dir>/session-env/<session id>/`**, and print-mode sessions keep a transcript unless `--no-session-persistence` is passed.
 - **`--append-system-prompt-file` is not listed in `claude --help`**; only the `--bare` text names it. It works, but the launch form leans on a flag the help does not document.
 
-## Minimum common behavior (draft)
+## Minimum common behavior
 
-Tiller can assume these on every host. Each row has a fallback for a host that falls short, so no host blocks the plan; if a host needs the fallback, that is a CP1 decision.
+Approved as the baseline at CP2 (Monday 2026-11-02, Lisbon time; `docs/spec/cp2-open.md`, H01). Host C has not run the probe yet; if it needs a fallback, that is a separate owner decision.
+
+Tiller can assume these on every host. Each row has a fallback for a host that falls short, so no host blocks the plan.
 
 | Tiller assumes | Fallback if a host falls short |
 |---|---|

@@ -2,7 +2,7 @@
 
 This is the contract for every way in and out of `state.db`: how an ask becomes a record, how a message reaches a session, how each hook event becomes an observation, the full `tiller` command surface, the board's HTTP and SSE API, the quota feed and the machine summary. `state.md` and `schema.sql` define the records; this spec defines who writes them, through which command or endpoint, and what a caller gets back.
 
-Written Monday 2026-11-02, Lisbon time (WET). Task T1.3. Status: draft for CP2.
+Written Monday 2026-11-02, Lisbon time (WET). Task T1.3. Status: approved at CP2 (Monday 2026-11-02), with the owner's decisions from `cp2-open.md` applied. A contract change from here on needs a stop-and-ask.
 
 T2.2 builds the CLI from section 6, T2.6 builds the hook and transcript handlers from sections 4 and 5, T2.5 builds delivery from section 3, T2.8 builds the API and the feeds from sections 7 to 9, and T4.4 wires intake from section 2. Authority (who may run what) is T1.4; this spec names the caller each command expects and leaves the deny rules to `authority.md`.
 
@@ -82,7 +82,7 @@ Modes, from the host config value `stop_hook_mode`:
 | `block-once` | When `would_block` is true and the input's `stop_hook_active` is false [D], print `{"decision":"block","reason":"<one line naming each unresolved ask and unknown tag>"}`. When `stop_hook_active` is true, never block, so one turn is blocked at most once. Workers are never blocked by this check |
 | `off` | Record only the turn end, no intake check |
 
-**The switching rule.** Observe mode measures what blocking would have done. A `would_block` stop is a *false block* when, within 2 minutes and without another owner prompt, the same session resolves every listed ask and every unknown tag turns out to be a card created in that window. `tiller intake stats` reports the stop count, the would-block count and the false-block rate over a window. The owner may switch to `block-once` only when the last 7 days hold at least 200 orchestrator stops and the false-block rate is under 2%. The switch is a config change the owner makes (`tiller config set stop_hook_mode block-once`), never automatic, and it is recorded as an event (`config.changed`). `config set` refuses the switch to `block-once` (exit 5, with the current stats) while the rule is not met. Switching back to `observe` is always allowed.
+**The switching rule.** Observe mode measures what blocking would have done. A `would_block` stop is a *false block* when, within 2 minutes and without another owner prompt, the same session resolves every listed ask and every unknown tag turns out to be a card created in that window. `tiller intake stats` reports the stop count, the would-block count and the false-block rate over a window. The owner may switch to `block-once` only when the last 7 days hold at least 200 orchestrator stops and the false-block rate is under 2% (numbers accepted at CP2, C14). The switch is a config change the owner makes (`tiller config set stop_hook_mode block-once`), never automatic, and it is recorded as an event (`config.changed`). `config set` refuses the switch to `block-once` (exit 5, with the current stats) while the rule is not met. Switching back to `observe` is always allowed.
 
 The turn-end guard Firstmate keeps (P26, never go idle with work in flight) is not a block here: the daemon delivers pending outbox messages to an idle orchestrator (section 3), which wakes it.
 
@@ -139,6 +139,16 @@ The daemon sends the owner a desktop notification through herdr (`herdr notify`,
 
 The notification names the project and the card, and opening it runs `herdr agent focus` on the project's orchestrator (the saved machine first for a remote host). A re-ring, a worker's status line, a PR event or a card moving between columns never notifies. Each notification is recorded in the event that caused it (`notified_at` in the payload), so a daemon restart cannot send it twice. Test: `delivery::notify::new_attention_item_notifies_once`.
 
+### 3.5 Review-page answers (P47)
+
+Decided at CP2 (C05): in v1. A worker that publishes a live review page records it with `artifact.add` (`state.md`, Artifact), and the owner's annotations on that page reach the worker through the outbox, not through the worker polling the page.
+
+- **Source.** A T2.5 poller reads the review page tool's feedback queue for every artifact that has a live page and an open card. It runs on the daemon's schedule (every 30 s while the artifact's run is active) and records its last success in `/health` like every poller.
+- **Delivery.** Each new feedback entry becomes one `outbox.enqueue` of kind `steer` to the live session of the run that published the artifact (`artifacts.run_id`), with actor `daemon` (the role matrix in `authority.md` gives the daemon the steer right and gives scripts none). The message body is the entry's text and the element it annotates, never the page itself. The ordinary delivery rules apply (3.3): store, then type; one line per batch; busy panes wait.
+- **Idempotency.** The key is `page:<artifact id>:<feedback entry id>`, so a re-poll, a daemon restart or a second poller pass never delivers an entry twice.
+- **No owning session.** When the publishing run has ended, the entry goes as a `note` to the card's supervisor orchestrator instead, which decides whether to start a run for it. An entry for an artifact whose card is closed is recorded as an event on the card and wakes nobody.
+- Test: `delivery::sources::page_answer_reaches_owning_worker`, plus `delivery::sources::page_answer_replay_is_not_delivered_twice`.
+
 ## 4. Hook events
 
 ### 4.1 One entry point
@@ -174,7 +184,7 @@ Claude Code documents 33 hook events [D]. Each maps to exactly one handler. `eve
 | `TaskCreated` | `ignore` | - | - | Claude Code's own task list, not Tiller cards |
 | `TaskCompleted` | `ignore` | - | - | as above |
 | `Stop` | `turn_end` | `Stop` | `idle` | section 2.5 for orchestrators. When `background_tasks` or `session_crons` is non-empty [D], the payload says so and the idle alarm treats the session as waiting on its own work, not stuck |
-| `StopFailure` | `turn_failed` | `StopFailure:<error>` | `errored` | `error` is one of `rate_limit`, `overloaded`, `authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`, `billing_error`, `invalid_request`, `model_not_found`, `server_error`, `max_output_tokens`, `cloud_credential_error`, `unknown` [D]. `rate_limit` also asks the daemon for an early quota read. Retry policy is T1.2's |
+| `StopFailure` | `turn_failed` | `StopFailure:<error>` | `errored` | `error` is one of `rate_limit`, `overloaded`, `authentication_failed`, `oauth_org_not_allowed`, `account_on_hold`, `billing_error`, `invalid_request`, `model_not_found`, `server_error`, `max_output_tokens`, `cloud_credential_error`, `unknown` [D]. `rate_limit` also asks the daemon for an early quota read. The daemon never retries or resumes a session for an API error; Claude Code's own retry is the only one (decided at CP2, C07; `recovery.md`, R12) |
 | `TeammateIdle` | `ignore` | - | - | fleet roles do not use agent teams |
 | `InstructionsLoaded` | `instructions` | `InstructionsLoaded` | null | payload: file path relative to the project or `~`, and its sha256. T1.5 uses it to show which sessions loaded a memory revision |
 | `ConfigChange` | `config` | `ConfigChange` | null | evidence that the session's `config_hash` drifted |
@@ -233,6 +243,24 @@ This replaces plan v2's line that `permission_prompt`, `elicitation_*` and `agen
 | Worker status line (`tiller status`, 6.4) | the worker's own report | `status:<state>` | null (the line is a run fact, not an activity) |
 
 Hook verdicts win over herdr's when both are newer than the projection: Firstmate measured herdr reading `idle` through a whole turn (`plan.md`, "How events reach the board with zero agent tokens"). The rule is the observation with the newest `observed_at`, except that a `herdr:idle` never replaces a hook `working` less than 30 s old. T2.6 pins this with `observe::merge::herdr_idle_does_not_override_fresh_hook_working`.
+
+### 4.6 Forge sources: PRs and deploys
+
+The daemon's forge poller (T2.5) reads GitHub through `gh-axi` only. It never writes to the forge; the only forge writes are `tiller land`'s (`authority.md`, section 6).
+
+| Source | Reads | Every | Writes |
+|---|---|---|---|
+| PR poller | each open PR on a card: head SHA, state, checks, merge commit | 60 s while a run on the card is active or an approval on the PR is open, else 5 minutes | `pr.refresh` (`state.md`), which marks approvals `stale` on a moved head |
+| Deploy poller | the runs of the project's `deploy_workflow` on its default branch, with `head_sha`, `status`, `conclusion`, the environment each job deployed to, and the run URL | 60 s while a deploy-watch obligation is open, else not at all | `deploy.record` (`state.md`, section 8) |
+| Ruleset check | the default branch's rulesets and their bypass actors | at `tiller project add` and hourly; `tiller doctor` only reports the stored value and the last check | `project.merge_gate` (`state.md`, section 8; `authority.md`, Enforced merge gate) |
+
+The deploy watch (decided at CP2, C02 amended by S07). A run counts for the watch only when it matches both the commit and the environment:
+
+- **Commit.** Its `head_sha` equals the pushed SHA, or descends from it on the default branch (the superseded case). A run for an older commit never counts, however recent it is.
+- **Environment.** When `projects.deploy_environment` is set, the run must have a job that deployed to that environment (`gh-axi` reads the run's deployments). A run of the same workflow that skipped the environment, or deployed only to another one, does not count. When it is null, the workflow run's own conclusion is the result.
+- **Results.** `success`, `failed`, `cancelled`, `superseded`, `missing` (no matching run 10 minutes after the push) and `timed_out` (a matching run not concluded by `deploy_timeout_minutes` after the push). `state.md` section 7 says what each one records; only `success` and `superseded` close the card.
+- **Idempotency.** `deploy.record` is keyed by the obligation id, the run id and the result, so a re-poll writes nothing new. `missing` and `timed_out` are written once per watch; a later matching conclusion still resolves the watch.
+- Tests: `daemon::forge::deploy_success_must_match_sha_and_environment`, `daemon::forge::deploy_for_older_commit_does_not_count`, `daemon::forge::superseded_deploy_closes_landed`, `daemon::forge::missing_and_timed_out_deploys_open_recovery`.
 
 ## 5. Transcript tailing
 
@@ -298,7 +326,7 @@ Reads have no side effects and are all trivially idempotent; they are listed aft
 | Command | Mutation | Caller | Retry |
 |---|---|---|---|
 | `tiller card create <project> --kind K --title T [...] [--ask <ask>]` | `card.create`; without `--ask` the card has no `created_by_ask_id` and no `ask_cards` row | orchestrator, owner | keyed |
-| `tiller card edit <card> --rev <n> [--title] [--priority] [--body] [--size] [--acceptance] [--category]` | `card.edit` | orchestrator, owner | natural: the same values at the new rev are a no-op; a stale rev is exit 4 |
+| `tiller card edit <card> --rev <n> [--title] [--priority] [--body] [--size] [--acceptance] [--category] [--dispatch <model>:<effort> \| --no-dispatch]` | `card.edit`; `--dispatch` and `--no-dispatch` set or clear `cards.dispatch_override` and are owner only | orchestrator, owner | natural: the same values at the new rev are a no-op; a stale rev is exit 4 |
 | `tiller card hold <card> --until <date> --reason <t>` | `card.hold` | orchestrator, owner | natural (same `until` and reason) |
 | `tiller card unhold <card>` | `hold.release` (`removed`) | orchestrator, owner | natural |
 | `tiller card dep add <card> <depends-on>` / `dep rm` | `dep.add` / `dep.release` (`removed`) | orchestrator, owner | natural |
@@ -321,7 +349,7 @@ Reads have no side effects and are all trivially idempotent; they are listed aft
 | `tiller land <approval>` | `approval.execute`, `approval.finish` | daemon; run by the owner it asks the daemon to land and waits for the result (exit 7 when the daemon is down), it never merges in its own process (`authority.md`, section 6) | natural up to `executing`; once the merge call is sent, a lost result is exit 8 and is never retried blind |
 | `tiller grant create <project> ...` / `revoke <grant>` | `grant.create` / `grant.revoke` (conditions in `authority.md`) | owner | keyed / natural |
 | `tiller away start --until <date> ...` / `end` | `away.start` / `away.end` (scope in `authority.md`) | owner | keyed / natural |
-| `tiller mem note` / `propose` / `approve` | `mem.note` / `mem.propose` / `mem.decide` (`memory.md`) | fleet roles; `approve` owner only | keyed |
+| `tiller mem note [--contradicts <memory>]` / `propose` / `approve` | `mem.note` / `mem.propose` / `mem.decide` (`memory.md`) | fleet roles; `approve` owner only | keyed |
 
 **Runs and agents**
 
@@ -341,6 +369,8 @@ Reads have no side effects and are all trivially idempotent; they are listed aft
 | `tiller agent focus <run\|session>` | none; `herdr agent focus <name>`, with `--machine` for a remote host | owner, board | natural |
 | `tiller send <run\|session> --kind steer\|note (--text <t> \| -)` | `outbox.enqueue` | orchestrator, owner | keyed |
 | `tiller inbox [<message>]` | `outbox.ack` (3.2) | the target session | natural |
+
+**Dispatch rules (P02; decided at CP2, C04).** The model and effort of every run come from a `[dispatch]` table in `~/.tiller/config.toml`, which fleet roles cannot read or write (`authority.md`, section 8). It holds an ordered model list (cheapest first), the effort order `low` < `medium` < `high` < `xhigh` < `max`, and rules keyed by card kind and size, each naming a model and an effort, with a default rule for anything unmatched. `run.start` resolves the rule inside its transaction and writes the resolved model, effort and the rule that matched into the `run.started` payload. `tiller spawn --model M --effort E` from the orchestrator may raise either value above the rule and is refused (exit 6, naming the rule) below it, since a downgrade needs the owner. The owner lowers or raises it for one card with `tiller card edit <card> --dispatch <model>:<effort>`, which sets `cards.dispatch_override` (owner only; `state.md`, Card); an override wins over the rule and is quoted in the payload. T4.2 enters Firstmate's four rules (haiku low, opus high, opus medium, default sonnet medium) from the P02 evidence as the shipped defaults. A `PostModelSwitch` that leaves the resolved model is recorded as drift (4.2). Test: `agents::spawn::dispatch_resolves_model_effort_from_rules`, plus `agents::spawn::orchestrator_downgrade_refused`.
 
 **Records**
 
@@ -386,7 +416,7 @@ Every mutation the CLI exposes is a row in `state.md` section 8 (this task added
 
 - The daemon serves `http://127.0.0.1:7421` only, never another interface (AGENTS.md).
 - **Host check.** Every request must carry `Host: 127.0.0.1:7421` or `localhost:7421`; any other value gets 421. This stops DNS rebinding.
-- **Credential.** `authority.md` (Board API credential) owns the requirement; this is the mechanism. Reads (`GET`, including the SSE stream) are served to any request that passes the Host check. Mutations need the owner cookie, `tiller_owner`, `HttpOnly; SameSite=Strict; Path=/`, which the browser sends with `fetch` and `EventSource` alike. It is minted only through the one-time login link `tiller board` prints (`GET /login/<one-time token>` sets it and redirects to `/`); `GET /` never sets it. Its hash is stored under `~/.tiller`, which every fleet role is denied. A mutation also needs `Content-Type: application/json`, `Sec-Fetch-Site: same-origin` and an `Origin` equal to the daemon's own. No CORS headers are sent, so another site's page can neither read nor write.
+- **Credential.** `authority.md` (Board API credential) owns the requirement; this is the mechanism. Reads (`GET`, including the SSE stream) are served to any request that passes the Host check. Mutations need the owner cookie, `tiller_owner`, `HttpOnly; SameSite=Strict; Path=/`, which the browser sends with `fetch` and `EventSource` alike. It is minted only through the one-time login link `tiller board` prints (`GET /login/<one-time token>` sets it and redirects to `/`); `GET /` never sets it. It survives daemon restarts, so open tabs keep working, and expires 30 days after it was minted (`Max-Age=2592000`, and the stored hash carries the same expiry, so a copied cookie stops working too); after that, `tiller board` must be run again (decided at CP2, C15). Its hash is stored under `~/.tiller`, which every fleet role is denied. A mutation also needs `Content-Type: application/json`, `Sec-Fetch-Site: same-origin` and an `Origin` equal to the daemon's own. No CORS headers are sent, so another site's page can neither read nor write.
 - **Same-user processes.** A process running as the owner's OS user that can read `~/.tiller` could still act as the owner. `authority.md` closes this for fleet roles (no access to `~/.tiller`, no localhost from the sandbox) and lists it as an alternate path with tests.
 - **Versioning.** Every path is under `/api/v1`. The OpenAPI document (`contract/openapi.json`, utoipa, T2.8) is the board's only source of types, including the SSE event schemas.
 
@@ -514,10 +544,10 @@ Exposed through `GET /api/v1/machines`, `tiller machines`, the snapshot and `hos
 
 ## 10. Kept Firstmate capabilities: other harnesses, remote homes, config push
 
-The owner kept D01 (secondmates and remote homes), D04 (other harness adapters) and D11 (config push to secondmate homes) and approved the other twelve drops (the decision reached this task on Monday 2026-11-02; `parity.md` records it since T1.6). This spec gives each a protocol home and leaves the rest of the design to CP2.
+The owner kept D01 (secondmates and remote homes), D04 (other harness adapters) and D11 (config push to secondmate homes) and approved the other twelve drops (the decision reached this task on Monday 2026-11-02; `parity.md` records it since T1.6). This spec gives each a protocol home; CP2 decided the two open points below (C12, C13).
 
-- **Other harnesses (D04).** `sessions.harness` (default `claude`) records which harness runs a session. `tiller hook --harness <h> <event>` is the entry point for another harness's hooks; each harness has an adapter table, like section 4.2, mapping its events onto the same `observations.event` and verdict vocabulary, with its own totality test. A harness with no adapter yet is observed through herdr and liveness only, as a reduced host is. Claude Code is the only adapter at cutover; which other harnesses get one first is open for CP2.
-- **Remote homes (D01).** A remote home is another host running its own Tiller, which owns its own projects (one owner host per project). `tiller peer add <label> --ssh <alias>` records it as a `remote` host. The daemon polls `ssh <alias> tiller machines --json --local` every 2 minutes for that host's own summary, which fills section 9's remote row; the peer's cards never enter this database (`state.md`, principle 1), and the board links to the peer's herdr through the saved machine. Sending an ask to a peer's orchestrator (`tiller ask note --host <peer> ...`, run as `ssh <alias> tiller ask note ...`) is a new control route; it stays off until CP2 decides it, because remote lanes are read-only in v1.
+- **Other harnesses (D04).** `sessions.harness` (default `claude`) records which harness runs a session. `tiller hook --harness <h> <event>` is the entry point for another harness's hooks; each harness has an adapter table, like section 4.2, mapping its events onto the same `observations.event` and verdict vocabulary, with its own totality test. A harness with no adapter yet is observed through herdr and liveness only, as a reduced host is. Claude Code is the only adapter at cutover: no other harness gets an adapter before cutover (decided at CP2, C13). Which one comes first after cutover is a later decision, and `authority.md` G35 still refuses a role on a harness without a pre-tool hook transport and a sandbox equivalent.
+- **Remote homes (D01).** A remote home is another host running its own Tiller, which owns its own projects (one owner host per project). `tiller peer add <label> --ssh <alias>` records it as a `remote` host. The daemon polls `ssh <alias> tiller machines --json --local` every 2 minutes for that host's own summary, which fills section 9's remote row; the peer's cards never enter this database (`state.md`, principle 1), and the board links to the peer's herdr through the saved machine. Sending an ask to a peer's orchestrator (`tiller ask note --host <peer> ...`, run as `ssh <alias> tiller ask note ...`) would be a new control route; it stays off in v1, and remote lanes stay read-only (decided at CP2, C12).
 - **Config push (D11).** Tiller's configuration (role files, settings fragments, hook registration) ships through the Nix flake and the home-manager module on every host, so a push is a dotfiles change plus a rebuild, not a file copy. `tiller config diff <peer>` compares this host's config hash with the peer's (`ssh <alias> tiller config hash`) and lists what differs. It is read-only.
 
 ## 11. Checks
@@ -543,7 +573,7 @@ The owner kept D01 (secondmates and remote homes), D04 (other harness adapters) 
 | 11 | Each hook event and notification type handled on its own; `StopFailure` and transcript interrupts; `unknown` and stale explicit; hooks merged with herdr and liveness by `observed_at` |
 | 12 | `tiller ask resolve` with four dispositions; tags for readability only; the Stop hook observes first and blocks once only after its false-block rate is measured; unresolved asks stay visible |
 | 13 | Wake-up line grammar, store then type, ack through the hook or `tiller inbox`, target check, batching, re-ring |
-| 18 | Remote hosts view only; the peer ask route stays off until CP2 |
+| 18 | Remote hosts view only; the peer ask route stays off in v1 (CP2, C12) |
 | 35 | The quota feed fails closed when stale and carries no account id |
 | 36 | Attention reads with evidence and `still_current`; permission prompts in their own list; receipts recorded, delivered, done |
 | 37 | Each poller's last success in `/health`; one stream with freshness |
@@ -564,12 +594,18 @@ Points 7 and 16 (rev conflicts, bound approvals) are `state.md`'s; this spec car
 
 ### Parity rows this spec gives a home
 
-P04 (quota feed), P18 and P20 (status lines and one wake per batch), P22 (`card show`, `run show` with a bounded tail), P23 (re-ring, polling pickup), P24 (`agent relaunch`, `interrupt`), P25 (`agent resume`), P26 (idle orchestrator woken by the outbox), P27 (every prompt is an ask, including in worker panes), P36 (receipts and attention reads; the notify rule is T2.5's), P38 (`tiller snapshot` and the boot snapshot), P43 (`tiller doctor`, `/health`), P60 (`tiller ask note`), P62 (machines, focus on the saved machine), D01, D04 and D11 (section 10).
+P02 (dispatch rules, 6.4), P04 (quota feed), P18 and P20 (status lines and one wake per batch), P22 (`card show`, `run show` with a bounded tail), P23 (re-ring, polling pickup), P24 (`agent relaunch`, `interrupt`), P25 (`agent resume`), P26 (idle orchestrator woken by the outbox), P27 (every prompt is an ask, including in worker panes), P36 (receipts and attention reads; the notify rule is T2.5's), P38 (`tiller snapshot` and the boot snapshot), P43 (`tiller doctor`, `/health`), P47 (review-page answers, 3.5), P60 (`tiller ask note`), P62 (machines, focus on the saved machine), D01, D04 and D11 (section 10).
 
-## Open for CP2
+## Decided at CP2
 
-1. Remote homes (D01): whether `tiller ask note --host <peer>` becomes a control route, which would change the read-only default for remote lanes.
-2. Other harnesses (D04): which harness gets an adapter first, and whether it is needed before cutover.
-3. The Stop hook switching rule: 200 stops over 7 days with under 2% false blocks are proposed starting values.
-4. How long the owner cookie lives before `tiller board` must be run again (`authority.md` owns the credential; this draft keeps it across daemon restarts so open tabs keep working).
-5. Default TOON output for agents with `--json` for scripts and tests, versus JSON everywhere.
+Monday 2026-11-02, Lisbon time. The owner's picks from `cp2-open.md`:
+
+1. **Remote homes** (C12): stay read-only for v1; `tiller ask note --host <peer>` is not a control route (section 10).
+2. **Other harnesses** (C13): none before cutover; Claude Code is the only adapter (section 10).
+3. **The Stop hook switching rule** (C14, confirmed by S06): 200 orchestrator stops over 7 days with a false-block rate under 2%, as 2.5 defines it (the false-block test, its denominator and the owner-only switch).
+4. **The owner cookie** (C15): survives daemon restarts and expires after 30 days (7.1).
+5. **Output** (C16): TOON by default for agents, `--json` on request (6.1).
+6. **Model and effort rules** (C04): a `[dispatch]` table in config, resolved in `run.start`, with an owner-only per-card override (6.4).
+7. **Review-page answers** (C05): a v1 poller that steers the owning worker (3.5).
+8. **`StopFailure`** (C07): never retried by the daemon (4.2; `recovery.md`, R12).
+9. **Deploy watch** (C02 amended by S07): matched to the pushed commit and environment (4.6).

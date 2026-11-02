@@ -108,7 +108,7 @@ about 3 min of the developer's time
 - [ ] Probe results from all three hosts reviewed (developer runs the work Mac one)
 - [ ] Dry-run bundle's open questions answered
 - [ ] Board demo used
-- [ ] Minimum common behavior across hosts agreed
+- [x] Minimum common behavior across hosts agreed (approved as the baseline at CP2, Monday 2026-11-02, H01; host C still has to run the probe, and any fallback it needs is a separate decision)
 - [ ] Parity matrix: every proposed drop approved or sent back
 
 ---
@@ -175,7 +175,7 @@ about 3 min of the developer's time
 
 ## CP2: Specs approved (developer, 30-45 min)
 
-- [ ] State, recovery, protocol, authority and memory specs approved. After this, contract changes need a stop-and-ask.
+- [x] State, recovery, protocol, authority and memory specs approved. After this, contract changes need a stop-and-ask. (Monday 2026-11-02, Lisbon time; every decision is closed in `docs/spec/cp2-open.md`, and the open owner values are listed at its top)
 
 ---
 
@@ -425,6 +425,12 @@ about 3 min of the developer's time
 
 Each flip needs every kept parity row for that host passing, or live-checked at CP7. Rollback triggers: lost work, an unauthorized action, a duplicate dispatch.
 
+One-time owner setup, per host and repo (CP2, S03):
+
+- [ ] Create one GitHub App owned by the owner's account (for example `tiller-merge`), with only the permissions `authority.md` lists for it; store its private key where only the daemon can read it (`authority.md`, Enforced merge gate)
+- [ ] For each gated repo (delivery `no-mistakes` or `no-mistakes-prod-only`, plus any project opted in) on the host being cut over: install the App, add a default-branch ruleset whose only bypass actor is the App, and confirm `tiller doctor` shows `merge_gate = enforced`. Until then that repo runs as `detect`, the labelled fallback
+- [ ] Choose the private remote the host's memory repo pushes to (`memory.remote`, C24)
+
 ### T6.1 Personal Mac
 `opus` high, developer present - 1-2 h
 
@@ -446,6 +452,7 @@ Each flip needs every kept parity row for that host passing, or live-checked at 
 `opus` high - 1-2 h - after 2-3 stable days on the personal Mac
 
 - [ ] CP7 go for the remote host
+- [ ] The sandbox starts on this host; until it does, the host is not cut over (CP2, C19)
 - [ ] Parity rows for this host passing
 - [ ] Same steps as T6.1
 

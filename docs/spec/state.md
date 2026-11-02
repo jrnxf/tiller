@@ -2,7 +2,7 @@
 
 This is the contract for `state.db`, the one SQLite database each host keeps as the authority for its workflow records (ADR 0002). It names every entity, the facts each one owns, how the board's columns are derived from those facts, and the transaction and event behind every mutation. `schema.sql` next to it is the draft DDL; T2.1 turns both into `crates/core`.
 
-Written Monday 2026-11-02, Lisbon time (WET). Task T1.1. Status: draft for CP2.
+Written Monday 2026-11-02, Lisbon time (WET). Task T1.1. Status: approved at CP2 (Monday 2026-11-02), with the owner's decisions from `cp2-open.md` applied. A contract change from here on needs a stop-and-ask.
 
 Every other spec builds on this one: recovery (T1.2) repairs these records, the protocol (T1.3) exposes them, authority (T1.4) says who may mutate them, and memory (T1.5) adds the tables that are never loaded into context.
 
@@ -41,7 +41,8 @@ Each entity lists the facts it owns. Columns the entity only caches say so.
 `hosts`: this host and every saved herdr machine it can see.
 
 - `id` (ULID), `label` (the role label the owner uses, for example `host-a`), `kind` (`local` or `remote`), `herdr_machine` (null for local, the saved machine id for remote).
-- `lane_capacity`: how many runs may be active at once on this host (required for the local host, null for remote ones). `ram_floor_mb`, `disk_floor_mb`: the free-resource floors `tiller spawn` checks live (P03). The floors are config, not state, and may move to the config file later; they are here so a spawn can quote the value it checked.
+- `lane_capacity`: how many runs may be active at once on this host (required for the local host, null for remote ones). `ram_floor_mb`, `disk_floor_mb`: the free-resource floors `tiller spawn` checks live (P03).
+- Why capacity and the floors live in `state.db`, not the config file (decided at CP2, C11; reason corrected by S09): the capacity check is a query inside `run.start`'s `BEGIN IMMEDIATE` transaction, which compares open reservations with `hosts.lane_capacity` and `projects.capacity` in one read, and the `capacity` view (free slots per host) that the Machines section and spawn read is defined over the same rows. A config file cannot take part in that transaction. Quoting the checked value is not the reason: a config value could be quoted in the `run.started` payload just as well, and every value checked is recorded there either way. The floors stay beside the capacity so one owner command (`tiller host edit`) changes all three with a `rev` and an event.
 - `last_seen_at`, `stale_reason` (cache from the herdr poller, T2.5): feed the Machines section.
 
 The owner marker is a file, `~/.tiller/owner`, not a row (plan v2, point 15). `tiller` refuses every mutation while the marker names another system. `meta.host_id` records which host this database belongs to, so a copied database cannot be mistaken for another host's.
@@ -51,6 +52,8 @@ The owner marker is a file, `~/.tiller/owner`, not a row (plan v2, point 15). `t
 `projects`: one row per project this host owns, plus `fleet`.
 
 - `id` (the slug, primary key), `name`, `repo` (`owner/name` or null for local-only), `remote` (git remote URL), `default_branch`, `delivery` (`no-mistakes`, `no-mistakes-prod-only`, `direct-pr`, `direct-push`, `local-only`; P10 and P11), `checks` (JSON: which project checks a direct push must run), `capacity` (max active runs for this project), `owner_host_id`, `added_at`, `next_card_seq`, `rev`, `retired_at`.
+- `deploy_workflow` (the workflow file a `direct-push` project deploys with, or null), `deploy_environment` (the GitHub environment that deploy must reach, or null when the workflow has none), `deploy_timeout_minutes` (default 60): what "the deploy was watched to its result" matches against (section 7; decided at CP2, C02 amended by S07).
+- `merge_gate`: `enforced` or `detect` (decided at CP2, S03). `enforced` only after the daemon's ruleset check confirms the repo's default branch accepts updates from the daemon's GitHub App alone; `detect` is the labelled fallback (`authority.md`, section 6).
 - The project's own checkout path is not stored; treehouse and the dotfiles own it.
 - `tiller init` creates one `ops` card in `fleet` per host, display id `fleet-1`, titled "Host health". Host-level recovery items (T1.2: backups, migrations, resource floors, a crashing orchestrator) attach to it, so `attention.card_id` stays required. It never closes: `card.close` and `card.cancel` refuse it.
 
@@ -82,8 +85,9 @@ Ask text is work data. It stays in this database and is never exported to git.
 
 `cards`: the unit of work. Every ask that is not chat becomes or touches a card.
 
-- `id` (ULID), `display_id`, `legacy_id` (the Firstmate task id on import, else null), `project_id`, `kind`: `ship` (a change that lands), `scout` (research that is reported), `question` (something only the owner can answer), `ops` (an operation with evidence, such as a cutover step).
+- `id` (ULID), `display_id`, `legacy_id` (the Firstmate task id on import, else null), `project_id`, `kind`: `ship` (a change that lands), `scout` (research that is reported), `question` (something only the owner can answer; kept as its own kind at CP2, C09, so a bare question has a display id to tag in chat), `ops` (an operation with evidence, such as a cutover step).
 - `title`, `body` (markdown brief), `priority` (0 highest to 4), `category`, `size` (`S`, `M`, `L` or null; never estimated by the importer, plan v2 point 20), `acceptance` (text), `fixes_card_id` (a later defect pointing back at the card that introduced it).
+- `dispatch_override`: JSON `{"model": ..., "effort": ...}` or null. The owner's per-card override of the `[dispatch]` rules (decided at CP2, C04; `protocol.md` 6.4). Only the owner sets or clears it; `card.edit` refuses the field from any session.
 - `state`: `open` or `closed`. `outcome` (null while open): `landed`, `reported`, `answered`, `completed`, `cancelled`, `failed`, `abandoned`, `superseded`. `closed_at`, `closed_by` (session or `board` or `daemon`).
 - `created_at`, `created_by_ask_id`, `rev`.
 
@@ -171,12 +175,14 @@ A run may have several PRs (a replacement PR). The newest open one is the run's 
 - `state`: `requested` (a decision was asked for), `accepted` (the owner approved, or a standing grant matched), `rejected`, `executing` (the daemon has started the action), `succeeded`, `failed`, `uncertain` (the action was sent and its result could not be read; reconcile resolves it from the forge), `stale` (the binding no longer matches reality: the head SHA moved, the PR closed, the base revision changed).
 - `requested_at`, `requested_by`, `decided_at`, `decided_by` (`owner` or `grant:<id>`), `decision_idempotency_key`, `executed_at`, `finished_at`, `result` (JSON: merge SHA, error text).
 - `grant_id`: the standing grant that accepted it, or null.
+- `memory_paths`: for a `merge` or `land_direct` approval, the JSON list of source-map paths (`memory.md`, section 3) the bound diff touches, or null when it touches none. A non-null value is the board's "memory change" flag. `linked_approval_id`: set only on a `memory` approval accepted with "Approve memory change and merge" (decided at CP2, S01); it names the merge or land-direct approval it was accepted with. One merge approval can have several memory approvals (one per touched source), so the merge side finds them by reverse lookup.
 
 Rules:
 
 - Only the daemon moves an approval to `executing` and beyond, and only `tiller land` run by the daemon merges (T1.4). Before `executing`, the daemon re-reads the PR head; a mismatch marks the approval `stale` and opens a `merge` attention item with the new SHA.
 - A PR refresh that sees a new head SHA while an approval is `accepted` marks it `stale` in the same transaction (T4.3 acceptance: a push after approval invalidates it).
 - A click that arrives twice with the same `decision_idempotency_key` returns the first outcome and causes no second action.
+- A `merge` or `land_direct` approval with `memory_paths` set is accepted only by the owner's "Approve memory change and merge" click, which writes one `memory` approval per touched source bound to that file's diff at `head_sha` and its base blob, in the same transaction. A grant never accepts it (`schema.sql` CHECK). A new head makes both halves `stale` together (`memory.md`, section 7).
 - `grants` (standing approvals, P13) are per project and action with conditions (checks green, PR opened by a fleet run, branch pattern). A matching grant creates an `accepted` approval bound to the head SHA at that moment, so the audit trail is the same as a hand approval. `authority.md` (T1.4, section 6) defines the conditions and who may create a grant; away mode (P34) is an `away` approval whose temporary merge grants are ordinary `merge` grants.
 
 ### Reservation
@@ -230,6 +236,7 @@ Rules:
 
 - `id`, `card_id`, `project_id`, `what`, `trigger_kind` (`event`, `date`, `standing`), `trigger_event` (an event kind and entity filter, JSON), `due_at`, `state` (`open`, `met`, `cancelled`), `opened_at`, `opened_by`, `met_at`, `met_by_event_seq`.
 - Reconcile marks an obligation `met` in the transaction that writes the triggering event, and enqueues the outbox message that fulfils it in the same transaction. A `standing` obligation re-arms instead of closing.
+- The deploy watch is an obligation the daemon opens (decided at CP2, C02 amended by S07): `trigger_kind = event`, `trigger_event` = `{"kind": "deploy.finished", "sha": <pushed sha>, "environment": <deploy_environment or null>}`, `due_at` = push time plus `projects.deploy_timeout_minutes`, `opened_by = daemon`. Section 7 says what meets it.
 
 ### Artifact
 
@@ -313,7 +320,7 @@ The board has six columns: Asked, Queued, Working, Needs you, Landing, Done. A c
 |---|---|---|---|
 | 1 | Done | `cards.state = closed`. Shown for 7 days after `closed_at`, then only in history | the outcome: landed, reported, answered, completed; or cancelled, failed, abandoned, superseded in their own colours |
 | 2 | Needs you | an open attention item exists for the card; or an active run's session activity is `waiting_permission` or `waiting_input` and not stale | the attention kind, or "permission prompt" kept visually apart from decisions; sorted by age |
-| 3 | Landing | `cards.kind = ship` and (an open PR on the card has `checks` pending or `pipeline_state` running, whether or not the run that opened it is still active, or a `merge` or `land_direct` approval for the card is `accepted` or `executing`) | checks, pipeline, merging |
+| 3 | Landing | `cards.kind = ship` and (an open PR on the card has `checks` pending or `pipeline_state` running, whether or not the run that opened it is still active, or a `merge` or `land_direct` approval for the card is `accepted` or `executing`, or an open deploy-watch obligation exists for the card) | checks, pipeline, merging, deploying |
 | 4 | Working | an active run exists (`runs.ended_at` is null), whatever its activity | the most urgent activity across the card's active runs: errored, working, paused until a date, idle, stale, unknown (a paused run that is idle shows its pause, not idle) |
 | 5 | Queued | the card is open with no active run: a hold is open, a dependency is unreleased, or nothing has started | parked with its reason and date; blocked by `<display id>`; waiting for capacity; filed |
 | 6 | Asked | not a card: an ask with `disposition = unresolved`. It should last seconds; one older than a minute shows its age | the orchestrator it waits on |
@@ -330,11 +337,24 @@ Notes:
 
 | Kind | Done means | Outcome | Who records it |
 |---|---|---|---|
-| `ship` | The change is on the project's default branch through the project's delivery mode: an approval of kind `merge` or `land_direct` reached `succeeded` for this card, or reconcile found the PR merged outside Tiller and the owner confirmed through a `recovery` item. For `direct-push` projects, the deploy build the project names has also been watched to a result. The worker's own "done" is never enough (P08) | `landed` | the daemon, in the transaction that records the approval result or the confirmed merge |
+| `ship` | The change is on the project's default branch through the project's delivery mode: an approval of kind `merge` or `land_direct` reached `succeeded` for this card, or reconcile found the PR merged outside Tiller and the owner confirmed through a `recovery` item. For a `direct-push` project with a `deploy_workflow`, the deploy has also been watched to success (below). The worker's own "done" is never enough (P08) | `landed` | the daemon, in the transaction that records the approval result, the confirmed merge, or the deploy result |
 | `scout` | A report artifact is recorded on the card, and no attention item is open. A scout that ends with choices files a `report` attention item and the card stays in Needs you until it is answered; then the card closes | `reported` | the orchestrator (`tiller card close --reported`), refused while attention is open |
 | `question` | Its attention item is answered | `answered` | the same transaction as `attention.answer` |
 | `ops` | `tiller card complete` with an evidence line (a command output, a link). No run is required | `completed` | the orchestrator or the owner |
 | any | The owner or orchestrator cancels it; the subject landed elsewhere; every run failed and nobody retries; the worker abandoned it | `cancelled`, `superseded`, `failed`, `abandoned` | an explicit `card.cancel` or `card.close --outcome`, always with a reason; never reconcile alone |
+
+Deploy watch for `direct-push` projects (decided at CP2, C02 amended by S07; the source is `protocol.md` 4.6). When a `land_direct` approval succeeds on a project with `deploy_workflow` set, the card's runs end `landed` (the commit is on the default branch) but the card stays open with a deploy-watch obligation (section 3, Obligation) and shows in Landing with the `deploying` badge. The daemon's forge poller reads the runs of `deploy_workflow` on the default branch and resolves the watch by `deploy.record`:
+
+| Result the poller sees | What the daemon records |
+|---|---|
+| A run for the pushed SHA (its `head_sha` equals the obligation's `sha`), reaching the obligation's `environment` when one is named, concludes `success` | `deploy.finished` (`success`), `obligation.meet`, `card.close landed` |
+| That run concludes `failure` | `deploy.finished` (`failed`), a `recovery` attention item on the card naming the run URL |
+| That run is `cancelled` and no later run covers the SHA | `deploy.finished` (`cancelled`), a `recovery` item |
+| A later run of the same workflow and environment, for a commit that descends from the pushed SHA, concludes `success` before the pushed SHA's own run does (the pushed SHA's run was skipped, cancelled by concurrency or never queued) | `deploy.finished` (`superseded`, carrying the later run's SHA and URL), `obligation.meet`, `card.close landed` |
+| No run for the pushed SHA or a descendant has appeared 10 minutes after the push | `deploy.finished` (`missing`), a `recovery` item; a run that shows up later still resolves the watch by the rows above |
+| A run exists but has not concluded by `due_at` | `deploy.finished` (`timed_out`), a `recovery` item; the watch stays open and a later conclusion still resolves it |
+
+The `recovery` item offers the owner "Mark landed" (closes the card `landed` with the reason in the event, for a deploy fixed by hand) and "Reopen work" (cancels the obligation and leaves the card open for a new run). A project with no `deploy_workflow` closes the card `landed` in `approval.finish` as before. PR-mode projects are not watched in v1: their deploy, if any, belongs to the pipeline.
 
 Every close requires: no open attention item, no active run, and (for `landed`) the approval or confirmation above. Runs are cleaned up (worktree returned, pane closed) only after the card is closed or the run has ended with no unlanded commits (P51). Cleanup is a run mutation, not part of close, and refuses while `worktrees.unlanded_commits` is non-zero or unknown.
 
@@ -350,7 +370,7 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `ask.resolve` | orchestrator, board (implicit on add), `UserPromptSubmit` hook (a prompt typed in a worker pane is a follow-up on its card) | ask `unresolved`; target card open for `followup` | `asks.disposition`, `ask_cards` | `ask.resolved`, `card.linked` |
 | `ask.link` | orchestrator | ask resolved `new` or `followup`; target card open for `followup` | `ask_cards` (and `card.create` for a new card) | `card.linked`, `card.created` for a new card |
 | `card.create` | `ask.resolve new`, `ask.link new`, board add, `tiller card create`, import | project not retired; `next_card_seq` read and bumped here | `projects.next_card_seq`, `cards`, `ask_cards` | `card.created` |
-| `card.edit` | board, orchestrator | `expected_rev` matches; card open | `cards` fields, `rev` | `card.edited` (fields changed) |
+| `card.edit` | board, orchestrator | `expected_rev` matches; card open; `dispatch_override` only from the owner (board or `tiller card edit` passing the owner check, `authority.md` section 3) | `cards` fields, `rev` | `card.edited` (fields changed) |
 | `card.hold` | orchestrator, board | card open; no open hold; `until_at` in the future | `holds` | `hold.set` |
 | `hold.release` | reconcile (due), orchestrator, board | hold open | `holds.released_at`; on `due` also `attention` | `hold.released`, `attention.opened` |
 | `dep.add` | orchestrator, board, import | both cards exist; no cycle; dependency open | `card_deps` | `dep.added` |
@@ -375,7 +395,8 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `approval.request` | orchestrator, daemon (PR green, no grant) | card open; binding complete; no open approval with the same binding | `approvals` (`requested`), `attention` (`merge`) | `approval.requested`, `attention.opened` |
 | `approval.decide` | board, `tiller approve`, grant match | approval `requested`; key new or identical; binding still matches the cache | `approvals` (`accepted` or `rejected`), `attention` answered | `approval.decided`, `attention.answered` |
 | `approval.execute` | daemon only | `accepted`; head re-read from the forge equals `head_sha`; one at a time per PR | `approvals` (`executing`) | `approval.executing` |
-| `approval.finish` | daemon only | `executing`, or `uncertain` resolved by reconcile (recovery.md R08) | `approvals` (`succeeded`, `failed`, `uncertain`); on success `run.end landed` for the card's active runs, `card.close landed`, `dep.release` for dependants, `obligations.met` | `approval.finished`, `run.ended`, `card.closed`, `dep.released`, `obligation.met` |
+| `approval.finish` | daemon only | `executing`, or `uncertain` resolved by reconcile (recovery.md R08) | `approvals` (`succeeded`, `failed`, `uncertain`); on success `run.end landed` for the card's active runs, then either `card.close landed`, `dep.release` for dependants and `obligations.met`, or, for a `land_direct` on a project with `deploy_workflow`, `obligation.open` for the deploy watch instead of the close (section 7); the memory approvals whose `linked_approval_id` names it finish in the same transaction (`memory.md`, section 7) | `approval.finished`, `run.ended`, then `card.closed`, `dep.released`, `obligation.met`, or `obligation.opened` |
+| `deploy.record` | daemon forge poller (T2.5) | an open deploy-watch obligation on the card; the result is new for that obligation (the idempotency key is the obligation id, the run id or none, and the result; `protocol.md` 4.6) | `events`; on `success` or `superseded`: `obligation.meet`, `card.close landed`, `dep.release`; on `failed`, `cancelled`, `missing`, `timed_out`: `attention.open` (`recovery`) | `deploy.finished`, then `obligation.met`, `card.closed`, `dep.released`, or `attention.opened` |
 | `grant.create` | owner only (T1.4) | project exists; conditions valid for the kind | `grants` | `grant.created` |
 | `grant.revoke` | owner; daemon on expiry or `away.end` | grant not revoked | `grants.revoked_at`, `revoke_reason`; `accepted` approvals from it not yet executing become `stale` | `grant.revoked`, `approval.stale` |
 | `away.start` | owner only (T1.4) | no active `away` approval; scope valid | `approvals` (kind `away`, `accepted`, decided by `owner`); temporary `grants` when the scope asks | `approval.decided`, `grant.created` |
@@ -388,9 +409,9 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `outbox.ack` | `tiller inbox <id>` in the target session, or its `UserPromptSubmit` hook on the wake-up line | `delivered` (or `pending`, when the session found it by polling) | `outbox` (`acked`) | `outbox.acked` |
 | `outbox.fail` | daemon | attempts exhausted or target gone with no successor | `outbox` (`failed`) | `outbox.failed`; a `recovery` attention item when the message was an answer |
 | `outbox.retarget` | daemon | target session ended; a successor session exists for the same run or project | `outbox.target_session_id`, `target_pane_id` | `outbox.retargeted` |
-| `obligation.open` | orchestrator | card open | `obligations` | `obligation.opened` |
+| `obligation.open` | orchestrator; daemon inside `approval.finish` (the deploy watch) | card open | `obligations` | `obligation.opened` |
 | `obligation.cancel` | orchestrator, owner | obligation `open` | `obligations.state` | `obligation.cancelled` |
-| `obligation.meet` | reconcile | trigger event written in this transaction | `obligations.met*`, `outbox` | `obligation.met`, `outbox.enqueued` |
+| `obligation.meet` | reconcile; daemon inside `deploy.record` | trigger event written in this transaction | `obligations.met*`, `outbox` | `obligation.met`, `outbox.enqueued` |
 | `artifact.add` | worker, orchestrator | card exists | `artifacts` | `artifact.added` |
 | `review.record` | worker, daemon | run exists | `reviews` | `review.recorded` |
 | `handoff.write` | orchestrator | session live | `handoffs` | `handoff.written` |
@@ -399,6 +420,7 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `daemon.start`, `daemon.stop` | daemon | single-instance lock held | `meta.boot_id` (written last in a reboot restore); `approvals` `executing` to `uncertain` at start | `daemon.started` (with tool versions), `daemon.stopped`; `host.degraded` and `host.recovered` from the host checks |
 | `guard.breach` | reconcile, `tiller land` | a breach detected per authority.md section 11 or recovery.md R19 | nothing but the event | `guard.breached` |
 | `project.add`, `project.edit`, `project.retire` | owner | id free (add); `expected_rev` matches (edit); no open card (retire) | `projects` | `project.added`, `project.edited`, `project.retired` |
+| `project.merge_gate` | daemon only: its ruleset check at `project.add` and hourly (`authority.md`, Enforced merge gate) | project not retired; the value changes | `projects.merge_gate`, `rev`; on a move to `detect`, `attention` (`recovery` on `fleet-1`) | `project.merge_gate_changed`, `host.degraded` and `attention.opened` on a move to `detect` |
 | `host.add`, `host.edit` | owner | label free (add); `expected_rev` matches (edit) | `hosts` | `host.added`, `host.edited` |
 | `config.set` | owner | key known; value valid | the config file, outside `state.db` | `config.changed` |
 | `import.apply` | `tiller import` | manifest valid; `meta.import_manifest_sha256` differs (a second import is a no-op) | every table, with `legacy_id` set | one `import.applied` plus the per-row events, all under `actor = import` |
@@ -421,6 +443,7 @@ The table from plan v2, expanded to every table in `schema.sql`.
 | Agent activity | nobody: it is observed. Newest `observations` row per session, with `observed_at` | `sessions.activity*` (same-transaction cache), the activity badge, the permission-prompt section |
 | PR state | GitHub, through `gh-axi`; `prs` is a cache with `fetched_at` | the Landing column, the PR chip |
 | Pipeline state | `no-mistakes` records; `prs.pipeline_state` is a cache | the Landing badge |
+| Deploy results | GitHub workflow runs, through `gh-axi`; no cache table, each result is a `deploy.finished` event and the open watch is an obligation | the Landing `deploying` badge, card detail |
 | Panes and sessions in herdr | herdr; `panes` is a cache with `fetched_at` | jump links, the Agents view |
 | Worktrees | treehouse plus git; `worktrees` is a cache | reconcile input, the cleanup guard |
 | Quota | `quota-axi`; `quota_windows` is a cache | the sidebar footer, Health, the spawn check |
@@ -497,8 +520,14 @@ Points 1 to 5, 18, 19, 21, 23, 25 to 33, 37, 39 to 43 are owned by other specs o
 
 P07 (scout to ship as a new run on the same card and worktree), P10 (project delivery mode), P15 (obligations), P19 and P30 (holds with `until_at`, `runs.pause_until`), P21 (`supervisor_session_id`), P29 and P31 (attention), P32 (dependencies), P44 (events), P50 (artifacts). The rest are tested by the tasks the matrix names.
 
-## Open for CP2
+## Decided at CP2
 
-1. Whether `question` is a card kind or every question is an attention item on an `ops` card. This draft keeps the kind, so a bare question has a display id to tag in chat.
-2. The staleness thresholds per role and the idle re-ring interval. T1.2 proposes them; this spec only says they are derived from `observed_at`.
-3. Whether `hosts.lane_capacity` and the floors live here or in the config file. This draft keeps them here so a spawn event can quote the value it checked.
+Monday 2026-11-02, Lisbon time. The owner's picks from `cp2-open.md`:
+
+1. **`question` stays a card kind** (C09), so a bare question has a display id to tag in chat (section 3, Card).
+2. **Staleness thresholds and the idle re-ring interval** (C10): accepted as `recovery.md` proposes them; this spec still only derives them from `observed_at`.
+3. **Capacity and floors live in `state.db`** (C11, reason corrected by S09): the capacity check runs inside `run.start`'s transaction against `hosts`, `projects` and open reservations, and the `capacity` view reads the same rows (section 3, Host).
+4. **Done for `direct-push` projects** (C02 amended by S07): the deploy watch matches the pushed commit and the project's environment, with missing, cancelled, superseded and timed-out results defined (section 7); `projects.deploy_workflow`, `deploy_environment` and `deploy_timeout_minutes` hold what it matches.
+5. **Dispatch override** (C04): `cards.dispatch_override`, owner-only (section 3, Card; `protocol.md` 6.4).
+6. **Enforced merge gate** (S03): `projects.merge_gate` records whether the daemon's ruleset check holds (`authority.md`, section 6).
+7. **Combined memory approval** (S01): `approvals.memory_paths` and `linked_approval_id` (section 3, Approval).

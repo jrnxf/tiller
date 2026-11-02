@@ -1,4 +1,5 @@
--- Tiller state.db: draft schema (task T1.1, Monday 2026-11-02, Lisbon time).
+-- Tiller state.db schema (task T1.1, Monday 2026-11-02, Lisbon time; approved at CP2
+-- the same day, with the owner's decisions from docs/spec/cp2-open.md applied).
 --
 -- This file is the DDL behind docs/spec/state.md. T2.1 turns it into the
 -- first rusqlite_migration step; until then it is a spec, kept loadable:
@@ -72,6 +73,12 @@ CREATE TABLE projects (
                    ('no-mistakes', 'no-mistakes-prod-only', 'direct-pr', 'direct-push', 'local-only')),
   checks         TEXT NOT NULL DEFAULT '[]', -- JSON: commands a direct push must run
   capacity       INTEGER NOT NULL DEFAULT 2, -- max active runs for this project
+  -- deploy watch for direct-push projects (state.md, section 7; CP2, C02 and S07)
+  deploy_workflow        TEXT,             -- workflow file, or null for no watch
+  deploy_environment     TEXT,             -- GitHub environment the run must reach, or null
+  deploy_timeout_minutes INTEGER NOT NULL DEFAULT 60 CHECK (deploy_timeout_minutes > 0),
+  -- enforced only while the daemon's ruleset check holds (authority.md, section 6; CP2, S03)
+  merge_gate     TEXT NOT NULL DEFAULT 'detect' CHECK (merge_gate IN ('enforced', 'detect')),
   owner_host_id  TEXT NOT NULL REFERENCES hosts(id),
   added_at       TEXT NOT NULL,
   next_card_seq  INTEGER NOT NULL DEFAULT 1, -- read and bumped inside card.create
@@ -96,6 +103,7 @@ CREATE TABLE cards (
   size               TEXT CHECK (size IN ('S', 'M', 'L')),
   acceptance         TEXT,
   fixes_card_id      TEXT REFERENCES cards(id),  -- a later defect points back
+  dispatch_override  TEXT,                   -- JSON {model, effort}; owner only (protocol.md 6.4; CP2, C04)
   state              TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'closed')),
   outcome            TEXT CHECK (outcome IN
                        ('landed', 'reported', 'answered', 'completed',
@@ -315,6 +323,8 @@ CREATE TABLE approvals (
   diff_sha256               TEXT,
   base_rev                  TEXT,
   scope                     TEXT,            -- JSON, away only
+  memory_paths              TEXT,            -- JSON: source-map paths a merge or land_direct diff touches
+  linked_approval_id        TEXT REFERENCES approvals(id),  -- memory approvals only: the merge approval accepted with it (CP2, S01)
   action                    TEXT NOT NULL CHECK (action IN ('merge', 'squash', 'rebase', 'push', 'apply', 'away')),
   state                     TEXT NOT NULL DEFAULT 'requested' CHECK (state IN
                               ('requested', 'accepted', 'rejected', 'executing',
@@ -333,6 +343,8 @@ CREATE TABLE approvals (
   CHECK (kind <> 'land_direct' OR (card_id IS NOT NULL AND repo IS NOT NULL AND branch IS NOT NULL AND head_sha IS NOT NULL AND action = 'push')),
   CHECK (kind <> 'memory'      OR (diff_sha256 IS NOT NULL AND base_rev IS NOT NULL AND action = 'apply')),
   CHECK (kind <> 'away'        OR (scope IS NOT NULL AND action = 'away')),
+  CHECK (memory_paths IS NULL OR (kind IN ('merge', 'land_direct') AND grant_id IS NULL)),
+  CHECK (linked_approval_id IS NULL OR kind = 'memory'),
   CHECK ((state IN ('requested', 'stale')) OR decided_at IS NOT NULL),
   CHECK ((state IN ('executing', 'succeeded', 'failed', 'uncertain')) = (executed_at IS NOT NULL))
 ) STRICT;
@@ -616,6 +628,14 @@ WITH
     WHERE kind IN ('merge', 'land_direct') AND state IN ('accepted', 'executing')
     GROUP BY card_id
   ),
+  deploy_watches AS (
+    -- an open deploy-watch obligation (state.md, section 7)
+    SELECT card_id, 1 AS landing
+    FROM obligations
+    WHERE state = 'open' AND trigger_kind = 'event'
+      AND json_extract(trigger_event, '$.kind') = 'deploy.finished'
+    GROUP BY card_id
+  ),
   open_holds AS (
     SELECT card_id, until_at, reason FROM holds WHERE released_at IS NULL
   ),
@@ -630,7 +650,7 @@ SELECT
   CASE
     WHEN c.state = 'closed' THEN 'done'
     WHEN oa.card_id IS NOT NULL OR ar.rank = 0 THEN 'needs_you'
-    WHEN c.kind = 'ship' AND (lp.landing = 1 OR la.landing = 1) THEN 'landing'
+    WHEN c.kind = 'ship' AND (lp.landing = 1 OR la.landing = 1 OR dw.landing = 1) THEN 'landing'
     WHEN ar.n > 0 THEN 'working'
     ELSE 'queued'
   END AS "column",
@@ -640,6 +660,7 @@ SELECT
     WHEN ar.rank = 0 THEN 'permission_prompt'
     WHEN c.kind = 'ship' AND la.landing = 1 THEN 'merging'
     WHEN c.kind = 'ship' AND lp.landing = 1 THEN 'checks'
+    WHEN c.kind = 'ship' AND dw.landing = 1 THEN 'deploying'
     WHEN ar.rank = 1 THEN 'errored'
     WHEN ar.rank = 2 THEN 'working'
     WHEN ar.rank = 3 THEN 'paused'
@@ -659,6 +680,7 @@ LEFT JOIN open_attention     oa ON oa.card_id = c.id
 LEFT JOIN active_runs        ar ON ar.card_id = c.id
 LEFT JOIN landing_prs        lp ON lp.card_id = c.id
 LEFT JOIN landing_approvals  la ON la.card_id = c.id
+LEFT JOIN deploy_watches     dw ON dw.card_id = c.id
 LEFT JOIN open_holds         oh ON oh.card_id = c.id
 LEFT JOIN open_deps          od ON od.card_id = c.id
 WHERE c.state = 'open'
