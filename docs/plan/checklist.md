@@ -192,7 +192,7 @@ about 3 min of the developer's time
 - [x] Check: property test with N concurrent writer processes, no lost updates
 - [x] Check: write killed mid-transaction leaves no half state
 - [x] Check: migrations run both ways on a fixture
-- [ ] Delivered
+- [x] Delivered
 
 ### T2.2 `tiller` CLI
 `sonnet` high - 3-4 h - after the T2.1 interface
