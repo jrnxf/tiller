@@ -2,8 +2,6 @@
 
 :root {
   --todo: #b8b9bd;
-  --orange-text: color-mix(in srgb, var(--orange) 66%, var(--fg-1));
-  --red-text: color-mix(in srgb, var(--red) 76%, var(--fg-1));
   --m-opus: #9a7dff;
   --m-sonnet: #3f97f0;
   --m-haiku: #2fb98f;
@@ -69,7 +67,7 @@
   background: color-mix(in srgb, var(--orange) 9%, transparent);
 }
 .lab.yel {
-  color: color-mix(in srgb, var(--yellow) 70%, var(--fg-1));
+  color: var(--yellow-text);
   border-color: color-mix(in srgb, var(--yellow) 50%, var(--line-2));
   background: color-mix(in srgb, var(--yellow) 10%, transparent);
 }
@@ -79,12 +77,12 @@
   background: color-mix(in srgb, var(--red) 9%, transparent);
 }
 .lab.ok {
-  color: color-mix(in srgb, var(--green) 80%, var(--fg-1));
+  color: var(--green-text);
   border-color: color-mix(in srgb, var(--green) 40%, var(--line-2));
   background: color-mix(in srgb, var(--green) 9%, transparent);
 }
 .lab.acc {
-  color: var(--accent);
+  color: var(--accent-text);
   border-color: color-mix(in srgb, var(--accent) 40%, var(--line-2));
   background: var(--accent-tint);
 }
@@ -102,18 +100,21 @@
   letter-spacing: 0.005em;
   white-space: nowrap;
   flex: none;
-  color: color-mix(in srgb, var(--mc) 70%, var(--fg-1));
+  color: var(--mc-text);
   background: color-mix(in srgb, var(--mc) 14%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mc) 26%, transparent);
 }
 .mchip.opus {
   --mc: var(--m-opus);
+  --mc-text: var(--m-opus-text);
 }
 .mchip.sonnet {
   --mc: var(--m-sonnet);
+  --mc-text: var(--m-sonnet-text);
 }
 .mchip.haiku {
   --mc: var(--m-haiku);
+  --mc-text: var(--m-haiku-text);
 }
 .si {
   width: 14px;
@@ -147,7 +148,7 @@
   place-items: center;
   font-size: 9px;
   font-weight: var(--w-bold);
-  color: #fff;
+  color: #1a0e08;
   position: relative;
   flex: none;
 }
@@ -196,7 +197,7 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 20%, transparent);
 }
 .obs.old {
-  color: color-mix(in srgb, var(--yellow) 70%, var(--fg-2));
+  color: var(--yellow-text);
 }
 /* ---------- board ---------- */
 .board {
@@ -485,8 +486,8 @@
   color: var(--fg-1);
 }
 .colh .ib.sm {
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   margin-left: auto;
 }
 .colh .ib.sm svg {
@@ -528,7 +529,7 @@ button.colh:hover {
   color: var(--fg-2);
 }
 .card.dim {
-  opacity: 0.62;
+  opacity: 0.72;
   border-style: dashed;
   box-shadow: none;
 }
@@ -796,7 +797,7 @@ button.colh:hover {
 }
 .sha.new {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--line-2));
-  color: var(--accent);
+  color: var(--accent-text);
 }
 .appr {
   border: 1px solid var(--line-1);
@@ -889,7 +890,7 @@ button.colh:hover {
   color: var(--red);
 }
 .evlog .warnl .tx {
-  color: color-mix(in srgb, var(--yellow) 75%, var(--fg-1));
+  color: var(--yellow-text);
 }
 .fresh {
   border: 1px solid var(--line-1);
@@ -923,7 +924,7 @@ button.colh:hover {
   white-space: nowrap;
 }
 .fresh .fr .t.old {
-  color: color-mix(in srgb, var(--yellow) 70%, var(--fg-1));
+  color: var(--yellow-text);
 }
 .pk-banner {
   display: flex;
@@ -961,6 +962,7 @@ button.colh:hover {
   overflow: auto;
   min-height: 0;
   padding-bottom: 16px;
+  scroll-padding: 12px;
 }
 .ag-ph {
   display: flex;
@@ -1159,7 +1161,7 @@ button.colh:hover {
 }
 .agd-b .acts kbd {
   margin-left: 4px;
-  background: color-mix(in srgb, #fff 18%, transparent);
+  background: color-mix(in srgb, #000 22%, transparent);
   border-color: color-mix(in srgb, #fff 30%, transparent);
   color: var(--accent-fg);
 }
@@ -1633,12 +1635,12 @@ a.card:hover {
   margin-top: 12px;
 }
 .btn.primary {
-  background: var(--accent);
+  background: var(--accent-solid);
   border-color: transparent;
   color: var(--accent-fg);
 }
 .btn.primary:hover {
-  background: var(--accent-hover);
+  background: var(--accent-solid-hover);
   color: var(--accent-fg);
 }
 .btn.sm {

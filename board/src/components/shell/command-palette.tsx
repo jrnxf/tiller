@@ -169,12 +169,22 @@ function PaletteBody({ onClose, activeHost }: Omit<PaletteProps, "open">) {
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const opener = useRef<Element | null>(document.activeElement);
   const listId = useId();
 
   const results = useMemo(() => rankCommands(commands, query), [commands, query]);
 
+  // Focus goes to the input on open and back to whatever opened the palette
+  // on close, so a keyboard user keeps their place.
   useEffect(() => {
     inputRef.current?.focus();
+    const back = opener.current;
+    return () => {
+      // Only when focus fell to the page: a command may have moved it on purpose.
+      const active = document.activeElement;
+      const lost = !active || active === document.body;
+      if (lost && back instanceof HTMLElement && back.isConnected) back.focus();
+    };
   }, []);
 
   const selected = Math.min(index, Math.max(0, results.length - 1));
@@ -197,7 +207,7 @@ function PaletteBody({ onClose, activeHost }: Omit<PaletteProps, "open">) {
           aria-activedescendant={
             results[selected] ? `${listId}-${results[selected].id}` : undefined
           }
-          placeholder="Type a command, or search a project or machine..."
+          placeholder="Type a command, or search..."
           value={query}
           onChange={(event) => {
             setQuery(event.target.value);
@@ -216,6 +226,9 @@ function PaletteBody({ onClose, activeHost }: Omit<PaletteProps, "open">) {
             } else if (event.key === "Escape") {
               event.preventDefault();
               onClose();
+            } else if (event.key === "Tab") {
+              // The input is the only stop; the list is driven by the arrow keys.
+              event.preventDefault();
             }
           }}
         />

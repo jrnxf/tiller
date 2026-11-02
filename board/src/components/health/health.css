@@ -254,7 +254,7 @@
   text-wrap: balance;
 }
 .verdict h2 span {
-  color: color-mix(in srgb, var(--green) 70%, var(--fg-1));
+  color: var(--green-text);
 }
 .verdict.bad h2 span {
   color: var(--red-text);
@@ -313,14 +313,14 @@
   border-radius: 50%;
 }
 .state.good {
-  color: color-mix(in srgb, var(--green) 78%, var(--fg-1));
+  color: var(--green-text);
   background: color-mix(in srgb, var(--green) 12%, transparent);
 }
 .state.good i {
   background: var(--green);
 }
 .state.watch {
-  color: color-mix(in srgb, var(--yellow) 66%, var(--fg-1));
+  color: var(--yellow-text);
   background: color-mix(in srgb, var(--yellow) 14%, transparent);
 }
 .state.watch i {
@@ -482,7 +482,7 @@
   border-radius: var(--round);
   font-size: 12px;
   font-weight: var(--w-medium);
-  color: color-mix(in srgb, var(--green) 78%, var(--fg-1));
+  color: var(--green-text);
   background: color-mix(in srgb, var(--green) 12%, transparent);
 }
 .q-state i {
@@ -492,7 +492,7 @@
   background: var(--green);
 }
 .q-state.warn {
-  color: color-mix(in srgb, var(--yellow) 66%, var(--fg-1));
+  color: var(--yellow-text);
   background: color-mix(in srgb, var(--yellow) 14%, transparent);
 }
 .q-state.warn i {

@@ -365,10 +365,10 @@ about 3 min of the developer's time
 ### T3.6 UI pass
 `sonnet` high - 1.5-2 h - after T3.2 to T3.5
 
-- [ ] Pixel review of every screen, both themes, 1440 px and 390 px
-- [ ] Keyboard navigation, focus rings, contrast
-- [ ] Check: screenshots attached, nothing clipped or overflowing, no console errors
-- [ ] Delivered
+- [x] Pixel review of every screen, both themes, 1440 px and 390 px
+- [x] Keyboard navigation, focus rings, contrast
+- [x] Check: screenshots attached, nothing clipped or overflowing, no console errors
+- [x] Delivered
 
 ## CP4: Live board (developer, 15-20 min)
 

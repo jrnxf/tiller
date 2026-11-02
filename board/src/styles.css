@@ -29,8 +29,8 @@
   --bg-cell: #00000005;
   --fg-1: #282a30;
   --fg-2: #3c4149;
-  --fg-3: #6f6e77;
-  --fg-4: #86848d;
+  --fg-3: #5f5e67;
+  --fg-4: #68666e;
   --line-1: #e9e8ea;
   --line-2: #e4e2e4;
   --line-3: #dcdbdd;
@@ -46,6 +46,17 @@
   --red: #eb5757;
   --blue: #4ea7fc;
   --teal: #00b8cc;
+  /* Text-safe forms of the hues: 4.5:1 or better on every surface and tint they sit on. */
+  --accent-text: #4c56aa;
+  --accent-solid: #5e6ad2;
+  --accent-solid-hover: #535fc7;
+  --green-text: #196c2c;
+  --yellow-text: #785f00;
+  --orange-text: #9a4927;
+  --red-text: #a23c3c;
+  --m-opus-text: #6451a6;
+  --m-sonnet-text: #28619a;
+  --m-haiku-text: #1b6b53;
   --shadow-high: 0px 7px 24px #0000000f;
   --shadow-stack:
     0px 8px 2px 0px #0000, 0px 5px 2px 0px #00000003, 0px 3px 2px 0px #0000000a,
@@ -99,8 +110,8 @@
   --bg-cell: #ffffff05;
   --fg-1: #f7f8f8;
   --fg-2: #d0d6e0;
-  --fg-3: #8a8f98;
-  --fg-4: #62666d;
+  --fg-3: #9ca1aa;
+  --fg-4: #8e929b;
   --line-1: #23252a;
   --line-2: #34343a;
   --line-3: #3e3e44;
@@ -109,6 +120,16 @@
   --accent-hover: #828fff;
   --accent-tint: #18182f;
   --accent-fg: #ffffff;
+  --accent-text: #9594ff;
+  --accent-solid: #5f5fe8;
+  --accent-solid-hover: #5252dc;
+  --green-text: #50b768;
+  --yellow-text: #f0bf00;
+  --orange-text: #fc7d48;
+  --red-text: #ef7c7c;
+  --m-opus-text: #b4a0ff;
+  --m-sonnet-text: #6db4fb;
+  --m-haiku-text: #58d3ad;
   --shadow-high: 0px 7px 32px #00000059;
   color-scheme: dark;
 }
@@ -150,7 +171,7 @@ button {
 }
 
 a {
-  color: var(--accent);
+  color: var(--accent-text);
   text-decoration: none;
 }
 
@@ -227,6 +248,7 @@ kbd {
   min-height: 0;
   overflow: auto;
   padding: 16px;
+  scroll-padding: 16px;
 }
 
 .nav-scrim {
@@ -363,7 +385,7 @@ kbd {
   font-size: 11px;
   font-weight: var(--w-semibold);
   color: var(--accent-fg);
-  background: var(--accent);
+  background: var(--accent-solid);
   border-radius: var(--round);
   padding: 0 6px;
   min-width: 18px;
@@ -686,7 +708,7 @@ kbd {
 }
 
 .mh2.stale {
-  color: color-mix(in srgb, var(--yellow) 62%, var(--fg-1));
+  color: var(--yellow-text);
 }
 
 .pips {

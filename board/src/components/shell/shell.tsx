@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { applyAppearance, prefsStore } from "../../lib/prefs";
 import { useStore } from "../../lib/store";
@@ -29,6 +29,8 @@ export function Shell({
 }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const shellRef = useRef<HTMLDivElement>(null);
+  const menuWasOpen = useRef(false);
   useAppearance();
 
   const closePalette = useCallback(() => setPaletteOpen(false), []);
@@ -47,16 +49,43 @@ export function Shell({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  // The drawer only exists on a phone-width layout; widening the window while
+  // it is open must not leave the screen behind it inert.
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 820px)");
+    const onChange = (event: MediaQueryListEvent) => {
+      if (!event.matches) setMenuOpen(false);
+    };
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, []);
+
+  // The phone drawer is modal: focus moves into it when it opens and back to
+  // its button when it closes, so a keyboard user is never left behind a scrim.
+  useEffect(() => {
+    const shell = shellRef.current;
+    if (!shell) return;
+    if (menuOpen) {
+      shell.querySelector<HTMLElement>(".side .search")?.focus();
+    } else if (menuWasOpen.current) {
+      const active = document.activeElement;
+      if (!active || active === document.body || shell.querySelector(".side")?.contains(active)) {
+        shell.querySelector<HTMLElement>(".menu-btn")?.focus();
+      }
+    }
+    menuWasOpen.current = menuOpen;
+  }, [menuOpen]);
+
   return (
-    <div className={`shell${menuOpen ? " menu-open" : ""}`}>
+    <div ref={shellRef} className={`shell${menuOpen ? " menu-open" : ""}`}>
       <Sidebar
         activeHost={activeHost}
         onNavigate={closeMenu}
         onOpenPalette={() => setPaletteOpen(true)}
       />
       <div className="nav-scrim" onClick={closeMenu} aria-hidden="true" />
-      <div className="main">
-        <Header activeHost={activeHost} onOpenMenu={() => setMenuOpen(true)} />
+      <div className="main" inert={menuOpen}>
+        <Header activeHost={activeHost} menuOpen={menuOpen} onOpenMenu={() => setMenuOpen(true)} />
         <main className="content">{children}</main>
       </div>
       <CommandPalette open={paletteOpen} onClose={closePalette} activeHost={activeHost} />

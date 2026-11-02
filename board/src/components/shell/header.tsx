@@ -33,6 +33,7 @@ const DENSITIES: { value: Density; label: string }[] = [
 
 interface HeaderProps {
   activeHost: string | undefined;
+  menuOpen: boolean;
   onOpenMenu: () => void;
 }
 
@@ -62,7 +63,7 @@ function ScopeCrumb({ activeHost }: { activeHost: string | undefined }) {
   );
 }
 
-export function Header({ activeHost, onOpenMenu }: HeaderProps) {
+export function Header({ activeHost, menuOpen, onOpenMenu }: HeaderProps) {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const { data: machines } = useSuspenseQuery(machinesQuery());
   const prefs = useStore(prefsStore);
@@ -78,6 +79,7 @@ export function Header({ activeHost, onOpenMenu }: HeaderProps) {
           type="button"
           className="ib menu-btn"
           aria-label="Open the sidebar"
+          aria-expanded={menuOpen}
           onClick={onOpenMenu}
         >
           <MenuIcon />

@@ -178,3 +178,57 @@ test("the degraded pill shows only while the stream is reconnecting", async () =
   act(() => connectionStore.set("live"));
   expect(pill.hidden).toBe(true);
 });
+
+test("the palette keeps focus in its input and hands it back to what opened it", async () => {
+  await renderApp();
+  const opener = screen.getByRole("button", { name: "Open command palette" });
+  opener.focus();
+  fireEvent.click(opener);
+
+  const input = screen.getByRole("combobox");
+  expect(document.activeElement).toBe(input);
+  // Tab must not walk out of a modal dialog into the screen behind it.
+  expect(fireEvent.keyDown(input, { key: "Tab" })).toBe(false);
+
+  fireEvent.keyDown(input, { key: "Escape" });
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(document.activeElement).toBe(opener);
+});
+
+test("the phone drawer takes focus when it opens, makes the screen inert and gives focus back", async () => {
+  await renderApp();
+  const menuButton = screen.getByRole("button", { name: "Open the sidebar" });
+  const main = document.querySelector(".main");
+  expect(menuButton.getAttribute("aria-expanded")).toBe("false");
+  expect(main?.hasAttribute("inert")).toBe(false);
+
+  menuButton.focus();
+  fireEvent.click(menuButton);
+  await vi.waitFor(() => expect(document.activeElement?.className).toBe("search"));
+  expect(menuButton.getAttribute("aria-expanded")).toBe("true");
+  expect(main?.hasAttribute("inert")).toBe(true);
+
+  fireEvent.keyDown(window, { key: "Escape" });
+  await vi.waitFor(() => expect(document.activeElement).toBe(menuButton));
+  expect(main?.hasAttribute("inert")).toBe(false);
+});
+
+test("widening past the phone layout closes the drawer so the screen is not left inert", async () => {
+  const listeners: ((event: { matches: boolean }) => void)[] = [];
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: false,
+    media: query,
+    addEventListener: (_type: string, listener: (event: { matches: boolean }) => void) => {
+      if (query.includes("max-width")) listeners.push(listener);
+    },
+    removeEventListener: () => {},
+  }));
+  await renderApp();
+  fireEvent.click(screen.getByRole("button", { name: "Open the sidebar" }));
+  expect(document.querySelector(".main")?.hasAttribute("inert")).toBe(true);
+
+  act(() => {
+    for (const listener of listeners) listener({ matches: false });
+  });
+  expect(document.querySelector(".main")?.hasAttribute("inert")).toBe(false);
+});

@@ -7,8 +7,6 @@
 }
 
 .inbox {
-  --orange-text: color-mix(in srgb, var(--orange) 66%, var(--fg-1));
-  --red-text: color-mix(in srgb, var(--red) 76%, var(--fg-1));
   --row-h: 36px;
   display: grid;
   grid-template-columns: 372px minmax(0, 1fr);
@@ -32,13 +30,13 @@
 /* Buttons and labels the shell does not have yet */
 
 .inbox .btn.primary {
-  background: var(--accent);
+  background: var(--accent-solid);
   border-color: transparent;
   color: var(--accent-fg);
 }
 
 .inbox .btn.primary:hover {
-  background: var(--accent-hover);
+  background: var(--accent-solid-hover);
 }
 
 .inbox .btn.sm {
@@ -94,13 +92,13 @@
 }
 
 .inbox .lab.ok {
-  color: color-mix(in srgb, var(--green) 80%, var(--fg-1));
+  color: var(--green-text);
   border-color: color-mix(in srgb, var(--green) 40%, var(--line-2));
   background: color-mix(in srgb, var(--green) 9%, transparent);
 }
 
 .inbox .lab.acc {
-  color: var(--accent);
+  color: var(--accent-text);
   border-color: color-mix(in srgb, var(--accent) 40%, var(--line-2));
   background: var(--accent-tint);
 }
@@ -117,7 +115,7 @@
   place-items: center;
   font-size: 12px;
   font-weight: var(--w-bold);
-  color: #fff;
+  color: #1a0e08;
   background: var(--orange);
   flex: none;
 }
@@ -127,11 +125,13 @@
 .in-list {
   border-right: 1px solid var(--line-1);
   overflow: auto;
+  scroll-padding: 12px;
   min-height: 0;
 }
 
 .in-detail {
   overflow: auto;
+  scroll-padding: 16px;
   min-height: 0;
   padding: 24px 32px 48px;
 }
@@ -212,6 +212,10 @@ a.irow:hover {
 
 .irow.empty {
   color: var(--fg-3);
+}
+
+.irow:focus-visible {
+  outline-offset: -2px;
 }
 
 .irow .ii {
@@ -584,7 +588,7 @@ a.irow:hover {
 
 .sha.new {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--line-2));
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .appr {
