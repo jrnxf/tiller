@@ -360,7 +360,7 @@ about 3 min of the developer's time
 - [x] No Firstmate comparison anywhere
 - [x] Check: every number traces to a state.db query or the quota feed, with a test
 - [x] Check: no email or account id; screenshots match the mocks, both themes, both widths
-- [ ] Delivered
+- [x] Delivered
 
 ### T3.6 UI pass
 `sonnet` high - 1.5-2 h - after T3.2 to T3.5
