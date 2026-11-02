@@ -64,6 +64,11 @@ fn a_fresh_session_reads_the_handoff_the_old_one_wrote() {
     assert_eq!(shown.data()["cards"][0]["title"], "the login page");
     let owner = world.must(&["handoff", "show", "--project", "alpha"]);
     assert_eq!(owner.data()["next_action"], "start a builder on it");
+    let other = world.run_as(&fresh, &["handoff", "show", "--project", "beta"]);
+    assert_eq!(other.code, 6, "{}", other.json);
+    let (_, worker) = world.builder_run(&login);
+    let by_worker = world.run_as(&worker, &["handoff", "show"]);
+    assert_eq!(by_worker.code, 6, "{}", by_worker.json);
     let no_project = world.run(&["handoff", "show"]);
     assert_eq!(no_project.code, 2, "{}", no_project.json);
 }
@@ -109,7 +114,7 @@ fn a_compaction_hook_leaves_one_note_asking_for_the_handoff() {
     assert!(sent[0].body.contains("tiller handoff write"));
     assert!(sent[0].body.contains("Only the owner clears a session"));
 
-    // The same call again is a replay: still one note.
-    hook(r#"{"session_id":"claude-orchestrator","trigger":"auto"}"#);
-    assert_eq!(notes().len(), 1);
+    // A second compaction is a second breakpoint and gets its own note.
+    hook(r#"{"session_id":"claude-orchestrator","trigger":"manual"}"#);
+    assert_eq!(notes().len(), 2);
 }

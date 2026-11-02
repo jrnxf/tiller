@@ -6,7 +6,7 @@ use std::io::Read;
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 use tiller_agents::handoff::{Brief, CLEAR_HELP};
-use tiller_core::domain::{ArtifactKind, Coverage, Reviewer, Run, TriggerKind, Verdict};
+use tiller_core::domain::{ArtifactKind, Coverage, Reviewer, Role, Run, TriggerKind, Verdict};
 use tiller_core::state::records::{NewArtifact, NewHandoff, NewObligation, NewReview};
 use tiller_core::state::resolve_card;
 
@@ -259,6 +259,17 @@ pub fn handoff(app: &App, cmd: HandoffCmd) -> Done {
 fn handoff_show(app: &App, args: HandoffShow) -> Done {
     let store = app.read()?;
     let project = match (args.project, app.session(&store)?) {
+        (_, Some(session)) if session.role != Role::Orchestrator => {
+            return Err(Failure::forbidden(
+                "tiller handoff show is run by an orchestrator session or the owner",
+            ));
+        }
+        // An orchestrator reads its own project's record only.
+        (Some(project), Some(session)) if project != session.project_id => {
+            return Err(Failure::forbidden(
+                "an orchestrator reads its own project's handoff",
+            ));
+        }
         (Some(project), _) => project,
         (None, Some(session)) => session.project_id,
         (None, None) => return Err(Failure::usage("give --project <project>")),

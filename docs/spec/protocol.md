@@ -193,7 +193,7 @@ Claude Code documents 33 hook events [D]. Each maps to exactly one handler. `eve
 | `FileChanged` | `ignore` | - | - | Tiller watches no files through Claude Code |
 | `WorktreeCreate` | `worktree` | `WorktreeCreate` | null | treehouse owns worker worktrees; a native worktree is evidence for T1.4 and reconcile |
 | `WorktreeRemove` | `worktree` | `WorktreeRemove` | null | as above |
-| `PreCompact` | `compact` | `PreCompact` | null | a breakpoint signal for handoff (T4.5): for a live orchestrator session, one `note` asking for the handoff, keyed `breakpoint:<observation id>`, written by `tiller hook` after the observation and again, idempotently, by the daemon's pass; none when the session wrote a handoff since, or the observation is over 30 minutes old |
+| `PreCompact` | `compact` | `PreCompact` | null | a breakpoint signal for handoff (T4.5): for a live orchestrator session, one `note` asking for the handoff, keyed `breakpoint:<observation id>`, written by `tiller hook` after the observation (idempotent, so a daemon pass may repeat it); none when the session wrote a handoff since, or the observation is over 30 minutes old |
 | `PostCompact` | `compact` | `PostCompact` | null | |
 | `PreModelSwitch` | `ignore` | - | - | `PostModelSwitch` records the result |
 | `PostModelSwitch` | `model` | `PostModelSwitch` | null | the run's model drifted from its spawn; evidence for P02 |
@@ -380,7 +380,7 @@ Reads have no side effects and are all trivially idempotent; they are listed aft
 | `tiller artifact add <card> --kind K --title T (--url <u> \| --path <p>)` | `artifact.add` | worker, orchestrator | keyed (natural per url) |
 | `tiller review record <run> --reviewer R --coverage C --verdict V [--high n --medium n --low n] [--url <u>]` | `review.record` | worker, daemon | keyed |
 | `tiller handoff write (--conclusions <t> --next <t> \| -)` | `handoff.write` | orchestrator | keyed |
-| `tiller handoff show [--project <p>]` | none (a read): the project's newest `handoffs` row, each id resolved, with what changed since it was written | orchestrator, owner | n/a |
+| `tiller handoff show [--project <p>]` | none (a read): the project's newest `handoffs` row, each id resolved, with what changed since it was written | orchestrator (its own project), owner | n/a |
 
 **Projects, hosts and config**
 

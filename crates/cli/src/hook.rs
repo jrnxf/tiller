@@ -7,6 +7,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 
+use rusqlite::config::DbConfig;
 use tiller_agents::handoff;
 use tiller_agents::intake::Hooks;
 use tiller_core::Timestamp;
@@ -48,11 +49,18 @@ pub fn run(args: &Args) {
     let intake = intake.as_ref().map(|hooks| hooks as &dyn hooks::Intake);
     let (outcome, output) = hooks::run_with(&args.event, &input, &env, intake);
     // A compaction is a breakpoint: the note asking for the handoff is
-    // written now, not on the daemon's next pass. A failure here is dropped
-    // like any hook failure; the daemon's pass sends the note.
+    // written here, after the observation. A failure is dropped like any
+    // hook failure; the note is lost, and the orchestrator still writes a
+    // handoff at its next natural breakpoint.
     if args.event == "PreCompact" && matches!(outcome, hooks::Outcome::Recorded { .. }) {
-        let _ = tiller_core::Store::open_current(env.tiller_home.join("state.db"))
-            .and_then(|mut store| handoff::signal_compactions(&mut store, Timestamp::now()));
+        let _ = tiller_core::Store::open_current(env.tiller_home.join("state.db")).and_then(
+            |mut store| {
+                store
+                    .conn()
+                    .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)?;
+                handoff::signal_compactions(&mut store, Timestamp::now())
+            },
+        );
     }
     if let Some(output) = output {
         println!("{output}");

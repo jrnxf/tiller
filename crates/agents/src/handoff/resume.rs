@@ -96,7 +96,9 @@ impl Brief {
         let mut unresolved = Vec::new();
 
         let mut cards = Vec::new();
-        for id in strings(&handoff.active_cards) {
+        let (ids, bad) = strings(&handoff.active_cards);
+        unresolved.extend(bad);
+        for id in ids {
             match find::<Card>(conn, "id = ?1", &[&id])? {
                 Some(card) => cards.push(card_line(&card)),
                 None => unresolved.push(id),
@@ -104,7 +106,9 @@ impl Brief {
         }
 
         let mut decisions = Vec::new();
-        for id in strings(&handoff.pending_attention) {
+        let (ids, bad) = strings(&handoff.pending_attention);
+        unresolved.extend(bad);
+        for id in ids {
             match find::<Attention>(conn, "id = ?1", &[&id])? {
                 Some(item) => decisions.push(decision_line(conn, &item)?),
                 None => unresolved.push(id),
@@ -112,17 +116,15 @@ impl Brief {
         }
 
         let mut workers = Vec::new();
-        let recorded: Vec<(String, String)> = handoff
-            .workers
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|worker| {
-                let id = worker.get("run_id")?.as_str()?;
-                let line = worker.get("line")?.as_str()?;
-                Some((id.to_owned(), line.to_owned()))
-            })
-            .collect();
+        let mut recorded: Vec<(String, String)> = Vec::new();
+        for worker in handoff.workers.as_array().into_iter().flatten() {
+            let id = worker.get("run_id").and_then(Value::as_str);
+            let line = worker.get("line").and_then(Value::as_str);
+            match (id, line) {
+                (Some(id), Some(line)) => recorded.push((id.to_owned(), line.to_owned())),
+                _ => unresolved.push(worker.to_string()),
+            }
+        }
         for (id, line) in &recorded {
             match find::<Run>(conn, "id = ?1", &[id])? {
                 Some(run) => workers.push(worker_line(conn, &run, line)?),
@@ -147,14 +149,17 @@ impl Brief {
     }
 }
 
-/// The ids in a JSON list of strings; anything else in it is skipped.
-fn strings(value: &Value) -> Vec<String> {
-    value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.as_str().map(str::to_owned))
-        .collect()
+/// The ids in a JSON list of strings, and the entries that are not strings.
+fn strings(value: &Value) -> (Vec<String>, Vec<String>) {
+    let mut ids = Vec::new();
+    let mut bad = Vec::new();
+    for item in value.as_array().into_iter().flatten() {
+        match item.as_str() {
+            Some(id) => ids.push(id.to_owned()),
+            None => bad.push(item.to_string()),
+        }
+    }
+    (ids, bad)
 }
 
 fn card_line(card: &Card) -> CardLine {

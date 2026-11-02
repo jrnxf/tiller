@@ -4,7 +4,7 @@
 use rusqlite::params;
 use tiller_core::domain::{OutboxKind, OutboxMessage};
 use tiller_core::state::outbox::NewMessage;
-use tiller_core::{Actor, Ctx, Result, Store, Timestamp};
+use tiller_core::{Actor, Ctx, Error, Result, Store, Timestamp};
 
 /// How long a `PreCompact` stays worth a note. After a daemon outage an old
 /// one is moot: the compaction it announced is long over.
@@ -23,8 +23,8 @@ time to /clear; only the owner clears a session";
 
 /// Sends one note per `PreCompact` observation of a live orchestrator
 /// session that has not had one, unless that session wrote a handoff since.
-/// Idempotent: the observation id is the message key, so the hook and the
-/// daemon's pass may both call it. Returns the notes written now.
+/// Idempotent: the observation id is the message key, so any number of
+/// callers (the hook, a daemon pass) may call it. Returns the notes written now.
 pub fn signal_compactions(store: &mut Store, now: Timestamp) -> Result<Vec<OutboxMessage>> {
     let cutoff = now.plus_minutes(-STALE_MINUTES);
     let due: Vec<(String, String)> = {
@@ -47,7 +47,9 @@ pub fn signal_compactions(store: &mut Store, now: Timestamp) -> Result<Vec<Outbo
     let mut sent = Vec::new();
     for (observation, session) in due {
         let key = format!("breakpoint:{observation}");
-        let applied = store.outbox_enqueue(
+        // A session that ended since the scan has nothing to note; the rest
+        // of the batch still goes out.
+        let applied = match store.outbox_enqueue(
             &ctx,
             Some(&key),
             NewMessage {
@@ -57,7 +59,11 @@ pub fn signal_compactions(store: &mut Store, now: Timestamp) -> Result<Vec<Outbo
                 card_id: None,
                 reply_to: None,
             },
-        )?;
+        ) {
+            Ok(applied) => applied,
+            Err(Error::Refused { .. }) => continue,
+            Err(error) => return Err(error),
+        };
         sent.push(applied.value);
     }
     Ok(sent)

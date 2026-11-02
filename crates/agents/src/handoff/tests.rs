@@ -433,6 +433,25 @@ fn an_id_the_record_names_but_cannot_resolve_is_listed_not_dropped() {
 }
 
 #[test]
+fn a_malformed_entry_in_the_record_is_listed_not_read_as_an_empty_fleet() {
+    let mut w = World::new();
+    let login = w.card("alpha", "the login page");
+    let (_, _) = w.builder(&login);
+    w.handoff("one card", "go");
+    w.store
+        .conn()
+        .execute(
+            "UPDATE handoffs SET active_cards = '[7]', workers = '[{\"run\": 1}]'",
+            [],
+        )
+        .unwrap();
+
+    let brief = w.brief("alpha").unwrap();
+    assert!(brief.cards.is_empty() && brief.workers.is_empty());
+    assert_eq!(brief.unresolved, vec!["7", r#"{"run":1}"#]);
+}
+
+#[test]
 fn compaction_notes_the_orchestrator_once() {
     let mut w = World::new();
     let orchestrator = w.orchestrator.clone();
@@ -473,18 +492,25 @@ fn compaction_note_is_for_a_live_orchestrator_that_still_needs_it() {
     w.pre_compact(&orchestrator, at(now.as_millis() - 31 * 60_000));
     assert!(signal_compactions(&mut w.store, now).unwrap().is_empty());
 
+    // A handoff written before the PreCompact does not answer it.
+    w.handoff("earlier", "earlier next");
+    let after_it = Timestamp::now();
+    w.pre_compact(&orchestrator, at(after_it.as_millis() + 1_000));
+    let sent = signal_compactions(&mut w.store, at(after_it.as_millis() + 1_000)).unwrap();
+    assert_eq!(sent.len(), 1);
+
     // A handoff written after the PreCompact answers it already.
-    let seen = at(now.as_millis() - 60_000);
+    let seen = Timestamp::now();
     w.pre_compact(&orchestrator, seen);
     w.handoff("done", "next");
-    assert!(signal_compactions(&mut w.store, now).unwrap().is_empty());
+    assert!(signal_compactions(&mut w.store, seen).unwrap().is_empty());
 
     // A session that has ended gets nothing, and nothing errors.
-    let later = at(now.as_millis() + 120_000);
+    let later = at(Timestamp::now().as_millis() + 120_000);
     w.pre_compact(&orchestrator, later);
     w.store
         .session_end(&Ctx::new(Actor::Owner), &orchestrator, "clear")
         .unwrap();
     assert!(signal_compactions(&mut w.store, later).unwrap().is_empty());
-    assert!(w.notes().is_empty());
+    assert_eq!(w.notes().len(), 1, "only the earlier-handoff note exists");
 }
