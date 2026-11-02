@@ -184,14 +184,14 @@ about 3 min of the developer's time
 ### T2.1 State core
 `opus` high - 6-8 h - after CP2 - critical path
 
-- [ ] Interface published at about 1.5 h: every crate and module stubbed, dependencies pinned in `[workspace.dependencies]`
-- [ ] Schema and migrations, WAL mode, `busy_timeout`
-- [ ] Lifecycle states as enums, transitions as functions returning `Result`
-- [ ] Repository layer: every mutation in `BEGIN IMMEDIATE` with its event row; `rev` conflict errors
-- [ ] ULID and display id minting; reservations
-- [ ] Check: property test with N concurrent writer processes, no lost updates
-- [ ] Check: write killed mid-transaction leaves no half state
-- [ ] Check: migrations run both ways on a fixture
+- [x] Interface published at about 1.5 h: every crate and module stubbed, dependencies pinned in `[workspace.dependencies]`
+- [x] Schema and migrations, WAL mode, `busy_timeout`
+- [x] Lifecycle states as enums, transitions as functions returning `Result`
+- [x] Repository layer: every mutation in `BEGIN IMMEDIATE` with its event row; `rev` conflict errors
+- [x] ULID and display id minting; reservations
+- [x] Check: property test with N concurrent writer processes, no lost updates
+- [x] Check: write killed mid-transaction leaves no half state
+- [x] Check: migrations run both ways on a fixture
 - [ ] Delivered
 
 ### T2.2 `tiller` CLI
