@@ -5,6 +5,29 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>Tiller</title>
+    <script>
+      // Runs before any CSS: sets the theme, its background and the density, so
+      // there is no flash. Keep the colors in step with THEME_BACKGROUND in
+      // src/lib/prefs.ts.
+      (function () {
+        var root = document.documentElement;
+        function stored(key) {
+          try {
+            return localStorage.getItem(key);
+          } catch (e) {
+            return null;
+          }
+        }
+        var preference = stored("tiller-theme");
+        var dark =
+          preference === "dark" ||
+          (preference !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        root.dataset.theme = dark ? "dark" : "light";
+        root.style.colorScheme = dark ? "dark" : "light";
+        root.style.backgroundColor = dark ? "#0f1012" : "#fbfbfc";
+        root.dataset.density = stored("tiller-density") === "compact" ? "compact" : "comfortable";
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

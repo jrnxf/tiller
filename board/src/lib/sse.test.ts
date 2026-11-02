@@ -1,0 +1,272 @@
+import { QueryClient } from "@tanstack/react-query";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+
+import type {
+  AttentionResponse,
+  BoardResponse,
+  BoardRow,
+  ChangeEvent,
+  MachinesResponse,
+  QuotaResponse,
+} from "./api-types";
+import { connectionStore } from "./connection";
+import { fixtureSnapshot } from "./fixtures";
+import { hydrateFromSnapshot } from "./boot";
+import { attentionPath, boardPath, machinesPath, queryKeyFor, quotaPath } from "./queries";
+import { applyChange, connectEvents } from "./sse";
+import type { EventSourceLike } from "./sse";
+
+const NOW = Date.parse("2026-11-02T12:00:00.000Z");
+
+function seededClient() {
+  const queryClient = new QueryClient();
+  hydrateFromSnapshot(queryClient, fixtureSnapshot("default", NOW));
+  return queryClient;
+}
+
+function event(fields: Partial<ChangeEvent>): ChangeEvent {
+  return {
+    seq: 4182,
+    at: "2026-11-02T12:00:01.000Z",
+    kind: "x.changed",
+    txn: "x",
+    entity: "x",
+    entity_id: "x",
+    rev_after: null,
+    card_id: null,
+    entity_state: null,
+    ...fields,
+  };
+}
+
+test("a card event replaces the card's row in the unfiltered board and adds a new one", () => {
+  const queryClient = seededClient();
+  const before = queryClient.getQueryData<BoardResponse>(queryKeyFor(boardPath()));
+  const first = before?.rows[0] as BoardRow;
+
+  applyChange(
+    queryClient,
+    event({
+      entity: "card",
+      card_id: first.id,
+      card: { ...first, column: "done", badge: "merged" },
+    }),
+  );
+  applyChange(
+    queryClient,
+    event({
+      seq: 4183,
+      entity: "card",
+      card_id: "new",
+      card: { ...first, id: "new", display_id: "alpha-99" },
+    }),
+  );
+
+  const after = queryClient.getQueryData<BoardResponse>(queryKeyFor(boardPath()));
+  expect(after?.rows.find((row) => row.id === first.id)?.column).toBe("done");
+  expect(after?.rows).toHaveLength((before?.rows.length ?? 0) + 1);
+});
+
+test("an entity event older than the cached rev is ignored, a newer one wins", () => {
+  const queryClient = seededClient();
+  const machines = queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath));
+  const hostA = machines?.machines[0];
+  if (!hostA) throw new Error("fixture has no machine");
+
+  applyChange(
+    queryClient,
+    event({
+      entity: "host",
+      entity_id: hostA.id,
+      rev_after: hostA.rev - 1,
+      entity_state: { ...hostA, rev: hostA.rev - 1, running_agents: 99 },
+    }),
+  );
+  expect(
+    queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath))?.machines[0]
+      ?.running_agents,
+  ).toBe(hostA.running_agents);
+
+  applyChange(
+    queryClient,
+    event({
+      seq: 4183,
+      entity: "host",
+      entity_id: hostA.id,
+      rev_after: hostA.rev + 1,
+      entity_state: { ...hostA, rev: hostA.rev + 1, running_agents: 4 },
+    }),
+  );
+  expect(
+    queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath))?.machines[0]
+      ?.running_agents,
+  ).toBe(4);
+});
+
+test("an answered attention item leaves the open queue", () => {
+  const queryClient = seededClient();
+  const open = queryClient.getQueryData<AttentionResponse>(queryKeyFor(attentionPath));
+  const item = open?.items[0];
+  if (!item) throw new Error("fixture has no attention item");
+
+  applyChange(
+    queryClient,
+    event({
+      entity: "attention",
+      entity_id: item.id,
+      entity_state: { ...item, rev: item.rev + 1, answered_at: "2026-11-02T12:00:00.000Z" },
+    }),
+  );
+
+  const after = queryClient.getQueryData<AttentionResponse>(queryKeyFor(attentionPath));
+  expect(after?.items.find((other) => other.id === item.id)).toBeUndefined();
+});
+
+test("a quota window event updates the window by label", () => {
+  const queryClient = seededClient();
+  const quota = queryClient.getQueryData<QuotaResponse>(queryKeyFor(quotaPath));
+  const weekly = quota?.windows.find((window) => window.kind === "weekly");
+  if (!weekly) throw new Error("fixture has no weekly window");
+
+  applyChange(
+    queryClient,
+    event({
+      entity: "quota_window",
+      entity_id: weekly.label,
+      entity_state: { ...weekly, percent_remaining: 12, dot: "amber" },
+    }),
+  );
+
+  const after = queryClient.getQueryData<QuotaResponse>(queryKeyFor(quotaPath));
+  expect(after?.windows.find((window) => window.label === weekly.label)?.dot).toBe("amber");
+  expect(after?.windows).toHaveLength(quota?.windows.length ?? 0);
+});
+
+class FakeSource implements EventSourceLike {
+  static all: FakeSource[] = [];
+  readyState = 1;
+  closed = false;
+  private listeners = new Map<string, ((event: MessageEvent<string>) => void)[]>();
+  constructor(readonly url: string) {
+    FakeSource.all.push(this);
+  }
+  addEventListener(type: string, listener: (event: MessageEvent<string>) => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+  }
+  close() {
+    this.closed = true;
+  }
+  emit(type: string, data?: unknown) {
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener({ data: JSON.stringify(data) } as MessageEvent<string>);
+    }
+  }
+}
+
+beforeEach(() => {
+  FakeSource.all = [];
+  connectionStore.set("connecting");
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+function connect(
+  queryClient: QueryClient,
+  lastEventSeq = 4181,
+  snapshot = fixtureSnapshot("default", NOW),
+) {
+  return connectEvents({
+    queryClient,
+    lastEventSeq,
+    createEventSource: (url) => new FakeSource(url),
+    fetchSnapshot: () => Promise.resolve(snapshot),
+  });
+}
+
+test("the stream applies each event once and skips a replayed seq", () => {
+  const queryClient = seededClient();
+  const stop = connect(queryClient);
+  const source = FakeSource.all[0] as FakeSource;
+  const machines = queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath));
+  const hostA = machines?.machines[0];
+  if (!hostA) throw new Error("fixture has no machine");
+
+  const changed = event({
+    seq: 4182,
+    entity: "host",
+    entity_id: hostA.id,
+    entity_state: { ...hostA, rev: hostA.rev + 1, running_agents: 5 },
+  });
+  source.emit("change", changed);
+  source.emit(
+    "change",
+    event({
+      seq: 4182,
+      entity: "host",
+      entity_id: hostA.id,
+      entity_state: { ...hostA, rev: hostA.rev + 2, running_agents: 0 },
+    }),
+  );
+  source.emit(
+    "change",
+    event({
+      seq: 4100,
+      entity: "host",
+      entity_id: hostA.id,
+      entity_state: { ...hostA, rev: hostA.rev + 3, running_agents: 0 },
+    }),
+  );
+
+  expect(
+    queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath))?.machines[0]
+      ?.running_agents,
+  ).toBe(5);
+  stop();
+});
+
+test("a reset refetches the snapshot into the cache without clearing it first", async () => {
+  const queryClient = seededClient();
+  const next = fixtureSnapshot("quota-red", NOW);
+  const stop = connect(queryClient, 4181, next);
+  const source = FakeSource.all[0] as FakeSource;
+
+  source.emit("reset", { seq: 9000 });
+  // The old data is still there until the new snapshot lands.
+  expect(queryClient.getQueryData<QuotaResponse>(queryKeyFor(quotaPath))?.windows[0]?.dot).toBe(
+    "green",
+  );
+  await vi.waitFor(() => {
+    expect(queryClient.getQueryData<QuotaResponse>(queryKeyFor(quotaPath))?.windows[0]?.dot).toBe(
+      "red",
+    );
+  });
+  stop();
+});
+
+test("the connection state follows open and error, and a closed stream reopens and resyncs", async () => {
+  vi.useFakeTimers();
+  const queryClient = seededClient();
+  const stop = connect(queryClient, 4181, fixtureSnapshot("quota-amber", NOW));
+  const first = FakeSource.all[0] as FakeSource;
+
+  first.emit("open");
+  expect(connectionStore.get()).toBe("live");
+
+  first.readyState = 2;
+  first.emit("error");
+  expect(connectionStore.get()).toBe("reconnecting");
+  expect(first.closed).toBe(true);
+
+  await vi.advanceTimersByTimeAsync(1000);
+  const second = FakeSource.all[1] as FakeSource;
+  expect(second).toBeDefined();
+  second.emit("open");
+  expect(connectionStore.get()).toBe("live");
+  await vi.advanceTimersByTimeAsync(0);
+  expect(queryClient.getQueryData<QuotaResponse>(queryKeyFor(quotaPath))?.windows[0]?.dot).toBe(
+    "amber",
+  );
+  stop();
+});
