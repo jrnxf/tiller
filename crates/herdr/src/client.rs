@@ -11,6 +11,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -212,19 +213,21 @@ impl Cli {
         let mut stderr = child.stderr.take();
         // Drain both pipes on their own threads so a large read never blocks
         // the child on a full pipe while this thread waits for it to exit.
-        let out = std::thread::spawn(move || {
+        let (out_tx, out) = mpsc::channel();
+        let (err_tx, err) = mpsc::channel();
+        std::thread::spawn(move || {
             let mut text = String::new();
             if let Some(pipe) = stdout.as_mut() {
                 let _ = pipe.read_to_string(&mut text);
             }
-            text
+            let _ = out_tx.send(text);
         });
-        let err = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             let mut text = String::new();
             if let Some(pipe) = stderr.as_mut() {
                 let _ = pipe.read_to_string(&mut text);
             }
-            text
+            let _ = err_tx.send(text);
         });
         let deadline = Instant::now() + self.timeout;
         let status = loop {
@@ -242,8 +245,19 @@ impl Cli {
                 Err(e) => return Err(HerdrError::Unreachable(format!("{call}: {e}"))),
             }
         };
-        let stdout = out.join().unwrap_or_default();
-        let stderr = err.join().unwrap_or_default();
+        // A process the child left behind can hold the pipes open past its
+        // exit, so the reads share the call's deadline too.
+        let drained = |pipe: mpsc::Receiver<String>| {
+            pipe.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .map_err(|_| {
+                    HerdrError::Unreachable(format!(
+                        "{call} kept its output open past {:?}",
+                        self.timeout
+                    ))
+                })
+        };
+        let stdout = drained(out)?;
+        let stderr = drained(err)?;
         if status.success() {
             return Ok(stdout);
         }
@@ -545,6 +559,23 @@ mod tests {
         assert!(quiet.send_enter("w1:p1").is_ok());
         let refused = Cli::local().program(vec!["false".into()]);
         assert!(refused.send_enter("w1:p1").is_err());
+    }
+
+    #[test]
+    fn a_leftover_process_holding_the_pipes_cannot_outlast_the_timeout() {
+        // `sh` exits at once; the `sleep` it leaves keeps stdout open.
+        let cli = Cli::local()
+            .program(vec![
+                "sh".into(),
+                "-c".into(),
+                "sleep 5 & exit 0".into(),
+                "--".into(),
+            ])
+            .timeout(Duration::from_millis(300));
+        let started = Instant::now();
+        let error = cli.send_enter("w1:p1").unwrap_err();
+        assert!(matches!(error, HerdrError::Unreachable(_)), "{error:?}");
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

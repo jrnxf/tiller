@@ -298,19 +298,40 @@ pub struct Repair {
 /// Re-reports row tokens herdr lost or never had, then applies the layout
 /// plan: renames first, so a herdr that refuses `workspace.move` still ends
 /// with correct labels in the wrong order (`herdr-layout.md`, Known limits).
+///
+/// A pane whose `session` token names another session is left alone, row
+/// and tokens both: the binding is stale, and reconcile settles it. A pane
+/// with no tokens at all is trusted, because R18 re-reports them after a
+/// herdr restart and nothing else can tell a recycled pane id apart; the
+/// delivery pass still types only into an empty Claude composer.
 pub fn repair(herdr: &dyn Herdr, snapshot: &Snapshot, bindings: &[Binding]) -> Result<Repair> {
     let mut done = Repair::default();
+    let mut trusted = Vec::with_capacity(bindings.len());
     for binding in bindings {
         let Some(pane) = snapshot.pane(&binding.pane_id) else {
             continue;
         };
+        if let Some(other) = pane
+            .tokens
+            .get("session")
+            .filter(|s| **s != binding.session_id)
+        {
+            tracing::warn!(
+                pane = %binding.pane_id,
+                bound = %binding.session_id,
+                claimed = %other,
+                "pane names another session; left for reconcile"
+            );
+            continue;
+        }
         let want = binding.tokens();
         if want.iter().any(|(k, v)| pane.tokens.get(k) != Some(v)) {
             herdr.report_tokens(&binding.pane_id, &want)?;
             done.tokens_reported += 1;
         }
+        trusted.push(binding.clone());
     }
-    let actions = plan(&snapshot.workspaces, &members(snapshot, bindings));
+    let actions = plan(&snapshot.workspaces, &members(snapshot, &trusted));
     for action in &actions {
         if let Action::Rename {
             workspace_id,

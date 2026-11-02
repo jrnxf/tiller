@@ -51,11 +51,9 @@ pub fn classify(ansi: &str) -> Composer {
             .collect();
         if footer.len() > MAX_FOOTER_ROWS || footer.iter().any(|row| row.starts_with(PROMPT)) {
             // Rows below the composer that Claude does not draw: a shell
-            // printed after Claude exited, or a popup. Not provably empty.
-            return match composer_text(&rows[top + 1..*bottom]) {
-                text if text.is_empty() => Composer::Unknown,
-                text => Composer::Holds(text),
-            };
+            // printed after Claude exited, or a popup. Neither empty nor a
+            // line Enter would submit to Claude.
+            return Composer::Unknown;
         }
         let text = composer_text(&rows[top + 1..*bottom]);
         if !text.is_empty() {
@@ -258,6 +256,12 @@ mod tests {
         let rule = "─".repeat(40);
         let screen = format!(
             "{rule}\n❯\u{a0}\n{rule}\n  ? for shortcuts\n\nResume this session with:\nclaude --resume 0\nhost ~ \n❯ \n"
+        );
+        assert_eq!(classify(&screen), Composer::Unknown);
+        // A wake-up line left in that frame is not held text: Enter would go
+        // to the shell, which would run it.
+        let screen = format!(
+            "{rule}\n❯\u{a0}tiller inbox 01JC2ZB6N0E2K4M6P8R0S2T4V6 # steer\n{rule}\n  ? for shortcuts\n\nhost ~ \n❯ \n"
         );
         assert_eq!(classify(&screen), Composer::Unknown);
     }

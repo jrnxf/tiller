@@ -42,6 +42,29 @@ pub const HELD_MINUTES: i64 = 10;
 /// after it was stored with no session to take it, goes to the owner.
 pub const ANSWER_MINUTES: i64 = 60;
 
+/// How long a remote lane's messages are left alone between looks.
+const QUIET_REMOTE_MINUTES: i64 = 5;
+/// The deferral reason for a composer holding someone's text.
+const HELD: &str = "composer holds text";
+
+/// How often `message` has been rung at its current target, and when the
+/// first of those rings was: `attempts` and `delivered_at` count every
+/// target, so a successor is judged by its own doorbell only.
+fn doorbell(store: &Store, message: &str) -> Result<(i64, Option<Timestamp>)> {
+    Ok(store
+        .conn()
+        .query_row(
+            "SELECT count(*), min(at) FROM events
+             WHERE entity = 'outbox' AND entity_id = ?1 AND kind = 'outbox.delivered'
+               AND seq > coalesce((SELECT max(seq) FROM events
+                                   WHERE entity = 'outbox' AND entity_id = ?1
+                                     AND kind = 'outbox.retargeted'), 0)",
+            [message],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(tiller_core::Error::from)?)
+}
+
 /// The wake-up line for `message` (`protocol.md` 3.1).
 pub fn wake_line(message: &OutboxMessage, card: Option<&Card>) -> String {
     match card {
@@ -125,8 +148,11 @@ pub struct Deliverer<H: Herdr> {
     host_id: String,
     /// When each message's composer was first seen holding someone's text.
     held_since: HashMap<String, Timestamp>,
-    /// Messages already reported as unread.
-    reported: HashSet<String>,
+    /// `(message, target session)` pairs already reported as unread.
+    reported: HashSet<(String, String)>,
+    /// Messages this daemon cannot act on yet (a remote lane, a successor
+    /// not started), skipped until then without writing anything.
+    quiet_until: HashMap<String, Timestamp>,
 }
 
 impl<H: Herdr> Deliverer<H> {
@@ -137,6 +163,7 @@ impl<H: Herdr> Deliverer<H> {
             host_id: host_id.into(),
             held_since: HashMap::new(),
             reported: HashSet::new(),
+            quiet_until: HashMap::new(),
         }
     }
 
@@ -157,6 +184,7 @@ impl<H: Herdr> Deliverer<H> {
                 sessions.push(message.target_session_id.clone());
             }
         }
+        self.quiet_until.retain(|_, until| *until > now);
         let ctx = Ctx::at(Actor::Daemon, now);
         let mut report = Report::default();
         for session in sessions {
@@ -179,18 +207,25 @@ impl<H: Herdr> Deliverer<H> {
         let due: Vec<&OutboxMessage> = unacked
             .iter()
             .filter(|m| m.next_attempt_at.is_some_and(|at| at <= now))
+            .filter(|m| !self.quiet_until.contains_key(&m.id))
             .collect();
         if due.is_empty() {
+            return Ok(());
+        }
+        if session.host_id != self.host_id {
+            // Remote lanes are read only in v1: the peer's own Tiller
+            // delivers, retargets and fails its messages.
+            self.quiet(&due, now.plus_minutes(QUIET_REMOTE_MINUTES));
             return Ok(());
         }
         if session.ended_at.is_some() {
             return self.rehome(ctx, &session, &due, report);
         }
-        if session.host_id != self.host_id {
-            // Remote lanes are read only in v1: the peer's own Tiller delivers.
-            return Ok(());
+        let mut doorbells = HashMap::with_capacity(unacked.len());
+        for message in &unacked {
+            doorbells.insert(message.id.clone(), doorbell(&self.store, &message.id)?);
         }
-        self.report_unread(ctx, &session, &unacked, report)?;
+        self.report_unread(ctx, &session, &unacked, &doorbells, report)?;
 
         // Only re-rings are due: they wait for the target to sit idle.
         if due.iter().all(|m| m.state == OutboxState::Delivered) {
@@ -202,22 +237,43 @@ impl<H: Herdr> Deliverer<H> {
             }
         }
 
-        match self.ring(&session, &unacked, now)? {
+        let rung = self.ring(&session, &unacked, now)?;
+        if !matches!(&rung, Err(defer) if defer.reason == HELD) {
+            // The composer is no longer known to hold someone's text.
+            for message in &unacked {
+                self.held_since.remove(&message.id);
+            }
+        }
+        match rung {
             Ok(pane_id) => {
                 for message in &unacked {
-                    let next = next_ring(
-                        message.delivered_at.unwrap_or(now),
-                        message.attempts + 1,
-                        now,
-                    );
-                    self.store
-                        .outbox_deliver(ctx, &message.id, &pane_id, next)?;
-                    self.held_since.remove(&message.id);
+                    let (rings, first) = doorbells.get(&message.id).copied().unwrap_or((0, None));
+                    let next = next_ring(first.unwrap_or(now), rings + 1, now);
+                    match self.store.outbox_deliver(ctx, &message.id, &pane_id, next) {
+                        Ok(_) => {}
+                        // The target's hook acked the batch the moment the
+                        // line was submitted, before this record.
+                        Err(_)
+                            if get::<OutboxMessage>(
+                                self.store.conn(),
+                                "outbox message",
+                                &message.id,
+                            )?
+                            .state
+                                == OutboxState::Acked => {}
+                        Err(error) => return Err(error.into()),
+                    }
                     report.rung.push(message.id.clone());
                 }
                 Ok(())
             }
             Err(defer) => self.defer(ctx, &due, defer, report),
+        }
+    }
+
+    fn quiet(&mut self, messages: &[&OutboxMessage], until: Timestamp) {
+        for message in messages {
+            self.quiet_until.insert(message.id.clone(), until);
         }
     }
 
@@ -290,7 +346,7 @@ impl<H: Herdr> Deliverer<H> {
                 for message in unacked {
                     self.held_since.entry(message.id.clone()).or_insert(now);
                 }
-                return Ok(Err(Defer::new(BUSY_DEFER_SECS, "composer holds text")));
+                return Ok(Err(Defer::new(BUSY_DEFER_SECS, HELD)));
             }
             Composer::Busy => return Ok(Err(Defer::new(BUSY_DEFER_SECS, "busy"))),
             Composer::Dialog => return Ok(Err(Defer::new(DIALOG_DEFER_SECS, "dialog showing"))),
@@ -364,9 +420,13 @@ impl<H: Herdr> Deliverer<H> {
                 (None, true) => Some("no session took the answer within an hour".to_owned()),
                 (None, false) => None,
             };
-            if let Some(reason) = reason {
-                self.store.outbox_fail(ctx, &message.id, &reason)?;
-                report.failed.push(message.id.clone());
+            match reason {
+                Some(reason) => {
+                    self.store.outbox_fail(ctx, &message.id, &reason)?;
+                    report.failed.push(message.id.clone());
+                }
+                // Waiting for the run's next session costs nothing per pass.
+                None => self.quiet(&[message], plus_secs(ctx.now, BUSY_DEFER_SECS)),
             }
         }
         Ok(())
@@ -381,35 +441,40 @@ impl<H: Herdr> Deliverer<H> {
         ctx: &Ctx,
         session: &Session,
         unacked: &[OutboxMessage],
+        doorbells: &HashMap<String, (i64, Option<Timestamp>)>,
         report: &mut Report,
     ) -> Result<()> {
         let now = ctx.now;
         for message in unacked {
-            if self.reported.contains(&message.id) {
+            let pair = (message.id.clone(), session.id.clone());
+            if self.reported.contains(&pair) {
                 continue;
             }
+            let (rings, first) = doorbells.get(&message.id).copied().unwrap_or((0, None));
             let held = self
                 .held_since
                 .get(&message.id)
                 .is_some_and(|at| at.plus_minutes(HELD_MINUTES) <= now);
             let unread = if message.kind == OutboxKind::Answer {
-                held || message
-                    .delivered_at
-                    .is_some_and(|at| at.plus_minutes(ANSWER_MINUTES) <= now)
+                held || first.is_some_and(|at| at.plus_minutes(ANSWER_MINUTES) <= now)
             } else {
                 session.role != Role::Orchestrator
-                    && (held || message.attempts > i64::try_from(RINGS_MINUTES.len()).unwrap_or(5))
+                    && (held || rings > i64::try_from(RINGS_MINUTES.len()).unwrap_or(5))
             };
             if !unread {
                 continue;
             }
-            if message.kind == OutboxKind::Answer {
+            let sent = if message.kind == OutboxKind::Answer {
                 self.open_recovery(ctx, session, message)?;
+                true
             } else {
-                self.note_orchestrator(ctx, session, message, held)?;
+                // With no live orchestrator, the next pass tries again.
+                self.note_orchestrator(ctx, session, message, held)?
+            };
+            if sent {
+                self.reported.insert(pair);
+                report.reported.push(message.id.clone());
             }
-            self.reported.insert(message.id.clone());
-            report.reported.push(message.id.clone());
         }
         Ok(())
     }
@@ -430,7 +495,7 @@ impl<H: Herdr> Deliverer<H> {
             Some(id) => get::<Card>(conn, "card", id)?.display_id,
             None => HOST_HEALTH_CARD.to_owned(),
         };
-        let key = format!("outbox-unread:{}", message.id);
+        let key = format!("outbox-unread:{}:{}", message.id, session.id);
         self.store.attention_open(
             ctx,
             Some(&key),
@@ -463,10 +528,10 @@ impl<H: Herdr> Deliverer<H> {
         session: &Session,
         message: &OutboxMessage,
         held: bool,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let conn = self.store.conn();
         let Some(orchestrator) = live_orchestrator(conn, &session.project_id)? else {
-            return Ok(());
+            return Ok(false);
         };
         let card = match &message.card_id {
             Some(id) => Some(get::<Card>(conn, "card", id)?),
@@ -477,7 +542,7 @@ impl<H: Herdr> Deliverer<H> {
         } else {
             format!("after {} rings", RINGS_MINUTES.len())
         };
-        let key = format!("outbox-unread:{}", message.id);
+        let key = format!("outbox-unread:{}:{}", message.id, session.id);
         self.store.outbox_enqueue(
             ctx,
             Some(&key),
@@ -495,7 +560,7 @@ impl<H: Herdr> Deliverer<H> {
                 reply_to: None,
             },
         )?;
-        Ok(())
+        Ok(true)
     }
 }
 

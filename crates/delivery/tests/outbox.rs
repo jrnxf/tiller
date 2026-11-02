@@ -8,13 +8,15 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use tiller_core::domain::{
-    Attention, AttentionKind, Card, OutboxKind, OutboxMessage, OutboxState, RunOutcome,
+    Attention, AttentionKind, Card, CardKind, Effort, OutboxKind, OutboxMessage, OutboxState,
+    RunOutcome, RunRole,
 };
+use tiller_core::state::cards::NewCard;
 use tiller_core::state::outbox::NewMessage;
-use tiller_core::state::runs::{Bind, EndRun, Relaunch};
+use tiller_core::state::runs::{Bind, EndRun, NewOrchestrator, NewRun, Relaunch, SpawnChecks};
 use tiller_core::state::{get, list};
 use tiller_core::{Actor, Ctx, Store, Timestamp};
-use tiller_delivery::outbox::{Deliverer, Report};
+use tiller_delivery::outbox::{Deliverer, RINGS_MINUTES, Report};
 use tiller_herdr::client::Herdr;
 use tiller_herdr::fake::{FakeHerdr, PAUSE_ENV, Screen};
 use tiller_herdr::poller::{HerdrSource, Registry};
@@ -387,16 +389,23 @@ fn message_to_dead_session_is_retargeted_to_successor() {
         .unwrap();
     w.poll(at(56));
 
-    let report = w.pass(at(60));
+    // A message waiting for a successor is looked at again 30 s on.
+    assert!(w.pass(at(60)).retargeted.is_empty());
+    let report = w.pass(at(70));
     assert_eq!(report.retargeted, std::slice::from_ref(&message.id));
     let moved = w.message(&message.id);
     assert_eq!(moved.target_session_id, successor);
     assert_eq!(moved.state, OutboxState::Pending);
-    let report = w.pass(at(61));
+    let report = w.pass(at(71));
     assert_eq!(report.rung, std::slice::from_ref(&message.id));
     assert_eq!(
         w.herdr.fake_pane("w4:p1").submitted,
         [line(&message, &w.card())]
+    );
+    // The successor's doorbell starts at its own first ring.
+    assert_eq!(
+        w.message(&message.id).next_attempt_at,
+        Some(at(71).plus_minutes(RINGS_MINUTES[0]))
     );
 }
 
@@ -622,4 +631,241 @@ fn herdr_down_defers_and_never_fails() {
     w.herdr.set_unreachable(false);
     assert_eq!(w.pass(at(400)).rung, std::slice::from_ref(&message.id));
     let _ = w.herdr.snapshot().unwrap();
+}
+
+#[test]
+fn held_timer_restarts_once_the_composer_stops_holding_text() {
+    let mut w = World::new();
+    let message = w.send(None, OutboxKind::Steer, at(1));
+    w.herdr.type_draft("w2:p1", "a draft");
+    w.pass(at(2));
+    // Claude exits and comes back with the draft still in the composer:
+    // the draft has been held only since then.
+    w.herdr.set_screen("w2:p1", Screen::Shell);
+    w.pass(at(300));
+    w.herdr.set_screen("w2:p1", Screen::Idle);
+    let notes = |w: &World| -> usize {
+        list::<OutboxMessage>(
+            w.fleet.store.conn(),
+            "target_session_id = ?1 AND kind = 'note'",
+            &[&w.fleet.orchestrator_session],
+        )
+        .unwrap()
+        .len()
+    };
+    let mut now = 331;
+    while now < 331 + 600 {
+        w.pass(at(now));
+        now += 31;
+    }
+    assert_eq!(notes(&w), 0, "held for under ten minutes");
+    w.pass(at(now));
+    assert_eq!(notes(&w), 1);
+    assert_eq!(w.message(&message.id).state, OutboxState::Pending);
+}
+
+/// herdr as the real one behaves when the target's `UserPromptSubmit` hook
+/// acks the batch before `send-keys Enter` returns.
+struct AckOnSubmit {
+    inner: FakeHerdr,
+    store: std::cell::RefCell<Store>,
+    session: String,
+    message: String,
+}
+
+impl Herdr for AckOnSubmit {
+    fn snapshot(&self) -> tiller_herdr::client::Result<tiller_herdr::client::Snapshot> {
+        self.inner.snapshot()
+    }
+    fn pane(
+        &self,
+        id: &str,
+    ) -> tiller_herdr::client::Result<Option<tiller_herdr::client::PaneInfo>> {
+        self.inner.pane(id)
+    }
+    fn read_visible(&self, id: &str) -> tiller_herdr::client::Result<String> {
+        self.inner.read_visible(id)
+    }
+    fn send_text(&self, id: &str, text: &str) -> tiller_herdr::client::Result<()> {
+        self.inner.send_text(id, text)
+    }
+    fn send_enter(&self, id: &str) -> tiller_herdr::client::Result<()> {
+        self.inner.send_enter(id)?;
+        let ctx = Ctx::at(Actor::Session(self.session.clone()), at(2));
+        self.store
+            .borrow_mut()
+            .outbox_ack(&ctx, &self.message)
+            .unwrap();
+        Ok(())
+    }
+    fn report_tokens(
+        &self,
+        id: &str,
+        tokens: &std::collections::BTreeMap<String, String>,
+    ) -> tiller_herdr::client::Result<()> {
+        self.inner.report_tokens(id, tokens)
+    }
+    fn create_workspace(
+        &self,
+        label: &str,
+        cwd: Option<&Path>,
+    ) -> tiller_herdr::client::Result<tiller_herdr::client::Created> {
+        self.inner.create_workspace(label, cwd)
+    }
+    fn rename_workspace(&self, id: &str, label: &str) -> tiller_herdr::client::Result<()> {
+        self.inner.rename_workspace(id, label)
+    }
+    fn move_workspace(&self, id: &str, index: usize) -> tiller_herdr::client::Result<()> {
+        self.inner.move_workspace(id, index)
+    }
+    fn notify(&self, title: &str, body: &str) -> tiller_herdr::client::Result<()> {
+        self.inner.notify(title, body)
+    }
+}
+
+#[test]
+fn an_ack_that_beats_the_delivery_record_is_not_an_error() {
+    let mut w = World::new();
+    let message = w.send(None, OutboxKind::Steer, at(1));
+    let herdr = AckOnSubmit {
+        inner: w.herdr.clone(),
+        store: std::cell::RefCell::new(w.fleet.open()),
+        session: w.worker.clone(),
+        message: message.id.clone(),
+    };
+    let mut deliverer = Deliverer::new(w.fleet.open(), herdr, &w.fleet.host);
+    let report = deliverer.pass(at(2)).unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.rung, std::slice::from_ref(&message.id));
+    assert_eq!(w.message(&message.id).state, OutboxState::Acked);
+    assert_eq!(w.submitted().len(), 1);
+}
+
+#[test]
+fn unread_note_waits_for_a_live_orchestrator() {
+    let mut w = World::new();
+    let message = w.send(None, OutboxKind::Steer, at(1));
+    let hook = Ctx::at(Actor::Hook, at(1));
+    let orchestrator = w.fleet.orchestrator_session.clone();
+    w.fleet
+        .store
+        .session_end(&hook, &orchestrator, "exited")
+        .unwrap();
+    w.pass(at(2));
+    let mut now = 2;
+    for _ in 0..5 {
+        now = (w.message(&message.id).next_attempt_at.unwrap().as_millis() - at(0).as_millis())
+            / 1000;
+        w.pass(at(now));
+    }
+    let report = w.pass(at(now + 3600));
+    assert!(report.reported.is_empty(), "no one to tell yet");
+
+    let next = w
+        .fleet
+        .store
+        .session_start(
+            &Ctx::at(Actor::Owner, at(now + 3601)),
+            NewOrchestrator {
+                project_id: "alpha".into(),
+                pane_id: Some("w1:p1".into()),
+                claude_session_id: Some("claude-orchestrator-2".into()),
+                ..NewOrchestrator::default()
+            },
+        )
+        .unwrap()
+        .value
+        .session
+        .id;
+    let report = w.pass(at(now + 7200));
+    assert_eq!(report.reported, std::slice::from_ref(&message.id));
+    let notes: Vec<OutboxMessage> = list(
+        w.fleet.store.conn(),
+        "target_session_id = ?1 AND kind = 'note'",
+        &[&next],
+    )
+    .unwrap();
+    assert_eq!(notes.len(), 1);
+}
+
+#[test]
+fn a_remote_lane_is_left_to_its_own_tiller() {
+    let mut w = World::new();
+    let remote = w.fleet.remote_host("m-1");
+    let card = w
+        .fleet
+        .store
+        .card_create(
+            &owner(),
+            None,
+            NewCard {
+                project_id: "alpha".into(),
+                kind: CardKind::Ship,
+                title: "remote work".into(),
+                ..NewCard::default()
+            },
+            None,
+        )
+        .unwrap()
+        .value;
+    let session = w
+        .fleet
+        .store
+        .run_start(
+            &owner(),
+            None,
+            NewRun {
+                worktree_path: Some("/home/user/worktrees/remote".into()),
+                card: card.display_id,
+                role: RunRole::Builder,
+                model: "test-model".into(),
+                effort: Effort::Medium,
+                host_id: Some(remote),
+                branch: None,
+                base_branch: None,
+                base_sha: None,
+                config_hash: None,
+                checks: SpawnChecks::default(),
+            },
+        )
+        .unwrap()
+        .value
+        .session
+        .id;
+    let message = w
+        .fleet
+        .store
+        .outbox_enqueue(
+            &Ctx::at(Actor::Daemon, at(1)),
+            None,
+            NewMessage {
+                target_session_id: session,
+                kind: OutboxKind::Steer,
+                body: "for the remote lane".into(),
+                card_id: None,
+                reply_to: None,
+            },
+        )
+        .unwrap()
+        .value;
+    let events = |w: &World| -> i64 {
+        w.fleet
+            .store
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM events WHERE entity_id = ?1",
+                [&message.id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let before = events(&w);
+    let calls = w.herdr.calls().len();
+    for n in 0..20 {
+        let report = w.pass(at(2 + 2 * n));
+        assert!(report.rung.is_empty() && report.deferred.is_empty() && report.failed.is_empty());
+    }
+    assert_eq!(events(&w), before, "nothing written for a remote lane");
+    assert_eq!(w.herdr.calls().len(), calls, "herdr never asked");
+    assert_eq!(w.message(&message.id).state, OutboxState::Pending);
 }

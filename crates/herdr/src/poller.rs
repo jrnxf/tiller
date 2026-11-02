@@ -308,9 +308,11 @@ impl<H: Herdr + Send + 'static> HerdrSource<H> {
     ) -> Result<(), PollError> {
         for binding in bindings {
             let pane = snapshot.pane(&binding.pane_id);
+            // The caches move only once the observation is recorded, so a
+            // failed write is retried on the next poll.
             let (event, verdict) = match pane {
                 None => {
-                    if !self.gone.insert(binding.pane_id.clone()) {
+                    if self.gone.contains(&binding.pane_id) {
                         continue;
                     }
                     ("pane_gone".to_owned(), Some(Activity::Ended))
@@ -320,9 +322,8 @@ impl<H: Herdr + Send + 'static> HerdrSource<H> {
                     if self.statuses.get(&binding.pane_id) == Some(&pane.agent_status) {
                         continue;
                     }
-                    self.statuses
-                        .insert(binding.pane_id.clone(), pane.agent_status.clone());
                     let Some(status) = pane.agent_status.as_deref() else {
+                        self.statuses.insert(binding.pane_id.clone(), None);
                         continue;
                     };
                     let session: Session = get(self.store.conn(), "session", &binding.session_id)?;
@@ -345,6 +346,15 @@ impl<H: Herdr + Send + 'static> HerdrSource<H> {
                     }),
                 },
             )?;
+            match pane {
+                None => {
+                    self.gone.insert(binding.pane_id.clone());
+                }
+                Some(pane) => {
+                    self.statuses
+                        .insert(binding.pane_id.clone(), pane.agent_status.clone());
+                }
+            }
         }
         Ok(())
     }
@@ -378,9 +388,14 @@ impl<H: Herdr + Send + 'static> Source for HerdrSource<H> {
         self.store.host_seen(&ctx, &self.host_id, None)?;
         self.observe(&ctx, &snapshot, &bindings)?;
         if self.machine.is_none() {
-            let repair = layout::repair(&self.herdr, &snapshot, &bindings)?;
-            if repair != layout::Repair::default() {
-                tracing::info!(?repair, "herdr layout repaired");
+            // Cosmetic: a failed repair is retried on the next poll and is
+            // no evidence that the host is unreachable.
+            match layout::repair(&self.herdr, &snapshot, &bindings) {
+                Ok(repair) if repair != layout::Repair::default() => {
+                    tracing::info!(?repair, "herdr layout repaired");
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "herdr layout repair failed"),
             }
         }
         Ok(())
@@ -693,6 +708,68 @@ mod tests {
             calls + 1,
             "a settled layout costs one snapshot and no writes"
         );
+    }
+
+    #[test]
+    fn a_refused_layout_move_is_not_a_failed_poll() {
+        let mut fleet = Fleet::new();
+        fleet.worker("w2:p1");
+        let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
+        fleet.place(&herdr);
+        herdr.refuse("move");
+        let registry = Registry::new();
+        let mut poller = registry
+            .register(HerdrSource::local(herdr.clone(), fleet.open(), &fleet.host))
+            .unwrap();
+        for n in 0..4 {
+            poller.poll_once(at(n * 10));
+        }
+        assert_eq!(poller.health().consecutive_failures, 0);
+        let host = host(&fleet, &fleet.host);
+        assert_eq!(host.stale_reason, None);
+        assert_eq!(host.last_seen_at, Some(at(30)));
+        // Renames run first, so the labels are right in the wrong order.
+        let labels: Vec<String> = herdr
+            .snapshot()
+            .unwrap()
+            .workspaces
+            .into_iter()
+            .map(|w| w.label)
+            .collect();
+        assert_eq!(labels, ["alpha", "notes", "└ alpha-1 build"]);
+    }
+
+    #[test]
+    fn a_pane_naming_another_session_keeps_its_tokens_and_row() {
+        let mut fleet = Fleet::new();
+        let worker = fleet.worker("w2:p1");
+        let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
+        fleet.place(&herdr);
+        let foreign = BTreeMap::from([("session".to_owned(), "01OTHERSESSION".to_owned())]);
+        herdr.set_tokens("w2:p1", foreign.clone());
+        let registry = Registry::new();
+        let mut poller = registry
+            .register(HerdrSource::local(herdr.clone(), fleet.open(), &fleet.host))
+            .unwrap();
+        poller.poll_once(at(0));
+        let snapshot = herdr.snapshot().unwrap();
+        assert_eq!(snapshot.pane("w2:p1").unwrap().tokens, foreign);
+        let labels: Vec<&str> = snapshot
+            .workspaces
+            .iter()
+            .map(|w| w.label.as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            ["alpha", "notes", "claude"],
+            "the row is left alone"
+        );
+
+        // Reconcile clears the stale claim; the next poll takes the pane.
+        herdr.set_tokens("w2:p1", BTreeMap::new());
+        poller.poll_once(at(10));
+        let snapshot = herdr.snapshot().unwrap();
+        assert_eq!(snapshot.pane("w2:p1").unwrap().tokens["session"], worker);
     }
 
     #[test]

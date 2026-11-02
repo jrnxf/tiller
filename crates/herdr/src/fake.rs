@@ -49,6 +49,8 @@ struct World {
     workspaces: Vec<WorkspaceInfo>,
     panes: Vec<FakePane>,
     unreachable: bool,
+    /// Calls the server answers with an error, as an older herdr does.
+    refused: Vec<String>,
     calls: Vec<String>,
     counts: BTreeMap<String, u32>,
 }
@@ -121,8 +123,16 @@ impl FakeHerdr {
     /// `<name>.after`.
     fn call(&self, name: &str, detail: String) -> Result<()> {
         self.pause_point(name);
-        if self.load().unreachable {
+        let world = self.load();
+        if world.unreachable {
             return Err(HerdrError::Unreachable("fake herdr is down".into()));
+        }
+        if world.refused.iter().any(|r| r == name) {
+            return Err(HerdrError::Api {
+                call: name.into(),
+                code: "unknown_method".into(),
+                message: "refused by the fake".into(),
+            });
         }
         self.edit(|w| w.calls.push(detail));
         Ok(())
@@ -181,6 +191,12 @@ impl FakeHerdr {
 
     pub fn set_unreachable(&self, down: bool) {
         self.edit(|w| w.unreachable = down);
+    }
+
+    /// Makes the server answer every `call` (a call name such as `move`)
+    /// with an error.
+    pub fn refuse(&self, call: &str) {
+        self.edit(|w| w.refused.push(call.into()));
     }
 
     /// A server restart: every token is lost and the workspaces come back in
