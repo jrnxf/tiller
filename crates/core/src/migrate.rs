@@ -4,8 +4,10 @@
 //! the version is visible in the data and the JSONL export.
 //!
 //! The verified pre-migration copy (`state.db.pre-<from>-<to>`) and the
-//! `tiller migrate` command belong to the schema migration tool (T2.3), which
-//! calls [`to_version`] after taking that copy.
+//! `tiller migrate` command belong to the schema migration tool
+//! ([`crate::backup::migrate`], T2.3), which calls [`to_version`] after
+//! taking that copy; [`crate::Store::open`] takes the same copy before it
+//! migrates up.
 
 use rusqlite::Connection;
 use rusqlite_migration::{M, Migrations, SchemaVersion};

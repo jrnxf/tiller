@@ -182,8 +182,9 @@ impl Store {
     /// daemon and the CLI migrate (`recovery.md` R11); hooks use
     /// [`Store::open_current`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let mut conn = Connection::open(path)?;
+        let mut conn = Connection::open(&path)?;
         configure(&conn)?;
+        crate::backup::before_migration(&conn, path.as_ref())?;
         migrate::up(&mut conn)?;
         Ok(Self { conn })
     }

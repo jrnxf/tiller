@@ -206,9 +206,9 @@ about 3 min of the developer's time
 ### T2.3 Backup, restore and export
 `opus` medium - 2-3 h - after the T2.1 interface
 
-- [ ] Nightly `sqlite3 .backup` inside each host's boundary
-- [ ] `tiller restore`, JSONL export and import, schema migration tool
-- [ ] Check: restore drill recovers an acknowledged card with its pending decision
+- [x] Nightly `sqlite3 .backup` inside each host's boundary
+- [x] `tiller restore`, JSONL export and import, schema migration tool
+- [x] Check: restore drill recovers an acknowledged card with its pending decision
 - [ ] Delivered
 
 ### T2.5 Delivery and herdr adapter
