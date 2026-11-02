@@ -333,7 +333,7 @@ about 3 min of the developer's time
 - [x] Unresolved asks stay visible
 - [x] Check: three interleaved asks map to the right cards
 - [x] Check: a board-created card is never created twice
-- [ ] Delivered
+- [x] Delivered
 
 ## CP3: Core end to end (developer, 15 min)
 
