@@ -9,7 +9,7 @@ use super::approvals::{Decision, Execution, NewApproval, NewPr, PrFetch};
 use super::asks::{NewAsk, Resolution};
 use super::attention::NewAttention;
 use super::cards::{CardEdit, MARK_LANDED, NewCard};
-use super::projects::{Init, NewProject};
+use super::projects::{HostEdit, Init, NewProject, ProjectEdit};
 use super::runs::{Bind, NewObservation, NewOrchestrator, NewRun, Relaunch, SpawnChecks};
 use crate::domain::*;
 use crate::error::Error;
@@ -165,10 +165,7 @@ pub(crate) fn wait_for(path: &Path, timeout: Duration) -> bool {
 }
 
 /// One writer process: `ops` card creates and `ops` read-modify-write
-/// appends to a shared card, retried on conflict, then one spawn. Each
-/// append is unique to its writer: an edit equal to the current value is a
-/// no-op whatever rev it names (`protocol.md` 6.3), so two writers counting
-/// from the same value could both succeed with one write.
+/// increments of a shared card, retried on conflict, then one spawn.
 #[test]
 #[ignore = "child process of concurrent_writers_lose_no_updates"]
 fn writer_child() {
@@ -196,18 +193,14 @@ fn writer_child() {
                 Err(other) => panic!("card create failed: {other}"),
             }
         }
-        let token = format!("{}-{i}", std::process::id());
         loop {
             let current = store.card(&shared).unwrap();
-            let body = match current.body.as_deref() {
-                Some(tokens) => format!("{tokens},{token}"),
-                None => token.clone(),
-            };
+            let n: i64 = current.body.as_deref().unwrap_or("0").parse().unwrap();
             let edit = CardEdit {
-                body: Some(Some(body)),
+                body: Some(Some((n + 1).to_string())),
                 ..CardEdit::default()
             };
-            match store.card_edit(&owner(), &shared, current.rev, edit) {
+            match store.card_edit(&owner(), None, &shared, current.rev, edit) {
                 Ok(_) => break,
                 Err(Error::Conflict { .. } | Error::Unavailable(_)) => continue,
                 Err(other) => panic!("card edit failed: {other}"),
@@ -262,10 +255,7 @@ proptest! {
         let store = Store::open(&db).unwrap();
         let total = (writers * ops) as i64;
         let shared = store.card(&shared).unwrap();
-        let tokens: Vec<&str> = shared.body.as_deref().unwrap_or_default().split(',').collect();
-        let unique: std::collections::BTreeSet<&str> = tokens.iter().copied().collect();
-        prop_assert_eq!(tokens.len() as i64, total, "an append was lost");
-        prop_assert_eq!(unique.len(), tokens.len(), "an append was applied twice");
+        prop_assert_eq!(shared.body, Some(total.to_string()), "an increment was lost");
         prop_assert_eq!(shared.rev, 1 + total);
 
         let mut display_ids: Vec<i64> = store
@@ -406,10 +396,10 @@ fn stale_rev_is_refused_with_the_current_value() {
         ..CardEdit::default()
     };
     store
-        .card_edit(&owner(), &card.display_id, 1, edit("new"))
+        .card_edit(&owner(), None, &card.display_id, 1, edit("new"))
         .unwrap();
     let error = store
-        .card_edit(&owner(), &card.display_id, 1, edit("newer"))
+        .card_edit(&owner(), None, &card.display_id, 1, edit("newer"))
         .unwrap_err();
     assert_eq!(
         error.to_string(),
@@ -418,12 +408,88 @@ fn stale_rev_is_refused_with_the_current_value() {
             card.id
         )
     );
-    // An edit to the values already there is a no-op whatever rev it names.
+    // At the current rev, an edit to the values already there is a no-op.
     let same = store
-        .card_edit(&owner(), &card.display_id, 1, edit("new"))
+        .card_edit(&owner(), None, &card.display_id, 2, edit("new"))
         .unwrap();
     assert!(same.replayed);
     assert!(same.events.is_empty());
+}
+
+/// A stale `rev` is a conflict even when the card already holds the sent
+/// values: two writers incrementing from one read both send the same value,
+/// and the second must not succeed. Only a retry under the same idempotency
+/// key replays.
+#[test]
+fn stale_rev_with_matching_values_conflicts_unless_its_key_replays() {
+    let (mut store, _) = memory_store();
+    let card = store
+        .card_create(&owner(), None, card(CardKind::Ship, "x"), None)
+        .unwrap()
+        .value;
+    let body = |text: &str| CardEdit {
+        body: Some(Some(text.into())),
+        ..CardEdit::default()
+    };
+    let first = store
+        .card_edit(&owner(), Some("edit-a"), &card.id, 1, body("1"))
+        .unwrap();
+    assert!(!first.replayed);
+
+    let before = snapshot(store.conn(), &[]);
+    let error = store
+        .card_edit(&owner(), Some("edit-b"), &card.id, 1, body("1"))
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "conflict: card {} is at rev 2, you sent 1; body is now \"1\"",
+            card.id
+        )
+    );
+    let error = store
+        .card_edit(&owner(), None, &card.id, 1, body("1"))
+        .unwrap_err();
+    assert_eq!(error.code(), "conflict");
+
+    let replay = store
+        .card_edit(&owner(), Some("edit-a"), &card.id, 1, body("1"))
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.value.rev, 2);
+    assert_eq!(replay.events, first.events);
+    assert_eq!(snapshot(store.conn(), &[]), before);
+    // An edit that names no field changes nothing and races with no one.
+    let empty = store
+        .card_edit(&owner(), None, &card.id, 1, CardEdit::default())
+        .unwrap();
+    assert!(empty.replayed);
+
+    // Project and host edits keep the same rule.
+    let rename = || ProjectEdit {
+        name: Some("Alpha 2".into()),
+        ..ProjectEdit::default()
+    };
+    let rev = store.project("alpha").unwrap().rev;
+    store
+        .project_edit(&owner(), "alpha", rev, rename())
+        .unwrap();
+    let error = store
+        .project_edit(&owner(), "alpha", rev, rename())
+        .unwrap_err();
+    assert_eq!(error.code(), "conflict");
+    let host = store.hosts().unwrap().remove(0);
+    let lanes = || HostEdit {
+        lane_capacity: Some(3),
+        ..HostEdit::default()
+    };
+    store
+        .host_edit(&owner(), &host.id, host.rev, lanes())
+        .unwrap();
+    let error = store
+        .host_edit(&owner(), &host.id, host.rev, lanes())
+        .unwrap_err();
+    assert_eq!(error.code(), "conflict");
 }
 
 /// The dispatch override is owner only (`authority.md` section 3).
@@ -444,13 +510,17 @@ fn dispatch_override_is_owner_only() {
     let error = store
         .card_edit(
             &Ctx::new(Actor::Session(session)),
+            None,
             &card.id,
             1,
             edit.clone(),
         )
         .unwrap_err();
     assert_eq!(error.code(), "forbidden");
-    let edited = store.card_edit(&owner(), &card.id, 1, edit).unwrap().value;
+    let edited = store
+        .card_edit(&owner(), None, &card.id, 1, edit)
+        .unwrap()
+        .value;
     assert_eq!(
         edited.dispatch_override,
         Some(serde_json::json!({"model": "big", "effort": "high"}))

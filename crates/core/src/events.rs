@@ -94,7 +94,7 @@ fn apply(
                 title: Some(format!("title {}", op.b % 3)),
                 ..CardEdit::default()
             };
-            run!("card.edit", store.card_edit(&ctx, &card, rev, edit))
+            run!("card.edit", store.card_edit(&ctx, None, &card, rev, edit))
         }
         2 => run!(
             "card.hold",

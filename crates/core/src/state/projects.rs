@@ -272,11 +272,22 @@ impl Store {
             if let Some(n) = edit.disk_floor_mb.filter(|n| host.disk_floor_mb != *n) {
                 changed.insert("disk_floor_mb".into(), json!(n));
             }
-            let Some((first, _)) = changed.iter().next() else {
+            let named = [
+                ("lane_capacity", edit.lane_capacity.is_some()),
+                ("ram_floor_mb", edit.ram_floor_mb.is_some()),
+                ("disk_floor_mb", edit.disk_floor_mb.is_some()),
+            ]
+            .into_iter()
+            .find_map(|(field, sent)| sent.then_some(field));
+            let Some(named) = named else {
                 return Ok(host);
             };
+            let first = changed.keys().next().map_or(named, String::as_str);
             let current = serde_json::to_value(&host)?;
             check_rev("host", &host.id, host.rev, expected_rev, Some((first, current[first].clone())))?;
+            if changed.is_empty() {
+                return Ok(host);
+            }
             if host.kind == HostKind::Remote && changed.contains_key("lane_capacity") {
                 return Err(Error::refused("host", &host.id, "a remote host has no lane capacity here"));
             }
@@ -321,8 +332,8 @@ impl Store {
         })
     }
 
-    /// `project.edit` against `expected_rev`. An edit that changes nothing is a
-    /// no-op whatever `rev` it names.
+    /// `project.edit` against `expected_rev`. A stale `rev` is a conflict even
+    /// when nothing would change; at the current `rev` that is a no-op.
     pub fn project_edit(
         &mut self,
         ctx: &Ctx,
@@ -335,9 +346,11 @@ impl Store {
             let project: Project = get(tx.conn(), "project", project_id)?;
             let mut next = project.clone();
             let mut changed = serde_json::Map::new();
+            let mut named = None;
             macro_rules! apply {
                 ($field:ident) => {
                     if let Some(value) = edit.$field.clone() {
+                        named.get_or_insert(stringify!($field));
                         if next.$field != value {
                             changed.insert(stringify!($field).into(), json!(value));
                             next.$field = value;
@@ -355,11 +368,15 @@ impl Store {
             apply!(deploy_workflow);
             apply!(deploy_environment);
             apply!(deploy_timeout_minutes);
-            let Some((first, _)) = changed.iter().next() else {
+            let Some(named) = named else {
                 return Ok(project);
             };
+            let first = changed.keys().next().map_or(named, String::as_str);
             let current = serde_json::to_value(&project)?;
             check_rev("project", &project.id, project.rev, expected_rev, Some((first, current[first].clone())))?;
+            if changed.is_empty() {
+                return Ok(project);
+            }
             if project.retired_at.is_some() {
                 return Err(Error::refused("project", &project.id, "project is retired"));
             }

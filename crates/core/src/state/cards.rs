@@ -426,12 +426,14 @@ impl Store {
         })
     }
 
-    /// `card.edit` against `expected_rev`. An edit whose fields all equal the
-    /// current values is a no-op whatever `rev` it names. The dispatch
-    /// override is owner only.
+    /// `card.edit` against `expected_rev`. A stale `rev` is a conflict even
+    /// when the fields already hold the sent values; only a known `key`
+    /// replays. An edit at the current `rev` that changes nothing is a no-op.
+    /// The dispatch override is owner only.
     pub fn card_edit(
         &mut self,
         ctx: &Ctx,
+        key: Option<&str>,
         card: &str,
         expected_rev: i64,
         edit: CardEdit,
@@ -448,7 +450,7 @@ impl Store {
         if let Some(priority) = edit.priority {
             check_priority(priority)?;
         }
-        self.write(ctx, "card.edit", None, |tx| {
+        self.write(ctx, "card.edit", key, |tx| {
             let card = resolve_card(tx.conn(), card)?;
             let dispatch = match &edit.dispatch_override {
                 Some(value) => Some(value.as_ref().map(serde_json::to_value).transpose()?),
@@ -456,9 +458,11 @@ impl Store {
             };
             let mut next = card.clone();
             let mut changed = serde_json::Map::new();
+            let mut named = None;
             macro_rules! apply {
                 ($field:ident, $value:expr) => {
                     if let Some(value) = $value {
+                        named.get_or_insert(stringify!($field));
                         if next.$field != value {
                             changed.insert(stringify!($field).into(), json!(value));
                             next.$field = value;
@@ -473,9 +477,12 @@ impl Store {
             apply!(size, edit.size);
             apply!(acceptance, edit.acceptance.clone());
             apply!(dispatch_override, dispatch);
-            let Some((first, _)) = changed.iter().next() else {
+            let Some(named) = named else {
                 return Ok(card);
             };
+            // Two writers that compute the same value from one stale read must
+            // not both succeed, so the rev is checked before the no-op.
+            let first = changed.keys().next().map_or(named, String::as_str);
             let current = serde_json::to_value(&card)?;
             check_rev(
                 "card",
@@ -484,6 +491,9 @@ impl Store {
                 expected_rev,
                 Some((first, current[first].clone())),
             )?;
+            if changed.is_empty() {
+                return Ok(card);
+            }
             require_open(&card)?;
             tx.conn().execute(
                 "UPDATE cards SET title = ?2, body = ?3, priority = ?4, category = ?5, size = ?6,
