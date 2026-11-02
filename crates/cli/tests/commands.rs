@@ -549,6 +549,7 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
             "hand-1",
         ],
     );
+    step_as(&world, &orchestrator, "handoff_show", &["handoff", "show"]);
 
     // Landing: a PR the forge poller has read, then the approval.
     let store_ctx = world.owner_ctx();

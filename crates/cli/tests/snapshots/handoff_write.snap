@@ -25,6 +25,9 @@ exit: 0
   "events": [
     "<seq>"
   ],
+  "help": [
+    "handoff written: tell the owner in one line that it is a good time to /clear; only the owner clears a session"
+  ],
   "ok": true,
   "replayed": false
 }

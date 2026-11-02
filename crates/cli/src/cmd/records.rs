@@ -5,6 +5,7 @@ use std::io::Read;
 
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
+use tiller_agents::handoff::{Brief, CLEAR_HELP};
 use tiller_core::domain::{ArtifactKind, Coverage, Reviewer, Run, TriggerKind, Verdict};
 use tiller_core::state::records::{NewArtifact, NewHandoff, NewObligation, NewReview};
 use tiller_core::state::resolve_card;
@@ -95,6 +96,15 @@ pub struct ReviewRecord {
 pub enum HandoffCmd {
     /// Write the orchestrator's handoff
     Write(HandoffWrite),
+    /// Show the project's newest handoff, resolved, to resume from
+    Show(HandoffShow),
+}
+
+#[derive(Args, Debug)]
+pub struct HandoffShow {
+    /// The project; an orchestrator session defaults to its own
+    #[arg(long)]
+    pub project: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -240,7 +250,30 @@ pub fn review(app: &App, cmd: ReviewCmd) -> Done {
 }
 
 pub fn handoff(app: &App, cmd: HandoffCmd) -> Done {
-    let HandoffCmd::Write(args) = cmd;
+    match cmd {
+        HandoffCmd::Write(args) => handoff_write(app, args),
+        HandoffCmd::Show(args) => handoff_show(app, args),
+    }
+}
+
+fn handoff_show(app: &App, args: HandoffShow) -> Done {
+    let store = app.read()?;
+    let project = match (args.project, app.session(&store)?) {
+        (Some(project), _) => project,
+        (None, Some(session)) => session.project_id,
+        (None, None) => return Err(Failure::usage("give --project <project>")),
+    };
+    store.project(&project)?;
+    let Some(brief) = Brief::load(store.conn(), &project)? else {
+        return Ok(Outcome::read(json!({"project": project, "handoff": null}))
+            .with_help("no handoff yet: start from `tiller card list` and `tiller run list`"));
+    };
+    Ok(Outcome::read(brief).with_help(
+        "read each active card with `tiller card show <card>`; a handoff line is a lead, the record decides",
+    ))
+}
+
+fn handoff_write(app: &App, args: HandoffWrite) -> Done {
     let (conclusions, next_action) = match (&args.conclusions, &args.next, &args.stdin) {
         (Some(conclusions), Some(next), None) => (conclusions.clone(), next.clone()),
         (None, None, Some(_)) => {
@@ -282,5 +315,7 @@ pub fn handoff(app: &App, cmd: HandoffCmd) -> Done {
             next_action,
         },
     )?;
-    Ok(Outcome::applied(applied).with_key(&keyed))
+    Ok(Outcome::applied(applied)
+        .with_key(&keyed)
+        .with_help(CLEAR_HELP))
 }

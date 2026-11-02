@@ -71,7 +71,9 @@ Reply shape: short lines, project first, one tag per line, facts from records wi
 
 ## Breakpoints
 
-At a natural breakpoint (a wave landed, the fleet idle, before a long wait) and when the daemon signals a compaction, write the handoff: `tiller handoff write --conclusions <t> --next <t>`. A fresh orchestrator resumes from that record plus `tiller card show` on each active card. Only the owner clears a session.
+At a natural breakpoint (a wave landed, the fleet idle, before a long wait) and when the daemon sends the note that a compaction is starting, write the handoff: `tiller handoff write --conclusions <t> --next <t>`. Then say in one line that it is a good time for the owner to `/clear`. Only the owner clears a session; never type, send or script `/clear`.
+
+First thing in a session that is new, cleared or resumed: run `tiller handoff show`. It prints the newest handoff with each card, decision and worker resolved, and marks what changed since it was written. Then read each active card with `tiller card show`. A handoff line is a lead; the record decides.
 
 ## Memory
 

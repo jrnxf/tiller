@@ -1,0 +1,44 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "cards": [
+      {
+        "card": "alpha-1",
+        "outcome": null,
+        "state": "open",
+        "title": "Dark mode for the board"
+      }
+    ],
+    "changed_since": {
+      "cards": [],
+      "decisions": [],
+      "workers": []
+    },
+    "conclusions": "dark mode is under way",
+    "decisions": [],
+    "handoff_id": "<id57>",
+    "next_action": "review the PR",
+    "project_id": "alpha",
+    "unresolved": [],
+    "workers": [
+      {
+        "card": "alpha-1",
+        "ended": false,
+        "line": "paused: waiting for CI",
+        "outcome": null,
+        "role": "builder",
+        "run_id": "<id35>",
+        "status_now": null
+      }
+    ],
+    "written_at": "<time>",
+    "written_by_session_id": "<id9>"
+  },
+  "help": [
+    "read each active card with `tiller card show <card>`; a handoff line is a lead, the record decides"
+  ],
+  "ok": true
+}

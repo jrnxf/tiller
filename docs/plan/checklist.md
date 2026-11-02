@@ -377,10 +377,10 @@ about 3 min of the developer's time
 ### T4.5 Handoff and resume
 `sonnet` high - 1.5-2 h - after T2.2
 
-- [ ] `tiller handoff` records active cards, pending decisions, workers, conclusions and next action
-- [ ] Orchestrator signals breakpoints; only the developer clears a session
-- [ ] Check: a fresh orchestrator answers three scripted state questions right from the handoff record alone
-- [ ] Delivered
+- [x] `tiller handoff` records active cards, pending decisions, workers, conclusions and next action
+- [x] Orchestrator signals breakpoints; only the developer clears a session
+- [x] Check: a fresh orchestrator answers three scripted state questions right from the handoff record alone
+- [x] Delivered
 
 ### T4.6 Evals
 `opus` medium - 2-3 h - after T4.1

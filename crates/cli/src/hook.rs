@@ -7,7 +7,9 @@
 use std::io::Read;
 use std::path::PathBuf;
 
+use tiller_agents::handoff;
 use tiller_agents::intake::Hooks;
+use tiller_core::Timestamp;
 use tiller_observe::hooks::{self, Env};
 
 #[derive(clap::Args)]
@@ -44,7 +46,14 @@ pub fn run(args: &Args) {
     let intake = matches!(args.event.as_str(), "UserPromptSubmit" | "Stop")
         .then(|| Hooks::load(&env.tiller_home));
     let intake = intake.as_ref().map(|hooks| hooks as &dyn hooks::Intake);
-    let (_, output) = hooks::run_with(&args.event, &input, &env, intake);
+    let (outcome, output) = hooks::run_with(&args.event, &input, &env, intake);
+    // A compaction is a breakpoint: the note asking for the handoff is
+    // written now, not on the daemon's next pass. A failure here is dropped
+    // like any hook failure; the daemon's pass sends the note.
+    if args.event == "PreCompact" && matches!(outcome, hooks::Outcome::Recorded { .. }) {
+        let _ = tiller_core::Store::open_current(env.tiller_home.join("state.db"))
+            .and_then(|mut store| handoff::signal_compactions(&mut store, Timestamp::now()));
+    }
     if let Some(output) = output {
         println!("{output}");
     }
