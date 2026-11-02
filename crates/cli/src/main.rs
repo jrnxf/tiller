@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 use serde_json::Value;
 
 use app::{App, Done, Failure};
-use cmd::{admin, approval, ask, attention, backup, card, later, read, records, run};
+use cmd::{admin, approval, ask, attention, backup, card, import, later, read, records, run};
 
 #[derive(Parser)]
 #[command(name = "tiller", version, about)]
@@ -132,6 +132,8 @@ enum Command {
     /// Migrate the schema up, or roll it back
     #[command(subcommand)]
     Migrate(backup::MigrateCmd),
+    /// Import a Firstmate export bundle (tiller-import/v1)
+    Import(import::ImportArgs),
     /// Health checks
     Doctor,
     /// Serve the board on localhost
@@ -188,6 +190,7 @@ fn dispatch(app: &App, command: Command) -> Done {
         Command::Restore(args) => backup::restore(app, args),
         Command::Export(args) => backup::export(app, args),
         Command::Migrate(cmd) => backup::migrate(app, cmd),
+        Command::Import(args) => import::import(app, args),
         Command::Doctor => later::doctor(app),
         Command::Daemon(_) | Command::Hook(_) => Err(Failure::new(
             "internal",

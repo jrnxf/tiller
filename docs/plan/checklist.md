@@ -258,10 +258,10 @@ about 3 min of the developer's time
 ### T2.4 Importer
 `opus` medium - 2-3 h - after T2.1 and the T0.4 bundle
 
-- [ ] `tiller import <bundle>` for `tiller-import/v1`; dry run prints the full plan
-- [ ] Real run writes state.db; memory becomes a placement plan for approval, with `legacy-import` provenance
-- [ ] Check: importing the dry-run bundle reproduces every card count in its manifest
-- [ ] Check: a second import changes nothing
+- [x] `tiller import <bundle>` for `tiller-import/v1`; dry run prints the full plan
+- [x] Real run writes state.db; memory becomes a placement plan for approval, with `legacy-import` provenance
+- [x] Check: importing the dry-run bundle reproduces every card count in its manifest
+- [x] Check: a second import changes nothing
 - [ ] Delivered
 
 ### T2.7 Reconcile engine
