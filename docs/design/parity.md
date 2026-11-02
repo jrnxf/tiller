@@ -16,7 +16,7 @@ Written Sunday 2026-11-01, Lisbon time. Every date below is a Lisbon date.
   - `[cards]`: counts over the bundle's 713 cards.
 - **Owner** is the plan task that builds it. "Spec" names the M1 spec that must describe it first (T1.6 checks this).
 - **Test** is a proposed name, written as `crate::module::test_name` for Rust, `board/<file>: <name>` for the board, `evals/<name>` for role evals, and `live check at CP7` where only a person can confirm it. The owner task may rename a test, but every row keeps at least one test, and each test proves its own row.
-- **Decision**: `keep`, `keep (gap)` when no plan task names the work yet and the owner here is a proposal, or `drop?` for a proposed drop that waits for CP1.
+- **Decision**: `keep`, `keep (gap)` when no plan task names the work yet and the owner here is a proposal, or `drop?` for a proposed drop that waits for CP1. `keep (CP1)` and `drop (CP1)` record the CP1 outcome on a row that was proposed as a drop.
 
 Project names are replaced with what each project is, so this file stays public-safe.
 
@@ -137,25 +137,27 @@ Project names are replaced with what each project is, so this file stays public-
 
 ### Proposed drops (for CP1)
 
-Each row waits for the developer's approval at CP1. A drop sends the capability nowhere: Tiller does not build it.
+Each row waited for the developer's approval at CP1. A drop sends the capability nowhere: Tiller does not build it.
+
+**CP1 outcome (Monday 2026-11-02, Lisbon time):** D01, D04 and D11 are kept; the other twelve are dropped. T1.6 recorded the outcome in the Decision column. The three kept rows have their spec home in `docs/spec/protocol.md` section 10 (remote homes as read-only peers, `tiller hook --harness`, `tiller config diff`) and `docs/spec/authority.md` (G25, G35); the design that is still open for them is in `docs/spec/cp2-open.md`.
 
 | # | Capability | Evidence | Reason to drop | Decision |
 |---|---|---|---|---|
-| D01 | Secondmates and remote homes | 0 uses since Tue 2026-10-06 `[cap]`; 1 incidental read, Wed 2026-10-28 `[scan]` | Never used on host B. Tiller's per-project orchestrators and the per-host daemon cover the same need. Recheck against host A's bundle | drop? |
-| D02 | Backlog handoff between homes | 0 uses `[cap]` | Never used. One owner host per project (plan default) | drop? |
-| D03 | Orca and Codex app backends | 0 uses `[cap]` | Never used. Tiller runs on herdr only | drop? |
-| D04 | Other harness adapters (six non-Claude harnesses) | 0 uses `[cap]`; harness detection 14 uses, all reporting Claude `[scan]` | Tiller is Claude Code only in v1 | drop? |
-| D05 | Quota-array dispatch and the usage warner | 0 uses `[cap]` | Never used. P04 keeps the quota floor and T3.5 shows the quota | drop? |
-| D06 | Quiet mode | 0 uses: its script never ran and its skill never loaded `[cap]`; the developer typed `/quiet` once, Sun 2026-10-18 `[scan]` | Away mode (P34) covers the developer's real use | drop? |
-| D07 | X (Twitter) follow-ups and mail | 0 uses `[cap]` | Never used | drop? |
-| D08 | Public follow-up collection | 0 uses `[cap]` | Never used | drop? |
-| D09 | herdr project groups and lab sessions | 0 uses `[cap]` | The plan picks nested workspaces, not herdr groups (herdr layout rules) | drop? |
-| D10 | Approval failover | 0 uses `[cap]` | Never used. Approvals are bound records in state.db | drop? |
-| D11 | Config push to secondmate homes | 0 uses `[cap]` | Follows D01 | drop? |
-| D12 | Pipeline spend accounting | 0 uses; flag present but empty `[cap]` | Never used. T3.5 reads the quota feed instead | drop? |
-| D13 | Watcher arm guard | PreToolUse hook `[cap]` | It guards a Firstmate mechanism (the orchestrator arming its own watcher) that Tiller does not have: the daemon owns watching. P58 and P59 keep the other two guards | drop? |
-| D14 | Self-update of Firstmate | 3 uses, last Sat 2026-10-31 `[cap]` | Firstmate-only, like work on the Firstmate repo itself (`firstmate-self-repo`). Tiller updates through the Nix flake and the dotfiles | drop? |
-| D15 | Mac deploy helper | 40 uses, last Wed 2026-10-28 `[cap]` | It belongs to the dotfiles, not the orchestrator. It stays on PATH and P67 keeps it callable; Tiller builds nothing for it | drop? |
+| D01 | Secondmates and remote homes | 0 uses since Tue 2026-10-06 `[cap]`; 1 incidental read, Wed 2026-10-28 `[scan]` | Never used on host B. Tiller's per-project orchestrators and the per-host daemon cover the same need. Recheck against host A's bundle | keep (CP1): spec `protocol.md` section 10 and `authority.md` G25; owner T2.5 (peer summary poll), T3.1 (Machines) |
+| D02 | Backlog handoff between homes | 0 uses `[cap]` | Never used. One owner host per project (plan default) | drop (CP1) |
+| D03 | Orca and Codex app backends | 0 uses `[cap]` | Never used. Tiller runs on herdr only | drop (CP1) |
+| D04 | Other harness adapters (six non-Claude harnesses) | 0 uses `[cap]`; harness detection 14 uses, all reporting Claude `[scan]` | Tiller is Claude Code only in v1 | keep (CP1): spec `protocol.md` section 10 and `authority.md` G35; owner T2.6 (an adapter table per harness) |
+| D05 | Quota-array dispatch and the usage warner | 0 uses `[cap]` | Never used. P04 keeps the quota floor and T3.5 shows the quota | drop (CP1) |
+| D06 | Quiet mode | 0 uses: its script never ran and its skill never loaded `[cap]`; the developer typed `/quiet` once, Sun 2026-10-18 `[scan]` | Away mode (P34) covers the developer's real use | drop (CP1) |
+| D07 | X (Twitter) follow-ups and mail | 0 uses `[cap]` | Never used | drop (CP1) |
+| D08 | Public follow-up collection | 0 uses `[cap]` | Never used | drop (CP1) |
+| D09 | herdr project groups and lab sessions | 0 uses `[cap]` | The plan picks nested workspaces, not herdr groups (herdr layout rules) | drop (CP1) |
+| D10 | Approval failover | 0 uses `[cap]` | Never used. Approvals are bound records in state.db | drop (CP1) |
+| D11 | Config push to secondmate homes | 0 uses `[cap]` | Follows D01 | keep (CP1): spec `protocol.md` section 10 (`tiller config diff <peer>`); owner T2.2 |
+| D12 | Pipeline spend accounting | 0 uses; flag present but empty `[cap]` | Never used. T3.5 reads the quota feed instead | drop (CP1) |
+| D13 | Watcher arm guard | PreToolUse hook `[cap]` | It guards a Firstmate mechanism (the orchestrator arming its own watcher) that Tiller does not have: the daemon owns watching. P58 and P59 keep the other two guards | drop (CP1) |
+| D14 | Self-update of Firstmate | 3 uses, last Sat 2026-10-31 `[cap]` | Firstmate-only, like work on the Firstmate repo itself (`firstmate-self-repo`). Tiller updates through the Nix flake and the dotfiles | drop (CP1) |
+| D15 | Mac deploy helper | 40 uses, last Wed 2026-10-28 `[cap]` | It belongs to the dotfiles, not the orchestrator. It stays on PATH and P67 keeps it callable; Tiller builds nothing for it | drop (CP1) |
 
 ## Gaps for CP1
 

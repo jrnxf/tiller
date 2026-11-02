@@ -137,6 +137,10 @@ CREATE TABLE sessions (
 -- at most one live orchestrator per project
 CREATE UNIQUE INDEX sessions_live_orchestrator ON sessions(project_id)
   WHERE role = 'orchestrator' AND ended_at IS NULL;
+-- at most one live session per run: a relaunch or resume ends the old row
+-- in the transaction that inserts the new one
+CREATE UNIQUE INDEX sessions_live_run ON sessions(run_id)
+  WHERE run_id IS NOT NULL AND ended_at IS NULL;
 CREATE INDEX sessions_run ON sessions(run_id);
 
 CREATE TABLE asks (
@@ -571,25 +575,24 @@ WITH
     GROUP BY card_id
   ),
   run_activity AS (
-    -- one row per active run: its badge, ranked so a card with several runs
-    -- shows the most urgent one (errored, working, idle, paused, stale, unknown)
+    -- one row per live session of an active run (at most one, by the
+    -- sessions_live_run index; a run with none ranks unknown), ranked so a
+    -- card with several runs shows the most urgent badge: prompt, errored,
+    -- working, paused, idle, stale, unknown. The rank is compared, never the
+    -- activity text, so min() cannot pick an alphabetically early verdict.
     SELECT r.card_id, r.id AS run_id,
            CASE
              WHEN a.effective_activity IN ('waiting_permission', 'waiting_input') THEN 0
              WHEN a.effective_activity = 'errored' THEN 1
              WHEN a.effective_activity = 'working' THEN 2
-             WHEN a.effective_activity = 'idle' THEN 3
-             WHEN r.pause_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') THEN 4
+             WHEN r.pause_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now') THEN 3
+             WHEN a.effective_activity = 'idle' THEN 4
              WHEN a.effective_activity = 'stale' THEN 5
              ELSE 6
            END AS rank
     FROM runs r
-    LEFT JOIN (
-      SELECT run_id, min(effective_activity) AS effective_activity
-      FROM session_activity
-      WHERE run_id IS NOT NULL AND effective_activity <> 'ended'
-      GROUP BY run_id
-    ) a ON a.run_id = r.id
+    LEFT JOIN session_activity a
+      ON a.run_id = r.id AND a.effective_activity <> 'ended'
     WHERE r.ended_at IS NULL
   ),
   active_runs AS (
@@ -639,8 +642,8 @@ SELECT
     WHEN c.kind = 'ship' AND lp.landing = 1 THEN 'checks'
     WHEN ar.rank = 1 THEN 'errored'
     WHEN ar.rank = 2 THEN 'working'
-    WHEN ar.rank = 3 THEN 'idle'
-    WHEN ar.rank = 4 THEN 'paused'
+    WHEN ar.rank = 3 THEN 'paused'
+    WHEN ar.rank = 4 THEN 'idle'
     WHEN ar.rank = 5 THEN 'stale'
     WHEN ar.n > 0 THEN 'unknown'
     WHEN oh.card_id IS NOT NULL THEN 'parked'

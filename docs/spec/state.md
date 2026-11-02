@@ -135,14 +135,14 @@ Rules:
 `runs`: one attempt by one worker role on one card.
 
 - `id`, `card_id`, `role` (`scout`, `builder`, `reviewer`, `verifier`), `attempt` (1, 2, ... per card and role), `predecessor_run_id` (set by a relaunch that keeps the worktree, P24), `model`, `effort`, `host_id`.
-- `worktree_path`, `branch`, `base_branch`, `base_sha`: what the run works in. Treehouse owns the worktree; these are the values recorded at spawn.
+- `worktree_path`, `branch`, `base_branch`, `base_sha`: what the run works in. Treehouse owns the worktree; these are the values recorded at spawn. `base_sha` is the remote default branch's head after a fetch made by the spawn, so every run starts from current origin (P05); a stale checkout is fast-forwarded first, never worked on.
 - `supervisor_session_id`: the orchestrator session that owns this run. Exactly one at a time (P21). Reconcile reassigns it to the project's live orchestrator after a restart, with an event.
 - `started_at`, `ended_at`, `outcome` (`landed`, `reported`, `failed`, `abandoned`, `relaunched`, `cancelled`, `cut`), `outcome_note` (for example the partial-work note a 30-minute cut leaves, P55).
 - `pause_until`: a worker's dated pause (`paused ... until`), which silences alarms until then (P19).
 - `last_status_line`, `last_status_at`: the worker's newest status line, copied from its status observation in the same transaction.
 - `config_hash`, `idempotency_key` (from the spawn), `rev`.
 
-A run is active while `ended_at` is null. Several runs of different roles may be active on one card (build and review). Two active runs of the same role on one card are refused (unique partial index).
+A run is active while `ended_at` is null. Several runs of different roles may be active on one card (build and review). Two active runs of the same role on one card are refused (unique partial index), and so are two live sessions on one run (unique partial index on `sessions`): a relaunch or a resume ends the old session row in the transaction that inserts the new one.
 
 A run's sessions are in `sessions` (`run_id`). A resume after a reboot that keeps the Claude session id keeps the session row; a relaunch with a fresh session adds a session row to the same run when the worktree and brief are reused, and the run's `predecessor_run_id` is used only when the relaunch is recorded as a new attempt (a new brief). T1.3 fixes which command does which.
 
@@ -314,7 +314,7 @@ The board has six columns: Asked, Queued, Working, Needs you, Landing, Done. A c
 | 1 | Done | `cards.state = closed`. Shown for 7 days after `closed_at`, then only in history | the outcome: landed, reported, answered, completed; or cancelled, failed, abandoned, superseded in their own colours |
 | 2 | Needs you | an open attention item exists for the card; or an active run's session activity is `waiting_permission` or `waiting_input` and not stale | the attention kind, or "permission prompt" kept visually apart from decisions; sorted by age |
 | 3 | Landing | `cards.kind = ship` and (an open PR on the card has `checks` pending or `pipeline_state` running, whether or not the run that opened it is still active, or a `merge` or `land_direct` approval for the card is `accepted` or `executing`) | checks, pipeline, merging |
-| 4 | Working | an active run exists (`runs.ended_at` is null), whatever its activity | the most urgent activity across the card's active runs: errored, working, idle, paused until a date, stale, unknown |
+| 4 | Working | an active run exists (`runs.ended_at` is null), whatever its activity | the most urgent activity across the card's active runs: errored, working, paused until a date, idle, stale, unknown (a paused run that is idle shows its pause, not idle) |
 | 5 | Queued | the card is open with no active run: a hold is open, a dependency is unreleased, or nothing has started | parked with its reason and date; blocked by `<display id>`; waiting for capacity; filed |
 | 6 | Asked | not a card: an ask with `disposition = unresolved`. It should last seconds; one older than a minute shows its age | the orchestrator it waits on |
 
@@ -366,8 +366,8 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `run.pause` | worker status line | run active; date parses | `runs.pause_until` | `run.paused` |
 | `run.reown` | reconcile | orchestrator session for the project is live and differs | `runs.supervisor_session_id` | `run.reowned` |
 | `session.resume` | daemon (reconcile) | session dead or host rebooted; worktree or checkout exists; floors pass; rate limit | launches `claude --resume`; on a `SessionStart` with the same id the row continues, with a fresh id the old row is ended in the transaction that inserts the new one | `session.resume_attempted`, then `session.resumed` or `session.ended` plus `session.started` |
-| `run.end` | `tiller done`, reconcile, `card.cancel`, `approval.finish` | run active; for `tiller done`: `unlanded_commits` not unknown (P51); outcome `landed` only from `approval.finish` or a confirmed outside merge (recovery.md R07, R13) | `runs.ended_at`, `outcome`; `reservations.released_at` | `run.ended`, `reservation.released` |
-| `run.relaunch` | `tiller agent relaunch` | run active or just ended; worktree exists; note given (P24) | `runs` (new attempt with `predecessor_run_id`) or `sessions` (new session on the same run); outbox note | `run.relaunched`, `session.started` |
+| `run.end` | `tiller done`, reconcile, `card.cancel`, `approval.finish` | run active; for `tiller done`: `unlanded_commits` not unknown (P51); outcome `landed` only from `approval.finish` or a confirmed outside merge (recovery.md R07, R13); a builder on a ship card whose PR is unmerged must give `failed` or `abandoned`, since its run ends `landed` with the merge (protocol.md, `tiller done`) | `runs.ended_at`, `outcome`; `reservations.released_at` | `run.ended`, `reservation.released` |
+| `run.relaunch` | `tiller agent relaunch` | run active or just ended; worktree exists; note given (P24); the run's live session, if any, has been stopped first (`agent-control`: the stop is proven by the ladder's *dead* verdict or an `exit` the harness confirmed; a session that cannot be proven stopped refuses the relaunch) and its row is ended in this transaction | `runs` (new attempt with `predecessor_run_id`) or `sessions` (new session on the same run); `sessions.ended_at` on the old row; outbox note | `run.relaunched`, `session.ended`, `session.started` |
 | `run.clean` | daemon cleanup after `tiller done`, `tiller run clean` | run ended; `worktrees.unlanded_commits = 0` and fresh; pane process not alive or pane closed | `worktrees.gone_at`, `panes.gone_at` | `run.cleaned` |
 | `observation.record` | `tiller hook`, tailer, pollers | none (append) | `observations`; `sessions.activity*` when newer | `observation.recorded` (only when the verdict changed; raw rows are not events) |
 | `pr.link` | worker (`tiller pr link`), reconcile | run active or card open | `prs` | `pr.linked` |
@@ -448,7 +448,7 @@ Tests in T2.1 and T2.7 prove each one.
 2. No stored column: `cards` has no column named for a board column, and the only definition of a column is the `card_column` view.
 3. Every mutation has an event: a transaction that changes a row in an authoritative table and commits without an `events` row with that `txn` fails the property test `core::events::every_mutation_writes_its_event`.
 4. A closed card has no open attention and no active run.
-5. At most one open hold per card; at most one active run per card and role; at most one open reservation per run; at most one live orchestrator session per project.
+5. At most one open hold per card; at most one active run per card and role; at most one live session per run; at most one open reservation per run; at most one live orchestrator session per project.
 6. Two concurrent `run.start` calls on a full host or project cannot both succeed.
 7. An `accepted` approval whose PR head differs from `head_sha` is `stale` before any execution starts.
 8. An outbox message in `acked` has a `delivered_at` or a recorded poll pickup; a `failed` answer always has a `recovery` attention item.

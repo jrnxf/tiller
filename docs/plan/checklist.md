@@ -167,11 +167,11 @@ about 3 min of the developer's time
 ### T1.6 Spec review
 `fable` high, fresh session - 1.5-2 h - after T1.2 to T1.5
 
-- [ ] Coverage of the second opinion's 43 points
-- [ ] Coverage of the parity matrix: every kept capability specified
-- [ ] Conflicts between specs, unexplained departures from Firstmate's contracts, anything untestable
-- [ ] Clear fixes applied; the rest listed for CP2
-- [ ] Delivered
+- [x] Coverage of the second opinion's 43 points
+- [x] Coverage of the parity matrix: every kept capability specified
+- [x] Conflicts between specs, unexplained departures from Firstmate's contracts, anything untestable
+- [x] Clear fixes applied; the rest listed for CP2
+- [x] Delivered (Monday 2026-11-02; fixes landed in `docs/spec/`, the open list and coverage tables in `docs/spec/cp2-open.md`)
 
 ## CP2: Specs approved (developer, 30-45 min)
 

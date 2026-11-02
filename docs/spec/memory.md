@@ -178,7 +178,7 @@ Rolling back means retiring a memory, not erasing history (point 28).
 
 ### Which sessions loaded a revision
 
-`session_loads`: one row per (session, revision) for every source revision a session could load, written by the `SessionStart` hook for each start, resume, clear and compaction (each one re-reads memory files), and by `run.start` for the rendered prompt.
+`session_loads`: one row per (session, revision) for every source revision a session could load, written by the daemon on each `SessionStart` observation (start, resume, clear and compaction each re-read memory files; the hook only records the trigger, so it stays inside its budget), and by `run.start` for the rendered prompt.
 
 - `session_id`, `revision_id`, `trigger` (`startup`, `resume`, `clear`, `compact`), `loaded_at`.
 - Lazy sources count as loaded at session start: the row means "could have loaded", which is the safe reading for a correction.
@@ -222,7 +222,7 @@ Acceptance for T1.5. Each guarantee is labeled **enforced** (code refuses, with 
 5. Verify L1 is off (the environment variable is set, or the fallback directory is empty and read-only) and L2 has no `memory` field.
 6. Write `session_loads` and `config_hash`.
 
-A refusal opens a `review` attention item on the project's `ops` card naming the file, its blob and what it failed. The owner accepts the external revision (one click, section 4), or Tiller reverts the worktree copy for a project file that drifted only in that worktree. The launch is retried after the answer.
+A refusal opens a `review` attention item on the card the run is for (for an orchestrator launch, on the host's `fleet-1` card, state.md Project) naming the file, its blob and what it failed. The owner accepts the external revision (one click, section 4), or Tiller reverts the worktree copy for a project file that drifted only in that worktree. The launch is retried after the answer.
 
 ### Guarantees
 
@@ -439,7 +439,7 @@ Each follows state.md, section 8: one `BEGIN IMMEDIATE` transaction with its eve
 | `mem.reconcile` | reconcile (T2.7) | none | `memory_revisions` (`external`, `unreviewed`), `memories` (line mapping), `memories.review_status` (`due`, `expired`), retire proposals for expired entries | `memory.revision_seen`, `memory.due`, `memory.expired`, `proposal.created` |
 | `mem.accept_external` | board (owner) | revision `unreviewed`; scrub `passed` | `approvals` (decided by `owner`, bound to the revision's diff from its parent and the parent's blob), `memory_revisions.review = approved`, `memories.review_status` | `approval.decided`, `memory.accepted` |
 | `mem.review` | board (owner) | memory `due` | `memories.review_due_at`, `reviewed_at`, `review_status = approved` | `memory.reviewed` |
-| `mem.load` | `run.start` launch check, `SessionStart` hook | launch check passed | `session_loads`, `sessions.config_hash` | `session.memory_loaded` |
+| `mem.load` | `run.start` launch check; the daemon, on each `SessionStart` observation (the hook records the trigger and hashes nothing, protocol.md 4.2) | launch check passed | `session_loads`, `sessions.config_hash` | `session.memory_loaded` |
 | `mem.source_sync` | install, reconcile | none | `memory_sources`, `baseline` revisions | `memory.source_added`, `memory.source_retired` |
 
 ## 13. Coverage

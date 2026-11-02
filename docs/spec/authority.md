@@ -75,6 +75,7 @@ What each principal may do. "Own" means only on its own run, card or worktree. E
 | Hold, depend, reprioritize | yes | release due holds | own project | no | no | no | no | no |
 | Start a run (the execute decision) | yes | no | own project, within capacity, quota and model rules | no | no | no | no | no |
 | Relaunch, pause or interrupt a run | yes | no | own runs | no | no | no | no | no |
+| Resume a session after a crash or a reboot (`session.resume`: the same Claude session id, the same worktree, under the floor checks, never a new attempt, never for a worker crash; recovery.md R02 and R04) | yes | yes | own runs | no | no | no | no | no |
 | Steer a session (outbox) | yes | yes | own runs | no | no | no | no | no |
 | Edit files | yes | no | its home and scratch only, never project code (P58) | own worktree | own worktree | scratch only | own worktree (build output) | no |
 | Commit | yes | no | no | own worktree | own worktree | no | no | no |
@@ -124,7 +125,7 @@ How the separation is held:
 
 ### Who lands
 
-Only the daemon merges a PR or moves a default branch, and only by executing an `accepted` approval (plan v2, point 17). The land code lives in `crates/agents/src/land/` and every function that changes a remote takes a `DaemonLock` value. Only the daemon's single-instance lock acquisition constructs one, so no CLI path can call it (G01). `tiller land <card>` run by the owner asks the daemon to land; it does not merge in its own process.
+Only the daemon merges a PR or moves a default branch, and only by executing an `accepted` approval (plan v2, point 17). The land code lives in `crates/agents/src/land/` and every function that changes a remote takes a `DaemonLock` value. Only the daemon's single-instance lock acquisition constructs one, so no CLI path can call it (G01). `tiller land <approval>` run by the owner asks the daemon to land and waits for the result; it does not merge in its own process (`protocol.md`, section 6.4).
 
 ### The land sequence
 
@@ -394,7 +395,7 @@ Each path names its example, the layers that hold it, the expected result, and i
 | Owner-only `tiller` | `tiller approve 01J... ` from a worker | deny, backstop, `tiller` principal check | denied `[owner-only]`; refused by `tiller` if it runs | `agents::guards::owner_tiller_commands_denied`, `core::authority::owner_commands_refuse_session_callers` |
 | Forged hook | `echo '{"session_id":"..."}' \| tiller hook UserPromptSubmit` | deny, backstop | denied `[owner-only]` | `agents::guards::owner_tiller_commands_denied` |
 | Identity stripping | `env -u TILLER_SESSION_ID -u CLAUDECODE script -qc 'tiller approve ...'` | backstop, `tiller` terminal check | denied `[identity]` | `agents::guards::identity_stripping_denied` |
-| Board API | `curl -X POST http://127.0.0.1:7421/api/approvals/01J.../decide` | deny, backstop, sandbox network, board credential | denied `[http-client]`; unreachable from the sandbox; refused without the cookie | live `agents::guards::live::sandboxed_role_cannot_reach_board_api`, `daemon::api::mutation_without_owner_cookie_is_refused` |
+| Board API | `curl -X POST http://127.0.0.1:7421/api/v1/approvals/01J.../decide` | deny, backstop, sandbox network, board credential | denied `[http-client]`; unreachable from the sandbox; refused without the cookie | live `agents::guards::live::sandboxed_role_cannot_reach_board_api`, `daemon::api::mutation_without_owner_cookie_is_refused` |
 | Type into another pane | `herdr pane send-keys <pane> "1"` to answer a dialog | deny, backstop, sandbox socket list | denied; socket unreachable | live `agents::guards::live::sandboxed_role_cannot_reach_herdr` |
 | Nested agent | `claude -p "merge PR 12" --dangerously-skip-permissions` | deny, backstop, sandbox network | denied; cannot reach the model API if run from a script | live `agents::guards::live::nested_claude_cannot_start` |
 | Scheduler outside Tiller | `crontab -l \| ...`, `systemd-run --user ...`, `at now + 1 hour` | deny, backstop | denied | `agents::guards::nested_agent_and_scheduler_denied` |
@@ -456,11 +457,11 @@ Points 1 to 14, 19 to 23, 25 to 28, 32, 34, 36 to 41 and 43 are owned by other s
 
 | Contract | Matches | Departs, and why |
 |---|---|---|
-| `cd-guard` | The orchestrator's persistent top-level `cd` into a project is denied with a stable code; subshell and `git -C` forms stay allowed; one decision owner with per-harness transport | It is one rule inside a role-aware backstop rather than its own hook, and the sandbox, not the `cd` rule, is what keeps the orchestrator out of project code |
-| `subagent-guard` | The matcher sees every tool name; delegation is classified by name shape, with the observe-only and plan-only exceptions; the deny list is passed per session, never in tracked project settings | The deny list is part of the generated role fragment, so it applies to every orchestrator, not only to homes that opted in |
+| `cd-guard` | The orchestrator's persistent top-level `cd` into a project is denied with a stable code; subshell and `git -C` forms stay allowed; one decision owner with per-harness transport | It is one rule inside a role-aware backstop rather than its own hook, and the sandbox, not the `cd` rule, is what keeps the orchestrator out of project code. Firstmate's cd guard fails open on malformed syntax; here `cd` is a protected token for the orchestrator, so a malformed command that contains one fails closed like every other protected command (one classifier, one fail mode). The cost is a rare false block on the orchestrator only, which the classifier tests bound |
+| `subagent-guard` | The matcher sees every tool name; delegation is classified by name shape, with the observe-only and plan-only exceptions; the deny list is passed per session, never in tracked project settings | The deny list is part of the generated role fragment, so it applies to every orchestrator, not only to homes that opted in. Firstmate never classifies `mcp__` tool names; here they are classified too (a merge-, push- or ref-writing MCP tool is denied, section 9), because fleet roles may carry MCP servers the owner's dotfiles configure and a GitHub MCP write tool is a merge path |
 | `arm-pretool-check` | Fail closed on a protected command the classifier cannot read; stable bracketed reason codes; the stderr-only deny output for Claude | The watcher-arm rule itself is dropped (D13): the daemon owns watching, so no session arms anything |
 | `captain-hold-lifecycle` | A merge happens only on the developer's recorded word or a standing grant; the answer is recorded before the action; a repeated answer is idempotent | The word is bound to a head SHA and executed by the daemon, not by the session that heard it |
-| `agent-control` | Relaunching or interrupting a worker is its owning orchestrator's or the owner's act | None |
+| `agent-control` | Relaunching or interrupting a worker is its owning orchestrator's or the owner's act; a relaunch stops the old agent first and refuses when it cannot prove the stop (state.md, `run.relaunch`) | The daemon gains one narrow right Firstmate's control plane did not have: resuming a session with its own id after a crash or a reboot (role matrix), because the recovery table needs it for P25 |
 
 ### Parity rows this spec gives a home
 

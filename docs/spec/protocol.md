@@ -121,9 +121,23 @@ T2.5 implements these; they are listed here because they are part of the contrac
 - **Store, then type.** `outbox.enqueue` commits before any keystroke. A crash between store and send leaves a `pending` row that the next delivery pass sends.
 - **One line per batch.** When several messages are pending for one session, the daemon types one line naming the oldest; the ack returns them all. A worker's done, blocked or decision therefore reaches the orchestrator once, without flooding the dialog (P20).
 - **Target check.** Before typing, the daemon checks that the pane's herdr metadata names the target session. A mismatch retargets or fails the message; it never types into the wrong session.
+- **Empty composer.** It also reads the pane's composer (`herdr pane read`, the full visible viewport) and types only on a positive `empty` verdict, as Firstmate's herdr backend does. A composer holding text (the owner's half-typed draft, a previous wake-up line not yet submitted) or one that cannot be read defers delivery (`next_attempt_at`, 30 s); the daemon never clears it, since the text may be the owner's. A bare shell prompt is never an empty composer: it means the agent is gone, and the message waits for a successor (recovery.md, R09). The line is typed once; only Enter is retried.
 - **Busy panes wait.** A session whose effective activity is `working` or `waiting_permission`, or whose pane shows a dialog, defers delivery (`next_attempt_at`).
 - **Re-ring.** A `delivered` message not acked after the idle threshold, with the session observed `idle`, is typed again (P23). The threshold is T1.2's.
 - **Polling pickup.** `tiller inbox` with no id lists and acks every pending or delivered message for the calling session. It is how a session drains its inbox when it suspects a missed doorbell.
+
+### 3.4 Notifications (P36)
+
+The daemon sends the owner a desktop notification through herdr (`herdr notify`, with `--machine` for a remote agent) only when something new needs them, once per cause, never for a routine turn:
+
+| Cause | Once per |
+|---|---|
+| An attention item opens (`attention.opened`), including a `merge` item for a PR ready for the owner's word | item |
+| A session has been in `waiting_permission` or `waiting_input` for 30 minutes (recovery.md, thresholds) | session, per prompt |
+| A reboot restore finished (recovery.md, R04) | boot |
+| The daemon entered read-only mode (recovery.md, R10, R11) | episode |
+
+The notification names the project and the card, and opening it runs `herdr agent focus` on the project's orchestrator (the saved machine first for a remote host). A re-ring, a worker's status line, a PR event or a card moving between columns never notifies. Each notification is recorded in the event that caused it (`notified_at` in the payload), so a daemon restart cannot send it twice. Test: `delivery::notify::new_attention_item_notifies_once`.
 
 ## 4. Hook events
 
@@ -143,7 +157,7 @@ Claude Code documents 33 hook events [D]. Each maps to exactly one handler. `eve
 
 | Hook event | Handler | `observations.event` | Verdict | Also |
 |---|---|---|---|---|
-| `SessionStart` | `session_bind` | `SessionStart:<source>` (`startup`, `resume`, `clear`, `compact`, `fork`) | null | `run.bind_session`: binds `claude_session_id` and the pane; the model goes in the payload. On `clear` or `fork` the Tiller session row is rebound to the new Claude id and the old id goes in the payload. It fires before the login is checked [T], so it never proves the session works |
+| `SessionStart` | `session_bind` | `SessionStart:<source>` (`startup`, `resume`, `clear`, `compact`, `fork`) | null | `run.bind_session`: binds `claude_session_id` and the pane; the model goes in the payload. On `clear` or `fork` the Tiller session row is rebound to the new Claude id and the old id goes in the payload. It fires before the login is checked [T], so it never proves the session works. The daemon runs `mem.load` (`memory.md`, section 7) on this observation to record which memory revisions the session could load; the hook itself hashes nothing, so it stays inside the 10 ms budget |
 | `Setup` | `ignore` | - | - | Tiller never launches with `--init` or `--maintenance` |
 | `UserPromptSubmit` | `intake` | `UserPromptSubmit`; `wake` for a wake-up line for this session; `wake_mismatch` for any other wake-up line | `working` | section 2 for asks, section 3.2 for wake-up lines |
 | `UserPromptExpansion` | `ignore` | - | - | `UserPromptSubmit` records the prompt the owner typed |
@@ -304,7 +318,7 @@ Reads have no side effects and are all trivially idempotent; they are listed aft
 | `tiller approval request <card> --kind merge\|land_direct [--pr <n>] [--action squash]` | `approval.request` (binds the cached head SHA) | orchestrator, daemon | natural: the same binding returns the open approval |
 | `tiller approve <approval> [--reject] [--sha <head>] [--key <k>]` | `approval.decide` | owner | keyed; `--sha`, when given, must equal the bound head or exit 5 says the approval is stale |
 | `tiller approve <approval> --ask <ask>` | `approval.decide` on the owner's chat word (`authority.md`, G06) | orchestrator | keyed |
-| `tiller land <approval>` | `approval.execute`, `approval.finish` | daemon only | natural up to `executing`; once the merge call is sent, a lost result is exit 8 and is never retried blind |
+| `tiller land <approval>` | `approval.execute`, `approval.finish` | daemon; run by the owner it asks the daemon to land and waits for the result (exit 7 when the daemon is down), it never merges in its own process (`authority.md`, section 6) | natural up to `executing`; once the merge call is sent, a lost result is exit 8 and is never retried blind |
 | `tiller grant create <project> ...` / `revoke <grant>` | `grant.create` / `grant.revoke` (conditions in `authority.md`) | owner | keyed / natural |
 | `tiller away start --until <date> ...` / `end` | `away.start` / `away.end` (scope in `authority.md`) | owner | keyed / natural |
 | `tiller mem note` / `propose` / `approve` | `mem.note` / `mem.propose` / `mem.decide` (`memory.md`) | fleet roles; `approve` owner only | keyed |
@@ -316,13 +330,14 @@ Reads have no side effects and are all trivially idempotent; they are listed aft
 | `tiller orchestrator start <project>` | `session.start` (role `orchestrator`); opens the herdr workspace and launches Claude | owner, daemon | natural: a live orchestrator for the project is returned, not a second one |
 | `tiller spawn <card> <role> [--model M --effort E] [--brief-file <f>]` | `run.start` (reservation, run, session), then the worktree and pane (T4.2) | orchestrator | keyed; a second spawn of the same card and role while one is active is refused by the unique index |
 | `tiller status <state> <text> [--until <date>]` (`state`: `working`, `needs-decision`, `blocked`, `paused`, `done`, `failed`) | `run.status` (`run.pause` with `--until`) and, in the same transaction, `outbox.enqueue` (`wake`) to the supervisor | worker | keyed (derived key) |
+| `tiller run pause <run> --until <date> --reason <t>` | `run.pause`: the orchestrator's form of a dated pause, which silences the run's alarms until then (recovery.md, R12); the worker's form is `tiller status paused --until` | orchestrator, owner | natural (same `until` and reason) |
 | `tiller pr link <url>` | `pr.link` | worker, reconcile | natural per PR url |
-| `tiller done [--outcome <o>]` | `run.end`; refuses while commits are unlanded (P51). The daemon runs `run.clean` afterwards | worker, orchestrator | natural |
+| `tiller done [<run>] [--outcome <o>]` | `run.end`; refuses while commits are unlanded (P51). The daemon runs `run.clean` afterwards. `<run>` is required outside a worker session (the orchestrator ending a crashed worker's run, recovery.md R03). Without `--outcome`, a scout, reviewer or verifier run ends `reported` once its report or review row exists; a builder's run ends `landed` only through `approval.finish`, so a builder's `tiller done` while its PR is unmerged is refused with "PR #n is not merged; stay on the card" unless it gives `--outcome failed` or `--outcome abandoned` (recovery.md, R13) | worker, orchestrator | natural |
 | `tiller run clean <run>` | `run.clean` | orchestrator, daemon | natural; refuses while `unlanded_commits` is non-zero or unknown |
 | `tiller agent relaunch <run> --note <t>` | `run.relaunch`: a new session on the same run, same worktree and brief (P24) | orchestrator | keyed |
 | `tiller agent relaunch <run> --new-attempt --brief-file <f> --note <t>` | `run.relaunch`: ends the run (`relaunched`) and starts attempt n+1 with `predecessor_run_id`, same worktree | orchestrator | keyed |
-| `tiller agent resume <run>` | none in `state.db` until the `SessionStart:resume` hook binds; it relaunches Claude with `--resume <claude session id>` in the run's worktree, which keeps the session row (P25) | daemon, orchestrator | natural: a live session is left alone |
-| `tiller agent interrupt <run>` | none; sends Escape through herdr and records an observation (`interrupt_sent`) | orchestrator, owner | not idempotent: a second Escape reaches whatever the agent does next, so the command refuses when the session is not `working` |
+| `tiller agent resume <run>` | `session.resume`: writes `session.resume_attempted` (so recovery.md's rate limit can count attempts), then relaunches Claude with `--resume <claude session id>` in the run's worktree, which keeps the session row when the `SessionStart:resume` hook binds the same id (P25; recovery.md, "Resuming a session") | daemon (after a crash or a reboot only, `authority.md` role matrix), orchestrator, owner | natural: a live session is left alone |
+| `tiller agent interrupt <run>` | none; sends Escape through herdr and records an observation (`interrupt_sent`). The response reports `cancel: confirmed` only when the tailer sees the interrupt marker or a hook reports the turn ended within 10 s, else `cancel: unconfirmed` (Firstmate's `agent-control`: busy state is never rewritten as proof) | orchestrator, owner | not idempotent: a second Escape reaches whatever the agent does next, so the command refuses when the session is not `working` |
 | `tiller agent focus <run\|session>` | none; `herdr agent focus <name>`, with `--machine` for a remote host | owner, board | natural |
 | `tiller send <run\|session> --kind steer\|note (--text <t> \| -)` | `outbox.enqueue` | orchestrator, owner | keyed |
 | `tiller inbox [<message>]` | `outbox.ack` (3.2) | the target session | natural |
@@ -352,7 +367,8 @@ Reads have no side effects and are all trivially idempotent; they are listed aft
 | `tiller hook <event>` | section 4 | Claude Code | keyed (the hook's own key) |
 | `tiller guard pretool --role <role>` | the PreToolUse decision (`authority.md`) plus its observation | Claude Code | natural: a decision, no state change beyond the coalesced observation |
 | `tiller board` | prints a one-time login link that mints the owner cookie (7.1) | owner | not idempotent: each call mints a new link, and a used link stops working |
-| `tiller owner ...` | reserved for owner-only commands; `authority.md` denies the whole namespace to every fleet role. This draft defines none under it | owner | - |
+| `tiller owner set tiller\|firstmate` / `tiller owner show` | writes `~/.tiller/owner` (the owner marker, state.md Host; recovery.md R20) atomically and commits an `owner.changed` event when the marker names `tiller` again; `show` reads it. `authority.md` denies the whole `tiller owner` namespace to every fleet role | owner | natural: the same name is a no-op |
+| `tiller migrate up\|down [--to <n>]` | the schema migration recovery.md R11 describes: `up` is what the daemon and the CLI run on open; `down` is the owner's rollback with the newer binary, after the same verified copy | owner (`down`), daemon and CLI (`up`) | natural: a database already at the target version changes nothing |
 | `tiller daemon` | runs the pollers, delivery, reconcile, the quota feed and the API (T2.8); takes the single-instance lock | the service manager | natural: a second instance exits 0 naming the running pid |
 | `tiller import <bundle> [--dry-run]` | `import.apply` (T2.4) | owner | natural: a second import is a no-op |
 | `tiller export --jsonl <dir>` / `tiller backup` / `tiller restore <file>` | T2.3 | owner, daemon timer | export and backup natural (same content, new file name); restore refuses while the daemon runs |
@@ -362,7 +378,7 @@ Reads have no side effects and are all trivially idempotent; they are listed aft
 
 `tiller snapshot` (the boot snapshot's JSON, P38), `tiller board [--project p] [--filter all|active|needs]`, `tiller card show <card>` (state, column, runs with activity and freshness, holds, deps, attention, PRs, approvals, artifacts; P22), `tiller card list [...]`, `tiller card timeline <card>`, `tiller ask list [--unresolved]`, `tiller ask show <ask>`, `tiller attention list [--open]`, `tiller run show <run> [--tail <n>]` (with a bounded herdr pane tail, at most 200 lines), `tiller run list`, `tiller agents`, `tiller machines [--local]` (`--local`: this host's own row only, which a peer polls), `tiller quota`, `tiller events [--since <seq>] [--follow] [--card <card>]`, `tiller config get [<key>]`, `tiller config hash`, `tiller config diff <peer>`, `tiller version`.
 
-Every mutation the CLI exposes is a row in `state.md` section 8 (this task added `ask.link`, `session.start`, `session.end`, `project.*`, `host.*`, `config.set` and `obligation.cancel` there); no command writes a table in any other way.
+Every mutation the CLI exposes is a row in `state.md` section 8 (this task added `ask.link`, `session.start`, `session.end`, `project.*`, `host.*`, `config.set` and `obligation.cancel` there; T1.6 added the `tiller run pause`, `tiller done <run>`, `tiller owner set` and `tiller migrate` forms that recovery.md relies on); no command writes a table in any other way.
 
 ## 7. Board API
 
@@ -498,7 +514,7 @@ Exposed through `GET /api/v1/machines`, `tiller machines`, the snapshot and `hos
 
 ## 10. Kept Firstmate capabilities: other harnesses, remote homes, config push
 
-The owner kept D01 (secondmates and remote homes), D04 (other harness adapters) and D11 (config push to secondmate homes) and approved the other twelve drops (the decision reached this task on Monday 2026-11-02; `parity.md` still shows them as proposed, and T1.6 reconciles it). This spec gives each a protocol home and leaves the rest of the design to CP2.
+The owner kept D01 (secondmates and remote homes), D04 (other harness adapters) and D11 (config push to secondmate homes) and approved the other twelve drops (the decision reached this task on Monday 2026-11-02; `parity.md` records it since T1.6). This spec gives each a protocol home and leaves the rest of the design to CP2.
 
 - **Other harnesses (D04).** `sessions.harness` (default `claude`) records which harness runs a session. `tiller hook --harness <h> <event>` is the entry point for another harness's hooks; each harness has an adapter table, like section 4.2, mapping its events onto the same `observations.event` and verdict vocabulary, with its own totality test. A harness with no adapter yet is observed through herdr and liveness only, as a reduced host is. Claude Code is the only adapter at cutover; which other harnesses get one first is open for CP2.
 - **Remote homes (D01).** A remote home is another host running its own Tiller, which owns its own projects (one owner host per project). `tiller peer add <label> --ssh <alias>` records it as a `remote` host. The daemon polls `ssh <alias> tiller machines --json --local` every 2 minutes for that host's own summary, which fills section 9's remote row; the peer's cards never enter this database (`state.md`, principle 1), and the board links to the peer's herdr through the saved machine. Sending an ask to a peer's orchestrator (`tiller ask note --host <peer> ...`, run as `ssh <alias> tiller ask note ...`) is a new control route; it stays off until CP2 decides it, because remote lanes are read-only in v1.
