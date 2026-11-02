@@ -4,7 +4,8 @@ import { resolve } from "node:path";
 
 import type { Connect, Plugin } from "vite";
 
-import { SCENARIOS, bootScript, fixtureResponses, fixtureSnapshot } from "./src/lib/fixtures.ts";
+import { fixtureMutation } from "./src/lib/fixture-mutations.ts";
+import { SCENARIOS, bootScript, fixtureSnapshot, serverResponses } from "./src/lib/fixtures.ts";
 import type { Scenario } from "./src/lib/fixtures.ts";
 
 // Stands in for the daemon until T2.8 lands: serves the board API from
@@ -25,22 +26,68 @@ function sendJson(res: ServerResponse, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
+// Open event streams, so a fixture mutation can push its later receipt stages.
+const streams = new Set<ServerResponse>();
+let seq = 100_000;
+
+function broadcast(event: object) {
+  seq += 1;
+  const data = JSON.stringify({ seq, at: new Date().toISOString(), ...event });
+  for (const stream of streams) stream.write(`id: ${seq}\nevent: change\ndata: ${data}\n\n`);
+}
+
+function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  return new Promise((done, fail) => {
+    let text = "";
+    req.on("data", (chunk: Buffer) => (text += chunk.toString()));
+    req.on("error", fail);
+    req.on("aborted", () => fail(new Error("request aborted")));
+    req.on("end", () => {
+      try {
+        done(JSON.parse(text) as Record<string, unknown>);
+      } catch {
+        done({});
+      }
+    });
+  });
+}
+
 function apiMiddleware(): Connect.NextHandleFunction {
   return (req: IncomingMessage, res, next) => {
     const url = req.url ?? "";
     if (!url.startsWith("/api/v1/")) return next();
     const scenario = scenarioOf(undefined, req.headers.referer);
 
+    if (req.method === "POST" || req.method === "PATCH") {
+      readBody(req)
+        .then((body) => {
+          const { reply, followUps } = fixtureMutation(req.method ?? "POST", url, body);
+          res.statusCode = reply.status;
+          sendJson(res, reply.body);
+          for (const { delayMs, event } of followUps) setTimeout(() => broadcast(event), delayMs);
+        })
+        .catch((error: unknown) => {
+          if (res.writableEnded || res.destroyed) return;
+          res.statusCode = 500;
+          sendJson(res, { ok: false, error: { code: "internal", message: String(error) } });
+        });
+      return;
+    }
+
     if (url === "/api/v1/events") {
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
       res.write("retry: 1000\n\n");
+      streams.add(res);
       const keepalive = setInterval(() => res.write(": keepalive\n\n"), 15_000);
-      req.on("close", () => clearInterval(keepalive));
+      req.on("close", () => {
+        clearInterval(keepalive);
+        streams.delete(res);
+      });
       return;
     }
     if (url === "/api/v1/snapshot") return sendJson(res, fixtureSnapshot(scenario));
 
-    const responses = fixtureResponses(scenario) as Record<string, unknown>;
+    const responses = serverResponses(scenario) as Record<string, unknown>;
     if (url in responses) return sendJson(res, responses[url]);
     res.statusCode = 404;
     sendJson(res, { ok: false, error: "not found" });

@@ -16,7 +16,15 @@ import type {
 } from "./api-types";
 import { connectionStore } from "./connection";
 import { hydrateFromSnapshot } from "./boot";
-import { fetchJson, machinesPath, projectsPath, quotaPath, queryKeyFor } from "./queries";
+import { recordProgress } from "./receipts";
+import {
+  attentionPath,
+  fetchJson,
+  machinesPath,
+  projectsPath,
+  quotaPath,
+  queryKeyFor,
+} from "./queries";
 import type { QueryPath } from "./queries";
 
 const EVENTS_PATH = "/api/v1/events";
@@ -29,6 +37,14 @@ function hasRev(value: unknown): value is { rev: number } {
     typeof value === "object" &&
     value !== null &&
     typeof (value as { rev?: unknown }).rev === "number"
+  );
+}
+
+function hasState(value: unknown): value is { state: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { state?: unknown }).state === "string"
   );
 }
 
@@ -124,6 +140,19 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
       break;
     case "project":
       if (state) writeProject(queryClient, state as Project);
+      break;
+    case "outbox":
+      // Moves the board's receipts on to delivered and done (section 7.2).
+      if (hasState(state)) recordProgress(event.entity_id, state.state, event.at);
+      break;
+    case "approval":
+      if (hasState(state)) recordProgress(event.entity_id, state.state, event.at);
+      // An attention item embeds its approval's state and head, so a stale or
+      // re-bound approval must reach the inbox before the owner clicks.
+      queryClient.invalidateQueries({
+        queryKey: queryKeyFor(attentionPath),
+        refetchType: "active",
+      });
       break;
     default:
       if (REFETCH_ENTITIES.has(event.entity)) {

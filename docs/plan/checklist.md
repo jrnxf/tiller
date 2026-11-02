@@ -300,11 +300,11 @@ about 3 min of the developer's time
 ### T3.3 Attention inbox and actions
 `opus` medium - 3-4 h - after T3.1 and T2.2
 
-- [ ] Global attention queue: question, evidence, recommendation, consequence, still current or not
-- [ ] Permission prompts kept separate from decisions
-- [ ] Actions with receipts (recorded, delivered, done): answer, approve bound to head SHA, reprioritize, comment, add card, open in herdr
-- [ ] Check: a second click repeats nothing
-- [ ] Check: approving a stale SHA is refused with a readable message
+- [x] Global attention queue: question, evidence, recommendation, consequence, still current or not
+- [x] Permission prompts kept separate from decisions
+- [x] Actions with receipts (recorded, delivered, done): answer, approve bound to head SHA, reprioritize, comment, add card, open in herdr
+- [x] Check: a second click repeats nothing
+- [x] Check: approving a stale SHA is refused with a readable message
 - [ ] Delivered
 
 ### T4.2 Spawn, capacity and layout

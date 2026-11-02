@@ -30,6 +30,7 @@ export type Scenario =
   | "quota-red"
   | "quota-grey"
   | "stale-machine"
+  | "stale-approval"
   | "empty";
 
 export const SCENARIOS: readonly Scenario[] = [
@@ -38,6 +39,7 @@ export const SCENARIOS: readonly Scenario[] = [
   "quota-red",
   "quota-grey",
   "stale-machine",
+  "stale-approval",
   "empty",
 ];
 
@@ -219,12 +221,14 @@ function card(
     host_id: host,
     kind: "ship",
     title,
+    priority: 2,
     column,
     badge,
     parked_until: null,
     parked_reason: null,
     blocked_by: null,
     closed_at: column === "done" ? "2026-11-01T18:20:00.000Z" : null,
+    rev: 3,
   };
 }
 
@@ -242,6 +246,7 @@ function boardFor(scenario: Scenario): BoardResponse {
         "Move the poller behind a trait",
         "01JHOSTB00000000000000000B",
       ),
+      card(44, "alpha", "needs_you", "merge", "Retry failed exports with backoff"),
       card(7, "beta", "working", "stale", "Rewrite the importer's dry run"),
       card(8, "beta", "queued", "filed", "Document the cutover steps"),
       card(9, "beta", "done", "merged", "Pin the toolchain version"),
@@ -252,25 +257,114 @@ function boardFor(scenario: Scenario): BoardResponse {
   };
 }
 
+// The head of the alpha-44 PR. In `stale-approval` the board shows the head
+// from before the last push, so approving it is refused (T3.3).
+export const FIXTURE_HEAD_SHA = "d82f4051c3a7e9b2f60d18a4c5e7b9d3a1f20c64";
+const FIXTURE_OLD_HEAD_SHA = "7c3e9a1b52d8f04e6a9c3b7d1e5f2a8c4b6d0e93";
+
 function attentionFor(scenario: Scenario, board: BoardResponse): AttentionResponse {
   if (scenario === "empty") return { items: [], permission_prompts: [] };
-  const needs = board.rows.filter((row) => row.column === "needs_you");
+  const byDisplay = new Map(board.rows.map((row) => [row.display_id, row.id]));
+  const cardId = (display: string) => byDisplay.get(display) ?? display;
   return {
-    items: needs.map((row, index) => ({
-      id: `01JATTN${String(index).padStart(19, "0")}`,
-      card_id: row.id,
-      kind: "decision" as const,
-      question: `Decide: ${row.title}`,
-      evidence: null,
-      recommendation: null,
-      consequence: null,
-      opened_at: "2026-11-02T09:00:00.000Z",
-      still_current: true,
-      answered_at: null,
-      withdrawn_at: null,
-      rev: 1,
-    })),
-    permission_prompts: [],
+    items: [
+      {
+        id: "01JATTN0000000000000000000",
+        card_id: cardId("alpha-41"),
+        kind: "decision",
+        question: "Which retry policy should the export job use?",
+        evidence: JSON.stringify([
+          "3 of the last 40 exports failed on a storage timeout and all three passed on a manual retry",
+          "The storage client already retries once inside a request",
+          "https://example.com/alpha/exports/runbook",
+        ]),
+        recommendation:
+          "Exponential backoff, three attempts. It covers every failure seen this month and adds at most 70 s to a bad export.",
+        consequence: "The builder implements the policy you pick and opens a PR within the hour.",
+        options: [
+          {
+            label: "Exponential backoff, three attempts",
+            consequence: "Waits 10 s, 20 s, then 40 s. A failing export gives up after about 70 s.",
+            recommended: true,
+          },
+          {
+            label: "Fixed delay, five attempts",
+            consequence:
+              "Retries every 15 s. Simpler to reason about, but a long outage costs 75 s.",
+            recommended: false,
+          },
+          {
+            label: "No automatic retry",
+            consequence: "A failed export opens an attention item instead, and you retry by hand.",
+            recommended: false,
+          },
+        ],
+        approval: null,
+        opened_by_session_id: "01JSESS000000000000000000A",
+        opened_at: "2026-11-02T09:00:00.000Z",
+        still_current: true,
+        answered_at: null,
+        withdrawn_at: null,
+        rev: 1,
+      },
+      {
+        id: "01JATTN0000000000000000001",
+        card_id: cardId("alpha-44"),
+        kind: "merge",
+        question: "Merge PR #52 at its current head?",
+        evidence: JSON.stringify([
+          "CI green on the head (4 of 4 checks)",
+          "Independent review: no blocking findings",
+          "https://example.com/alpha/pull/52",
+        ]),
+        recommendation: "Approve. The review found nothing blocking and every check passed.",
+        consequence:
+          "Approving binds to this exact head. The daemon re-reads the head before it merges, and a new push voids the approval.",
+        options: null,
+        approval: {
+          id: "01JAPPR0000000000000000000",
+          kind: "merge",
+          head_sha: scenario === "stale-approval" ? FIXTURE_OLD_HEAD_SHA : FIXTURE_HEAD_SHA,
+          pr_number: 52,
+          state: "requested",
+        },
+        opened_by_session_id: "01JSESS000000000000000000A",
+        opened_at: "2026-11-02T10:35:00.000Z",
+        still_current: true,
+        answered_at: null,
+        withdrawn_at: null,
+        rev: 1,
+      },
+      {
+        id: "01JATTN0000000000000000002",
+        card_id: cardId("beta-7"),
+        kind: "recovery",
+        question: "The importer's dry-run worker went quiet. Relaunch it or end the run?",
+        evidence: "No transcript or hook activity for 41 minutes.\nThe pane is still open.",
+        recommendation: null,
+        consequence: null,
+        options: [
+          { label: "Relaunch the worker", consequence: null, recommended: false },
+          { label: "End the run", consequence: null, recommended: false },
+        ],
+        approval: null,
+        opened_by_session_id: null,
+        opened_at: "2026-11-02T08:10:00.000Z",
+        still_current: false,
+        answered_at: null,
+        withdrawn_at: null,
+        rev: 2,
+      },
+    ],
+    permission_prompts: [
+      {
+        session_id: "01JSESS000000000000000000C",
+        card_id: cardId("gamma-12"),
+        tool: "Bash",
+        detail: "rm -rf target/debug/incremental && cargo build -p gamma-cert",
+        since: "2026-11-02T11:58:00.000Z",
+      },
+    ],
   };
 }
 
@@ -303,6 +397,13 @@ export function fixtureResponses(scenario: Scenario = "default", now: number = D
     [quotaPath]: quotaFor(scenario, now),
     [projectsPath]: PROJECTS,
   } satisfies Record<string, unknown>;
+}
+
+// What the stand-in server answers a later fetch with. In `stale-approval` the
+// boot snapshot holds the head the page first showed, while the server already
+// has the pushed one, so the refetch after a refusal brings the new head.
+export function serverResponses(scenario: Scenario = "default", now: number = Date.now()) {
+  return fixtureResponses(scenario === "stale-approval" ? "default" : scenario, now);
 }
 
 export function fixtureSnapshot(

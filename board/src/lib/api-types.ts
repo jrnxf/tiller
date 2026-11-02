@@ -14,12 +14,15 @@ export interface BoardRow {
   host_id: string | null;
   kind: string;
   title: string;
+  // 0 is the most urgent, 4 the least (state.md, Card).
+  priority: number;
   column: CardColumn;
   badge: string;
   parked_until: string | null;
   parked_reason: string | null;
   blocked_by: string | null;
   closed_at: string | null;
+  rev: number;
 }
 
 interface AskedRow {
@@ -35,14 +38,34 @@ export interface BoardResponse {
   asked: AskedRow[];
 }
 
+// One answer the asker offers, with what it sets in motion.
+interface AttentionOption {
+  label: string;
+  consequence: string | null;
+  recommended: boolean;
+}
+
+// The approval a `merge` item asks for, bound to the head the board shows.
+interface ApprovalBinding {
+  id: string;
+  kind: "merge" | "land_direct";
+  head_sha: string;
+  pr_number: number | null;
+  state: string;
+}
+
 export interface AttentionItem {
   id: string;
   card_id: string;
   kind: "decision" | "credential" | "merge" | "review" | "recovery" | "report";
   question: string;
+  // Text, or a JSON list of pointers (event ids, artifact ids, PR urls).
   evidence: string | null;
   recommendation: string | null;
   consequence: string | null;
+  options: AttentionOption[] | null;
+  approval: ApprovalBinding | null;
+  opened_by_session_id: string | null;
   opened_at: string;
   still_current: boolean;
   answered_at: string | null;
@@ -50,10 +73,12 @@ export interface AttentionItem {
   rev: number;
 }
 
-interface PermissionPrompt {
+export interface PermissionPrompt {
   session_id: string;
   card_id: string;
   tool: string;
+  // What the tool wants to run, from the session's newest observation.
+  detail: string | null;
   since: string;
 }
 
@@ -147,6 +172,35 @@ export interface ChangeEvent {
   card_id: string | null;
   entity_state: unknown;
   card?: BoardRow;
+}
+
+// The receipt every mutation returns (protocol.md section 7.2). Recorded is
+// this response; delivered and done follow over SSE from the outbox row or the
+// approval it names.
+export interface Receipt {
+  recorded_at: string;
+  outbox_id: string | null;
+  approval_id: string | null;
+}
+
+export interface MutationResponse<T = unknown> {
+  ok: true;
+  replayed: boolean;
+  events: number[];
+  receipt: Receipt;
+  data: T;
+}
+
+export interface ApiErrorBody {
+  ok: false;
+  error: {
+    code: string;
+    message: string;
+    entity?: string;
+    id?: string;
+    current?: Record<string, unknown>;
+    hint?: string;
+  };
 }
 
 // The inlined `<script id="tiller-boot">` body and `GET /api/v1/snapshot`.
