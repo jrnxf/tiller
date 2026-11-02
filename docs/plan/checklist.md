@@ -201,7 +201,7 @@ about 3 min of the developer's time
 - [x] Check: insta snapshot of each command's JSON output plus an exit code test
 - [x] Check: same idempotency key twice has no second effect
 - [x] Check: startup under 10 ms on the personal Mac
-- [ ] Delivered
+- [x] Delivered
 
 ### T2.3 Backup, restore and export
 `opus` medium - 2-3 h - after the T2.1 interface
