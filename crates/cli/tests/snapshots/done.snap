@@ -19,7 +19,7 @@ exit: 0
     "last_status_line": "paused: waiting for CI",
     "model": "test-model",
     "outcome": "abandoned",
-    "outcome_note": null,
+    "outcome_note": "ended abandoned while /home/user/work/alpha-1 is missing, so whether its commits landed is unknown",
     "pause_until": "<time>",
     "predecessor_run_id": null,
     "rev": 6,
@@ -34,5 +34,6 @@ exit: 0
     "<seq>"
   ],
   "ok": true,
-  "replayed": false
+  "replayed": false,
+  "warning": "ended abandoned while /home/user/work/alpha-1 is missing, so whether its commits landed is unknown"
 }

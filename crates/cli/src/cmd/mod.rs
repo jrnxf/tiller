@@ -13,6 +13,7 @@ pub mod later;
 pub mod read;
 pub mod records;
 pub mod run;
+pub mod spawn;
 
 use clap::Args;
 use serde_json::Value;

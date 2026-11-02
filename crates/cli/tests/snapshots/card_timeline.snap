@@ -34,7 +34,7 @@ exit: 0
         "idempotency_key": null,
         "kind": "run.ended",
         "payload": {
-          "note": null,
+          "note": "ended abandoned while /home/user/work/alpha-1 is missing, so whether its commits landed is unknown",
           "outcome": "abandoned",
           "role": "builder"
         },

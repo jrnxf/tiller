@@ -9,7 +9,6 @@ use tiller_core::domain::{
 };
 use tiller_core::state::approvals::NewPr;
 use tiller_core::state::outbox::NewMessage;
-use tiller_core::state::runs::EndRun;
 use tiller_core::state::{find, get, list, resolve_card, resolve_id};
 
 use super::card::herdr_name;
@@ -194,20 +193,8 @@ fn list_runs(app: &App, card: Option<String>, active: bool) -> Done {
 }
 
 fn clean(app: &App, reference: &str) -> Done {
-    let mut store = app.write()?;
-    let run = resolve_run(&store, reference)?;
-    // The pane is closed when no pane of the run's sessions is still there.
-    let open_panes: i64 = store
-        .conn()
-        .query_row(
-            "SELECT count(*) FROM panes
-         WHERE gone_at IS NULL AND session_id IN (SELECT id FROM sessions WHERE run_id = ?1)",
-            [&run.id],
-            |row| row.get(0),
-        )
-        .map_err(tiller_core::Error::from)?;
-    let applied = store.run_clean(&app.ctx(), &run.id, open_panes == 0)?;
-    Ok(Outcome::applied_as(applied, |run| json!({"run": run})))
+    let run = resolve_run(&app.read()?, reference)?;
+    super::spawn::clean(app, &run)
 }
 
 pub fn done(app: &App, args: Done_) -> Done {
@@ -228,15 +215,7 @@ pub fn done(app: &App, args: Done_) -> Done {
         Some(outcome) => outcome,
         None => default_outcome(&store, &run)?,
     };
-    let applied = store.run_end(
-        &app.ctx(),
-        &run.id,
-        EndRun {
-            outcome,
-            note: None,
-        },
-    )?;
-    Ok(Outcome::applied(applied))
+    super::spawn::done(app, &mut store, &run, outcome)
 }
 
 /// What a run ends as without `--outcome` (`protocol.md` 6.4, `tiller done`).

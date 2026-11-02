@@ -114,6 +114,9 @@ pub trait Herdr {
     fn rename_workspace(&self, workspace_id: &str, label: &str) -> Result<()>;
     /// Moves a workspace to `index` in the sidebar order (0 is the top).
     fn move_workspace(&self, workspace_id: &str, index: usize) -> Result<()>;
+    /// Closes a pane; herdr closes the workspace it empties. A pane herdr no
+    /// longer has is already closed.
+    fn close_pane(&self, pane_id: &str) -> Result<()>;
     fn notify(&self, title: &str, body: &str) -> Result<()>;
 }
 
@@ -494,6 +497,13 @@ impl Herdr for Cli {
             json!({"workspace_id": workspace_id, "insert_index": index}),
         )
         .map(drop)
+    }
+
+    fn close_pane(&self, pane_id: &str) -> Result<()> {
+        match self.run(&["pane", "close", pane_id]) {
+            Err(HerdrError::Api { code, .. }) if code == "pane_not_found" => Ok(()),
+            other => other.map(drop),
+        }
     }
 
     fn notify(&self, title: &str, body: &str) -> Result<()> {

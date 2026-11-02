@@ -134,6 +134,62 @@ fn refresh_panes(tx: &mut Tx<'_>, host_id: &str, panes: &[PaneReading]) -> Resul
     Ok(changes)
 }
 
+/// Writes one worktree reading; true when a fact changed (with its event).
+fn upsert_worktree(tx: &mut Tx<'_>, host_id: &str, worktree: &WorktreeReading) -> Result<bool> {
+    let old: Option<Worktree> = find(
+        tx.conn(),
+        "host_id = ?1 AND path = ?2",
+        &[&host_id, &worktree.path],
+    )?;
+    tx.conn().execute(
+        "INSERT INTO worktrees (path, host_id, project_id, run_id, branch, head_sha, dirty, unlanded_commits, fetched_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT (host_id, path) DO UPDATE SET
+           project_id = excluded.project_id, run_id = excluded.run_id, branch = excluded.branch,
+           head_sha = excluded.head_sha, dirty = excluded.dirty, unlanded_commits = excluded.unlanded_commits,
+           fetched_at = excluded.fetched_at, gone_at = NULL",
+        params![
+            worktree.path,
+            host_id,
+            worktree.project_id,
+            worktree.run_id,
+            worktree.branch,
+            worktree.head_sha,
+            worktree.dirty,
+            worktree.unlanded_commits,
+            tx.now(),
+        ],
+    )?;
+    let changed = match &old {
+        None => true,
+        Some(old) => {
+            old.gone_at.is_some()
+                || old.head_sha != worktree.head_sha
+                || old.branch != worktree.branch
+                || old.dirty != worktree.dirty
+                || old.unlanded_commits != worktree.unlanded_commits
+                || old.run_id != worktree.run_id
+        }
+    };
+    if changed {
+        tx.event(
+            NewEvent::new(
+                "worktree",
+                format!("{host_id}:{}", worktree.path),
+                "worktree.changed",
+            )
+            .payload(json!({
+                "host_id": host_id,
+                "path": worktree.path,
+                "head_sha": worktree.head_sha,
+                "dirty": worktree.dirty,
+                "unlanded_commits": worktree.unlanded_commits,
+            })),
+        )?;
+    }
+    Ok(changed)
+}
+
 /// A full snapshot of one host's worktrees. Worktrees missing from it are gone.
 fn refresh_worktrees(
     tx: &mut Tx<'_>,
@@ -142,57 +198,8 @@ fn refresh_worktrees(
 ) -> Result<usize> {
     let mut changes = 0;
     for worktree in worktrees {
-        let old: Option<Worktree> = find(
-            tx.conn(),
-            "host_id = ?1 AND path = ?2",
-            &[&host_id, &worktree.path],
-        )?;
-        tx.conn().execute(
-            "INSERT INTO worktrees (path, host_id, project_id, run_id, branch, head_sha, dirty, unlanded_commits, fetched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT (host_id, path) DO UPDATE SET
-               project_id = excluded.project_id, run_id = excluded.run_id, branch = excluded.branch,
-               head_sha = excluded.head_sha, dirty = excluded.dirty, unlanded_commits = excluded.unlanded_commits,
-               fetched_at = excluded.fetched_at, gone_at = NULL",
-            params![
-                worktree.path,
-                host_id,
-                worktree.project_id,
-                worktree.run_id,
-                worktree.branch,
-                worktree.head_sha,
-                worktree.dirty,
-                worktree.unlanded_commits,
-                tx.now(),
-            ],
-        )?;
-        let changed = match &old {
-            None => true,
-            Some(old) => {
-                old.gone_at.is_some()
-                    || old.head_sha != worktree.head_sha
-                    || old.branch != worktree.branch
-                    || old.dirty != worktree.dirty
-                    || old.unlanded_commits != worktree.unlanded_commits
-                    || old.run_id != worktree.run_id
-            }
-        };
-        if changed {
+        if upsert_worktree(tx, host_id, worktree)? {
             changes += 1;
-            tx.event(
-                NewEvent::new(
-                    "worktree",
-                    format!("{host_id}:{}", worktree.path),
-                    "worktree.changed",
-                )
-                .payload(json!({
-                    "host_id": host_id,
-                    "path": worktree.path,
-                    "head_sha": worktree.head_sha,
-                    "dirty": worktree.dirty,
-                    "unlanded_commits": worktree.unlanded_commits,
-                })),
-            )?;
         }
     }
     let seen: Vec<&str> = worktrees.iter().map(|w| w.path.as_str()).collect();
@@ -316,6 +323,21 @@ impl Store {
             tx.rebuildable();
             get::<Host>(tx.conn(), "host", host_id)?;
             refresh_worktrees(tx, host_id, &worktrees)
+        })
+    }
+
+    /// `cache.refresh` for one worktree, read just now by spawn or `tiller
+    /// done`: the other rows of the host are left as they are.
+    pub fn cache_worktree(
+        &mut self,
+        ctx: &Ctx,
+        host_id: &str,
+        worktree: WorktreeReading,
+    ) -> Result<Applied<bool>> {
+        self.write(ctx, "cache.refresh", None, |tx| {
+            tx.rebuildable();
+            get::<Host>(tx.conn(), "host", host_id)?;
+            upsert_worktree(tx, host_id, &worktree)
         })
     }
 

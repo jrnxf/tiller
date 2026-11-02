@@ -56,6 +56,21 @@ pub struct Started {
     pub reservation: Reservation,
 }
 
+/// Where a spawned run works, recorded once spawn has made it: `run.start`
+/// reserves before the worktree and pane exist (`state.md`, Reservation).
+/// `None` leaves a field as it is.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Placement {
+    pub worktree_path: Option<String>,
+    pub branch: Option<String>,
+    pub base_branch: Option<String>,
+    pub base_sha: Option<String>,
+    /// The SHA-256 of the run's settings fragment, for the run and its session.
+    pub config_hash: Option<String>,
+    /// The herdr pane spawn opened for the run's session.
+    pub pane_id: Option<String>,
+}
+
 /// How a run ends.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EndRun {
@@ -591,6 +606,111 @@ impl Store {
         })
     }
 
+    /// `run.place` (`tiller spawn`): records the worktree, branch, base and
+    /// fragment hash on the run and the pane on its session. A value already
+    /// recorded never changes: a run's worktree and pane do not move, and a
+    /// relaunch is a new session. Natural: the same values write nothing.
+    pub fn run_place(&mut self, ctx: &Ctx, run: &str, place: Placement) -> Result<Applied<Run>> {
+        self.write(ctx, "run.place", None, |tx| {
+            let run = load_run(tx, run)?;
+            match tx.actor() {
+                Actor::Owner | Actor::Board | Actor::Daemon => {}
+                Actor::Session(id) if *id == run.supervisor_session_id => {}
+                other => {
+                    return Err(Error::Forbidden(format!(
+                        "{other} may not place run {}; its supervisor or the owner does",
+                        run.id
+                    )));
+                }
+            }
+            require_active(&run)?;
+            let session = live_session(tx.conn(), &run.id)?;
+            let fields = [
+                ("worktree_path", &run.worktree_path, &place.worktree_path),
+                ("branch", &run.branch, &place.branch),
+                ("base_branch", &run.base_branch, &place.base_branch),
+                ("base_sha", &run.base_sha, &place.base_sha),
+                ("config_hash", &run.config_hash, &place.config_hash),
+            ];
+            let mut set = serde_json::Map::new();
+            for (column, old, new) in fields {
+                match (old, new) {
+                    (_, None) => {}
+                    (Some(old), Some(new)) if old == new => {}
+                    (Some(old), Some(new)) => {
+                        return Err(Error::refused(
+                            "run",
+                            &run.id,
+                            format!("{column} is already {old}; it cannot become {new}"),
+                        ));
+                    }
+                    (None, Some(new)) => {
+                        set.insert(column.to_owned(), json!(new));
+                    }
+                }
+            }
+            let mut pane = None;
+            if let Some(new) = &place.pane_id {
+                let session = session.as_ref().ok_or_else(|| {
+                    Error::refused(
+                        "run",
+                        &run.id,
+                        "the run has no live session to bind a pane to",
+                    )
+                })?;
+                match &session.pane_id {
+                    Some(old) if old == new => {}
+                    Some(old) => {
+                        return Err(Error::refused(
+                            "session",
+                            &session.id,
+                            format!("pane is already {old}; it cannot become {new}"),
+                        ));
+                    }
+                    None => pane = Some((session, new)),
+                }
+            }
+            if set.is_empty() && pane.is_none() {
+                return Ok(run);
+            }
+            for (column, value) in &set {
+                // The column names come from the fixed list above.
+                tx.conn().execute(
+                    &format!("UPDATE runs SET {column} = ?2 WHERE id = ?1"),
+                    params![run.id, value.as_str()],
+                )?;
+            }
+            if !set.is_empty() {
+                tx.conn()
+                    .execute("UPDATE runs SET rev = rev + 1 WHERE id = ?1", [&run.id])?;
+            }
+            if let Some(hash) = set.get("config_hash").and_then(Value::as_str)
+                && let Some(session) = &session
+            {
+                tx.conn().execute(
+                    "UPDATE sessions SET config_hash = ?2 WHERE id = ?1 AND config_hash IS NULL",
+                    params![session.id, hash],
+                )?;
+            }
+            if let Some((session, pane_id)) = &pane {
+                tx.conn().execute(
+                    "UPDATE sessions SET pane_id = ?2, rev = rev + 1 WHERE id = ?1",
+                    params![session.id, pane_id],
+                )?;
+                set.insert("pane_id".into(), json!(pane_id));
+                set.insert("session_id".into(), json!(session.id));
+            }
+            let placed: Run = get(tx.conn(), "run", &run.id)?;
+            tx.event(
+                NewEvent::new("run", &run.id, "run.placed")
+                    .rev(placed.rev)
+                    .card(&run.card_id)
+                    .payload(Value::Object(set)),
+            )?;
+            Ok(placed)
+        })
+    }
+
     /// `run.end` (`tiller done`, reconcile). `landed` needs a succeeded
     /// approval or a confirmed outside merge; a session ending its own run
     /// needs a known `unlanded_commits` for its worktree (P51).
@@ -1035,8 +1155,9 @@ impl Store {
         })
     }
 
-    /// `run.clean`: the run ended, its worktree has no unlanded commits by a
-    /// reading taken after it ended, and its pane is closed. Marks the cache
+    /// `run.clean`: the run ended, its worktree has no unlanded commits and
+    /// no uncommitted changes by a reading taken after it ended, and its pane
+    /// is closed. Marks the cache
     /// rows gone. Natural: a cleaned worktree is returned unchanged.
     pub fn run_clean(&mut self, ctx: &Ctx, run: &str, pane_closed: bool) -> Result<Applied<Run>> {
         self.write(ctx, "run.clean", None, |tx| {
@@ -1060,6 +1181,14 @@ impl Store {
                     "worktree",
                     &path,
                     format!("unlanded commits: {:?}", worktree.unlanded_commits),
+                ));
+            }
+            // Uncommitted changes are unlanded work too (`recovery.md` R13).
+            if worktree.dirty != Some(false) {
+                return Err(Error::refused(
+                    "worktree",
+                    &path,
+                    format!("uncommitted changes: {:?}", worktree.dirty),
                 ));
             }
             if !pane_closed {

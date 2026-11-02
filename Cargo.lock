@@ -1235,7 +1235,9 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tiller-core",
+ "tiller-herdr",
  "tiller-observe",
+ "tiller-reconcile",
  "toml",
 ]
 
@@ -1257,7 +1259,9 @@ dependencies = [
  "tempfile",
  "tiller-agents",
  "tiller-core",
+ "tiller-herdr",
  "tiller-observe",
+ "tiller-reconcile",
  "tokio",
  "toml",
  "tower",

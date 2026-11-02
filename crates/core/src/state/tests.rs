@@ -1232,3 +1232,127 @@ fn a_quota_window_the_feed_drops_is_gone() {
         .unwrap();
     assert_eq!(labels(&store), ["claude-weekly"]);
 }
+
+/// `run.place` records where spawn put a run once, for its supervisor.
+#[test]
+fn run_place_records_once_and_only_for_the_supervisor() {
+    let (mut store, session) = memory_store();
+    let orchestrator = Ctx::new(Actor::Session(session));
+    let card = store
+        .card_create(&owner(), None, card(CardKind::Ship, "placed"), None)
+        .unwrap()
+        .value;
+    let started = store
+        .run_start(&orchestrator, None, builder_run(&card.id))
+        .unwrap()
+        .value;
+    let run = started.run.id;
+    let worker = Ctx::new(Actor::Session(started.session.id.clone()));
+    let worktree = super::runs::Placement {
+        worktree_path: Some("/home/user/worktrees/alpha-1".into()),
+        branch: Some("tiller/alpha-1-build".into()),
+        config_hash: Some("ab".repeat(32)),
+        ..Default::default()
+    };
+
+    // The worker may not place its own run.
+    let before = snapshot(store.conn(), &[]);
+    let error = store
+        .run_place(&worker, &run, worktree.clone())
+        .unwrap_err();
+    assert!(matches!(error, Error::Forbidden(_)), "{error}");
+    assert_eq!(snapshot(store.conn(), &[]), before);
+
+    let placed = store
+        .run_place(&orchestrator, &run, worktree.clone())
+        .unwrap();
+    assert_eq!(placed.events.len(), 1);
+    assert_eq!(placed.value.branch.as_deref(), Some("tiller/alpha-1-build"));
+    let session: Session = super::get(store.conn(), "session", &started.session.id).unwrap();
+    assert_eq!(session.config_hash, worktree.config_hash);
+
+    // The same values again write nothing; a different value is refused.
+    let again = store
+        .run_place(&orchestrator, &run, worktree.clone())
+        .unwrap();
+    assert!(again.events.is_empty());
+    let moved = super::runs::Placement {
+        worktree_path: Some("/home/user/worktrees/elsewhere".into()),
+        ..Default::default()
+    };
+    let error = store.run_place(&orchestrator, &run, moved).unwrap_err();
+    assert!(error.to_string().contains("already"), "{error}");
+
+    // The pane goes on the run's live session, once.
+    let pane = |id: &str| super::runs::Placement {
+        pane_id: Some(id.into()),
+        ..Default::default()
+    };
+    store.run_place(&orchestrator, &run, pane("w2:p1")).unwrap();
+    let session: Session = super::get(store.conn(), "session", &started.session.id).unwrap();
+    assert_eq!(session.pane_id.as_deref(), Some("w2:p1"));
+    assert!(store.run_place(&orchestrator, &run, pane("w3:p1")).is_err());
+
+    // An ended run is not placed.
+    store
+        .run_end(
+            &owner(),
+            &run,
+            super::runs::EndRun {
+                outcome: RunOutcome::Abandoned,
+                note: None,
+            },
+        )
+        .unwrap();
+    let late = super::runs::Placement {
+        base_sha: Some("0".repeat(40)),
+        ..Default::default()
+    };
+    assert!(store.run_place(&orchestrator, &run, late).is_err());
+}
+
+/// `run.clean` refuses a worktree with uncommitted changes, as it does one
+/// with unlanded commits (`recovery.md` R13).
+#[test]
+fn run_clean_refuses_uncommitted_changes() {
+    let (mut store, session) = memory_store();
+    let orchestrator = Ctx::new(Actor::Session(session));
+    let card = store
+        .card_create(&owner(), None, card(CardKind::Ship, "dirty"), None)
+        .unwrap()
+        .value;
+    let path = "/home/user/worktrees/alpha-1".to_owned();
+    let mut new = builder_run(&card.id);
+    new.worktree_path = Some(path.clone());
+    let run = store.run_start(&orchestrator, None, new).unwrap().value.run;
+    store
+        .run_end(
+            &owner(),
+            &run.id,
+            super::runs::EndRun {
+                outcome: RunOutcome::Abandoned,
+                note: None,
+            },
+        )
+        .unwrap();
+    let reading = |dirty: Option<bool>| super::caches::WorktreeReading {
+        path: path.clone(),
+        project_id: Some("alpha".into()),
+        run_id: Some(run.id.clone()),
+        branch: None,
+        head_sha: None,
+        dirty,
+        unlanded_commits: Some(0),
+    };
+    for dirty in [Some(true), None] {
+        store
+            .cache_worktree(&Ctx::new(Actor::Daemon), &run.host_id, reading(dirty))
+            .unwrap();
+        let error = store.run_clean(&owner(), &run.id, true).unwrap_err();
+        assert!(error.to_string().contains("uncommitted changes"), "{error}");
+    }
+    store
+        .cache_worktree(&Ctx::new(Actor::Daemon), &run.host_id, reading(Some(false)))
+        .unwrap();
+    store.run_clean(&owner(), &run.id, true).unwrap();
+}

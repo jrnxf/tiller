@@ -718,6 +718,9 @@ impl Herdr for AckOnSubmit {
     fn move_workspace(&self, id: &str, index: usize) -> tiller_herdr::client::Result<()> {
         self.inner.move_workspace(id, index)
     }
+    fn close_pane(&self, id: &str) -> tiller_herdr::client::Result<()> {
+        self.inner.close_pane(id)
+    }
     fn notify(&self, title: &str, body: &str) -> tiller_herdr::client::Result<()> {
         self.inner.notify(title, body)
     }

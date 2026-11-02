@@ -14,7 +14,9 @@ use clap::{Parser, Subcommand};
 use serde_json::Value;
 
 use app::{App, Done, Failure};
-use cmd::{admin, approval, ask, attention, backup, card, import, later, read, records, run};
+use cmd::{
+    admin, approval, ask, attention, backup, card, import, later, read, records, run, spawn,
+};
 
 #[derive(Parser)]
 #[command(name = "tiller", version, about)]
@@ -65,7 +67,7 @@ enum Command {
     #[command(subcommand)]
     Orchestrator(later::OrchestratorCmd),
     /// Start a run on a card
-    Spawn(later::Spawn),
+    Spawn(spawn::Spawn),
     /// Report a worker's status line
     Status(run::Status),
     /// Runs
@@ -166,7 +168,7 @@ fn dispatch(app: &App, command: Command) -> Done {
         Command::Away(cmd) => approval::run_away(app, cmd),
         Command::Mem(cmd) => later::mem(app, cmd),
         Command::Orchestrator(cmd) => later::orchestrator(app, cmd),
-        Command::Spawn(args) => later::spawn(app, args),
+        Command::Spawn(args) => spawn::spawn(app, args),
         Command::Status(args) => run::status(app, args),
         Command::Run(cmd) => run::run_cmd(app, cmd),
         Command::Pr(cmd) => run::pr_cmd(app, cmd),

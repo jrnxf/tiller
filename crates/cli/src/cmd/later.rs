@@ -2,26 +2,13 @@
 //! herdr or the forge, or read memory sources. Their arguments are parsed here
 //! so the command surface is complete and a wrong call is a usage error, but
 //! each answers `unavailable` (exit 7, nothing written) until the task that
-//! owns the outside half lands: spawn and orchestrator launch (T4.2), landing
+//! owns the outside half lands: orchestrator launch (T4.2), landing
 //! (T4.3), relaunch and resume (T4.5), herdr control and doctor (T2.5, T2.8),
 //! memory (T7.2).
 
 use clap::{Args, Subcommand};
 
 use crate::app::{App, Done, Failure};
-
-#[derive(Args, Debug)]
-pub struct Spawn {
-    pub card: String,
-    /// scout, builder, reviewer or verifier
-    pub role: tiller_core::domain::RunRole,
-    #[arg(long, requires = "effort")]
-    pub model: Option<String>,
-    #[arg(long, requires = "model")]
-    pub effort: Option<tiller_core::domain::Effort>,
-    #[arg(long)]
-    pub brief_file: Option<std::path::PathBuf>,
-}
 
 #[derive(Subcommand, Debug)]
 pub enum OrchestratorCmd {
@@ -69,13 +56,6 @@ fn later(what: &str, needs: &str) -> Done {
         "{what} needs {needs}, which this build does not have yet"
     ))
     .hint("nothing was written; retry once it ships"))
-}
-
-pub fn spawn(_app: &App, args: Spawn) -> Done {
-    later(
-        &format!("tiller spawn {} {}", args.card, args.role),
-        "the spawn path (worktree, herdr pane and capacity reservation, T4.2)",
-    )
 }
 
 pub fn orchestrator(_app: &App, cmd: OrchestratorCmd) -> Done {

@@ -310,11 +310,11 @@ about 3 min of the developer's time
 ### T4.2 Spawn, capacity and layout
 `opus` high - 3-4 h - after T2.5, T2.7, T4.1 - critical path
 
-- [ ] `tiller spawn`: atomic capacity reservation; quota check per account floor with a fixed share per host
-- [ ] Treehouse worktree, herdr workspace nested under the orchestrator, role and brief injected, run recorded
-- [ ] `tiller done` refuses while commits are unlanded
-- [ ] Check: two simultaneous spawns cannot oversubscribe capacity
-- [ ] Check: cleanup never removes unlanded work
+- [x] `tiller spawn`: atomic capacity reservation; quota check per account floor with a fixed share per host
+- [x] Treehouse worktree, herdr workspace nested under the orchestrator, role and brief injected, run recorded
+- [x] `tiller done` refuses while commits are unlanded
+- [x] Check: two simultaneous spawns cannot oversubscribe capacity
+- [x] Check: cleanup never removes unlanded work
 - [ ] Delivered
 
 ### T4.3 Guards and landing

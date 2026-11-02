@@ -340,7 +340,15 @@ impl Herdr for FakeHerdr {
     fn create_workspace(&self, label: &str, _cwd: Option<&Path>) -> Result<Created> {
         self.call("create_workspace", format!("create_workspace {label}"))?;
         Ok(self.edit(|w| {
-            let workspace_id = format!("w{}", w.workspaces.len() + 1);
+            // One past the highest id, so a closed workspace's id is never reused.
+            let next = w
+                .workspaces
+                .iter()
+                .filter_map(|ws| ws.workspace_id.strip_prefix('w')?.parse::<usize>().ok())
+                .max()
+                .unwrap_or(0)
+                + 1;
+            let workspace_id = format!("w{next}");
             let pane_id = format!("{workspace_id}:p1");
             w.workspaces.push(WorkspaceInfo {
                 workspace_id: workspace_id.clone(),
@@ -386,6 +394,20 @@ impl Herdr for FakeHerdr {
                 let ws = w.workspaces.remove(from);
                 let index = index.min(w.workspaces.len());
                 w.workspaces.insert(index, ws);
+            }
+        });
+        Ok(())
+    }
+
+    fn close_pane(&self, pane_id: &str) -> Result<()> {
+        self.call("close_pane", format!("close_pane {pane_id}"))?;
+        self.edit(|w| {
+            let Some(at) = w.panes.iter().position(|p| p.pane_id == pane_id) else {
+                return;
+            };
+            let workspace = w.panes.remove(at).workspace_id;
+            if !w.panes.iter().any(|p| p.workspace_id == workspace) {
+                w.workspaces.retain(|ws| ws.workspace_id != workspace);
             }
         });
         Ok(())

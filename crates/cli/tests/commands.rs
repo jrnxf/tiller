@@ -803,10 +803,21 @@ fn exit_codes_follow_the_table() {
         "a session that resolves to no row is refused"
     );
 
-    // 7: the daemon is needed and absent, and nothing was written.
+    // 2: a spawn for a project with no checkout configured writes nothing.
     let seq = world.store().last_seq().unwrap();
+    let out = world.run(&["spawn", "alpha-1", "builder"]);
+    assert_eq!((out.code, out.error_code()), (2, "usage"));
+    assert!(
+        out.json["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("checkouts.alpha")),
+        "{}",
+        out.json
+    );
+    assert_eq!(world.store().last_seq().unwrap(), seq);
+
+    // 7: the daemon is needed and absent, and nothing was written.
     for args in [
-        vec!["spawn", "alpha-1", "builder"],
         vec!["orchestrator", "start", "alpha"],
         vec!["agent", "relaunch", "alpha-1-build", "--note", "x"],
         vec!["agent", "resume", "alpha-1-build"],

@@ -5,9 +5,7 @@ exit: 5
 {
   "error": {
     "code": "refused",
-    "entity": "worktree",
-    "id": "/home/user/work/alpha-1",
-    "message": "worktree /home/user/work/alpha-1: no reading of the worktree"
+    "message": "/home/user/work/alpha-1 is missing, so whether its commits landed is unknown; cleanup never removes unlanded work"
   },
   "ok": false
 }
