@@ -7,9 +7,15 @@ export function weeklyWindow(quota: QuotaResponse): QuotaWindow | undefined {
   return quota.windows.find((window) => window.kind === "weekly");
 }
 
+function clampPercent(value: number): number {
+  return Math.min(100, Math.max(0, value));
+}
+
 export interface QuotaFooterView {
   dot: QuotaDot;
   percentLeft: number | null;
+  percentUsed: number | null;
+  elapsedPercent: number | null;
   label: string;
   resets: string | null;
 }
@@ -22,7 +28,9 @@ export function quotaFooterView(quota: QuotaResponse): QuotaFooterView | null {
   const resets = formatLisbon(window.resets_at);
   return {
     dot: window.dot,
-    percentLeft: percent === null ? null : Math.min(100, Math.max(0, percent)),
+    percentLeft: percent === null ? null : clampPercent(percent),
+    percentUsed: percent === null ? null : clampPercent(100 - percent),
+    elapsedPercent: window.elapsed_percent === null ? null : clampPercent(window.elapsed_percent),
     label: rounded === null ? "week unknown" : `${rounded}% week left`,
     resets: resets ? `resets ${resets}` : null,
   };

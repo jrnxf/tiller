@@ -3,6 +3,7 @@ import { Outlet, createRootRouteWithContext } from "@tanstack/react-router";
 
 import { Shell } from "../components/shell/shell";
 import {
+  agentsQuery,
   attentionQuery,
   boardQuery,
   machinesQuery,
@@ -28,6 +29,7 @@ export const Route = createRootRouteWithContext<RouterContext>()({
     // pending state is ever visible (it is in the boot snapshot anyway).
     await Promise.all([
       context.queryClient.ensureQueryData(projectsQuery()),
+      context.queryClient.ensureQueryData(agentsQuery()),
       context.queryClient.ensureQueryData(machinesQuery()),
       context.queryClient.ensureQueryData(quotaQuery()),
       context.queryClient.ensureQueryData(attentionQuery()),

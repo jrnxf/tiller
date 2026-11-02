@@ -28,6 +28,19 @@ async function loadSnapshot(): Promise<Snapshot | null> {
   }
 }
 
+// The first paint has to use the real font, or the text re-flows when it
+// arrives and the layout shifts. The font ships inside the binary, so this takes
+// a few milliseconds; the cap keeps a font that cannot load from holding the
+// board back.
+async function fontReady(): Promise<void> {
+  const cap = new Promise<void>((resolve) => setTimeout(resolve, 300));
+  try {
+    await Promise.race([document.fonts.load('13px "Inter"'), cap]);
+  } catch {
+    // The fallback font is fine.
+  }
+}
+
 const queryClient = createQueryClient();
 const snapshot = await loadSnapshot();
 const lastEventSeq = snapshot ? hydrateFromSnapshot(queryClient, snapshot) : 0;
@@ -35,7 +48,7 @@ const lastEventSeq = snapshot ? hydrateFromSnapshot(queryClient, snapshot) : 0;
 const router = createAppRouter(queryClient);
 // Load the first route before rendering, so the first paint is the finished
 // screen and not a frame of nothing.
-await router.load();
+await Promise.all([router.load(), fontReady()]);
 
 createRoot(root).render(
   <StrictMode>

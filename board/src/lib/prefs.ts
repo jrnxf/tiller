@@ -21,8 +21,8 @@ export const VIEW_KEY = "tiller-view";
 // Keep in step with the inline script in index.html, which paints these before
 // any CSS loads (tests check both).
 export const THEME_BACKGROUND: Record<Theme, string> = {
-  light: "#fbfbfc",
-  dark: "#0f1012",
+  light: "#f8f8f8",
+  dark: "#0f1011",
 };
 
 const DEFAULTS: Prefs = {

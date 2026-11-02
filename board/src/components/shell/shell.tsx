@@ -49,14 +49,14 @@ export function Shell({
 
   return (
     <div className={`shell${menuOpen ? " menu-open" : ""}`}>
-      <Sidebar activeHost={activeHost} onNavigate={closeMenu} />
-      <div className="scrim" onClick={closeMenu} aria-hidden="true" />
+      <Sidebar
+        activeHost={activeHost}
+        onNavigate={closeMenu}
+        onOpenPalette={() => setPaletteOpen(true)}
+      />
+      <div className="nav-scrim" onClick={closeMenu} aria-hidden="true" />
       <div className="main">
-        <Header
-          activeHost={activeHost}
-          onOpenMenu={() => setMenuOpen(true)}
-          onOpenPalette={() => setPaletteOpen(true)}
-        />
+        <Header activeHost={activeHost} onOpenMenu={() => setMenuOpen(true)} />
         <main className="content">{children}</main>
       </div>
       <CommandPalette open={paletteOpen} onClose={closePalette} activeHost={activeHost} />

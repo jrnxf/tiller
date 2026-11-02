@@ -113,7 +113,7 @@ test("a stale remote host shows how long ago it answered and why", async () => {
   const row = screen.getByTestId("machine-host-c");
   expect(row.textContent).toContain("last seen 17 min ago");
   expect(row.textContent).toContain("view only");
-  expect(row.getAttribute("title")).toContain("does not answer");
+  expect(within(row).getByRole("tooltip").textContent).toContain("does not answer");
 });
 
 test("Cmd+K opens the palette, filters, and Enter runs the command", async () => {
