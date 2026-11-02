@@ -233,6 +233,24 @@ impl Store {
         T: Serialize + DeserializeOwned,
         F: FnOnce(&mut Tx<'_>) -> Result<T>,
     {
+        self.write_as(ctx, txn, txn, key, f)
+    }
+
+    /// [`Store::write`] for a command whose response differs from that of the
+    /// mutation it opens with: `command` names it in `idempotency_keys`, so
+    /// its key never replays as a plain `txn` (or the other way round).
+    pub fn write_as<T, F>(
+        &mut self,
+        ctx: &Ctx,
+        txn: &'static str,
+        command: &'static str,
+        key: Option<&str>,
+        f: F,
+    ) -> Result<Applied<T>>
+    where
+        T: Serialize + DeserializeOwned,
+        F: FnOnce(&mut Tx<'_>) -> Result<T>,
+    {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -240,11 +258,11 @@ impl Store {
         if let Some(key) = key
             && let Some(stored) = lookup_key(&tx, key, ctx.now)?
         {
-            if stored.command != txn {
+            if stored.command != command {
                 return Err(Error::refused(
                     "idempotency key",
                     key,
-                    format!("key was used for {}, not {txn}", stored.command),
+                    format!("key was used for {}, not {command}", stored.command),
                 ));
             }
             let response: StoredResponse<T> = serde_json::from_value(stored.response)?;
@@ -295,7 +313,7 @@ impl Store {
             tx.execute(
                 "INSERT INTO idempotency_keys (key, command, entity, entity_id, response, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![key, txn, entity, entity_id, response, ctx.now],
+                params![key, command, entity, entity_id, response, ctx.now],
             )?;
         }
 

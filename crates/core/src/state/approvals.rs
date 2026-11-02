@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::attention::{NewAttention, answer_attention, open_attention, withdraw_attention};
-use super::cards::{active_runs, close_card, open_attention_id};
+use super::cards::{MARK_LANDED, active_runs, close_card, open_attention_id};
 use super::projects::{require_daemon, require_owner};
 use super::records::{NewObligation, meet_obligation, open_obligation};
 use super::runs::{EndRun, end_run};
@@ -91,7 +91,8 @@ pub struct Decided {
 pub enum Execution {
     /// The head matched: the daemon may run the action.
     Executing(Approval),
-    /// The head moved: the approval is `stale` and a `merge` item asks again.
+    /// The head moved or the card closed: the approval is `stale`. On a moved
+    /// head a new `requested` approval at the forge head asks again.
     Stale(Approval),
 }
 
@@ -154,7 +155,7 @@ fn approval_item(conn: &Connection, approval: &Approval) -> Result<Option<Attent
 
 /// Marks an approval `stale`, with the memory approvals accepted with it,
 /// and withdraws the question it was waiting on.
-fn mark_stale(tx: &mut Tx<'_>, approval: &Approval, why: &str) -> Result<Approval> {
+pub(crate) fn mark_stale(tx: &mut Tx<'_>, approval: &Approval, why: &str) -> Result<Approval> {
     approval
         .state
         .mark_stale()
@@ -205,6 +206,69 @@ fn ask_merge(
             ..NewAttention::default()
         },
     )
+}
+
+/// Asks the owner again for an approval that went stale because the head
+/// moved: a new `requested` approval with the same binding at `head`, and its
+/// `merge` item. The old item pointed at the stale approval, so answering it
+/// could never execute.
+fn reapprove(tx: &mut Tx<'_>, stale: &Approval, card: &Card, head: &str) -> Result<Approval> {
+    let head = check_sha(head)?;
+    let id = ids::new_ulid();
+    tx.conn().execute(
+        "INSERT INTO approvals (id, kind, project_id, card_id, run_id, repo, pr_id, branch, head_sha, memory_paths,
+                                action, state, requested_at, requested_by)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'requested', ?12, ?13)",
+        params![
+            id,
+            stale.kind,
+            stale.project_id,
+            card.id,
+            stale.run_id,
+            stale.repo,
+            stale.pr_id,
+            stale.branch,
+            head,
+            stale.memory_paths,
+            stale.action,
+            tx.now(),
+            tx.actor().to_string(),
+        ],
+    )?;
+    tx.event(
+        NewEvent::new("approval", &id, "approval.requested")
+            .rev(1)
+            .card(&card.id)
+            .payload(json!({
+                "kind": stale.kind,
+                "head_sha": head,
+                "action": stale.action,
+                "memory_paths": stale.memory_paths,
+                "supersedes": stale.id,
+            })),
+    )?;
+    let approval: Approval = get(tx.conn(), "approval", &id)?;
+    let question = format!(
+        "The head of {} moved to {} after approval. Approve the new head?",
+        card.display_id,
+        short_sha(head)
+    );
+    ask_merge(tx, &approval, card, question)?;
+    Ok(approval)
+}
+
+/// A commit sha as git prints it: hex, 4 to 64 characters.
+fn check_sha(sha: &str) -> Result<&str> {
+    if (4..=64).contains(&sha.len()) && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(sha)
+    } else {
+        Err(Error::Usage(format!("{sha:?} is not a commit sha")))
+    }
+}
+
+/// The first 12 characters of a checked sha, for questions.
+fn short_sha(sha: &str) -> &str {
+    sha.get(..12).unwrap_or(sha)
 }
 
 /// A grant that may accept an approval now.
@@ -391,23 +455,21 @@ impl Store {
                     .card(&new.card_id)
                     .payload(Value::Object(changed)),
             )?;
-            let head_moved = old.head_sha.is_some() && new.head_sha.is_some() && old.head_sha != new.head_sha;
-            if head_moved || new.state != PrState::Open {
-                let open: Vec<Approval> = list(
-                    tx.conn(),
-                    "pr_id = ?1 AND state IN ('requested', 'accepted') ORDER BY id",
-                    &[&new.id],
-                )?;
-                for approval in open {
-                    let why = if head_moved {
-                        format!("head moved to {}", new.head_sha.as_deref().unwrap_or_default())
-                    } else {
-                        format!("PR is {}", new.state)
-                    };
-                    if approval.head_sha != new.head_sha || new.state != PrState::Open {
-                        mark_stale(tx, &approval, &why)?;
-                    }
-                }
+            // Compare each open approval with the fetched head, not with the
+            // previous fetch: the head may have moved before the PR's first
+            // recorded head, or between an approval and a missed fetch.
+            let open: Vec<Approval> = list(
+                tx.conn(),
+                "pr_id = ?1 AND state IN ('requested', 'accepted') ORDER BY id",
+                &[&new.id],
+            )?;
+            for approval in open {
+                let why = match &new.head_sha {
+                    _ if new.state != PrState::Open => format!("PR is {}", new.state),
+                    Some(head) if approval.head_sha.as_ref() != Some(head) => format!("head moved to {head}"),
+                    _ => continue,
+                };
+                mark_stale(tx, &approval, &why)?;
             }
             Ok(new)
         })
@@ -417,7 +479,7 @@ impl Store {
     /// returned. With a matched grant the approval is `accepted` at once;
     /// otherwise it is `requested` with a `merge` attention item.
     pub fn approval_request(&mut self, ctx: &Ctx, new: NewApproval) -> Result<Applied<Approval>> {
-        required("head sha", &new.head_sha)?;
+        check_sha(&new.head_sha)?;
         self.write(ctx, "approval.request", None, |tx| {
             let card = resolve_card(tx.conn(), &new.card)?;
             if card.state != CardState::Open {
@@ -520,7 +582,7 @@ impl Store {
                     let question = format!(
                         "{what} {} at {} ({})?",
                         card.display_id,
-                        &new.head_sha[..new.head_sha.len().min(12)],
+                        short_sha(&new.head_sha),
                         new.action
                     );
                     ask_merge(tx, &approval, &card, question)?;
@@ -561,6 +623,13 @@ impl Store {
                 .map(|paths| serde_json::from_value(paths.clone()))
                 .transpose()?
                 .unwrap_or_default();
+            if paths.is_empty() && !decision.memory.is_empty() {
+                return Err(Error::refused(
+                    "approval",
+                    &approval.id,
+                    "approval touches no memory source, so it takes no memory binding",
+                ));
+            }
             if decision.accept && !paths.is_empty() {
                 let mut bound: Vec<&str> = decision.memory.iter().map(|m| m.path.as_str()).collect();
                 bound.sort_unstable();
@@ -639,25 +708,26 @@ impl Store {
         forge_head: &str,
     ) -> Result<Applied<Execution>> {
         require_daemon(&ctx.actor, "approval.execute")?;
+        check_sha(forge_head)?;
         self.write(ctx, "approval.execute", None, |tx| {
             let approval = load(tx, approval)?;
             if approval.state == ApprovalState::Executing {
                 return Ok(Execution::Executing(approval));
             }
             approval.state.execute().map_err(refuse("approval", &approval.id))?;
+            let card: Option<Card> = approval
+                .card_id
+                .as_deref()
+                .map(|id| get(tx.conn(), "card", id))
+                .transpose()?;
+            if let Some(card) = card.as_ref().filter(|card| card.state != CardState::Open) {
+                let stale = mark_stale(tx, &approval, &format!("card {} is closed", card.display_id))?;
+                return Ok(Execution::Stale(stale));
+            }
             if approval.head_sha.as_deref() != Some(forge_head) {
                 let stale = mark_stale(tx, &approval, &format!("head moved to {forge_head}"))?;
-                if let Some(card_id) = &approval.card_id {
-                    let card: Card = get(tx.conn(), "card", card_id)?;
-                    if card.state == CardState::Open {
-                        let question = format!(
-                            "The head of {} moved to {forge_head} after approval. Approve the new head?",
-                            card.display_id
-                        );
-                        let mut asked = stale.clone();
-                        asked.head_sha = Some(forge_head.to_owned());
-                        ask_merge(tx, &asked, &card, question)?;
-                    }
+                if let Some(card) = &card {
+                    reapprove(tx, &stale, card, forge_head)?;
                 }
                 return Ok(Execution::Stale(stale));
             }
@@ -918,7 +988,7 @@ impl Store {
                             evidence: Some(
                                 json!({"obligation_id": watch.id, "details": details}).to_string(),
                             ),
-                            options: Some(json!(["Mark landed", "Reopen work"])),
+                            options: Some(json!([MARK_LANDED, "Reopen work"])),
                             ..NewAttention::default()
                         },
                     )?);

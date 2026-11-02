@@ -268,6 +268,25 @@ fn refresh_quota(tx: &mut Tx<'_>, windows: &[QuotaReading]) -> Result<usize> {
             )?;
         }
     }
+    // A window the feed no longer reports is gone (a plan changed, a provider
+    // was dropped). An empty feed is a failed read, not an empty plan.
+    if !windows.is_empty() {
+        let gone: Vec<QuotaWindow> = list(tx.conn(), "1 = 1 ORDER BY label", &[])?;
+        for window in gone
+            .into_iter()
+            .filter(|old| !windows.iter().any(|w| w.label == old.label))
+        {
+            tx.conn().execute(
+                "DELETE FROM quota_windows WHERE label = ?1",
+                [&window.label],
+            )?;
+            changes += 1;
+            tx.event(
+                NewEvent::new("quota", &window.label, "quota.changed")
+                    .payload(json!({"label": window.label, "gone": true})),
+            )?;
+        }
+    }
     Ok(changes)
 }
 
@@ -385,7 +404,6 @@ impl Store {
     ) -> Result<Applied<Vec<String>>> {
         require_daemon(&ctx.actor, "daemon.start")?;
         self.write(ctx, "daemon.start", None, |tx| {
-            local_host_id(tx.conn())?;
             let host = local_host_id(tx.conn())?;
             tx.event(NewEvent::new("host", &host, "daemon.started").payload(json!({"versions": versions, "boot_id": boot_id})))?;
             let executing: Vec<Approval> = list(tx.conn(), "state = 'executing' ORDER BY id", &[])?;

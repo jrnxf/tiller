@@ -399,7 +399,7 @@ impl Store {
         key: Option<&str>,
         new: NewCard,
     ) -> Result<Applied<BoardAdded>> {
-        self.write(ctx, "ask.record", key, |tx| {
+        self.write_as(ctx, "ask.record", "board.add", key, |tx| {
             let text = match &new.body {
                 Some(body) => format!("{}\n\n{body}", new.title),
                 None => new.title.clone(),

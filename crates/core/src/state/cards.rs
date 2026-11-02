@@ -5,6 +5,7 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::approvals::mark_stale;
 use super::attention::{NewAttention, open_attention, withdraw_attention};
 use super::outbox::{NewMessage, enqueue, live_orchestrator};
 use super::runs::{EndRun, end_run};
@@ -271,6 +272,18 @@ pub(crate) fn close_card(
             .payload(merge(json!({"outcome": outcome}), payload)),
     )?;
 
+    // An approval the closed card was waiting on can no longer execute.
+    // Linked memory approvals go stale with the one they ride on.
+    let waiting: Vec<Approval> = list(
+        tx.conn(),
+        "card_id = ?1 AND kind IN ('merge', 'land_direct') AND state IN ('requested', 'accepted')
+         AND linked_approval_id IS NULL ORDER BY id",
+        &[&card.id],
+    )?;
+    for approval in waiting {
+        mark_stale(tx, &approval, &format!("card closed {outcome}"))?;
+    }
+
     let mut released_holds = Vec::new();
     if let Some(hold) = find::<Hold>(
         tx.conn(),
@@ -358,11 +371,15 @@ fn release_dep(tx: &mut Tx<'_>, dep: &CardDep, reason: DepReleaseReason) -> Resu
     Ok(())
 }
 
-/// Releases every dependency on `card_id` whose card closed with a
-/// satisfying outcome, for callers that close a card themselves.
+/// The option on a `recovery` item that confirms a change landed outside an
+/// approval: an outside merge, or a deploy fixed by hand (`state.md` 7).
+pub const MARK_LANDED: &str = "Mark landed";
+
+/// Whether the card has the evidence a `landed` outcome needs.
 pub(crate) fn landed_evidence(conn: &rusqlite::Connection, card: &Card) -> Result<bool> {
     // An approval reached `succeeded`, or the owner confirmed an outside merge
-    // by answering a `recovery` item on the card (`state.md` section 7).
+    // by answering a `recovery` item on the card with "Mark landed"
+    // (`state.md` section 7). Any other answer is not evidence.
     let approved: bool = conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM approvals WHERE card_id = ?1 AND kind IN ('merge', 'land_direct') AND state = 'succeeded')",
         [&card.id],
@@ -372,8 +389,9 @@ pub(crate) fn landed_evidence(conn: &rusqlite::Connection, card: &Card) -> Resul
         return Ok(true);
     }
     Ok(conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM attention WHERE card_id = ?1 AND kind = 'recovery' AND answered_at IS NOT NULL)",
-        [&card.id],
+        "SELECT EXISTS (SELECT 1 FROM attention WHERE card_id = ?1 AND kind = 'recovery'
+                        AND lower(trim(answer)) = lower(?2))",
+        params![card.id, MARK_LANDED],
         |row| row.get(0),
     )?)
 }
@@ -698,7 +716,7 @@ impl Store {
                     return Err(Error::refused(
                         "card",
                         &card.display_id,
-                        "landed needs a succeeded merge or land approval, or an outside merge the owner confirmed",
+                        "landed needs a succeeded merge or land approval, or a recovery item answered \"Mark landed\"",
                     ));
                 }
                 CardOutcome::Reported => {

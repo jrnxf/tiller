@@ -187,6 +187,37 @@ fn supervisor(conn: &Connection, actor: &Actor, project_id: &str) -> Result<Sess
     }
 }
 
+/// Frees `claude_id` for `session_id`. Claude ids are unique, and a resume
+/// can carry an ended session's id into a new row: the ended row gives the
+/// id up, with the taker in its event. A live row keeps it.
+fn take_claude_id(tx: &mut Tx<'_>, claude_id: &str, session_id: &str) -> Result<()> {
+    let Some(holder) = find::<Session>(
+        tx.conn(),
+        "claude_session_id = ?1 AND id != ?2",
+        &[&claude_id, &session_id],
+    )?
+    else {
+        return Ok(());
+    };
+    if holder.ended_at.is_none() {
+        return Err(Error::refused(
+            "session",
+            &holder.id,
+            format!("Claude session {claude_id} is bound to this live session"),
+        ));
+    }
+    tx.conn().execute(
+        "UPDATE sessions SET claude_session_id = NULL, rev = rev + 1 WHERE id = ?1",
+        [&holder.id],
+    )?;
+    tx.event(
+        NewEvent::new("session", &holder.id, "session.unbound")
+            .rev(holder.rev + 1)
+            .payload(json!({"claude_session_id": claude_id, "taken_by": session_id})),
+    )?;
+    Ok(())
+}
+
 /// Inserts a placeholder session for a run; the `SessionStart` hook binds it.
 fn insert_run_session(
     tx: &mut Tx<'_>,
@@ -625,6 +656,9 @@ impl Store {
                 ));
             }
             let id = ids::new_ulid();
+            if let Some(claude_id) = &new.claude_session_id {
+                take_claude_id(tx, claude_id, &id)?;
+            }
             let host = local_host_id(tx.conn())?;
             tx.conn().execute(
                 "INSERT INTO sessions (id, claude_session_id, role, project_id, host_id, pane_id, transcript_path,
@@ -698,6 +732,7 @@ impl Store {
             {
                 return Ok(session);
             }
+            take_claude_id(tx, &bind.claude_session_id, &session.id)?;
             tx.conn().execute(
                 "UPDATE sessions SET claude_session_id = ?2, pane_id = ?3, transcript_path = ?4, rev = rev + 1
                  WHERE id = ?1",
@@ -899,6 +934,30 @@ impl Store {
                 ended_session = Some(session.id);
             }
             let target = if relaunch.new_attempt {
+                // A new attempt is a new run: it passes the spawn checks that
+                // still apply to it, and the project's live orchestrator
+                // supervises it, not the one that started the old attempt.
+                if card.state != CardState::Open {
+                    return Err(Error::refused("card", &card.display_id, "card is closed"));
+                }
+                let project: Project = get(tx.conn(), "project", &card.project_id)?;
+                if project.retired_at.is_some() {
+                    return Err(Error::refused("project", &project.id, "project is retired"));
+                }
+                if let Some(active) = find::<Run>(
+                    tx.conn(),
+                    "card_id = ?1 AND role = ?2 AND ended_at IS NULL AND id != ?3",
+                    &[&card.id, &run.role, &run.id],
+                )? {
+                    return Err(Error::refused(
+                        "card",
+                        &card.display_id,
+                        format!("{} run {} is already active", run.role, active.id),
+                    ));
+                }
+                let supervisor = live_orchestrator(tx.conn(), &project.id)?.ok_or_else(|| {
+                    Error::refused("project", &project.id, "no live orchestrator to supervise the run")
+                })?;
                 if run.outcome.is_none() {
                     end_run(
                         tx,
@@ -910,7 +969,6 @@ impl Store {
                     )?;
                 }
                 let host: Host = get(tx.conn(), "host", &run.host_id)?;
-                let project: Project = get(tx.conn(), "project", &card.project_id)?;
                 check_capacity(tx.conn(), &host, &project)?;
                 let id = ids::new_ulid();
                 let attempt = next_attempt(tx.conn(), &card.id, run.role)?;
@@ -919,9 +977,9 @@ impl Store {
                                        worktree_path, branch, base_branch, base_sha, supervisor_session_id,
                                        started_at, config_hash)
                      SELECT ?1, card_id, role, ?2, id, model, effort, host_id, worktree_path, branch, base_branch,
-                            base_sha, supervisor_session_id, ?3, config_hash
+                            base_sha, ?5, ?3, config_hash
                      FROM runs WHERE id = ?4",
-                    params![id, attempt, tx.now(), run.id],
+                    params![id, attempt, tx.now(), run.id, supervisor.id],
                 )?;
                 let new_run: Run = get(tx.conn(), "run", &id)?;
                 reserve(tx, &host, &project, &new_run)?;

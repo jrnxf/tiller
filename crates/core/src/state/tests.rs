@@ -5,11 +5,12 @@ use std::time::{Duration, Instant};
 use proptest::prelude::*;
 use rusqlite::types::Value as SqlValue;
 
+use super::approvals::{Decision, Execution, NewApproval, NewPr, PrFetch};
 use super::asks::{NewAsk, Resolution};
 use super::attention::NewAttention;
-use super::cards::{CardEdit, NewCard};
+use super::cards::{CardEdit, MARK_LANDED, NewCard};
 use super::projects::{Init, NewProject};
-use super::runs::{NewObservation, NewOrchestrator, NewRun, SpawnChecks};
+use super::runs::{Bind, NewObservation, NewOrchestrator, NewRun, Relaunch, SpawnChecks};
 use crate::domain::*;
 use crate::error::Error;
 use crate::store::{Actor, Ctx, Store};
@@ -164,7 +165,10 @@ pub(crate) fn wait_for(path: &Path, timeout: Duration) -> bool {
 }
 
 /// One writer process: `ops` card creates and `ops` read-modify-write
-/// increments of a shared card, retried on conflict, then one spawn.
+/// appends to a shared card, retried on conflict, then one spawn. Each
+/// append is unique to its writer: an edit equal to the current value is a
+/// no-op whatever rev it names (`protocol.md` 6.3), so two writers counting
+/// from the same value could both succeed with one write.
 #[test]
 #[ignore = "child process of concurrent_writers_lose_no_updates"]
 fn writer_child() {
@@ -192,11 +196,15 @@ fn writer_child() {
                 Err(other) => panic!("card create failed: {other}"),
             }
         }
+        let token = format!("{}-{i}", std::process::id());
         loop {
             let current = store.card(&shared).unwrap();
-            let n: i64 = current.body.as_deref().unwrap_or("0").parse().unwrap();
+            let body = match current.body.as_deref() {
+                Some(tokens) => format!("{tokens},{token}"),
+                None => token.clone(),
+            };
             let edit = CardEdit {
-                body: Some(Some((n + 1).to_string())),
+                body: Some(Some(body)),
                 ..CardEdit::default()
             };
             match store.card_edit(&owner(), &shared, current.rev, edit) {
@@ -254,7 +262,10 @@ proptest! {
         let store = Store::open(&db).unwrap();
         let total = (writers * ops) as i64;
         let shared = store.card(&shared).unwrap();
-        prop_assert_eq!(shared.body, Some(total.to_string()), "an increment was lost");
+        let tokens: Vec<&str> = shared.body.as_deref().unwrap_or_default().split(',').collect();
+        let unique: std::collections::BTreeSet<&str> = tokens.iter().copied().collect();
+        prop_assert_eq!(tokens.len() as i64, total, "an append was lost");
+        prop_assert_eq!(unique.len(), tokens.len(), "an append was applied twice");
         prop_assert_eq!(shared.rev, 1 + total);
 
         let mut display_ids: Vec<i64> = store
@@ -766,4 +777,387 @@ fn a_write_without_its_event_is_rolled_back() {
         .unwrap_err();
     assert_eq!(error.code(), "internal");
     assert_eq!(store.card(&card.id).unwrap().title, "x");
+}
+
+fn daemon() -> Ctx {
+    Ctx::new(Actor::Daemon)
+}
+
+/// A ship card with open PR `number` at `head` and a merge approval
+/// requested on it. Returns the card and the approval.
+fn requested_merge(store: &mut Store, number: i64, head: &str) -> (Card, Approval) {
+    let card = store
+        .card_create(&owner(), None, card(CardKind::Ship, "ship it"), None)
+        .unwrap()
+        .value;
+    let pr = store
+        .pr_link(
+            &owner(),
+            NewPr {
+                card: card.id.clone(),
+                run_id: None,
+                number,
+                url: format!("https://example.com/example/alpha/pull/{number}"),
+                head_sha: Some(head.into()),
+                base_ref: Some("main".into()),
+            },
+        )
+        .unwrap()
+        .value;
+    let approval = store
+        .approval_request(
+            &owner(),
+            NewApproval {
+                kind: ApprovalKind::Merge,
+                card: card.id.clone(),
+                run_id: None,
+                pr_id: Some(pr.id),
+                branch: None,
+                head_sha: head.into(),
+                action: ApprovalAction::Squash,
+                memory_paths: None,
+                grant_id: None,
+            },
+        )
+        .unwrap()
+        .value;
+    (card, approval)
+}
+
+fn accept() -> Decision {
+    Decision {
+        accept: true,
+        via: AnsweredVia::Board,
+        memory: Vec::new(),
+    }
+}
+
+fn recovery(store: &mut Store, card: &Card) -> Attention {
+    store
+        .attention_open(
+            &owner(),
+            None,
+            NewAttention {
+                card: card.id.clone(),
+                kind: AttentionKind::Recovery,
+                question: "PR merged outside Tiller. Mark landed or reopen work?".into(),
+                options: Some(serde_json::json!([MARK_LANDED, "Reopen work"])),
+                ..NewAttention::default()
+            },
+        )
+        .unwrap()
+        .value
+}
+
+/// Only a "Mark landed" answer to a recovery item is evidence for
+/// `landed`; "Reopen work" is not.
+#[test]
+fn only_mark_landed_confirms_an_outside_merge() {
+    let (mut store, _) = memory_store();
+    let ship = store
+        .card_create(&owner(), None, card(CardKind::Ship, "outside"), None)
+        .unwrap()
+        .value;
+    let item = recovery(&mut store, &ship);
+    store
+        .attention_answer(&owner(), None, &item.id, "Reopen work", AnsweredVia::Board)
+        .unwrap();
+    let error = store
+        .card_close(&owner(), &ship.id, CardOutcome::Landed, None, None)
+        .unwrap_err();
+    assert_eq!(error.code(), "refused");
+
+    let item = recovery(&mut store, &ship);
+    store
+        .attention_answer(&owner(), None, &item.id, MARK_LANDED, AnsweredVia::Board)
+        .unwrap();
+    let closed = store
+        .card_close(&owner(), &ship.id, CardOutcome::Landed, None, None)
+        .unwrap()
+        .value;
+    assert_eq!(closed.card.outcome, Some(CardOutcome::Landed));
+}
+
+/// Cancelling a card stales its requested and accepted approvals, so the
+/// daemon can never execute one for a closed card.
+#[test]
+fn closing_a_card_stales_its_approvals() {
+    let (mut store, _) = memory_store();
+    let (requested_card, requested) = requested_merge(&mut store, 1, "a1b2c3d4e5f6a7b8");
+    store
+        .card_cancel(&owner(), &requested_card.id, "not needed")
+        .unwrap();
+    let approval: Approval = super::get(store.conn(), "approval", &requested.id).unwrap();
+    assert_eq!(approval.state, ApprovalState::Stale);
+
+    let (accepted_card, accepted) = requested_merge(&mut store, 2, "0123456789abcdef");
+    store
+        .approval_decide(&owner(), None, &accepted.id, accept())
+        .unwrap();
+    store
+        .card_cancel(&owner(), &accepted_card.id, "not needed")
+        .unwrap();
+    let approval: Approval = super::get(store.conn(), "approval", &accepted.id).unwrap();
+    assert_eq!(approval.state, ApprovalState::Stale);
+    let error = store
+        .approval_execute(&daemon(), &accepted.id, "0123456789abcdef")
+        .unwrap_err();
+    assert_eq!(error.code(), "refused");
+}
+
+/// When the forge head moved after an approval, the old approval goes stale
+/// and a new requested approval at the new head asks the owner again; that
+/// one can be accepted and executed.
+#[test]
+fn a_moved_head_asks_again_on_a_new_approval() {
+    let (mut store, _) = memory_store();
+    let (card, old) = requested_merge(&mut store, 1, "aaaaaaaaaaaa1111");
+    store
+        .approval_decide(&owner(), None, &old.id, accept())
+        .unwrap();
+    let moved = "bbbbbbbbbbbb2222";
+    let execution = store
+        .approval_execute(&daemon(), &old.id, moved)
+        .unwrap()
+        .value;
+    let Execution::Stale(stale) = execution else {
+        panic!("a moved head must not execute: {execution:?}");
+    };
+    assert_eq!(stale.state, ApprovalState::Stale);
+
+    let fresh: Approval = super::find(
+        store.conn(),
+        "card_id = ?1 AND state = 'requested'",
+        &[&card.id],
+    )
+    .unwrap()
+    .expect("a new approval at the moved head");
+    assert_eq!(fresh.head_sha.as_deref(), Some(moved));
+    assert_eq!(fresh.pr_id, old.pr_id);
+    let item: Attention = super::find(
+        store.conn(),
+        "card_id = ?1 AND kind = 'merge' AND answered_at IS NULL AND withdrawn_at IS NULL",
+        &[&card.id],
+    )
+    .unwrap()
+    .expect("a merge item asks again");
+    let evidence: serde_json::Value =
+        serde_json::from_str(item.evidence.as_deref().unwrap()).unwrap();
+    assert_eq!(evidence["approval_id"], fresh.id.as_str());
+
+    // The forge poller records the new head; the fresh approval matches it.
+    store
+        .pr_refresh(
+            &daemon(),
+            fresh.pr_id.as_deref().unwrap(),
+            PrFetch {
+                state: PrState::Open,
+                head_sha: Some(moved.into()),
+                base_ref: Some("main".into()),
+                checks: Checks::Success,
+                review_decision: ReviewDecision::None,
+                mergeable: Mergeable::Clean,
+                merged_at: None,
+                merge_sha: None,
+                pipeline_state: PipelineState::None,
+                fetch_error: None,
+            },
+        )
+        .unwrap();
+
+    store
+        .approval_decide(&owner(), None, &fresh.id, accept())
+        .unwrap();
+    let execution = store
+        .approval_execute(&daemon(), &fresh.id, moved)
+        .unwrap()
+        .value;
+    assert!(matches!(execution, Execution::Executing(_)));
+}
+
+/// A head sha that is not hex is a usage error, never a slicing panic.
+#[test]
+fn a_malformed_head_sha_is_refused() {
+    let (mut store, _) = memory_store();
+    let (_, approval) = requested_merge(&mut store, 1, "abcdef0123456789");
+    let error = store
+        .approval_execute(&daemon(), &approval.id, "héad-moved")
+        .unwrap_err();
+    assert_eq!(error.code(), "usage");
+}
+
+/// A resume can carry an ended session's Claude id into a new row: the ended
+/// row gives it up. A live row keeps it.
+#[test]
+fn a_claude_id_moves_from_an_ended_session_only() {
+    let (mut store, orchestrator) = memory_store();
+    let card = store
+        .card_create(&owner(), None, card(CardKind::Ship, "work"), None)
+        .unwrap()
+        .value;
+    let started = store
+        .run_start(&owner(), None, builder_run(&card.id))
+        .unwrap()
+        .value;
+    let bind = |claude: &str| Bind {
+        session_id: started.session.id.clone(),
+        claude_session_id: claude.into(),
+        pane_id: None,
+        transcript_path: None,
+        source: "resume".into(),
+    };
+    let error = store
+        .run_bind_session(&Ctx::new(Actor::Hook), bind("claude-orchestrator"))
+        .unwrap_err();
+    assert_eq!(error.code(), "refused");
+
+    store
+        .session_end(&owner(), &orchestrator, "restarted")
+        .unwrap();
+    let resumed = store
+        .session_start(
+            &owner(),
+            NewOrchestrator {
+                project_id: "alpha".into(),
+                claude_session_id: Some("claude-orchestrator".into()),
+                ..NewOrchestrator::default()
+            },
+        )
+        .unwrap()
+        .value
+        .session;
+    assert_eq!(
+        resumed.claude_session_id.as_deref(),
+        Some("claude-orchestrator")
+    );
+    let old: Session = super::get(store.conn(), "session", &orchestrator).unwrap();
+    assert_eq!(old.claude_session_id, None);
+}
+
+/// A new attempt is supervised by the project's live orchestrator, and is
+/// refused when there is none.
+#[test]
+fn a_relaunched_attempt_takes_the_live_orchestrator() {
+    let (mut store, orchestrator) = memory_store();
+    let card = store
+        .card_create(&owner(), None, card(CardKind::Ship, "work"), None)
+        .unwrap()
+        .value;
+    let started = store
+        .run_start(
+            &owner(),
+            None,
+            NewRun {
+                worktree_path: Some("/home/user/work/alpha-1".into()),
+                ..builder_run(&card.id)
+            },
+        )
+        .unwrap()
+        .value;
+    let relaunch = || Relaunch {
+        note: "fresh brief".into(),
+        new_attempt: true,
+        stop_proof: Some("pane exited".into()),
+    };
+    store
+        .session_end(&owner(), &orchestrator, "restarted")
+        .unwrap();
+    let error = store
+        .run_relaunch(&owner(), &started.run.id, relaunch())
+        .unwrap_err();
+    assert_eq!(error.code(), "refused");
+
+    let successor = store
+        .session_start(
+            &owner(),
+            NewOrchestrator {
+                project_id: "alpha".into(),
+                claude_session_id: Some("claude-orchestrator-2".into()),
+                ..NewOrchestrator::default()
+            },
+        )
+        .unwrap()
+        .value
+        .session;
+    let relaunched = store
+        .run_relaunch(&owner(), &started.run.id, relaunch())
+        .unwrap()
+        .value;
+    assert_ne!(relaunched.run.id, started.run.id);
+    assert_eq!(relaunched.run.supervisor_session_id, successor.id);
+}
+
+/// The board's add card keys under its own command: its key never replays
+/// as a plain `ask.record`, whose response has a different shape.
+#[test]
+fn a_board_add_key_is_not_an_ask_record_key() {
+    let (mut store, _) = memory_store();
+    store
+        .board_add(
+            &Ctx::new(Actor::Board),
+            Some("click-9"),
+            card(CardKind::Ship, "from the board"),
+        )
+        .unwrap();
+    let again = store
+        .board_add(
+            &Ctx::new(Actor::Board),
+            Some("click-9"),
+            card(CardKind::Ship, "from the board"),
+        )
+        .unwrap();
+    assert!(again.replayed);
+    let error = store
+        .ask_record(
+            &owner(),
+            Some("click-9"),
+            NewAsk {
+                project_id: "alpha".into(),
+                session_id: None,
+                source: AskSource::Script,
+                text: "note".into(),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "refused");
+    assert!(error.to_string().contains("board.add"), "{error}");
+}
+
+/// A quota window the feed stops reporting is dropped, so the spawn floor
+/// never reads a dead window; an empty feed is a failed read and keeps all.
+#[test]
+fn a_quota_window_the_feed_drops_is_gone() {
+    let (mut store, _) = memory_store();
+    let window = |label: &str| super::caches::QuotaReading {
+        label: label.into(),
+        percent_remaining: Some(50.0),
+        resets_at: None,
+        pace: None,
+        reserve: None,
+        burn_multiple: None,
+        elapsed_percent: None,
+        projected_exhaustion_at: None,
+        title: None,
+        kind: Some("weekly".into()),
+        fetch_error: None,
+    };
+    let labels = |store: &Store| -> Vec<String> {
+        super::list::<QuotaWindow>(store.conn(), "1 = 1 ORDER BY label", &[])
+            .unwrap()
+            .into_iter()
+            .map(|w| w.label)
+            .collect()
+    };
+    store
+        .cache_quota(
+            &daemon(),
+            vec![window("claude-weekly"), window("codex-weekly")],
+        )
+        .unwrap();
+    store.cache_quota(&daemon(), Vec::new()).unwrap();
+    assert_eq!(labels(&store), ["claude-weekly", "codex-weekly"]);
+    store
+        .cache_quota(&daemon(), vec![window("claude-weekly")])
+        .unwrap();
+    assert_eq!(labels(&store), ["claude-weekly"]);
 }
