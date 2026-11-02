@@ -1,0 +1,486 @@
+# State model
+
+This is the contract for `state.db`, the one SQLite database each host keeps as the authority for its workflow records (ADR 0002). It names every entity, the facts each one owns, how the board's columns are derived from those facts, and the transaction and event behind every mutation. `schema.sql` next to it is the draft DDL; T2.1 turns both into `crates/core`.
+
+Written Monday 2026-11-02, Lisbon time (WET). Task T1.1. Status: draft for CP2.
+
+Every other spec builds on this one: recovery (T1.2) repairs these records, the protocol (T1.3) exposes them, authority (T1.4) says who may mutate them, and memory (T1.5) adds the tables that are never loaded into context.
+
+## 1. Principles
+
+1. **One authority per host.** `state.db` at `~/.tiller/state.db` owns asks, cards, runs, attention, approvals, reservations, the outbox and events for the projects this host owns. A project has exactly one owner host in v1. Another host's cards never enter this database; remote hosts appear only as read-only pane caches.
+2. **Facts, not columns.** The database stores lifecycle facts: work state, holds, dependencies, attention, run and session activity, PR state. The board column is computed from them by the precedence table in section 6 and is never stored.
+3. **One owner per fact.** Section 9 names the record that owns each fact. Everything else is a cache with a `fetched_at`, or a projection that can be rebuilt by a query.
+4. **Every mutation is one transaction with its event.** All writes go through `tiller` or the daemon, in `BEGIN IMMEDIATE`, in WAL mode with `busy_timeout`. The record change and its event row commit together or not at all. Hooks write the same way, without the daemon.
+5. **Edits carry `rev`; transitions carry preconditions.** A field edit (title, priority, reason) must name the `rev` it was made against and is refused with a readable conflict when stale. A state transition (close, start a run, answer a decision) is guarded by the facts it needs (open, no open attention, same head SHA), which is what makes a stale click harmless.
+6. **Stable ids inside, short ids outside.** Every row has a ULID primary key. Cards also carry a display id, `alpha-42`, minted from a per-project counter in the same transaction that creates the card.
+7. **Nothing destructive is derived.** No query result closes a card, removes a worktree or merges a PR. Those are explicit mutations with their own preconditions, and reconcile (T1.2) may only open attention items when evidence conflicts.
+
+## 2. Identity
+
+### ULIDs
+
+Every entity's primary key is a ULID: 26 characters of Crockford base32, time-ordered, minted by the writer (`ulid` crate). ULIDs are stored as `TEXT` and sort by creation time. They never change, are never reused, and are the ids the CLI, the API and the SSE stream use. The CLI accepts an unambiguous prefix of a ULID wherever it accepts a ULID (T1.3).
+
+### Display ids
+
+Cards get a display id for chat and the board: `<project>-<n>`, for example `alpha-42`. `n` is `projects.next_card_seq`, read and incremented inside the `card.create` transaction, so two concurrent creates cannot mint the same id. A display id is unique per host (`cards.display_id` is unique), never reused, and survives the card's whole life, including import: an imported Firstmate task keeps its original id as `legacy_id` and gets a fresh display id.
+
+Project ids are short lowercase slugs (`^[a-z][a-z0-9]{1,15}$`). The id `fleet` is reserved on every host for host-level work that belongs to no project.
+
+Runs are addressed through their card and role: `alpha-42 build`. The herdr agent name is `<display id>-<role>`, `alpha-42-build`; a second run of the same role on the same card appends its attempt number, `alpha-42-build-2` (`runs.attempt`).
+
+Asks, attention items, approvals and outbox messages are addressed by ULID. The board shows them with their card's display id beside them; the CLI prints both.
+
+## 3. Entities
+
+Each entity lists the facts it owns. Columns the entity only caches say so.
+
+### Host
+
+`hosts`: this host and every saved herdr machine it can see.
+
+- `id` (ULID), `label` (the role label the owner uses, for example `host-a`), `kind` (`local` or `remote`), `herdr_machine` (null for local, the saved machine id for remote).
+- `lane_capacity`: how many runs may be active at once on this host (required for the local host, null for remote ones). `ram_floor_mb`, `disk_floor_mb`: the free-resource floors `tiller spawn` checks live (P03). The floors are config, not state, and may move to the config file later; they are here so a spawn can quote the value it checked.
+- `last_seen_at`, `stale_reason` (cache from the herdr poller, T2.5): feed the Machines section.
+
+The owner marker is a file, `~/.tiller/owner`, not a row (plan v2, point 15). `tiller` refuses every mutation while the marker names another system. `meta.host_id` records which host this database belongs to, so a copied database cannot be mistaken for another host's.
+
+### Project
+
+`projects`: one row per project this host owns, plus `fleet`.
+
+- `id` (the slug, primary key), `name`, `repo` (`owner/name` or null for local-only), `remote` (git remote URL), `default_branch`, `delivery` (`no-mistakes`, `no-mistakes-prod-only`, `direct-pr`, `direct-push`, `local-only`; P10 and P11), `checks` (JSON: which project checks a direct push must run), `capacity` (max active runs for this project), `owner_host_id`, `added_at`, `next_card_seq`, `rev`, `retired_at`.
+- The project's own checkout path is not stored; treehouse and the dotfiles own it.
+
+Ownership moves between hosts only through export and import (M6). There is no in-place reassignment in v1.
+
+### Session
+
+`sessions`: every Claude Code session Tiller launched or recognized: the orchestrator per project and each worker session.
+
+- `id` (ULID), `claude_session_id` (the harness id, unique when known), `role` (`orchestrator`, `scout`, `builder`, `reviewer`, `verifier`), `project_id`, `run_id` (null for an orchestrator), `host_id`, `pane_id` (cache from herdr), `started_at`, `ended_at`, `end_reason`.
+- `activity`, `activity_observed_at`, `activity_source`: the newest observation's verdict, copied in the same transaction that inserts the observation. These three columns are a projection of `observations` kept for cheap reads; the observation row owns the fact.
+- `transcript_path`: where the tailer reads (host-capabilities, transcript rule).
+- `config_hash`: the configuration that produced this session: role file, skills, settings fragment, memory revision, model, CLI version (plan v2, point 22).
+
+An orchestrator session has no run. Its card-level facts are its project's.
+
+### Ask
+
+`asks`: every message the owner sends an orchestrator, and every note a script drops (P27, P60). Recorded by the `UserPromptSubmit` hook or `tiller ask note` before the agent reads it.
+
+- `id` (ULID), `project_id`, `session_id` (null for a script note), `source` (`prompt`, `board`, `script`, `import`), `text`, `received_at`.
+- `disposition`: `unresolved` until `tiller ask resolve` runs, then `new` (a card was created), `followup` (an existing card was touched), `chat`, or `cancelled`. `resolved_at`, `resolved_by_session_id`.
+- A board "add card" records an ask with `source = board` and resolves it to `new` in the same transaction as the card create, so the wake-up line the orchestrator sees never creates a second card (plan v2, point 13).
+
+Ask text is work data. It stays in this database and is never exported to git.
+
+### Card
+
+`cards`: the unit of work. Every ask that is not chat becomes or touches a card.
+
+- `id` (ULID), `display_id`, `legacy_id` (the Firstmate task id on import, else null), `project_id`, `kind`: `ship` (a change that lands), `scout` (research that is reported), `question` (something only the owner can answer), `ops` (an operation with evidence, such as a cutover step).
+- `title`, `body` (markdown brief), `priority` (0 highest to 4), `category`, `size` (`S`, `M`, `L` or null; never estimated by the importer, plan v2 point 20), `acceptance` (text), `fixes_card_id` (a later defect pointing back at the card that introduced it).
+- `state`: `open` or `closed`. `outcome` (null while open): `landed`, `reported`, `answered`, `completed`, `cancelled`, `failed`, `abandoned`, `superseded`. `closed_at`, `closed_by` (session or `board` or `daemon`).
+- `created_at`, `created_by_ask_id`, `rev`.
+
+A card never stores a column, a hold, a dependency, an attention state or an activity. Those live in their own tables below, so each has one owner and the column can be derived.
+
+### Ask to card link
+
+`ask_cards`: many to many. One ask can create several cards; several asks can touch one card.
+
+- `ask_id`, `card_id`, `relation` (`created`, `followup`), `linked_at`, `linked_by_session_id`.
+- Written by `ask.resolve` in the same transaction as the disposition.
+
+### Dependency
+
+`card_deps`: `card_id` waits on `depends_on_card_id` (P32).
+
+- `added_at`, `added_by`, `released_at`, `release_reason` (`landed`, `reported`, `answered`, `completed`, `removed`).
+- A dependency is released by reconcile in the transaction that closes the dependency card with a satisfying outcome, or removed by hand. A dependency on a cancelled or failed card is not released; it opens an attention item instead, so the owner decides.
+
+### Hold
+
+`holds`: a dated park (P19, P30). At most one open hold per card.
+
+- `id`, `card_id`, `until_at` (the re-ask moment in UTC, set from a Lisbon date), `reason`, `set_at`, `set_by`, `released_at`, `release_reason` (`due`, `answered`, `removed`).
+- A hold with `until_at` in the future keeps the card in Queued with no alarm. When `until_at` passes, reconcile releases it and opens an attention item of kind `decision` with the hold's reason as the question, in one transaction. That is how a dated hold re-asks on its date.
+- Undated waits are not holds; they are attention items (P31), because what they wait for is the owner's word.
+- Blocked waits are not holds; they are dependencies.
+
+### Attention
+
+`attention`: everything that needs the owner (P29, P31, P35, plan v2 point 36). One row per question; a card may have several over its life.
+
+- `id`, `card_id`, `kind`: `decision` (a product or direction question), `credential` (a secret or login only the owner can supply), `merge` (a PR ready and the project has no standing grant), `review` (a page or artifact to look at and answer, P47), `recovery` (reconcile found conflicting evidence and will not act), `report` (a scout finished with choices, P33).
+- `question`, `evidence` (text or a JSON list of pointers: event ids, artifact ids, PR urls), `recommendation`, `consequence` (what happens after each answer), `options` (JSON list, optional).
+- `opened_at`, `opened_by_session_id`, `opened_by_run_id`.
+- `answered_at`, `answer` (the owner's exact words), `answered_via` (`board`, `chat`, `cli`), `answer_idempotency_key`.
+- `withdrawn_at`, `withdraw_reason`: the item stopped being a question (the subject landed, the run was cancelled). A withdrawn item was never answered and says so.
+- `rev`.
+
+Rules:
+
+- A card cannot close while it has an open attention item. `card.close` is refused with the item's id. Cleanup never closes a question (matches Firstmate's hold lifecycle).
+- `still_current` is derived, not stored: open, card open, and the run that opened it is still active or the kind does not need a run. The board shows it; the answer path checks it and warns when the item is no longer current but still records the answer.
+- Permission prompts are not attention rows. They are derived from the newest observation of a session (`activity = waiting_permission`) and shown in their own section, so a decision list never fills with dialog clicks (plan v2, point 36).
+- Answering records the exact words and resolves the item in one transaction. A second answer with the same idempotency key returns the first result and changes nothing (`idempotency_keys`; the key is also unique on the row). A different answer to an already answered item is refused: one row holds one answer.
+
+### Run
+
+`runs`: one attempt by one worker role on one card.
+
+- `id`, `card_id`, `role` (`scout`, `builder`, `reviewer`, `verifier`), `attempt` (1, 2, ... per card and role), `predecessor_run_id` (set by a relaunch that keeps the worktree, P24), `model`, `effort`, `host_id`.
+- `worktree_path`, `branch`, `base_branch`, `base_sha`: what the run works in. Treehouse owns the worktree; these are the values recorded at spawn.
+- `supervisor_session_id`: the orchestrator session that owns this run. Exactly one at a time (P21). Reconcile reassigns it to the project's live orchestrator after a restart, with an event.
+- `started_at`, `ended_at`, `outcome` (`landed`, `reported`, `failed`, `abandoned`, `relaunched`, `cancelled`, `cut`), `outcome_note` (for example the partial-work note a 30-minute cut leaves, P55).
+- `pause_until`: a worker's dated pause (`paused ... until`), which silences alarms until then (P19).
+- `last_status_line`, `last_status_at`: the worker's newest status line, copied from its status observation in the same transaction.
+- `config_hash`, `idempotency_key` (from the spawn), `rev`.
+
+A run is active while `ended_at` is null. Several runs of different roles may be active on one card (build and review). Two active runs of the same role on one card are refused (unique partial index).
+
+A run's sessions are in `sessions` (`run_id`). A resume after a reboot that keeps the Claude session id keeps the session row; a relaunch with a fresh session adds a session row to the same run when the worktree and brief are reused, and the run's `predecessor_run_id` is used only when the relaunch is recorded as a new attempt (a new brief). T1.3 fixes which command does which.
+
+### Pull request
+
+`prs`: GitHub owns PR state; this is the cache with its fetch time.
+
+- `id`, `project_id`, `run_id` (the run that opened it, nullable for a PR found by reconcile), `card_id`, `number` (in the project's repo), `url`.
+- Cached from the forge: `state` (`open`, `merged`, `closed`), `head_sha`, `base_ref`, `checks` (`pending`, `success`, `failure`, `none`), `review_decision` (`approved`, `changes_requested`, `none`), `mergeable` (`clean`, `dirty`, `blocked`, `unknown`), `merged_at`, `merge_sha`, `fetched_at`, `fetch_error`.
+- `pipeline_state` (`none`, `running`, `passed`, `failed`): the `no-mistakes` run state, cached from its records.
+- `linked_at`, `linked_by`.
+
+A run may have several PRs (a replacement PR). The newest open one is the run's PR for column derivation.
+
+### Approval
+
+`approvals`: a bound decision to execute one action (plan v2, point 16).
+
+- `id`, `kind` (`merge`, `memory`, `land_direct`, `away`), `card_id`, `run_id`, `project_id`.
+- Binding, by kind:
+  - `merge`: `card_id`, `repo`, `pr_id`, `head_sha`, `action` (`merge`, `squash`, `rebase`).
+  - `land_direct`: `card_id`, `repo`, `branch`, `head_sha`, `action = push`.
+  - `repo` is a snapshot of what was approved; it stays even if the project's repo is renamed later.
+  - `memory`: `diff_sha256`, `base_rev` (the memory file's git revision), `action = apply`.
+  - `away`: `scope` JSON (the standing orders and spend cap), `action = away`; T1.4 owns the shape.
+- `state`: `requested` (a decision was asked for), `accepted` (the owner approved, or a standing grant matched), `rejected`, `executing` (the daemon has started the action), `succeeded`, `failed`, `uncertain` (the action was sent and its result could not be read; reconcile resolves it from the forge), `stale` (the binding no longer matches reality: the head SHA moved, the PR closed, the base revision changed).
+- `requested_at`, `requested_by`, `decided_at`, `decided_by` (`owner` or `grant:<id>`), `decision_idempotency_key`, `executed_at`, `finished_at`, `result` (JSON: merge SHA, error text).
+- `grant_id`: the standing grant that accepted it, or null.
+
+Rules:
+
+- Only the daemon moves an approval to `executing` and beyond, and only `tiller land` run by the daemon merges (T1.4). Before `executing`, the daemon re-reads the PR head; a mismatch marks the approval `stale` and opens a `merge` attention item with the new SHA.
+- A PR refresh that sees a new head SHA while an approval is `accepted` marks it `stale` in the same transaction (T4.3 acceptance: a push after approval invalidates it).
+- A click that arrives twice with the same `decision_idempotency_key` returns the first outcome and causes no second action.
+- `grants` (standing approvals, P13 and P34) are per project and action with conditions (checks green, PR opened by a fleet run, branch pattern). A matching grant creates an `accepted` approval bound to the head SHA at that moment, so the audit trail is the same as a hand approval. T1.4 defines the conditions and who may create a grant.
+
+### Reservation
+
+`reservations`: capacity held for a run (plan v2, point 35).
+
+- `id`, `host_id`, `project_id`, `run_id`, `reserved_at`, `reserved_by`, `released_at`, `release_reason` (`ended`, `spawn_failed`, `reconciled`).
+- `spawn` reserves inside `BEGIN IMMEDIATE`: it counts active reservations for the host and the project, compares them with `hosts.lane_capacity` and `projects.capacity`, and inserts or refuses. Two spawns cannot both pass, because the second waits for the first transaction. The reservation is created before the worktree and pane exist; a spawn that fails later releases it with `spawn_failed` in its own transaction.
+- A reservation is released when its run ends. Reconcile releases a reservation whose run is ended or whose run row is missing, and never the other way around.
+- The RAM and disk floors (P03) and the quota floor (P04) are checked live at spawn, inside the same transaction window, and the values seen are written into the `run.start` event payload. Quota windows are cached in `quota_windows` (owned by `quota-axi`, fetched every 5 minutes, never with an account id).
+
+### Outbox
+
+`outbox`: every message to a session, stored before anything is typed (plan v2, point 13).
+
+- `id`, `target_session_id`, `target_pane_id` (cache at enqueue time), `kind` (`wake`, `steer`, `answer`, `note`), `body`, `card_id`, `reply_to` (an ask or attention id), `idempotency_key`.
+- `state`: `pending` (stored, not yet delivered), `delivered` (the wake-up line reached the pane and herdr confirmed the session is the target), `acked` (the target ran `tiller inbox <id>`, which reads the body and acks in one transaction), `failed` (attempts exhausted, or the target session is gone and no successor exists).
+- `attempts`, `next_attempt_at`, `delivered_at`, `acked_at`, `failed_at`, `failure_reason`.
+- `rev`.
+
+Rules:
+
+- The pane only ever receives one line, `tiller inbox <id>`. The payload is the row.
+- A retry checks that the pane still hosts `target_session_id` before typing; if the session moved, the message is retargeted to the successor session of the same run or project in a new transaction, with an event.
+- `delivered` but not `acked` after the idle threshold, with the session observed idle, means the doorbell was missed: the daemon rings again (`attempts` grows, state stays `delivered`) (P23).
+- A busy pane or a visible permission dialog defers delivery (`next_attempt_at`), it does not fail it.
+- Enqueue with an existing `idempotency_key` returns the existing row.
+
+### Observation
+
+`observations`: append-only evidence about sessions. Hooks, the transcript tailer, the herdr poller and liveness checks write here. Nothing here is ever loaded into an agent's context.
+
+- `id`, `session_id` (nullable when the source could not map it yet), `run_id`, `source` (`hook`, `transcript`, `herdr`, `liveness`, `status_line`), `event` (the hook event or detected kind: `UserPromptSubmit`, `Stop`, `StopFailure`, `Notification:permission_prompt`, `interrupt`, `session_end`, `pane_gone`, ...), `verdict` (the activity it implies: `working`, `idle`, `waiting_permission`, `waiting_input`, `errored`, `ended`, `unknown`, or null when it implies none), `observed_at` (when the source saw it), `recorded_at`, `payload` (JSON, with unknown fields kept).
+- T1.3 maps every hook event and `notification_type` to exactly one `event` and `verdict`.
+- The session's `activity` columns are updated in the same transaction when the new observation is newer than the current `activity_observed_at`. Out-of-order arrivals are stored but do not move the projection backwards.
+- Staleness is derived: an activity whose `activity_observed_at` is older than the role's threshold reads as `stale` (thresholds: T1.2). `unknown` is explicit: a session with no observation yet, or one whose last source has gone away.
+- Retention: 30 days, except rows referenced by an `evidence` row (T1.5) or a retro.
+
+### Event
+
+`events`: the append-only log, one or more rows per mutation, written in the mutation's transaction.
+
+- `seq` (integer, autoincrement; the SSE `Last-Event-ID`), `id` (ULID), `at`, `txn` (the mutation name from section 8), `actor` (`session:<id>`, `board`, `daemon`, `hook`, `import`, `owner`; `owner` is the developer acting through the CLI or the board, see T1.4), `entity` (`ask`, `card`, `run`, ...), `entity_id`, `kind` (`card.created`, `run.ended`, ...), `rev_after` (the entity's rev after the write, null for append-only entities), `card_id` (denormalized for timeline queries), `payload` (JSON, the fields that changed and the preconditions checked), `idempotency_key`.
+- Events are never updated or deleted. They are exported in the JSONL export (T2.3).
+- The board's SSE stream carries `seq`, `entity`, `entity_id` and `rev_after`, so a client ignores an event older than what it holds and resumes from `seq` after a gap.
+- Firstmate's fleet ledger events map onto these: `task.dispatched` is `run.started`, `task.status` is `run.status`, `task.pr_ready` is `pr.linked`, `task.merged` is `approval.succeeded` or `card.closed` with `landed`, `task.cleaned_up` is `run.cleaned`.
+
+### Obligation
+
+`obligations`: a promise tied to an event (P15, P16). "Report it ready once CI passes" is a row, not a memory.
+
+- `id`, `card_id`, `project_id`, `what`, `trigger_kind` (`event`, `date`, `standing`), `trigger_event` (an event kind and entity filter, JSON), `due_at`, `state` (`open`, `met`, `cancelled`), `opened_at`, `opened_by`, `met_at`, `met_by_event_seq`.
+- Reconcile marks an obligation `met` in the transaction that writes the triggering event, and enqueues the outbox message that fulfils it in the same transaction. A `standing` obligation re-arms instead of closing.
+
+### Artifact
+
+`artifacts`: pages, screenshots and reports made for the owner, so they stay findable (P50).
+
+- `id`, `card_id`, `run_id`, `kind` (`page`, `screenshot`, `report`, `video`, `other`), `title`, `url` (a link the owner can open), `path` (local, outside the repo), `created_at`, `created_by_session_id`, `retired_at`.
+
+### Review
+
+`reviews`: review coverage and findings per run (plan v2, point 20).
+
+- `id`, `run_id`, `card_id`, `reviewer` (`code-review`, `spec-review`, `no-mistakes`, `human`), `coverage` (`diff`, `spec`, `full`), `findings_high`, `findings_medium`, `findings_low`, `verdict` (`pass`, `fail`, `ask-user`), `recorded_at`, `source_url`.
+
+### Handoff
+
+`handoffs`: the record a fresh orchestrator resumes from (plan v2, point 34; T4.5).
+
+- `id`, `project_id`, `session_id`, `written_at`, `active_cards` (JSON list of card ids), `pending_attention` (JSON list), `workers` (JSON list of run ids with one line each), `conclusions` (text), `next_action` (text).
+- Most of it is a projection of the tables above at write time; `conclusions` and `next_action` are the only new facts.
+
+### Caches owned elsewhere
+
+These tables hold a copy of a fact another system owns. Each row carries `fetched_at`; a stale cache is shown as stale, never trusted as current.
+
+- `panes` (herdr): `pane_id`, `host_id`, `workspace_label`, `agent_name`, `agent_status`, `session_id` (the Tiller session bound to it), `metadata` (JSON row tokens), `fetched_at`, `gone_at`.
+- `worktrees` (treehouse and git): `path`, `host_id`, `project_id`, `run_id`, `branch`, `head_sha`, `dirty`, `unlanded_commits` (count of commits not on the default branch, or null when unknown), `fetched_at`, `gone_at`.
+- `quota_windows` (quota-axi): `label`, `percent_remaining`, `resets_at`, `pace`, `reserve`, `burn_multiple`, `elapsed_percent`, `projected_exhaustion_at`, `fetched_at`, `fetch_error`. No account id, no email, ever.
+
+### Bookkeeping
+
+- `meta`: key-value: `schema_version`, `host_id`, `created_at`, `import_manifest_sha256`.
+- `idempotency_keys`: `key`, `command`, `entity`, `entity_id`, `response` (JSON), `created_at`. A command that carries a key already present returns the stored response and performs nothing. Keys expire after 30 days.
+- `proposals`, `evidence`, `memory_revisions`: owned by T1.5. `schema.sql` reserves the names and says nothing else about them.
+
+## 4. Relationships
+
+| From | To | Cardinality | Where it lives |
+|---|---|---|---|
+| ask | card | many to many | `ask_cards` (`created` or `followup`) |
+| card | run | one to many | `runs.card_id`; several roles may be active at once, one per role |
+| run | session | one to many | `sessions.run_id`; a resume or relaunch adds a session |
+| run | PR | one to many | `prs.run_id`; the newest open one is the run's PR |
+| card | PR | one to many | `prs.card_id`, denormalized from the run for PRs found without a run |
+| card | dependency | many to many | `card_deps` |
+| card | hold | one to at most one open | `holds`, partial unique index on open rows |
+| card | attention | one to many | `attention.card_id` |
+| run | approval | one to many | `approvals.run_id`; a stale approval stays and a new one is requested |
+| run | reservation | one to one while active | `reservations.run_id`, partial unique on open rows |
+| session | outbox message | one to many | `outbox.target_session_id` |
+| session | observation | one to many | `observations.session_id` |
+| run | supervisor session | many to one | `runs.supervisor_session_id`; exactly one at a time |
+| project | owner host | many to one | `projects.owner_host_id`; one host per project in v1 |
+| project | orchestrator session | one to at most one live | `sessions` where `role = orchestrator` and `ended_at` is null |
+| card | artifact, review, obligation | one to many | each table's `card_id` |
+| card | later defect | one to many | `cards.fixes_card_id` on the later card |
+
+## 5. Lifecycle facts
+
+The facts that decide what a card is doing, each with its one owner:
+
+| Fact | Owner | Values | Written by |
+|---|---|---|---|
+| Work state | `cards.state`, `cards.outcome` | `open`; `closed` with an outcome | `card.close`, `card.cancel`, `card.reopen` |
+| Dated park | `holds` (open row) | `until_at`, `reason` | `card.hold`, `hold.release` |
+| Dependency | `card_deps` (unreleased rows) | the card waited on | `dep.add`, `dep.release` |
+| Attention | `attention` (open rows) | kind, question, still current (derived) | `attention.open`, `attention.answer`, `attention.withdraw` |
+| Run state | `runs.ended_at`, `runs.outcome`, `runs.pause_until` | active, paused until, ended with an outcome | `run.start`, `run.pause`, `run.end` |
+| Agent activity | newest `observations` row per session; cached on `sessions.activity` with `activity_observed_at` | `working`, `idle`, `waiting_permission`, `waiting_input`, `errored`, `ended`, `unknown`; `stale` is derived from age | `observation.record` |
+| PR state | `prs` (cache of GitHub) | `open`, `merged`, `closed`, with `checks`, `head_sha`, `pipeline_state` | `pr.refresh` |
+| Delivery of a decision | `approvals.state` | requested to succeeded, or stale | `approval.*` |
+| Capacity | `reservations` (open rows) | reserved or released | `reservation.reserve`, `reservation.release` |
+| Message delivery | `outbox.state` | pending, delivered, acked, failed | `outbox.*` |
+
+Nothing in this table is a column name on the board.
+
+## 6. Column derivation
+
+The board has six columns: Asked, Queued, Working, Needs you, Landing, Done. A column is computed per card (and per unresolved ask) by the first matching row below. `schema.sql` carries the same logic as the view `card_column`, so the daemon, the CLI and a test all read one definition.
+
+| Order | Column | A card is here when | Badge |
+|---|---|---|---|
+| 1 | Done | `cards.state = closed`. Shown for 7 days after `closed_at`, then only in history | the outcome: landed, reported, answered, completed; or cancelled, failed, abandoned, superseded in their own colours |
+| 2 | Needs you | an open attention item exists for the card; or an active run's session activity is `waiting_permission` or `waiting_input` and not stale | the attention kind, or "permission prompt" kept visually apart from decisions; sorted by age |
+| 3 | Landing | `cards.kind = ship` and (an open PR on the card has `checks` pending or `pipeline_state` running, whether or not the run that opened it is still active, or a `merge` or `land_direct` approval for the card is `accepted` or `executing`) | checks, pipeline, merging |
+| 4 | Working | an active run exists (`runs.ended_at` is null), whatever its activity | the most urgent activity across the card's active runs: errored, working, idle, paused until a date, stale, unknown |
+| 5 | Queued | the card is open with no active run: a hold is open, a dependency is unreleased, or nothing has started | parked with its reason and date; blocked by `<display id>`; waiting for capacity; filed |
+| 6 | Asked | not a card: an ask with `disposition = unresolved`. It should last seconds; one older than a minute shows its age | the orchestrator it waits on |
+
+Notes:
+
+- A ship card with a PR open but implementation still going on (the worker is pushing more commits) is Landing only while checks are pending; with checks green and no approval it is Needs you (`merge` attention, or auto-accepted by a grant and so Landing again). A PR open with checks failed and the worker active is Working with a red PR chip, since the worker owns the fix. A PR open with checks failed and no active run is Queued with the red chip until a run is started or the card is closed.
+- The Needs you badge and sort order come from the oldest open attention item.
+- A card with an active run whose session is `errored` is Working with an error badge until reconcile ends the run or opens a `recovery` item.
+- A closed card with an open attention item cannot exist (the close is refused). A closed card with an open run cannot exist either: `card.close` requires every run ended, except `cancel`, which ends them with `cancelled`.
+- `stale` never changes the column by itself. Reconcile decides, by the recovery table, when a stale run becomes a `recovery` attention item.
+
+## 7. Definition of done per card kind
+
+| Kind | Done means | Outcome | Who records it |
+|---|---|---|---|
+| `ship` | The change is on the project's default branch through the project's delivery mode: an approval of kind `merge` or `land_direct` reached `succeeded` for this card, or reconcile found the PR merged outside Tiller and the owner confirmed through a `recovery` item. For `direct-push` projects, the deploy build the project names has also been watched to a result. The worker's own "done" is never enough (P08) | `landed` | the daemon, in the transaction that records the approval result or the confirmed merge |
+| `scout` | A report artifact is recorded on the card, and no attention item is open. A scout that ends with choices files a `report` attention item and the card stays in Needs you until it is answered; then the card closes | `reported` | the orchestrator (`tiller card close --reported`), refused while attention is open |
+| `question` | Its attention item is answered | `answered` | the same transaction as `attention.answer` |
+| `ops` | `tiller card complete` with an evidence line (a command output, a link). No run is required | `completed` | the orchestrator or the owner |
+| any | The owner or orchestrator cancels it; the subject landed elsewhere; every run failed and nobody retries; the worker abandoned it | `cancelled`, `superseded`, `failed`, `abandoned` | an explicit `card.cancel` or `card.close --outcome`, always with a reason; never reconcile alone |
+
+Every close requires: no open attention item, no active run, and (for `landed`) the approval or confirmation above. Runs are cleaned up (worktree returned, pane closed) only after the card is closed or the run has ended with no unlanded commits (P51). Cleanup is a run mutation, not part of close, and refuses while `worktrees.unlanded_commits` is non-zero or unknown.
+
+## 8. Mutations
+
+Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks its preconditions inside the transaction, writes its rows, writes its event rows, and commits. The event's `txn` column carries the name. A mutation that composes others (a spawn) runs them in one transaction and writes one event per sub-step.
+
+`rev` is bumped on every write to a row that has one. Edits name `expected_rev`; a mismatch is refused with `conflict: <entity> <id> is at rev <n>, you sent <m>; <field> is now "<value>"`. Transitions check preconditions instead and refuse with the fact that failed.
+
+| Mutation | Caller | Preconditions | Writes | Events |
+|---|---|---|---|---|
+| `ask.record` | `UserPromptSubmit` hook, `tiller ask note`, board | project exists; idempotency key new | `asks` | `ask.recorded` |
+| `ask.resolve` | orchestrator, board (implicit on add) | ask `unresolved`; target card open for `followup` | `asks.disposition`, `ask_cards` | `ask.resolved`, `card.linked` |
+| `card.create` | `ask.resolve new`, board add, import | project not retired; `next_card_seq` read and bumped here | `projects.next_card_seq`, `cards`, `ask_cards` | `card.created` |
+| `card.edit` | board, orchestrator | `expected_rev` matches; card open | `cards` fields, `rev` | `card.edited` (fields changed) |
+| `card.hold` | orchestrator, board | card open; no open hold; `until_at` in the future | `holds` | `hold.set` |
+| `hold.release` | reconcile (due), orchestrator, board | hold open | `holds.released_at`; on `due` also `attention` | `hold.released`, `attention.opened` |
+| `dep.add` | orchestrator, board, import | both cards exist; no cycle; dependency open | `card_deps` | `dep.added` |
+| `dep.release` | reconcile in `card.close`, orchestrator | dependency unreleased | `card_deps.released_at` | `dep.released` |
+| `attention.open` | orchestrator, worker (through its orchestrator), reconcile, daemon | card open; idempotency key new | `attention` | `attention.opened` |
+| `attention.answer` | board, `tiller attention answer`, chat intake | item open; key new or identical | `attention` answer fields, `rev`; for a `question` card also `card.close` | `attention.answered`, maybe `card.closed`; `outbox.enqueued` for the owning session |
+| `attention.withdraw` | reconcile, orchestrator | item open; reason given | `attention.withdrawn_at` | `attention.withdrawn` |
+| `run.start` | `tiller spawn` | card open; no active run of this role; reservation fits host and project capacity; floors and quota pass; key new | `reservations`, `runs`, `sessions` (placeholder until the hook binds the Claude id), `events` | `reservation.reserved`, `run.started`, `session.started` |
+| `run.bind_session` | `SessionStart` hook | run active | `sessions.claude_session_id`, `pane_id` | `session.bound` |
+| `run.status` | worker status line (hook or tailer) | run active | `runs.last_status_line`, `observations` | `run.status` |
+| `run.pause` | worker status line | run active; date parses | `runs.pause_until` | `run.paused` |
+| `run.reown` | reconcile | orchestrator session for the project is live and differs | `runs.supervisor_session_id` | `run.reowned` |
+| `run.end` | `tiller done`, reconcile, `card.cancel` | run active; for `tiller done`: no unlanded commits unknown (P51) | `runs.ended_at`, `outcome`; `reservations.released_at` | `run.ended`, `reservation.released` |
+| `run.relaunch` | `tiller agent relaunch` | run active or just ended; worktree exists; note given (P24) | `runs` (new attempt with `predecessor_run_id`) or `sessions` (new session on the same run); outbox note | `run.relaunched`, `session.started` |
+| `run.clean` | `tiller done`, cleanup | run ended; `worktrees.unlanded_commits = 0` and fresh; pane process not alive or pane closed | `worktrees.gone_at`, `panes.gone_at` | `run.cleaned` |
+| `observation.record` | `tiller hook`, tailer, pollers | none (append) | `observations`; `sessions.activity*` when newer | `observation.recorded` (only when the verdict changed; raw rows are not events) |
+| `pr.link` | worker (`tiller pr link`), reconcile | run active or card open | `prs` | `pr.linked` |
+| `pr.refresh` | daemon poller | PR exists | `prs` cache columns; `approvals.state = stale` when `accepted` and the head moved | `pr.changed` (only on a change), `approval.stale` |
+| `approval.request` | orchestrator, daemon (PR green, no grant) | card open; binding complete; no open approval with the same binding | `approvals` (`requested`), `attention` (`merge`) | `approval.requested`, `attention.opened` |
+| `approval.decide` | board, `tiller approve`, grant match | approval `requested`; key new or identical; binding still matches the cache | `approvals` (`accepted` or `rejected`), `attention` answered | `approval.decided`, `attention.answered` |
+| `approval.execute` | daemon only | `accepted`; head re-read from the forge equals `head_sha`; one at a time per PR | `approvals` (`executing`) | `approval.executing` |
+| `approval.finish` | daemon only | `executing` | `approvals` (`succeeded`, `failed`, `uncertain`); on success `card.close landed`, `dep.release` for dependants, `obligations.met` | `approval.finished`, `card.closed`, `dep.released`, `obligation.met` |
+| `card.close` | orchestrator, daemon, owner | card open; no open attention; no active run; outcome allowed for the kind (section 7) | `cards.state`, `outcome`; releases holds and dependants | `card.closed`, `hold.released`, `dep.released` |
+| `card.cancel` | owner, orchestrator | card open; reason | ends active runs (`cancelled`), withdraws attention, releases reservations, closes the card | `run.ended`, `attention.withdrawn`, `reservation.released`, `card.closed` |
+| `card.reopen` | owner, orchestrator | card closed; reason | `cards.state = open`; `outcome`, `closed_at`, `closed_by` null | `card.reopened` |
+| `outbox.enqueue` | board, orchestrator, daemon | target session exists; key new | `outbox` (`pending`) | `outbox.enqueued` |
+| `outbox.deliver` | daemon | `pending` or `delivered` (re-ring); pane hosts the target session | `outbox` (`delivered`, `attempts`) | `outbox.delivered` |
+| `outbox.ack` | `tiller inbox <id>` in the target session | `delivered` (or `pending`, when the session found it by polling) | `outbox` (`acked`) | `outbox.acked` |
+| `outbox.fail` | daemon | attempts exhausted or target gone with no successor | `outbox` (`failed`) | `outbox.failed`; a `recovery` attention item when the message was an answer |
+| `obligation.open` | orchestrator | card open | `obligations` | `obligation.opened` |
+| `obligation.meet` | reconcile | trigger event written in this transaction | `obligations.met*`, `outbox` | `obligation.met`, `outbox.enqueued` |
+| `artifact.add` | worker, orchestrator | card exists | `artifacts` | `artifact.added` |
+| `review.record` | worker, daemon | run exists | `reviews` | `review.recorded` |
+| `handoff.write` | orchestrator | session live | `handoffs` | `handoff.written` |
+| `cache.refresh` | pollers | none | `panes`, `worktrees`, `quota_windows`, `hosts.last_seen_at` | `host.changed`, `pane.changed`, `worktree.changed` only on a change |
+| `import.apply` | `tiller import` | manifest valid; `meta.import_manifest_sha256` differs (a second import is a no-op) | every table, with `legacy_id` set | one `import.applied` plus the per-row events, all under `actor = import` |
+
+Every row in the events table names its mutation, so a timeline query answers "who changed this, under which transaction, with which preconditions".
+
+## 9. Fact ownership
+
+The table from plan v2, expanded to every table in `schema.sql`.
+
+| Fact | Owner (authoritative) | Projections and caches |
+|---|---|---|
+| Asks, cards, runs, sessions, links, dispositions, holds, dependencies | `state.db`: `asks`, `cards`, `runs`, `sessions`, `ask_cards`, `holds`, `card_deps` | the board, `tiller` output, the JSONL export, the `card_column` view |
+| Attention and answers | `state.db`: `attention` | the inbox, receipts |
+| Approvals and their outcomes | `state.db`: `approvals`, `grants`; bound to a SHA or a diff revision | board receipts, the Safety signal |
+| Capacity | `state.db`: `reservations`, with `hosts.lane_capacity` and `projects.capacity` | the Machines section |
+| Delivery of messages | `state.db`: `outbox` | receipts (recorded, delivered, done) |
+| Obligations, artifacts, reviews, handoffs | `state.db`: their tables | card detail, Health |
+| Events | `state.db`: `events` | SSE, timelines, Health signals, the export |
+| Agent activity | nobody: it is observed. Newest `observations` row per session, with `observed_at` | `sessions.activity*` (same-transaction cache), the activity badge, the permission-prompt section |
+| PR state | GitHub, through `gh-axi`; `prs` is a cache with `fetched_at` | the Landing column, the PR chip |
+| Pipeline state | `no-mistakes` records; `prs.pipeline_state` is a cache | the Landing badge |
+| Panes and sessions in herdr | herdr; `panes` is a cache with `fetched_at` | jump links, the Agents view |
+| Worktrees | treehouse plus git; `worktrees` is a cache | reconcile input, the cleanup guard |
+| Quota | `quota-axi`; `quota_windows` is a cache | the sidebar footer, Health, the spawn check |
+| Owner marker | the file `~/.tiller/owner` | `tiller` refuses mutations when it names another system |
+| Approved memory and rules | canonical files under git (CLAUDE.md, AGENTS.md, memory dirs, the dotfiles source) | the memory view (T1.5) |
+| Unapproved evidence and proposals | `state.db`: `evidence`, `proposals` (T1.5); never loaded | the proposal view |
+| Raw transcripts | Claude Code's own JSONL files; read only, never committed | the tailer, retros, the baseline |
+| Board column, staleness, still-current, free slots | nobody: derived by query (`card_column`, `session_activity`) | the board |
+
+## 10. Durability
+
+| Class | Records | Policy |
+|---|---|---|
+| Authoritative | `state.db` tables in section 9's first seven rows; the memory files under git | WAL mode, `synchronous = NORMAL` (WAL makes a committed transaction durable against a process crash; an OS crash can lose the last transactions but never corrupt), nightly backup through SQLite's online backup API inside the host's boundary (T2.3), versioned migrations with a down path, a restore drill in CI |
+| Rebuildable | `observations`, `events`-derived projections, every cache table, `sessions.activity*` | kept, pruned by retention, rebuilt from their source when missing |
+| Disposable | logs, the daemon's in-memory SSE buffer | not backed up |
+
+Schema version lives in `meta.schema_version` and is managed by `rusqlite_migration`. Every migration has an up and a down, and T2.1 runs both on a fixture.
+
+## 11. Invariants
+
+Tests in T2.1 and T2.7 prove each one.
+
+1. One owner per fact: no column in `schema.sql` duplicates another table's fact except the labelled caches (`sessions.activity*`, `prs.*`, `panes`, `worktrees`, `quota_windows`, `hosts.last_seen_at`) and denormalized `card_id` keys.
+2. No stored column: `cards` has no column named for a board column, and the only definition of a column is the `card_column` view.
+3. Every mutation has an event: a transaction that changes a row in an authoritative table and commits without an `events` row with that `txn` fails the property test `core::events::every_mutation_writes_its_event`.
+4. A closed card has no open attention and no active run.
+5. At most one open hold per card; at most one active run per card and role; at most one open reservation per run; at most one live orchestrator session per project.
+6. Two concurrent `run.start` calls on a full host or project cannot both succeed.
+7. An `accepted` approval whose PR head differs from `head_sha` is `stale` before any execution starts.
+8. An outbox message in `acked` has a `delivered_at` or a recorded poll pickup; a `failed` answer always has a `recovery` attention item.
+9. Display ids are unique per host and never reused, including across import.
+10. A mutation carrying a known idempotency key returns the stored response and writes nothing.
+
+## 12. Coverage
+
+### Second opinion points this spec covers
+
+| Point | How |
+|---|---|
+| 6 | One authority per host, the fact-ownership table, every projection labelled |
+| 7 | `BEGIN IMMEDIATE`, `rev` on editable records, readable conflicts, event in the same transaction |
+| 8 | Durability classes, backup, migrations, the restore drill as a test |
+| 9 | Lifecycle facts stored separately; the precedence table; done per card kind; cancelled, failed, abandoned, superseded as outcomes |
+| 10 | ULIDs behind display ids; asks to cards many to many; card to runs; run to sessions and PRs; owner host per project |
+| 11 | Observations with `observed_at`; `unknown` and `stale` explicit; verdict per event type (mapping in T1.3) |
+| 12 | `asks.disposition` and `ask_cards` recorded by a structured command; an unresolved ask stays visible in Asked |
+| 13 | The outbox with four states, idempotent retries, target-session check, board adds that cannot double-create |
+| 14 | The tables reconcile reads and the `recovery` attention kind; the rows themselves are T1.2 |
+| 15 | The owner marker and `meta.host_id` |
+| 16 | Approvals bound to repo, PR, head SHA and action, or diff and base revision; states requested to uncertain; stale on a moved head; idempotent clicks |
+| 17 | `approval.execute` and `approval.finish` are daemon-only; the roles behind that are T1.4 |
+| 20 | `category`, `size`, `acceptance`, `fixes_card_id`, every attempt as a run, `reviews` |
+| 22 | `config_hash` on sessions and runs |
+| 24 | `observations` is never loaded; `evidence` and `proposals` reserved for T1.5 |
+| 34 | `handoffs` |
+| 35 | `reservations` inside the spawn transaction; quota cached per account window; stale quota visible |
+| 36 | `attention` carries question, evidence, recommendation, consequence; still-current derived; permission prompts kept apart; receipts from outbox and approval states |
+| 38 | Stable ids and idempotency keys as records |
+
+Points 1 to 5, 18, 19, 21, 23, 25 to 33, 37, 39 to 43 are owned by other specs or the build plan.
+
+### Firstmate contracts matched or departed from
+
+| Contract | Matches | Departs, and why |
+|---|---|---|
+| `captain-hold-lifecycle` | Cleanup never closes an open call; an answer records the exact words and resolves in one act; an exact replay is idempotent and a drifted answer is refused; a dated deferral re-asks on its date; a landed subject retires its decision (withdraw); a question whose state cannot be established is kept | A decision is an `attention` row on a card, not the card itself. A ship card can carry several decisions over its life without changing kind, each one auditable; a `question` card is the case where the answer is the whole work. Snapshot buckets (`blocked`, `dated`, `aged`, `live`) become the derived column plus age |
+| `fleet-ledger` | The five event names map one to one onto event kinds; readers ignore unknown fields | Events have a sequence number, are written in the mutation's transaction, and are never duplicated, so a reader does not need to tolerate repeats |
+| `supervision-host` | One supervisor per run (`runs.supervisor_session_id`); a captain outcome is presented until acknowledged (`attention` stays open until answered); a dated pause silences alarms | The wake path is the outbox, with acknowledgement as a state, not a drain cursor; routine outcomes are events, not notes |
+| `agent-control` | A relaunch is transactional, keeps the worktree, and requires a note for a worker; a harness or model change is an ordinary relaunch | The journal file is replaced by the transaction and the `run.relaunched` event; there is only one harness, so no harness re-resolution |
+| `herdr-backend` | Pane identity lives in metadata, not labels; status is cached with a fetch time | Panes are a cache table, not a backend record; the layout rules are in `herdr-layout.md` |
+
+### Parity rows this spec gives a home
+
+P07 (scout to ship as a new run on the same card and worktree), P10 (project delivery mode), P15 (obligations), P19 and P30 (holds with `until_at`, `runs.pause_until`), P21 (`supervisor_session_id`), P29 and P31 (attention), P32 (dependencies), P44 (events), P50 (artifacts). The rest are tested by the tasks the matrix names.
+
+## Open for CP2
+
+1. Whether `question` is a card kind or every question is an attention item on an `ops` card. This draft keeps the kind, so a bare question has a display id to tag in chat.
+2. The staleness thresholds per role and the idle re-ring interval. T1.2 proposes them; this spec only says they are derived from `observed_at`.
+3. Whether `hosts.lane_capacity` and the floors live here or in the config file. This draft keeps them here so a spawn event can quote the value it checked.

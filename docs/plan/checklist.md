@@ -118,12 +118,12 @@ about 3 min of the developer's time
 ### T1.1 State model
 `fable` high - 3-4 h - after CP1 - runs alone
 
-- [ ] `docs/spec/state.md` and draft `docs/spec/schema.sql`
-- [ ] Entities, ULIDs and display ids (`alpha-42`); relationships (asks to cards, card to runs, run to session, run to PRs, owner host)
-- [ ] Lifecycle facts, column precedence, each card type's definition of done
-- [ ] `rev` columns and events in the same transaction; outbox states; approval states and binding; capacity reservations; fact-ownership table
-- [ ] Check: every fact has one owner, every column is derived, every mutation names its transaction and event
-- [ ] Delivered
+- [x] `docs/spec/state.md` and draft `docs/spec/schema.sql`
+- [x] Entities, ULIDs and display ids (`alpha-42`); relationships (asks to cards, card to runs, run to session, run to PRs, owner host)
+- [x] Lifecycle facts, column precedence, each card type's definition of done
+- [x] `rev` columns and events in the same transaction; outbox states; approval states and binding; capacity reservations; fact-ownership table
+- [x] Check: every fact has one owner, every column is derived, every mutation names its transaction and event
+- [x] Delivered (Monday 2026-11-02, landed on main in the commit that adds the spec; CP2 reviews the draft)
 
 ### T1.2 Recovery table
 `fable` high - 2-3 h - after a T1.1 draft
