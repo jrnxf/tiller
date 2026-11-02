@@ -315,7 +315,7 @@ about 3 min of the developer's time
 - [x] `tiller done` refuses while commits are unlanded
 - [x] Check: two simultaneous spawns cannot oversubscribe capacity
 - [x] Check: cleanup never removes unlanded work
-- [ ] Delivered
+- [x] Delivered
 
 ### T4.3 Guards and landing
 `opus` high - 3-4 h - after T1.4 and T2.1
