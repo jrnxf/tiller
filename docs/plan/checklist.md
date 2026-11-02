@@ -353,13 +353,13 @@ about 3 min of the developer's time
 ### T3.5 Health page
 `sonnet` high, `dataviz` skill - 2-3 h - after T3.1
 
-- [ ] Verdict line plus one thing to watch
-- [ ] Four signals with readings, status, chips and 8-week trends: Shipping, Your time, Quality, Safety
-- [ ] Claude quota block: plain sentence, used vs elapsed meter, other windows, reserve and burn chips, Lisbon times
-- [ ] "Show the numbers", collapsed by default
-- [ ] No Firstmate comparison anywhere
-- [ ] Check: every number traces to a state.db query or the quota feed, with a test
-- [ ] Check: no email or account id; screenshots match the mocks, both themes, both widths
+- [x] Verdict line plus one thing to watch
+- [x] Four signals with readings, status, chips and 8-week trends: Shipping, Your time, Quality, Safety
+- [x] Claude quota block: plain sentence, used vs elapsed meter, other windows, reserve and burn chips, Lisbon times
+- [x] "Show the numbers", collapsed by default
+- [x] No Firstmate comparison anywhere
+- [x] Check: every number traces to a state.db query or the quota feed, with a test
+- [x] Check: no email or account id; screenshots match the mocks, both themes, both widths
 - [ ] Delivered
 
 ### T3.6 UI pass

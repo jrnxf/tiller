@@ -21,6 +21,7 @@ import type {
   Snapshot,
   TimelineResponse,
 } from "./api-types.ts";
+import { signalsFor } from "./fixtures-signals.ts";
 import {
   agentsPath,
   attentionPath,
@@ -28,6 +29,7 @@ import {
   machinesPath,
   projectsPath,
   quotaPath,
+  signalsPath,
 } from "./queries.ts";
 
 export type Scenario =
@@ -39,6 +41,7 @@ export type Scenario =
   | "stale-approval"
   | "empty"
   | "busy"
+  | "health-bad"
   | "live";
 
 export const SCENARIOS: readonly Scenario[] = [
@@ -50,6 +53,7 @@ export const SCENARIOS: readonly Scenario[] = [
   "stale-approval",
   "empty",
   "busy",
+  "health-bad",
   "live",
 ];
 
@@ -905,6 +909,7 @@ export function fixtureResponses(scenario: Scenario = "default", now: number = D
     [machinesPath]: machinesFor(scenario, now),
     [quotaPath]: quotaFor(scenario, now),
     [projectsPath]: projects,
+    [signalsPath]: signalsFor(scenario === "health-bad", now),
   } satisfies Record<string, unknown>;
 }
 

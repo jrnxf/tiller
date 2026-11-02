@@ -1,7 +1,13 @@
 import { createFileRoute } from "@tanstack/react-router";
 
-import { ScreenPlaceholder } from "../components/shell/screen-placeholder";
+import { HealthPage } from "../components/health/health-page";
+import { quotaQuery, signalsQuery } from "../lib/queries";
 
 export const Route = createFileRoute("/health")({
-  component: () => <ScreenPlaceholder title="Health" source="task T3.5" />,
+  loader: ({ context }) =>
+    Promise.all([
+      context.queryClient.ensureQueryData(signalsQuery()),
+      context.queryClient.ensureQueryData(quotaQuery()),
+    ]),
+  component: HealthPage,
 });

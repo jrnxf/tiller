@@ -338,3 +338,36 @@ export interface Snapshot {
   thresholds: Record<string, unknown>;
   queries: Record<string, unknown>;
 }
+
+// `GET /api/v1/signals`: the Health page's counts, one entry per Lisbon week,
+// oldest first, the last being the week in progress (protocol.md section 7.3).
+export interface SignalsWeek {
+  start: string;
+  end: string;
+  landed: number;
+  reported: number;
+  merged_prs: number;
+  needed: number;
+  median_answer_minutes: number | null;
+  reverts: number;
+  escaped: number;
+  rework: number;
+  lost_work: number;
+  duplicate_dispatches: number;
+  unauthorized: number;
+}
+
+interface SignalsProject {
+  project_id: string;
+  accepted: number;
+  needed: number;
+  escaped: number;
+  median_answer_minutes: number | null;
+}
+
+export interface SignalsResponse {
+  weeks: SignalsWeek[];
+  by_project: SignalsProject[];
+  machines_live: number;
+  machines_total: number;
+}

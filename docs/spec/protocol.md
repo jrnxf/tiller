@@ -459,6 +459,7 @@ The receipt's three stages (point 36) come from records, not from the response: 
 | `GET /api/v1/quota` | section 8 |
 | `GET /api/v1/health` | daemon version, schema version, each poller's last success and last error, tool versions (P43, point 37). No work data |
 | `GET /api/v1/projects` | projects with delivery mode and capacity |
+| `GET /api/v1/signals` | the Health page's counts (T3.5): one entry per Lisbon week for the last 8, oldest first, with cards landed and reported, merged PRs, attention items opened, median minutes to answer, reverts, escaped bugs, rework, lost work, duplicate dispatches and unauthorized actions; the per-project counts for the newest week; machines live of total. Plain counts over `state.db` (`tiller-core` `Store::signals`); no Firstmate figure |
 | `GET /api/v1/memory?scope=<scope>` | the memory view: each source's lines with open proposals inline and each proposal's budget figure (`memory.md`, section 6). Board only; no fleet role and no rendered prompt reads it |
 
 ### 7.4 Mutations

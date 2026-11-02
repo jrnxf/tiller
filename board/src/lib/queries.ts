@@ -10,6 +10,7 @@ import type {
   ProjectsResponse,
   QuotaResponse,
   RunDetail,
+  SignalsResponse,
   TimelineResponse,
 } from "./api-types.ts";
 
@@ -71,6 +72,9 @@ export const machinesQuery = () => readQuery<MachinesResponse>(machinesPath);
 
 export const quotaPath: QueryPath = "/api/v1/quota";
 export const quotaQuery = () => readQuery<QuotaResponse>(quotaPath);
+
+export const signalsPath: QueryPath = "/api/v1/signals";
+export const signalsQuery = () => readQuery<SignalsResponse>(signalsPath);
 
 export const projectsPath: QueryPath = "/api/v1/projects";
 export const projectsQuery = () => readQuery<ProjectsResponse>(projectsPath);

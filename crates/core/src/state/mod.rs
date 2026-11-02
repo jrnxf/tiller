@@ -19,6 +19,7 @@ pub mod projects;
 pub mod reads;
 pub mod records;
 pub mod runs;
+pub mod signals;
 
 #[cfg(test)]
 pub(crate) mod testing;
