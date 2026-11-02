@@ -267,11 +267,11 @@ about 3 min of the developer's time
 ### T2.7 Reconcile engine
 `fable` high or `opus` xhigh - 4-6 h - after T2.5 and T2.6 - critical path
 
-- [ ] Reconcile loop over cards, runs, panes, worktrees and PRs, per `recovery.md`
-- [ ] Board column derivation
-- [ ] Check: every recovery table row has a passing end-to-end test
-- [ ] Check: conflicting evidence ends as `needs` or `unknown`, never a destructive action
-- [ ] Delivered
+- [x] Reconcile loop over cards, runs, panes, worktrees and PRs, per `recovery.md`
+- [x] Board column derivation
+- [x] Check: every recovery table row has a passing end-to-end test
+- [x] Check: conflicting evidence ends as `needs` or `unknown`, never a destructive action
+- [x] Delivered
 
 ### T2.8 Daemon and service
 `opus` high - 2-3 h - after T2.1, integrating T2.5 to T2.7
