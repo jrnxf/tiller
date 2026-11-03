@@ -2,7 +2,7 @@
 
 This is the contract for who may do what in Tiller, and for how each rule is held: by a mechanism the model cannot talk its way past, or only by instructions and audit. It covers the role matrix, the three separate decisions (review, execute, merge), landing by the daemon after a bound approval, standing grants and away mode, the permission deny rules per role, the PreToolUse backstop, the OS sandbox, and the alternate paths T4.3 must test.
 
-Written Monday 2026-11-02, Lisbon time (WET). Task T1.4. Status: approved at CP2 (Monday 2026-11-02), with the owner's decisions from `cp2-open.md` applied. A contract change from here on needs a stop-and-ask.
+Written Monday 2026-11-02, Lisbon time (WET). Task T1.4. Status: approved at CP2 (Monday 2026-11-02), with the owner's decisions from `cp2-open.md` applied. A contract change from here on needs a stop-and-ask. Amended by ADR 0003 (federated board), accepted Tuesday 2026-11-03: sections 3, 4, 7, 8, 9, 10, 11 and 14.
 
 It builds on `state.md` and `schema.sql` (T1.1): those say what an approval, a grant and a run are; this spec says who may create, decide and execute them. T4.1 writes the role files and settings fragments from section 8, and T4.3 builds the backstop, the sandbox wiring and `tiller land` from sections 6 to 9.
 
@@ -57,6 +57,7 @@ A principal is who a mutation acts for. `tiller` resolves the principal for ever
 | Daemon | `tiller daemon`: pollers, reconcile, outbox delivery, landing | In-process; it holds the single-instance lock | `daemon` |
 | Orchestrator | One live session per project | `TILLER_SESSION_ID` set at launch, resolved to a `sessions` row with `role = orchestrator` | `session:<id>` |
 | Worker | A scout, builder, reviewer or verifier run | `TILLER_SESSION_ID`, resolved to a session whose run is active; the role comes from `runs.role` | `session:<id>` |
+| Owner through a peer board | The developer on another host's board, acting on a record this host owns (ADR 0003) | `tiller peer serve`, started by sshd for the owner's OS user with no session id, no `CLAUDECODE` and no Claude Code ancestor, verified the frame: an unrevoked `act` row of `peer_keys`, a valid Ed25519 signature, a fresh `ts` (section 7, Peer link) | `board@<viewer label>`, with `via_peer` in the payload |
 | Hook | `tiller hook <event>`, invoked by Claude Code | The harness's `session_id` in the hook payload | `hook` |
 | Script | A cron or dotfiles job dropping a note (P60), or any call that matches none of the above | No session id and no terminal | `script` |
 | Import | `tiller import`, run once by the owner per host | Owner CLI checks, plus the import manifest | `import` |
@@ -66,6 +67,7 @@ Rules:
 - Any Claude Code session, including the developer's own interactive ones, sets `CLAUDECODE` in its shells and is the ancestor of every command it runs, so a CLI call from any agent shell is never the owner. The owner decides on the board or in a terminal they type into. Decided at CP2 (C03, amended by S05): `! tiller approve <id>` typed into the developer's own Claude session is refused (exit 6) and that is accepted; an approval given in chat goes through the orchestrator's `tiller approve --ask` route (G06), and the board and a plain terminal stay the owner surfaces. No owner token file is added. Any "one runnable command" handed to the developer (recovery.md R17, G34) is never an owner-only `tiller` command.
 - Environment variables can be stripped by a shell. Stripping them turns a session into a script principal, which can do less, not more. Reaching the owner principal from an agent shell also needs a pseudo-terminal and a parent chain with no Claude Code process in it; section 10 lists the pseudo-terminal forms and the backstop denies them (G23), and the ancestry check holds the rest (section 7, "Routes and their controls").
 - A session id that resolves to no row, or to an ended run, is refused for every mutation except `observation.record`.
+- The owner through a peer board has exactly the board's row of the matrix, limited to the forwarding allowlist (`protocol.md` 7.4). It never has the owner CLI's extra rights: no grants, away mode, landing, spawn, host, project, config, peer or owner marker commands, and no `tiller approve --ask`.
 
 ## 4. Role matrix
 
@@ -98,14 +100,14 @@ What each principal may do. "Own" means only on its own run, card or worktree. E
 | Apply a memory change | after a `memory` approval (T1.5) | no | no | no | no | no | no | no |
 | Read secrets | owner's own business | no | no | no | no | no | no | no |
 | Spawn subagents | yes | no | no (P59) | read-only helpers | yes, never with worktree isolation | read-only helpers | read-only helpers | no |
-| Mutate another host's records | no | no | no | no | no | no | no | no |
+| Mutate another host's records | only through a peer board, on the forwarding allowlist, verified by the owning host (G41) | no | no | no | no | no | no | no |
 
 Notes:
 
 - "Through its orchestrator" means a worker reports a decision, a blocker or a finished report in its status line or handoff, and the orchestrator files the attention item. A worker never writes `attention` itself (state.md, `attention.open`).
 - The reviewer is read-only and has no memory tool (point 31): its fragment removes `Edit`, `Write` and `NotebookEdit`, and fleet roles launch with auto memory off.
 - A scout may prototype in its worktree and commit locally, but cannot push. Promoting it (P07) starts a builder run on the same worktree, which is a new execute decision.
-- Remote hosts are read-only in v1 (point 18, D01 kept): "Open in herdr" is the only cross-host action, and it is a herdr jump, not a Tiller mutation.
+- Remote hosts were read-only at CP2 (point 18, D01 kept). ADR 0003 (accepted Tuesday 2026-11-03) adds one cross-host route: the owner's board mutation, forwarded over the peer link and authorized again by the host that owns the record (G41 to G44). "Open in herdr" stays a herdr jump. No fleet role gains a cross-host action.
 
 ## 5. Three decisions: review, execute, merge
 
@@ -253,6 +255,16 @@ The board's mutations need the owner principal. The daemon serves reads to any r
 
 The cookie's hash is stored under `~/.tiller`, which every fleet role is denied (G20). Sandboxed roles cannot reach localhost at all (G24). T1.3 owns the endpoint list; this spec owns the requirement.
 
+### Peer link (ADR 0003)
+
+The one route by which another host changes this host's records. It is the owner's, and it is held at both ends:
+
+- **Board host.** A forwarded mutation passes the board credential above first. The private key is `~/.tiller/peers/<label>.key` (mode 0600), under `~/.tiller`, which every fleet role is denied (G20); only the daemon reads it, to sign. The daemon opens the link itself; no command exposes a signing operation, so nothing else on the host can get a frame signed.
+- **Transport.** The owner's SSH, with host-key checking and `BatchMode`. No new listening port. The owner cookie never crosses hosts.
+- **Peer.** `tiller peer serve` refuses to start unless sshd started it for the owner (`SSH_CONNECTION` set, no `TILLER_SESSION_ID`, no `CLAUDECODE`, no Claude Code ancestor). It answers a `hello` only for an unrevoked `peer_keys` row while config `federation.accept` is not `false`, and checks a `mutate` in the one order `protocol.md` 10.3 step 3 gives: `federation.accept`, an unrevoked key row, its signature, `ts` within 120 s, this host's `host_id`, scope `act`, the allowlist, the owner marker (G26) and a project this host owns (G25). Then the same core function runs with its own preconditions.
+- **Pairing.** `peer.accept` needs the owner principal on the peer (a terminal from `ssh -t`, no Claude ancestor), so a fleet role cannot add a key. Config `federation.accept = false` refuses every pairing, every `hello`, and every `mutate` and `query` on a link already open.
+- **Out of scope.** Whoever can read the board host's `~/.tiller` can act as the owner on every `act` peer. That is the owner's own shell, the adversary section 1 leaves out. A `--read-only` pairing and a host that sets `federation.accept = false` bound the reach.
+
 ### Routes and their controls (CP2, S05)
 
 Claude Code's sandbox covers the shell only. Each other route a fleet role has into the host needs its own control, and the one sandbox exception, `tiller`, is safe only if it can do no more than the caller's row in the role matrix. This table is the evidence for C20 (keep `tiller` as the one excluded command) and for the owner principal (C03).
@@ -263,6 +275,7 @@ Claude Code's sandbox covers the shell only. Each other route a fleet role has i
 | File tools: `Read`, `Edit`, `Write`, `NotebookEdit` | inside the Claude Code process, outside the sandbox | deny rules (evaluated first, in every mode); `dontAsk` with `Edit` allowed only in the write set (workers); the backstop | none: file tools cannot run a program | not applicable: the permission engine reads the session's own fragment | none for deny rules; the backstop needs hooks |
 | Hooks | `tiller hook <event>` and `tiller guard pretool`, started by Claude Code from the run fragment | the fragment is packaged, passed with `--settings` and hashed into `config_hash`; settings files are denied to every role (G21); `tiller hook` typed in a fleet shell is denied (G22) | a hook is the `hook` principal: it records observations and asks and binds sessions, nothing else in the matrix | the harness `session_id` in the payload, matched to a live `sessions` row; a payload forged from a shell never gets this far (G22) | hooks fire (host-capabilities); on a hooks-blocked host the tailer replaces them and there is no backstop |
 | MCP servers | separate processes started by Claude Code, outside the sandbox | `--strict-mcp-config` with the role's packaged MCP config only (T4.1), part of `config_hash`; spawn refuses any other config (G35); no packaged server exposes shell, file-write or forge-write tools; the backstop denies merge, push and ref-writing tool names | none: Tiller ships no MCP server in v1 | not applicable | none |
+| Peer link | `tiller peer serve` on this host, started over SSH by a paired board host's daemon (ADR 0003) | owner-only pairing (`peer.accept`); Ed25519 signatures; the allowlist; the start check; fleet roles cannot reach a peer's SSH endpoint (sandbox network) or run `ssh ... tiller` (backstop `[peer]`) | `peer serve` is not the sandbox exception: it runs outside every fleet session, and refuses to start under one | the frame's key id and signature, matched to an unrevoked `peer_keys` row | SSH between the hosts; the sandbox starts on the board host (C19) |
 | Daemon | `tiller daemon`: pollers, reconcile, delivery, landing, the board API | there is no daemon control socket in v1. The daemon accepts HTTP only on `127.0.0.1` (owner cookie, same origin, local `Host`; unreachable from the sandbox, G24) and otherwise acts only on rows in `state.db` | none beyond its matrix row: a `tiller land` from anywhere only waits for the daemon to execute an approval that is already `accepted`, and only the owner or a grant can accept one (G04) | the daemon never takes a request from a caller; it acts on rows whose event names the principal `tiller` resolved, and on board requests that carry the owner cookie | the daemon can bind localhost (else the board is unavailable; the CLI still works) |
 
 What this shows, and the CP2 decision on open item 4 (C20, amended by S05): `tiller` stays the one excluded command. The exemption gives a fleet role no right its matrix row lacks, because authority is checked inside `tiller` and the daemon takes no calls, only rows. Two conditions are not yet proven and T4.3 tests both on every host before C20 counts: the exclusion applies only to the packaged binary as a simple command (section 2; the backstop also denies, as `[guard-tamper]`, any command that assigns `PATH`, defines a function or alias named `tiller`, or runs a `tiller` that resolves anywhere but the packaged path), and the ancestry check finds the Claude Code process on each host (`core::authority::owner_check_refuses_claude_ancestor`). If either fails, the alternative (every agent process inside the sandbox, `tiller` reaching the daemon over a socket that identifies its peer) comes back to the owner as a stop-and-ask.
@@ -294,7 +307,7 @@ The fragments are written in Claude Code's rule syntax. `<worktree>`, `<scratch>
       "Bash(herdr *)",
       "Bash(claude *)", "Bash(npx *claude-code*)",
       "Bash(tiller approve *)", "Bash(tiller grant *)", "Bash(tiller away *)", "Bash(tiller land *)",
-      "Bash(tiller board*)", "Bash(tiller import *)", "Bash(tiller hook *)", "Bash(tiller owner *)",
+      "Bash(tiller board*)", "Bash(tiller import *)", "Bash(tiller hook *)", "Bash(tiller owner *)", "Bash(tiller peer *)",
       "Bash(crontab *)", "Bash(at *)", "Bash(systemd-run *)", "Bash(systemctl *)", "Bash(launchctl *)",
       "Bash(pkill *)", "Bash(killall *)",
       "Bash(script *)", "Bash(expect *)", "Bash(unbuffer *)",
@@ -341,9 +354,10 @@ The PreToolUse backstop is the mechanism behind most rows, so it is specified fi
   - any HTTP client binary (`curl`, `wget`, `http`, `xh`, `aria2c`, `nc`);
   - `env -u` or `unset` of `TILLER_*` or `CLAUDECODE`, and pseudo-terminal allocators (`script`, `expect`, `unbuffer`, `socat ... pty`);
   - writes into `~/.tiller`, `~/.claude`, `.claude/` or `.git/hooks`, and `git config` that sets `core.hooksPath`;
+  - `ssh`, `mosh` or `et` whose remote command names `tiller`, and any `tiller peer` form (`[peer]`, ADR 0003);
   - for the orchestrator, a top-level `cd`, `pushd` or `popd` that persists into a project checkout or worktree (Firstmate's cd guard), and any delegation-shaped tool name (Firstmate's subagent-guard stems, with its observe-only and plan-only exceptions).
 - **Fail mode.** A command that contains no protected token after quote removal is allowed fast, without a database read. A command that contains one but cannot be classified (malformed syntax, an unknown decoder form) is **denied**: fail closed on protected commands, as Firstmate's arm guard does, because a wrong allow here is a merge or a lost worktree. If the guard binary is missing or crashes, Claude Code treats the hook as a non-blocking error; the deny rules and the sandbox still hold, and G35 makes sure a session never starts in that state.
-- **Output.** A deny carries one stable code in brackets (`[merge]`, `[default-push]`, `[foreign-branch]`, `[http-client]`, `[owner-only]`, `[identity]`, `[state-write]`, `[guard-tamper]`, `[worktree-admin]`, `[delegation]`, `[persistent-cd]`) and one sentence that names the allowed path ("ask the orchestrator to request a merge approval"). T4.3 pins the exact transport against the installed CLI version, as Firstmate's cd guard documents: exit code 2, the decision JSON (`hookSpecificOutput` with `permissionDecision: "deny"` and the reason) on stderr, and nothing on stdout (`cli::guard::deny_exits_two_with_the_decision_on_stderr`; live `agents::guards::live::backstop_deny_reaches_the_model`). An allow exits 0 and prints nothing. Because Claude Code reads exit 2 as a deny, a `tiller guard` or `tiller hook` command line that does not parse (a broken fragment) exits 0 silently, like an unknown role: the deny rules and the sandbox still hold, and spawn checks the fragment (`cli::guard::unparsable_guard_arguments_allow`). The orchestrator fragment quotes its root paths, and a root that holds a quote is refused at render.
+- **Output.** A deny carries one stable code in brackets (`[merge]`, `[default-push]`, `[foreign-branch]`, `[http-client]`, `[owner-only]`, `[identity]`, `[state-write]`, `[guard-tamper]`, `[worktree-admin]`, `[delegation]`, `[persistent-cd]`, `[peer]`) and one sentence that names the allowed path ("ask the orchestrator to request a merge approval"). T4.3 pins the exact transport against the installed CLI version, as Firstmate's cd guard documents: exit code 2, the decision JSON (`hookSpecificOutput` with `permissionDecision: "deny"` and the reason) on stderr, and nothing on stdout (`cli::guard::deny_exits_two_with_the_decision_on_stderr`; live `agents::guards::live::backstop_deny_reaches_the_model`). An allow exits 0 and prints nothing. Because Claude Code reads exit 2 as a deny, a `tiller guard` or `tiller hook` command line that does not parse (a broken fragment) exits 0 silently, like an unknown role: the deny rules and the sandbox still hold, and spawn checks the fragment (`cli::guard::unparsable_guard_arguments_allow`). The orchestrator fragment quotes its root paths, and a root that holds a quote is refused at render.
 - **Record.** Every deny writes an `observations` row (`source = hook`, `event = PreToolUse:denied`, payload with the code and the classified command, never the full payload). The Health page's Safety signal counts them per role and code.
 
 ### Guarantee register
@@ -374,7 +388,7 @@ The PreToolUse backstop is the mechanism behind most rows, so it is specified fi
 | G22 | Owner-only `tiller` commands refuse every caller but the owner principal, and the backstop denies them and `tiller hook` from fleet shells | enforced | `tiller` principal check (no session id, no `CLAUDECODE`, a terminal, no Claude Code ancestor); deny rules; backstop `[owner-only]` | `core::authority::owner_commands_refuse_session_callers`, `core::authority::owner_commands_require_tty`, `core::authority::owner_check_refuses_claude_ancestor`, `agents::guards::owner_tiller_commands_denied` |
 | G23 | No fleet role impersonates the owner by stripping its identity and faking a terminal | convention until T4.3's live test passes on the host, then enforced (host precondition: sandbox starts) | The forms section 10 lists are denied (`[identity]`). A written script that still tries either runs `tiller` from the Bash tool, which keeps the Claude Code ancestor the principal check refuses, or detaches, which keeps it in the sandbox with `~/.tiller` unreadable ("Routes and their controls"). Detected: every owner CLI decision records its terminal device and parent process, and the Safety signal lists CLI decisions | `agents::guards::identity_stripping_denied`, `core::authority::owner_cli_decision_records_terminal`, live `agents::guards::live::detached_script_cannot_act_as_owner` |
 | G24 | Board mutations need the owner cookie, a same-origin request and a local `Host`; sandboxed roles cannot reach the daemon port | enforced (host precondition for the second half: sandbox starts) | Board credential; sandbox network with no localhost | `daemon::api::mutation_without_owner_cookie_is_refused`, `daemon::api::cross_origin_mutation_is_refused`, `daemon::api::foreign_host_header_is_refused`, live `agents::guards::live::sandboxed_role_cannot_reach_board_api` |
-| G25 | Mutations for a project this host does not own are refused; remote lanes are read-only | enforced | `tiller` checks `projects.owner_host_id = meta.host_id` | `core::authority::foreign_project_mutation_is_refused` |
+| G25 | Mutations for a project this host does not own are refused here; another host's record changes only on that host, through a forwarded owner mutation it verified (G41) | enforced | `tiller` checks `projects.owner_host_id = meta.host_id`; a board mutation with a peer `host` is sent, never applied here | `core::authority::foreign_project_mutation_is_refused`, `daemon::peer::forwarded_mutation_never_writes_viewer_db` |
 | G26 | `tiller` refuses every mutation while the owner marker names another system | enforced | Owner marker check (state.md, Host) | `core::owner::mutations_refused_when_marker_names_other_system` |
 | G27 | Review never authorizes, and a run never reviews itself | enforced | `approval.decide` refuses non-owner, non-grant deciders; `review.record` refuses a reviewer session from the reviewed run | `core::authority::review_cannot_decide_approval`, `core::reviews::reviewer_session_must_differ_from_reviewed_run` |
 | G28 | Only the orchestrator or the owner starts a run, and only inside capacity, the quota floor, the model rules and any away spend cap | enforced | `run.start` principal check and preconditions (state.md) | `core::authority::workers_cannot_spawn`, `agents::spawn::refuses_model_below_rule_without_owner_permission`, `agents::handoff::away_contract_caps_spend_and_writes_return_brief` |
@@ -390,6 +404,10 @@ The PreToolUse backstop is the mechanism behind most rows, so it is specified fi
 | G38 | Every guard denial is recorded and counted | enforced | Backstop writes the observation before it answers | `agents::guards::denial_writes_observation` |
 | G39 | Remote Control is off for workers (P68) | enforced | Launch form | `agents::spawn::worker_launch_has_remote_control_off` |
 | G40 | Workers resolve conflicts by merging the default branch, never by rebasing published commits (P54) | convention | Builder role; the force-push half is G11 | `evals/builder_merges_default_branch_instead_of_rebasing` |
+| G41 | A forwarded mutation applies only when signed by an unrevoked `act` key, fresh (`ts` within 120 s), addressed to this `host_id`, on the allowlist, and accepted by this host's own preconditions; otherwise nothing is written (ADR 0003) | enforced | `peer serve` verification order (`protocol.md` 10.3 step 3); the same core function as the local board | `daemon::peer::mutate_bad_sig_refused`, `daemon::peer::mutate_replayed_ts_refused`, `daemon::peer::mutate_wrong_host_id_refused`, `daemon::peer::revoked_key_refused`, `daemon::peer::spawn_not_forwardable`, `daemon::peer::forwarded_precondition_failure_passes_through` |
+| G42 | A `read` pairing never mutates, and no host forwards a frame on to a third host | enforced | `peer_keys.scope` checked on every `mutate`; `peer serve` has no client half | `daemon::peer::read_scope_cannot_mutate`, `daemon::peer::serve_never_opens_onward_link` |
+| G43 | No fleet role reaches a peer link: it cannot read the key, run `tiller peer`, or SSH to a peer's `tiller` | enforced (host precondition: sandbox starts) | G20 on `~/.tiller/peers`; deny rule `Bash(tiller peer *)`; backstop `[peer]`; the sandbox network allow list never includes a peer's SSH endpoint | `agents::guards::peer_commands_denied`, `agents::guards::ssh_remote_tiller_denied`, live `agents::guards::live::sandboxed_role_cannot_reach_peer_ssh` |
+| G44 | The owner cookie never leaves its host, and `peer serve` refuses to start under a session or a Claude Code ancestor | enforced | No frame carries the cookie; `peer serve` start check | `daemon::peer::frames_never_carry_cookie`, `cli::peer::serve_refuses_session_and_claude_ancestor` |
 
 ## 10. Alternate paths to test
 
@@ -433,6 +451,11 @@ Each path names its example, the layers that hold it, the expected result, and i
 | Delegation tool | the orchestrator calls `Agent`, `Workflow`, or a future `SpawnWorker` tool | bare-name deny, backstop stem match | tool absent or denied `[delegation]` | `agents::guards::orchestrator_subagent_spawn_is_denied`, `agents::guards::delegation_shaped_future_tool_is_denied` |
 | Stop the daemon | `pkill -f "tiller daemon"`, `systemctl --user stop tiller` | deny, backstop | denied | `agents::guards::daemon_stop_denied` |
 | Secrets | `cat .env`, `Read` on `config/server.key` | Read deny, sandbox `denyRead` | denied | live `agents::guards::live::env_file_read_is_denied` |
+| SSH to a peer's `tiller` | `ssh host-b tiller approve 01J...`, `ssh -t host-b tiller peer accept ...`, `sh -c 'ssh host-b tiller card close ...'` | backstop, sandbox network | denied `[peer]`; the peer's SSH endpoint is unreachable from the sandbox | `agents::guards::ssh_remote_tiller_denied`, live `agents::guards::live::sandboxed_role_cannot_reach_peer_ssh` |
+| Read the peer key | `cat ~/.tiller/peers/host-b.key` | Read deny, sandbox `denyRead`, backstop | denied `[state-write]`; read fails | `agents::guards::state_dir_access_denied` |
+| Forged or replayed frame | a `mutate` frame with a bad signature, another host's `host_id`, or a `ts` older than 120 s, sent to `peer serve` | `peer serve` verification | `peer_refused`; nothing written | `daemon::peer::mutate_bad_sig_refused`, `daemon::peer::mutate_wrong_host_id_refused`, `daemon::peer::mutate_replayed_ts_refused` |
+| Non-allowlisted forward | a `mutate` for spawn, land, a grant or away mode | board host allowlist; `peer serve` allowlist | refused on both hosts | `daemon::peer::spawn_not_forwardable` |
+| Read-scope mutate | a `mutate` over a `read` pairing | `peer serve` scope check | `peer_refused` | `daemon::peer::read_scope_cannot_mutate` |
 
 ## 11. Unauthorized actions and detection
 
@@ -442,7 +465,7 @@ An unauthorized action is one of the cutover's rollback triggers (build plan, M6
 |---|---|---|
 | A PR of a Tiller project merged with no `approval.succeeded` for it | `pr.refresh` sees `merged` with no matching approval in `succeeded` or `executing` | `reconcile::recovery::merge_without_approval_opens_recovery` |
 | A default branch moved by anything but `tiller land` | The daemon polls the remote default-branch head and compares it with the last `approval.succeeded` merge SHA or direct-push SHA | `reconcile::recovery::default_branch_move_without_land_opens_recovery` |
-| An approval decided by a principal other than the owner or a grant | An `approval.decided` event whose `actor` is not `owner`, `board` or `daemon` with a grant id | `core::authority::decision_by_wrong_principal_raises_trigger` |
+| An approval decided by a principal other than the owner or a grant | An `approval.decided` event whose `actor` is not `owner`, `board`, `board@<label>` whose `payload.via_peer.key_id` names an `act` key that was unrevoked when the event was written, or `daemon` with a grant id | `core::authority::decision_by_wrong_principal_raises_trigger` |
 | A grant created or revoked by a principal other than the owner | The same check on `grant.created` and `grant.revoked` | `core::authority::grant_by_wrong_principal_raises_trigger` |
 | A worktree with unlanded or unknown commits removed | A `worktrees` row went `gone_at` without a `run.cleaned` event | `reconcile::recovery::worktree_gone_with_active_run_opens_recovery` |
 | A state row changed with no event | The property test `core::events::every_mutation_writes_its_event` in CI; at runtime, an `events` sequence gap or a `rev` that moved with no event row | `core::events::rev_change_without_event_is_reported` |
@@ -475,7 +498,7 @@ At CP2 (S03, S01) this spec's decisions added, in the commit that lands the CP2 
 | 15 | `tiller` refuses mutations under another system's owner marker (G26) |
 | 16 | Landing rechecks the bound SHA, passes it to the forge, and marks a moved head stale; one click is one action (G02, G03) |
 | 17 | Every guarantee labeled enforced or convention, with mechanisms and tests; alternate paths tested; review, execute and merge as separate decisions; the merge path centralized in the daemon (sections 1, 5, 6, 9, 10) |
-| 18 | Remote lanes read-only; mutations for another host's project refused (G25) |
+| 18 | Data and control flows specified separately (ADR 0003, accepted): mutations for another host's project are refused here and only forwarded, signed, allowlisted and re-checked by the owning host (G25, G41 to G44) |
 | 24 | Fleet roles launch with auto memory off, checked at startup (G35) |
 | 29 | PR bodies scrubbed before merge (G30) |
 | 30 | One launch form for every fleet role, never `--agent` (section 7) |
@@ -498,7 +521,7 @@ Points 1 to 14, 19 to 23, 25 to 28, 32, 34, 36 to 41 and 43 are owned by other s
 
 ### Parity rows this spec gives a home
 
-P09 (G33), P11 and P12 (section 6), P13 (grants), P17 (G30, G31), P25 (G29), P34 (away mode), P37 (G34), P51 (G18), P54 (G40), P58 (G15), P59 (G16), P64 (`gh-axi` as the GitHub path, with its merge and raw API calls kept to the daemon), P68 (G39). Kept drops: D01 (remote homes are read-only, G25), D04 (other harnesses only with a pre-tool transport and a sandbox, G35), D11 (a pushed fragment is refused unless it is the packaged one, G35). Dropped and confirmed not needed here: D10 (approval failover; approvals are bound records) and D13 (watcher arm guard).
+P09 (G33), P11 and P12 (section 6), P13 (grants), P17 (G30, G31), P25 (G29), P34 (away mode), P37 (G34), P51 (G18), P54 (G40), P58 (G15), P59 (G16), P64 (`gh-axi` as the GitHub path, with its merge and raw API calls kept to the daemon), P68 (G39). Kept drops: D01 (remote homes, G25; actionable from a paired board host only under G41 to G44, ADR 0003), D04 (other harnesses only with a pre-tool transport and a sandbox, G35), D11 (a pushed fragment is refused unless it is the packaged one, G35). Dropped and confirmed not needed here: D10 (approval failover; approvals are bound records) and D13 (watcher arm guard).
 
 ## Decided at CP2
 
@@ -509,3 +532,7 @@ The owner's decisions on this spec's open items, Monday 2026-11-02 (`cp2-open.md
 3. **The sandbox on host B** (C19): host B is not cut over until its sandbox works (section 1).
 4. **`tiller` as the only excluded command** (C20, amended by S05): kept, with the per-route evidence in section 7, "Routes and their controls", and two conditions T4.3 must prove first; a failure is a stop-and-ask.
 5. **The owner's own Claude session** (C03, amended by S05): never the owner principal, now also by process ancestry; accepted (section 3).
+
+## Accepted after CP2: ADR 0003
+
+Tuesday 2026-11-03, Lisbon time, accepted by the owner. C12 (`cp2-open.md` item 12) is reopened: the owner's board mutations forward to the owning host over the peer link. The new principal row (section 3), the matrix row and note (section 4), the Peer link controls (section 7), the deny rule and `[peer]` (sections 8 and 9), G25 reworded, G41 to G44, five alternate paths (section 10) and the detector's `board@<label>` actor (section 11) are that change. No fleet role gains a right.

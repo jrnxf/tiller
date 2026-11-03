@@ -99,8 +99,8 @@ Proceed with these defaults unless the developer changes them at checkpoint CP0.
 |---|---|---|
 | Language | **Decided by the developer, Sunday 2026-11-01:** Rust for the core (CLI, daemon, hooks, herdr adapter, SQLite); TypeScript for the board (Vite, React, TanStack Router and Query, no SSR). See "Stack" below | The core is the authority for state and approvals and must never destroy live work: the compiler forces error handling, exhaustive state matches and typed JSON at every boundary, which is where agent-written TypeScript most often fails silently. Rust is also first-class in Nix and ships as one 2 MB binary. Agents build UI far better in React. Measured cost of Bun was never the reason: a Bun CLI call took 9.5 ms against 2.0 ms for Rust. |
 | Repo | `tiller`, private at first, under the developer's GitHub account; MIT license | Ready to make public. |
-| Remote lanes | Read-only in v1, plus "Open in herdr" through herdr's saved machine | A new control route needs an explicit change to the constraints. |
-| Work data | The work Mac runs its own Tiller; its board and data never leave that machine | Data boundary. |
+| Remote lanes | Read-only in v1, plus "Open in herdr" through herdr's saved machine. **Accepted Tuesday 2026-11-03 (ADR 0003):** one federated board; peers are read live over SSH, and the owner's board mutations forward to the owning host, signed and re-checked there. Fleet roles never act across hosts | A new control route needs an explicit change to the constraints. ADR 0003 is that change, asked for by the owner. |
+| Work data | The work Mac runs its own Tiller; its board and data never leave that machine. Under ADR 0003 it sets `federation.accept = false` unless the owner chooses otherwise | Data boundary. |
 | Multi-host | Each project has exactly one owner host; running a project on several hosts at once is not allowed in v1 | Simplicity. |
 | Auto memory for fleet roles | Off (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`); approved memory loads through CLAUDE.md and imports | Nothing loads without approval. |
 | Worker launch form | `claude --append-system-prompt-file <role>.md`; never `--agent`, which replaces the default system prompt | Documented behavior. |
@@ -162,6 +162,7 @@ Keep each list to five items or fewer, with no preamble and no recap.
 | CP4 | wave E board | uses the live board against the daemon | 15-20 min |
 | CP5 | wave E agents | a supervised live trial on a throwaway sandbox repo: ask, card, worker, PR, bound approval, merge | 30-45 min |
 | CP6 | wave F | replay gate go or no-go, judged from the difference report | 20-30 min |
+| CP-F | federation (F6) | uses the two-host board: answers a peer's card, freezes the peer, sees the staleness (ADR 0003) | 15 min |
 | CP7 | before each host flips | cutover go for that host | 10 min per host |
 | CP8 | 2 weeks after the last cutover | the two-week check report (T7.4) against the baseline. Delete Firstmate, or fall back | 20 min |
 
@@ -196,7 +197,9 @@ Wave D (day 3-5)    T2.4 importer | T2.7 reconcile | T2.8 daemon and service
 Wave E (day 5-6)    T3.4 degraded states | T3.5 health page, then T3.6 UI pass -> CP4
                     T4.5 handoff | T4.6 evals                       -> CP5
 Wave F (day 6-7)    T5.1 replay harness, then T5.2 replay run      -> CP6
-Cutover             T6.1 personal Mac, T6.2 watch, T6.3 remote Linux host, T6.4 work Mac -> CP7 per host
+Federation          F1 spec, then F2 pairing, F3 link, F4 forwarding | F5 board UI (mocked API), then F6 e2e -> CP-F
+  (beside E and F, after the owner approves ADR 0003; done before T6.3)
+Cutover             T6.1 personal Mac, T6.2 watch, T6.3 remote Linux host (after CP-F), T6.4 work Mac -> CP7 per host
 After               T7.1 health depth | T7.2 memory view, then T7.3 learning loop -> CP8
 ```
 
@@ -209,7 +212,8 @@ Every estimate below is agent wall-clock time for one lane, including that task'
 | Scope | Agent-hours, summed | Critical path with 4 lanes |
 |---|---|---|
 | Day one (M0 to M5) | 88-117 h | 40-56 h |
-| Cutover, all three hosts | 4-6 h | 4-6 h, plus stability days between hosts |
+| Federated board (F1 to F6, ADR 0003) | 13-17.5 h | 10.5-14 h, beside waves E and F, off the day-one critical path |
+| Cutover, all three hosts | 4.5-6.5 h | 4.5-6.5 h, plus stability days between hosts |
 | After day one (M7) | 14-21 h | 10-14 h |
 
 Day one is higher than the 50-70 h in plan v2 for three reasons: this plan adds the spec phase (M1), counts review and CI on every task, and adds about 8-12 h for the Rust core (compile loops and async work) and the two-toolchain setup. The approved mocks moved the Health page into day one (T3.5, 2-3 h) and shrank the after-day-one health work (T7.1).
@@ -534,7 +538,7 @@ The board is built from the mocks the developer approved at CP-UI (`docs/design/
 
 The sidebar has:
 - the view knob (All projects or Focus) and a visibility toggle per project;
-- **Machines**, one row per host: a health dot, running agents against capacity ("3 running, 2 free"), and a quiet "view only" tag on remote hosts. Clicking a row filters Board and Agents to that host and shows a removable chip in the header. A stale host shows "last seen N min ago" in amber, with the reason in its tooltip;
+- **Machines**, one row per host: a health dot, running agents against capacity ("3 running, 2 free"), and a quiet "view only" tag on remote hosts that are not paired for acting (ADR 0003 adds a link state for paired peers, task F5). Clicking a row filters Board and Agents to that host and shows a removable chip in the header. A stale host shows "last seen N min ago" in amber, with the reason in its tooltip;
 - **a quota footer** in place of any status text: a status dot, a tiny meter, "27% week left" and "resets Tue 14:00". The dot is green on pace, amber when spending ahead of pace, red near exhaustion. The daemon's live or stale state is in the dot's tooltip only. Clicking it opens Health.
 
 **Perfect loads.** The developer wants every load to be perfect: no spinners, no skeletons, no layout shift and no theme flash. Every board task follows these rules:
@@ -725,6 +729,69 @@ The sidebar has:
 
 ---
 
+## M5F: Federated board
+
+ADR 0003 (accepted Tuesday 2026-11-03) gives the owner one board across hosts: each host keeps its own `state.db` and its own projects; the board host reads every paired peer live over SSH and forwards the owner's mutations to the owning host, which re-checks them. The contracts are `protocol.md` section 10, `authority.md` G41 to G44, `state.md` principle 1 and `recovery.md` R05. These tasks run beside M4's tail and M5, in one or two lanes, and finish before T6.3. F2 to F4 run in order: they share `crates/daemon` and `crates/cli`.
+
+### F1 Land the federation spec
+- **Goal:** Record the owner's decision on ADR 0003 and its three choices, and merge the spec edits as reviewed.
+- **Depends on:** the owner's approval of ADR 0003.
+- **Model, effort:** `sonnet` medium.
+- **Estimate:** 0.5 h.
+- **Owns:** `docs/adr/0003-federated-board.md`, the amended spec sections.
+- **Acceptance:** The ADR says accepted, with the choices; every spec status line names it.
+
+### F2 Pairing and keys
+- **Goal:** `tiller peer add|accept|list|remove|revoke`, the `peer_keys` table, `hosts.peer_scope` and `peer_host_id`, the Ed25519 key file, and config `federation.accept`.
+- **Depends on:** F1.
+- **Model, effort:** `opus` high.
+- **Estimate:** 2.5-3.5 h.
+- **Owns:** `crates/core/migrations/` (one new migration), `crates/core/src/state/peers.rs`, `crates/cli/src/cmd/peer.rs` (the existing `peer add` moves there from `admin.rs`).
+- **Acceptance:**
+  - The migration runs both ways on the fixture.
+  - Pairing over `ssh -t` needs the owner on both hosts; a session caller is refused on both.
+  - A second `peer add` for the same peer revokes the old key; `federation.accept = false` refuses pairing.
+
+### F3 Peer link and federated reads
+- **Goal:** `tiller peer serve` and the daemon's link client (`protocol.md` 10.2), and the federated reads, snapshot and SSE additions (7.3, 7.5, 7.6).
+- **Depends on:** F2.
+- **Model, effort:** `opus` high.
+- **Estimate:** 3-4 h.
+- **Owns:** `crates/daemon/src/peer/` (new), host tagging in `crates/daemon/src/views.rs`, the SSE additions in `crates/daemon/src/sse.rs`, `contract/openapi.json`.
+- **Acceptance:**
+  - A peer's cards appear within one frame of a change on the peer, and a resume after a gap misses nothing.
+  - Link states follow frame age; a link that hangs never blocks a local write or a local SSE push.
+
+### F4 Forwarded mutations
+- **Goal:** Signed `mutate` frames, the allowlist on both hosts, the new HTTP codes, `board@<label>` with `via_peer`, the `[peer]` backstop and deny rule.
+- **Depends on:** F3.
+- **Model, effort:** `opus` high.
+- **Estimate:** 3-4 h.
+- **Owns:** `crates/daemon/src/peer/forward.rs`, the mutation routing in `crates/daemon/src/api.rs`, the `[peer]` rule in `crates/agents/src/guards/bash.rs`.
+- **Acceptance:** Every G41 to G44 test passes (with F3's `peer serve` tests); a mutation for an unreachable peer writes nothing on either host; a retried 504 applies once.
+
+### F5 Board: host chips and staleness
+- **Goal:** `protocol.md` 10.5 on the board: host chips, "as of" with the age, disabled controls with the reason, "sent, not confirmed", the project picker grouped by host, the Machines link state.
+- **Depends on:** F1; the mocked API until F3 lands.
+- **Model, effort:** `sonnet` high.
+- **Estimate:** 2.5-3.5 h.
+- **Owns:** a host chip and peer-state hooks under `board/src/components/board/`, the Machines row in `board/src/components/shell/`, the stale states in `board/src/components/states/`.
+- **Acceptance:** Screenshots match in both themes at 1440 px and 390 px; the perfect-load rules hold with peers in the snapshot; no screen changes for a host with no peers.
+
+### F6 Two-host end to end
+- **Goal:** Two homes on one machine, joined through an SSH shim, drive the whole path.
+- **Depends on:** F4 and F5.
+- **Model, effort:** `sonnet` high.
+- **Estimate:** 1.5-2 h.
+- **Owns:** `crates/daemon/tests/peer_e2e.rs`, `scripts/two-host-demo.sh`.
+- **Acceptance:**
+  - A board answer for the peer's card reaches the peer's orchestrator through its outbox.
+  - With the peer frozen (`SIGSTOP`), the local board, its writes and its SSE are unaffected, and the peer's cards show "as of".
+
+**Checkpoint CP-F follows.** The developer uses the two-host board from F6.
+
+---
+
 ## M6: Cutover
 
 Each host goes through the bundle's `CUTOVER.md`. Rollback triggers go live at the moment of the flip: lost work, an unauthorized action, or a duplicate dispatch.
@@ -739,10 +806,10 @@ Before each flip, every kept row in the parity matrix that applies to that host 
   - The daemon checks the rollback triggers at no token cost.
   - Once a day, send a summary in the checkpoint shape.
   - Model, effort: `sonnet` medium.
-- **T6.3 Remote host.** The same steps as T6.1, after 2-3 stable days on the personal Mac.
+- **T6.3 Remote host.** The same steps as T6.1, after 2-3 stable days on the personal Mac and after CP-F. Then pair it from the personal Mac (`tiller peer add`), confirm the link is `live`, and live-check one forwarded answer and one cut link.
   - Model, effort: `opus` high.
-  - Estimate: 1-2 h.
-- **T6.4 Work Mac.** It runs on the work Mac under the work account, by an agent session there. It uses the reduced behavior the probe found, and its data stays on that machine.
+  - Estimate: 1.5-2.5 h.
+- **T6.4 Work Mac.** It runs on the work Mac under the work account, by an agent session there. It uses the reduced behavior the probe found, and its data stays on that machine: it sets `federation.accept = false` unless the owner chose otherwise for ADR 0003.
   - Model, effort: `opus` high.
   - Estimate: 1-2 h.
 

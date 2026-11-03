@@ -56,12 +56,33 @@ CREATE TABLE hosts (
   lane_capacity  INTEGER,                  -- local only: max active runs
   ram_floor_mb   INTEGER,                  -- spawn refuses below these floors
   disk_floor_mb  INTEGER,
-  -- cache (herdr poller): when this host was last reachable and why not
+  -- cache (herdr poller, or the peer link): when this host was last reachable and why not
   last_seen_at   TEXT,
   stale_reason   TEXT,
+  -- ADR 0003 (accepted): a paired peer on the board host; null otherwise
+  peer_scope     TEXT CHECK (peer_scope IN ('read', 'act')),
+  peer_host_id   TEXT,                     -- the peer's meta.host_id, checked on every hello
   rev            INTEGER NOT NULL DEFAULT 1,
-  CHECK (kind <> 'local' OR lane_capacity IS NOT NULL)
+  CHECK (kind <> 'local' OR lane_capacity IS NOT NULL),
+  CHECK (kind = 'remote' OR peer_scope IS NULL),
+  CHECK ((peer_scope IS NULL) = (peer_host_id IS NULL))
 ) STRICT;
+
+-- ADR 0003 (accepted): on a peer, one row per board host allowed to read it,
+-- and to act on it when scope is act. The public half only; the private key is
+-- a file on the board host (~/.tiller/peers/<label>.key).
+CREATE TABLE peer_keys (
+  id              TEXT PRIMARY KEY,         -- ULID, the key id in every frame
+  viewer_label    TEXT NOT NULL,
+  viewer_host_id  TEXT NOT NULL,            -- the board host's meta.host_id
+  public_key      TEXT NOT NULL,            -- Ed25519, base64
+  scope           TEXT NOT NULL CHECK (scope IN ('read', 'act')),
+  accepted_at     TEXT NOT NULL,
+  revoked_at      TEXT,
+  rev             INTEGER NOT NULL DEFAULT 1
+) STRICT;
+
+CREATE UNIQUE INDEX peer_keys_one_live ON peer_keys(viewer_host_id) WHERE revoked_at IS NULL;
 
 CREATE TABLE projects (
   id             TEXT PRIMARY KEY CHECK (id GLOB '[a-z][a-z0-9]*' AND length(id) BETWEEN 2 AND 16),
@@ -420,7 +441,7 @@ CREATE TABLE events (
   id               TEXT NOT NULL UNIQUE,
   at               TEXT NOT NULL,
   txn              TEXT NOT NULL,            -- mutation name, e.g. card.close
-  actor            TEXT NOT NULL,            -- session:<id>, board, daemon, hook, import, owner
+  actor            TEXT NOT NULL,            -- session:<id>, board, board@<viewer label> (ADR 0003), daemon, hook, import, owner
   entity           TEXT NOT NULL,
   entity_id        TEXT NOT NULL,
   kind             TEXT NOT NULL,            -- e.g. card.created, run.ended

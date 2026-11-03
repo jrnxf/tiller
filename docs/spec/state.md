@@ -2,13 +2,13 @@
 
 This is the contract for `state.db`, the one SQLite database each host keeps as the authority for its workflow records (ADR 0002). It names every entity, the facts each one owns, how the board's columns are derived from those facts, and the transaction and event behind every mutation. `schema.sql` next to it is the draft DDL; T2.1 turns both into `crates/core`.
 
-Written Monday 2026-11-02, Lisbon time (WET). Task T1.1. Status: approved at CP2 (Monday 2026-11-02), with the owner's decisions from `cp2-open.md` applied. A contract change from here on needs a stop-and-ask.
+Written Monday 2026-11-02, Lisbon time (WET). Task T1.1. Status: approved at CP2 (Monday 2026-11-02), with the owner's decisions from `cp2-open.md` applied. A contract change from here on needs a stop-and-ask. Amended by ADR 0003 (federated board), accepted Tuesday 2026-11-03: principle 1, Host, Peer key, sections 8, 9, 10 and 11.
 
 Every other spec builds on this one: recovery (T1.2) repairs these records, the protocol (T1.3) exposes them, authority (T1.4) says who may mutate them, and memory (T1.5) adds the tables that are never loaded into context.
 
 ## 1. Principles
 
-1. **One authority per host.** `state.db` at `~/.tiller/state.db` owns asks, cards, runs, attention, approvals, reservations, the outbox and events for the projects this host owns. A project has exactly one owner host in v1. Another host's cards never enter this database; remote hosts appear only as read-only pane caches.
+1. **One authority per host.** `state.db` at `~/.tiller/state.db` owns asks, cards, runs, attention, approvals, reservations, the outbox and events for the projects this host owns. A project has exactly one owner host in v1. Another host's cards never enter this database as rows. A paired peer's cards are read live over the peer link and held only in the daemon's memory, as a disposable cache (`protocol.md` section 10); a change to one is made by the peer, in the peer's own `state.db`, from a forwarded owner mutation the peer verified (ADR 0003). Hosts that are only herdr saved machines still appear as pane caches.
 2. **Facts, not columns.** The database stores lifecycle facts: work state, holds, dependencies, attention, run and session activity, PR state. The board column is computed from them by the precedence table in section 6 and is never stored.
 3. **One owner per fact.** Section 9 names the record that owns each fact. Everything else is a cache with a `fetched_at`, or a projection that can be rebuilt by a query.
 4. **Every mutation is one transaction with its event.** All writes go through `tiller` or the daemon, in `BEGIN IMMEDIATE`, in WAL mode with `busy_timeout`. The record change and its event row commit together or not at all. Hooks write the same way, without the daemon.
@@ -43,9 +43,18 @@ Each entity lists the facts it owns. Columns the entity only caches say so.
 - `id` (ULID), `label` (the role label the owner uses, for example `host-a`), `kind` (`local` or `remote`), `herdr_machine` (null for local, the saved machine id for remote).
 - `lane_capacity`: how many runs may be active at once on this host (required for the local host, null for remote ones). `ram_floor_mb`, `disk_floor_mb`: the free-resource floors `tiller spawn` checks live (P03).
 - Why capacity and the floors live in `state.db`, not the config file (decided at CP2, C11; reason corrected by S09): the capacity check is a query inside `run.start`'s `BEGIN IMMEDIATE` transaction, which compares open reservations with `hosts.lane_capacity` and `projects.capacity` in one read, and the `capacity` view (free slots per host) that the Machines section and spawn read is defined over the same rows. A config file cannot take part in that transaction. Quoting the checked value is not the reason: a config value could be quoted in the `run.started` payload just as well, and every value checked is recorded there either way. The floors stay beside the capacity so one owner command (`tiller host edit`) changes all three with a `rev` and an event.
-- `last_seen_at`, `stale_reason` (cache from the herdr poller, T2.5): feed the Machines section.
+- `last_seen_at`, `stale_reason` (cache from the herdr poller, T2.5, and from the peer link for a paired peer): feed the Machines section. For a peer, `stale_reason` adds `peer_link_down` (the link is not live), `peer_refused` (the peer refused the hello: a revoked key, `federation.accept = false`, or a changed `host_id`) and `peer_version` (no common peer protocol version).
+- `peer_scope` (`read` or `act`; null for the local host and for a herdr-only machine) and `peer_host_id` (the peer's `meta.host_id`, recorded at pairing): set by `peer.pair` on the board host (ADR 0003). The link checks `peer_host_id` on every hello, so a peer whose database was replaced is refused until the owner runs `tiller peer remove` and `tiller peer add` again. The peer's private signing key is a file, `~/.tiller/peers/<label>.key` (mode 0600), never a column.
 
 The owner marker is a file, `~/.tiller/owner`, not a row (plan v2, point 15). `tiller` refuses every mutation while the marker names another system. `meta.host_id` records which host this database belongs to, so a copied database cannot be mistaken for another host's.
+
+### Peer key
+
+`peer_keys`: on a host that accepted a pairing, one row per board host allowed to read it, and to act on it when the scope is `act` (ADR 0003). This is the only record that authorizes a forwarded mutation.
+
+- `id` (ULID, the key id), `viewer_label`, `viewer_host_id` (the board host's `meta.host_id`), `public_key` (Ed25519, base64), `scope` (`read` or `act`), `accepted_at`, `revoked_at`, `rev`.
+- At most one unrevoked row per `viewer_host_id`. A new pairing from the same board host revokes the old row in the same transaction.
+- The public half only. A fleet role that read it would gain nothing, and `~/.tiller` is denied to fleet roles anyway (`authority.md` G20).
 
 ### Project
 
@@ -226,7 +235,7 @@ Rules:
 
 `events`: the append-only log, one or more rows per mutation, written in the mutation's transaction.
 
-- `seq` (integer, autoincrement; the SSE `Last-Event-ID`), `id` (ULID), `at`, `txn` (the mutation name from section 8), `actor` (`session:<id>`, `board`, `daemon`, `hook`, `import`, `owner`; `owner` is the developer acting through the CLI or the board, see T1.4), `entity` (`ask`, `card`, `run`, ...), `entity_id`, `kind` (`card.created`, `run.ended`, ...), `rev_after` (the entity's rev after the write, null for append-only entities), `card_id` (denormalized for timeline queries), `payload` (JSON, the fields that changed and the preconditions checked), `idempotency_key`.
+- `seq` (integer, autoincrement; the SSE `Last-Event-ID`), `id` (ULID), `at`, `txn` (the mutation name from section 8), `actor` (`session:<id>`, `board`, `board@<viewer label>`, `daemon`, `hook`, `import`, `owner`; `owner` is the developer acting through the CLI or the board, see T1.4; `board@<viewer label>` is the owner acting through a paired board host, ADR 0003), `entity` (`ask`, `card`, `run`, ...), `entity_id`, `kind` (`card.created`, `run.ended`, ...), `rev_after` (the entity's rev after the write, null for append-only entities), `card_id` (denormalized for timeline queries), `payload` (JSON, the fields that changed and the preconditions checked), `idempotency_key`.
 - Events are never updated or deleted. They are exported in the JSONL export (T2.3).
 - The board's SSE stream carries `seq`, `entity`, `entity_id` and `rev_after`, so a client ignores an event older than what it holds and resumes from `seq` after a gap.
 - Firstmate's fleet ledger events map onto these: `task.dispatched` is `run.started`, `task.status` is `run.status`, `task.pr_ready` is `pr.linked`, `task.merged` is `approval.succeeded` or `card.closed` with `landed`, `task.cleaned_up` is `run.cleaned`.
@@ -438,10 +447,16 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `review_pass.finish` | orchestrator, owner (`tiller review finish`) | pass `running`; for each chunk `n`, a live `report` artifact titled `chunk <n> of <total>` on the pass card from a run that recorded a `reviews` row there, both since start; a live `page` artifact on the card; fix cards in the project; `reviewed_through_sha` still equals `base_sha` | `projects.reviewed_through_sha` (compare-and-set to `head_sha`), `review_passes` (`finished`), one `review` attention item; the next weekly obligation while pre-launch; the final pass for a weekly pass that finishes after launch | `project.reviewed`, `review_pass.finished`, `attention.opened`, `obligation.opened` or `review_pass.created` |
 | `review_pass.abandon` | orchestrator, owner (`tiller review abandon`) | pass `pending` or `running`; a reason | `review_passes` (`abandoned`), the card closed `abandoned`; the next weekly obligation while pre-launch, or a new pending final pass | `review_pass.abandoned`, `card.closed`, `obligation.opened` or `review_pass.created` |
 | `host.add`, `host.edit` | owner | label free (add); `expected_rev` matches (edit) | `hosts` | `host.added`, `host.edited` |
+| `peer.accept` | owner, on the peer, through `tiller peer accept` run by `tiller peer add` over `ssh -t` (`authority.md` section 3) | config `federation.accept` is not `false` (also checked on every hello, `mutate` and `query`: `protocol.md` 10.2); the public key parses; the viewer is not this host | `peer_keys` (and `revoked_at` on an older row for the same viewer) | `peer.accepted`, maybe `peer.revoked` |
+| `peer.revoke` | owner, on the peer (`tiller peer revoke <viewer label>`) | key not revoked | `peer_keys.revoked_at`; an open link from that key is closed at once | `peer.revoked` |
+| `peer.pair` | owner, on the board host, inside `tiller peer add`, after the peer's `peer.accept` succeeded | label free, or a row with that label whose `peer_scope` is null (never paired, or removed) or whose `peer_host_id` is the same; the key file was written first | `hosts` (`kind = remote`, `herdr_machine`, `peer_scope`, `peer_host_id`) | `host.added` or `host.edited` |
+| `peer.remove` | owner, on the board host (`tiller peer remove <label>`) | `peer_scope` set | `hosts.peer_scope` and `peer_host_id` null (the row stays as a herdr machine); the key file is deleted after the commit | `host.edited` |
 | `config.set` | owner | key known; value valid | the config file, outside `state.db` | `config.changed` |
 | `import.apply` | `tiller import` | manifest valid; `meta.import_manifest_sha256` differs (a second import is a no-op) | every table, with `legacy_id` set | one `import.applied` plus the per-row events, all under `actor = import` |
 
 Every row in the events table names its mutation, so a timeline query answers "who changed this, under which transaction, with which preconditions".
+
+A forwarded mutation (ADR 0003) is not a new mutation. The peer runs the same row of this table that its own board would run, with the same preconditions, and writes the event with `actor = board@<viewer label>` and `payload.via_peer = {viewer_host_id, key_id}`.
 
 ## 9. Fact ownership
 
@@ -461,6 +476,9 @@ The table from plan v2, expanded to every table in `schema.sql`.
 | Pipeline state | `no-mistakes` records; `prs.pipeline_state` is a cache | the Landing badge |
 | Deploy results | GitHub workflow runs, through `gh-axi`; no cache table, each result is a `deploy.finished` event and the open watch is an obligation | the Landing `deploying` badge, card detail |
 | Panes and sessions in herdr | herdr; `panes` is a cache with `fetched_at` | jump links, the Agents view |
+| A peer's cards, attention, agents and summary | the peer's own `state.db` | the board host's in-memory peer cache, never stored here; labelled with the host and its link state (`protocol.md` section 10) |
+| Who may read or act on this host from another host | `state.db`: `peer_keys` | the peer link's hello and every forwarded mutation |
+| This host's right to read or act on a peer | the key file `~/.tiller/peers/<label>.key`, with `hosts.peer_scope` | the Machines row |
 | Worktrees | treehouse plus git; `worktrees` is a cache | reconcile input, the cleanup guard |
 | Quota | `quota-axi`; `quota_windows` is a cache | the sidebar footer, Health, the spawn check |
 | Owner marker | the file `~/.tiller/owner` | `tiller` refuses mutations when it names another system |
@@ -475,7 +493,8 @@ The table from plan v2, expanded to every table in `schema.sql`.
 |---|---|---|
 | Authoritative | `state.db` tables in section 9's first seven rows; the memory files under git | WAL mode, `synchronous = NORMAL` (WAL makes a committed transaction durable against a process crash; an OS crash can lose the last transactions but never corrupt), nightly backup through SQLite's online backup API inside the host's boundary (T2.3), versioned migrations with a down path, a restore drill in CI |
 | Rebuildable | `observations`, `events`-derived projections, every cache table, `sessions.activity*` | kept, pruned by retention, rebuilt from their source when missing |
-| Disposable | logs, the daemon's in-memory SSE buffer | not backed up |
+| Disposable | logs, the daemon's in-memory SSE buffer, the in-memory peer cache | not backed up; the peer cache is refilled from the peer's snapshot on reconnect |
+| Credential | `~/.tiller/peers/<label>.key` | not backed up; a lost key is replaced by running `tiller peer add` again, which revokes the old one on the peer |
 
 Schema version lives in `meta.schema_version` and is managed by `rusqlite_migration`. Every migration has an up and a down, and T2.1 runs both on a fixture.
 
@@ -493,6 +512,8 @@ Tests in T2.1 and T2.7 prove each one.
 8. An outbox message in `acked` has a `delivered_at` or a recorded poll pickup; a `failed` answer always has a `recovery` attention item.
 9. Display ids are unique per host and never reused, including across import.
 10. A mutation carrying a known idempotency key returns the stored response and writes nothing.
+11. No row in `state.db` belongs to a project another host owns: every `cards.project_id` names a project whose `owner_host_id = meta.host_id` (ADR 0003 keeps principle 1).
+12. Every event with `actor = board@<label>` carries `payload.via_peer.key_id`, which names an `act` row of `peer_keys` that was unrevoked when the event was written.
 
 ## 12. Coverage
 
@@ -547,3 +568,11 @@ Monday 2026-11-02, Lisbon time. The owner's picks from `cp2-open.md`:
 5. **Dispatch override** (C04): `cards.dispatch_override`, owner-only (section 3, Card; `protocol.md` 6.4).
 6. **Enforced merge gate** (S03): `projects.merge_gate` records whether the daemon's ruleset check holds (`authority.md`, section 6).
 7. **Combined memory approval** (S01): `approvals.memory_paths` and `linked_approval_id` (section 3, Approval).
+
+## Accepted after CP2: ADR 0003
+
+Tuesday 2026-11-03, Lisbon time, accepted by the owner. The owner asked for one board across hosts, which reopens C12 (`cp2-open.md` item 12).
+
+1. **Principle 1 kept, worded for federation.** One authority per host and one owner host per project stay. A peer's cards are a disposable in-memory cache on the board host, never rows (section 1).
+2. **Pairing records.** `hosts.peer_scope` and `peer_host_id` on the board host; `peer_keys` on the peer; `peer.accept`, `peer.revoke`, `peer.pair` and `peer.remove` (sections 3 and 8). `schema.sql` carries the draft DDL; T2.1's migration path adds them in a new migration with a down step (task F2).
+3. **Forwarded mutations reuse section 8.** The actor is `board@<viewer label>`; invariants 11 and 12 pin both rules.

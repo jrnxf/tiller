@@ -2,7 +2,7 @@
 
 This is the contract for every way in and out of `state.db`: how an ask becomes a record, how a message reaches a session, how each hook event becomes an observation, the full `tiller` command surface, the board's HTTP and SSE API, the quota feed and the machine summary. `state.md` and `schema.sql` define the records; this spec defines who writes them, through which command or endpoint, and what a caller gets back.
 
-Written Monday 2026-11-02, Lisbon time (WET). Task T1.3. Status: approved at CP2 (Monday 2026-11-02), with the owner's decisions from `cp2-open.md` applied. A contract change from here on needs a stop-and-ask.
+Written Monday 2026-11-02, Lisbon time (WET). Task T1.3. Status: approved at CP2 (Monday 2026-11-02), with the owner's decisions from `cp2-open.md` applied. A contract change from here on needs a stop-and-ask. Amended by ADR 0003 (federated board), accepted Tuesday 2026-11-03: sections 6.2, 6.4, 7, 9, 10, 11 and 12.
 
 T2.2 builds the CLI from section 6, T2.6 builds the hook and transcript handlers from sections 4 and 5, T2.5 builds delivery from section 3, T2.8 builds the API and the feeds from sections 7 to 9, and T4.4 wires intake from section 2. Authority (who may run what) is T1.4; this spec names the caller each command expects and leaves the deny rules to `authority.md`.
 
@@ -294,7 +294,7 @@ The deploy watch (decided at CP2, C02 amended by S07). A run counts for the watc
 | 5 | `refused` | a precondition failed (`state.md`, section 8); the failed fact is named | after the fact changes |
 | 6 | `forbidden` | the actor may not do this (T1.4), or the owner marker names another system | no |
 | 7 | `unavailable` | database busy past `busy_timeout`, the daemon is needed and down, or herdr or the forge is unreachable; nothing was written | yes, same key |
-| 8 | `uncertain` | an outside action was sent and its result could not be read (only `tiller land`); the approval is `uncertain` | no; reconcile resolves it from the forge |
+| 8 | `uncertain` | an outside action was sent and its result could not be read: `tiller land` (the approval is `uncertain`), or a mutation forwarded to a peer (10.3, 504 `forward_uncertain`) | `land`: no; reconcile resolves it from the forge. A forwarded mutation: yes, same key, since the peer applies a key once |
 
 Hooks always exit 0, except what the PreToolUse guard (T1.4) and the Stop hook in `block-once` mode print as their decision.
 
@@ -395,7 +395,11 @@ Reads have no side effects and are all trivially idempotent; they are listed aft
 | `tiller project stage <id> pre-launch\|launched --rev <n> [--from <sha>]` | `project.stage`; to pre-launch the CLI reads the default-branch head from the project's checkout first, unless `--from` names the commit | owner | natural |
 | `tiller host edit [--lane-capacity n] [--ram-floor-mb n] [--disk-floor-mb n] --rev <n>` | host row (`host.edit`) | owner | natural |
 | `tiller config set <key> <value>` | `config.set`: writes `~/.tiller/config.toml` atomically (temporary file, then rename), then commits a `config.changed` event; a crash between the two leaves a file newer than its event, which `tiller doctor` reports | owner | natural |
-| `tiller peer add <label> --ssh <alias>` (section 10) | `host.add` (`kind = remote`); the SSH alias is config (`peers.<label>.ssh`), not a column | owner | natural |
+| `tiller peer add <label> --ssh <alias> [--herdr-machine <id>] [--read-only]` (section 10.1) | on the peer, `peer.accept` through `ssh -t <alias> tiller peer accept`; then here, `peer.pair` (`host.add` with `kind = remote`, `herdr_machine` (default: the label), `peer_scope`, `peer_host_id`) after writing the key file; the SSH alias is config (`peers.<label>.ssh`), not a column | owner, with a terminal | natural: the same label and peer pair again, revoking the old key on the peer |
+| `tiller peer accept --from <label> --viewer-host-id <id> --pubkey <b64> --scope act\|read` | `peer.accept`; prints this host's `meta.host_id`, label, schema and peer protocol versions as JSON | owner, with a terminal (run by `peer add`, rarely by hand) | natural: the same viewer and key return the same row |
+| `tiller peer revoke <viewer label>` | `peer.revoke`; an open link from that key closes at once | owner | natural |
+| `tiller peer remove <label>` | `peer.remove`; deletes `~/.tiller/peers/<label>.key` after the commit; the peer's key row stays until `peer revoke` there, and is useless without the private half | owner | natural |
+| `tiller peer list` | read: each peer's label, scope, link state, `as_of`, and on a peer, the accepted board hosts | owner | read |
 
 **Plumbing**
 
@@ -410,6 +414,7 @@ Reads have no side effects and are all trivially idempotent; they are listed aft
 | `tiller import <bundle> [--dry-run]` | `import.apply` (T2.4) | owner | natural: a second import is a no-op |
 | `tiller export --jsonl <dir>` / `tiller backup` / `tiller restore <file>` | T2.3 | owner, daemon timer | export and backup natural (same content, new file name); restore refuses while the daemon runs |
 | `tiller doctor` | the health checks of P43 (tool versions, herdr, quota-axi, no-mistakes daemon against its CLI, hook registration) | owner, orchestrator at start | read |
+| `tiller peer serve --from <label>` | the peer end of the peer link (section 10.2): reads `state.db` itself, needs no daemon, and applies verified forwarded mutations through the same core functions. Refuses unless started by sshd for the owner (`SSH_CONNECTION` set, no `TILLER_SESSION_ID`, no `CLAUDECODE`, no Claude Code process among its ancestors) | the board host's daemon, over SSH | each forwarded mutation is keyed by the board's `idempotency_key` |
 
 **Reads**
 
@@ -424,6 +429,7 @@ Every mutation the CLI exposes is a row in `state.md` section 8 (this task added
 - The daemon serves `http://127.0.0.1:7421` only, never another interface (AGENTS.md).
 - **Host check.** Every request must carry `Host: 127.0.0.1:7421` or `localhost:7421`; any other value gets 421. This stops DNS rebinding. The owner can name extra hosts with `tiller daemon --allow-host <host>` (repeatable, exact match), such as a reverse proxy's name; those get reads only: a mutation from them gets 403 and the login link 421.
 - **Credential.** `authority.md` (Board API credential) owns the requirement; this is the mechanism. Reads (`GET`, including the SSE stream) are served to any request that passes the Host check. Mutations need the owner cookie, `tiller_owner`, `HttpOnly; SameSite=Strict; Path=/`, which the browser sends with `fetch` and `EventSource` alike. It is minted only through the one-time login link `tiller board` prints (`GET /login/<one-time token>` sets it and redirects to `/`); `GET /` never sets it. It survives daemon restarts, so open tabs keep working, and expires 30 days after it was minted (`Max-Age=2592000`, and the stored hash carries the same expiry, so a copied cookie stops working too); after that, `tiller board` must be run again (decided at CP2, C15). Its hash is stored under `~/.tiller`, which every fleet role is denied. A mutation also needs `Content-Type: application/json`, `Sec-Fetch-Site: same-origin` and an `Origin` equal to the daemon's own. No CORS headers are sent, so another site's page can neither read nor write.
+- **Peer forwarding.** A mutation aimed at a paired peer's record (7.4, `host`) passes every check above on this host first, then travels to the peer over the peer link (section 10.3) and is authorized again there. The owner cookie never leaves this host, and the peer never accepts a cookie from elsewhere. A request from an `--allow-host` name still gets reads only, including of peers.
 - **Same-user processes.** A process running as the owner's OS user that can read `~/.tiller` could still act as the owner. `authority.md` closes this for fleet roles (no access to `~/.tiller`, no localhost from the sandbox) and lists it as an alternate path with tests.
 - **Versioning.** Every path is under `/api/v1`. The OpenAPI document (`contract/openapi.json`, utoipa, T2.8) is the board's only source of types, including the SSE event schemas.
 
@@ -448,7 +454,11 @@ The receipt's three stages (point 36) come from records, not from the response: 
 | 409 | 4 | stale `rev`; body has `current` |
 | 421 | - | wrong `Host` |
 | 422 | 5 | precondition refused |
-| 503 | 7 | unavailable; nothing written |
+| 502 | 6 | `peer_refused`: the owning peer refused a forwarded mutation's credential (revoked key, read scope, op not allowlisted, owner marker there); nothing written there |
+| 503 | 7 | unavailable; nothing written. Also `peer_unreachable`: the owning peer's link is not `live`, so nothing was sent |
+| 504 | 8 | `forward_uncertain`: the frame was sent and no result came within 10 s; nothing is held for a retry. The owner may retry from the control, which reuses the same `idempotency_key`, so the peer answers from its stored response or applies it once |
+
+A peer's own refusal (404, 409, 422 and their bodies) is passed through unchanged, with `host` added to the error.
 
 ### 7.3 Reads
 
@@ -467,6 +477,8 @@ The receipt's three stages (point 36) come from records, not from the response: 
 | `GET /api/v1/projects` | projects with delivery mode, effective delivery and capacity; stage, last reviewed commit and when, next review due, `review_overdue`, and the kind of an open review pass |
 | `GET /api/v1/signals` | the Health page's counts (T3.5): one entry per Lisbon week for the last 8, oldest first, with cards landed and reported, merged PRs, attention items opened, median minutes to answer, reverts, escaped bugs, rework, lost work, duplicate dispatches and unauthorized actions; the per-project counts for the newest week; machines live of total. Plain counts over `state.db` (`tiller-core` `Store::signals`); no Firstmate figure |
 | `GET /api/v1/memory?scope=<scope>` | the memory view: each source's lines with open proposals inline and each proposal's budget figure (`memory.md`, section 6). Board only; no fleet role and no rendered prompt reads it |
+
+**Federated reads** (ADR 0003). `board`, `attention`, `agents`, `projects` and `machines` return this host's rows and every paired peer's cached rows together. Every row carries `host` (label) and `host_id`; a peer row also carries `as_of` (the peer's `server_time` of the frame it came from) and `link`. `?host=` narrows to one host. The single-entity reads (`cards/{id}`, `cards/{id}/timeline`, `runs/{id}`) take `?host=<label>`; absent means this host. For a peer they are sent over the link as a `query` frame and answered from the peer's `state.db`, with a 10 s timeout; an unreachable peer gets 503 `peer_unreachable` with the cached card row in `current`. `quota`, `health`, `signals` and `memory` stay local: each host's quota and memory are its own. A display id that appears on more than one host is shown host-qualified (`host-b · fleet-1`); an id input that matches on several hosts fails with 404 listing the candidates.
 
 ### 7.4 Mutations
 
@@ -487,6 +499,8 @@ Every mutation body carries `idempotency_key` (a ULID the board mints when the c
 
 There is no endpoint for spawn, land, run end or cleanup. Those belong to agents and the daemon.
 
+**Forwarding** (ADR 0003). Every mutation body above may carry `host` (a peer label; absent means this host). With a peer `host`, the daemon checks the cookie and headers as for any mutation, refuses at once with 503 `peer_unreachable` when the link is not `live`, and otherwise sends the body as a signed `mutate` frame (section 10.3) and returns the peer's response with `host` added. Project slugs are unique only per host and `fleet` exists on every host, so `POST /api/v1/cards` takes `host` like the rest; the new-card picker sends the host of the project the owner chose. The forwarding allowlist is exactly: `POST /api/v1/cards`, `PATCH /api/v1/cards/{id}`, `POST .../comment`, `POST` and `DELETE .../hold`, `POST .../close`, `.../cancel` and `.../reopen`, `POST /api/v1/attention/{id}/answer` and `POST /api/v1/approvals/{id}/decide`. Not forwarded: `memory/proposals/decide`, because memory reads stay local (7.3), so the board host never shows what a decision would keep; `projects/{id}/stage`, because the forwarded owner has no project commands (`authority.md` section 3); and `agents/{session}/focus`, which already runs herdr against the peer's saved machine. A mutation off the list with a peer `host` is 502 `peer_refused`.
+
 ### 7.5 SSE stream
 
 One stream: `GET /api/v1/events` (`text/event-stream`).
@@ -502,6 +516,7 @@ data: {"seq":4182,"at":"2026-11-02T14:05:09.123Z","kind":"attention.answered","t
 - **Source.** The daemon reads new `events` rows (it sees CLI and hook writes through `data_version` polling) and sends them. Every pushed change is an `events` row, so every change can be resumed. Cache refreshes write `pane.changed`, `host.changed`, `worktree.changed` and `quota.changed` events only on a change (`state.md`, `cache.refresh`), and observations write `observation.recorded` only when a session's verdict changes.
 - **Resume.** The browser's `EventSource` sends `Last-Event-ID`. The daemon replays every row with `seq` greater than it, then streams live. If the gap is more than 5,000 rows, or the id is greater than the newest `seq` (a restored database), the daemon sends `event: reset` with `{"seq": <newest>}` and the client refetches the snapshot silently while the UI stays put. Because events are durable, this works across a daemon restart (T2.8 acceptance).
 - **Keepalive.** A comment line every 15 s, and `retry: 1000`.
+- **Peers** (section 10.2). A peer's change is sent as `event: peer` with `data: {"host","host_id","as_of","change":{<the change shape above>}}` and no SSE `id`, since a peer's `seq` is not this host's. A link state change is `event: link` with `{"host","link","as_of","stale_reason"}`. When the browser reconnects, the daemon sends `event: peer_reset` per peer, with the peer's current cached `queries`, after replaying this host's rows, so a peer's changes missed during the gap are never needed.
 - **Time.** Staleness is derived from age, so it changes without an event. Each snapshot and each `reset` carries `server_time`; the client computes staleness from `activity_observed_at` with the clock offset, using the thresholds the snapshot carries.
 
 ### 7.6 Boot snapshot
@@ -512,6 +527,7 @@ The daemon renders `index.html` with the snapshot inlined:
 <script type="application/json" id="tiller-boot">{"v":1,"server_time":"...","last_event_seq":4181,"thresholds":{...},"queries":{"/api/v1/board?filter=all":{...},"/api/v1/attention?state=open":{...},"/api/v1/agents":{...},"/api/v1/machines":{...},"/api/v1/quota":{...},"/api/v1/projects":{...}}}</script>
 ```
 
+- **Peers** (section 10). The snapshot adds `"peers":[{"host","host_id","link","as_of","server_time_offset_ms","scope","last_event_seq"}]`, and every federated query entry already includes the peer rows the daemon held when it rendered.
 - Each `queries` entry is exactly the response of that GET, built by the same handler, keyed by its path and query string. The board's query option factories (T3.1) map those paths to query keys, so the snapshot never drifts from the API.
 - The JSON is escaped for HTML (`<`, `>`, `&` and U+2028/2029 as `\u` escapes).
 - All snapshot reads run in one SQLite read transaction, and `last_event_seq` is read in it, so the client's first SSE request (`Last-Event-ID: <last_event_seq>`) neither misses nor repeats an event.
@@ -542,12 +558,13 @@ One row per host the board shows: this host, and every remote host it knows thro
 
 | Field | Local host | Remote host |
 |---|---|---|
-| `label`, `kind`, `view_only` | `hosts`; `view_only` is derived, false | `hosts`; `view_only` is derived from `kind = remote`, always true in v1 |
-| `health` | `ok`, `degraded` (a poller failing, the quota feed stale, a hook error in the last hour) or `down` (the daemon itself cannot read `state.db`) | `ok`, or `stale` when `last_seen_at` is older than 2 minutes |
-| `running_agents` | live sessions with an active run, plus orchestrators | live panes in `panes` whose `agent_status` is not `done`; from the peer summary when there is one |
-| `capacity`, `free_slots` | the `capacity` view | from the peer summary; null without one |
-| `last_seen_at` | now, while the daemon runs | `hosts.last_seen_at` (cache from the herdr poller) |
-| `stale_reason` | null | `herdr_link_down` (the saved machine does not answer), `host_asleep` (herdr reports the remote server suspended, I; T2.5 confirms what herdr exposes), `poll_failed` (an answer that did not parse), `never_seen` |
+| `label`, `kind`, `view_only` | `hosts`; `view_only` is derived, false | `hosts`; `view_only` is true for a herdr-only machine and a `read` pairing, false for an `act` pairing (ADR 0003) |
+| `link`, `peer_scope` | null | for a paired peer: `live`, `lagging`, `down`, `refused` or `never` (section 10.2), and `read` or `act`; null for a herdr-only machine |
+| `health` | `ok`, `degraded` (a poller failing, the quota feed stale, a hook error in the last hour) or `down` (the daemon itself cannot read `state.db`) | the peer's own `health` while the link is `live`; otherwise `stale`. A herdr-only machine: `ok`, or `stale` when `last_seen_at` is older than 2 minutes |
+| `running_agents` | live sessions with an active run, plus orchestrators | from the peer's own row over the link; else live panes in `panes` whose `agent_status` is not `done` |
+| `capacity`, `free_slots` | the `capacity` view | from the peer's own row over the link; null without one |
+| `last_seen_at` | now, while the daemon runs | the last frame from the peer link, or `hosts.last_seen_at` from the herdr poller, whichever is newer |
+| `stale_reason` | null | `herdr_link_down` (the saved machine does not answer), `host_asleep` (herdr reports the remote server suspended, I; T2.5 confirms what herdr exposes), `poll_failed` (an answer that did not parse), `never_seen`, `peer_link_down`, `peer_refused`, `peer_version` |
 
 Exposed through `GET /api/v1/machines`, `tiller machines`, the snapshot and `host.changed` events. A click on a row filters Board and Agents by `host`.
 
@@ -556,8 +573,72 @@ Exposed through `GET /api/v1/machines`, `tiller machines`, the snapshot and `hos
 The owner kept D01 (secondmates and remote homes), D04 (other harness adapters) and D11 (config push to secondmate homes) and approved the other twelve drops (the decision reached this task on Monday 2026-11-02; `parity.md` records it since T1.6). This spec gives each a protocol home; CP2 decided the two open points below (C12, C13).
 
 - **Other harnesses (D04).** `sessions.harness` (default `claude`) records which harness runs a session. `tiller hook --harness <h> <event>` is the entry point for another harness's hooks; each harness has an adapter table, like section 4.2, mapping its events onto the same `observations.event` and verdict vocabulary, with its own totality test. A harness with no adapter yet is observed through herdr and liveness only, as a reduced host is. Claude Code is the only adapter at cutover: no other harness gets an adapter before cutover (decided at CP2, C13). Which one comes first after cutover is a later decision, and `authority.md` G35 still refuses a role on a harness without a pre-tool hook transport and a sandbox equivalent.
-- **Remote homes (D01).** A remote home is another host running its own Tiller, which owns its own projects (one owner host per project). `tiller peer add <label> --ssh <alias>` records it as a `remote` host. The daemon polls `ssh <alias> tiller machines --json --local` every 2 minutes for that host's own summary, which fills section 9's remote row; the peer's cards never enter this database (`state.md`, principle 1), and the board links to the peer's herdr through the saved machine. Sending an ask to a peer's orchestrator (`tiller ask note --host <peer> ...`, run as `ssh <alias> tiller ask note ...`) would be a new control route; it stays off in v1, and remote lanes stay read-only (decided at CP2, C12).
+- **Remote homes (D01).** A remote home is another host running its own Tiller, which owns its own projects (one owner host per project). CP2 kept it view only (C12). ADR 0003, accepted Tuesday 2026-11-03, reopens C12: the board host shows every paired peer's cards live and forwards the owner's mutations to the owning host. Sections 10.1 to 10.6 are that contract. Sending an ask to a peer's orchestrator from a session (`tiller ask note --host <peer> ...`) stays off: it would be a fleet route, and forwarding is owner-only.
 - **Config push (D11).** Tiller's configuration (role files, settings fragments, hook registration) ships through the Nix flake and the home-manager module on every host, so a push is a dotfiles change plus a rebuild, not a file copy. `tiller config diff <peer>` compares this host's config hash with the peer's (`ssh <alias> tiller config hash`) and lists what differs. It is read-only.
+
+### 10.1 Pairing
+
+`tiller peer add <label> --ssh <alias> [--read-only]` on the board host, run by the owner in a terminal:
+
+1. Refuses a session caller (`authority.md` G22), an alias that starts with `-`, and a label still paired to a different peer (`tiller peer remove` it first).
+2. Generates an Ed25519 key pair. The private half goes to `~/.tiller/peers/<label>.key` (mode 0600, written atomically), never to `state.db` or a log.
+3. Runs `ssh -t <alias> tiller peer accept --from <this label> --viewer-host-id <this meta.host_id> --pubkey <public half> --scope act|read`. `-t` gives the peer a terminal, so the peer sees its owner principal (`authority.md` section 3) and asks for confirmation; it refuses when its config has `federation.accept = false`. It writes `peer_keys` and prints its `host_id`, label and versions.
+4. Commits `peer.pair` here (`hosts` row with `peer_scope` and `peer_host_id`) and config `peers.<label>.ssh`, then the daemon opens the link. A failure at step 3 deletes the key file; nothing else was written. A failure at step 4 also deletes the key file, which leaves the peer's new `peer_keys` row with no private half; running `tiller peer add` again replaces it, since a new accept from the same board host revokes the old row.
+
+Adding a host stays one command. A peer whose database was replaced reports a new `host_id` and is `refused`; `tiller peer remove <label>` then `tiller peer add` pairs it again. Removing one is `tiller peer remove <label>` here and, to make the old key useless at once, `tiller peer revoke <label>` there.
+
+### 10.2 Peer link, freshness and resume
+
+One SSH session per paired peer, opened by the board host's daemon: `ssh -T -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=2 <alias> tiller peer serve --from <label>`. Frames are JSON lines, protocol `tiller-peer/1`:
+
+| Frame | Direction | Carries |
+|---|---|---|
+| `hello` | board host to peer | `v`, `from`, `key_id`, `viewer_host_id`, `nonce`, `ts`, `sig` (Ed25519 over all of them and the peer's expected `host_id`), `last_seq` (the peer `seq` the board host last applied, or null) |
+| `welcome` / `refused` | peer | `host_id`, `label`, `schema_version`, `tiller_version`, `server_time`; or `reason` (`revoked`, `unknown_key`, `bad_sig`, `clock_skew`, `version`, `accept_off`) |
+| `snapshot` | peer | `server_time`, `last_event_seq`, and `queries`: the peer's own `board?filter=all`, `attention?state=open`, `agents`, `projects` and its local `machines` row, built by the same handlers as 7.6, in one read transaction |
+| `event` | peer | one `events` row in the SSE change shape (7.5), in `seq` order |
+| `beat` | peer | `server_time`, `last_event_seq`, every 10 s |
+| `query` / `result` | board host / peer | `id`, an allowlisted single-entity GET (`cards/{id}`, `cards/{id}/timeline`, `runs/{id}`); `id`, `http_status`, `body` |
+| `mutate` / `result` | board host / peer | section 10.3 |
+
+- **Hello checks.** The peer answers `hello` only when config `federation.accept` is not `false`, the key row is unrevoked, the signature is valid and `ts` is within 120 s of its clock; otherwise `refused` with `accept_off`, `revoked` or `unknown_key`, `bad_sig` or `clock_skew`. It re-reads `federation.accept` and the key row on every `mutate` and `query`, and closes the link when either changes, so setting `federation.accept = false` cuts a live link at once.
+- **Fetch.** After `welcome`, the peer sends `snapshot` when `last_seq` is null, older than 5,000 rows, or greater than its newest `seq` (a restored database); otherwise it replays every row after `last_seq`. Then it streams `event` frames as it sees new rows (`data_version` polling every 200 ms, like the daemon) and a `beat` every 10 s.
+- **Fresh.** The board host applies each `event` to its in-memory copy at once and pushes it to browsers as `event: peer`. Derived columns are re-read: while events arrive, it asks for a fresh `snapshot` at most once every 2 s (coalesced), so a column a peer derives never drifts from the peer.
+- **Link state.** `live`: a frame within the last 25 s. `lagging`: the last frame 25 s to 2 min ago. `down`: no frame for 2 min, or reconnect failing. `refused`: the last `hello` was refused, or the peer's `host_id` differs from `hosts.peer_host_id`. `never`: no `welcome` yet. Every change is an `event: link` and a `host.changed` event here.
+- **Reconnect.** When the SSH child exits, the connection is refused, or the link reaches `down` (no frame for 2 min, which also catches a frozen `peer serve` behind a live TCP session), the daemon kills the SSH child and retries after 5 s, 15 s, 30 s, then every 60 s. `refused` waits for the owner (`tiller peer add` again) except `clock_skew` and `version`, which retry every 60 s.
+- **Clock.** Each `welcome` and `beat` carries the peer's `server_time`; the board host keeps the offset and serves it in `peers[].server_time_offset_ms`, so a peer agent's activity staleness is computed against the peer's clock, not this one.
+- **Isolation.** Each link runs in its own task with its own timeouts. Nothing on this host waits on it: no local write, no SSE push of a local event, no poller.
+
+### 10.3 Forwarded mutations
+
+1. The board sends a 7.4 mutation with `host = <peer label>`. This daemon checks the cookie and headers (7.1), that the link is `live` (else 503 `peer_unreachable`), that the pairing is `act` (else 502 `peer_refused`) and that the op is on the allowlist (7.4).
+2. It sends `mutate{id, op, target, body, idempotency_key, ts, viewer_host_id, peer_host_id, key_id, sig}`. `op` names the 7.4 endpoint. The signature covers every other field.
+3. The peer's `peer serve` verifies, in this order, which is the one canonical order (`authority.md` section 7 and G41 refer to it): config `federation.accept` is not `false`; the key row exists and is unrevoked; the signature; `ts` within 120 s of its clock; `peer_host_id` is its own; the row's scope is `act`; `op` is allowlisted; the owner marker (`authority.md` G26) still names `tiller`; and the target is in a project this host owns (G25). A failure is `result{http_status: 502, code: "peer_refused", reason}` and writes nothing.
+4. It then runs the same core function its own board would run (protocol principle 1), with every precondition, `rev` and `head_sha` check of its own, with `actor = board@<viewer label>` and `via_peer` in the event payload. Its `idempotency_key` table makes a repeat return the stored response.
+5. Its response comes back as `result`, and the board host returns it to the browser with `host` added. The peer's own SSE and its `event` frame carry the change, so the board updates the same way it does for a local write.
+6. No result within 10 s is 504 `forward_uncertain`. The board shows "sent, not confirmed" and keeps the control's `idempotency_key`. Neither daemon holds or replays anything. When the link is `live` again the owner may retry from the control; the board host signs a new frame with a fresh `ts` and the same key, and the peer either returns the stored response or applies it once.
+
+The peer never forwards a frame on. A board host that is also some other host's peer serves only its own records over its own link.
+
+### 10.4 An unreachable peer
+
+- The board host keeps working. Its own cards, agents and mutations do not wait on any link (10.2, Isolation).
+- The peer keeps working. Its orchestrators, workers, delivery, landing and its own localhost board need nothing from the board host.
+- The board host keeps the last snapshot and events it applied, in memory. A daemon restart drops them, and the peer's cards reappear when the link is `live` again.
+- A mutation for the peer is refused at once with 503 `peer_unreachable` and nothing is queued (ADR 0003, owner choice 3). The board says so on the control; the owner retries when the link is back.
+- No attention item is opened for a link: an outage is not a question for the owner. `GET /api/v1/health` lists each link's last success and last error; the Machines row shows the state; the existing 24 h Safety signal (`recovery.md` R05) still applies to a peer that stays down.
+
+### 10.5 Staleness on the board
+
+- Every card, attention item and agent from a peer carries a host chip with the peer's label. Local rows carry one too when any peer is paired.
+- While the link is `live`, a peer's rows look like local rows.
+- Otherwise its rows are dimmed and say "as of <time>" in Europe/Lisbon with the weekday, and the age ("as of Tue 14:02, 6 min ago"). Their controls are disabled, with the reason as the tooltip ("host-b is unreachable since Tue 14:02", "host-b refused the link: key revoked").
+- A `read` pairing shows its rows live with controls disabled ("view only pairing").
+- The new-card project picker groups projects by owner host and disables a group whose link is not `live`.
+
+### 10.6 Security
+
+`authority.md` owns it: section 3 (the forwarded owner principal), section 7 (Peer link), G25 and G41 to G44, and the alternate paths in section 10.
 
 ## 11. Checks
 
@@ -571,6 +652,10 @@ The owner kept D01 (secondmates and remote homes), D04 (other harness adapters) 
 | No hook stores a reply, a tool input or a secret | 4.1. Test: `observe::hooks::payload_allowlist_drops_reply_and_tool_fields` |
 | No email or account id leaves the daemon | 8. Test: `daemon::quota::account_fields_never_deserialized` with a fixture that has them |
 | SSE resumes with no missed event | 7.5. Test: `daemon::sse::resume_after_restart_replays_from_last_event_id` |
+| A peer's cards appear live and resume after a gap | 10.2. Tests (F3): `daemon::peer::snapshot_then_events_fill_cache`, `daemon::peer::resume_from_last_seq_replays_gap`, `daemon::peer::gap_over_5000_sends_snapshot`, `daemon::peer::frozen_serve_reaches_down_and_reconnects` |
+| A frozen peer never stalls this host | 10.2, 10.4. Test (F6): `e2e::peer::sigstop_peer_local_board_and_writes_unaffected` |
+| A forwarded mutation is authorized on the owning host | 10.3. Tests (F4): `daemon::peer::mutate_bad_sig_refused`, `daemon::peer::mutate_replayed_ts_refused`, `daemon::peer::mutate_wrong_host_id_refused`, `daemon::peer::revoked_key_refused`, `daemon::peer::read_scope_cannot_mutate`, `daemon::peer::spawn_not_forwardable`, `daemon::peer::forwarded_precondition_failure_passes_through`, `daemon::peer::same_key_twice_applies_once` |
+| A mutation for an unreachable peer writes nothing anywhere | 10.4. Test (F4): `daemon::peer::unreachable_returns_503_and_queues_nothing` |
 
 ## 12. Coverage
 
@@ -582,7 +667,7 @@ The owner kept D01 (secondmates and remote homes), D04 (other harness adapters) 
 | 11 | Each hook event and notification type handled on its own; `StopFailure` and transcript interrupts; `unknown` and stale explicit; hooks merged with herdr and liveness by `observed_at` |
 | 12 | `tiller ask resolve` with four dispositions; tags for readability only; the Stop hook observes first and blocks once only after its false-block rate is measured; unresolved asks stay visible |
 | 13 | Wake-up line grammar, store then type, ack through the hook or `tiller inbox`, target check, batching, re-ring |
-| 18 | Remote hosts view only; the peer ask route stays off in v1 (CP2, C12) |
+| 18 | Data and control flows separated per host (ADR 0003, accepted): peers are read through a read-only link, and owner mutations are forwarded only on an allowlist, signed, and re-authorized on the owning host; the fleet ask route to a peer stays off |
 | 35 | The quota feed fails closed when stale and carries no account id |
 | 36 | Attention reads with evidence and `still_current`; permission prompts in their own list; receipts recorded, delivered, done |
 | 37 | Each poller's last success in `/health`; one stream with freshness |
@@ -609,7 +694,7 @@ P02 (dispatch rules, 6.4), P04 (quota feed), P18 and P20 (status lines and one w
 
 Monday 2026-11-02, Lisbon time. The owner's picks from `cp2-open.md`:
 
-1. **Remote homes** (C12): stay read-only for v1; `tiller ask note --host <peer>` is not a control route (section 10).
+1. **Remote homes** (C12): stay read-only for v1; `tiller ask note --host <peer>` is not a control route (section 10). Reopened Tuesday 2026-11-03 by ADR 0003 (accepted Tuesday 2026-11-03): owner mutations forward to the owning host; the fleet route stays off.
 2. **Other harnesses** (C13): none before cutover; Claude Code is the only adapter (section 10).
 3. **The Stop hook switching rule** (C14, confirmed by S06): 200 orchestrator stops over 7 days with a false-block rate under 2%, as 2.5 defines it (the false-block test, its denominator and the owner-only switch).
 4. **The owner cookie** (C15): survives daemon restarts and expires after 30 days (7.1).

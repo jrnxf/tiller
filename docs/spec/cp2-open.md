@@ -10,10 +10,11 @@ Status: CP2 done Monday 2026-11-02, Lisbon time. The owner answered every item o
 
 ## Still needs the owner
 
-Neither blocks Wave C.
+None of these blocks Wave C.
 
 1. **Which private remote the memory repo pushes to** (`memory.remote`, C24): chosen at cutover, per host.
 2. **Host C's probe** (H01): the owner approved the minimum common behavior in `docs/design/host-capabilities.md` as the baseline, but host C has not run the probe yet. Any fallback it turns out to need is a separate decision.
+3. **C12 reopened: one federated board** (ADR 0003, accepted Tuesday 2026-11-03): **Decided:** the owner approved the federated board with its three recommended choices: the personal Mac is the one board host and every other host its peer; host C (the work Mac) stays out with `federation.accept = false` and keeps its own Tiller; a mutation for an unreachable peer is refused at once and nothing is queued. It blocks only tasks F1 to F6 and T6.3 (`docs/plan/checklist.md`, Federation).
 
 ## H01: minimum common behavior across hosts
 
@@ -50,7 +51,7 @@ Each item ends with the owner's decision. The id in brackets is the CP2 card: C0
 
 `protocol.md`:
 
-12. Remote homes (D01): whether `tiller ask note --host <peer>` becomes a control route, which would change the read-only default for remote lanes (point 18). **Decided:** Stay read-only for v1 (C12). In `protocol.md` section 10.
+12. Remote homes (D01): whether `tiller ask note --host <peer>` becomes a control route, which would change the read-only default for remote lanes (point 18). **Decided:** Stay read-only for v1 (C12). In `protocol.md` section 10. **Reopened** Tuesday 2026-11-03, Lisbon time: the owner asked for one board across hosts that can answer, steer and act on any card. ADR 0003 (accepted Tuesday 2026-11-03) keeps one owner host per project and one `state.db` per host, reads peers live over SSH, and forwards the owner's board mutations, signed and allowlisted, to the owning host, which re-checks them. The fleet route (`tiller ask note --host`) stays off. In `protocol.md` section 10, `authority.md` G41 to G44 and `state.md` principle 1.
 13. Other harnesses (D04): which harness gets an adapter first, and whether any is needed before cutover. `authority.md` G35 refuses a role on a harness without a pre-tool hook transport and a sandbox equivalent. **Decided:** None before cutover (C13). In `protocol.md` section 10.
 14. The Stop hook switching rule: 200 orchestrator stops over 7 days with a false-block rate under 2% are proposed starting values. **Decided:** Accepted (C14), and S06 kept: `protocol.md` 2.5 already defines the false-block test, its denominator and the owner-only switch.
 15. How long the owner cookie lives before `tiller board` must be run again (the draft keeps it across daemon restarts). **Decided:** Survives restarts, expires after 30 days (C15). In `protocol.md` 7.1 and `authority.md` section 7.

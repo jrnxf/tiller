@@ -22,6 +22,7 @@ Started Sunday 2026-11-01, Lisbon time.
 ## CP0: Before anything (developer, 5-10 min)
 
 - [x] Defaults confirmed: repo `tiller`, private, MIT; remote lanes read-only; work data stays on the work Mac; one owner host per project; auto memory off for fleet roles (Sunday 2026-11-01)
+- [x] Remote lanes default reopened (C12, Tuesday 2026-11-03): owner approved ADR 0003, the federated board, with its three recommended choices (the personal Mac as the one board host, the work Mac out with `federation.accept = false`, an unreachable peer's mutation refused at once and nothing queued). Blocks only the Federation section and T6.3
 - [x] Firstmate fleet ledger: on. Remote host since 2026-10-23, personal Mac since Sunday 2026-11-01 19:57
 - [x] alpha secondmate trial for 2-3 days during the build: yes
 - [x] GitHub repo created: `tiller` under the developer's account, private, empty (Sunday 2026-11-01)
@@ -422,6 +423,67 @@ about 3 min of the developer's time
 
 ---
 
+## Federation: one board across hosts (beside waves E and F)
+
+ADR 0003, accepted Tuesday 2026-11-03. The owner approved it; runs in one or two lanes beside the replay gate and must finish before T6.3. F2 to F4 run in order because they share `crates/daemon` and `crates/cli`; F5 runs beside them against the mocked API.
+
+### F1 Land the federation spec
+`sonnet` medium - 0.5 h - after the owner approves ADR 0003
+
+- [x] ADR 0003 status set to accepted with the owner's three choices
+- [x] `state.md`, `protocol.md`, `authority.md`, `recovery.md` and `cp2-open.md` edits merged as reviewed
+- [x] Delivered
+
+### F2 Pairing and keys
+`opus` high - 2.5-3.5 h - after F1
+
+- [ ] Migration with a down step: `hosts.peer_scope`, `hosts.peer_host_id`, `peer_keys`; new stale reasons
+- [ ] `tiller peer add` over `ssh -t`, `peer accept`, `peer list`, `peer remove`, `peer revoke`; Ed25519 key file at mode 0600
+- [ ] Config `federation.accept`; `peer.accept`, `peer.revoke`, `peer.pair`, `peer.remove` with their events
+- [ ] Check: `migrations_run_both_ways_on_fixture` covers the new migration; owner-only checks refuse a session caller
+- [ ] Delivered
+
+### F3 Peer link and federated reads
+`opus` high - 3-4 h - after F2
+
+- [ ] `tiller peer serve`: start check, hello and welcome, snapshot, events, beats, `query`
+- [ ] Daemon link client: one task per peer, link states, backoff, resume from `last_seq`, 2 s coalesced snapshot refresh, clock offset
+- [ ] Federated reads tag `host`; `?host=`; snapshot `peers`; SSE `peer`, `link`, `peer_reset`; Machines row from the link; OpenAPI regenerated
+- [ ] Check: `daemon::peer::snapshot_then_events_fill_cache`, `resume_from_last_seq_replays_gap`, `gap_over_5000_sends_snapshot`, `link_states_follow_frame_age`, `frozen_serve_reaches_down_and_reconnects`, `serve_never_opens_onward_link`, `cli::peer::serve_refuses_session_and_claude_ancestor`
+- [ ] Delivered
+
+### F4 Forwarded mutations
+`opus` high - 3-4 h - after F3
+
+- [ ] `mutate` frames signed and verified in the order `protocol.md` 10.3 gives; the allowlist on both hosts
+- [ ] 502, 503 and 504 codes; idempotent retry; actor `board@<label>` with `via_peer`; the unauthorized-action detector accepts it
+- [ ] Deny rule `Bash(tiller peer *)` and backstop `[peer]`; the G41, G43 and G44 tests not already in F3; live `sandboxed_role_cannot_reach_peer_ssh`
+- [ ] Check: `daemon::peer::mutate_bad_sig_refused`, `mutate_replayed_ts_refused`, `mutate_wrong_host_id_refused`, `revoked_key_refused`, `read_scope_cannot_mutate`, `spawn_not_forwardable`, `forwarded_precondition_failure_passes_through`, `same_key_twice_applies_once`, `unreachable_returns_503_and_queues_nothing`, `forwarded_mutation_never_writes_viewer_db`, `frames_never_carry_cookie`; `agents::guards::peer_commands_denied`, `ssh_remote_tiller_denied`
+- [ ] Delivered
+
+### F5 Board: host chips and staleness
+`sonnet` high - 2.5-3.5 h - after F1 (mocked API until F3)
+
+- [ ] Host chip on cards, attention and agents; host-qualified display ids when ambiguous
+- [ ] A peer that is not `live`: dimmed rows, "as of" with the age in Lisbon time, disabled controls with the reason
+- [ ] "Sent, not confirmed" for 504; the project picker grouped by host; Machines link state; `read` pairings view only
+- [ ] Check: screenshots in both themes at 1440 px and 390 px; perfect-load rules hold with peers in the snapshot
+- [ ] Delivered
+
+### F6 Two-host end to end
+`sonnet` high - 1.5-2 h - after F4 and F5
+
+- [ ] Two homes on one machine joined through an SSH shim; a board with both hosts' cards
+- [ ] A forwarded answer reaches the peer's orchestrator through its outbox
+- [ ] Check: with the peer frozen (`SIGSTOP`), the local board, its writes and its SSE are unaffected and the peer's cards show "as of"
+- [ ] Delivered
+
+## CP-F: Federated board (developer, 15 min)
+
+- [ ] Developer uses the two-host board from F6: answers a peer's card, freezes the peer, sees the staleness
+
+---
+
 ## Cutover (one host at a time)
 
 Each flip needs every kept parity row for that host passing, or live-checked at CP7. Rollback triggers: lost work, an unauthorized action, a duplicate dispatch.
@@ -450,12 +512,14 @@ One-time owner setup, per host and repo (CP2, S03):
 - [ ] Day 2 summary sent
 
 ### T6.3 Remote host
-`opus` high - 1-2 h - after 2-3 stable days on the personal Mac
+`opus` high - 1.5-2.5 h - after 2-3 stable days on the personal Mac and CP-F
 
 - [ ] CP7 go for the remote host
 - [ ] The sandbox starts on this host; until it does, the host is not cut over (CP2, C19)
 - [ ] Parity rows for this host passing
 - [ ] Same steps as T6.1
+- [ ] `tiller peer add` from the personal Mac; the link is `live`; the remote host's cards appear on the personal Mac's board
+- [ ] Live check: one forwarded answer reaches the remote orchestrator; with the link cut, the cards show "as of" and controls are disabled
 
 ### T6.4 Work Mac
 `opus` high, agent session on the work Mac - 1-2 h
@@ -463,6 +527,7 @@ One-time owner setup, per host and repo (CP2, S03):
 - [ ] CP7 go for the work Mac
 - [ ] Parity rows for this host passing, using the reduced behavior the probe found
 - [ ] Same steps as T6.1; data stays on that machine
+- [ ] `federation.accept = false` set, unless the owner chose otherwise for ADR 0003
 
 ---
 
