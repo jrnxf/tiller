@@ -244,6 +244,25 @@
             CARGO_INCREMENTAL = "0";
           };
 
+          # The role behavior evals (evals/README.md): Claude Code at the
+          # version evals/pins.env pins, from the locked nixpkgs. Claude Code
+          # is unfree, so this shell allows that one package and no other.
+          devShells.evals =
+            let
+              evalPkgs = import nixpkgs {
+                inherit system;
+                config.allowUnfreePredicate = p: lib.getName p == "claude-code";
+              };
+            in
+            evalPkgs.mkShellNoCC {
+              packages = [
+                evalPkgs.claude-code
+                evalPkgs.nodejs
+                evalPkgs.git
+                evalPkgs.bashInteractive
+              ];
+            };
+
           formatter = pkgs.nixfmt;
         };
     in

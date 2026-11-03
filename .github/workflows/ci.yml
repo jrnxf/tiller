@@ -53,6 +53,16 @@ jobs:
       - name: No private names, paths or hosts
         run: scripts/scrub-check.sh
 
+  evals:
+    name: evals
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Offline: cases, fixtures and the judge lock. The evals themselves run
+      # on demand in evals.yml.
+      - name: Eval suite checks
+        run: evals/check.sh
+
   nix:
     name: nix
     runs-on: ubuntu-latest

@@ -59,7 +59,7 @@ Nix:
 | Smoke test the embedded board | `scripts/smoke.sh result/bin/tiller` |
 | Regenerate `board/bun.nix` after changing board dependencies | `bun run --cwd board nix:sync` |
 
-The full gate is the CI workflow (`.github/workflows/ci.yml`): its `rust` and `board` jobs run the Rust and board commands above, its `nix` job runs `bunNixFresh`, `nix build` and `scripts/smoke.sh`, and its `scrub` job runs `scripts/scrub-check.sh`. `nix flake check` does not run the board checks, the smoke test or the scrub check.
+The full gate is the CI workflow (`.github/workflows/ci.yml`): its `rust` and `board` jobs run the Rust and board commands above, its `nix` job runs `bunNixFresh`, `nix build` and `scripts/smoke.sh`, its `scrub` job runs `scripts/scrub-check.sh`, and its `evals` job runs the offline `evals/check.sh`. The role behavior evals call real models, so they run only on demand: the `Evals` workflow (`.github/workflows/evals.yml`), or `nix develop .#evals -c evals/run.sh` locally (`evals/README.md`). `nix flake check` does not run the board checks, the smoke test or the scrub check.
 
 `board/bun.nix` and `board/src/routeTree.gen.ts` are generated. Never edit them by hand; the `bunNixFresh` flake check fails when `bun.nix` is stale.
 

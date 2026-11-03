@@ -385,9 +385,10 @@ about 3 min of the developer's time
 ### T4.6 Evals
 `opus` medium - 2-3 h - after T4.1
 
-- [ ] Skill-trigger evals with `claude plugin eval --no-publish`
-- [ ] Role behavior evals with a holdout set; no-skill baseline per skill; pinned judge and rubric
-- [ ] Infrastructure tests kept separate
+- [ ] Skill-trigger evals with `claude plugin eval --no-publish` (deferred until tiller ships its first skill)
+- [x] Role behavior evals with a holdout set; pinned judge and rubric
+- [ ] No-skill baseline per skill (deferred until tiller ships its first skill)
+- [x] Infrastructure tests kept separate
 - [ ] Check: every eval runs in CI on demand; the holdout is never used for tuning
 - [ ] Delivered
 

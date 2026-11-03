@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# A stand-in for the tiller CLI inside an eval run. It records every call in
+# .tiller/calls.log and answers from the case's canned replies, so a role can
+# act on simulated records without a daemon. Graders read the Bash calls in
+# the transcript; the log is for debugging a run kept with --keep-temp.
+#
+# A reply lives in .tiller/replies/<first word>-<second word>, for example
+# .tiller/replies/card-show, and its exit code in <key>.exit when the call
+# should fail. Without one, a read prints nothing and an action prints "ok".
+set -u
+
+state=.tiller
+mkdir -p "$state"
+printf '%s\n' "$*" >>"$state/calls.log"
+
+key="${1:-}-${2:-}"
+if [ -f "$state/replies/$key" ]; then
+	cat "$state/replies/$key"
+	exit "$(cat "$state/replies/$key.exit" 2>/dev/null || echo 0)"
+fi
+
+case "${1:-}" in
+inbox)
+	cat "$state/replies/inbox" 2>/dev/null
+	;;
+spawn)
+	printf 'run %s-run-1 started for %s as %s\n' "${3:-role}" "${2:-card}" "${3:-role}"
+	;;
+card | run | ask | review | handoff | quota | approval | attention | mem | artifact | status | done | pr | agent)
+	case "${2:-}" in
+	show | list | due) ;;
+	*) echo ok ;;
+	esac
+	;;
+*)
+	echo ok
+	;;
+esac

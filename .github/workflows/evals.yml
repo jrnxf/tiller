@@ -1,0 +1,60 @@
+name: Evals
+
+# The role behavior evals call real models and cost money, so they run only
+# when someone starts them from the Actions tab. evals/README.md has the
+# policy; the offline checks run on every push in ci.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      split:
+        description: Which split to run (the holdout prints only its aggregate)
+        type: choice
+        options: [tuning, holdout]
+        default: tuning
+      max_cost_usd:
+        description: Stop starting new runs once this many dollars are spent
+        type: string
+        default: "10"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evals
+  cancel-in-progress: false
+
+jobs:
+  evals:
+    name: evals (${{ inputs.split }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+      # Claude Code sandboxes every Bash call with bubblewrap (its nixpkgs
+      # wrapper brings bubblewrap and socat), which needs unprivileged user
+      # namespaces; Ubuntu 24.04 restricts them by default.
+      - name: Allow the Bash sandbox
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Run
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SPLIT: ${{ inputs.split }}
+          MAX_COST_USD: ${{ inputs.max_cost_usd }}
+        run: |
+          [ -n "$ANTHROPIC_API_KEY" ] || { echo "::error::Add the ANTHROPIC_API_KEY repository secret (evals/README.md)"; exit 1; }
+          nix develop .#evals -c evals/run.sh --split "$SPLIT" --max-cost-usd "$MAX_COST_USD" --out "$RUNNER_TEMP/evals"
+      # Only the summary leaves the runner. The transcripts hold whatever
+      # the agents ran, an agent can print its environment, which holds the
+      # key, and artifacts are not masked like logs. The holdout's summary is
+      # its aggregate alone.
+      - name: Upload the summary
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evals-${{ inputs.split }}
+          path: ${{ runner.temp }}/evals/summary.txt
+          if-no-files-found: warn
