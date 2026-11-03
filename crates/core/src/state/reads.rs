@@ -32,7 +32,7 @@ impl Store {
         list(self.conn(), "1 = 1 ORDER BY kind, label", &[])
     }
 
-    /// The `card_column` view: open cards and those closed in the last seven
+    /// The `card_column` view: open cards and those closed in the last three
     /// days, for one project or all.
     pub fn card_columns(&self, project: Option<&str>) -> Result<Vec<CardColumn>> {
         let mut stmt = self.conn().prepare(

@@ -709,6 +709,42 @@ fn dependencies_release_on_a_satisfying_close() {
     );
 }
 
+/// The Done column shows a closed card for three days (`state.md` section 6):
+/// one closed two days ago is on the board, one closed four days ago is not.
+#[test]
+fn a_closed_card_leaves_the_board_after_three_days() {
+    let (mut store, _) = memory_store();
+    let recent = store
+        .card_create(&owner(), None, card(CardKind::Ops, "recent"), None)
+        .unwrap()
+        .value;
+    let old = store
+        .card_create(&owner(), None, card(CardKind::Ops, "old"), None)
+        .unwrap()
+        .value;
+    for (card, days) in [(&recent, 2), (&old, 4)] {
+        store
+            .card_close(
+                &owner(),
+                &card.id,
+                CardOutcome::Completed,
+                None,
+                Some("done: ok"),
+            )
+            .unwrap();
+        let closed_at = Timestamp::now().plus_minutes(-days * 24 * 60);
+        store
+            .conn()
+            .execute(
+                "UPDATE cards SET closed_at = ?2 WHERE id = ?1",
+                rusqlite::params![card.id, closed_at],
+            )
+            .unwrap();
+    }
+    assert!(store.card_column(&recent.id).unwrap().is_some());
+    assert!(store.card_column(&old.id).unwrap().is_none());
+}
+
 /// A prompt typed in a worker pane is a follow-up on the run's card and is
 /// noted to the supervisor; a script note with no orchestrator warns.
 #[test]

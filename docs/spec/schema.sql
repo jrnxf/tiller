@@ -710,7 +710,7 @@ LEFT JOIN deploy_watches     dw ON dw.card_id = c.id
 LEFT JOIN open_holds         oh ON oh.card_id = c.id
 LEFT JOIN open_deps          od ON od.card_id = c.id
 WHERE c.state = 'open'
-   OR julianday('now') - julianday(c.closed_at) <= 7;
+   OR julianday('now') - julianday(c.closed_at) <= 3;
 
 -- Unresolved asks are the Asked column. They are not cards.
 CREATE VIEW asked AS

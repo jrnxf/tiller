@@ -114,7 +114,7 @@ fn row_extras(store: &Store, card_id: &str) -> Result<RowExtras> {
 }
 
 /// One card's board row, or `None` when the card has left the board (closed
-/// more than seven days ago).
+/// more than three days ago).
 pub fn board_row(store: &Store, card_id: &str) -> Result<Option<BoardRow>> {
     let Some(column) = store.card_column(card_id)? else {
         return Ok(None);

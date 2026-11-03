@@ -328,7 +328,7 @@ The board has six columns: Asked, Queued, Working, Needs you, Landing, Done. A c
 
 | Order | Column | A card is here when | Badge |
 |---|---|---|---|
-| 1 | Done | `cards.state = closed`. Shown for 7 days after `closed_at`, then only in history | the outcome: landed, reported, answered, completed; or cancelled, failed, abandoned, superseded in their own colours |
+| 1 | Done | `cards.state = closed`. Shown for 3 days after `closed_at`, then only in history | the outcome: landed, reported, answered, completed; or cancelled, failed, abandoned, superseded in their own colours |
 | 2 | Needs you | an open attention item exists for the card; or an active run's session activity is `waiting_permission` or `waiting_input` and not stale | the attention kind, or "permission prompt" kept visually apart from decisions; sorted by age |
 | 3 | Landing | `cards.kind = ship` and (an open PR on the card has `checks` pending or `pipeline_state` running, whether or not the run that opened it is still active, or a `merge` or `land_direct` approval for the card is `accepted` or `executing`, or an open deploy-watch obligation exists for the card) | checks, pipeline, merging, deploying |
 | 4 | Working | an active run exists (`runs.ended_at` is null), whatever its activity | the most urgent activity across the card's active runs: errored, working, paused until a date, idle, stale, unknown (a paused run that is idle shows its pause, not idle) |
