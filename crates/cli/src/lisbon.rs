@@ -7,33 +7,11 @@
 //! (`Tue 2026-11-03 14:00`). A date input without a time means 09:00 Lisbon
 //! that day; an input with an offset is taken as given (`protocol.md` 6.1).
 
-use jiff::civil::{self, Weekday};
-use jiff::tz::{Offset, TimeZone};
+use jiff::civil;
 use jiff::{Timestamp, ToSpan};
 use serde_json::Value;
 use tiller_core::Error;
-
-fn last_sunday_1am_utc(year: i16, month: i8) -> Option<Timestamp> {
-    let mut day = civil::Date::new(year, month, 31).ok()?;
-    while day.weekday() != Weekday::Sunday {
-        day = day.yesterday().ok()?;
-    }
-    let at = day.at(1, 0, 0, 0).to_zoned(TimeZone::UTC).ok()?;
-    Some(at.timestamp())
-}
-
-/// The Lisbon offset in hours (0 or 1) at an instant.
-fn offset_hours(ts: Timestamp) -> i8 {
-    let year = ts.to_zoned(TimeZone::UTC).year();
-    match (last_sunday_1am_utc(year, 3), last_sunday_1am_utc(year, 10)) {
-        (Some(start), Some(end)) if ts >= start && ts < end => 1,
-        _ => 0,
-    }
-}
-
-fn zone(hours: i8) -> TimeZone {
-    TimeZone::fixed(Offset::constant(hours))
-}
+use tiller_core::time::lisbon::{from_local as resolve, offset_hours, zone};
 
 /// `Tue 2026-11-03 14:00` for an instant, in Lisbon time.
 pub fn display(ts: Timestamp) -> String {
@@ -44,18 +22,7 @@ pub fn display(ts: Timestamp) -> String {
 
 /// A Lisbon wall-clock time as an instant.
 fn from_local(local: civil::DateTime) -> Result<Timestamp, Error> {
-    // Try the summer offset first; the hour that does not exist or repeats at
-    // a changeover resolves to the earlier instant.
-    for hours in [1i8, 0] {
-        if let Ok(zoned) = local.to_zoned(zone(hours))
-            && offset_hours(zoned.timestamp()) == hours
-        {
-            return Ok(zoned.timestamp());
-        }
-    }
-    Err(Error::Usage(format!(
-        "{local} does not exist in Europe/Lisbon"
-    )))
+    resolve(local).ok_or_else(|| Error::Usage(format!("{local} does not exist in Europe/Lisbon")))
 }
 
 /// Parses a `--until` style input: RFC 3339 with an offset, a date (09:00

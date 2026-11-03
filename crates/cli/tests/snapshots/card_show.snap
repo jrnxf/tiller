@@ -167,6 +167,7 @@ exit: 0
         "released_at": "<time>"
       }
     ],
+    "effective_delivery": "direct-pr",
     "holds": [],
     "obligations": [
       {

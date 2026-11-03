@@ -1,6 +1,6 @@
 # Pre-launch validation
 
-Design note, Monday 2026-11-02 (Lisbon time). Status: decided by the owner on Tuesday 2026-11-03 (section 9). Nothing here is built yet.
+Design note, Monday 2026-11-02 (Lisbon time). Status: decided by the owner on Tuesday 2026-11-03 (section 9), built the same day (Lisbon time). Section 10 lists where the build had to settle a detail the sections above left open.
 
 A project in the **pre-launch** stage skips per-change validation (the `no-mistakes` pipeline) and gets one batched review a week instead. A **launched** project keeps today's behavior. Switching to launched runs one final batched review first.
 
@@ -72,7 +72,7 @@ The board shows the stage as a chip on the project in the sidebar, plus last rev
 `tiller review plan <project>` computes the plan in Rust, deterministically, from git and the `prs` table:
 
 1. Range: `base_sha..head_sha` on the default branch, first-parent only. `head_sha` is the fetched head at pass start. Dates are never used.
-2. Units: each first-parent commit maps to its PR (`prs.merge_sha`, else the forge through `gh-axi` for a PR merged outside Tiller), else a "direct commit" unit.
+2. Units: each first-parent commit maps to its PR (`prs.merge_sha`, else the forge for a PR merged outside Tiller), else a "direct commit" unit.
 3. Size: changed lines (added plus deleted), not counting lockfiles, generated files (the repo's `linguist-generated` attributes, plus `bun.nix` and `*.gen.ts` style names) and binaries. Excluded paths are listed in the report.
 4. Group by code area first: PRs that touch the same files land in the same group (connected components over changed files), so changes that can interact are read together. Then pack groups, in merge order inside each, into chunks of at most **1,500 changed lines** (hard cap 2,000) and 15 PRs. A group over the cap is split by directory into slices of at most 1,500 lines, each carrying the PR titles and bodies. A single file over the cap is its own chunk, flagged in the report.
 5. Bound: about 1,500 diff lines is roughly 25-40k tokens. With a ~50k start and room to read callers, a chunk session stays well under 150k. The chunk brief also says: past ~150k, stop, record what was covered, and the uncovered files become a new chunk. Coverage is never dropped silently.
@@ -154,3 +154,21 @@ The options as they were presented:
 | D3 | How a chunk runs | (a) One `reviewer` run per chunk, one after another, plus a summary run. (b) One run that farms chunks to read-only subagents. | (a): each chunk is a recorded run with its own review row, liveness and cut handling; a crash loses one chunk, not the week. Context per chunk is the same either way (section 4). |
 | D4 | Grants that require `pipeline: passed` | (a) Literal: they stop matching in pre-launch; the owner adds a second grant without `pipeline` and must revoke it at launch. (b) The matcher skips the `pipeline` condition while the project is pre-launch, and enforces it again from the moment of launch. | (b): under (a), a grant with no `pipeline` condition still matches a PR whose pipeline **failed** (`grants.rs:164-170`; `pipeline_done` only blocks `running`, `land/mod.rs:696`), so a pre-launch grant forgotten at launch would auto-merge failed PRs. (b) ties the condition to the stage the owner set, with nothing to remember. Checks, reviews and path exclusions still apply. |
 | D5 | Weekly slot | (a) Fixed slot, Saturday 06:00 Lisbon time. (b) 7 days after the previous pass finished. | (a): the report is ready the same morning each week; a late pass (quota floor, crash) does not push every later one. |
+
+## 10. Settled while building
+
+Details the sections above left open, each settled in the direction that never lowers rigor:
+
+- **The forge read** goes through `gh api`, like the land sequence's forge seam, because the commit-to-PR lookup needs machine-readable replies. `TILLER_GH` names another client for tests.
+- **The pass card closes when the owner answers.** `card.close` refuses while an attention item is open, so finishing opens the `review` item and answering it closes the pass card `reported`. `reviewed_through_sha` and the next due date are still written at finish and never wait for the answer (section 5).
+- **"Every chunk has a `reviews` row"** is checked per chunk: chunk `n` counts once a live `report` artifact titled `chunk <n> of <total>` is on the pass card, from a run that also recorded a review there, both since the pass started. A re-run of a cut chunk covers that chunk again and the summary run covers none, so neither can stand in for a chunk that never ran.
+- **D4 waives only a missing pipeline.** The grant matcher skips the `pipeline` condition while pre-launch only for a PR with no pipeline run (`pipeline_state = none`). A pipeline that ran and failed still blocks, so switching to pre-launch never merges a PR the gate rejected.
+- **A weekly review met before a launch** is covered by the final pass: `tiller review due` lists only obligations met since the project last became pre-launch.
+- **The stage switch fetches only when it applies.** `tiller project stage` and the board read the default-branch head only for a switch to pre-launch at the current `rev` with a new key; a replay, a stale `rev` or the current stage answers without touching the remote. `tiller review start` refuses before reading the range when nothing is due.
+- **A live pass at launch.** At most one pass per project is pending or running. A pending weekly pass is superseded (its card closes `superseded`) and the final pass opens at once; a running weekly pass continues, and its finish or abandon opens the final pass (section 7, steps 2 and 3).
+- **Abandoning a final pass** opens a new pending final pass, so the project is never left launched without one.
+- **Back to pre-launch** is refused while a pass is pending or running, so the compare-and-set at finish always has the base it started from.
+- **Chunk worktrees.** A spawned run's worktree is cut at the default-branch head at spawn time, which is at or after the pass head. The chunk brief anchors every line at the pass head and tells the reviewer to read a moved file with `git show <head>:<path>`.
+- **A cut chunk.** A chunk report's "Not covered" files get one more reviewer run, briefed with `tiller review brief <pass> --chunk <n> --only <path>`; the stored plan does not change.
+- **Seams** are files changed in more than one chunk; the summary brief lists them.
+

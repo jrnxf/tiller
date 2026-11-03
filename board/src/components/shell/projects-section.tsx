@@ -1,4 +1,5 @@
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
+import { Fragment, useState } from "react";
 import type { CSSProperties } from "react";
 
 import { projectColor } from "../../lib/project-color";
@@ -7,20 +8,33 @@ import { toggleProjectHidden, updatePrefs, prefsStore, visibleProjects } from ".
 import { projectsOnHost } from "../../lib/scope";
 import type { ViewKnob } from "../../lib/prefs";
 import { useStore } from "../../lib/store";
-import { CheckIcon, EyeIcon, EyeOffIcon, FocusIcon, LayersIcon } from "./icons";
+import { CheckIcon, ChevronIcon, EyeIcon, EyeOffIcon, FocusIcon, LayersIcon } from "./icons";
+import { ProjectDetail, StageChip } from "./project-stage";
 
 const VIEWS: { value: ViewKnob; label: string }[] = [
   { value: "all", label: "All projects" },
   { value: "focus", label: "Focus" },
 ];
 
+// A weekly review turns overdue a day after it came due, with no event to
+// say so, so a pre-launch project's row is read again now and then.
+const OVERDUE_POLL_MS = 10 * 60_000;
+
 export function ProjectsSection({ activeHost }: { activeHost: string | undefined }) {
-  const { data: projects } = useSuspenseQuery(projectsQuery());
+  const { data: projects } = useSuspenseQuery({
+    ...projectsQuery(),
+    refetchInterval: (query) =>
+      query.state.data?.projects.some((project) => project.stage === "pre-launch")
+        ? OVERDUE_POLL_MS
+        : false,
+  });
   const { data: board } = useSuspenseQuery(boardQuery());
   // Attention only marks the projects that need you; the Inbox says when it
   // failed.
   const attention = useQuery(attentionQuery()).data;
   const prefs = useStore(prefsStore);
+  // The projects whose stage panel is open.
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
 
   const shown = visibleProjects(prefs, projects.projects);
   const focusing = prefs.view === "focus";
@@ -81,46 +95,69 @@ export function ProjectsSection({ activeHost }: { activeHost: string | undefined
           const hidden = !focusing && prefs.hiddenProjects.includes(project.id);
           const current = focusing && focused?.id === project.id;
           const dim = (focusing && !current) || (onHost !== null && !onHost.has(project.id));
+          const detailOpen = expanded.has(project.id);
           return (
-            <div
-              key={project.id}
-              className="prow"
-              style={{ "--pc": projectColor(index) } as CSSProperties}
-              data-off={hidden}
-              data-dim={dim}
-              aria-current={current ? "true" : undefined}
-            >
-              <button
-                type="button"
-                className="pbtn"
-                title={`Focus ${project.name}`}
-                aria-pressed={focusing ? current : undefined}
-                onClick={() => updatePrefs({ view: "focus", focusProject: project.id })}
+            <Fragment key={project.id}>
+              <div
+                className="prow"
+                style={{ "--pc": projectColor(index) } as CSSProperties}
+                data-off={hidden}
+                data-dim={dim}
+                aria-current={current ? "true" : undefined}
               >
-                <span className="pdot" />
-                <span className="nm">{project.name}</span>
-                <span className="pct">
-                  {needsYou.has(project.id) ? <i /> : null}
-                  {open}
-                </span>
-              </button>
-              {focusing ? (
-                <span className={current ? "eye on" : "eye sp"}>
-                  {current ? <CheckIcon /> : null}
-                </span>
-              ) : (
                 <button
                   type="button"
-                  className="eye"
-                  title={`${hidden ? "Show" : "Hide"} ${project.name} in All projects`}
-                  aria-label={`${hidden ? "Show" : "Hide"} ${project.name}`}
-                  aria-pressed={!hidden}
-                  onClick={() => toggleProjectHidden(project.id)}
+                  className="pbtn"
+                  title={`Focus ${project.name}`}
+                  aria-pressed={focusing ? current : undefined}
+                  onClick={() => updatePrefs({ view: "focus", focusProject: project.id })}
                 >
-                  {hidden ? <EyeOffIcon /> : <EyeIcon />}
+                  <span className="pdot" />
+                  <span className="nm">{project.name}</span>
+                  <StageChip project={project} />
+                  <span className="pct">
+                    {needsYou.has(project.id) ? <i /> : null}
+                    {open}
+                  </span>
                 </button>
-              )}
-            </div>
+                <span className="pacts">
+                  <button
+                    type="button"
+                    className="eye"
+                    title={`${detailOpen ? "Hide" : "Show"} the stage of ${project.name}`}
+                    aria-label={`Stage of ${project.name}`}
+                    aria-expanded={detailOpen}
+                    aria-controls={`stage-${project.id}`}
+                    onClick={() =>
+                      setExpanded((ids) => {
+                        const next = new Set(ids);
+                        if (!next.delete(project.id)) next.add(project.id);
+                        return next;
+                      })
+                    }
+                  >
+                    <ChevronIcon />
+                  </button>
+                  {focusing ? (
+                    <span className={current ? "eye on" : "eye sp"}>
+                      {current ? <CheckIcon /> : null}
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="eye"
+                      title={`${hidden ? "Show" : "Hide"} ${project.name} in All projects`}
+                      aria-label={`${hidden ? "Show" : "Hide"} ${project.name}`}
+                      aria-pressed={!hidden}
+                      onClick={() => toggleProjectHidden(project.id)}
+                    >
+                      {hidden ? <EyeOffIcon /> : <EyeIcon />}
+                    </button>
+                  )}
+                </span>
+              </div>
+              {detailOpen ? <ProjectDetail project={project} id={`stage-${project.id}`} /> : null}
+            </Fragment>
           );
         })}
       </section>

@@ -83,7 +83,11 @@ CREATE TABLE projects (
   added_at       TEXT NOT NULL,
   next_card_seq  INTEGER NOT NULL DEFAULT 1, -- read and bumped inside card.create
   retired_at     TEXT,
-  rev            INTEGER NOT NULL DEFAULT 1
+  rev            INTEGER NOT NULL DEFAULT 1,
+  -- pre-launch validation (docs/design/pre-launch-validation.md; migration 0002)
+  stage          TEXT NOT NULL DEFAULT 'launched' CHECK (stage IN ('pre-launch', 'launched')),
+  reviewed_through_sha TEXT,               -- last commit a batched review covered
+  stage_changed_at TEXT
 ) STRICT;
 
 -- ---------------------------------------------------------------------------
@@ -480,6 +484,28 @@ CREATE TABLE reviews (
   source_url       TEXT
 ) STRICT;
 CREATE INDEX reviews_run ON reviews(run_id);
+
+-- One batched review of a project's commit range (docs/design/pre-launch-validation.md).
+CREATE TABLE review_passes (
+  id             TEXT PRIMARY KEY,
+  project_id     TEXT NOT NULL REFERENCES projects(id),
+  card_id        TEXT NOT NULL REFERENCES cards(id),   -- the pass card (kind scout)
+  kind           TEXT NOT NULL CHECK (kind IN ('weekly', 'final')),
+  base_sha       TEXT NOT NULL,                        -- = reviewed_through_sha at start
+  head_sha       TEXT,                                 -- default-branch head, fixed at start
+  chunks         TEXT NOT NULL DEFAULT '[]',           -- JSON chunk plan
+  state          TEXT NOT NULL DEFAULT 'pending' CHECK (state IN
+                   ('pending', 'running', 'finished', 'abandoned')),
+  report_artifact_id TEXT REFERENCES artifacts(id),
+  fix_card_ids   TEXT NOT NULL DEFAULT '[]',           -- JSON
+  obligation_id  TEXT REFERENCES obligations(id),      -- the weekly due date that started it
+  created_at     TEXT NOT NULL,
+  started_at     TEXT,
+  finished_at    TEXT,
+  rev            INTEGER NOT NULL DEFAULT 1
+) STRICT;
+CREATE UNIQUE INDEX review_passes_live ON review_passes(project_id)
+  WHERE state IN ('pending', 'running');
 
 CREATE TABLE handoffs (
   id                 TEXT PRIMARY KEY,

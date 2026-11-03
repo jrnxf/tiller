@@ -116,6 +116,20 @@ pub fn card_brief(card: &Card) -> String {
     brief
 }
 
+/// The delivery line a builder's brief ends with: the project's effective
+/// delivery (`docs/design/pre-launch-validation.md` section 2).
+pub fn delivery_line(project: &Project) -> String {
+    let effective = project.effective_delivery();
+    if effective == project.delivery {
+        format!("\nDelivery: {effective}.\n")
+    } else {
+        format!(
+            "\nDelivery: {effective}. The project is {}: skip no-mistakes, keep your own /code-review, push the branch and open the PR.\n",
+            project.stage
+        )
+    }
+}
+
 /// The world a spawn, a `tiller done` and a cleanup act on.
 pub struct World<'a> {
     pub config: &'a SpawnConfig,
@@ -346,14 +360,13 @@ fn place(
     }
 
     let scratch = world.scratch_root.join(&run.id);
-    let card_brief_text;
-    let brief = match &request.brief {
-        Some(brief) => brief.as_str(),
-        None => {
-            card_brief_text = card_brief(card);
-            card_brief_text.as_str()
-        }
+    let mut brief = match &request.brief {
+        Some(brief) => brief.clone(),
+        None => card_brief(card),
     };
+    if run.role == RunRole::Builder {
+        brief.push_str(&delivery_line(project));
+    }
     let launched = launch::write(&LaunchSpec {
         role,
         session_id: &session.id,
@@ -362,7 +375,7 @@ fn place(
         scratch: &scratch,
         model: &run.model,
         effort: run.effort,
-        brief,
+        brief: &brief,
         tiller: world.tiller,
         default_branch: &project.default_branch,
         network_allow: &world.config.spawn.network_allow,

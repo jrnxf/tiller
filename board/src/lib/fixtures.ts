@@ -13,6 +13,7 @@ import type {
   EventLine,
   Machine,
   MachinesResponse,
+  Project,
   ProjectsResponse,
   QuotaDot,
   QuotaResponse,
@@ -218,30 +219,66 @@ function machinesFor(scenario: Scenario, now: number): MachinesResponse {
 const HOST_A = "01JHOSTA00000000000000000A";
 const HOST_B = "01JHOSTB00000000000000000B";
 
+// A launched project with no review open; each fixture project overrides what
+// makes it different.
+function launched(
+  id: string,
+  delivery: string,
+  capacity: number,
+  rev: number,
+  more: Partial<Project> = {},
+): Project {
+  return {
+    id,
+    name: id,
+    delivery,
+    capacity,
+    rev,
+    stage: "launched",
+    effective_delivery: delivery,
+    reviewed_through_sha: null,
+    reviewed_at: null,
+    stage_changed_at: null,
+    next_review_due: null,
+    review_overdue: false,
+    review_open: null,
+    ...more,
+  };
+}
+
+// alpha is pre-launch: its no-mistakes pipeline is skipped (direct-pr), the
+// last weekly review ended Saturday 31 Oct, and the next is due Saturday 7 Nov
+// at 06:00 Lisbon time.
+const ALPHA = launched("alpha", "no-mistakes", 2, 1, {
+  stage: "pre-launch",
+  effective_delivery: "direct-pr",
+  reviewed_through_sha: "9c1e4f7a02b86d35e1a74c90b3f2d8e65a0c7b14",
+  reviewed_at: "2026-10-31T07:12:00.000Z",
+  stage_changed_at: "2026-10-24T09:30:00.000Z",
+  next_review_due: "2026-11-07T06:00:00.000Z",
+});
+
+// delta was launched this week and its final review is still running.
+const DELTA = launched("delta", "direct-pr", 2, 1, {
+  reviewed_through_sha: "5b7d20e9c4a1f386d02e8b57a9c3140f6e2d8a71",
+  reviewed_at: "2026-10-31T07:12:00.000Z",
+  stage_changed_at: "2026-11-02T16:05:00.000Z",
+  review_open: "final",
+});
+
 const DEFAULT_PROJECTS: ProjectsResponse = {
-  projects: [
-    { id: "alpha", name: "alpha", delivery: "no-mistakes", capacity: 2, rev: 1 },
-    { id: "beta", name: "beta", delivery: "direct-push", capacity: 2, rev: 1 },
-    { id: "gamma", name: "gamma", delivery: "direct-pr", capacity: 1, rev: 3 },
-  ],
+  projects: [ALPHA, launched("beta", "direct-push", 2, 1), launched("gamma", "direct-pr", 1, 3)],
 };
 
 const BUSY_PROJECTS: ProjectsResponse = {
-  projects: [
-    ...DEFAULT_PROJECTS.projects,
-    { id: "delta", name: "delta", delivery: "direct-pr", capacity: 2, rev: 1 },
-  ],
+  projects: [...DEFAULT_PROJECTS.projects, DELTA],
 };
 
 // `degraded`: delta runs on the stale host (a disconnected lane), beta's
 // orchestrator has gone quiet (a stale lane), gamma has a card whose state is
 // unknown, and kiln was registered and has no cards.
 const DEGRADED_PROJECTS: ProjectsResponse = {
-  projects: [
-    ...DEFAULT_PROJECTS.projects,
-    { id: "delta", name: "delta", delivery: "direct-pr", capacity: 2, rev: 1 },
-    { id: "kiln", name: "kiln", delivery: "direct-push", capacity: 1, rev: 1 },
-  ],
+  projects: [...DEFAULT_PROJECTS.projects, DELTA, launched("kiln", "direct-push", 1, 1)],
 };
 
 function projectsFor(scenario: Scenario): ProjectsResponse {

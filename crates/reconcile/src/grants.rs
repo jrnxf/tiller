@@ -11,6 +11,7 @@ use tiller_core::domain::{
     ApprovalAction, Card, Checks, Grant, GrantKind, PipelineState, Pr, PrState, Review, Run,
     Verdict,
 };
+use tiller_core::state::review::prelaunch;
 use tiller_core::state::{find, list};
 
 use crate::sources::PrRead;
@@ -110,9 +111,12 @@ pub fn check(
             return fail("PR checks are not in the required state");
         }
     }
+    // Skipped for a PR with no pipeline run while the project is pre-launch,
+    // which runs no pipeline (`docs/design/pre-launch-validation.md`, D4).
     if let Some(pipeline) = c.get("pipeline").and_then(Value::as_str) {
         let required: PipelineState = pipeline.parse()?;
-        if pr.pipeline_state != required {
+        let waived = pr.pipeline_state == PipelineState::None && prelaunch(conn, &card.project_id)?;
+        if pr.pipeline_state != required && !waived {
             return fail("pipeline is not in the required state");
         }
     }

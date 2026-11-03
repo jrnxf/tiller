@@ -21,7 +21,10 @@ exit: 0
       "remote": null,
       "repo": null,
       "retired_at": null,
-      "rev": 2
+      "rev": 2,
+      "reviewed_through_sha": null,
+      "stage": "launched",
+      "stage_changed_at": null
     },
     "health_card": {
       "acceptance": null,

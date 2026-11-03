@@ -141,6 +141,15 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
     case "project":
       if (state) writeProject(queryClient, state as Project);
       break;
+    case "review_pass":
+    case "obligation":
+      // A project row carries its open review pass and its next weekly due
+      // date, which these entities move.
+      queryClient.invalidateQueries({
+        queryKey: queryKeyFor(projectsPath),
+        refetchType: "active",
+      });
+      break;
     case "outbox":
       // Moves the board's receipts on to delivered and done (section 7.2).
       if (hasState(state)) recordProgress(event.entity_id, state.state, event.at);

@@ -97,6 +97,39 @@ fn migrations_run_both_ways_on_fixture() {
         .unwrap();
 }
 
+/// Migration 2 lowers no project's rigor: every project that existed before
+/// it reads `launched`, with nothing reviewed yet.
+#[test]
+fn existing_projects_read_launched_after_0002() {
+    let mut conn = connection();
+    to_version(&mut conn, 1).unwrap();
+    conn.execute_batch(&format!("BEGIN; {FIXTURE_V1} COMMIT;"))
+        .unwrap();
+    let before: i64 = conn
+        .query_row("SELECT count(*) FROM projects", [], |row| row.get(0))
+        .unwrap();
+    assert!(before > 0);
+    to_version(&mut conn, 2).unwrap();
+    let projects: Vec<crate::domain::Project> =
+        crate::state::list(&conn, "1 ORDER BY id", &[]).unwrap();
+    assert_eq!(projects.len() as i64, before);
+    for project in projects {
+        assert_eq!(
+            project.stage,
+            crate::domain::Stage::Launched,
+            "{}",
+            project.id
+        );
+        assert_eq!(project.effective_delivery(), project.delivery);
+        assert_eq!(project.reviewed_through_sha, None);
+        assert_eq!(project.stage_changed_at, None);
+    }
+    let passes: i64 = conn
+        .query_row("SELECT count(*) FROM review_passes", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(passes, 0);
+}
+
 /// `recovery.md` R11: an older binary never writes to a newer database.
 #[test]
 fn older_binary_refuses_newer_schema_without_writing() {

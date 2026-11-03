@@ -12,7 +12,7 @@ use tiller_core::domain::{
     Obligation, Pane, Pr, QuotaWindow as QuotaRow, Review, Role, Run, RunOutcome, Session,
 };
 use tiller_core::state::signals::WeekWindow;
-use tiller_core::state::{attention::still_current, find, get, list};
+use tiller_core::state::{attention::still_current, find, get, list, review};
 use tiller_core::{Result, Store, Timestamp};
 use tiller_herdr::poller::Health as PollerRecord;
 
@@ -658,25 +658,52 @@ pub fn quota_one(store: &Store, label: &str, now: Timestamp) -> Result<Option<Qu
 
 // -- projects -----------------------------------------------------------------
 
-fn project_shape(project: tiller_core::domain::Project) -> Project {
-    Project {
+fn project_shape(
+    store: &Store,
+    project: tiller_core::domain::Project,
+    now: Timestamp,
+) -> Result<Project> {
+    let conn = store.conn();
+    // When `reviewed_through_sha` was last set: a pass finish, or a switch
+    // to pre-launch that reset it to the head.
+    let reviewed_at: Option<Timestamp> = one(
+        store,
+        "SELECT max(at) FROM events WHERE entity = 'project' AND entity_id = ?1
+         AND (kind = 'project.reviewed'
+              OR (kind = 'project.staged' AND json_extract(payload, '$.to') = 'pre-launch'))",
+        &[&project.id],
+    )?;
+    let next = review::open_weekly(conn, &project.id)?.and_then(|due| due.due_at);
+    let review_overdue = review::due_reviews(conn, Some(&project.id), now)?
+        .iter()
+        .any(|due| due.overdue);
+    let review_open = review::live_pass(conn, &project.id)?.map(|pass| pass.kind.to_string());
+    Ok(Project {
+        effective_delivery: project.effective_delivery().to_string(),
+        stage: project.stage.to_string(),
+        reviewed_through_sha: project.reviewed_through_sha,
+        reviewed_at: at_opt(reviewed_at),
+        stage_changed_at: at_opt(project.stage_changed_at),
+        next_review_due: at_opt(next),
+        review_overdue,
+        review_open,
         id: project.id,
         name: project.name,
         delivery: project.delivery.to_string(),
         capacity: project.capacity,
         rev: project.rev,
-    }
+    })
 }
 
 /// `GET /api/v1/projects`: projects not retired.
-pub fn projects(store: &Store) -> Result<ProjectsResponse> {
+pub fn projects(store: &Store, now: Timestamp) -> Result<ProjectsResponse> {
     Ok(ProjectsResponse {
         projects: store
             .projects()?
             .into_iter()
             .filter(|project| project.retired_at.is_none())
-            .map(project_shape)
-            .collect(),
+            .map(|project| project_shape(store, project, now))
+            .collect::<Result<_>>()?,
     })
 }
 
@@ -1298,7 +1325,7 @@ pub fn snapshot(store: &Store, local: &LocalHealth, now: Timestamp) -> Result<Sn
             SNAPSHOT_PATHS[2]: agents(store, None)?,
             SNAPSHOT_PATHS[3]: machines(store, local, now)?,
             SNAPSHOT_PATHS[4]: quota(store, now)?,
-            SNAPSHOT_PATHS[5]: projects(store)?,
+            SNAPSHOT_PATHS[5]: projects(store, now)?,
         });
         Ok(Snapshot {
             v: 1,
@@ -1370,7 +1397,7 @@ fn entity_state(
             None => Value::Null,
         },
         "project" => match find::<tiller_core::domain::Project>(conn, "id = ?1", &[&id])? {
-            Some(project) => serde_json::to_value(project_shape(project))?,
+            Some(project) => serde_json::to_value(project_shape(store, project, now)?)?,
             None => Value::Null,
         },
         "outbox" => {

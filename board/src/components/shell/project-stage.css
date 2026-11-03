@@ -1,0 +1,197 @@
+/* The stage chip on a project row, the panel under it, and the confirm dialog */
+
+.stage-chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: var(--round);
+  font-size: 11px;
+  font-weight: var(--w-medium);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* The two icon buttons sit close, so the project name keeps its room. */
+.prow .pacts {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex: none;
+}
+
+.stage-chip[data-stage="pre-launch"] {
+  color: var(--yellow-text);
+  background: color-mix(in srgb, var(--yellow) 14%, transparent);
+}
+
+.stage-chip[data-stage="final"] {
+  color: var(--accent-text);
+  background: var(--accent-tint);
+}
+
+.prow[data-off="true"] .stage-chip,
+.prow[data-dim="true"] .stage-chip {
+  opacity: 0.6;
+}
+
+.prow .eye[aria-expanded] .icon {
+  transition: transform var(--fast) var(--ease);
+}
+
+.prow .eye[aria-expanded="true"] .icon {
+  transform: rotate(90deg);
+}
+
+.pdetail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 2px 2px 6px 16px;
+  padding: 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r8);
+  background: var(--bg-card);
+}
+
+.stage-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+}
+
+.stage-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.stage-fact dt {
+  font-size: 11.5px;
+  color: var(--fg-3);
+}
+
+.stage-fact dd {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  color: var(--fg-1);
+  font-size: var(--fs-mini);
+  font-weight: var(--w-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+.stage-sha {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.stage-when {
+  color: var(--fg-3);
+  font-weight: var(--w-normal);
+}
+
+.stage-flag,
+.stage-note {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: var(--round);
+  font-size: 11px;
+  font-weight: var(--w-medium);
+  white-space: nowrap;
+}
+
+.stage-flag {
+  color: var(--orange-text);
+  background: color-mix(in srgb, var(--orange) 12%, transparent);
+}
+
+.stage-note {
+  color: var(--accent-text);
+  background: var(--accent-tint);
+}
+
+.stage-switch {
+  justify-content: center;
+}
+
+.stage-receipt {
+  font-size: 11.5px;
+  color: var(--fg-3);
+  line-height: 1.45;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  background: color-mix(in srgb, #000 35%, transparent);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 16px;
+}
+
+.dialog {
+  width: min(460px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  padding: 18px;
+  background: var(--bg-pop);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r12);
+  box-shadow: var(--shadow-high);
+}
+
+.dialog h2 {
+  margin: 0 0 8px;
+  font-size: var(--fs-regular);
+  font-weight: var(--w-semibold);
+  color: var(--fg-1);
+}
+
+.dialog p {
+  margin: 0;
+  color: var(--fg-2);
+  line-height: 1.5;
+}
+
+.dialog .refusal {
+  margin-top: 12px;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.dialog-actions .btn {
+  height: 32px;
+  padding: 0 14px;
+  font-size: var(--fs-small);
+}
+
+.dialog-actions .btn.primary {
+  background: var(--accent-solid);
+  border-color: transparent;
+  color: var(--accent-fg);
+}
+
+.dialog-actions .btn.primary:hover {
+  background: var(--accent-solid-hover);
+}
+
+.dialog-actions .btn[disabled] {
+  opacity: 0.45;
+  pointer-events: none;
+}

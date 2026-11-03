@@ -23,6 +23,10 @@ Find the defects in the diff that would matter after merge, rank them by severit
 5. **Scrub check.** Any absolute local path, hostname, LAN address, machine name, quoted owner chat or private project name in the diff, the PR body or a test fixture is a `high` finding with the exact line (P17).
 6. **Verdict.** `pass` when no `high` or `medium` finding remains; `fail` otherwise; `ask-user` only when a finding is a product choice no worker should make, with the question in one line.
 
+## Pre-launch review chunks
+
+A brief that opens with "Pre-launch review of" is one chunk of a batched review, run on the pass card. The brief replaces step 1: judge only the diff it lists, at the pass head it names, while reading anything else you need. Scope is correctness bugs, security issues and regressions only; no style, no refactors. Every finding also names the PR that introduced it. Past about 150k tokens of context, stop and end the report with a "Not covered" list; nothing is dropped silently. Record and attach the report as the brief says, on the pass card, keeping the title `chunk <n> of <total>`: finishing the pass counts each chunk by that title.
+
 ## Report
 
 Write `review.md` in your scratch directory:

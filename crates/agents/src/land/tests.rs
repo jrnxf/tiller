@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tiller_core::domain::{
     AnsweredVia, Approval, ApprovalAction, ApprovalKind, ApprovalState, Attention, Boundary, Card,
     CardKind, Checks, Coverage, Delivery, Effort, GrantKind, MergeGate, Mergeable, PipelineState,
-    PrState, ReviewDecision, Reviewer, RunRole, Verdict,
+    PrState, ReviewDecision, Reviewer, RunRole, Stage, Verdict,
 };
 use tiller_core::state::approvals::{Decision, NewApproval, NewGrant, NewPr, PrFetch};
 use tiller_core::state::cards::NewCard;
@@ -792,6 +792,107 @@ fn standing_grant_merges_only_green_in_scope_prs() {
         .unwrap()
         .approvals
         .is_empty()
+    );
+}
+
+/// D4 of `docs/design/pre-launch-validation.md`: a `pipeline: passed` grant
+/// matches a pre-launch PR that had no pipeline run, and refuses the same PR
+/// once the project is launched.
+#[test]
+fn pipeline_condition_skipped_only_while_prelaunch() {
+    let mut world = World::new(Delivery::NoMistakes);
+    let lock = world.lock();
+    let forge = FakeForge::new();
+    let mut conditions = standing();
+    conditions["pipeline"] = json!("passed");
+    conditions["reviews"] = Value::Null;
+    let grant_id = grant(&mut world, conditions);
+    let grant_row: tiller_core::domain::Grant =
+        get(world.store.conn(), "grant", &grant_id).unwrap();
+    let (card, pr_id) = world.pr();
+    let approval = world.request(&card, &pr_id);
+    let pr: tiller_core::domain::Pr = get(world.store.conn(), "pr", &pr_id).unwrap();
+    assert_eq!(pr.pipeline_state, PipelineState::None);
+    let view = forge.view.borrow().clone();
+    let evaluate = |store: &Store| {
+        grants::evaluate(
+            store.conn(),
+            &grant_row,
+            &approval,
+            &pr,
+            &view,
+            tiller_core::Timestamp::now(),
+        )
+        .unwrap()
+    };
+    let stage = |store: &mut Store, stage: Stage| {
+        let rev = get::<tiller_core::domain::Project>(store.conn(), "project", "alpha")
+            .unwrap()
+            .rev;
+        store
+            .project_stage(&owner(), "alpha", rev, stage, Some(HEAD))
+            .unwrap();
+    };
+
+    let miss = evaluate(&world.store).unwrap_err();
+    assert!(miss.contains("pipeline is none, not passed"), "{miss}");
+
+    stage(&mut world.store, Stage::PreLaunch);
+    assert_eq!(evaluate(&world.store), Ok(()));
+    // A pipeline that ran and failed still blocks while pre-launch.
+    let failed = tiller_core::domain::Pr {
+        pipeline_state: PipelineState::Failed,
+        ..pr.clone()
+    };
+    let miss = grants::evaluate(
+        world.store.conn(),
+        &grant_row,
+        &approval,
+        &failed,
+        &view,
+        tiller_core::Timestamp::now(),
+    )
+    .unwrap()
+    .unwrap_err();
+    assert!(miss.contains("pipeline is failed, not passed"), "{miss}");
+    // Checks and paths still apply while pre-launch.
+    let mut red = view.clone();
+    red.checks = Checks::Failure;
+    assert!(
+        grants::evaluate(
+            world.store.conn(),
+            &grant_row,
+            &approval,
+            &pr,
+            &red,
+            tiller_core::Timestamp::now()
+        )
+        .unwrap()
+        .is_err()
+    );
+
+    // The daemon's grant pass agrees: a PR with no approval yet matches.
+    let (_, other) = world.pr_numbered(8);
+    let matched = lander(&forge)
+        .match_grants(&lock, &mut world.store)
+        .unwrap()
+        .approvals;
+    assert_eq!(matched.len(), 1);
+    assert_eq!(matched[0].pr_id.as_deref(), Some(other.as_str()));
+
+    stage(&mut world.store, Stage::Launched);
+    let miss = evaluate(&world.store).unwrap_err();
+    assert!(miss.contains("pipeline is none, not passed"), "{miss}");
+    let (_, third) = world.pr_numbered(9);
+    let matched = lander(&forge)
+        .match_grants(&lock, &mut world.store)
+        .unwrap()
+        .approvals;
+    assert!(
+        matched
+            .iter()
+            .all(|a| a.pr_id.as_deref() != Some(third.as_str())),
+        "{matched:?}"
     );
 }
 

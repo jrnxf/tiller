@@ -19,6 +19,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tiller_agents::spawn::config::SpawnConfig;
+use tiller_core::domain::Stage;
 use tiller_core::domain::{
     AnsweredVia, Approval, CardKind, CardOutcome, HoldReleaseReason, HostKind, Session,
 };
@@ -384,6 +386,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/quota", get(quota))
         .route("/api/v1/health", get(health))
         .route("/api/v1/projects", get(projects))
+        .route("/api/v1/projects/{id}/stage", post(stage_project))
         .route("/api/v1/signals", get(signals))
         .route("/api/v1/events", get(events))
         .route("/login/{token}", get(login))
@@ -587,7 +590,9 @@ async fn quota(State(state): State<AppState>) -> ApiResult<QuotaResponse> {
 #[utoipa::path(get, path = "/api/v1/projects", tag = "reads",
     responses((status = 200, body = ProjectsResponse)))]
 async fn projects(State(state): State<AppState>) -> ApiResult<ProjectsResponse> {
-    read(&state, views::projects).await.map(Json)
+    read(&state, |store| views::projects(store, Timestamp::now()))
+        .await
+        .map(Json)
 }
 
 #[utoipa::path(get, path = "/api/v1/signals", tag = "reads",
@@ -814,6 +819,60 @@ async fn close(
         },
     )
     .await
+}
+
+#[utoipa::path(post, path = "/api/v1/projects/{id}/stage", tag = "mutations", request_body = StageProject,
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse), (status = 409, body = ErrorBody)))]
+async fn stage_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers)?;
+    let request: StageProject = body(&bytes)?;
+    let stage: Stage = request.stage.parse()?;
+    let home = state.0.home.clone();
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| {
+            // To pre-launch, the reviewed commit is the default-branch head
+            // read now, as `tiller project stage` reads it. A replay, a stale
+            // rev or the current stage fetches nothing.
+            let head = if store.stage_reads_head(ctx, &id, request.rev, stage)? {
+                let project: tiller_core::domain::Project = get_row(store.conn(), "project", &id)?;
+                Some(prelaunch_head(&home, &project)?)
+            } else {
+                None
+            };
+            Done::of(store.project_stage(ctx, &id, request.rev, stage, head.as_deref())?)
+        },
+    )
+    .await
+}
+
+fn prelaunch_head(
+    home: &std::path::Path,
+    project: &tiller_core::domain::Project,
+) -> tiller_core::Result<String> {
+    let table = match std::fs::read_to_string(home.join("config.toml")) {
+        Ok(text) => text
+            .parse::<toml::Table>()
+            .map_err(|error| Error::Usage(format!("config.toml does not parse: {error}")))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(error) => return Err(Error::Internal(format!("read config.toml: {error}"))),
+    };
+    let config = SpawnConfig::from_table(&table)
+        .map_err(|error| Error::Usage(format!("config.toml: {error}")))?;
+    let (_, head) =
+        tiller_agents::review::checkout_head(&config, project).map_err(|error| Error::Refused {
+            entity: "project",
+            id: project.id.clone(),
+            fact: error.to_string(),
+        })?;
+    Ok(head)
 }
 
 fn reason(request: &Transition) -> Result<String, ApiError> {
@@ -1107,7 +1166,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, decide, focus
+        cancel, reopen, answer, decide, focus, stage_project
     ),
     components(schemas(ChangeEvent, ResetEvent, ErrorBody, ErrorDetail)),
     tags(
@@ -1493,6 +1552,131 @@ mod tests {
             assert_eq!(send(&app, request).await.status, status, "{name}");
         }
         assert_eq!(cards(&fleet), before);
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// The board's stage switch: to pre-launch it reads the default-branch
+    /// head from the project's checkout, then launch opens the final pass.
+    #[tokio::test]
+    async fn board_stage_switch_reads_the_head_then_launches() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let (origin, checkout) = (home.join("origin.git"), home.join("checkout"));
+        git(
+            home,
+            &["init", "-q", "-b", "main", origin.to_str().unwrap()],
+        );
+        git(
+            &origin,
+            &[
+                "-c",
+                "user.email=dev@example.com",
+                "-c",
+                "user.name=Dev",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        );
+        let head = git(&origin, &["rev-parse", "HEAD"]);
+        git(
+            home,
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                checkout.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(
+            home.join("config.toml"),
+            format!("[checkouts]\nalpha = {:?}\n", checkout.to_str().unwrap()),
+        )
+        .unwrap();
+        let app = app(home, Assets::of::<Fixture>());
+        let cookie = owner_cookie(home);
+        let origin_header = format!("http://{HOST}");
+        let stage = |key: &str, rev: i64, stage: &str| {
+            let mut request = Request::post("/api/v1/projects/alpha/stage")
+                .body(Body::from(
+                    json!({"idempotency_key": key, "rev": rev, "stage": stage}).to_string(),
+                ))
+                .unwrap();
+            for (name, value) in [
+                ("host", HOST),
+                ("content-type", "application/json"),
+                ("sec-fetch-site", "same-origin"),
+                ("origin", origin_header.as_str()),
+                ("cookie", cookie.as_str()),
+            ] {
+                let name: header::HeaderName = name.parse().unwrap();
+                request.headers_mut().insert(name, value.parse().unwrap());
+            }
+            request
+        };
+        let project = |app: Router| async move {
+            let answer = get(&app, "/api/v1/projects").await;
+            let body: Value = serde_json::from_str(&answer.body).unwrap();
+            body["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == "alpha")
+                .unwrap()
+                .clone()
+        };
+
+        let before = project(app.clone()).await;
+        assert_eq!(before["stage"], "launched");
+        let rev = before["rev"].as_i64().unwrap();
+        let staged = send(&app, stage("k-stage-1", rev, "pre-launch")).await;
+        assert_eq!(staged.status, StatusCode::OK, "{}", staged.body);
+        let now = project(app.clone()).await;
+        assert_eq!(now["stage"], "pre-launch");
+        assert_eq!(now["reviewed_through_sha"], head.as_str());
+        assert!(now["next_review_due"].is_string(), "{now}");
+        assert_eq!(now["review_open"], Value::Null);
+
+        let launched = send(
+            &app,
+            stage("k-stage-2", now["rev"].as_i64().unwrap(), "launched"),
+        )
+        .await;
+        assert_eq!(launched.status, StatusCode::OK, "{}", launched.body);
+        let body: Value = serde_json::from_str(&launched.body).unwrap();
+        assert_eq!(body["data"]["final_pass"]["state"], "pending");
+        let now = project(app.clone()).await;
+        assert_eq!(
+            (now["stage"].as_str(), now["review_open"].as_str()),
+            (Some("launched"), Some("final"))
+        );
+        assert_eq!(now["next_review_due"], Value::Null);
+
+        // With the remote gone, a retry of the recorded switch replays and a
+        // stale rev is still a conflict: neither fetches.
+        std::fs::remove_dir_all(&origin).unwrap();
+        let retry = send(&app, stage("k-stage-1", rev, "pre-launch")).await;
+        assert_eq!(retry.status, StatusCode::OK, "{}", retry.body);
+        let body: Value = serde_json::from_str(&retry.body).unwrap();
+        assert_eq!(body["replayed"], true, "{body}");
+        let stale = send(&app, stage("k-stage-3", rev, "pre-launch")).await;
+        assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.body);
     }
 
     #[test]

@@ -3,7 +3,21 @@ import { expect, test } from "vitest";
 import type { AgentRow, AgentsResponse, BoardRow, Project } from "../../lib/api-types";
 import { agentGroups, findLine } from "./agents-model";
 
-const project = (id: string): Project => ({ id, name: id, delivery: "x", capacity: 1, rev: 1 });
+const project = (id: string): Project => ({
+  id,
+  name: id,
+  delivery: "x",
+  capacity: 1,
+  rev: 1,
+  stage: "launched",
+  effective_delivery: "x",
+  reviewed_through_sha: null,
+  reviewed_at: null,
+  stage_changed_at: null,
+  next_review_due: null,
+  review_overdue: false,
+  review_open: null,
+});
 
 function agent(id: string, role: string, host: string, extra: Partial<AgentRow> = {}): AgentRow {
   return {

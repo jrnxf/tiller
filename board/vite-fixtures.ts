@@ -105,7 +105,7 @@ function apiMiddleware(): Connect.NextHandleFunction {
       return;
     }
 
-    if (url === "/api/v1/events") {
+    if (url.split("?")[0] === "/api/v1/events") {
       // `?fixture=degraded`: the daemon is unreachable, so the board keeps the
       // reconnecting banner up.
       if (scenario === "degraded") {

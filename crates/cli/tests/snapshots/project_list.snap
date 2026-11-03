@@ -22,7 +22,10 @@ exit: 0
         "remote": null,
         "repo": "example/alpha",
         "retired_at": null,
-        "rev": 1
+        "rev": 1,
+        "reviewed_through_sha": null,
+        "stage": "launched",
+        "stage_changed_at": null
       },
       {
         "added_at": "<time>",
@@ -41,7 +44,10 @@ exit: 0
         "remote": null,
         "repo": null,
         "retired_at": null,
-        "rev": 2
+        "rev": 2,
+        "reviewed_through_sha": null,
+        "stage": "launched",
+        "stage_changed_at": null
       }
     ]
   },

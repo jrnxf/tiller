@@ -4,10 +4,10 @@ use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 use tiller_core::domain::{
     Approval, Artifact, Attention, CardDep, CardOutcome, CardState, Column, Hold,
-    HoldReleaseReason, Obligation, Pr, Review, Run, Session,
+    HoldReleaseReason, Obligation, Pr, Project, Review, Run, Session,
 };
 use tiller_core::state::cards::{CardEdit, DispatchOverride};
-use tiller_core::state::{list, resolve_card};
+use tiller_core::state::{get, list, resolve_card};
 
 use super::{CardFields, KeyArg, card_of, clearable, parse_dispatch, tag};
 use crate::app::{App, Done, Failure, Outcome, text_input};
@@ -359,10 +359,12 @@ fn show(app: &App, reference: &str) -> Done {
     let artifacts: Vec<Artifact> = list(conn, "card_id = ?1 ORDER BY created_at", &[&card.id])?;
     let reviews: Vec<Review> = list(conn, "card_id = ?1 ORDER BY recorded_at", &[&card.id])?;
     let obligations: Vec<Obligation> = list(conn, "card_id = ?1 ORDER BY opened_at", &[&card.id])?;
+    let project: Project = get(conn, "project", &card.project_id)?;
     Ok(Outcome::read(json!({
         "card": card,
         "tag": tag(&card.display_id),
         "column": column,
+        "effective_delivery": project.effective_delivery(),
         "runs": run_rows,
         "holds": holds,
         "dependencies": deps,

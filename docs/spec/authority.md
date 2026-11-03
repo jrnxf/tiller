@@ -194,7 +194,7 @@ A grant is the owner's merge decision for a class of PRs, made in advance. Only 
 
 - `actions`: the merge actions the grant may choose; the approval records the one used. `base_ref`: the PR must target this branch. `head_ref_pattern`: a glob on the PR's head branch, or null.
 - `opened_by_fleet_run`: the PR's `prs.run_id` is set and belongs to a card of this project. This is what "in scope" means in P13.
-- `checks`: required `prs.checks`. `pipeline`: required `prs.pipeline_state`, or null for projects without `no-mistakes`.
+- `checks`: required `prs.checks`. `pipeline`: required `prs.pipeline_state`, or null for projects without `no-mistakes`. While the PR's project is `pre-launch`, the matcher skips the `pipeline` condition for a PR with no pipeline run (a pipeline that ran and failed still blocks) and enforces it again from the moment of launch; every other condition still applies (`docs/design/pre-launch-validation.md`, D4).
 - `reviews`: required reviewer kinds with a `pass` verdict on the PR's run, and the most high findings allowed, or null.
 - `exclude_paths`: globs; a PR touching any matching path never matches the grant and goes to the owner. Every source-map path (`memory.md` section 3) is excluded from every grant whatever `exclude_paths` says, so a PR that changes what a fleet role loads always reaches the owner as a memory change (CP2, S01: there is no standing memory grant).
 - `expires_at`: UTC timestamp, or null for a standing grant. `away_approval_id`: set on a grant created by away mode (below).

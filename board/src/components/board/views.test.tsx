@@ -3,14 +3,20 @@ import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
-import type { BoardResponse, BoardRow, ChangeEvent } from "../../lib/api-types";
+import type {
+  BoardResponse,
+  BoardRow,
+  ChangeEvent,
+  Project,
+  ProjectsResponse,
+} from "../../lib/api-types";
 import { hydrateFromSnapshot } from "../../lib/boot";
 import { connectionStore } from "../../lib/connection";
 import { fixtureResource, fixtureSnapshot } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
 import { loadPrefs, prefsStore, updatePrefs } from "../../lib/prefs";
 import { createQueryClient } from "../../lib/query-client";
-import { boardPath, queryKeyFor } from "../../lib/queries";
+import { boardPath, projectsPath, queryKeyFor } from "../../lib/queries";
 import { createAppRouter } from "../../lib/router";
 import { applyChange } from "../../lib/sse";
 import { resetBoardLook } from "./board-prefs";
@@ -22,6 +28,7 @@ const CARD_41 = "01JCARD0000000000000000041";
 interface Posted {
   path: string;
   method: string;
+  body: Record<string, unknown>;
 }
 
 // Answers the board API from the fixtures and records every write.
@@ -33,7 +40,11 @@ function stubApi(scenario: Scenario, focusStatus = 200) {
       const path = String(input);
       const method = init?.method ?? "GET";
       if (method !== "GET") {
-        posted.push({ path, method });
+        posted.push({
+          path,
+          method,
+          body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+        });
         return focusStatus === 200
           ? new Response(
               JSON.stringify({ ok: true, replayed: false, events: [], receipt: null, data: null }),
@@ -367,7 +378,7 @@ test("Open in herdr asks the daemon to focus that agent, and says the remote mac
 
   await waitFor(() => expect(posted).toHaveLength(1));
   const sessionId = row.dataset.testid?.replace("agent-", "");
-  expect(posted[0]).toEqual({ path: `/api/v1/agents/${sessionId}/focus`, method: "POST" });
+  expect(posted[0]).toMatchObject({ path: `/api/v1/agents/${sessionId}/focus`, method: "POST" });
   await waitFor(() =>
     expect(screen.getByRole("status").textContent).toContain("Opened herdr on host-b"),
   );
@@ -555,4 +566,100 @@ test("on a phone with no agent chosen the O key does nothing", async () => {
   fireEvent.keyDown(window, { key: "o" });
   await new Promise((done) => setTimeout(done, 50));
   expect(posted).toHaveLength(0);
+});
+
+// ---- Project stage ----
+
+function projectsRegion() {
+  return screen.getByRole("region", { name: "Projects" });
+}
+
+test("a pre-launch project shows its chip and, opened, its review facts", async () => {
+  stubApi("default");
+  const { queryClient } = await renderApp();
+
+  const sidebar = projectsRegion();
+  expect(within(sidebar).getAllByText("pre-launch")).toHaveLength(1);
+  expect(within(sidebar).queryByText("final review")).toBeNull();
+
+  fireEvent.click(within(sidebar).getByRole("button", { name: "Stage of alpha" }));
+  const panel = within(sidebar).getByRole("group", { name: "alpha stage" });
+  expect(panel.textContent).toContain("9c1e4f7a02b8");
+  expect(panel.textContent).not.toContain("9c1e4f7a02b86");
+  expect(panel.textContent).toContain("Sat 31 Oct 07:12");
+  expect(panel.textContent).toContain("Sat 7 Nov 06:00");
+  expect(panel.textContent).toContain("direct-pr");
+  expect(panel.textContent).not.toContain("review overdue");
+  expect(within(panel).getByRole("button", { name: "Switch to launched" })).toBeTruthy();
+
+  const projects = queryClient.getQueryData<ProjectsResponse>(queryKeyFor(projectsPath));
+  const alpha = projects?.projects.find((project) => project.id === "alpha") as Project;
+  act(() => {
+    applyChange(queryClient, {
+      seq: 5001,
+      at: "2026-11-08T12:00:00.000Z",
+      kind: "project.changed",
+      txn: "x",
+      entity: "project",
+      entity_id: "alpha",
+      rev_after: 2,
+      card_id: null,
+      entity_state: { ...alpha, rev: 2, review_overdue: true },
+    } satisfies ChangeEvent);
+  });
+  await waitFor(() => expect(panel.textContent).toContain("review overdue"));
+});
+
+test("a launched project shows no chip, except while its final review runs", async () => {
+  stubApi("busy");
+  await renderApp("busy");
+
+  const sidebar = projectsRegion();
+  const rowOf = (name: string) => within(sidebar).getByTitle(`Focus ${name}`);
+  expect(within(rowOf("beta")).queryByText(/pre-launch|final review/)).toBeNull();
+  expect(within(rowOf("delta")).getByText("final review")).toBeTruthy();
+
+  fireEvent.click(within(sidebar).getByRole("button", { name: "Stage of delta" }));
+  const panel = within(sidebar).getByRole("group", { name: "delta stage" });
+  expect(panel.textContent).toContain("final review running");
+  expect(within(panel).getByRole("button", { name: "Switch to pre-launch" })).toBeTruthy();
+});
+
+test("switching stage asks first, says what changes, and sends the rev it read", async () => {
+  const posted = stubApi("default");
+  await renderApp();
+
+  fireEvent.click(within(projectsRegion()).getByRole("button", { name: "Stage of alpha" }));
+  fireEvent.click(screen.getByRole("button", { name: "Switch to launched" }));
+  const dialog = screen.getByRole("dialog", { name: "Switch alpha to launched?" });
+  expect(dialog.textContent).toContain(
+    "Validation is back on for every push from now on. A final review of everything since the last reviewed commit starts next. Open PRs with no pipeline run must go back through the gate before they merge.",
+  );
+  expect(posted).toHaveLength(0);
+
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(posted).toHaveLength(0);
+
+  fireEvent.click(screen.getByRole("button", { name: "Switch to launched" }));
+  fireEvent.click(
+    within(screen.getByRole("dialog")).getByRole("button", { name: "Switch to launched" }),
+  );
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]?.path).toBe("/api/v1/projects/alpha/stage");
+  expect(posted[0]?.method).toBe("POST");
+  expect(posted[0]?.body).toMatchObject({ rev: 1, stage: "launched" });
+  expect(typeof posted[0]?.body.idempotency_key).toBe("string");
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+test("the switch to pre-launch says validation is skipped and a Saturday review runs", async () => {
+  stubApi("default");
+  await renderApp();
+
+  fireEvent.click(within(projectsRegion()).getByRole("button", { name: "Stage of beta" }));
+  fireEvent.click(screen.getByRole("button", { name: "Switch to pre-launch" }));
+  expect(screen.getByRole("dialog").textContent).toContain(
+    "Per-change validation (no-mistakes) is skipped and a batched review runs every Saturday at 06:00 Lisbon time. Grants skip their pipeline condition for a PR with no pipeline run while pre-launch; every other condition still applies.",
+  );
 });

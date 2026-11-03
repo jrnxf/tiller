@@ -48,6 +48,8 @@ impl Out {
 pub struct World {
     pub dir: TempDir,
     names: RefCell<Names>,
+    /// Extra environment for every command, like a fake forge client.
+    env: RefCell<Vec<(String, String)>>,
 }
 
 #[derive(Default)]
@@ -60,6 +62,7 @@ impl World {
         Self {
             dir: tempfile::tempdir().unwrap(),
             names: RefCell::default(),
+            env: RefCell::default(),
         }
     }
 
@@ -98,11 +101,18 @@ impl World {
             .env_remove("TILLER_DB")
             .env_remove("TILLER_SESSION_ID")
             .env_remove("TILLER_RUN_ID")
-            .env_remove("TILLER_SSH");
+            .env_remove("TILLER_SSH")
+            .env_remove("TILLER_GH");
         if let Some(session) = session {
             command.env("TILLER_SESSION_ID", session);
         }
+        command.envs(self.env.borrow().iter().cloned());
         command
+    }
+
+    /// Sets `key` for every later command.
+    pub fn set_env(&self, key: &str, value: &str) {
+        self.env.borrow_mut().push((key.into(), value.into()));
     }
 
     /// Runs `tiller --json <args>` as the owner.

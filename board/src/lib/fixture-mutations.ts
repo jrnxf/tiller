@@ -1,10 +1,10 @@
 // Stands in for the daemon's mutations (protocol.md section 7.4) on the dev and
 // preview servers until T2.8 lands: a keyed replay table, the stale-head
 // refusal, and the later receipt stages as change events.
-import type { ChangeEvent } from "./api-types.ts";
-import type { AttentionResponse } from "./api-types.ts";
+import type { ChangeEvent, Project } from "./api-types.ts";
+import type { AttentionResponse, ProjectsResponse } from "./api-types.ts";
 import { FIXTURE_HEAD_SHA, fixtureResponses } from "./fixtures.ts";
-import { attentionPath } from "./queries.ts";
+import { attentionPath, projectsPath } from "./queries.ts";
 
 interface Reply {
   status: number;
@@ -106,6 +106,57 @@ function attentionFor(approvalId: string): string | null {
   return queue.items.find((item) => item.approval?.id === approvalId)?.id ?? null;
 }
 
+// The projects the owner has switched since the server started, so a second
+// switch sends the new `rev` and a stale one is refused.
+const switched = new Map<string, Project>();
+
+function currentProject(id: string): Project | undefined {
+  const known = (fixtureResponses("busy")[projectsPath] as ProjectsResponse).projects;
+  return switched.get(id) ?? known.find((project) => project.id === id);
+}
+
+const lisbonHour = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Lisbon",
+  hour: "numeric",
+  hourCycle: "h23",
+});
+
+// 06:00 Lisbon on the UTC day of `day`: 06:00 UTC in winter, 05:00 in summer.
+function sixLisbon(day: Date): Date {
+  const at = new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(), 6));
+  const offset = Number(lisbonHour.format(at)) - 6;
+  return new Date(at.getTime() - offset * 3_600_000);
+}
+
+// The next Saturday at 06:00 Lisbon after `from`.
+function nextSaturday(from: Date): string {
+  const day = new Date(from);
+  day.setUTCDate(day.getUTCDate() + ((6 - day.getUTCDay() + 7) % 7));
+  let next = sixLisbon(day);
+  if (next.getTime() <= from.getTime()) {
+    day.setUTCDate(day.getUTCDate() + 7);
+    next = sixLisbon(day);
+  }
+  return next.toISOString();
+}
+
+function restaged(project: Project, stage: Project["stage"]): Project {
+  const at = new Date();
+  const direct = project.delivery === "no-mistakes" || project.delivery === "no-mistakes-prod-only";
+  const prelaunch = stage === "pre-launch";
+  return {
+    ...project,
+    rev: project.rev + 1,
+    stage,
+    effective_delivery: prelaunch && direct ? "direct-pr" : project.delivery,
+    reviewed_through_sha: project.reviewed_through_sha ?? FIXTURE_HEAD_SHA,
+    stage_changed_at: at.toISOString(),
+    next_review_due: prelaunch ? nextSaturday(at) : null,
+    review_overdue: false,
+    review_open: prelaunch ? null : "final",
+  };
+}
+
 function handle(method: string, path: string, body: Record<string, unknown>): MutationResult {
   const answer = /^\/api\/v1\/attention\/([^/]+)\/answer$/.exec(path);
   if (method === "POST" && answer) {
@@ -143,6 +194,49 @@ function handle(method: string, path: string, body: Record<string, unknown>): Mu
   if (method === "POST" && /^\/api\/v1\/(cards\/[^/]+\/comment|cards)$/.test(path)) {
     const outbox = fakeId("01JOUTB");
     return { reply: recorded({}, outbox, null), followUps: outboxStages(outbox) };
+  }
+  const stage = /^\/api\/v1\/projects\/([^/]+)\/stage$/.exec(path);
+  if (method === "POST" && stage?.[1]) {
+    const project = currentProject(stage[1]);
+    if (!project) {
+      return { reply: refused(404, "not_found", `no project ${stage[1]}`), followUps: [] };
+    }
+    if (body.rev !== project.rev) {
+      return {
+        reply: refused(
+          409,
+          "stale",
+          `project ${project.id} is at rev ${project.rev}, you changed rev ${String(body.rev)}`,
+          { rev: project.rev },
+        ),
+        followUps: [],
+      };
+    }
+    if (body.stage !== "pre-launch" && body.stage !== "launched") {
+      return {
+        reply: refused(422, "refused", "stage must be pre-launch or launched"),
+        followUps: [],
+      };
+    }
+    const next = restaged(project, body.stage);
+    switched.set(next.id, next);
+    return {
+      reply: recorded(next, null, null),
+      followUps: [
+        {
+          delayMs: 300,
+          event: {
+            kind: "project.staged",
+            txn: "project.stage",
+            entity: "project",
+            entity_id: next.id,
+            rev_after: next.rev,
+            card_id: null,
+            entity_state: next,
+          },
+        },
+      ],
+    };
   }
   if (method === "POST" && /^\/api\/v1\/agents\/[^/]+\/focus$/.test(path)) {
     return { reply: recorded({}, null, null), followUps: [] };

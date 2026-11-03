@@ -18,6 +18,7 @@ pub mod outbox;
 pub mod projects;
 pub mod reads;
 pub mod records;
+pub mod review;
 pub mod runs;
 pub mod signals;
 

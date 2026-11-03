@@ -381,6 +381,23 @@ pub struct Project {
     pub delivery: String,
     pub capacity: i64,
     pub rev: i64,
+    /// `pre-launch` or `launched`.
+    pub stage: String,
+    /// The mode builders and the land loop follow: `delivery`, or
+    /// `direct-pr` for a pre-launch project that otherwise runs `no-mistakes`.
+    pub effective_delivery: String,
+    /// The last commit a batched review covered.
+    pub reviewed_through_sha: Option<String>,
+    /// When `reviewed_through_sha` was last set: a pass finished, or the
+    /// project became pre-launch.
+    pub reviewed_at: Option<String>,
+    pub stage_changed_at: Option<String>,
+    /// When the next weekly review is due, while pre-launch.
+    pub next_review_due: Option<String>,
+    /// A weekly review came due over 24 hours ago and no pass started.
+    pub review_overdue: bool,
+    /// `weekly` or `final` while a review pass is pending or running.
+    pub review_open: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -572,6 +589,17 @@ pub struct EditCard {
     pub priority: Option<i64>,
     #[serde(default)]
     pub body: Option<String>,
+}
+
+/// `POST /api/v1/projects/{id}/stage`: the owner's stage switch, against
+/// the `rev` the board read.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StageProject {
+    pub idempotency_key: String,
+    pub rev: i64,
+    /// `pre-launch` or `launched`.
+    pub stage: String,
 }
 
 /// `POST /api/v1/cards/{id}/comment`.

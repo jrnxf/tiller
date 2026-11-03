@@ -91,6 +91,39 @@ text_enum!(
     }
 );
 
+text_enum!(
+    /// A project's stage. A pre-launch project skips the `no-mistakes`
+    /// pipeline and gets a weekly batched review instead
+    /// (`docs/design/pre-launch-validation.md`).
+    Stage {
+        PreLaunch = "pre-launch",
+        Launched = "launched",
+    }
+);
+
+impl Stage {
+    /// The delivery mode builders and the land loop follow: a pre-launch
+    /// project with a `no-mistakes` mode delivers `direct-pr`; every other
+    /// pair keeps `delivery`.
+    pub fn effective_delivery(self, delivery: Delivery) -> Delivery {
+        match (self, delivery) {
+            (Stage::PreLaunch, Delivery::NoMistakes | Delivery::NoMistakesProdOnly) => {
+                Delivery::DirectPr
+            }
+            _ => delivery,
+        }
+    }
+}
+
+text_enum!(ReviewPassKind { Weekly = "weekly", Final = "final" });
+
+text_enum!(ReviewPassState {
+    Pending = "pending",
+    Running = "running",
+    Finished = "finished",
+    Abandoned = "abandoned",
+});
+
 text_enum!(MergeGate { Enforced = "enforced", Detect = "detect" });
 
 text_enum!(CardKind {
@@ -415,6 +448,31 @@ mod tests {
             assert_eq!(serde_json::from_str::<Delivery>(&json).unwrap(), *delivery);
         }
         assert!("no_mistakes".parse::<Delivery>().is_err());
+    }
+
+    #[test]
+    fn effective_delivery_table() {
+        use Delivery::*;
+        let table = [
+            (Stage::PreLaunch, NoMistakes, DirectPr),
+            (Stage::PreLaunch, NoMistakesProdOnly, DirectPr),
+            (Stage::PreLaunch, DirectPr, DirectPr),
+            (Stage::PreLaunch, DirectPush, DirectPush),
+            (Stage::PreLaunch, LocalOnly, LocalOnly),
+            (Stage::Launched, NoMistakes, NoMistakes),
+            (Stage::Launched, NoMistakesProdOnly, NoMistakesProdOnly),
+            (Stage::Launched, DirectPr, DirectPr),
+            (Stage::Launched, DirectPush, DirectPush),
+            (Stage::Launched, LocalOnly, LocalOnly),
+        ];
+        assert_eq!(table.len(), Stage::ALL.len() * Delivery::ALL.len());
+        for (stage, delivery, effective) in table {
+            assert_eq!(
+                stage.effective_delivery(delivery),
+                effective,
+                "{stage} with {delivery}"
+            );
+        }
     }
 
     #[test]

@@ -227,6 +227,16 @@ impl Store {
         &self.conn
     }
 
+    /// Whether the caller's idempotency key is already recorded, so a write
+    /// with it would replay. Lets a mutation skip slow work it only needs
+    /// when it applies.
+    pub fn key_recorded(&self, ctx: &Ctx) -> Result<bool> {
+        match ctx.key.as_deref() {
+            Some(key) => Ok(lookup_key(&self.conn, key, ctx.now)?.is_some()),
+            None => Ok(false),
+        }
+    }
+
     /// Runs one mutation named `txn` in one `BEGIN IMMEDIATE` transaction.
     ///
     /// With `key`, a key already stored for the same mutation returns the

@@ -379,6 +379,11 @@ Reads have no side effects and are all trivially idempotent; they are listed aft
 | `tiller obligation open <card> --what <t> (--on <event filter> \| --due <date> \| --standing <event filter>)` / `cancel <id>` | `obligation.open` / `obligation.cancel` | orchestrator | keyed / natural |
 | `tiller artifact add <card> --kind K --title T (--url <u> \| --path <p>)` | `artifact.add` | worker, orchestrator | keyed (natural per url) |
 | `tiller review record <run> --reviewer R --coverage C --verdict V [--high n --medium n --low n] [--url <u>]` | `review.record` | worker, daemon | keyed |
+| `tiller review plan <project>` | none (a read): the chunk plan of the next pass, from the project's checkout and `prs` (`docs/design/pre-launch-validation.md` section 4) | orchestrator, owner | n/a |
+| `tiller review start <project>` | `review_pass.start`: fetches the default-branch head, computes the plan and stores both | orchestrator (its own project), owner | natural |
+| `tiller review brief <pass> (--chunk <n> [--only <path>]... \| --summary) [--out <file>]` | none (a read): the brief of one chunk run or of the summary run, for `tiller spawn --brief-file` | orchestrator, owner | n/a |
+| `tiller review finish <pass> [--report <artifact>] [--fix-card <card>]...` / `abandon <pass> --reason <r>` | `review_pass.finish` / `review_pass.abandon` | orchestrator (its own project), owner | natural |
+| `tiller review due [--project <p>]` | none (a read): met weekly obligations with no pass after them, each marked `overdue` after 24 hours | orchestrator, owner | n/a |
 | `tiller handoff write (--conclusions <t> --next <t> \| -)` | `handoff.write` | orchestrator | keyed |
 | `tiller handoff show [--project <p>]` | none (a read): the project's newest `handoffs` row, each id resolved, with what changed since it was written | orchestrator (its own project), owner | n/a |
 
@@ -387,6 +392,7 @@ Reads have no side effects and are all trivially idempotent; they are listed aft
 | Command | Mutation | Caller | Retry |
 |---|---|---|---|
 | `tiller project add <id> --name <n> [--repo owner/name] [--remote <url>] [--default-branch <b>] --delivery D [--checks <json>] [--capacity n]` / `edit <id> --rev <n>` with any of the same flags / `retire <id>` | project rows (`project.add`, `project.edit`, `project.retire`) | owner | natural (add with the same values returns the row) |
+| `tiller project stage <id> pre-launch\|launched --rev <n> [--from <sha>]` | `project.stage`; to pre-launch the CLI reads the default-branch head from the project's checkout first, unless `--from` names the commit | owner | natural |
 | `tiller host edit [--lane-capacity n] [--ram-floor-mb n] [--disk-floor-mb n] --rev <n>` | host row (`host.edit`) | owner | natural |
 | `tiller config set <key> <value>` | `config.set`: writes `~/.tiller/config.toml` atomically (temporary file, then rename), then commits a `config.changed` event; a crash between the two leaves a file newer than its event, which `tiller doctor` reports | owner | natural |
 | `tiller peer add <label> --ssh <alias>` (section 10) | `host.add` (`kind = remote`); the SSH alias is config (`peers.<label>.ssh`), not a column | owner | natural |
@@ -458,7 +464,7 @@ The receipt's three stages (point 36) come from records, not from the response: 
 | `GET /api/v1/machines` | section 9 |
 | `GET /api/v1/quota` | section 8 |
 | `GET /api/v1/health` | daemon version, schema version, each poller's last success and last error, tool versions (P43, point 37). No work data |
-| `GET /api/v1/projects` | projects with delivery mode and capacity |
+| `GET /api/v1/projects` | projects with delivery mode, effective delivery and capacity; stage, last reviewed commit and when, next review due, `review_overdue`, and the kind of an open review pass |
 | `GET /api/v1/signals` | the Health page's counts (T3.5): one entry per Lisbon week for the last 8, oldest first, with cards landed and reported, merged PRs, attention items opened, median minutes to answer, reverts, escaped bugs, rework, lost work, duplicate dispatches and unauthorized actions; the per-project counts for the newest week; machines live of total. Plain counts over `state.db` (`tiller-core` `Store::signals`); no Firstmate figure |
 | `GET /api/v1/memory?scope=<scope>` | the memory view: each source's lines with open proposals inline and each proposal's budget figure (`memory.md`, section 6). Board only; no fleet role and no rendered prompt reads it |
 
@@ -476,6 +482,7 @@ Every mutation body carries `idempotency_key` (a ULID the board mints when the c
 | `POST /api/v1/attention/{id}/answer` | `attention.answer` | `answer` (exact words) |
 | `POST /api/v1/approvals/{id}/decide` | `approval.decide` | `decision` (`accept` or `reject`), `head_sha` the board showed; a mismatch is 422 with the new SHA, shown as the stale-approval refusal (T3.3) |
 | `POST /api/v1/memory/proposals/decide` | `mem.decide` (Keep or Discard), one approval row per proposal (`memory.md`, section 6) | `decisions`: a list of `{proposal, decision, base_blob}`, where `base_blob` is the blob the board showed; a mismatch is 422, shown as stale |
+| `POST /api/v1/projects/{id}/stage` | `project.stage`; to pre-launch the daemon reads the default-branch head from the project's checkout (`checkouts.<id>` in `config.toml`) | `rev`, `stage` |
 | `POST /api/v1/agents/{session}/focus` | none; `herdr agent focus`, with the saved machine for a remote agent | - |
 
 There is no endpoint for spawn, land, run end or cleanup. Those belong to agents and the daemon.

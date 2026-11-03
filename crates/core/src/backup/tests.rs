@@ -635,7 +635,8 @@ fn failed_migration_rolls_back_and_keeps_copy() {
     })
     .unwrap_err();
     assert!(error.to_string().contains("rolled back"), "{error}");
-    assert!(error.to_string().contains("state.db.pre-1-0"), "{error}");
+    let pre = format!("state.db.pre-{}-0", crate::migrate::LATEST);
+    assert!(error.to_string().contains(&pre), "{error}");
 
     let store = Store::open(&paths.db).unwrap();
     assert!(get::<Card>(store.conn(), "card", &card.id).is_ok());
@@ -645,8 +646,8 @@ fn failed_migration_rolls_back_and_keeps_copy() {
         .iter()
         .find(|entry| entry.kind == EntryKind::PreMigration)
         .unwrap();
-    assert_eq!(copy.file, "state.db.pre-1-0");
-    assert_eq!(copy.schema_version, 1);
+    assert_eq!(copy.file, pre);
+    assert_eq!(copy.schema_version, crate::migrate::LATEST);
     assert!(verify(paths, copy).is_ok());
 }
 
@@ -659,7 +660,7 @@ fn migration_copy_is_kept_until_the_next_nightly_backup_verifies() {
     drop(store);
 
     let down = migrate(paths, 0, at("2026-11-02T10:00:00Z")).unwrap();
-    assert_eq!((down.from, down.to), (1, 0));
+    assert_eq!((down.from, down.to), (crate::migrate::LATEST, 0));
     let copy = down.copy.unwrap();
     assert_eq!(migrate(paths, 0, Timestamp::now()).unwrap().copy, None);
     let up = migrate(paths, crate::migrate::LATEST, at("2026-11-02T10:05:00Z")).unwrap();

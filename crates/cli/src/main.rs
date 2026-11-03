@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use app::{App, Done, Failure};
 use cmd::{
-    admin, approval, ask, attention, backup, card, import, later, read, records, run, spawn,
+    admin, approval, ask, attention, backup, card, import, later, read, records, review, run, spawn,
 };
 
 #[derive(Parser)]
@@ -93,7 +93,7 @@ enum Command {
     Artifact(records::ArtifactCmd),
     /// Reviews
     #[command(subcommand)]
-    Review(records::ReviewCmd),
+    Review(review::ReviewCmd),
     /// Handoffs
     #[command(subcommand)]
     Handoff(records::HandoffCmd),
@@ -178,7 +178,7 @@ fn dispatch(app: &App, command: Command) -> Done {
         Command::Inbox(args) => run::inbox(app, args),
         Command::Obligation(cmd) => records::obligation(app, cmd),
         Command::Artifact(cmd) => records::artifact(app, cmd),
-        Command::Review(cmd) => records::review(app, cmd),
+        Command::Review(cmd) => review::review(app, cmd),
         Command::Handoff(cmd) => records::handoff(app, cmd),
         Command::Project(cmd) => admin::project(app, cmd),
         Command::Host(cmd) => admin::host(app, cmd),

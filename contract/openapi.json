@@ -835,6 +835,54 @@
         }
       }
     },
+    "/api/v1/projects/{id}/stage": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "stage_project",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StageProject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/quota": {
       "get": {
         "tags": [
@@ -2417,7 +2465,10 @@
           "name",
           "delivery",
           "capacity",
-          "rev"
+          "rev",
+          "stage",
+          "effective_delivery",
+          "review_overdue"
         ],
         "properties": {
           "capacity": {
@@ -2427,15 +2478,61 @@
           "delivery": {
             "type": "string"
           },
+          "effective_delivery": {
+            "type": "string",
+            "description": "The mode builders and the land loop follow: `delivery`, or\n`direct-pr` for a pre-launch project that otherwise runs `no-mistakes`."
+          },
           "id": {
             "type": "string"
           },
           "name": {
             "type": "string"
           },
+          "next_review_due": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the next weekly review is due, while pre-launch."
+          },
           "rev": {
             "type": "integer",
             "format": "int64"
+          },
+          "review_open": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`weekly` or `final` while a review pass is pending or running."
+          },
+          "review_overdue": {
+            "type": "boolean",
+            "description": "A weekly review came due over 24 hours ago and no pass started."
+          },
+          "reviewed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When `reviewed_through_sha` was last set: a pass finished, or the\nproject became pre-launch."
+          },
+          "reviewed_through_sha": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The last commit a batched review covered."
+          },
+          "stage": {
+            "type": "string",
+            "description": "`pre-launch` or `launched`."
+          },
+          "stage_changed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -2839,6 +2936,29 @@
             "minimum": 0
           }
         }
+      },
+      "StageProject": {
+        "type": "object",
+        "description": "`POST /api/v1/projects/{id}/stage`: the owner's stage switch, against\nthe `rev` the board read.",
+        "required": [
+          "idempotency_key",
+          "rev",
+          "stage"
+        ],
+        "properties": {
+          "idempotency_key": {
+            "type": "string"
+          },
+          "rev": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "stage": {
+            "type": "string",
+            "description": "`pre-launch` or `launched`."
+          }
+        },
+        "additionalProperties": false
       },
       "TimelineEntry": {
         "type": "object",

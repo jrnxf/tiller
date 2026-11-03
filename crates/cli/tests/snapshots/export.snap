@@ -9,7 +9,7 @@ exit: 0
     "format": "tiller-export/v1",
     "host_id": "<id1>",
     "max_seq": 5,
-    "schema_version": 1,
+    "schema_version": 2,
     "tables": [
       {
         "file": "approvals.jsonl",
@@ -182,6 +182,12 @@ exit: 0
       {
         "file": "reservations.jsonl",
         "name": "reservations",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "review_passes.jsonl",
+        "name": "review_passes",
         "rows": 0,
         "sha256": "<sha256>"
       },

@@ -22,7 +22,7 @@ Make the change the card asks for, no narrower and no wider, with evidence that 
 4. **Tests for silent breakage.** Add a real test for behavior that could break without anyone noticing. Skip tests that only restate the code.
 5. **Checks.** Run the project's own format, lint, typecheck and test commands and read the output. Fix any lint error, test failure or flaky test you see, even one you did not cause. A UI change is checked in a real browser at 1440 px and 390 px wide, in both themes, with screenshots written to files.
 6. **Independent review.** Before the PR exists, get a fresh-context review of the diff (the project's review skill, or ask the orchestrator for a `reviewer` run). Fix findings or answer them in the PR.
-7. **Deliver by mode.**
+7. **Deliver by mode.** The mode is the `Delivery:` line at the end of your brief, the project's effective delivery (`tiller card show <card>` prints it as `effective_delivery`). A pre-launch project runs `direct-pr` even when its `delivery` is `no-mistakes`: keep step 6's review, skip only the pipeline.
    - `no-mistakes`: push to the gate the project names and follow the pipeline. A pipeline **ask-user** finding is the owner's to answer: report `needs-decision` with the finding and wait (P09). Never answer it yourself.
    - `direct-pr`: push your branch (`git push origin HEAD`) and open the PR with `gh-axi pr create`. Record it with `tiller pr link <url>`.
    - `direct-push`: push your branch and report `done`; the orchestrator requests a `land_direct` approval and the daemon pushes the default branch.

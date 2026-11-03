@@ -139,6 +139,29 @@ pub(crate) fn meet_obligation(
     get(tx.conn(), "obligation", &obligation.id)
 }
 
+/// Cancels an obligation in the caller's transaction: the state check, the
+/// row and its `obligation.cancelled` event.
+pub(crate) fn cancel_obligation(
+    tx: &mut Tx<'_>,
+    obligation: &Obligation,
+    reason: &str,
+) -> Result<()> {
+    obligation
+        .state
+        .cancel()
+        .map_err(refuse("obligation", &obligation.id))?;
+    tx.conn().execute(
+        "UPDATE obligations SET state = 'cancelled' WHERE id = ?1",
+        [&obligation.id],
+    )?;
+    tx.event(
+        NewEvent::new("obligation", &obligation.id, "obligation.cancelled")
+            .card_opt(obligation.card_id.clone())
+            .payload(json!({"reason": reason})),
+    )?;
+    Ok(())
+}
+
 impl Store {
     /// `obligation.open`.
     pub fn obligation_open(
@@ -173,19 +196,7 @@ impl Store {
             if obligation.state == ObligationState::Cancelled {
                 return Ok(obligation);
             }
-            obligation
-                .state
-                .cancel()
-                .map_err(refuse("obligation", &obligation.id))?;
-            tx.conn().execute(
-                "UPDATE obligations SET state = 'cancelled' WHERE id = ?1",
-                [&obligation.id],
-            )?;
-            tx.event(
-                NewEvent::new("obligation", &obligation.id, "obligation.cancelled")
-                    .card_opt(obligation.card_id.clone())
-                    .payload(json!({"reason": reason})),
-            )?;
+            cancel_obligation(tx, &obligation, reason)?;
             get(tx.conn(), "obligation", &obligation.id)
         })
     }

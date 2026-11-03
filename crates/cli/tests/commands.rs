@@ -752,6 +752,35 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
     );
     step(&world, "owner_marker_serves_reads", &["card", "list"]);
     step(&world, "owner_set_tiller", &["owner", "set", "tiller"]);
+
+    // The pre-launch stage (`docs/design/pre-launch-validation.md`).
+    let rev = || {
+        let out = world.run(&["project", "list"]);
+        out.data()["projects"][0]["rev"]
+            .as_i64()
+            .unwrap()
+            .to_string()
+    };
+    step(
+        &world,
+        "project_stage_prelaunch",
+        &[
+            "project",
+            "stage",
+            "alpha",
+            "pre-launch",
+            "--rev",
+            &rev(),
+            "--from",
+            HEAD,
+        ],
+    );
+    step(&world, "review_due", &["review", "due"]);
+    step(
+        &world,
+        "project_stage_launched",
+        &["project", "stage", "alpha", "launched", "--rev", &rev()],
+    );
 }
 
 /// Each exit code of `protocol.md` section 6.2 is reached by a real command.

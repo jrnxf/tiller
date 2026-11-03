@@ -14,9 +14,14 @@ use rusqlite_migration::{M, Migrations, SchemaVersion};
 
 use crate::error::{Error, Result};
 
-static MIGRATIONS: &[M<'static>] = &[M::up(include_str!("../migrations/0001_initial/up.sql"))
-    .down(include_str!("../migrations/0001_initial/down.sql"))
-    .foreign_key_check()];
+static MIGRATIONS: &[M<'static>] = &[
+    M::up(include_str!("../migrations/0001_initial/up.sql"))
+        .down(include_str!("../migrations/0001_initial/down.sql"))
+        .foreign_key_check(),
+    M::up(include_str!("../migrations/0002_project_stage/up.sql"))
+        .down(include_str!("../migrations/0002_project_stage/down.sql"))
+        .foreign_key_check(),
+];
 
 fn migrations() -> Migrations<'static> {
     Migrations::from_slice(MIGRATIONS)

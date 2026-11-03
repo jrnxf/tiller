@@ -8,6 +8,7 @@ use tiller_core::domain::{
     Approval, ApprovalAction, Card, Checks, Grant, GrantKind, PipelineState, Pr, Review, Run,
     Verdict,
 };
+use tiller_core::state::review::prelaunch;
 use tiller_core::state::{find, get, list};
 use tiller_core::{Result, Timestamp};
 
@@ -161,8 +162,13 @@ pub fn evaluate(
     {
         return Ok(Err(format!("checks are {}, not {checks}", view.checks)));
     }
+    // A pre-launch project runs no pipeline: the condition is skipped for a
+    // PR with no pipeline run while the owner keeps the project pre-launch,
+    // and holds again from launch. A pipeline that ran still counts
+    // (`docs/design/pre-launch-validation.md`, D4).
     if let Some(pipeline) = &conditions.pipeline
         && pr.pipeline_state.as_str() != pipeline
+        && !(pr.pipeline_state == PipelineState::None && prelaunch(conn, &approval.project_id)?)
     {
         return Ok(Err(format!(
             "the pipeline is {}, not {pipeline}",

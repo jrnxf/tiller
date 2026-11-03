@@ -242,6 +242,9 @@ mod tests {
             next_card_seq: 1,
             retired_at: None,
             rev: 1,
+            stage: tiller_core::domain::Stage::Launched,
+            reviewed_through_sha: None,
+            stage_changed_at: None,
         }
     }
 

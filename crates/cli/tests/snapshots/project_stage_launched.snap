@@ -1,0 +1,65 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "cancelled_obligations": [
+      "<id97>"
+    ],
+    "final_pass": {
+      "base_sha": "0123456789abcdef0123456789abcdef01234567",
+      "card_id": "<id99>",
+      "chunks": [],
+      "created_at": "<time>",
+      "finished_at": null,
+      "fix_card_ids": [],
+      "head_sha": null,
+      "id": "<id101>",
+      "kind": "final",
+      "obligation_id": null,
+      "project_id": "alpha",
+      "report_artifact_id": null,
+      "rev": 1,
+      "short": "<id101.short>",
+      "started_at": null,
+      "state": "pending"
+    },
+    "obligation": null,
+    "project": {
+      "added_at": "<time>",
+      "capacity": 3,
+      "checks": [],
+      "default_branch": "main",
+      "delivery": "direct-pr",
+      "deploy_environment": null,
+      "deploy_timeout_minutes": 60,
+      "deploy_workflow": null,
+      "id": "alpha",
+      "merge_gate": "detect",
+      "name": "Alpha Project",
+      "next_card_seq": 5,
+      "owner_host_id": "<id1>",
+      "remote": null,
+      "repo": "example/alpha",
+      "retired_at": null,
+      "rev": 8,
+      "reviewed_through_sha": "0123456789abcdef0123456789abcdef01234567",
+      "stage": "launched",
+      "stage_changed_at": "<time>"
+    },
+    "unvalidated_prs": []
+  },
+  "events": [
+    "<seq>",
+    "<seq>",
+    "<seq>",
+    "<seq>",
+    "<seq>"
+  ],
+  "help": [
+    "validation is back on; the orchestrator starts the final review with tiller review start"
+  ],
+  "ok": true,
+  "replayed": false
+}

@@ -54,6 +54,7 @@ The owner marker is a file, `~/.tiller/owner`, not a row (plan v2, point 15). `t
 - `id` (the slug, primary key), `name`, `repo` (`owner/name` or null for local-only), `remote` (git remote URL), `default_branch`, `delivery` (`no-mistakes`, `no-mistakes-prod-only`, `direct-pr`, `direct-push`, `local-only`; P10 and P11), `checks` (JSON: which project checks a direct push must run), `capacity` (max active runs for this project), `owner_host_id`, `added_at`, `next_card_seq`, `rev`, `retired_at`.
 - `deploy_workflow` (the workflow file a `direct-push` project deploys with, or null), `deploy_environment` (the GitHub environment that deploy must reach, or null when the workflow has none), `deploy_timeout_minutes` (default 60): what "the deploy was watched to its result" matches against (section 7; decided at CP2, C02 amended by S07).
 - `merge_gate`: `enforced` or `detect` (decided at CP2, S03). `enforced` only after the daemon's ruleset check confirms the repo's default branch accepts updates from the daemon's GitHub App alone; `detect` is the labelled fallback (`authority.md`, section 6).
+- `stage` (`pre-launch` or `launched`, default `launched`), `reviewed_through_sha` (the last commit a batched review covered), `stage_changed_at`: pre-launch validation (`docs/design/pre-launch-validation.md`). A pre-launch project skips `no-mistakes` and gets one chunked review a week instead. The derived `effective_delivery` is what builders and the land loop follow: `pre-launch` with `no-mistakes` or `no-mistakes-prod-only` gives `direct-pr`; every other pair keeps `delivery`.
 - The project's own checkout path is not stored; treehouse and the dotfiles own it.
 - `tiller init` creates one `ops` card in `fleet` per host, display id `fleet-1`, titled "Host health". Host-level recovery items (T1.2: backups, migrations, resource floors, a crashing orchestrator) attach to it, so `attention.card_id` stays required. It never closes: `card.close` and `card.cancel` refuse it.
 
@@ -250,6 +251,15 @@ Rules:
 
 - `id`, `run_id`, `card_id`, `reviewer` (`code-review`, `spec-review`, `no-mistakes`, `human`), `coverage` (`diff`, `spec`, `full`), `findings_high`, `findings_medium`, `findings_low`, `verdict` (`pass`, `fail`, `ask-user`), `recorded_at`, `source_url`.
 
+### Review pass
+
+`review_passes`: one batched review of a project's first-parent commit range, `base_sha..head_sha` (`docs/design/pre-launch-validation.md`).
+
+- `id`, `project_id`, `card_id` (the pass card, kind `scout`, category `pre-launch-review`), `kind` (`weekly`, `final`), `base_sha`, `head_sha` (fixed at start), `chunks` (the JSON plan `tiller review plan` prints), `state` (`pending`, `running`, `finished`, `abandoned`), `report_artifact_id`, `fix_card_ids`, `obligation_id` (the weekly due date that started it), `created_at`, `started_at`, `finished_at`, `rev`.
+- At most one pass per project is `pending` or `running` (the `review_passes_live` index).
+- The weekly due date is an ordinary `date` obligation with no card, `what = "pre-launch review"`, due Saturday 06:00 Lisbon time.
+- Finishing opens one `review` attention item on the pass card; answering it closes the card `reported`. Scheduling and `reviewed_through_sha` never wait for that answer.
+
 ### Handoff
 
 `handoffs`: the record a fresh orchestrator resumes from (plan v2, point 34; T4.5).
@@ -423,6 +433,10 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `guard.breach` | reconcile, `tiller land` | a breach detected per authority.md section 11 or recovery.md R19 | nothing but the event | `guard.breached` |
 | `project.add`, `project.edit`, `project.retire` | owner | id free (add); `expected_rev` matches (edit); no open card (retire) | `projects` | `project.added`, `project.edited`, `project.retired` |
 | `project.merge_gate` | daemon only: its ruleset check at `project.add` and hourly (`authority.md`, Enforced merge gate) | project not retired; the value changes | `projects.merge_gate`, `rev`; on a move to `detect`, `attention` (`recovery` on `fleet-1`) | `project.merge_gate_changed`, `host.degraded` and `attention.opened` on a move to `detect` |
+| `project.stage` | owner (`tiller project stage`, board) | `expected_rev` matches; not `fleet`, not retired; the same stage is a no-op. To `pre-launch`: a default-branch head is given and no pass is live. | `projects.stage`, `stage_changed_at`, `rev`; to `pre-launch`: `reviewed_through_sha` and the first weekly `date` obligation. To `launched`: open weekly obligations cancelled; a pending weekly pass abandoned (card closed `superseded`) and a pending `final` pass with its card opened, unless a weekly pass is running (its finish opens the final pass) | `project.staged`; `obligation.opened`, `obligation.cancelled`, `review_pass.created`, `card.created`, `card.closed` as they apply |
+| `review_pass.start` | orchestrator, owner (`tiller review start`) | a pending final pass, or a pre-launch project with a met weekly obligation no pass started from; a running pass with the same head and plan is a no-op | `review_passes` (`running`, `head_sha`, `chunks`, `started_at`); for a weekly pass, its card and row first | `review_pass.started`; `card.created`, `review_pass.created` for a weekly pass |
+| `review_pass.finish` | orchestrator, owner (`tiller review finish`) | pass `running`; for each chunk `n`, a live `report` artifact titled `chunk <n> of <total>` on the pass card from a run that recorded a `reviews` row there, both since start; a live `page` artifact on the card; fix cards in the project; `reviewed_through_sha` still equals `base_sha` | `projects.reviewed_through_sha` (compare-and-set to `head_sha`), `review_passes` (`finished`), one `review` attention item; the next weekly obligation while pre-launch; the final pass for a weekly pass that finishes after launch | `project.reviewed`, `review_pass.finished`, `attention.opened`, `obligation.opened` or `review_pass.created` |
+| `review_pass.abandon` | orchestrator, owner (`tiller review abandon`) | pass `pending` or `running`; a reason | `review_passes` (`abandoned`), the card closed `abandoned`; the next weekly obligation while pre-launch, or a new pending final pass | `review_pass.abandoned`, `card.closed`, `obligation.opened` or `review_pass.created` |
 | `host.add`, `host.edit` | owner | label free (add); `expected_rev` matches (edit) | `hosts` | `host.added`, `host.edited` |
 | `config.set` | owner | key known; value valid | the config file, outside `state.db` | `config.changed` |
 | `import.apply` | `tiller import` | manifest valid; `meta.import_manifest_sha256` differs (a second import is a no-op) | every table, with `legacy_id` set | one `import.applied` plus the per-row events, all under `actor = import` |

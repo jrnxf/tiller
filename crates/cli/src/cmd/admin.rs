@@ -8,11 +8,14 @@ use clap::{Args, Subcommand};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use tiller_core::Applied;
-use tiller_core::domain::{Boundary, Delivery, HostKind};
+use tiller_core::Store;
+use tiller_core::domain::{Boundary, Delivery, HostKind, Project, Stage};
+use tiller_core::state::get;
 use tiller_core::state::projects::{HostEdit, Init, NewProject, NewRemoteHost, ProjectEdit};
 
 use super::clearable;
 use super::read::{STOP_HOOK_MAX_RATE, STOP_HOOK_MIN_STOPS, intake_stats};
+use super::review::checkout_head;
 use crate::app::{App, Done, Failure, Outcome};
 
 #[derive(Args, Debug)]
@@ -38,10 +41,25 @@ pub enum ProjectCmd {
     Add(ProjectAdd),
     /// Edit a project against the rev you read
     Edit(ProjectEditArgs),
+    /// Move a project between pre-launch and launched against the rev you read
+    Stage(ProjectStage),
     /// Retire a project
     Retire { id: String },
     /// List projects
     List,
+}
+
+#[derive(Args, Debug)]
+pub struct ProjectStage {
+    pub id: String,
+    /// pre-launch or launched
+    pub stage: Stage,
+    #[arg(long)]
+    pub rev: i64,
+    /// To pre-launch: the reviewed commit to start from, instead of the
+    /// default-branch head read now
+    #[arg(long)]
+    pub from: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -228,8 +246,44 @@ pub fn project(app: &App, cmd: ProjectCmd) -> Done {
                 },
             )?))
         }
+        ProjectCmd::Stage(args) => project_stage(app, &mut store, args),
         ProjectCmd::Retire { id } => Ok(Outcome::applied(store.project_retire(&app.ctx(), &id)?)),
     }
+}
+
+fn project_stage(app: &App, store: &mut Store, args: ProjectStage) -> Done {
+    // The head is fetched only for a switch that applies: a replay, a stale
+    // rev or the current stage needs none.
+    let reads_head = store.stage_reads_head(&app.ctx(), &args.id, args.rev, args.stage)?;
+    let head = match args.from {
+        Some(from) if args.stage == Stage::PreLaunch => Some(from),
+        _ if reads_head => {
+            let project: Project = get(store.conn(), "project", &args.id)?;
+            Some(checkout_head(app, &project)?.1)
+        }
+        _ => None,
+    };
+    let applied =
+        store.project_stage(&app.ctx(), &args.id, args.rev, args.stage, head.as_deref())?;
+    let unvalidated: Vec<String> = applied
+        .value
+        .unvalidated_prs
+        .iter()
+        .map(|pr| pr.url.clone())
+        .collect();
+    let outcome = Outcome::applied(applied);
+    Ok(match args.stage {
+        Stage::PreLaunch => outcome.with_help(
+            "while pre-launch, grants skip their pipeline condition for a PR with no pipeline run; every other condition still applies",
+        ),
+        Stage::Launched if unvalidated.is_empty() => outcome.with_help(
+            "validation is back on; the orchestrator starts the final review with tiller review start",
+        ),
+        Stage::Launched => outcome.with_help(format!(
+            "validation is back on; send each open PR with no pipeline run back through the gate before it merges: {}",
+            unvalidated.join(", ")
+        )),
+    })
 }
 
 pub fn host(app: &App, cmd: HostCmd) -> Done {

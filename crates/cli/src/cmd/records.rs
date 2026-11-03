@@ -65,12 +65,6 @@ pub struct ArtifactAdd {
     pub key: KeyArg,
 }
 
-#[derive(Subcommand, Debug)]
-pub enum ReviewCmd {
-    /// Record a review of a run
-    Record(ReviewRecord),
-}
-
 #[derive(Args, Debug)]
 pub struct ReviewRecord {
     pub run: String,
@@ -221,8 +215,7 @@ pub fn artifact(app: &App, cmd: ArtifactCmd) -> Done {
     Ok(Outcome::applied(applied).with_key(&keyed))
 }
 
-pub fn review(app: &App, cmd: ReviewCmd) -> Done {
-    let ReviewCmd::Record(args) = cmd;
+pub fn review_record(app: &App, args: ReviewRecord) -> Done {
     let mut store = app.write()?;
     let run: Run = resolve_run(&store, &args.run)?;
     let keyed = app.key(

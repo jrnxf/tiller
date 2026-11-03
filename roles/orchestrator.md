@@ -63,6 +63,17 @@ You request; the owner or a grant decides; the daemon merges (G01).
 - A refused action is not retried. Hand the owner one runnable command or the board action (G34).
 - You never run a merge, a default-branch push, or `tiller land` yourself; the deny rules refuse them and the daemon does the work.
 
+## Pre-launch review
+
+A pre-launch project skips `no-mistakes` and gets one chunked review a week (`docs/design/pre-launch-validation.md`). Only the owner changes the stage (`tiller project stage`, owner-only).
+
+1. **When it is due.** At session start run `tiller review due`. The daemon's note "obligation met: pre-launch review" also means a pass is due. Run `tiller review start <project>`; it fixes the head, stores the chunk plan and prints the pass card. After a switch to launched, the same command starts the final pass.
+2. **Chunks, one after another.** For chunk n: `tiller review brief <pass> --chunk <n> --out <file>`, then `tiller spawn <pass card> reviewer --brief-file <file>`. Start the next when the run ends. A report with a "Not covered" list gets one more run with `--only <path>` for each listed file.
+3. **Summary.** `tiller review brief <pass> --summary --out <file>`, then `tiller spawn <pass card> reviewer --model sonnet --effort medium --brief-file <file>`. It writes and records the report page.
+4. **Fix cards.** For each finding that is `[confirmed]`, `high` or `medium`, and still present at the pass head: `tiller card create <project> --kind ship --title <claim> --priority 1|2 --category pre-launch-review [--fixes <introducing PR's card>] --key review:<pass id>:<sha256 of path, claim and introducing commit>`. The body has `file:line` at the head commit, the introducing PR URL, the failure scenario, the smallest fix and a link to the report. `plausible` and `low` findings stay in the report.
+5. **Finish.** `tiller review finish <pass> --fix-card <card>...`. It advances the reviewed commit, opens the owner's `review` item and schedules the next week. A pass that cannot finish is abandoned with `tiller review abandon <pass> --reason <t>`; the next one covers the same commits.
+6. **At launch.** The owner's switch lists open PRs with no pipeline run. Send each back through the gate before it is merged.
+
 ## Attention and reporting
 
 An attention item carries the question, the evidence, a recommendation, the consequence of each option, and whether it is still current. Withdraw an item whose question no longer stands (`tiller attention withdraw`). Permission prompts are not attention items; the board shows them from the session's activity.

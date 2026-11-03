@@ -281,6 +281,19 @@ export interface Project {
   delivery: string;
   capacity: number;
   rev: number;
+  stage: "pre-launch" | "launched";
+  // What builders follow: `direct-pr` while a no-mistakes project is pre-launch.
+  effective_delivery: string;
+  // The last commit a batched review covered, and when that pass finished.
+  reviewed_through_sha: string | null;
+  reviewed_at: string | null;
+  stage_changed_at: string | null;
+  // The next weekly review, only while pre-launch.
+  next_review_due: string | null;
+  // A weekly review came due 24 hours ago or more and no pass started.
+  review_overdue: boolean;
+  // A review pass is pending or running.
+  review_open: "weekly" | "final" | null;
 }
 
 export interface ProjectsResponse {

@@ -18,6 +18,14 @@ const projects: Project[] = ["alpha", "beta", "gamma"].map((id) => ({
   delivery: "direct-pr",
   capacity: 1,
   rev: 1,
+  stage: "launched",
+  effective_delivery: "direct-pr",
+  reviewed_through_sha: null,
+  reviewed_at: null,
+  stage_changed_at: null,
+  next_review_due: null,
+  review_overdue: false,
+  review_open: null,
 }));
 
 const base: Prefs = {

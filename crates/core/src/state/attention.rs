@@ -172,19 +172,28 @@ pub(crate) fn answer_attention(
         None => None,
     };
 
-    let closed_card = if card.kind == CardKind::Question && card.state == CardState::Open {
+    // A question card closes answered; a finished review pass card closes
+    // reported once its review item is read.
+    let done = match (card.kind, item.kind) {
+        (CardKind::Question, _) => Some(CardOutcome::Answered),
+        (CardKind::Scout, AttentionKind::Review)
+            if tx.conn().query_row(
+                "SELECT EXISTS (SELECT 1 FROM review_passes WHERE card_id = ?1 AND state = 'finished')",
+                [&card.id],
+                |row| row.get::<_, bool>(0),
+            )? =>
+        {
+            Some(CardOutcome::Reported)
+        }
+        _ => None,
+    };
+    let closed_card = if let Some(outcome) = done
+        && card.state == CardState::Open
+    {
         let open_left = super::cards::open_attention_id(tx.conn(), &card.id)?;
         let active = super::cards::active_runs(tx.conn(), &card.id)?;
         if open_left.is_none() && active.is_empty() {
-            Some(
-                close_card(
-                    tx,
-                    &card,
-                    CardOutcome::Answered,
-                    json!({"attention_id": item.id}),
-                )?
-                .card,
-            )
+            Some(close_card(tx, &card, outcome, json!({"attention_id": item.id}))?.card)
         } else {
             None
         }

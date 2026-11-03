@@ -726,6 +726,8 @@ fn owner_tiller_commands_denied() {
         "tiller migrate down",
         "tiller config set stop_hook_mode off",
         "tiller project add beta --name Beta",
+        "tiller project stage alpha pre-launch --rev 3",
+        "tiller project stage alpha launched --rev 4",
         "tiller host edit --lane-capacity 9",
         "tiller daemon",
         "tiller --json approve 01JABC",

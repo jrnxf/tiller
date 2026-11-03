@@ -12,7 +12,14 @@ import type {
 import { connectionStore } from "./connection";
 import { fixtureSnapshot } from "./fixtures";
 import { hydrateFromSnapshot } from "./boot";
-import { attentionPath, boardPath, machinesPath, queryKeyFor, quotaPath } from "./queries";
+import {
+  attentionPath,
+  boardPath,
+  machinesPath,
+  projectsPath,
+  queryKeyFor,
+  quotaPath,
+} from "./queries";
 import { applyChange, connectEvents } from "./sse";
 import type { EventSourceLike } from "./sse";
 
@@ -383,4 +390,16 @@ test("a session or run event marks the agents and run details stale", () => {
 
   expect(queryClient.getQueryState(run)?.isInvalidated).toBe(true);
   expect(queryClient.getQueryState(queryKeyFor("/api/v1/agents"))?.isInvalidated).toBe(true);
+});
+
+test("a review pass or obligation event marks the projects stale", () => {
+  for (const entity of ["review_pass", "obligation"]) {
+    const queryClient = seededClient();
+    const projects = queryKeyFor(projectsPath);
+    queryClient.setQueryData(projects, { projects: [] });
+
+    applyChange(queryClient, event({ entity }));
+
+    expect(queryClient.getQueryState(projects)?.isInvalidated).toBe(true);
+  }
 });

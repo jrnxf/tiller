@@ -148,6 +148,11 @@ fn backup_restore_export_and_migrate_commands() {
         &world,
         2,
         "migrate_down_to_latest",
-        &["migrate", "down", "--to", "1"],
+        &[
+            "migrate",
+            "down",
+            "--to",
+            &tiller_core::migrate::LATEST.to_string(),
+        ],
     );
 }

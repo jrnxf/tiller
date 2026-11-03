@@ -1316,6 +1316,7 @@ dependencies = [
 name = "tiller-agents"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "rusqlite",
  "serde",
  "serde_json",

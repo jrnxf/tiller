@@ -91,9 +91,97 @@ impl<'de> Deserialize<'de> for Timestamp {
     }
 }
 
+/// Europe/Lisbon wall-clock time without a timezone database, so the binary
+/// computes the same inside a Nix build sandbox. Lisbon follows the EU rule:
+/// UTC+0 in winter, UTC+1 from 01:00 UTC on the last Sunday of March until
+/// 01:00 UTC on the last Sunday of October.
+pub mod lisbon {
+    use jiff::civil::{self, Weekday};
+    use jiff::tz::{Offset, TimeZone};
+
+    use super::Timestamp;
+
+    fn last_sunday_1am_utc(year: i16, month: i8) -> Option<jiff::Timestamp> {
+        let mut day = civil::Date::new(year, month, 31).ok()?;
+        while day.weekday() != Weekday::Sunday {
+            day = day.yesterday().ok()?;
+        }
+        let at = day.at(1, 0, 0, 0).to_zoned(TimeZone::UTC).ok()?;
+        Some(at.timestamp())
+    }
+
+    /// The Lisbon offset in hours (0 or 1) at an instant.
+    pub fn offset_hours(ts: jiff::Timestamp) -> i8 {
+        let year = ts.to_zoned(TimeZone::UTC).year();
+        match (last_sunday_1am_utc(year, 3), last_sunday_1am_utc(year, 10)) {
+            (Some(start), Some(end)) if ts >= start && ts < end => 1,
+            _ => 0,
+        }
+    }
+
+    /// A fixed zone at `hours` east of UTC.
+    pub fn zone(hours: i8) -> TimeZone {
+        TimeZone::fixed(Offset::constant(hours))
+    }
+
+    /// The instant as a Lisbon wall-clock time.
+    pub fn local(ts: jiff::Timestamp) -> civil::DateTime {
+        ts.to_zoned(zone(offset_hours(ts))).datetime()
+    }
+
+    /// A Lisbon wall-clock time as an instant, or `None` for the hour that
+    /// does not exist at the spring changeover. The hour that repeats in
+    /// autumn resolves to the earlier instant.
+    pub fn from_local(local: civil::DateTime) -> Option<jiff::Timestamp> {
+        [1i8, 0].into_iter().find_map(|hours| {
+            let zoned = local.to_zoned(zone(hours)).ok()?;
+            (offset_hours(zoned.timestamp()) == hours).then(|| zoned.timestamp())
+        })
+    }
+
+    /// The weekly review slot: Saturday 06:00 Lisbon time.
+    pub const REVIEW_DAY: Weekday = Weekday::Saturday;
+    pub const REVIEW_HOUR: i8 = 6;
+
+    /// The first weekly review slot strictly after `after`.
+    pub fn next_review_slot(after: Timestamp) -> Timestamp {
+        let mut day = local(after.as_jiff()).date();
+        for _ in 0..8 {
+            if day.weekday() == REVIEW_DAY
+                && let Some(slot) = from_local(day.at(REVIEW_HOUR, 0, 0, 0))
+                && slot > after.as_jiff()
+            {
+                return Timestamp::from_jiff(slot);
+            }
+            match day.tomorrow() {
+                Ok(next) => day = next,
+                Err(_) => break,
+            }
+        }
+        after
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_slots_are_saturday_six_lisbon_across_both_changeovers() {
+        let slot = |after: &str| lisbon::next_review_slot(after.parse().unwrap()).to_string();
+        // Winter: 06:00 Lisbon is 06:00 UTC.
+        assert_eq!(slot("2026-11-03T14:00:00Z"), "2026-11-07T06:00:00.000Z");
+        // Exactly at a slot, the next one is a week later.
+        assert_eq!(slot("2026-11-07T06:00:00Z"), "2026-11-14T06:00:00.000Z");
+        assert_eq!(slot("2026-11-07T05:59:59Z"), "2026-11-07T06:00:00.000Z");
+        // Summer: 06:00 Lisbon is 05:00 UTC.
+        assert_eq!(slot("2026-07-01T12:00:00Z"), "2026-07-04T05:00:00.000Z");
+        // March: the clocks go forward on Sunday 2026-03-29.
+        assert_eq!(slot("2026-03-28T06:00:00Z"), "2026-04-04T05:00:00.000Z");
+        // October: the clocks go back on Sunday 2026-10-25.
+        assert_eq!(slot("2026-10-24T05:00:00Z"), "2026-10-31T06:00:00.000Z");
+        assert_eq!(slot("2026-10-24T04:59:00Z"), "2026-10-24T05:00:00.000Z");
+    }
 
     #[test]
     fn formats_fixed_width_utc_millis_and_round_trips() {

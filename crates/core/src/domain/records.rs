@@ -78,7 +78,18 @@ record!(Project in "projects" {
     next_card_seq: i64,
     retired_at: Option<Timestamp>,
     rev: i64,
+    stage: Stage,
+    reviewed_through_sha: Option<String>,
+    stage_changed_at: Option<Timestamp>,
 });
+
+impl Project {
+    /// The delivery mode builders and the land loop follow
+    /// ([`Stage::effective_delivery`]).
+    pub fn effective_delivery(&self) -> Delivery {
+        self.stage.effective_delivery(self.delivery)
+    }
+}
 
 record!(Card in "cards" {
     id: String,
@@ -371,6 +382,24 @@ record!(Review in "reviews" {
     verdict: Verdict,
     recorded_at: Timestamp,
     source_url: Option<String>,
+});
+
+record!(ReviewPass in "review_passes" {
+    id: String,
+    project_id: String,
+    card_id: String,
+    kind: ReviewPassKind,
+    base_sha: String,
+    head_sha: Option<String>,
+    chunks: Value,
+    state: ReviewPassState,
+    report_artifact_id: Option<String>,
+    fix_card_ids: Value,
+    obligation_id: Option<String>,
+    created_at: Timestamp,
+    started_at: Option<Timestamp>,
+    finished_at: Option<Timestamp>,
+    rev: i64,
 });
 
 record!(Handoff in "handoffs" {
