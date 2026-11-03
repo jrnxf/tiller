@@ -116,14 +116,22 @@ export const signalsQuery = () => readQuery<SignalsResponse>(signalsPath);
 export const projectsPath: QueryPath = "/api/v1/projects";
 export const projectsQuery = () => readQuery<ProjectsResponse>(projectsPath);
 
-const cardPath = (cardId: string): QueryPath => `/api/v1/cards/${cardId}`;
-export const cardQuery = (cardId: string) => readQuery<CardDetail>(cardPath(cardId));
+// A single-entity read takes `?host=<label>` for a peer's record; absent means
+// this host (protocol.md section 7.3).
+const cardPath = (cardId: string, owner?: string): QueryPath =>
+  withParams(`/api/v1/cards/${cardId}`, { host: owner });
+export const cardQuery = (cardId: string, owner?: string) =>
+  readQuery<CardDetail>(cardPath(cardId, owner));
 
-export const timelinePath = (cardId: string, before?: number): QueryPath =>
+export const timelinePath = (cardId: string, before?: number, owner?: string): QueryPath =>
   withParams(`/api/v1/cards/${cardId}/timeline`, {
     before: before === undefined ? undefined : String(before),
+    host: owner,
   });
-export const timelineQuery = (cardId: string) => readQuery<TimelineResponse>(timelinePath(cardId));
+export const timelineQuery = (cardId: string, owner?: string) =>
+  readQuery<TimelineResponse>(timelinePath(cardId, undefined, owner));
 
-const runPath = (runId: string): QueryPath => `/api/v1/runs/${runId}`;
-export const runQuery = (runId: string) => readQuery<RunDetail>(runPath(runId));
+const runPath = (runId: string, owner?: string): QueryPath =>
+  withParams(`/api/v1/runs/${runId}`, { host: owner });
+export const runQuery = (runId: string, owner?: string) =>
+  readQuery<RunDetail>(runPath(runId, owner));

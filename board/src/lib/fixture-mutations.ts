@@ -157,7 +157,44 @@ function restaged(project: Project, stage: Project["stage"]): Project {
   };
 }
 
+// The paired peers a mutation can name (see `fixtures-federated.ts`): host-e is
+// down, host-f only reads, and a comment, title or answer on host-d that says
+// "uncertain" is sent and never confirmed (protocol.md section 7.4). The retry
+// keeps its key and is answered.
+const unsure = new Set<string>();
+
+function refusal(status: number, code: string, message: string): MutationResult {
+  return { reply: refused(status, code, message), followUps: [] };
+}
+
+function forwarded(
+  method: string,
+  path: string,
+  body: Record<string, unknown>,
+): MutationResult | null {
+  const host = body.host;
+  if (typeof host !== "string") return null;
+  if (/\/(stage|focus)$/.test(path) || /\/memory\//.test(path)) {
+    return refusal(502, "peer_refused", `${method} ${path} is not forwarded to ${host}`);
+  }
+  if (host === "host-e") {
+    return refusal(503, "peer_unreachable", `host-e is unreachable since the link went down`);
+  }
+  if (host === "host-f") {
+    return refusal(502, "peer_refused", "host-f paired with a read scope: view only pairing");
+  }
+  const key = typeof body.idempotency_key === "string" ? body.idempotency_key : null;
+  const text = [body.text, body.title, body.answer].find((value) => typeof value === "string");
+  if (key && host === "host-d" && /uncertain/i.test(String(text)) && !unsure.has(key)) {
+    unsure.add(key);
+    return refusal(504, "forward_uncertain", "host-d did not confirm in time");
+  }
+  return null;
+}
+
 function handle(method: string, path: string, body: Record<string, unknown>): MutationResult {
+  const peer = forwarded(method, path, body);
+  if (peer) return peer;
   const answer = /^\/api\/v1\/attention\/([^/]+)\/answer$/.exec(path);
   if (method === "POST" && answer) {
     const outbox = fakeId("01JOUTB");
@@ -260,6 +297,7 @@ export function fixtureMutation(
     return { reply: replayed, followUps: [] };
   }
   const result = handle(method, path, body);
-  if (key) replies.set(key, result);
+  // A 504 was never confirmed, so the retry with the same key must run again.
+  if (key && result.reply.status !== 504) replies.set(key, result);
   return result;
 }

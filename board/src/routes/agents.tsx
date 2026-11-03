@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 
 import { AgentsView } from "../components/board/agents-view";
+import { ownerOf } from "../lib/peers";
 import { agentsQuery, runQuery } from "../lib/queries";
 
 export interface AgentsSearch {
@@ -18,8 +19,10 @@ export const Route = createFileRoute("/agents")({
     const roster = await context.queryClient.fetchQuery(agentsQuery());
     const runs = roster.orchestrators
       .flatMap((orchestrator) => [orchestrator, ...orchestrator.workers])
-      .flatMap((agent) => (agent.run_id ? [agent.run_id] : []));
-    await Promise.all(runs.map((id) => context.queryClient.prefetchQuery(runQuery(id))));
+      .flatMap((agent) => (agent.run_id ? [{ id: agent.run_id, owner: ownerOf(agent) }] : []));
+    await Promise.all(
+      runs.map(({ id, owner }) => context.queryClient.prefetchQuery(runQuery(id, owner))),
+    );
   },
   component: AgentsRoute,
 });

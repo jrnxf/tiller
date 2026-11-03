@@ -3,33 +3,30 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import type { BoardRow } from "../../lib/api-types";
+import { focusReason, hostField, ownerKey, ownerOf, projectGroups } from "../../lib/peers";
 import { projectsQuery } from "../../lib/queries";
+import { PeerNote } from "../board/host-chip";
+import { useHostLabel, useMachineRows, useStanding } from "../board/peer-state";
+import { ActionFailure } from "./action-failure";
 import { sendMutation } from "./api";
 import { PRIORITIES } from "./format";
 import { PaneIcon, SendIcon } from "./icons";
 import { InlineReceipt, ReceiptPanel } from "./receipt";
 import { useAction } from "./use-action";
 
-function Refusal({ message }: { message: string | undefined }) {
-  return message ? (
-    <p className="refusal" role="alert">
-      {message}
-    </p>
-  ) : null;
-}
-
 // Reprioritize is a field edit, so it carries the card's `rev` and a stale
 // one is a readable conflict (state.md principle 5).
-function PriorityControl({ card }: { card: BoardRow }) {
+function PriorityControl({ card, off }: { card: BoardRow; off: string | null }) {
   const [priority, setPriority] = useState(card.priority);
   const send = useCallback(
     (idempotency_key: string) =>
       sendMutation("PATCH", `/api/v1/cards/${card.id}`, {
         rev: card.rev,
         priority,
+        ...hostField(card),
         idempotency_key,
       }),
-    [card.id, card.rev, priority],
+    [card, priority],
   );
   const action = useAction({ binding: `${card.id}:${card.rev}:${priority}`, send });
   const unchanged = priority === card.priority;
@@ -42,7 +39,8 @@ function PriorityControl({ card }: { card: BoardRow }) {
         id={`pri-${card.id}`}
         className="ca-select"
         value={priority}
-        disabled={action.pending}
+        disabled={action.pending || off !== null}
+        title={off ?? undefined}
         onChange={(event) => setPriority(Number(event.target.value))}
       >
         {PRIORITIES.map((name, value) => (
@@ -57,28 +55,30 @@ function PriorityControl({ card }: { card: BoardRow }) {
         <button
           type="button"
           className="btn"
-          disabled={unchanged || action.pending}
+          disabled={unchanged || action.pending || off !== null}
+          title={off ?? undefined}
           onClick={action.trigger}
         >
           {action.pending ? "Saving..." : "Save"}
         </button>
       )}
-      <Refusal message={action.error?.message} />
+      <ActionFailure error={action.error} host={ownerOf(card)} />
     </div>
   );
 }
 
 // A comment is an outbox note to the card's orchestrator.
-function CommentControl({ card }: { card: BoardRow }) {
+function CommentControl({ card, off }: { card: BoardRow; off: string | null }) {
   const [text, setText] = useState("");
   const [lastReceipt, setLastReceipt] = useState<string | null>(null);
   const send = useCallback(
     (idempotency_key: string) =>
       sendMutation("POST", `/api/v1/cards/${card.id}/comment`, {
         text: text.trim(),
+        ...hostField(card),
         idempotency_key,
       }),
-    [card.id, text],
+    [card, text],
   );
   const onRecorded = useCallback((_: unknown, key: string) => {
     setLastReceipt(key);
@@ -96,23 +96,25 @@ function CommentControl({ card }: { card: BoardRow }) {
           className="note-in"
           placeholder={`A note on ${card.display_id}`}
           value={text}
-          disabled={action.pending}
+          disabled={action.pending || off !== null}
+          title={off ?? undefined}
           onChange={(event) => setText(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && text.trim() !== "") action.trigger();
+            if (event.key === "Enter" && text.trim() !== "" && off === null) action.trigger();
           }}
         />
         <button
           type="button"
           className="btn"
-          disabled={text.trim() === "" || action.pending}
+          disabled={text.trim() === "" || action.pending || off !== null}
+          title={off ?? undefined}
           onClick={action.trigger}
         >
           <SendIcon />
           {action.pending ? "Sending..." : "Send"}
         </button>
       </div>
-      <Refusal message={action.error?.message} />
+      <ActionFailure error={action.error} host={ownerOf(card)} />
       {lastReceipt ? (
         <ReceiptPanel
           receiptKey={lastReceipt}
@@ -131,24 +133,44 @@ function CommentControl({ card }: { card: BoardRow }) {
 const KINDS = ["ship", "scout", "question", "ops"] as const;
 
 // Files a new card in the same project, through the same path as a typed ask.
-function AddCardControl({ card, extra }: { card: BoardRow; extra: ReactNode }) {
+function AddCardControl({
+  card,
+  extra,
+  off,
+}: {
+  card: BoardRow;
+  extra: ReactNode;
+  off: string | null;
+}) {
   const { data: projects } = useSuspenseQuery(projectsQuery());
+  const machines = useMachineRows();
+  const localLabel = useHostLabel({});
+  const groups = projectGroups(projects.projects, machines, localLabel);
+  const grouped = groups.some((group) => group.peer);
   const [open, setOpen] = useState(false);
-  const [project, setProject] = useState(card.project_id);
+  // A project slug is unique only per host, so the choice is the owner-qualified key.
+  const [project, setProject] = useState(ownerKey(card.project_id, card));
+  const chosen = projects.projects.find((p) => ownerKey(p.id, p) === project);
+  const chosenGroup = groups.find(
+    (group) => chosen !== undefined && group.projects.includes(chosen),
+  );
+  const chosenOff =
+    chosenGroup && !chosenGroup.standing.canAct ? chosenGroup.standing.reason : null;
+  const blocked = off ?? chosenOff;
   const [kind, setKind] = useState<string>("ship");
   const [title, setTitle] = useState("");
   const [lastReceipt, setLastReceipt] = useState<string | null>(null);
-  const send = useCallback(
-    (idempotency_key: string) =>
-      sendMutation("POST", "/api/v1/cards", {
-        project,
-        kind,
-        title: title.trim(),
-        body: `Follow-up to ${card.display_id}.`,
-        idempotency_key,
-      }),
-    [card.display_id, kind, project, title],
-  );
+  const targetProject = chosen?.id ?? card.project_id;
+  const targetHost = ownerOf(chosen ?? card);
+  const send = (idempotency_key: string) =>
+    sendMutation("POST", "/api/v1/cards", {
+      project: targetProject,
+      kind,
+      title: title.trim(),
+      body: `Follow-up to ${card.display_id}.`,
+      ...(targetHost ? { host: targetHost } : {}),
+      idempotency_key,
+    });
   const onRecorded = useCallback((_: unknown, key: string) => {
     setLastReceipt(key);
     setTitle("");
@@ -163,7 +185,7 @@ function AddCardControl({ card, extra }: { card: BoardRow; extra: ReactNode }) {
           className="ca-form"
           onSubmit={(event) => {
             event.preventDefault();
-            if (title.trim() !== "") action.trigger();
+            if (title.trim() !== "" && blocked === null) action.trigger();
           }}
         >
           <label className="ca-l" htmlFor={`add-title-${card.id}`}>
@@ -184,11 +206,32 @@ function AddCardControl({ card, extra }: { card: BoardRow; extra: ReactNode }) {
               value={project}
               onChange={(event) => setProject(event.target.value)}
             >
-              {projects.projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
+              {groups.map((group) => {
+                const options = group.projects.map((p) => (
+                  <option
+                    key={ownerKey(p.id, p)}
+                    value={ownerKey(p.id, p)}
+                    disabled={!group.standing.canAct}
+                  >
+                    {p.name}
+                  </option>
+                ));
+                return grouped ? (
+                  <optgroup
+                    key={`${group.peer}:${group.host}`}
+                    label={
+                      group.standing.reason
+                        ? `${group.host} - ${group.standing.reason}`
+                        : (group.host ?? "")
+                    }
+                    disabled={!group.standing.canAct}
+                  >
+                    {options}
+                  </optgroup>
+                ) : (
+                  options
+                );
+              })}
             </select>
             <select
               aria-label="Kind"
@@ -209,16 +252,23 @@ function AddCardControl({ card, extra }: { card: BoardRow; extra: ReactNode }) {
             <button
               type="submit"
               className="btn primary"
-              disabled={title.trim() === "" || action.pending}
+              disabled={title.trim() === "" || action.pending || blocked !== null}
+              title={blocked ?? undefined}
             >
               {action.pending ? "Adding..." : "Add card"}
             </button>
           </div>
-          <Refusal message={action.error?.message} />
+          <ActionFailure error={action.error} host={targetHost} />
         </form>
       ) : (
         <div className="acts">
-          <button type="button" className="btn" onClick={() => setOpen(true)}>
+          <button
+            type="button"
+            className="btn"
+            disabled={off !== null}
+            title={off ?? undefined}
+            onClick={() => setOpen(true)}
+          >
             Add card
           </button>
           {extra}
@@ -247,7 +297,16 @@ function isShown(element: Element): boolean {
 }
 
 // Focuses the agent's pane in herdr, with the saved machine for a remote one.
-export function OpenInHerdr({ sessionId, label }: { sessionId: string; label?: string }) {
+export function OpenInHerdr({
+  sessionId,
+  label,
+  off,
+}: {
+  sessionId: string;
+  label?: string;
+  // Why the button is off: pane focus is not forwarded to a peer.
+  off?: string | null;
+}) {
   const send = useCallback(
     (idempotency_key: string) =>
       sendMutation("POST", `/api/v1/agents/${sessionId}/focus`, { idempotency_key }),
@@ -280,9 +339,10 @@ export function OpenInHerdr({ sessionId, label }: { sessionId: string; label?: s
       if (!button.current || !isShown(button.current)) return;
       trigger();
     };
+    if (off) return;
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [trigger]);
+  }, [trigger, off]);
 
   return (
     <span className="ca-herdr">
@@ -290,8 +350,8 @@ export function OpenInHerdr({ sessionId, label }: { sessionId: string; label?: s
         type="button"
         ref={button}
         className="btn"
-        disabled={action.pending}
-        title="Focus this agent's pane in herdr"
+        disabled={action.pending || Boolean(off)}
+        title={off ?? "Focus this agent's pane in herdr"}
         onClick={action.trigger}
       >
         <PaneIcon />
@@ -301,7 +361,7 @@ export function OpenInHerdr({ sessionId, label }: { sessionId: string; label?: s
       {lastReceipt && !action.pending ? (
         <InlineReceipt receiptKey={lastReceipt} text="Focused in herdr" />
       ) : null}
-      <Refusal message={action.error?.message} />
+      <ActionFailure error={action.error} host={undefined} />
     </span>
   );
 }
@@ -313,23 +373,28 @@ export function CardActions({
   card: BoardRow | null;
   sessionId: string | null;
 }) {
-  const herdr = sessionId ? <OpenInHerdr sessionId={sessionId} /> : null;
+  const standing = useStanding(card ?? {});
+  const off = standing.canAct ? null : standing.reason;
+  const herdr = sessionId ? (
+    <OpenInHerdr sessionId={sessionId} off={card ? focusReason(ownerOf(card)) : null} />
+  ) : null;
   return (
     <div className="blk card-acts" data-testid="card-actions">
       <div className="blk-h">
         Card
         {card ? <span className="c">{card.display_id}</span> : null}
       </div>
+      <PeerNote standing={standing} />
       {card ? (
         <>
-          <PriorityControl key={`${card.id}:${card.rev}`} card={card} />
-          <CommentControl card={card} />
+          <PriorityControl key={`${card.id}:${card.rev}`} card={card} off={off} />
+          <CommentControl card={card} off={off} />
         </>
       ) : (
         <p className="ca-none">This card is not on the board any more.</p>
       )}
       {card ? (
-        <AddCardControl card={card} extra={herdr} />
+        <AddCardControl card={card} extra={herdr} off={off} />
       ) : herdr ? (
         <div className="acts">{herdr}</div>
       ) : null}

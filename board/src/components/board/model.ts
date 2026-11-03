@@ -1,4 +1,5 @@
 import type { BoardFilter, BoardResponse, BoardRow } from "../../lib/api-types";
+import { ownerKey } from "../../lib/peers";
 
 // The six columns of the board in the order the mocks draw them. `asked` is not
 // a card column: it holds the unresolved asks (state.md, section 6).
@@ -29,7 +30,7 @@ export function tilesOf(board: BoardResponse): Tile[] {
   const cards = board.rows.map<Tile>((row) => ({
     key: row.id,
     column: row.column,
-    projectId: row.project_id,
+    projectId: ownerKey(row.project_id, row),
     hostId: row.host_id,
     row,
     ask: null,

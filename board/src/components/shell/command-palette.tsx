@@ -3,6 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { rankCommands } from "../../lib/commands";
+import { projectKey } from "../../lib/peers";
 import type { Command } from "../../lib/commands";
 import { machinesQuery, projectsQuery } from "../../lib/queries";
 import { toggleProjectHidden, updatePrefs, prefsStore } from "../../lib/prefs";
@@ -121,16 +122,16 @@ function useCommands(activeHost: string | undefined, close: () => void): Command
     ];
     for (const project of projects?.projects ?? []) {
       commands.push({
-        id: `focus-${project.id}`,
+        id: `focus-${projectKey(project)}`,
         group: "View",
-        label: `Focus ${project.name}`,
-        run: () => updatePrefs({ view: "focus", focusProject: project.id }),
+        label: `Focus ${project.name}${project.host && project.link ? ` (${project.host})` : ""}`,
+        run: () => updatePrefs({ view: "focus", focusProject: projectKey(project) }),
       });
       commands.push({
-        id: `toggle-${project.id}`,
+        id: `toggle-${projectKey(project)}`,
         group: "View",
-        label: `${prefs.hiddenProjects.includes(project.id) ? "Show" : "Hide"} ${project.name} in All projects`,
-        run: () => toggleProjectHidden(project.id),
+        label: `${prefs.hiddenProjects.includes(projectKey(project)) ? "Show" : "Hide"} ${project.name} in All projects`,
+        run: () => toggleProjectHidden(projectKey(project)),
       });
     }
     for (const machine of machines?.machines ?? []) {

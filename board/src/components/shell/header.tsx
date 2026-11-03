@@ -3,6 +3,7 @@ import { Link, useRouterState } from "@tanstack/react-router";
 import type { CSSProperties } from "react";
 
 import { BoardFilterSegment, BoardFilterTabs } from "../board/filter";
+import { projectKey } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import { boardQuery, machinesQuery, projectsQuery } from "../../lib/queries";
 import { prefsStore, updatePrefs } from "../../lib/prefs";
@@ -48,7 +49,9 @@ function ScopeCrumb({ activeHost }: { activeHost: string | undefined }) {
   const shown = scopedProjects(prefs, projects.projects, board.rows, activeHost);
 
   if (prefs.view === "focus" && shown[0]) {
-    const index = projects.projects.findIndex((project) => project.id === shown[0]?.id);
+    const index = projects.projects.findIndex(
+      (project) => projectKey(project) === (shown[0] ? projectKey(shown[0]) : null),
+    );
     return (
       <>
         <span className="pdot" style={{ "--pc": projectColor(index) } as CSSProperties} />
@@ -78,7 +81,7 @@ export function Header({ activeHost, menuOpen, onOpenMenu }: HeaderProps) {
   const narrowed =
     prefs.view === "focus" ||
     (projects
-      ? projects.some((p) => prefs.hiddenProjects.includes(p.id))
+      ? projects.some((p) => prefs.hiddenProjects.includes(projectKey(p)))
       : prefs.hiddenProjects.length > 0);
 
   return (

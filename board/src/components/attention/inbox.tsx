@@ -3,11 +3,15 @@ import { Link } from "@tanstack/react-router";
 import type { CSSProperties, ReactNode } from "react";
 
 import type { AttentionItem, BoardRow, PermissionPrompt, Project } from "../../lib/api-types";
+import { focusReason, ownerKey, ownerOf, projectIndex, shownId } from "../../lib/peers";
+import type { Owned } from "../../lib/peers";
 import { prefsStore } from "../../lib/prefs";
 import { projectColor } from "../../lib/project-color";
 import { attentionQuery, boardQuery, projectsQuery } from "../../lib/queries";
 import { scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
+import { HostChip } from "../board/host-chip";
+import { useAmbiguousIds, useStanding } from "../board/peer-state";
 import { CheckIcon } from "../shell/icons";
 import { answeredStore } from "./answered";
 import { AnswerForm } from "./answer";
@@ -37,23 +41,34 @@ interface Context {
   projects: Project[];
 }
 
+// The row that owns an entry: its card when the board still has it, else the
+// entry itself, which carries the same host fields.
+function ownerOfEntry(entry: Entry, ctx: Context): Owned {
+  const own = entry.type === "decision" ? entry.item : entry.prompt;
+  return ctx.cards.get(own.card_id) ?? own;
+}
+
 function Meta({
   cardId,
+  owner,
   ctx,
   chip,
   when,
 }: {
   cardId: string;
+  owner: Owned;
   ctx: Context;
   chip: ReactNode;
   when: string;
 }) {
   const card = ctx.cards.get(cardId);
-  const index = ctx.projects.findIndex((project) => project.id === card?.project_id);
+  const ambiguous = useAmbiguousIds();
+  const index = card ? projectIndex(ctx.projects, card) : -1;
   const project = ctx.projects[index];
   return (
     <div className="d-meta">
       {chip}
+      <HostChip entity={owner} />
       {project ? (
         <>
           <span className="pdot" style={{ "--pc": projectColor(index) } as CSSProperties} />
@@ -61,7 +76,7 @@ function Meta({
           <span className="sep">/</span>
         </>
       ) : null}
-      <span>{card?.display_id ?? cardId.slice(-7)}</span>
+      <span>{card ? shownId(card, ambiguous) : cardId.slice(-7)}</span>
       <span className="sep">/</span>
       <span>{when}</span>
     </div>
@@ -160,6 +175,7 @@ function DecisionDetail({
       <BackLink />
       <Meta
         cardId={item.card_id}
+        owner={item}
         ctx={ctx}
         chip={chip}
         when={`asked ${formatWhen(item.opened_at)}, ${formatAge(item.opened_at)} ago`}
@@ -201,6 +217,7 @@ function PermissionDetail({ prompt, ctx }: { prompt: PermissionPrompt; ctx: Cont
       <BackLink />
       <Meta
         cardId={prompt.card_id}
+        owner={ctx.cards.get(prompt.card_id) ?? prompt}
         ctx={ctx}
         chip={chip}
         when={`waiting since ${formatWhen(prompt.since)}, ${formatAge(prompt.since)}`}
@@ -223,7 +240,11 @@ function PermissionDetail({ prompt, ctx }: { prompt: PermissionPrompt; ctx: Cont
         </div>
       </div>
       <div className="acts">
-        <OpenInHerdr sessionId={prompt.session_id} label="Open the pane in herdr" />
+        <OpenInHerdr
+          sessionId={prompt.session_id}
+          label="Open the pane in herdr"
+          off={focusReason(ownerOf(ctx.cards.get(prompt.card_id) ?? prompt))}
+        />
       </div>
       <CardActions card={ctx.cards.get(prompt.card_id) ?? null} sessionId={null} />
     </>
@@ -233,7 +254,10 @@ function PermissionDetail({ prompt, ctx }: { prompt: PermissionPrompt; ctx: Cont
 function Row({ entry, selected, ctx }: { entry: Entry; selected: boolean; ctx: Context }) {
   const cardId = entry.type === "decision" ? entry.item.card_id : entry.prompt.card_id;
   const card = ctx.cards.get(cardId);
-  const index = ctx.projects.findIndex((project) => project.id === card?.project_id);
+  const owner = ownerOfEntry(entry, ctx);
+  const standing = useStanding(owner);
+  const ambiguous = useAmbiguousIds();
+  const index = card ? projectIndex(ctx.projects, card) : -1;
   const project = ctx.projects[index];
   const since = entry.type === "decision" ? entry.item.opened_at : entry.prompt.since;
   const answered = entry.type === "decision" && entry.answered !== null;
@@ -246,7 +270,7 @@ function Row({ entry, selected, ctx }: { entry: Entry; selected: boolean; ctx: C
     <Link
       to="/inbox"
       search={({ host }) => ({ host, item: entry.id })}
-      className={`irow${gone ? " gone" : ""}${answered ? " answered" : ""}`}
+      className={`irow${gone ? " gone" : ""}${answered ? " answered" : ""}${standing.dim ? " dim" : ""}`}
       // The router sets aria-current on the link that matches the URL exactly;
       // the highlight also covers the item shown by default.
       data-selected={selected}
@@ -262,6 +286,7 @@ function Row({ entry, selected, ctx }: { entry: Entry; selected: boolean; ctx: C
       <span className="bd">
         <span className={`t${entry.type === "permission" ? " mono" : ""}`}>{title}</span>
         <span className="s">
+          <HostChip entity={owner} />
           {project ? (
             <>
               <span className="pdot" style={{ "--pc": projectColor(index) } as CSSProperties} />
@@ -269,7 +294,7 @@ function Row({ entry, selected, ctx }: { entry: Entry; selected: boolean; ctx: C
               <span className="sl">/</span>
             </>
           ) : null}
-          {card?.display_id ?? cardId.slice(-7)}
+          {card ? shownId(card, ambiguous) : cardId.slice(-7)}
           <span className="sl">/</span>
           {formatAge(since)}
           {answered ? <span className="lab sm ok">answered</span> : null}
@@ -337,12 +362,14 @@ export function Inbox({
 
   const cards = new Map(board.rows.map((row) => [row.id, row]));
   const shown = new Set(
-    scopedProjects(prefs, projects.projects, board.rows, host).map((project) => project.id),
+    scopedProjects(prefs, projects.projects, board.rows, host).map((project) =>
+      ownerKey(project.id, project),
+    ),
   );
   // Same scope as the sidebar badge: a card that left the board still counts.
   const inScope = (cardId: string) => {
     const row = cards.get(cardId);
-    return !row || (shown.has(row.project_id) && (!host || row.host_id === host));
+    return !row || (shown.has(ownerKey(row.project_id, row)) && (!host || row.host_id === host));
   };
   const ctx: Context = { cards, projects: projects.projects };
 

@@ -464,11 +464,11 @@ ADR 0003, accepted Tuesday 2026-11-03. The owner approved it; runs in one or two
 ### F5 Board: host chips and staleness
 `sonnet` high - 2.5-3.5 h - after F1 (mocked API until F3)
 
-- [ ] Host chip on cards, attention and agents; host-qualified display ids when ambiguous
-- [ ] A peer that is not `live`: dimmed rows, "as of" with the age in Lisbon time, disabled controls with the reason
-- [ ] "Sent, not confirmed" for 504; the project picker grouped by host; Machines link state; `read` pairings view only
-- [ ] Check: screenshots in both themes at 1440 px and 390 px; perfect-load rules hold with peers in the snapshot
-- [ ] Delivered
+- [x] Host chip on cards, attention and agents; host-qualified display ids when ambiguous
+- [x] A peer that is not `live`: dimmed rows, "as of" with the age in Lisbon time, disabled controls with the reason
+- [x] "Sent, not confirmed" for 504; the project picker grouped by host; Machines link state; `read` pairings view only
+- [x] Check: screenshots in both themes at 1440 px and 390 px; perfect-load rules hold with peers in the snapshot
+- [x] Delivered
 
 ### F6 Two-host end to end
 `sonnet` high - 1.5-2 h - after F4 and F5

@@ -8,7 +8,10 @@ import { ChevronDownIcon, PaneIcon, Status } from "./icons";
 import type { StatusMark } from "./icons";
 import { COLUMNS, openCount } from "./model";
 import type { ColumnId, Tile } from "./model";
+import { PeerNote } from "./host-chip";
 import { MiniTile, TileView } from "./tile";
+import { focusReason, ownerOf, projectKey } from "../../lib/peers";
+import type { Standing } from "../../lib/peers";
 import { useHerdrFocus } from "./herdr";
 import { ServerIcon } from "../shell/icons";
 import type { LaneHealth } from "../states/degraded";
@@ -69,6 +72,7 @@ interface LaneProps {
   orchestrator: AgentRow | undefined;
   remoteHost: Machine | undefined;
   health: LaneHealth;
+  standing: Standing;
   hostLabel: string;
   doneFolded: boolean;
   filterName: string | null;
@@ -83,11 +87,14 @@ export function Lane({
   orchestrator,
   remoteHost,
   health,
+  standing,
   hostLabel,
   doneFolded,
   filterName,
 }: LaneProps) {
   const focus = useHerdrFocus();
+  const key = projectKey(project);
+  const off = focusReason(ownerOf(project));
   const counts = COLUMNS.map((column) => ({
     column,
     count: tiles.filter((tile) => tile.column === column.id).length,
@@ -110,8 +117,8 @@ export function Lane({
                 <button
                   type="button"
                   className="btn ghost"
-                  disabled={health.kind === "disconnected"}
-                  title="Focus this agent's terminal in herdr"
+                  disabled={health.kind === "disconnected" || off !== null}
+                  title={off ?? "Focus this agent's terminal in herdr"}
                   onClick={() => focus(orchestrator)}
                 >
                   <PaneIcon />
@@ -155,7 +162,7 @@ export function Lane({
 
   if (focusMode) {
     return (
-      <section className="lane" data-open="true" data-testid={`lane-${project.id}`}>
+      <section className="lane" data-open="true" data-testid={`lane-${key}`}>
         {body}
       </section>
     );
@@ -166,7 +173,7 @@ export function Lane({
       className="lane"
       data-open={open}
       data-state={health.kind === "ok" ? undefined : health.kind}
-      data-testid={`lane-${project.id}`}
+      data-testid={`lane-${key}`}
     >
       <div
         className="lane-h"
@@ -174,11 +181,11 @@ export function Lane({
         tabIndex={0}
         aria-expanded={open}
         style={{ "--pc": color } as CSSProperties}
-        onClick={() => toggleLane(project.id)}
+        onClick={() => toggleLane(key)}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
-            toggleLane(project.id);
+            toggleLane(key);
           }
         }}
       >
@@ -210,6 +217,7 @@ export function Lane({
       {health.kind === "ok" ? null : (
         <LaneNote health={health} projectName={project.name} hostLabel={hostLabel} />
       )}
+      <PeerNote standing={standing} />
       {body}
     </section>
   );

@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import type { Project } from "../../lib/api-types";
+import { ownerOf } from "../../lib/peers";
 import { projectsPath, queryKeyFor } from "../../lib/queries";
 import { sendMutation } from "../attention/api";
 import { InlineReceipt } from "../attention/receipt";
@@ -222,6 +223,9 @@ export function ProjectDetail({ project, id }: { project: Project; id: string })
   const [receipt, setReceipt] = useState<{ key: string; text: string } | null>(null);
   const opener = useRef<HTMLButtonElement>(null);
   const target: Stage = project.stage === "pre-launch" ? "launched" : "pre-launch";
+  // The board host does not forward a stage switch (protocol.md section 7.4).
+  const owner = ownerOf(project);
+  const off = owner ? `${owner} owns this project: switch its stage there` : undefined;
 
   const close = useCallback(() => {
     setConfirming(false);
@@ -237,6 +241,8 @@ export function ProjectDetail({ project, id }: { project: Project; id: string })
         ref={opener}
         type="button"
         className="btn stage-switch"
+        disabled={off !== undefined}
+        title={off}
         onClick={() => setConfirming(true)}
       >
         Switch to {target}

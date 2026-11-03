@@ -4,6 +4,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, RefObject } from "react";
 
 import type { BoardFilter } from "../../lib/api-types";
+import { ownerKey, projectKey, standingOf } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import { agentsQuery, boardQuery, machinesQuery, projectsQuery } from "../../lib/queries";
 import { prefsStore, updatePrefs } from "../../lib/prefs";
@@ -157,7 +158,7 @@ export function BoardView({ host, filter }: { host: string | undefined; filter: 
       host,
       look.collapsed.join(","),
       look.doneFolded,
-      lanes.map((project) => project.id).join(","),
+      lanes.map((project) => projectKey(project)).join(","),
       tiles
         .map((tile) => `${tile.key}:${tile.column}:${tile.row?.badge}:${tile.row?.title}`)
         .join("|"),
@@ -176,7 +177,7 @@ export function BoardView({ host, filter }: { host: string | undefined; filter: 
   for (const tile of tiles) {
     byProject.set(tile.projectId, [...(byProject.get(tile.projectId) ?? []), tile]);
   }
-  const shown = lanes.flatMap((project) => byProject.get(project.id) ?? []);
+  const shown = lanes.flatMap((project) => byProject.get(projectKey(project)) ?? []);
 
   const inColumn = (id: ColumnId) => shown.filter((tile) => tile.column === id).length;
   const counts = COLUMNS.map((column) => inColumn(column.id));
@@ -247,21 +248,29 @@ export function BoardView({ host, filter }: { host: string | undefined; filter: 
           })}
         </div>
         {lanes.map((project) => {
-          const orchestrator = orchestrators.find((agent) => agent.project_id === project.id);
+          const key = projectKey(project);
+          const orchestrator = orchestrators.find(
+            (agent) => agent.project_id === project.id && ownerKey(agent.project_id, agent) === key,
+          );
           const hostOfOrchestrator = machines.machines.find(
             (machine) => machine.id === orchestrator?.host_id,
           );
           return (
             <Lane
-              key={project.id}
+              key={key}
               project={project}
-              color={projectColor(projects.projects.findIndex((p) => p.id === project.id))}
-              tiles={byProject.get(project.id) ?? []}
-              open={!look.collapsed.includes(project.id)}
+              color={projectColor(projects.projects.findIndex((p) => projectKey(p) === key))}
+              tiles={byProject.get(key) ?? []}
+              open={!look.collapsed.includes(key)}
               focusMode={focusMode}
               orchestrator={orchestrator}
               remoteHost={hostOfOrchestrator?.kind === "remote" ? hostOfOrchestrator : undefined}
-              health={laneHealth(orchestrator, hostOfOrchestrator)}
+              health={
+                standingOf(project, machines.machines).peer
+                  ? { kind: "ok" }
+                  : laneHealth(orchestrator, hostOfOrchestrator)
+              }
+              standing={standingOf(project, machines.machines)}
               hostLabel={hostOfOrchestrator?.label ?? "unknown"}
               doneFolded={look.doneFolded}
               filterName={FILTER_NAME[filter]}

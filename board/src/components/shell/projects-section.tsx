@@ -2,12 +2,14 @@ import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { Fragment, useState } from "react";
 import type { CSSProperties } from "react";
 
+import { isPeerRow, ownerKey, projectKey } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import { attentionQuery, boardQuery, projectsQuery } from "../../lib/queries";
 import { toggleProjectHidden, updatePrefs, prefsStore, visibleProjects } from "../../lib/prefs";
 import { projectsOnHost } from "../../lib/scope";
 import type { ViewKnob } from "../../lib/prefs";
 import { useStore } from "../../lib/store";
+import { HostChip } from "../board/host-chip";
 import { CheckIcon, ChevronIcon, EyeIcon, EyeOffIcon, FocusIcon, LayersIcon } from "./icons";
 import { ProjectDetail, StageChip } from "./project-stage";
 
@@ -42,7 +44,7 @@ export function ProjectsSection({ activeHost }: { activeHost: string | undefined
   const subset = !focusing && shown.length < projects.projects.length;
 
   const onHost = projectsOnHost(board.rows, activeHost);
-  const projectOfCard = new Map(board.rows.map((row) => [row.id, row.project_id]));
+  const projectOfCard = new Map(board.rows.map((row) => [row.id, ownerKey(row.project_id, row)]));
   const needsYou = new Set<string>();
   for (const item of attention?.items ?? []) {
     const project = projectOfCard.get(item.card_id);
@@ -89,15 +91,16 @@ export function ProjectsSection({ activeHost }: { activeHost: string | undefined
       </div>
       <section aria-label="Projects" className="projects">
         {projects.projects.map((project, index) => {
+          const key = projectKey(project);
           const open = board.rows.filter(
-            (row) => row.project_id === project.id && row.column !== "done",
+            (row) => ownerKey(row.project_id, row) === key && row.column !== "done",
           ).length;
-          const hidden = !focusing && prefs.hiddenProjects.includes(project.id);
-          const current = focusing && focused?.id === project.id;
-          const dim = (focusing && !current) || (onHost !== null && !onHost.has(project.id));
-          const detailOpen = expanded.has(project.id);
+          const hidden = !focusing && prefs.hiddenProjects.includes(key);
+          const current = focusing && focused !== undefined && projectKey(focused) === key;
+          const dim = (focusing && !current) || (onHost !== null && !onHost.has(key));
+          const detailOpen = expanded.has(key);
           return (
-            <Fragment key={project.id}>
+            <Fragment key={key}>
               <div
                 className="prow"
                 style={{ "--pc": projectColor(index) } as CSSProperties}
@@ -110,13 +113,14 @@ export function ProjectsSection({ activeHost }: { activeHost: string | undefined
                   className="pbtn"
                   title={`Focus ${project.name}`}
                   aria-pressed={focusing ? current : undefined}
-                  onClick={() => updatePrefs({ view: "focus", focusProject: project.id })}
+                  onClick={() => updatePrefs({ view: "focus", focusProject: key })}
                 >
                   <span className="pdot" />
                   <span className="nm">{project.name}</span>
+                  {isPeerRow(project) ? <HostChip entity={project} /> : null}
                   <StageChip project={project} />
                   <span className="pct">
-                    {needsYou.has(project.id) ? <i /> : null}
+                    {needsYou.has(key) ? <i /> : null}
                     {open}
                   </span>
                 </button>
@@ -127,11 +131,11 @@ export function ProjectsSection({ activeHost }: { activeHost: string | undefined
                     title={`${detailOpen ? "Hide" : "Show"} the stage of ${project.name}`}
                     aria-label={`Stage of ${project.name}`}
                     aria-expanded={detailOpen}
-                    aria-controls={`stage-${project.id}`}
+                    aria-controls={`stage-${key}`}
                     onClick={() =>
                       setExpanded((ids) => {
                         const next = new Set(ids);
-                        if (!next.delete(project.id)) next.add(project.id);
+                        if (!next.delete(key)) next.add(key);
                         return next;
                       })
                     }
@@ -149,14 +153,14 @@ export function ProjectsSection({ activeHost }: { activeHost: string | undefined
                       title={`${hidden ? "Show" : "Hide"} ${project.name} in All projects`}
                       aria-label={`${hidden ? "Show" : "Hide"} ${project.name}`}
                       aria-pressed={!hidden}
-                      onClick={() => toggleProjectHidden(project.id)}
+                      onClick={() => toggleProjectHidden(key)}
                     >
                       {hidden ? <EyeOffIcon /> : <EyeIcon />}
                     </button>
                   )}
                 </span>
               </div>
-              {detailOpen ? <ProjectDetail project={project} id={`stage-${project.id}`} /> : null}
+              {detailOpen ? <ProjectDetail project={project} id={`stage-${key}`} /> : null}
             </Fragment>
           );
         })}

@@ -1,6 +1,10 @@
 import { useCallback, useState } from "react";
 
 import type { AttentionItem } from "../../lib/api-types";
+import { hostField, ownerOf } from "../../lib/peers";
+import { PeerNote } from "../board/host-chip";
+import { useStanding } from "../board/peer-state";
+import { ActionFailure } from "./action-failure";
 import { sendMutation } from "./api";
 import { ReceiptPanel } from "./receipt";
 import { useStore } from "../../lib/store";
@@ -25,15 +29,18 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
   );
   const [note, setNote] = useState("");
   const answer = answerText(pick, note);
+  const standing = useStanding(item);
+  const off = standing.canAct ? null : standing.reason;
 
   const send = useCallback(
     (idempotency_key: string) =>
       sendMutation<AttentionItem>("POST", `/api/v1/attention/${item.id}/answer`, {
         answer,
         rev: item.rev,
+        ...hostField(item),
         idempotency_key,
       }),
-    [answer, item.id, item.rev],
+    [answer, item],
   );
   const onRecorded = useCallback(() => markAnswered(item, answer, pick), [item, answer, pick]);
   const action = useAction({
@@ -44,7 +51,7 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
     send,
     onRecorded,
   });
-  const locked = action.recorded || action.pending;
+  const locked = action.recorded || action.pending || off !== null;
 
   return (
     <>
@@ -52,6 +59,7 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
         <div className="blk-h">
           {options.length ? "Your answer, and what each one does" : "Your answer"}
         </div>
+        <PeerNote standing={standing} />
         {options.map((option) => (
           <label key={option.label} className={`optrow${locked ? " dis" : ""}`}>
             <input
@@ -95,6 +103,7 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
                 type="button"
                 className="btn primary lg"
                 disabled={locked || answer === ""}
+                title={off ?? undefined}
                 onClick={action.trigger}
               >
                 <SendIcon />
@@ -103,11 +112,7 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
             </div>
           </>
         )}
-        {action.error ? (
-          <p className="refusal" role="alert">
-            {action.error.message}
-          </p>
-        ) : null}
+        <ActionFailure error={action.error} host={ownerOf(item)} />
       </div>
       <ReceiptPanel
         receiptKey={action.receiptKey}

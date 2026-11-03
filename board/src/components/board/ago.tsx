@@ -23,6 +23,11 @@ function subscribe(listener: () => void) {
 
 const getTick = () => tick;
 
+// Re-renders the caller once a second, for text whose words move with the clock.
+export function useTick() {
+  useSyncExternalStore(subscribe, getTick, getTick);
+}
+
 // "observed 12 s ago": the age text moves with the clock, without an event.
 export function Ago({
   at,
@@ -34,7 +39,7 @@ export function Ago({
   // Seconds after which the text reads as old (amber).
   oldAfter?: number;
 }) {
-  useSyncExternalStore(subscribe, getTick, getTick);
+  useTick();
   const seconds = secondsSince(at);
   if (seconds === null) return <span className="obs">{prefix ? `${prefix} never` : "never"}</span>;
   const old = oldAfter !== undefined && seconds > oldAfter;

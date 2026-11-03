@@ -1,4 +1,5 @@
 import type { AgentRow, AgentsResponse, BoardRow, Project } from "../../lib/api-types";
+import { ownerKey, projectKey, shownId } from "../../lib/peers";
 
 // One project's block on the Agents view: the orchestrator first, its workers
 // under it as `├` rows with the last one `└`, the way herdr nests workspaces.
@@ -16,8 +17,13 @@ export interface AgentGroup {
   lines: AgentLine[];
 }
 
-function workerLabel(glyph: string, agent: AgentRow, card: BoardRow | null): string {
-  const id = card?.display_id ?? agent.card_id ?? "no card";
+function workerLabel(
+  glyph: string,
+  agent: AgentRow,
+  card: BoardRow | null,
+  ambiguous: Set<string>,
+): string {
+  const id = card ? shownId(card, ambiguous) : (agent.card_id ?? "no card");
   return `${glyph} ${id} ${agent.role}`;
 }
 
@@ -28,12 +34,18 @@ export function agentGroups(
   projects: Project[],
   rows: BoardRow[],
   host: string | undefined,
+  ambiguous: Set<string> = new Set(),
 ): AgentGroup[] {
   const cards = new Map(rows.map((row) => [row.id, row]));
   const groups: AgentGroup[] = [];
   for (const project of projects) {
     for (const orchestrator of roster.orchestrators) {
-      if (orchestrator.project_id !== project.id) continue;
+      if (
+        orchestrator.project_id === undefined ||
+        ownerKey(orchestrator.project_id, orchestrator) !== projectKey(project)
+      ) {
+        continue;
+      }
       const workers = orchestrator.workers.filter((worker) => !host || worker.host_id === host);
       if (host && orchestrator.host_id !== host && workers.length === 0) continue;
       const lines: AgentLine[] = [];
@@ -46,7 +58,7 @@ export function agentGroups(
         lines.push({
           agent: worker,
           orchestrator: false,
-          label: workerLabel(glyph, worker, card),
+          label: workerLabel(glyph, worker, card, ambiguous),
           card,
         });
       });

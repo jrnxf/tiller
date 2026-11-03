@@ -7,7 +7,7 @@ import { machinesPath } from "./queries";
 
 const NOW = Date.parse("2026-11-02T12:00:00.000Z");
 
-function machines(scenario: "default" | "stale-machine"): Machine[] {
+function machines(scenario: "default" | "stale-machine" | "federated"): Machine[] {
   return (fixtureSnapshot(scenario, NOW).queries[machinesPath] as MachinesResponse).machines;
 }
 
@@ -44,4 +44,44 @@ test("a host that was never seen says so", () => {
     NOW,
   );
   expect(view.staleText).toBe("never seen");
+});
+
+function peer(label: string): Machine {
+  const found = machines("federated").find((machine) => machine.label === label);
+  if (!found) throw new Error(`no fixture peer ${label}`);
+  return found;
+}
+
+test("a live act peer is tagged as a peer and shows its running agents", () => {
+  const view = machineRowView(peer("host-d"), NOW);
+  expect(view).toMatchObject({ peer: true, viewOnly: false, stale: false, linkReason: null });
+  expect(view.summary).toBe("2 running");
+});
+
+test("a read pairing is live, view only, and gives the reason its controls are off", () => {
+  const view = machineRowView(peer("host-f"), NOW);
+  expect(view).toMatchObject({ peer: true, viewOnly: true, stale: false });
+  expect(view.linkReason).toBe("view only pairing");
+});
+
+test("a down peer says unreachable since its last frame, in Lisbon time, amber", () => {
+  const view = machineRowView(peer("host-e"), NOW);
+  expect(view.staleText).toBe("unreachable since Mon 11:54");
+  expect(view.linkReason).toBe("host-e is unreachable since Mon 11:54");
+  expect(view.tone).toBe("amber");
+});
+
+test("a refused peer is red and names why the link was refused", () => {
+  const view = machineRowView(peer("host-g"), NOW);
+  expect(view.staleText).toBe("refused: key revoked");
+  expect(view.linkReason).toBe("host-g refused the link: key revoked");
+  expect(view.tone).toBe("red");
+});
+
+test("a host with no peers keeps the rows it always had", () => {
+  for (const machine of machines("default")) {
+    const view = machineRowView(machine, NOW);
+    expect(view.peer).toBe(false);
+    expect(view.linkReason).toBeNull();
+  }
 });

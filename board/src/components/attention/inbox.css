@@ -214,6 +214,11 @@ a.irow:hover {
   color: var(--fg-3);
 }
 
+/* A peer that is not live: the row stays readable but quieter. */
+.irow.dim .bd {
+  opacity: 0.62;
+}
+
 .irow:focus-visible {
   outline-offset: -2px;
 }

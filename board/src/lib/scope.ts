@@ -1,4 +1,5 @@
 import type { AttentionResponse, BoardRow, Project } from "./api-types";
+import { ownerKey, projectKey } from "./peers";
 import { visibleProjects } from "./prefs";
 import type { Prefs } from "./prefs";
 
@@ -6,7 +7,9 @@ import type { Prefs } from "./prefs";
 // Without a machine filter every project is on it.
 export function projectsOnHost(rows: BoardRow[], host: string | undefined): Set<string> | null {
   if (!host) return null;
-  return new Set(rows.filter((row) => row.host_id === host).map((row) => row.project_id));
+  return new Set(
+    rows.filter((row) => row.host_id === host).map((row) => ownerKey(row.project_id, row)),
+  );
 }
 
 // What the screens show: the projects the view knob lets through, narrowed to
@@ -19,7 +22,7 @@ export function scopedProjects(
 ): Project[] {
   const shown = visibleProjects(prefs, projects);
   const onHost = projectsOnHost(rows, host);
-  return onHost ? shown.filter((project) => onHost.has(project.id)) : shown;
+  return onHost ? shown.filter((project) => onHost.has(projectKey(project))) : shown;
 }
 
 // The Inbox badge: open decisions and permission prompts whose card is in
@@ -33,7 +36,7 @@ export function attentionCount(
   const cards = new Map(rows.map((row) => [row.id, row]));
   const inScope = (cardId: string) => {
     const row = cards.get(cardId);
-    return !row || (scope.has(row.project_id) && (!host || row.host_id === host));
+    return !row || (scope.has(ownerKey(row.project_id, row)) && (!host || row.host_id === host));
   };
   return (
     attention.items.filter((item) => inScope(item.card_id)).length +

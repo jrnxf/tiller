@@ -1,4 +1,5 @@
 import type { Project } from "./api-types";
+import { projectKey } from "./peers";
 import { createStore } from "./store";
 
 export type ThemePreference = "system" | "light" | "dark";
@@ -115,10 +116,11 @@ export function toggleProjectHidden(projectId: string) {
 // the one focused project, or the first project when none was picked yet.
 export function visibleProjects(prefs: Prefs, projects: Project[]): Project[] {
   if (prefs.view === "focus") {
-    const focused = projects.find((project) => project.id === prefs.focusProject) ?? projects[0];
+    const focused =
+      projects.find((project) => projectKey(project) === prefs.focusProject) ?? projects[0];
     return focused ? [focused] : [];
   }
-  return projects.filter((project) => !prefs.hiddenProjects.includes(project.id));
+  return projects.filter((project) => !prefs.hiddenProjects.includes(projectKey(project)));
 }
 
 export function resolveTheme(preference: ThemePreference, systemDark: boolean): Theme {

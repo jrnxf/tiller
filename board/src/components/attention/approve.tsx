@@ -2,8 +2,12 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
 
 import type { AttentionItem } from "../../lib/api-types";
+import { hostField, ownerOf } from "../../lib/peers";
 import { attentionPath, queryKeyFor } from "../../lib/queries";
 import { useStore } from "../../lib/store";
+import { PeerNote } from "../board/host-chip";
+import { useStanding } from "../board/peer-state";
+import { ActionFailure } from "./action-failure";
 import { ActionError, sendMutation } from "./api";
 import { answeredStore, markAnswered } from "./answered";
 import { shortSha } from "./format";
@@ -43,6 +47,7 @@ function useDecide(item: AttentionItem, decision: Decision, onStale: (r: StaleRe
           decision,
           head_sha: headSha,
           rev: item.rev,
+          ...hostField(item),
           idempotency_key,
         });
       } catch (caught) {
@@ -55,7 +60,7 @@ function useDecide(item: AttentionItem, decision: Decision, onStale: (r: StaleRe
         throw caught;
       }
     },
-    [approvalId, decision, headSha, item.rev, onStale, queryClient],
+    [approvalId, decision, headSha, item, onStale, queryClient],
   );
   const onRecorded = useCallback(
     () => markAnswered(item, decision === "accept" ? `Approved ${shortSha(headSha)}` : "Rejected"),
@@ -74,6 +79,8 @@ function useDecide(item: AttentionItem, decision: Decision, onStale: (r: StaleRe
 export function ApproveBlock({ item }: { item: AttentionItem }) {
   const [refusal, setRefusal] = useState<StaleRefusal | null>(null);
   const answered = useStore(answeredStore)[item.id]?.answer;
+  const standing = useStanding(item);
+  const off = standing.canAct ? null : standing.reason;
   const accept = useDecide(item, "accept", setRefusal);
   const reject = useDecide(item, "reject", setRefusal);
   const approval = item.approval;
@@ -115,6 +122,7 @@ export function ApproveBlock({ item }: { item: AttentionItem }) {
             </span>
           )}
         </div>
+        <PeerNote standing={standing} />
         {shown ? (
           <p className="refusal" role="alert" data-testid="stale-refusal">
             {staleMessage(shown, approval.pr_number)}
@@ -126,21 +134,24 @@ export function ApproveBlock({ item }: { item: AttentionItem }) {
               type="button"
               className="btn primary lg"
               // Until the new head arrives there is nothing current to approve.
-              disabled={pending || headSha === shown?.shown}
+              disabled={pending || headSha === shown?.shown || off !== null}
+              title={off ?? undefined}
               onClick={accept.trigger}
             >
               {accept.pending ? "Approving..." : `Approve ${shortSha(headSha)}`}
             </button>
-            <button type="button" className="btn lg" disabled={pending} onClick={reject.trigger}>
+            <button
+              type="button"
+              className="btn lg"
+              disabled={pending || off !== null}
+              title={off ?? undefined}
+              onClick={reject.trigger}
+            >
               {reject.pending ? "Rejecting..." : "Reject"}
             </button>
           </div>
         )}
-        {otherError ? (
-          <p className="refusal" role="alert">
-            {otherError.message}
-          </p>
-        ) : null}
+        <ActionFailure error={otherError} host={ownerOf(item)} />
       </div>
       <ReceiptPanel
         receiptKey={accept.receiptKey}

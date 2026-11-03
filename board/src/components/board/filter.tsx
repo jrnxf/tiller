@@ -2,6 +2,7 @@ import { useSuspenseQuery } from "@tanstack/react-query";
 import { getRouteApi, useNavigate } from "@tanstack/react-router";
 
 import type { BoardFilter } from "../../lib/api-types";
+import { projectKey } from "../../lib/peers";
 import { boardQuery, projectsQuery } from "../../lib/queries";
 import { prefsStore } from "../../lib/prefs";
 import { scopedProjects } from "../../lib/scope";
@@ -30,7 +31,7 @@ function useBoardFilter() {
 
   const filter = parseFilter(search.filter);
   const lanes = new Set(
-    scopedProjects(prefs, projects.projects, board.rows, search.host).map((p) => p.id),
+    scopedProjects(prefs, projects.projects, board.rows, search.host).map((p) => projectKey(p)),
   );
   const tiles = tilesOf(board).filter(
     (tile) => lanes.has(tile.projectId) && onHost(tile, search.host),

@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
 import { agentsQuery, attentionQuery, boardQuery, projectsQuery } from "../../lib/queries";
+import { ownerKey, projectKey } from "../../lib/peers";
 import { prefsStore } from "../../lib/prefs";
 import { attentionCount, scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
@@ -30,7 +31,9 @@ function useShownIds(activeHost: string | undefined): Set<string> {
   const { data: projects } = useSuspenseQuery(projectsQuery());
   const prefs = useStore(prefsStore);
   return new Set(
-    scopedProjects(prefs, projects.projects, board.rows, activeHost).map((project) => project.id),
+    scopedProjects(prefs, projects.projects, board.rows, activeHost).map((project) =>
+      projectKey(project),
+    ),
   );
 }
 
@@ -41,7 +44,7 @@ function OpenCount({ activeHost }: { activeHost: string | undefined }) {
   const shownIds = useShownIds(activeHost);
   const open = board.rows.filter(
     (row) =>
-      shownIds.has(row.project_id) &&
+      shownIds.has(ownerKey(row.project_id, row)) &&
       row.column !== "done" &&
       (!activeHost || row.host_id === activeHost),
   ).length;
@@ -123,7 +126,8 @@ export function Sidebar({
           <Link
             key={item.to}
             to={item.to}
-            search={(prev) => prev}
+            // `owner` belongs to the card page; no other screen takes it.
+            search={(prev) => ({ ...prev, owner: undefined })}
             className="nav"
             activeProps={{ className: "nav", "aria-current": "page" }}
             activeOptions={{ exact: true }}

@@ -15,6 +15,7 @@ import type {
   Snapshot,
 } from "./api-types";
 import { connectionStore } from "./connection";
+import { isPeerRow } from "./peers";
 import { SNAPSHOT_PATH, hydrateFromSnapshot } from "./boot";
 import { recordProgress } from "./receipts";
 import {
@@ -117,7 +118,15 @@ function writeQuota(queryClient: QueryClient, window: QuotaWindow) {
 
 function writeProject(queryClient: QueryClient, project: Project) {
   queryClient.setQueryData<ProjectsResponse | undefined>(queryKeyFor(projectsPath), (old) =>
-    old ? { projects: upsert(old.projects, project, (other) => other.id === project.id) } : old,
+    old
+      ? {
+          projects: upsert(
+            old.projects,
+            project,
+            (other) => other.id === project.id && !isPeerRow(other),
+          ),
+        }
+      : old,
   );
 }
 
@@ -186,7 +195,7 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
       queryKey: API_KEY_PREFIX,
       predicate: (query) => {
         const path = String(query.queryKey[1] ?? "");
-        return path === detail || path.startsWith(`${detail}/`);
+        return path === detail || path.startsWith(`${detail}/`) || path.startsWith(`${detail}?`);
       },
       refetchType: "active",
     });

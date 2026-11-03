@@ -66,6 +66,7 @@ export function MachinesSection({ activeHost }: { activeHost: string | undefined
                   className={`live${view.tone === "green" ? "" : view.tone === "red" ? " bad" : " warn"}`}
                 />
                 <b>{machine.label}</b>
+                {view.peer ? <em className="mtag">peer</em> : null}
                 {view.viewOnly ? <em className="mtag">view only</em> : null}
                 {active ? (
                   <span className="mfilt">
@@ -74,7 +75,9 @@ export function MachinesSection({ activeHost }: { activeHost: string | undefined
                 ) : null}
               </span>
               {view.stale ? (
-                <span className="mh2 stale">{view.staleText}</span>
+                <span className="mh2 stale" data-testid={`link-${machine.label}`}>
+                  {view.staleText}
+                </span>
               ) : view.summary ? (
                 <span className="mh2">
                   <Pips machine={machine} />
@@ -83,11 +86,17 @@ export function MachinesSection({ activeHost }: { activeHost: string | undefined
               ) : null}
               <span className="tip" role="tooltip" id={tipId}>
                 <b>{machine.label}</b>
-                {view.stale
-                  ? `${view.staleText}. ${view.tooltip ? `${view.tooltip}.` : ""} Cards on this machine show their last known state.`
-                  : view.viewOnly
-                    ? "can be watched and opened in herdr from here. Answers and dispatches stay on that machine."
-                    : "runs agents for this board."}
+                {view.peer && view.stale
+                  ? `${view.linkReason ?? view.staleText}. Its cards stay on the board as of the last frame, dimmed, and cannot be changed from here until the link is live.`
+                  : view.peer
+                    ? view.viewOnly
+                      ? "is paired view only: its cards are live here, and changes stay on that machine."
+                      : "is paired: its cards are live here and changes you make go to it."
+                    : view.stale
+                      ? `${view.staleText}. ${view.tooltip ? `${view.tooltip}.` : ""} Cards on this machine show their last known state.`
+                      : view.viewOnly
+                        ? "can be watched and opened in herdr from here. Answers and dispatches stay on that machine."
+                        : "runs agents for this board."}
                 {quotaLine ? <span className="tq">{quotaLine}</span> : null}
                 {view.stale ? null : (
                   <span className="tq">Click to show only this machine on Board and Agents.</span>

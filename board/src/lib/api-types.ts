@@ -6,8 +6,17 @@ type CardColumn = "needs_you" | "working" | "landing" | "queued" | "done";
 
 export type BoardFilter = "all" | "active" | "needs";
 
+// What a federated read adds to a row (protocol.md section 7.3): the owning
+// host's label, and for a peer's row when the board host last heard it and the
+// link state it is in. Absent on a host with no peers.
+interface Federated {
+  host?: string;
+  as_of?: string | null;
+  link?: LinkState | null;
+}
+
 // One `card_column` row plus the card's own display fields.
-export interface BoardRow {
+export interface BoardRow extends Federated {
   id: string;
   display_id: string;
   project_id: string;
@@ -60,7 +69,7 @@ interface ApprovalBinding {
   state: string;
 }
 
-export interface AttentionItem {
+export interface AttentionItem extends Federated {
   id: string;
   card_id: string;
   kind: "decision" | "credential" | "merge" | "review" | "recovery" | "report";
@@ -79,7 +88,7 @@ export interface AttentionItem {
   rev: number;
 }
 
-export interface PermissionPrompt {
+export interface PermissionPrompt extends Federated {
   session_id: string;
   card_id: string;
   tool: string;
@@ -93,7 +102,7 @@ export interface AttentionResponse {
   permission_prompts: PermissionPrompt[];
 }
 
-export interface AgentRow {
+export interface AgentRow extends Federated {
   session_id: string;
   role: string;
   model: string;
@@ -233,7 +242,18 @@ export interface TimelineResponse {
 
 export type MachineHealth = "ok" | "degraded" | "down" | "stale";
 
-export type StaleReason = "herdr_link_down" | "host_asleep" | "poll_failed" | "never_seen";
+export type StaleReason =
+  | "herdr_link_down"
+  | "host_asleep"
+  | "poll_failed"
+  | "never_seen"
+  | "peer_link_down"
+  | "peer_refused"
+  | "peer_version";
+
+// A paired peer's link (protocol.md section 10.2) and what the pairing allows.
+export type LinkState = "live" | "lagging" | "down" | "refused" | "never";
+export type PeerScope = "read" | "act";
 
 export interface Machine {
   id: string;
@@ -246,6 +266,13 @@ export interface Machine {
   free_slots: number | null;
   last_seen_at: string | null;
   stale_reason: StaleReason | null;
+  // For a paired peer (section 9): the link state and the pairing's scope; null
+  // or absent for this host and for a herdr-only machine.
+  link?: LinkState | null;
+  peer_scope?: PeerScope | null;
+  // Why the peer refused the link (`revoked`, `unknown_key`, `bad_sig`,
+  // `clock_skew`, `version`, `accept_off`), when it did.
+  link_reason?: string | null;
   rev: number;
 }
 
@@ -275,7 +302,7 @@ export interface QuotaResponse {
   windows: QuotaWindow[];
 }
 
-export interface Project {
+export interface Project extends Federated {
   id: string;
   name: string;
   delivery: string;
@@ -344,12 +371,24 @@ export interface ApiErrorBody {
 }
 
 // The inlined `<script id="tiller-boot">` body and `GET /api/v1/snapshot`.
+export interface SnapshotPeer {
+  host: string;
+  host_id: string;
+  link: LinkState;
+  as_of: string | null;
+  server_time_offset_ms: number;
+  scope: PeerScope;
+  last_event_seq: number | null;
+}
+
 export interface Snapshot {
   v: 1;
   server_time: string;
   last_event_seq: number;
   thresholds: Record<string, unknown>;
   queries: Record<string, unknown>;
+  // One entry per paired peer; absent on a host with none (section 7.6).
+  peers?: SnapshotPeer[];
 }
 
 // `GET /api/v1/signals`: the Health page's counts, one entry per Lisbon week,

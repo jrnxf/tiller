@@ -22,7 +22,16 @@ import type {
   Snapshot,
   TimelineResponse,
 } from "./api-types.ts";
+import {
+  peerAgents,
+  peerAttention,
+  peerMachines,
+  peerProjects,
+  peerRows,
+  peerSnapshot,
+} from "./fixtures-federated.ts";
 import { signalsFor } from "./fixtures-signals.ts";
+import { isPeerRow } from "./peers.ts";
 import {
   agentsPath,
   attentionPath,
@@ -44,7 +53,8 @@ export type Scenario =
   | "empty"
   | "busy"
   | "health-bad"
-  | "live";
+  | "live"
+  | "federated";
 
 export const SCENARIOS: readonly Scenario[] = [
   "default",
@@ -58,6 +68,7 @@ export const SCENARIOS: readonly Scenario[] = [
   "busy",
   "health-bad",
   "live",
+  "federated",
 ];
 
 const WEEKLY_FLOOR_PERCENT = 3;
@@ -209,7 +220,8 @@ function machinesFor(scenario: Scenario, now: number): MachinesResponse {
       scenario === "stale-machine" || scenario === "degraded" ? "herdr_link_down" : null,
     rev: 2,
   };
-  return { machines: [hostA, hostB, hostC] };
+  const machines = [hostA, hostB, hostC];
+  return { machines: scenario === "federated" ? [...machines, ...peerMachines(now)] : machines };
 }
 
 const HOST_A = "01JHOSTA00000000000000000A";
@@ -277,7 +289,10 @@ const DEGRADED_PROJECTS: ProjectsResponse = {
   projects: [...DEFAULT_PROJECTS.projects, DELTA, launched("kiln", "direct-push", 1, 1)],
 };
 
-function projectsFor(scenario: Scenario): ProjectsResponse {
+function projectsFor(scenario: Scenario, now: number = Date.now()): ProjectsResponse {
+  if (scenario === "federated") {
+    return { projects: [...DEFAULT_PROJECTS.projects, ...peerProjects(now)] };
+  }
   if (scenario === "degraded") return DEGRADED_PROJECTS;
   return scenario === "busy" ? BUSY_PROJECTS : DEFAULT_PROJECTS;
 }
@@ -540,6 +555,9 @@ function busyRows(now: number): BoardRow[] {
 function boardFor(scenario: Scenario, now: number): BoardResponse {
   if (scenario === "empty") return { rows: [], asked: [] };
   if (scenario === "degraded") return { rows: degradedRows(now), asked: [] };
+  if (scenario === "federated") {
+    return { rows: [...defaultRows(now), ...peerRows(now)], asked: [] };
+  }
   if (scenario === "busy") {
     return {
       rows: busyRows(now),
@@ -580,11 +598,17 @@ function boardFor(scenario: Scenario, now: number): BoardResponse {
 export const FIXTURE_HEAD_SHA = "d82f4051c3a7e9b2f60d18a4c5e7b9d3a1f20c64";
 const FIXTURE_OLD_HEAD_SHA = "7c3e9a1b52d8f04e6a9c3b7d1e5f2a8c4b6d0e93";
 
-function attentionFor(scenario: Scenario, board: BoardResponse): AttentionResponse {
+function attentionFor(
+  scenario: Scenario,
+  board: BoardResponse,
+  now: number = Date.now(),
+): AttentionResponse {
   if (scenario === "empty") return { items: [], permission_prompts: [] };
-  const byDisplay = new Map(board.rows.map((row) => [row.display_id, row.id]));
+  const byDisplay = new Map(
+    board.rows.filter((row) => !isPeerRow(row)).map((row) => [row.display_id, row.id]),
+  );
   const cardId = (display: string) => byDisplay.get(display) ?? display;
-  return {
+  const local: AttentionResponse = {
     items: [
       {
         id: "01JATTN0000000000000000000",
@@ -684,6 +708,12 @@ function attentionFor(scenario: Scenario, board: BoardResponse): AttentionRespon
       },
     ],
   };
+  if (scenario !== "federated") return local;
+  const peer = peerAttention(now, board.rows);
+  return {
+    items: [...local.items, ...peer.items],
+    permission_prompts: [...local.permission_prompts, ...peer.permission_prompts],
+  };
 }
 
 function sessionId(key: string): string {
@@ -722,10 +752,13 @@ function agentsFor(
   scenario: Scenario,
 ): AgentsResponse {
   if (board.rows.length === 0) return { orchestrators: [] };
-  return {
-    orchestrators: projects.projects.map((project, projectIndex) => {
+  const peerProjectRows = projects.projects.filter(isPeerRow);
+  const localOrchestrators = projects.projects
+    .filter((p) => !isPeerRow(p))
+    .map((project, projectIndex) => {
       const live = board.rows.filter(
         (row) =>
+          !isPeerRow(row) &&
           row.project_id === project.id &&
           (row.column === "working" || row.column === "landing" || row.column === "needs_you"),
       );
@@ -749,7 +782,9 @@ function agentsFor(
         workspace_label: project.id,
         state_since: minutes(now, -(40 + projectIndex * 9)),
       };
-    }),
+    });
+  return {
+    orchestrators: [...localOrchestrators, ...peerAgents(now, board.rows, peerProjectRows)],
   };
 }
 
@@ -1015,10 +1050,10 @@ function runDetailFor(runId: string, now: number = Date.now()): RunDetail {
 
 export function fixtureResponses(scenario: Scenario = "default", now: number = Date.now()) {
   const board = boardFor(scenario, now);
-  const projects = projectsFor(scenario);
+  const projects = projectsFor(scenario, now);
   return {
     [boardPath()]: board,
-    [attentionPath]: attentionFor(scenario, board),
+    [attentionPath]: attentionFor(scenario, board, now),
     [agentsPath()]: agentsFor(board, projects, now, scenario),
     [machinesPath]: machinesFor(scenario, now),
     [quotaPath]: quotaFor(scenario, now),
@@ -1074,6 +1109,7 @@ export function fixtureSnapshot(
     last_event_seq: 4181,
     thresholds: { orchestrator_stale_minutes: 30, worker_stale_minutes: 15 },
     queries: fixtureResponses(scenario, now),
+    ...(scenario === "federated" ? { peers: peerSnapshot(now) } : {}),
   };
 }
 

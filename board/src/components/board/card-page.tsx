@@ -10,6 +10,7 @@ import type {
   TimelineEntry,
   TimelineResponse,
 } from "../../lib/api-types";
+import { focusReason, ownerOf, shownId } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import {
   cardQuery,
@@ -22,6 +23,8 @@ import {
 import { agentActivity } from "./activity";
 import { Ago } from "./ago";
 import { badgeText, statusMark } from "./badge";
+import { HostChip, PeerNote } from "./host-chip";
+import { useAmbiguousIds, useStanding } from "./peer-state";
 import { approvalFor, approvalStanding, mergeTimeline } from "./card-model";
 import { durationSeconds, formatAge, formatLisbonMoment, secondsSince, shortSha } from "./format";
 import { focusTooltip, useHerdrFocus, useOpenKey } from "./herdr";
@@ -53,8 +56,8 @@ function ActorIcon({ actor }: { actor: TimelineEntry["actor"] }) {
   return <PaneIcon />;
 }
 
-function Timeline({ cardId }: { cardId: string }) {
-  const { data: first } = useSuspenseQuery(timelineQuery(cardId));
+function Timeline({ cardId, owner }: { cardId: string; owner: string | undefined }) {
+  const { data: first } = useSuspenseQuery(timelineQuery(cardId, owner));
   // Earlier pages belong to the first page they were loaded under. When an event
   // refetches the first page, the pages below it may no longer join it, so they
   // are dropped and "Show earlier" starts again from the new first page.
@@ -77,7 +80,7 @@ function Timeline({ cardId }: { cardId: string }) {
     if (next === null) return;
     setFailed(false);
     try {
-      const page = await fetchJson<TimelineResponse>(timelinePath(cardId, next));
+      const page = await fetchJson<TimelineResponse>(timelinePath(cardId, next, owner));
       setLoaded((current) =>
         current.base === first
           ? {
@@ -126,7 +129,8 @@ function Timeline({ cardId }: { cardId: string }) {
   );
 }
 
-function RunCard({ run }: { run: CardRun }) {
+function RunCard({ run, owner }: { run: CardRun; owner: string | undefined }) {
+  const off = focusReason(owner);
   const focus = useHerdrFocus();
   const { data: machines } = useSuspenseQuery(machinesQuery());
   const failed = run.outcome === "failed";
@@ -174,7 +178,8 @@ function RunCard({ run }: { run: CardRun }) {
           <button
             type="button"
             className="btn sm"
-            title={focusTooltip(machine)}
+            disabled={off !== null}
+            title={off ?? focusTooltip(machine)}
             onClick={() => focus({ session_id: sessionId, host_id: hostId })}
           >
             <PaneIcon />
@@ -312,17 +317,27 @@ function PullRequest({ pr, approvals }: { pr: CardPr; approvals: CardApproval[] 
   );
 }
 
-export function CardPage({ cardId }: { cardId: string }) {
-  const { data: detail } = useSuspenseQuery(cardQuery(cardId));
+export function CardPage({ cardId, owner }: { cardId: string; owner?: string }) {
+  const { data: detail } = useSuspenseQuery(cardQuery(cardId, owner));
   const { data: projects } = useSuspenseQuery(projectsQuery());
   const { card, column } = detail;
-  const project = projects.projects.find((p) => p.id === card.project_id);
-  const color = projectColor(projects.projects.findIndex((p) => p.id === card.project_id));
+  const standing = useStanding(column);
+  const id = shownId(column.host ? { ...card, host: column.host } : card, useAmbiguousIds());
+  // A peer's project is the one that host owns, whatever slug this host uses.
+  const owned = (p: { id: string; host?: string }) =>
+    p.id === card.project_id && (p.host ?? null) === (ownerOf(column) ?? null);
+  const project =
+    projects.projects.find(owned) ?? projects.projects.find((p) => p.id === card.project_id);
+  const color = projectColor(project ? projects.projects.indexOf(project) : -1);
   const focus = useHerdrFocus();
   const activeRun = detail.runs.find((run) => run.ended_at === null);
   const sessionId = activeRun?.session_id;
   const hostId = activeRun?.host_id;
-  useOpenKey(sessionId && hostId ? () => focus({ session_id: sessionId, host_id: hostId }) : null);
+  useOpenKey(
+    sessionId && hostId && !ownerOf(column)
+      ? () => focus({ session_id: sessionId, host_id: hostId })
+      : null,
+  );
 
   // Per PR, from the approval that binds it: an old approval that was replaced
   // must not raise the banner while the new one is current.
@@ -350,8 +365,10 @@ export function CardPage({ cardId }: { cardId: string }) {
         <span className="pdot" style={{ "--pc": color } as CSSProperties} />
         <span className="muted">{project?.name ?? card.project_id}</span>
         <ChevronRightIcon />
-        <b>{card.display_id}</b>
+        <b>{id}</b>
+        <HostChip entity={column} />
       </div>
+      <PeerNote standing={standing} />
 
       {staleApproval && stalePr ? (
         <div className="pk-banner">
@@ -418,7 +435,7 @@ export function CardPage({ cardId }: { cardId: string }) {
         ) : null}
       </dl>
 
-      <Timeline cardId={cardId} />
+      <Timeline cardId={cardId} owner={owner} />
 
       <div className="sect">
         <div className="sect-h">
@@ -428,7 +445,7 @@ export function CardPage({ cardId }: { cardId: string }) {
           </span>
         </div>
         {detail.runs.length > 0 ? (
-          detail.runs.map((run) => <RunCard key={run.id} run={run} />)
+          detail.runs.map((run) => <RunCard key={run.id} run={run} owner={ownerOf(column)} />)
         ) : (
           <div className="run">
             <p style={{ margin: 0 }}>

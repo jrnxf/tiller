@@ -1,4 +1,4 @@
-import { createStore } from "./store";
+import { createStore } from "./store.ts";
 
 // Staleness is derived from age, so it moves without an event. The snapshot's
 // `server_time` gives the offset between this clock and the daemon's, and its

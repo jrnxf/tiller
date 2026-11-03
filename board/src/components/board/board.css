@@ -1576,6 +1576,13 @@ a.card:hover {
 .board[data-fit="3"] .card .c-chips {
   display: none;
 }
+/* The host chip stays when the other chips go (protocol.md section 10.5). */
+.board[data-fit="3"] .card .c-chips:has(.hchip) {
+  display: flex;
+}
+.board[data-fit="3"] .card .c-chips > :not(.hchip) {
+  display: none;
+}
 .board[data-fit="3"] .card[data-attn="true"] .c-title,
 .board[data-fit="3"] .card .c-title {
   color: var(--fg-1);
@@ -1666,4 +1673,75 @@ a.card:hover {
 .btn[disabled] {
   opacity: 0.45;
   pointer-events: none;
+}
+
+/* Host chip and staleness (protocol.md section 10.5). */
+.hchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--r4);
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--fg-3);
+  border: 1px solid var(--line-2);
+  white-space: nowrap;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: none;
+}
+/* On a project row the name keeps its room; the chip gives way first. */
+.prow .hchip {
+  flex: 0 1 auto;
+  min-width: 24px;
+}
+.prow .nm {
+  min-width: 4ch;
+}
+.hchip .icon {
+  width: 11px;
+  height: 11px;
+  flex: none;
+}
+.hchip.off {
+  color: var(--yellow-text);
+  border-color: color-mix(in srgb, var(--yellow) 40%, var(--line-2));
+  border-style: dashed;
+}
+.asof {
+  font-size: 11.5px;
+  color: var(--yellow-text);
+}
+.card .c-asof {
+  display: flex;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.peer-note {
+  margin: 8px 0;
+  padding: 6px 10px;
+  border: 1px dashed color-mix(in srgb, var(--yellow) 40%, var(--line-2));
+  border-radius: var(--r8);
+  font-size: var(--fs-mini);
+  color: var(--fg-2);
+  line-height: 1.5;
+}
+.lane[data-open="false"] .peer-note {
+  display: none;
+}
+.sent-unsure {
+  margin: 10px 0 0;
+  padding: 8px 12px;
+  border-radius: var(--r8);
+  border: 1px solid color-mix(in srgb, var(--yellow) 45%, var(--line-2));
+  background: color-mix(in srgb, var(--yellow) 8%, transparent);
+  color: var(--fg-1);
+  font-size: var(--fs-small);
+  line-height: 1.5;
 }

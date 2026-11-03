@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import type { CSSProperties } from "react";
 
 import type { Machine, Project } from "../../lib/api-types";
+import { focusReason, ownerKey, ownerOf, projectKey, shownId } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import { agentsQuery, boardQuery, machinesQuery, projectsQuery, runQuery } from "../../lib/queries";
 import { prefsStore } from "../../lib/prefs";
@@ -17,7 +18,9 @@ import { EmptyScope } from "./board-view";
 import { formatLisbonMoment } from "./format";
 import { focusCommand, focusTooltip, useHerdrFocus, useOpenKey } from "./herdr";
 import { ChevronLeftIcon, PaneIcon } from "./icons";
-import { ModelChip } from "./tile";
+import { AsOf, HostChip, PeerNote } from "./host-chip";
+import { useAmbiguousIds, useStanding } from "./peer-state";
+import { ModelChip, ownerSearch } from "./tile";
 import { ToastHost } from "./toast";
 import { BoardIcon, ServerIcon } from "../shell/icons";
 import "./board.css";
@@ -56,7 +59,10 @@ function AgentRowView({
   onOpen: () => void;
 }) {
   const { agent, card } = line;
+  const standing = useStanding(agent);
   const activity = hostAwareActivity(agent, host);
+  const off = focusReason(ownerOf(agent));
+  const ambiguous = useAmbiguousIds();
   const navigate = useNavigate();
   const select = () =>
     void navigate({
@@ -68,7 +74,7 @@ function AgentRowView({
     <div
       role="button"
       tabIndex={0}
-      className={`ag-row${line.orchestrator ? "" : " nest"}`}
+      className={`ag-row${line.orchestrator ? "" : " nest"}${standing.dim ? " dim" : ""}`}
       aria-selected={selected}
       data-testid={`agent-${agent.session_id}`}
       onClick={select}
@@ -87,11 +93,12 @@ function AgentRowView({
         <div className="ag-l1">
           <span className="wsl">{line.label}</span>
           <RoleLabel role={agent.role} />
+          <HostChip entity={agent} />
           <ModelChip model={agent.model} />
           <span className="ag-t">
             {card ? (
               <>
-                <span className="aid">{card.display_id}</span> {card.title}
+                <span className="aid">{shownId(card, ambiguous)}</span> {card.title}
               </>
             ) : (
               <>
@@ -104,7 +111,14 @@ function AgentRowView({
           </span>
         </div>
         <div className="ag-act" data-s={activity.dot}>
-          {activity.label}, <Ago at={agent.activity_observed_at} prefix="observed" oldAfter={300} />
+          {standing.dim ? (
+            <AsOf asOf={standing.asOf} />
+          ) : (
+            <>
+              {activity.label},{" "}
+              <Ago at={agent.activity_observed_at} prefix="observed" oldAfter={300} />
+            </>
+          )}
         </div>
         {agent.last_status_line ? (
           <div className="ag-last">
@@ -122,7 +136,8 @@ function AgentRowView({
         <button
           type="button"
           className="btn sm"
-          title={focusTooltip(host)}
+          disabled={off !== null}
+          title={off ?? focusTooltip(host)}
           onClick={(event) => {
             event.stopPropagation();
             onOpen();
@@ -151,9 +166,14 @@ function AgentDetail({
   onOpen: () => void;
 }) {
   const { agent, card } = line;
+  const standing = useStanding(agent);
+  const off = focusReason(ownerOf(agent));
   const activity = hostAwareActivity(agent, host);
   // The loader reads every listed agent's run, so a selection is already cached.
-  const run = useQuery({ ...runQuery(agent.run_id ?? ""), enabled: Boolean(agent.run_id) }).data;
+  const run = useQuery({
+    ...runQuery(agent.run_id ?? "", ownerOf(agent)),
+    enabled: Boolean(agent.run_id),
+  }).data;
   const remote = host?.kind === "remote";
   return (
     <div className="agd">
@@ -175,8 +195,10 @@ function AgentDetail({
             <span className="dot" style={{ background: ROLE_COLOR[agent.role] ?? "var(--fg-4)" }} />
             {agent.role}
           </span>
+          <HostChip entity={agent} />
           <ModelChip model={agent.model} />
         </div>
+        <PeerNote standing={standing} />
         <h4>{card ? card.title : `${project.name} orchestrator`}</h4>
         <p className="agd-act" data-s={activity.dot}>
           {activity.label}
@@ -188,13 +210,24 @@ function AgentDetail({
           </div>
         ) : null}
         <div className="acts">
-          <button type="button" className="btn primary" title={focusTooltip(host)} onClick={onOpen}>
+          <button
+            type="button"
+            className="btn primary"
+            disabled={off !== null}
+            title={off ?? focusTooltip(host)}
+            onClick={onOpen}
+          >
             <PaneIcon />
             Open in herdr
             <kbd>O</kbd>
           </button>
           {card ? (
-            <Link to="/cards/$cardId" params={{ cardId: card.id }} className="btn">
+            <Link
+              to="/cards/$cardId"
+              params={{ cardId: card.id }}
+              search={ownerSearch(card)}
+              className="btn"
+            >
               <BoardIcon />
               Open card {card.display_id}
             </Link>
@@ -300,7 +333,8 @@ export function AgentsView({
   const navigate = useNavigate();
 
   const shownProjects = scopedProjects(prefs, projects.projects, board.rows, host);
-  const groups = agentGroups(roster, shownProjects, board.rows, host);
+  const ambiguous = useAmbiguousIds();
+  const groups = agentGroups(roster, shownProjects, board.rows, host, ambiguous);
   const current = findLine(groups, selected);
   // On a phone the list shows alone until a row is chosen; the O key must not
   // act on an agent that is not on screen.
@@ -310,6 +344,7 @@ export function AgentsView({
           typeof window.matchMedia === "function" &&
           window.matchMedia("(max-width: 820px)").matches;
         if (stacked && !selected) return;
+        if (focusReason(ownerOf(current.line.agent))) return;
         focus(current.line.agent);
       }
     : null;
@@ -349,11 +384,15 @@ export function AgentsView({
   }
 
   const hostOf = (id: string) => machines.machines.find((machine) => machine.id === id);
-  const colorOf = (id: string) => projectColor(projects.projects.findIndex((p) => p.id === id));
+  const colorOf = (key: string) =>
+    projectColor(projects.projects.findIndex((p) => projectKey(p) === key));
   const openCards = new Map<string, number>();
   for (const row of board.rows) {
     if (row.column !== "done")
-      openCards.set(row.project_id, (openCards.get(row.project_id) ?? 0) + 1);
+      openCards.set(
+        ownerKey(row.project_id, row),
+        (openCards.get(ownerKey(row.project_id, row)) ?? 0) + 1,
+      );
   }
   return (
     <div className="agents-view">
@@ -363,8 +402,11 @@ export function AgentsView({
             const workers = lines.filter((line) => !line.orchestrator).length;
             const remote = hostOf(lines[0]?.agent.host_id ?? "");
             return (
-              <section key={project.id} aria-label={project.name}>
-                <div className="ag-ph" style={{ "--pc": colorOf(project.id) } as CSSProperties}>
+              <section key={projectKey(project)} aria-label={project.name}>
+                <div
+                  className="ag-ph"
+                  style={{ "--pc": colorOf(projectKey(project)) } as CSSProperties}
+                >
                   <span className="pdot" />
                   <b>{project.name}</b>
                   {remote?.kind === "remote" ? (
@@ -383,7 +425,7 @@ export function AgentsView({
                     key={line.agent.session_id}
                     line={line}
                     project={project}
-                    openCards={openCards.get(project.id) ?? 0}
+                    openCards={openCards.get(projectKey(project)) ?? 0}
                     host={hostOf(line.agent.host_id)}
                     selected={line.agent.session_id === current.line.agent.session_id}
                     onOpen={() => focus(line.agent)}
@@ -397,7 +439,7 @@ export function AgentsView({
           <AgentDetail
             line={current.line}
             project={current.group.project}
-            color={colorOf(current.group.project.id)}
+            color={colorOf(projectKey(current.group.project))}
             host={hostOf(current.line.agent.host_id)}
             onOpen={() => focus(current.line.agent)}
           />
