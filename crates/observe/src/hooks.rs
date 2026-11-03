@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use tiller_core::domain::{Activity, ObservationSource, Session};
+use tiller_core::error::READ_ONLY_MARKER;
 use tiller_core::state::runs::{Bind, NewObservation};
 use tiller_core::state::{find, get};
 use tiller_core::{Actor, Ctx, Error, Store, Timestamp};
@@ -353,6 +354,11 @@ pub fn run_with(
         // Not initialized: nothing to record into, and nothing to replay
         // later. Spooling is for a database this binary cannot write (R11).
         return (Outcome::NoDatabase, None);
+    }
+    // A daemon whose database failed its check wrote this marker: nothing is
+    // written until the owner restores (`recovery.md` R10).
+    if let Ok(reason) = fs::read_to_string(env.tiller_home.join(READ_ONLY_MARKER)) {
+        return (spool(env, &observed, reason.trim()), None);
     }
     // Only the two hooks that carry intake need the raw input again; a tool
     // event's input can be a whole file. `observe` already parsed it, so

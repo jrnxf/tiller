@@ -600,14 +600,9 @@ fn dot(windows: &[QuotaRow], provider_name: &str, now: Timestamp) -> &'static st
     if window_stale(weekly, now) {
         return "grey";
     }
-    let exhausted_early = matches!(
-        (weekly.projected_exhaustion_at, weekly.resets_at),
-        (Some(exhaustion), Some(resets)) if exhaustion < resets
-    );
     if weekly
         .percent_remaining
         .is_some_and(|percent| percent <= WEEKLY_FLOOR_PERCENT)
-        || exhausted_early
     {
         "red"
     } else if weekly.pace.as_deref() == Some("ahead") {

@@ -903,3 +903,28 @@ fn a_spool_file_that_fails_to_apply_does_not_block_the_rest() {
     assert!(!home.join("hook-spool/01B.json").exists());
     assert_eq!(session(&store, &fleet.worker).activity, Activity::Errored);
 }
+
+/// `recovery.md` R10: while a daemon holds `state.db` read-only, a hook writes
+/// nothing to it and spools; the import after the restore finds the record.
+#[test]
+fn hook_spools_while_the_database_is_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join(".tiller");
+    fs::create_dir_all(&home).unwrap();
+    let (store, fleet) = file_store(&home);
+    drop(store);
+    let env = Env {
+        tiller_home: home.clone(),
+        user_home: None,
+        tiller_session_id: Some(fleet.worker.clone()),
+    };
+    fs::write(home.join(READ_ONLY_MARKER), "quick_check: damaged").unwrap();
+
+    let failure = input("claude-worker", json!({"error": "overloaded"}));
+    let Outcome::Spooled(path) = run("StopFailure", &failure, &env) else {
+        panic!("expected a spool");
+    };
+    let store = Store::open(home.join("state.db")).unwrap();
+    assert_eq!(count(&store, "SELECT count(*) FROM observations"), 0);
+    assert!(path.exists());
+}

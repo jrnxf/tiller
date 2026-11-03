@@ -529,7 +529,7 @@ The daemon renders `index.html` with the snapshot inlined:
 
   | Dot | When (on the weekly window) |
   |---|---|
-  | `red` | `percent_remaining` at or under the weekly floor (3%, AGENTS.md rule 8), or `projected_exhaustion_at` before `resets_at` |
+  | `red` | `percent_remaining` at or under the weekly floor (3%, AGENTS.md rule 8); a projected exhaustion before `resets_at` alone is not red |
   | `amber` | `pace = ahead` |
   | `green` | otherwise |
   | `grey` | stale or never fetched; the tooltip says since when |

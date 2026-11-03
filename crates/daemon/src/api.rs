@@ -34,6 +34,7 @@ use tokio::sync::watch;
 
 use crate::assets::{self, Assets};
 use crate::dto::*;
+use crate::readonly::Damage;
 use crate::views::{self, Filter, LocalHealth};
 use crate::{auth, sse};
 
@@ -63,6 +64,9 @@ pub struct Inner {
     pub started_at: Timestamp,
     /// Tool versions, filled in once after start.
     pub tools: Arc<Mutex<Value>>,
+    /// Set when `state.db` fails its integrity check (`recovery.md` R10):
+    /// reads go on, every mutation is refused.
+    pub damage: Damage,
 }
 
 impl AppState {
@@ -204,18 +208,30 @@ fn uninitialized() -> ApiError {
     .hint(INIT_HINT)
 }
 
+/// The 503 every mutation answers while `state.db` is damaged.
+fn read_only(reason: &str) -> ApiError {
+    ApiError::from(Error::Unavailable(format!(
+        "read only: state.db failed its integrity check ({reason}); mutations are refused until the owner restores it"
+    )))
+    .hint("stop the daemon, then run tiller restore <file> --dry-run and again without the flag")
+}
+
 /// Runs `read` on the blocking pool against a fresh read connection.
 async fn read<T: Send + 'static>(
     state: &AppState,
     read: impl FnOnce(&Store) -> tiller_core::Result<T> + Send + 'static,
 ) -> Result<T, ApiError> {
     let db = state.db();
+    let damage = state.0.damage.clone();
     let joined = tokio::task::spawn_blocking(move || {
         if !db.exists() {
             return Err(uninitialized());
         }
-        let store = Store::open_current(&db)?;
-        Ok(read(&store)?)
+        let done = Store::open_current(&db).and_then(|store| read(&store));
+        if let Err(error) = &done {
+            damage.suspect(&db, error);
+        }
+        Ok(done?)
     })
     .await;
     match joined {
@@ -330,14 +346,23 @@ async fn mutate(
     key: String,
     mutation: impl FnOnce(&mut Store, &Ctx, &str) -> tiller_core::Result<Done> + Send + 'static,
 ) -> ApiResult<MutationResponse> {
+    if let Some(reason) = state.0.damage.reason() {
+        return Err(read_only(&reason));
+    }
     let db = state.db();
+    let damage = state.0.damage.clone();
     let joined = tokio::task::spawn_blocking(move || {
         if !db.exists() {
             return Err(uninitialized());
         }
-        let mut store = Store::open_current(&db)?;
-        let ctx = Ctx::new(Actor::Board).with_key(key.clone());
-        Ok(mutation(&mut store, &ctx, &key)?)
+        let done = Store::open_current(&db).and_then(|mut store| {
+            let ctx = Ctx::new(Actor::Board).with_key(key.clone());
+            mutation(&mut store, &ctx, &key)
+        });
+        if let Err(error) = &done {
+            damage.suspect(&db, error);
+        }
+        Ok(done?)
     })
     .await;
     let done = match joined {
@@ -1202,7 +1227,7 @@ pub fn contract() -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::body::to_bytes;
     use rust_embed::RustEmbed;
@@ -1211,7 +1236,7 @@ mod tests {
 
     #[derive(RustEmbed)]
     #[folder = "tests/fixtures/dist"]
-    struct Fixture;
+    pub(crate) struct Fixture;
 
     #[derive(RustEmbed)]
     #[folder = "tests/fixtures/empty"]
@@ -1222,6 +1247,10 @@ mod tests {
     const HOST: &str = "127.0.0.1:7421";
 
     fn app(home: &std::path::Path, assets: Assets) -> Router {
+        app_with(home, assets, Damage::default())
+    }
+
+    pub(crate) fn app_with(home: &std::path::Path, assets: Assets, damage: Damage) -> Router {
         let (_newest_tx, newest) = watch::channel(0);
         let (_stop_tx, stop) = watch::channel(false);
         router(AppState::new(Inner {
@@ -1235,16 +1264,17 @@ mod tests {
             herdr: Cli::local(),
             started_at: Timestamp::now(),
             tools: Arc::new(Mutex::new(Value::Null)),
+            damage,
         }))
     }
 
-    struct Answer {
-        status: StatusCode,
+    pub(crate) struct Answer {
+        pub(crate) status: StatusCode,
         headers: HeaderMap,
-        body: String,
+        pub(crate) body: String,
     }
 
-    async fn send(app: &Router, request: Request<Body>) -> Answer {
+    pub(crate) async fn send(app: &Router, request: Request<Body>) -> Answer {
         let response = app.clone().oneshot(request).await.unwrap();
         let status = response.status();
         let headers = response.headers().clone();
@@ -1256,7 +1286,7 @@ mod tests {
         }
     }
 
-    async fn get(app: &Router, path: &str) -> Answer {
+    pub(crate) async fn get(app: &Router, path: &str) -> Answer {
         send(
             app,
             Request::get(path)
@@ -1275,7 +1305,7 @@ mod tests {
     }
 
     /// The owner cookie, minted and redeemed as the login link does.
-    fn owner_cookie(home: &std::path::Path) -> String {
+    pub(crate) fn owner_cookie(home: &std::path::Path) -> String {
         let token = auth::mint_login(home, Timestamp::now()).unwrap();
         let cookie = auth::redeem_login(home, &token, Timestamp::now())
             .unwrap()
@@ -1285,7 +1315,7 @@ mod tests {
 
     /// `POST /api/v1/cards` as the board sends it, with `headers` set over
     /// the board's own.
-    fn create(headers: &[(&str, &str)]) -> Request<Body> {
+    pub(crate) fn create(headers: &[(&str, &str)]) -> Request<Body> {
         let mut request = Request::post("/api/v1/cards").body(Body::from(
             json!({"idempotency_key": "k-1", "project": "alpha", "kind": "ship", "title": "Undo strokes"})
                 .to_string(),
@@ -1305,7 +1335,7 @@ mod tests {
         request
     }
 
-    fn cards(fleet: &Fleet) -> i64 {
+    pub(crate) fn cards(fleet: &Fleet) -> i64 {
         fleet
             .open()
             .conn()

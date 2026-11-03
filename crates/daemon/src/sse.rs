@@ -267,6 +267,7 @@ mod tests {
             herdr: Cli::local(),
             started_at: Timestamp::now(),
             tools: Arc::new(Mutex::new(serde_json::Value::Null)),
+            damage: crate::readonly::Damage::default(),
         }));
         let mut stopping = stop.clone();
         tokio::spawn(async move {

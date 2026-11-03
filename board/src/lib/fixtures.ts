@@ -73,11 +73,7 @@ interface DotInput {
 // The dot table from protocol.md section 8, on the weekly window.
 export function quotaDot(input: DotInput): QuotaDot {
   if (input.stale || input.percentRemaining === null) return "grey";
-  const exhaustsBeforeReset =
-    input.projectedExhaustionAt !== null &&
-    input.resetsAt !== null &&
-    Date.parse(input.projectedExhaustionAt) < Date.parse(input.resetsAt);
-  if (input.percentRemaining <= WEEKLY_FLOOR_PERCENT || exhaustsBeforeReset) return "red";
+  if (input.percentRemaining <= WEEKLY_FLOOR_PERCENT) return "red";
   if (input.pace === "ahead") return "amber";
   return "green";
 }

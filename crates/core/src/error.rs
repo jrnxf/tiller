@@ -139,10 +139,23 @@ fn conflict_message(error: &Error) -> String {
     message
 }
 
+/// Starts the message of the [`Error::Unavailable`] a damaged database
+/// produces, so the daemon can tell it apart from a busy one and run
+/// `quick_check` (`recovery.md` R10).
+pub const DAMAGED_PREFIX: &str = "state.db is damaged";
+
+/// `<home>/read-only`: written by a daemon whose `state.db` failed its
+/// integrity check, holding the reason. A hook that finds it spools its
+/// observation instead of writing (`recovery.md` R10).
+pub const READ_ONLY_MARKER: &str = "read-only";
+
 impl From<rusqlite::Error> for Error {
     fn from(error: rusqlite::Error) -> Self {
         use rusqlite::ErrorCode;
         match error.sqlite_error_code() {
+            Some(ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase) => {
+                Error::Unavailable(format!("{DAMAGED_PREFIX}: {error}"))
+            }
             Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => {
                 Error::Unavailable(format!("database busy: {error}"))
             }

@@ -40,7 +40,7 @@ test("a window without a weekly kind gives no footer reading", () => {
   ).toBeNull();
 });
 
-test("the dot table: floor or early exhaustion is red, ahead of pace is amber, stale is grey", () => {
+test("the dot table: only the floor is red, ahead of pace is amber, stale is grey", () => {
   const base = {
     percentRemaining: 50,
     resetsAt: "2026-11-03T14:00:00.000Z",
@@ -53,8 +53,10 @@ test("the dot table: floor or early exhaustion is red, ahead of pace is amber, s
   expect(quotaDot({ ...base, pace: "mystery" })).toBe("green");
   expect(quotaDot({ ...base, percentRemaining: 3 })).toBe("red");
   expect(quotaDot({ ...base, percentRemaining: 4 })).toBe("green");
-  expect(quotaDot({ ...base, projectedExhaustionAt: "2026-11-03T10:00:00.000Z" })).toBe("red");
-  expect(quotaDot({ ...base, projectedExhaustionAt: "2026-11-04T10:00:00.000Z" })).toBe("green");
+  // Plenty left with a projected early exhaustion is not red: only nearly empty is.
+  expect(
+    quotaDot({ ...base, percentRemaining: 96, projectedExhaustionAt: "2026-11-03T10:00:00.000Z" }),
+  ).toBe("green");
   expect(quotaDot({ ...base, stale: true, pace: "ahead" })).toBe("grey");
   expect(quotaDot({ ...base, percentRemaining: null })).toBe("grey");
 });

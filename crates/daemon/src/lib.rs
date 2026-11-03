@@ -5,6 +5,7 @@ pub mod assets;
 pub mod auth;
 pub mod dto;
 pub mod quota;
+pub mod readonly;
 pub mod server;
 pub mod sse;
 pub mod views;

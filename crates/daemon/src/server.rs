@@ -27,6 +27,7 @@ use tokio::sync::watch;
 
 use crate::api::{self, AppState, Inner};
 use crate::assets::Assets;
+use crate::readonly::Damage;
 use crate::workers::{self, Tools};
 
 /// The board's port (`protocol.md` 7.1).
@@ -205,6 +206,11 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         }
     })?;
 
+    // A damaged database is served read-only and never written, not even by
+    // the workers or the stop event (`recovery.md` R10).
+    let damage = Damage::default();
+    damage.check_at_start(&config.home.join("state.db"));
+
     let (stop_tx, stop) = watch::channel(false);
     let (newest_tx, newest) = watch::channel(0_i64);
     let db = config.home.join("state.db");
@@ -233,6 +239,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
     };
     let workers = tokio::spawn(start_workers(
         config.home.clone(),
+        damage.clone(),
         lock,
         tools.clone(),
         registry.clone(),
@@ -265,6 +272,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         herdr: config.herdr,
         started_at,
         tools: tool_versions,
+        damage: damage.clone(),
     });
 
     // The address line is the readiness signal for supervisors and the smoke
@@ -315,7 +323,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         let _ = std::fs::remove_file(info_path(&config.home));
         return Ok(Ended::NewerSchema { found });
     }
-    if db.exists() {
+    if db.exists() && damage.reason().is_none() {
         let home = config.home.clone();
         let _ = tokio::task::spawn_blocking(move || {
             let mut store = Store::open_current(home.join("state.db"))?;
@@ -331,11 +339,13 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
 }
 
 /// Starts the workers once `state.db` is initialized, waiting for `tiller
-/// init` if needed. The database is migrated first (`recovery.md` R11). A
+/// init` if needed. The database is migrated first (`recovery.md` R11); a
+/// damaged one gets no workers at all (R10). A
 /// database newer than this binary, or a panic, stops the daemon through
 /// `fatal`.
 async fn start_workers(
     home: PathBuf,
+    damage: Damage,
     lock: Arc<DaemonLock>,
     tools: Tools,
     registry: Registry,
@@ -345,6 +355,13 @@ async fn start_workers(
     let mut stop = stopping.subscribe();
     loop {
         if *stop.borrow() {
+            return Vec::new();
+        }
+        if let Some(reason) = damage.reason() {
+            tracing::error!(
+                reason,
+                "state.db is damaged; no workers run (read-only mode)"
+            );
             return Vec::new();
         }
         let (home_, lock_, tools_, registry_, stop_) = (
