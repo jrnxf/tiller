@@ -81,6 +81,12 @@ macro_rules! text_enum {
 text_enum!(HostKind { Local = "local", Remote = "remote" });
 
 text_enum!(
+    /// What a pairing allows the board host to do on a peer (ADR 0003): read
+    /// it, or also forward the owner's mutations to it.
+    PeerScope { Read = "read", Act = "act" }
+);
+
+text_enum!(
     /// A project's delivery mode (P10, P11).
     Delivery {
         NoMistakes = "no-mistakes",

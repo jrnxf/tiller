@@ -1,0 +1,12 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "accepted": [],
+    "federation_accept": true,
+    "peers": []
+  },
+  "ok": true
+}

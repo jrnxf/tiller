@@ -1,0 +1,13 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 3
+{
+  "error": {
+    "code": "not_found",
+    "entity": "peer key",
+    "id": "host-b",
+    "message": "no peer key host-b"
+  },
+  "ok": false
+}

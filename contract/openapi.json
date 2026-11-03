@@ -2299,7 +2299,7 @@
               "string",
               "null"
             ],
-            "description": "`herdr_link_down`, `host_asleep`, `poll_failed` or `never_seen`."
+            "description": "`herdr_link_down`, `host_asleep`, `poll_failed` or `never_seen`; for a\npaired peer also `peer_link_down`, `peer_refused` or `peer_version`."
           },
           "view_only": {
             "type": "boolean"

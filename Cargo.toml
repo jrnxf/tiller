@@ -35,7 +35,10 @@ tiller-replay = { path = "crates/replay" }
 # Runtime
 anyhow = "1"
 axum = "0.8"
+base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
+ed25519-dalek = "3"
+getrandom = "0.4"
 jiff = { version = "0.2.38", features = ["serde"] }
 notify = "8"
 rusqlite = { version = "0.40", features = ["bundled", "serde_json"] }

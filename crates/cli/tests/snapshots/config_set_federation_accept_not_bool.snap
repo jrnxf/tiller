@@ -1,0 +1,11 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 2
+{
+  "error": {
+    "code": "usage",
+    "message": "federation.accept is true or false (ADR 0003)"
+  },
+  "ok": false
+}

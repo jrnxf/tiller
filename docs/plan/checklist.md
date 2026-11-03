@@ -437,11 +437,11 @@ ADR 0003, accepted Tuesday 2026-11-03. The owner approved it; runs in one or two
 ### F2 Pairing and keys
 `opus` high - 2.5-3.5 h - after F1
 
-- [ ] Migration with a down step: `hosts.peer_scope`, `hosts.peer_host_id`, `peer_keys`; new stale reasons
-- [ ] `tiller peer add` over `ssh -t`, `peer accept`, `peer list`, `peer remove`, `peer revoke`; Ed25519 key file at mode 0600
-- [ ] Config `federation.accept`; `peer.accept`, `peer.revoke`, `peer.pair`, `peer.remove` with their events
-- [ ] Check: `migrations_run_both_ways_on_fixture` covers the new migration; owner-only checks refuse a session caller
-- [ ] Delivered
+- [x] Migration with a down step: `hosts.peer_scope`, `hosts.peer_host_id`, `peer_keys`; new stale reasons
+- [x] `tiller peer add` over `ssh -t`, `peer accept`, `peer list`, `peer remove`, `peer revoke`; Ed25519 key file at mode 0600
+- [x] Config `federation.accept`; `peer.accept`, `peer.revoke`, `peer.pair`, `peer.remove` with their events
+- [x] Check: `migrations_run_both_ways_on_fixture` covers the new migration; owner-only checks refuse a session caller
+- [x] Delivered
 
 ### F3 Peer link and federated reads
 `opus` high - 3-4 h - after F2

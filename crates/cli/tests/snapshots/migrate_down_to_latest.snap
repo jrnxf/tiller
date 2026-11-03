@@ -5,7 +5,7 @@ exit: 2
 {
   "error": {
     "code": "usage",
-    "message": "migrate down goes below this tiller's schema 3; use --to <n> with n < 3"
+    "message": "migrate down goes below this tiller's schema 4; use --to <n> with n < 4"
   },
   "ok": false
 }

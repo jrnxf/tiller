@@ -336,7 +336,8 @@ pub struct Machine {
     pub capacity: Option<i64>,
     pub free_slots: Option<i64>,
     pub last_seen_at: Option<String>,
-    /// `herdr_link_down`, `host_asleep`, `poll_failed` or `never_seen`.
+    /// `herdr_link_down`, `host_asleep`, `poll_failed` or `never_seen`; for a
+    /// paired peer also `peer_link_down`, `peer_refused` or `peer_version`.
     pub stale_reason: Option<String>,
     pub rev: i64,
 }

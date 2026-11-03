@@ -1,5 +1,6 @@
-//! Owner-side setup: `init`, projects, hosts, config, peers and the owner
-//! marker (`protocol.md` section 6.4, Projects, hosts and config).
+//! Owner-side setup: `init`, projects, hosts, config and the owner marker
+//! (`protocol.md` section 6.4, Projects, hosts and config). `tiller peer` is
+//! [`super::peer`].
 
 use std::io::Write;
 use std::path::Path;
@@ -11,7 +12,7 @@ use tiller_core::Applied;
 use tiller_core::Store;
 use tiller_core::domain::{Boundary, Delivery, HostKind, Project, Stage};
 use tiller_core::state::get;
-use tiller_core::state::projects::{HostEdit, Init, NewProject, NewRemoteHost, ProjectEdit};
+use tiller_core::state::projects::{HostEdit, Init, NewProject, ProjectEdit};
 
 use super::clearable;
 use super::read::{STOP_HOOK_MAX_RATE, STOP_HOOK_MIN_STOPS, intake_stats};
@@ -144,20 +145,6 @@ pub enum ConfigCmd {
     Hash,
     /// Compare this host's configuration with a peer's
     Diff { peer: String },
-}
-
-#[derive(Subcommand, Debug)]
-pub enum PeerCmd {
-    /// Record another host running its own Tiller, read only
-    Add {
-        label: String,
-        /// The ssh alias that reaches it
-        #[arg(long)]
-        ssh: String,
-        /// The herdr saved machine name; the label by default
-        #[arg(long)]
-        herdr_machine: Option<String>,
-    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -341,7 +328,7 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), Failure> {
     Ok(())
 }
 
-fn get_path<'a>(table: &'a toml::Table, key: &str) -> Option<&'a toml::Value> {
+pub(crate) fn get_path<'a>(table: &'a toml::Table, key: &str) -> Option<&'a toml::Value> {
     let mut parts = key.split('.');
     let mut current = table.get(parts.next()?)?;
     for part in parts {
@@ -389,7 +376,7 @@ pub fn config_hash_of(table: &toml::Table) -> String {
 
 /// Sets one key, then records the change: the file first, so a crash between
 /// the two leaves a file newer than its event, which `doctor` reports.
-fn set_config(
+pub(crate) fn set_config(
     app: &App,
     store: &mut tiller_core::Store,
     key: &str,
@@ -422,6 +409,11 @@ pub fn config(app: &App, cmd: ConfigCmd) -> Done {
             app.require_owner("tiller config set")?;
             let mut store = app.write()?;
             let value = parse_value(&value);
+            if key == "federation.accept" && !value.is_bool() {
+                return Err(Failure::usage(
+                    "federation.accept is true or false (ADR 0003)",
+                ));
+            }
             if key == "stop_hook_mode" && value.as_str() == Some("block-once") {
                 let stats = intake_stats(&store, 7)?;
                 if !stats.rule_met {
@@ -546,36 +538,6 @@ fn flatten_diff(
             (a, b) => out.push(json!({"key": path, "here": a, "there": b})),
         }
     }
-}
-
-pub fn peer(app: &App, cmd: PeerCmd) -> Done {
-    app.require_owner("tiller peer")?;
-    let PeerCmd::Add {
-        label,
-        ssh,
-        herdr_machine,
-    } = cmd;
-    if ssh.starts_with('-') || ssh.is_empty() {
-        return Err(Failure::usage("an ssh alias is a host name, not an option"));
-    }
-    let mut store = app.write()?;
-    let applied = store.host_add(
-        &app.ctx(),
-        NewRemoteHost {
-            herdr_machine: herdr_machine.unwrap_or_else(|| label.clone()),
-            label: label.clone(),
-        },
-    )?;
-    let config = set_config(
-        app,
-        &mut store,
-        &format!("peers.{label}.ssh"),
-        toml::Value::String(ssh),
-    )?;
-    let mut applied = applied;
-    applied.events.extend(config.events);
-    applied.replayed &= config.replayed;
-    Ok(Outcome::applied(applied))
 }
 
 pub fn owner(app: &App, cmd: OwnerCmd) -> Done {

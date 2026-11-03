@@ -4,6 +4,22 @@ use super::*;
 
 const FIXTURE_V1: &str = include_str!("fixture_v1.sql");
 
+/// The rows of migration 4's tables and columns, loaded on top of
+/// [`FIXTURE_V1`]: a paired peer on the board host and a live and a revoked
+/// accepted key.
+const FIXTURE_V4: &str = "
+    INSERT INTO hosts (id, label, kind, herdr_machine, peer_scope, peer_host_id)
+    VALUES ('01JC00000000000000000HOST3', 'host-c', 'remote', 'machine-c', 'act',
+            '01JC0000000000000000PEERC');
+    INSERT INTO peer_keys (id, viewer_label, viewer_host_id, public_key, scope, accepted_at, revoked_at)
+    VALUES ('01JC00000000000000000KEY1', 'host-d', '01JC0000000000000000PEERD',
+            'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', 'read',
+            '2026-11-03T09:00:00.000Z', '2026-11-03T10:00:00.000Z'),
+           ('01JC00000000000000000KEY2', 'host-d', '01JC0000000000000000PEERD',
+            'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=', 'act',
+            '2026-11-03T10:00:00.000Z', NULL);
+";
+
 fn connection() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
@@ -68,6 +84,12 @@ fn migrations_run_both_ways_on_fixture() {
                 .collect();
             assert_eq!(empty, vec![], "the fixture must put a row in every table");
         }
+        if version == 4 {
+            // migration 4 runs down over a paired host and accepted keys
+            conn.execute_batch(&format!("BEGIN; {FIXTURE_V4} COMMIT;"))
+                .unwrap();
+            assert_eq!(foreign_key_violations(&conn), 0);
+        }
         schemas.push(schema(&conn));
     }
     let schema_version: String = conn
@@ -128,6 +150,53 @@ fn existing_projects_read_launched_after_0002() {
         .query_row("SELECT count(*) FROM review_passes", [], |row| row.get(0))
         .unwrap();
     assert_eq!(passes, 0);
+}
+
+/// Migration 4 pairs nothing by itself, and its checks hold the rules of
+/// `schema.sql`: only a remote host is paired, scope and host id go together,
+/// and a board host has at most one live key on a peer.
+#[test]
+fn pairing_columns_and_keys_after_0004() {
+    let mut conn = connection();
+    to_version(&mut conn, 3).unwrap();
+    conn.execute_batch(&format!("BEGIN; {FIXTURE_V1} COMMIT;"))
+        .unwrap();
+    to_version(&mut conn, 4).unwrap();
+    let paired: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM hosts WHERE peer_scope IS NOT NULL OR peer_host_id IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(paired, 0);
+
+    for bad in [
+        "UPDATE hosts SET peer_scope = 'act', peer_host_id = 'x' WHERE label = 'host-a'",
+        "UPDATE hosts SET peer_scope = 'act' WHERE label = 'host-b'",
+        "UPDATE hosts SET peer_host_id = 'x' WHERE label = 'host-b'",
+        "UPDATE hosts SET peer_scope = 'write', peer_host_id = 'x' WHERE label = 'host-b'",
+    ] {
+        assert!(conn.execute(bad, []).is_err(), "{bad}");
+    }
+    conn.execute(
+        "UPDATE hosts SET peer_scope = 'read', peer_host_id = 'x' WHERE label = 'host-b'",
+        [],
+    )
+    .unwrap();
+
+    conn.execute_batch(FIXTURE_V4).unwrap();
+    let second_live =
+        "INSERT INTO peer_keys (id, viewer_label, viewer_host_id, public_key, scope, accepted_at)
+        VALUES ('01JC00000000000000000KEY3', 'host-d', '01JC0000000000000000PEERD', 'k', 'act',
+                '2026-11-03T11:00:00.000Z')";
+    assert!(conn.execute(second_live, []).is_err());
+
+    to_version(&mut conn, 3).unwrap();
+    let hosts: i64 = conn
+        .query_row("SELECT count(*) FROM hosts", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(hosts, 3, "a paired host stays, as a herdr machine");
 }
 
 /// `recovery.md` R11: an older binary never writes to a newer database.

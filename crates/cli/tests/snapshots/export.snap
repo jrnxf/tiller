@@ -9,7 +9,7 @@ exit: 0
     "format": "tiller-export/v1",
     "host_id": "<id1>",
     "max_seq": 5,
-    "schema_version": 3,
+    "schema_version": 4,
     "tables": [
       {
         "file": "approvals.jsonl",
@@ -146,6 +146,12 @@ exit: 0
       {
         "file": "panes.jsonl",
         "name": "panes",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "peer_keys.jsonl",
+        "name": "peer_keys",
         "rows": 0,
         "sha256": "<sha256>"
       },

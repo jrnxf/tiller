@@ -15,7 +15,8 @@ use serde_json::Value;
 
 use app::{App, Done, Failure};
 use cmd::{
-    admin, approval, ask, attention, backup, card, import, later, read, records, review, run, spawn,
+    admin, approval, ask, attention, backup, card, import, later, peer, read, records, review, run,
+    spawn,
 };
 
 #[derive(Parser)]
@@ -108,7 +109,7 @@ enum Command {
     Config(admin::ConfigCmd),
     /// Other hosts running their own Tiller
     #[command(subcommand)]
-    Peer(admin::PeerCmd),
+    Peer(peer::PeerCmd),
     /// Which system owns this host
     #[command(subcommand)]
     Owner(admin::OwnerCmd),
@@ -183,7 +184,7 @@ fn dispatch(app: &App, command: Command) -> Done {
         Command::Project(cmd) => admin::project(app, cmd),
         Command::Host(cmd) => admin::host(app, cmd),
         Command::Config(cmd) => admin::config(app, cmd),
-        Command::Peer(cmd) => admin::peer(app, cmd),
+        Command::Peer(cmd) => peer::run(app, cmd),
         Command::Owner(cmd) => admin::owner(app, cmd),
         Command::Snapshot => read::snapshot(app),
         Command::Board(args) => read::board(app, args),

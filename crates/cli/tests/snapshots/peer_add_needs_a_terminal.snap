@@ -1,0 +1,12 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 6
+{
+  "error": {
+    "code": "forbidden",
+    "hint": "run it yourself in a terminal, not from an agent",
+    "message": "tiller peer add needs the owner at a terminal: stdin is not a terminal"
+  },
+  "ok": false
+}

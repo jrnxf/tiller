@@ -102,7 +102,10 @@ impl World {
             .env_remove("TILLER_SESSION_ID")
             .env_remove("TILLER_RUN_ID")
             .env_remove("TILLER_SSH")
-            .env_remove("TILLER_GH");
+            .env_remove("TILLER_GH")
+            // Run from a Claude Code shell or not, the owner checks see the
+            // same caller: no `CLAUDECODE`, stdin not a terminal.
+            .env_remove("CLAUDECODE");
         if let Some(session) = session {
             command.env("TILLER_SESSION_ID", session);
         }

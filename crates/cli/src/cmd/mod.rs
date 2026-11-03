@@ -10,6 +10,7 @@ pub mod backup;
 pub mod card;
 pub mod import;
 pub mod later;
+pub mod peer;
 pub mod read;
 pub mod records;
 pub mod review;

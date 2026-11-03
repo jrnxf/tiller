@@ -57,8 +57,25 @@ record!(Host in "hosts" {
     disk_floor_mb: Option<i64>,
     last_seen_at: Option<Timestamp>,
     stale_reason: Option<String>,
+    peer_scope: Option<PeerScope>,
+    peer_host_id: Option<String>,
     rev: i64,
 });
+
+record!(
+    /// On a peer, one board host it accepted (ADR 0003). The public half
+    /// only; the private half is a file on the board host.
+    PeerKey in "peer_keys" {
+        id: String,
+        viewer_label: String,
+        viewer_host_id: String,
+        public_key: String,
+        scope: PeerScope,
+        accepted_at: Timestamp,
+        revoked_at: Option<Timestamp>,
+        rev: i64,
+    }
+);
 
 record!(Project in "projects" {
     id: String,

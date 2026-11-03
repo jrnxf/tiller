@@ -11,6 +11,8 @@ exit: 0
     "label": "host-a",
     "lane_capacity": 3,
     "last_seen_at": null,
+    "peer_host_id": null,
+    "peer_scope": null,
     "ram_floor_mb": null,
     "rev": 2,
     "short": "<id1.short>",

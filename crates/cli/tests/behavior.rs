@@ -17,6 +17,8 @@ use tiller_core::state::runs::NewObservation;
 use tiller_core::{Actor, Ctx, Timestamp};
 
 const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+/// The Ed25519 base point: a public key that parses.
+const BASEPOINT: &str = "WGZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmY=";
 
 fn hook() -> Ctx {
     Ctx::new(Actor::Hook)
@@ -227,12 +229,100 @@ fn intake_stats_count_false_blocks_and_gate_block_once() {
     );
 }
 
+/// `protocol.md` 10.1: pairing needs the owner at a terminal on both hosts,
+/// and `federation.accept = false` refuses it before anyone is asked. A
+/// refused `peer add` reaches no peer and leaves no key file.
+#[test]
+fn pairing_needs_the_owner_at_a_terminal() {
+    let world = World::initialized();
+    let marker = world.dir.path().join("ssh-ran");
+    let fake = world.dir.path().join("ssh");
+    std::fs::write(&fake, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    world.set_env("TILLER_SSH", fake.to_str().unwrap());
+    let seq = world.store().last_seq().unwrap();
+
+    let out = world.run(&["peer", "add", "host-b", "--ssh", "host-b-alias"]);
+    assert_eq!(
+        (out.code, out.error_code()),
+        (6, "forbidden"),
+        "{}",
+        out.json
+    );
+    assert!(
+        out.json.to_string().contains("not a terminal"),
+        "{}",
+        out.json
+    );
+    for bad in ["../b", "-b", "a b"] {
+        let out = world.run(&["peer", "add", bad, "--ssh", "host-b-alias"]);
+        assert_eq!(out.code, 2, "{bad}: {}", out.json);
+    }
+    assert!(!marker.exists(), "a refused peer add runs no ssh");
+    assert!(
+        !world.home().join("peers").exists(),
+        "and writes no key file"
+    );
+
+    let accept = |world: &World| {
+        world.run(&[
+            "peer",
+            "accept",
+            "--from",
+            "board",
+            "--viewer-host-id",
+            "01JC0000000000000000B0ARD1",
+            "--pubkey",
+            BASEPOINT,
+            "--scope",
+            "act",
+        ])
+    };
+    let out = accept(&world);
+    assert_eq!(
+        (out.code, out.error_code()),
+        (6, "forbidden"),
+        "{}",
+        out.json
+    );
+    world.must(&["config", "set", "federation.accept", "false"]);
+    let off_seq = world.store().last_seq().unwrap();
+    let out = accept(&world);
+    assert_eq!((out.code, out.error_code()), (5, "refused"), "{}", out.json);
+    assert!(
+        out.json.to_string().contains("federation.accept"),
+        "{}",
+        out.json
+    );
+    let out = world.run(&[
+        "peer",
+        "accept",
+        "--from",
+        "board",
+        "--viewer-host-id",
+        "01JC0000000000000000B0ARD1",
+        "--pubkey",
+        "AAAA",
+        "--scope",
+        "act",
+    ]);
+    assert_eq!(out.code, 2, "a key that does not parse: {}", out.json);
+    assert_eq!(world.store().last_seq().unwrap(), off_seq);
+    assert_eq!(off_seq, seq + 1, "only the config change was written");
+
+    let list = world.must(&["peer", "list"]);
+    assert_eq!(list.data()["federation_accept"], false);
+    assert_eq!(list.data()["peers"], serde_json::json!([]));
+    assert_eq!(list.data()["accepted"], serde_json::json!([]));
+}
+
 #[test]
 fn config_diff_lists_what_differs_from_a_peer() {
     let world = World::initialized();
     world.must(&["config", "set", "quota_providers", "[\"claude\"]"]);
     world.must(&["config", "set", "stop_hook_mode", "observe"]);
-    world.must(&["peer", "add", "host-b", "--ssh", "host-b-alias"]);
+    world.must(&["config", "set", "peers.host-b.ssh", "host-b-alias"]);
 
     // A fake ssh that answers as the peer's `tiller config get --json`.
     let fake = world.dir.path().join("ssh");
@@ -310,6 +400,21 @@ fn fleet_sessions_cannot_run_owner_commands() {
             "alpha",
         ],
         vec!["peer", "add", "b", "--ssh", "b"],
+        vec![
+            "peer",
+            "accept",
+            "--from",
+            "b",
+            "--viewer-host-id",
+            "01JC0000000000000000B0ARD1",
+            "--pubkey",
+            BASEPOINT,
+            "--scope",
+            "act",
+        ],
+        vec!["peer", "list"],
+        vec!["peer", "remove", "b"],
+        vec!["peer", "revoke", "b"],
     ] {
         let out = world.run_as(&orchestrator, &args);
         assert_eq!(

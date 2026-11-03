@@ -15,6 +15,7 @@ pub mod attention;
 pub mod caches;
 pub mod cards;
 pub mod outbox;
+pub mod peers;
 pub mod projects;
 pub mod reads;
 pub mod records;

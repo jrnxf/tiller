@@ -9,6 +9,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+base64.workspace = true
+ed25519-dalek.workspace = true
+getrandom.workspace = true
 jiff.workspace = true
 rusqlite = { workspace = true, features = ["backup"] }
 rusqlite_migration.workspace = true

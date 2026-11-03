@@ -731,10 +731,56 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
         &["config", "get", "dispatch.default.model"],
     );
     step(&world, "config_hash", &["config", "hash"]);
+    // Pairing needs the owner at a terminal on both hosts; the harness has
+    // none, so the happy path is the core's tests and a live pairing.
+    fails(
+        &world,
+        6,
+        "peer_add_needs_a_terminal",
+        &["peer", "add", "host-b", "--ssh", "host-b-ssh"],
+    );
+    let accept = [
+        "peer",
+        "accept",
+        "--from",
+        "host-b",
+        "--viewer-host-id",
+        "01JC0000000000000000B0ARD1",
+        "--pubkey",
+        "WGZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmY=",
+        "--scope",
+        "act",
+    ];
+    fails(&world, 6, "peer_accept_needs_a_terminal", &accept);
+    fails(
+        &world,
+        2,
+        "config_set_federation_accept_not_bool",
+        &["config", "set", "federation.accept", "maybe"],
+    );
     step(
         &world,
-        "peer_add",
-        &["peer", "add", "host-b", "--ssh", "host-b-ssh"],
+        "config_set_federation_accept_off",
+        &["config", "set", "federation.accept", "false"],
+    );
+    fails(&world, 5, "peer_accept_refused_accept_off", &accept);
+    step(
+        &world,
+        "config_set_federation_accept_on",
+        &["config", "set", "federation.accept", "true"],
+    );
+    step(&world, "peer_list", &["peer", "list"]);
+    fails(
+        &world,
+        3,
+        "peer_revoke_unknown",
+        &["peer", "revoke", "host-b"],
+    );
+    fails(
+        &world,
+        3,
+        "peer_remove_unknown",
+        &["peer", "remove", "host-b"],
     );
     step(&world, "owner_show", &["owner", "show"]);
     step(
