@@ -24,6 +24,7 @@ Project names in examples (`alpha`, `beta`, `gamma`, card ids like `alpha-42`) a
 | [`herdr-layout.md`](herdr-layout.md) | How orchestrators and workers are laid out in herdr |
 | [`host-capabilities.md`](host-capabilities.md) | The minimum common behavior across hosts, from the capability probe (T0.3) |
 | [`parity.md`](parity.md) | The Firstmate parity matrix: the checklist for "comparable" (T0.6) |
+| [`pre-launch-validation.md`](pre-launch-validation.md) | Pre-launch stage: a weekly batched review in place of per-change validation, decided 2026-11-03 |
 | [`../plan/build-plan.md`](../plan/build-plan.md) | The executable build plan, task by task |
 | [`../plan/checklist.md`](../plan/checklist.md) | Build progress, ticked as work lands |
 | [`../firstmate-export.md`](../firstmate-export.md) | The Firstmate export prompt: the import contract |
