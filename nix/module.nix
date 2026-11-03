@@ -2,11 +2,17 @@
 # service, a launchd agent on macOS and a systemd user unit on Linux
 # (`protocol.md` 6.4).
 #
-# The service runs the profile's `tiller`, not a store path, so after a
-# rebuild a restart picks up the new binary. Both service managers restart
-# the daemon when it dies (a crash, a kill, or exit 3 for a database newer
-# than the binary, `recovery.md` R11) and leave it down after a clean exit 0:
-# a stop, or a second instance that found the first running.
+# The service runs the profile's `tiller`, and its environment carries the
+# package's store path in TILLER_PACKAGE. A rebuild that changes the package
+# therefore changes the launchd plist and the systemd unit, and home-manager's
+# activation reloads the agent or restarts the unit, so the daemon runs the
+# new binary. A rebuild that keeps the package leaves both untouched and the
+# daemon running. `checks.moduleRestartsDaemon` in the flake guards this.
+#
+# Both service managers restart the daemon when it dies (a crash, a kill, or
+# exit 3 for a database newer than the binary, `recovery.md` R11) and leave it
+# down after a clean exit 0: a stop, or a second instance that found the first
+# running.
 self:
 {
   config,
@@ -37,7 +43,12 @@ let
       ]
     );
   }
-  // cfg.daemon.environment;
+  // cfg.daemon.environment
+  // {
+    # Ties the service definition to the package; see the header. Last, so
+    # `daemon.environment` cannot drop it.
+    TILLER_PACKAGE = "${cfg.package}";
+  };
   log = "${config.home.homeDirectory}/Library/Logs/tiller-daemon.log";
 in
 {

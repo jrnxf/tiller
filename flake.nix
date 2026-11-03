@@ -173,6 +173,62 @@
                     || { echo "board/bun.nix is stale: run 'bun run nix:sync' in board/" >&2; exit 1; }
                   touch $out
                 '';
+            # A rebuild restarts the daemon only because the launchd agent and
+            # the systemd unit change with the package (see nix/module.nix).
+            # Evaluates the module against stub home-manager options with two
+            # packages and fails if either service definition stays the same.
+            moduleRestartsDaemon =
+              let
+                stubPackage = name: pkgs.writeText name name;
+                serviceFor =
+                  isDarwin: package:
+                  let
+                    config =
+                      (lib.evalModules {
+                        modules = [
+                          (import ./nix/module.nix self)
+                          {
+                            options = {
+                              home.packages = lib.mkOption { type = lib.types.listOf lib.types.package; };
+                              home.profileDirectory = lib.mkOption { type = lib.types.str; };
+                              home.homeDirectory = lib.mkOption { type = lib.types.str; };
+                              launchd.agents = lib.mkOption {
+                                type = lib.types.attrsOf lib.types.anything;
+                                default = { };
+                              };
+                              systemd.user.services = lib.mkOption {
+                                type = lib.types.attrsOf lib.types.anything;
+                                default = { };
+                              };
+                            };
+                            config = {
+                              home.profileDirectory = "/home/user/.nix-profile";
+                              home.homeDirectory = "/home/user";
+                              programs.tiller = {
+                                enable = true;
+                                inherit package;
+                              };
+                            };
+                          }
+                        ];
+                        specialArgs.pkgs.stdenv.hostPlatform = {
+                          inherit system isDarwin;
+                          isLinux = !isDarwin;
+                        };
+                      }).config;
+                  in
+                  builtins.toJSON (
+                    if isDarwin then config.launchd.agents.tiller else config.systemd.user.services.tiller
+                  );
+                follows =
+                  isDarwin:
+                  serviceFor isDarwin (stubPackage "tiller-a") != serviceFor isDarwin (stubPackage "tiller-b");
+              in
+              assert lib.assertMsg (follows true)
+                "nix/module.nix: the launchd agent does not change with the package, so a rebuild leaves the old daemon running";
+              assert lib.assertMsg (follows false)
+                "nix/module.nix: the systemd unit does not change with the package, so a rebuild leaves the old daemon running";
+              pkgs.runCommand "tiller-module-restarts-daemon" { } "touch $out";
           };
 
           devShells.default = craneLib.devShell {
