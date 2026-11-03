@@ -12,7 +12,7 @@ on:
         options: [tuning, holdout]
         default: tuning
       max_cost_usd:
-        description: Stop starting new runs once this many dollars are spent
+        description: Stop starting new runs once this many estimated dollars of usage are spent
         type: string
         default: "10"
 
@@ -41,11 +41,14 @@ jobs:
           fi
       - name: Run
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           SPLIT: ${{ inputs.split }}
           MAX_COST_USD: ${{ inputs.max_cost_usd }}
         run: |
-          [ -n "$ANTHROPIC_API_KEY" ] || { echo "::error::Add the ANTHROPIC_API_KEY repository secret (evals/README.md)"; exit 1; }
+          [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || { echo "::error::Add the CLAUDE_CODE_OAUTH_TOKEN repository secret (evals/README.md)"; exit 1; }
+          # An API key would take precedence over the subscription token and
+          # bill at API prices, so the job never carries one.
+          unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN
           nix develop .#evals -c evals/run.sh --split "$SPLIT" --max-cost-usd "$MAX_COST_USD" --out "$RUNNER_TEMP/evals"
       # Only the summary leaves the runner. The transcripts hold whatever
       # the agents ran, an agent can print its environment, which holds the

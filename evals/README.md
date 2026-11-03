@@ -113,12 +113,25 @@ Change one pin at a time. A pin change re-baselines both splits.
 
 The `Evals` workflow (`.github/workflows/evals.yml`) runs only when started by
 hand from the Actions tab, with a split and a cost cap. It never runs on push
-and deploys nothing. It reads the model key from the repository secret
-`ANTHROPIC_API_KEY`, and fails at once when that secret is missing. Add the
-secret under Settings > Secrets and variables > Actions before the first run.
+and deploys nothing.
+
+The evals use the owner's Claude subscription, not API pricing. Locally,
+`claude` uses its existing login; unset `ANTHROPIC_API_KEY` first, because a
+key takes precedence over the login and bills at API prices. In CI the
+workflow reads the repository secret `CLAUDE_CODE_OAUTH_TOKEN`, fails at once
+when it is missing, and unsets `ANTHROPIC_API_KEY` in the job. To set it up:
+
+1. Run `claude setup-token` and sign in. It prints a long-lived token.
+2. Run `gh secret set CLAUDE_CODE_OAUTH_TOKEN -R jrnxf/tiller` and paste it.
+
+`--max-cost-usd` still works on a subscription: `claude plugin eval` counts
+the estimated API-equivalent cost of each run and stops with
+`partial: cost_ceiling` at the cap. The dollars are not billed; they measure
+how much of the subscription's usage a run consumes.
+
 Each run uploads only `summary.txt`: per-case scores for tuning, the
 aggregate for the holdout. Transcripts stay on the runner, because an agent
-can print its environment, which holds the key. To read transcripts, run
+can print its environment, which holds the token. To read transcripts, run
 tuning locally with `--keep`.
 
 ## Writing a case
