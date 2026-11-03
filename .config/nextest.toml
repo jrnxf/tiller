@@ -3,3 +3,16 @@
 [[profile.default.overrides]]
 filter = 'binary(hook) & test(hook_is_inside_the_ten_ms_budget_with_the_daemon_down)'
 threads-required = "num-test-threads"
+
+# The startup check (T2.2) measures wall-clock time too. On a two-core runner
+# one neighbouring test takes a whole core and pushed its quartile from about
+# 9 ms over the 10 ms bound. The test checks that it is in the `wall-clock`
+# group, so a rename that drops it from this filter fails loudly instead of
+# running it in parallel again.
+[test-groups]
+wall-clock = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(startup) & test(startup_is_under_ten_milliseconds)'
+test-group = "wall-clock"
+threads-required = "num-test-threads"

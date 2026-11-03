@@ -30,8 +30,18 @@ fn quartile_ms(world: &World, args: &[&str]) -> f64 {
     times[times.len() / 4]
 }
 
+/// Wall-clock time is only a measure of the binary when nothing else runs
+/// beside it, so `.config/nextest.toml` runs this test alone, in the
+/// `wall-clock` group. Under nextest the test refuses to measure outside it.
 #[test]
 fn startup_is_under_ten_milliseconds() {
+    if std::env::var_os("NEXTEST_RUN_ID").is_some() {
+        assert_eq!(
+            std::env::var("NEXTEST_TEST_GROUP").as_deref(),
+            Ok("wall-clock"),
+            "the nextest override that runs this test alone no longer matches it"
+        );
+    }
     let world = World::initialized();
     world.must(&[
         "card", "create", "alpha", "--kind", "ship", "--title", "One",
