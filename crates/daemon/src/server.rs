@@ -61,6 +61,8 @@ pub struct Config {
     pub home: PathBuf,
     /// 0 picks a free port.
     pub port: u16,
+    /// Extra `Host` values served reads (`Inner::allowed_hosts`).
+    pub allowed_hosts: Vec<String>,
     pub herdr: Cli,
     pub quota: Vec<OsString>,
     pub assets: Assets,
@@ -250,6 +252,12 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
     let state = AppState::new(Inner {
         home: config.home.clone(),
         port: bound.port(),
+        allowed_hosts: config
+            .allowed_hosts
+            .iter()
+            .map(|host| host.trim().to_ascii_lowercase())
+            .filter(|host| !host.is_empty())
+            .collect(),
         assets: config.assets,
         newest,
         stop: stop.clone(),

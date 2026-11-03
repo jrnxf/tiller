@@ -248,7 +248,7 @@ The board's mutations need the owner principal. The daemon serves reads to any r
 
 - the owner cookie: `HttpOnly`, `SameSite=Strict`, minted when the owner opens `tiller board` in a terminal, which prints a one-time login link (owner CLI checks apply). It survives daemon restarts and expires 30 days after it was minted (decided at CP2, C15), after which the owner runs `tiller board` again;
 - an `Origin` equal to the daemon's own origin;
-- a `Host` of `127.0.0.1:<port>` or `localhost:<port>`, which stops DNS rebinding;
+- a `Host` of `127.0.0.1:<port>` or `localhost:<port>`, which stops DNS rebinding. A host the owner adds with `tiller daemon --allow-host` is served reads only;
 - the record's `rev` or the transition's preconditions (state.md, section 1).
 
 The cookie's hash is stored under `~/.tiller`, which every fleet role is denied (G20). Sandboxed roles cannot reach localhost at all (G24). T1.3 owns the endpoint list; this spec owns the requirement.

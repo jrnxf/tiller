@@ -259,6 +259,7 @@ mod tests {
         let app = router(AppState::new(Inner {
             home: home.to_owned(),
             port,
+            allowed_hosts: Vec::new(),
             assets: Assets::board(),
             newest,
             stop: stop.clone(),

@@ -49,6 +49,9 @@ pub struct Inner {
     pub home: PathBuf,
     /// The port the daemon listens on, for the `Host` and `Origin` checks.
     pub port: u16,
+    /// Extra `Host` values served reads, such as a reverse proxy's name
+    /// (`tiller daemon --allow-host`). Lowercase.
+    pub allowed_hosts: Vec<String>,
     pub assets: Assets,
     /// The newest `seq`, published by the change feed.
     pub newest: watch::Receiver<i64>,
@@ -223,17 +226,19 @@ async fn read<T: Send + 'static>(
 
 // -- the Host check and the mutation guard ---------------------------------------
 
-fn allowed_hosts(port: u16) -> [String; 2] {
+fn loopback_hosts(port: u16) -> [String; 2] {
     [format!("127.0.0.1:{port}"), format!("localhost:{port}")]
 }
 
-/// 421 unless `Host` is exactly this daemon's loopback address.
+/// 421 unless `Host` is exactly this daemon's loopback address, or one the
+/// owner allowed with `--allow-host`.
 ///
 /// A page opened on `localhost` is sent to `127.0.0.1`, the host the login
 /// link names: the owner cookie belongs to one host, so a board on the other
-/// could read but never write. API calls are answered on either.
+/// could read but never write. API calls are answered on either. An allowed
+/// host is served reads only: `guard` refuses its mutations.
 async fn host_check(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    let [own, alias] = allowed_hosts(state.0.port);
+    let [own, alias] = loopback_hosts(state.0.port);
     let host = request
         .headers()
         .get(header::HOST)
@@ -246,13 +251,19 @@ async fn host_check(State(state): State<AppState>, request: Request, next: Next)
             .path_and_query()
             .map_or("/", |path| path.as_str());
         Redirect::permanent(&format!("http://{own}{path}")).into_response()
-    } else if host.is_some_and(|host| host == own || host == alias) {
+    } else if host.is_some_and(|host| {
+        host == own
+            || host == alias
+            // The login link mints the owner cookie, so it stays on loopback.
+            || (!request.uri().path().starts_with("/login/")
+                && state.0.allowed_hosts.contains(&host.to_ascii_lowercase()))
+    }) {
         next.run(request).await
     } else {
         ApiError::new(
             StatusCode::MISDIRECTED_REQUEST,
             "forbidden",
-            "the board answers only on 127.0.0.1 or localhost",
+            "the board answers only on 127.0.0.1, localhost or an --allow-host name",
         )
         .into_response()
     }
@@ -278,6 +289,11 @@ fn guard(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
         ));
     }
     let host = text(header::HOST).unwrap_or_default();
+    if !loopback_hosts(state.0.port).iter().any(|own| own == host) {
+        return Err(ApiError::forbidden(
+            "a mutation must come from the board on 127.0.0.1",
+        ));
+    }
     if text(header::ORIGIN) != Some(format!("http://{host}").as_str()) {
         return Err(ApiError::forbidden(
             "a mutation must come from the board's own origin",
@@ -1211,6 +1227,7 @@ mod tests {
         router(AppState::new(Inner {
             home: home.to_owned(),
             port: PORT,
+            allowed_hosts: vec!["board.example.com".into()],
             assets,
             newest,
             stop,
@@ -1497,6 +1514,55 @@ mod tests {
             let answer = send(&app, request).await;
             assert_eq!(answer.status, StatusCode::OK, "{host} {}", answer.body);
         }
+    }
+
+    #[tokio::test]
+    async fn allowed_host_is_served_reads_only() {
+        let fleet = Fleet::new();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        for host in ["board.example.com", "Board.Example.com"] {
+            for path in ["/", "/api/v1/board", "/assets/app-abc123.js"] {
+                let request = Request::get(path)
+                    .header(header::HOST, host)
+                    .body(Body::empty())
+                    .unwrap();
+                let answer = send(&app, request).await;
+                assert_eq!(answer.status, StatusCode::OK, "{host} {path}");
+            }
+        }
+        // The allow-list names exact hosts: no suffix or other port matches,
+        // and the login link, which mints the owner cookie, stays on loopback.
+        for (host, path) in [
+            ("evil.board.example.com", "/"),
+            ("board.example.com:7421", "/"),
+            ("", "/"),
+            ("board.example.com", "/login/abc"),
+        ] {
+            let request = Request::get(path)
+                .header(header::HOST, host)
+                .body(Body::empty())
+                .unwrap();
+            let answer = send(&app, request).await;
+            assert_eq!(
+                answer.status,
+                StatusCode::MISDIRECTED_REQUEST,
+                "{host} {path}"
+            );
+        }
+        // A mutation through it is refused even with the owner's cookie.
+        let before = cards(&fleet);
+        let cookie = owner_cookie(fleet.dir.path());
+        let refused = send(
+            &app,
+            create(&[
+                ("host", "board.example.com"),
+                ("origin", "http://board.example.com"),
+                ("cookie", &cookie),
+            ]),
+        )
+        .await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+        assert_eq!(cards(&fleet), before);
     }
 
     #[tokio::test]

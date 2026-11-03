@@ -16,6 +16,10 @@ pub struct Args {
     /// Port to listen on, 0 picks a free one. The daemon only binds localhost.
     #[arg(long, default_value_t = tiller_daemon::PORT)]
     port: u16,
+    /// Also serve reads to requests with this `Host` header, such as a
+    /// reverse proxy's name; repeatable. Mutations stay on 127.0.0.1.
+    #[arg(long = "allow-host", value_name = "HOST")]
+    allow_hosts: Vec<String>,
 }
 
 fn command_line(variable: &str, default: &str) -> Vec<OsString> {
@@ -44,6 +48,7 @@ pub fn run(args: &Args) -> anyhow::Result<ExitCode> {
     let config = Config {
         home,
         port: args.port,
+        allowed_hosts: args.allow_hosts.clone(),
         herdr: Cli::local().program(command_line("TILLER_HERDR", "herdr")),
         quota: command_line("TILLER_QUOTA_AXI", "quota-axi"),
         assets: Assets::board(),
