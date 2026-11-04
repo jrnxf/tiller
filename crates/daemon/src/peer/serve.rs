@@ -1,7 +1,8 @@
 //! `tiller peer serve` (`protocol.md` 10.2): the peer's half of a link, run
 //! by sshd for the board host's daemon. It reads `hello`, answers `welcome`
 //! or `refused`, then sends a `snapshot` or the replay, every new `events`
-//! row as an `event`, a `beat` every 10 s, and a `result` for each `query`.
+//! row as an `event`, a `beat` every 10 s, and a `result` for each `query`
+//! and each `mutate` (10.3, applied by [`super::forward`]).
 //!
 //! It serves this host's own records only. It has no client half: it never
 //! opens a link of its own, so a board host that is also some other host's
@@ -15,10 +16,12 @@ use std::time::{Duration, Instant};
 use axum::http::StatusCode;
 use serde_json::Value;
 use tiller_core::domain::{HostKind, PeerKey};
+use tiller_core::error::READ_ONLY_MARKER;
 use tiller_core::state::peers::PEER_PROTOCOL;
 use tiller_core::{Store, Timestamp};
 use tiller_herdr::client::Cli;
 
+use super::forward::{self, Mutate};
 use super::{Frame, Hello, PeerQueries, PeerSnapshot, Timing, Welcome, federation_accept};
 use crate::api::{ApiError, pane_tail_of};
 use crate::dto::{ErrorBody, MachinesResponse};
@@ -104,8 +107,8 @@ pub fn serve(
     link.run(&frames, &mut output)
 }
 
-/// Why a link is not served.
-enum Denied {
+/// Why a link is not served, or a `mutate` is refused.
+pub(super) enum Denied {
     /// A `refused` reason and a line for the owner.
     Refused(&'static str, String),
     /// This host could not check: no `refused` is sent, the link just ends,
@@ -119,8 +122,16 @@ impl From<tiller_core::Error> for Denied {
     }
 }
 
-fn refused<T>(reason: &'static str, message: String) -> Result<T, Denied> {
+pub(super) fn refused<T>(reason: &'static str, message: String) -> Result<T, Denied> {
     Err(Denied::Refused(reason, message))
+}
+
+/// How far a frame's `ts` is from `now`, in ms; `u64::MAX` when it does
+/// not parse.
+pub(super) fn skew_ms(ts: &str, now: Timestamp) -> u64 {
+    ts.parse::<Timestamp>()
+        .map(|ts| (now.as_millis() - ts.as_millis()).unsigned_abs())
+        .unwrap_or(u64::MAX)
 }
 
 /// The hello checks, in `protocol.md` 10.2 order.
@@ -147,11 +158,7 @@ fn check_hello(
     if !hello.verifies(&key.public_key, &host.id) {
         return refused("bad_sig", "the hello signature is not valid".to_owned());
     }
-    let skew = hello
-        .ts
-        .parse::<Timestamp>()
-        .map(|ts| (now.as_millis() - ts.as_millis()).unsigned_abs())
-        .unwrap_or(u64::MAX);
+    let skew = skew_ms(&hello.ts, now);
     if u128::from(skew) > config.timing.skew.as_millis() {
         return refused(
             "clock_skew",
@@ -169,7 +176,11 @@ fn check_hello(
 
 /// `federation.accept`, then the key row: what every `query` and every
 /// tick re-reads, so a changed pairing cuts a live link at once.
-fn current_key(store: &Store, config: &ServeConfig, key_id: &str) -> Result<PeerKey, Denied> {
+pub(super) fn current_key(
+    store: &Store,
+    config: &ServeConfig,
+    key_id: &str,
+) -> Result<PeerKey, Denied> {
     if !federation_accept(&config.home) {
         return refused("accept_off", "config federation.accept is false".to_owned());
     }
@@ -265,6 +276,22 @@ impl Link<'_> {
                         },
                     )?;
                 }
+                Ok(Frame::Mutate(frame)) => {
+                    // The checks run before anything is written; a refusal
+                    // is a 502 `result` and the link stays up.
+                    let (http_status, body) = self.mutate(&frame);
+                    // This link's own write does not move `data_version`.
+                    self.send_events(output, true)?;
+                    send(
+                        output,
+                        &Frame::Result {
+                            id: frame.id,
+                            http_status,
+                            body,
+                        },
+                    )?;
+                    self.recheck(output)?;
+                }
                 Ok(Frame::Refresh) => {
                     self.send_events(output, true)?;
                     let seq = self.send_snapshot(output)?;
@@ -288,6 +315,23 @@ impl Link<'_> {
                     },
                 )?;
             }
+        }
+    }
+
+    /// Verifies a `mutate` (`protocol.md` 10.3 step 3) and applies it.
+    fn mutate(&mut self, frame: &Mutate) -> (u16, Value) {
+        match forward::verify(&self.store, self.config, &self.key, frame, Timestamp::now()) {
+            Ok(op) => match std::fs::read_to_string(self.config.home.join(READ_ONLY_MARKER)) {
+                // The daemon found `state.db` damaged (`recovery.md` R10):
+                // a forwarded write is refused as a local one is.
+                Ok(reason) => crate::api::read_only(reason.trim()).into_result(),
+                Err(_) => forward::apply(&mut self.store, &self.key, frame, op),
+            },
+            Err(Denied::Refused(reason, message)) => {
+                tracing::warn!(reason, %message, "forwarded mutation refused");
+                ApiError::peer_refused(reason, message).into_result()
+            }
+            Err(Denied::Failed(error)) => ApiError::from(error).into_result(),
         }
     }
 

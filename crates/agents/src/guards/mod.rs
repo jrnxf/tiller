@@ -44,6 +44,8 @@ pub enum Code {
     WorktreeAdmin,
     Delegation,
     PersistentCd,
+    /// A peer link: `tiller peer`, or SSH to another host's `tiller` (G43).
+    Peer,
 }
 
 impl Code {
@@ -60,6 +62,7 @@ impl Code {
             Code::WorktreeAdmin => "worktree-admin",
             Code::Delegation => "delegation",
             Code::PersistentCd => "persistent-cd",
+            Code::Peer => "peer",
         }
     }
 
@@ -94,6 +97,9 @@ impl Code {
             }
             Code::PersistentCd => {
                 "do not move the orchestrator shell into a checkout: use git -C <dir> or a ( cd <dir> && ... ) subshell"
+            }
+            Code::Peer => {
+                "another host's records change only from the owner's board: hand the owner the one command to run"
             }
         }
     }

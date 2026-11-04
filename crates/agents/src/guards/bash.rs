@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::shell::{self, Script, Simple, Word};
+use super::shell::{self, Redirect, Script, Simple, Word};
 use super::{Code, Context, Denial, is_packaged, is_secret_path, path_denial, resolve};
 use crate::roles::Role;
 
@@ -245,6 +245,7 @@ pub(super) fn classify(command: &str, ctx: &Context<'_>) -> Option<Denial> {
         vars: HashMap::new(),
         background: HashSet::new(),
         depth: 0,
+        remote: false,
     };
     walker.text(command, true)
 }
@@ -257,6 +258,8 @@ struct Walker<'a, 'b> {
     /// background: the one process id `kill` may take from a variable.
     background: HashSet<String>,
     depth: usize,
+    /// The script runs on another host through `ssh`, `mosh` or `et`.
+    remote: bool,
 }
 
 impl Walker<'_, '_> {
@@ -741,6 +744,13 @@ impl Walker<'_, '_> {
 
     fn unknown_program(&self, words: &[Arg]) -> Option<Denial> {
         let shown = texts(words);
+        if self.remote {
+            return self.deny(
+                Code::Peer,
+                "the remote program is not known before it runs and could be tiller",
+                shown,
+            );
+        }
         protected(&shown).then(|| {
             Denial::new(
                 guessed_code(&shown),
@@ -765,6 +775,13 @@ impl Walker<'_, '_> {
         all.extend_from_slice(args);
         let shown = texts(&all);
         let ctx = self.ctx;
+        if self.remote && name == "tiller" {
+            return self.deny(
+                Code::Peer,
+                "the remote command runs tiller on another host",
+                shown,
+            );
+        }
         if SHELLS.contains(&name) {
             return self.shell(args, command, script, appended);
         }
@@ -939,6 +956,7 @@ impl Walker<'_, '_> {
             "git" => return self.git(args, &shown, appended),
             "gh" | "gh-axi" => return self.gh(name, args, &shown, appended),
             "tiller" => return self.tiller(program, args, &shown, appended),
+            "ssh" | "mosh" | "et" => return self.remote_shell(name, args, command, &shown),
             "cd" | "pushd" if persists && ctx.role == Role::Orchestrator => {
                 return self.cd(args, &shown);
             }
@@ -1909,6 +1927,87 @@ impl Walker<'_, '_> {
         })
     }
 
+    /// `ssh`, `mosh` or `et` that runs `tiller` on another host: a peer's
+    /// `tiller` is reached only by the board host's daemon (G43). The remote
+    /// command, each option that holds a command, and a script fed on
+    /// standard input are read as scripts on that host, and a word in them
+    /// not known before it runs could name `tiller` too.
+    fn remote_shell(
+        &mut self,
+        name: &str,
+        args: &[Arg],
+        command: &Simple,
+        shown: &str,
+    ) -> Option<Denial> {
+        let parsed = match remote_args(name, args) {
+            Ok(parsed) => parsed,
+            Err(why) => return self.deny(Code::Peer, why, shown),
+        };
+        for script in &parsed.scripts {
+            if !script.fixed {
+                return self.deny(
+                    Code::Peer,
+                    format!("a {name} option that runs a command is not known before it runs"),
+                    shown,
+                );
+            }
+            if let Some(found) = self.remote(&script.text) {
+                return Some(found);
+            }
+        }
+        if parsed.command.iter().any(|word| !word.fixed) {
+            return self.deny(
+                Code::Peer,
+                format!("the {name} remote command is not known before it runs"),
+                shown,
+            );
+        }
+        if !parsed.command.is_empty()
+            && let Some(found) = self.remote(&texts(&parsed.command))
+        {
+            return Some(found);
+        }
+        if !parsed.destination || !reads_script(&parsed.command) {
+            return None;
+        }
+        for redirect in &command.redirects {
+            if redirect.stdin_text {
+                if let Some(found) = self.remote(&redirect.target.text) {
+                    return Some(found);
+                }
+            } else if reads_stdin(redirect) {
+                return self.deny(
+                    Code::Peer,
+                    format!("{name} reads a remote script from a file"),
+                    shown,
+                );
+            }
+        }
+        command.piped_in.then(|| {
+            Denial::new(
+                Code::Peer,
+                format!("{name} reads a remote script from standard input"),
+                shown,
+            )
+        })
+    }
+
+    /// Reads `text` as a script that runs on another host, where this
+    /// script's variables are not set and any `tiller` is a peer's.
+    fn remote(&mut self, text: &str) -> Option<Denial> {
+        if shell::parse(text).is_err() {
+            return self.deny(Code::Peer, "the remote command could not be read", text);
+        }
+        let vars = std::mem::take(&mut self.vars);
+        let background = std::mem::take(&mut self.background);
+        let remote = std::mem::replace(&mut self.remote, true);
+        let found = self.text(text, false);
+        self.vars = vars;
+        self.background = background;
+        self.remote = remote;
+        found
+    }
+
     fn tiller(&self, program: &Arg, args: &[Arg], shown: &str, appended: bool) -> Option<Denial> {
         let ctx = self.ctx;
         if program.text.contains('/') {
@@ -1973,6 +2072,9 @@ impl Walker<'_, '_> {
             .get(1)
             .map(|arg| arg.text.as_str())
             .unwrap_or("");
+        if sub.text == "peer" {
+            return self.deny(Code::Peer, "tiller peer runs a peer link", shown);
+        }
         let owner_only = match sub.text.as_str() {
             "approve" => {
                 if ctx.role == Role::Orchestrator && !appended && chat_approve(args) {
@@ -1981,7 +2083,7 @@ impl Walker<'_, '_> {
                 true
             }
             "grant" | "away" | "land" | "board" | "import" | "hook" | "guard" | "owner"
-            | "init" | "backup" | "export" | "restore" | "daemon" | "peer" | "host" => true,
+            | "init" | "backup" | "export" | "restore" | "daemon" | "host" => true,
             "migrate" => unseen || second == "down",
             "config" => unseen || second == "set",
             "project" => second != "list",
@@ -2027,6 +2129,251 @@ fn chat_approve(args: &[Arg]) -> bool {
         j += 1;
     }
     ids == 1 && asks == 1
+}
+
+/// `ssh`, `mosh` or `et` arguments, read the way the client reads them.
+#[derive(Default)]
+struct Remote {
+    /// A host is named, so the client connects to it.
+    destination: bool,
+    /// Option values that hold a command (`-o ProxyCommand=...`,
+    /// `mosh --server`, `et -c`).
+    scripts: Vec<Arg>,
+    /// The words after the destination: the remote command.
+    command: Vec<Arg>,
+}
+
+/// `ssh` flags that take no value.
+const SSH_FLAGS: &str = "46AaCfGgKkMNnqsTtVvXxYy";
+/// `ssh` options that take a value, attached or as the next word.
+const SSH_VALUES: &str = "BbcDEeFIiJLlmOoPpQRSWw";
+/// `ssh -o` keys whose value is a command.
+const SSH_COMMAND_KEYS: &[&str] = &[
+    "proxycommand",
+    "localcommand",
+    "remotecommand",
+    "knownhostscommand",
+];
+
+/// The options a client takes, by name.
+struct Options {
+    flags: &'static [&'static str],
+    values: &'static [&'static str],
+    /// The options among `values` whose value is a command.
+    commands: &'static [&'static str],
+}
+
+const MOSH_OPTIONS: Options = Options {
+    flags: &[
+        "-a",
+        "-n",
+        "-4",
+        "-6",
+        "-o",
+        "--predict-overwrite",
+        "--no-init",
+        "--local",
+        "--ssh-pty",
+        "--no-ssh-pty",
+        "--help",
+        "--version",
+    ],
+    values: &[
+        "-p",
+        "--port",
+        "--ssh",
+        "--server",
+        "--client",
+        "--predict",
+        "--family",
+        "--bind-server",
+        "--experimental-remote-ip",
+    ],
+    commands: &["--ssh", "--server", "--client"],
+};
+
+const ET_OPTIONS: Options = Options {
+    flags: &[
+        "-x",
+        "-N",
+        "-f",
+        "-h",
+        "--kill-other-sessions",
+        "--no-terminal",
+        "--forward-ssh-agent",
+        "--silent",
+        "--noexit",
+        "--help",
+        "--version",
+    ],
+    values: &[
+        "-c",
+        "--command",
+        "-p",
+        "--port",
+        "-u",
+        "-t",
+        "--tunnel",
+        "-r",
+        "--reversetunnel",
+        "--jumphost",
+        "--jport",
+        "-v",
+        "--verbose",
+        "--serverfifo",
+        "--logdir",
+        "--ssh-option",
+        "--terminal-path",
+    ],
+    commands: &["-c", "--command", "--terminal-path", "--ssh-option"],
+};
+
+/// Splits a client's arguments into options, the destination and the remote
+/// command. Options may follow the destination; the first word after it that
+/// is not an option, or `--`, starts the command. An option the guard does
+/// not know is refused, since its value could hold a command.
+fn remote_args(name: &str, args: &[Arg]) -> Result<Remote, String> {
+    let mut out = Remote::default();
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        i += 1;
+        if arg.is("--") {
+            if !out.destination && i < args.len() {
+                out.destination = true;
+                i += 1;
+            }
+            out.command = args.get(i..).unwrap_or_default().to_vec();
+            return Ok(out);
+        }
+        if !arg.fixed || !arg.text.starts_with('-') || arg.text == "-" {
+            if out.destination {
+                out.command = args[i - 1..].to_vec();
+                return Ok(out);
+            }
+            out.destination = true;
+            continue;
+        }
+        let (used, script) = match name {
+            "ssh" => ssh_option(arg, args.get(i))?,
+            "mosh" => listed_option(name, &MOSH_OPTIONS, arg, args.get(i))?,
+            _ => listed_option(name, &ET_OPTIONS, arg, args.get(i))?,
+        };
+        i += used;
+        out.scripts.extend(script);
+    }
+    Ok(out)
+}
+
+/// One `ssh` option cluster such as `-tt`, `-p2222` or `-o Key=value`: how
+/// many of the following words it takes, and the command it holds, if any.
+fn ssh_option(arg: &Arg, next: Option<&Arg>) -> Result<(usize, Option<Arg>), String> {
+    for (at, letter) in arg.text.char_indices().skip(1) {
+        if SSH_FLAGS.contains(letter) {
+            continue;
+        }
+        if !SSH_VALUES.contains(letter) {
+            return Err(format!("ssh option -{letter} is not one the guard knows"));
+        }
+        let rest = &arg.text[at + letter.len_utf8()..];
+        let (value, used) = if rest.is_empty() {
+            match next {
+                Some(next) => (next.clone(), 1),
+                None => return Ok((0, None)),
+            }
+        } else {
+            (
+                Arg {
+                    text: rest.to_owned(),
+                    fixed: arg.fixed,
+                },
+                0,
+            )
+        };
+        if letter != 'o' {
+            return Ok((used, None));
+        }
+        if !value.fixed {
+            return Ok((used, Some(value)));
+        }
+        let option = value.text.trim_start();
+        let split = option
+            .find(|c: char| c == '=' || c.is_whitespace())
+            .unwrap_or(option.len());
+        let (key, command) = option.split_at(split);
+        let command = command.trim_start_matches(|c: char| c == '=' || c.is_whitespace());
+        let runs = SSH_COMMAND_KEYS.contains(&key.to_ascii_lowercase().as_str());
+        return Ok((used, runs.then(|| Arg::fixed(command))));
+    }
+    Ok((0, None))
+}
+
+/// One `mosh` or `et` option, by the client's table: how many of the
+/// following words it takes, and the command it holds, if any.
+fn listed_option(
+    name: &str,
+    options: &Options,
+    arg: &Arg,
+    next: Option<&Arg>,
+) -> Result<(usize, Option<Arg>), String> {
+    let text = arg.text.as_str();
+    let (key, attached) = match text.split_once('=') {
+        Some((key, value)) if key.starts_with("--") => (key, Some(value)),
+        _ if !text.starts_with("--") => match text.split_at_checked(2) {
+            Some((key, value)) if !value.is_empty() => (key, Some(value)),
+            _ => (text, None),
+        },
+        _ => (text, None),
+    };
+    if attached.is_none() && options.flags.contains(&key) {
+        return Ok((0, None));
+    }
+    if !options.values.contains(&key) {
+        return Err(format!("{name} option {key} is not one the guard knows"));
+    }
+    let (value, used) = match attached {
+        Some(value) => (
+            Arg {
+                text: value.to_owned(),
+                fixed: arg.fixed,
+            },
+            0,
+        ),
+        None => match next {
+            Some(next) => (next.clone(), 1),
+            None => return Ok((0, None)),
+        },
+    };
+    Ok((used, options.commands.contains(&key).then_some(value)))
+}
+
+/// Programs that read a script on standard input when given none.
+const SCRIPT_READERS: &[&str] = &[
+    "python", "python3", "perl", "ruby", "node", "bun", "deno", "php", "lua", "xargs", "source",
+    ".",
+];
+
+/// A remote command that reads a script on standard input. With no command,
+/// the remote login shell reads one.
+fn reads_script(words: &[Arg]) -> bool {
+    words.is_empty()
+        || words.iter().any(|word| {
+            word.text
+                .split(|c: char| !(c.is_ascii_alphanumeric() || "-_./".contains(c)))
+                .any(|token| {
+                    let name = basename(token);
+                    SHELLS.contains(&name) || SCRIPT_READERS.contains(&name)
+                })
+        })
+}
+
+/// A redirection that feeds a file on standard input (`<`, `0<`, `<&`).
+fn reads_stdin(redirect: &Redirect) -> bool {
+    let fd_len = redirect
+        .op
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(redirect.op.len());
+    let (fd, op) = redirect.op.split_at(fd_len);
+    matches!(fd, "" | "0") && op.starts_with('<') && redirect.target.text != "/dev/null"
 }
 
 fn is_sha(text: &str) -> bool {

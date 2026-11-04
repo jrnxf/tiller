@@ -1137,6 +1137,8 @@ pub fn timeline(store: &Store, reference: &str, before: Option<i64>) -> Result<T
             at: at(event.at),
             actor: match event.actor.as_str() {
                 "owner" | "board" => "you",
+                // The owner on a paired board host (a forwarded mutation).
+                actor if actor.starts_with("board@") => "you",
                 "hook" => "hook",
                 actor if actor.starts_with("session:") => "orchestrator",
                 _ => "system",

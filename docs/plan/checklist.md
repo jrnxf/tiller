@@ -455,10 +455,10 @@ ADR 0003, accepted Tuesday 2026-11-03. The owner approved it; runs in one or two
 ### F4 Forwarded mutations
 `opus` high - 3-4 h - after F3
 
-- [ ] `mutate` frames signed and verified in the order `protocol.md` 10.3 gives; the allowlist on both hosts
+- [x] `mutate` frames signed and verified in the order `protocol.md` 10.3 gives; the allowlist on both hosts
 - [ ] 502, 503 and 504 codes; idempotent retry; actor `board@<label>` with `via_peer`; the unauthorized-action detector accepts it
-- [ ] Deny rule `Bash(tiller peer *)` and backstop `[peer]`; the G41, G43 and G44 tests not already in F3; live `sandboxed_role_cannot_reach_peer_ssh`
-- [ ] Check: `daemon::peer::mutate_bad_sig_refused`, `mutate_replayed_ts_refused`, `mutate_wrong_host_id_refused`, `revoked_key_refused`, `read_scope_cannot_mutate`, `spawn_not_forwardable`, `forwarded_precondition_failure_passes_through`, `same_key_twice_applies_once`, `unreachable_returns_503_and_queues_nothing`, `forwarded_mutation_never_writes_viewer_db`, `frames_never_carry_cookie`; `agents::guards::peer_commands_denied`, `ssh_remote_tiller_denied`
+- [x] Deny rule `Bash(tiller peer *)` and backstop `[peer]`; the G41, G43 and G44 tests not already in F3; live `sandboxed_role_cannot_reach_peer_ssh`
+- [x] Check: `daemon::peer::mutate_bad_sig_refused`, `mutate_replayed_ts_refused`, `mutate_wrong_host_id_refused`, `revoked_key_refused`, `read_scope_cannot_mutate`, `spawn_not_forwardable`, `forwarded_precondition_failure_passes_through`, `same_key_twice_applies_once`, `unreachable_returns_503_and_queues_nothing`, `forwarded_mutation_never_writes_viewer_db`, `frames_never_carry_cookie`; `agents::guards::peer_commands_denied`, `ssh_remote_tiller_denied`
 - [ ] Delivered
 
 ### F5 Board: host chips and staleness

@@ -511,6 +511,41 @@ fn sandboxed_role_cannot_reach_board_api() {
     );
 }
 
+/// G43: a peer's SSH endpoint, stood in for by a listener here on loopback
+/// and on this host's own outward address, is not on the sandbox network
+/// allow list.
+#[test]
+#[ignore = "live: one model session on this host"]
+fn sandboxed_role_cannot_reach_peer_ssh() {
+    let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut hosts = vec!["'127.0.0.1'".to_owned()];
+    hosts.extend(outward_ip().map(|ip| format!("'{ip}'")));
+    let lab = Lab::new(Role::Builder);
+    let call = lab.bash(&format!(
+        "python3 -c \"import socket; print('probe-ran', [socket.socket().connect_ex((host, {port})) for host in [{}]])\"",
+        hosts.join(", ")
+    ));
+    assert!(
+        call.result.contains("probe-ran"),
+        "the probe did not run: {call:#?}"
+    );
+    assert!(
+        listener.accept().is_err(),
+        "the sandboxed shell reached the peer's SSH port {port} on one of {hosts:?}"
+    );
+}
+
+/// This host's address on its default route, the one a peer is reached
+/// from. Connecting a UDP socket sends no packet.
+fn outward_ip() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("192.0.2.1:9").ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
 #[test]
 #[ignore = "live: one model session on this host"]
 fn sandboxed_role_cannot_reach_herdr() {

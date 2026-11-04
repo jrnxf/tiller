@@ -79,6 +79,16 @@
               }
             }
           },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "503": {
             "content": {
               "application/json": {
@@ -129,6 +139,33 @@
           },
           "422": {
             "description": "the head moved: `current.head_sha` is the bound head",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
             "content": {
               "application/json": {
                 "schema": {
@@ -231,6 +268,33 @@
             }
           },
           "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
             "content": {
               "application/json": {
                 "schema": {
@@ -359,6 +423,36 @@
                 }
               }
             }
+          },
+          "502": {
+            "description": "`peer_refused`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`peer_unreachable`: nothing was sent or queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`forward_uncertain`: retry with the same key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -466,6 +560,33 @@
                 }
               }
             }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -502,6 +623,33 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -544,6 +692,33 @@
                 }
               }
             }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -580,6 +755,33 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -622,6 +824,33 @@
                 }
               }
             }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       },
@@ -656,6 +885,33 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -695,6 +951,33 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -942,6 +1225,16 @@
             }
           },
           "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
             "content": {
               "application/json": {
                 "schema": {
@@ -1224,6 +1517,13 @@
           "answer": {
             "type": "string",
             "description": "The owner's exact words."
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label: forward the mutation to it (`protocol.md`\n7.4, 10.3). Absent means this host."
           },
           "idempotency_key": {
             "type": "string"
@@ -2079,6 +2379,13 @@
           "text"
         ],
         "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label: forward the mutation to it (`protocol.md`\n7.4, 10.3). Absent means this host."
+          },
           "idempotency_key": {
             "type": "string"
           },
@@ -2103,6 +2410,13 @@
               "string",
               "null"
             ]
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label: forward the mutation to it (`protocol.md`\n7.4, 10.3). Absent means this host."
           },
           "idempotency_key": {
             "type": "string"
@@ -2142,6 +2456,13 @@
           "head_sha": {
             "type": "string",
             "description": "The head the board showed; a mismatch is 422 with the bound head."
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label: forward the mutation to it (`protocol.md`\n7.4, 10.3). Absent means this host."
           },
           "idempotency_key": {
             "type": "string"
@@ -2186,6 +2507,13 @@
               "string",
               "null"
             ]
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label: forward the mutation to it (`protocol.md`\n7.4, 10.3). Absent means this host."
           },
           "idempotency_key": {
             "type": "string"
@@ -2251,6 +2579,13 @@
               "null"
             ]
           },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The peer a forwarded mutation was for (`protocol.md` 10.3)."
+          },
           "id": {
             "type": [
               "string",
@@ -2259,6 +2594,13 @@
           },
           "message": {
             "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`peer_refused` only: which check refused (`protocol.md` 10.3)."
           }
         }
       },
@@ -2297,6 +2639,13 @@
           "idempotency_key"
         ],
         "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label: forward the mutation to it (`protocol.md`\n7.4, 10.3). Absent means this host."
+          },
           "idempotency_key": {
             "type": "string"
           }
@@ -2399,6 +2748,13 @@
           "reason"
         ],
         "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label: forward the mutation to it (`protocol.md`\n7.4, 10.3). Absent means this host."
+          },
           "idempotency_key": {
             "type": "string"
           },
@@ -2640,6 +2996,13 @@
               "type": "integer",
               "format": "int64"
             }
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The peer that applied a forwarded mutation (`protocol.md` 10.3);\nabsent for this host's own."
           },
           "ok": {
             "type": "boolean",
@@ -3414,6 +3777,13 @@
           "stage"
         ],
         "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label: forward the mutation to it (`protocol.md`\n7.4, 10.3). Absent means this host."
+          },
           "idempotency_key": {
             "type": "string"
           },
@@ -3482,6 +3852,13 @@
           "idempotency_key"
         ],
         "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label: forward the mutation to it (`protocol.md`\n7.4, 10.3). Absent means this host."
+          },
           "idempotency_key": {
             "type": "string"
           },

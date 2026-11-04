@@ -6,29 +6,32 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use axum::Router;
 use axum::http::StatusCode;
 use ed25519_dalek::SigningKey;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tiller_core::domain::{CardKind, PeerScope};
+use tiller_core::error::READ_ONLY_MARKER;
 use tiller_core::state::cards::NewCard;
 use tiller_core::state::peers::{
     KeyFile, NewPairing, NewPeerKey, generate_key, key_path, public_key_text, write_key_file,
 };
 use tiller_core::{Store, Timestamp};
 use tiller_herdr::testing::{Fleet, owner};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{broadcast, watch};
 use tokio::time::Instant;
 
+use super::forward::{Mutate, Op, Order};
 use super::link::{Connecting, Connection, Connector, PeerMessage, Peers, Target};
 use super::serve::{ServeConfig, own_snapshot, serve};
 use super::{Frame, Hello, HelloKey, Timing, Welcome};
-use crate::api::tests::{app_with_peers, get};
-use crate::dto::{BoardResponse, ErrorBody, LinkState};
+use crate::api::tests::{Answer, app_with_peers, get, mutation, owner_cookie, send};
+use crate::dto::{BoardResponse, ErrorBody, ErrorDetail, LinkState, MutationResponse};
 use crate::readonly::Damage;
 
 fn ms(millis: u64) -> Duration {
@@ -684,4 +687,778 @@ fn serve_never_opens_onward_link() {
     assert_eq!(ask("q1", format!("cards/{own}")), 200);
     assert_eq!(ask("q2", format!("cards/{own}?host=third")), 400);
     assert_eq!(ask("q3", format!("cards/{third_card}")), 404);
+}
+
+// -- forwarded mutations (`protocol.md` 10.3) -------------------------------------
+
+fn card_id(fleet: &Fleet, title: &str) -> String {
+    fleet
+        .open()
+        .conn()
+        .query_row("SELECT id FROM cards WHERE title = ?1", [title], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+fn titled(fleet: &Fleet, title: &str) -> i64 {
+    fleet
+        .open()
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM cards WHERE title = ?1",
+            [title],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn last_seq(fleet: &Fleet) -> i64 {
+    fleet.open().last_seq().unwrap()
+}
+
+/// Each event after `seq` on `fleet`, as `txn kind actor`.
+fn events_since(fleet: &Fleet, seq: i64) -> Vec<String> {
+    let store = fleet.open();
+    let mut statement = store
+        .conn()
+        .prepare("SELECT txn || ' ' || kind || ' ' || actor || ' ' || payload FROM events WHERE seq > ?1")
+        .unwrap();
+    statement
+        .query_map([seq], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+fn signer(pair: &Pair) -> HelloKey<'_> {
+    HelloKey {
+        key: &pair.key,
+        from: "test-host",
+        key_id: &pair.key_id,
+        viewer_host_id: &pair.board.host,
+    }
+}
+
+fn comment_order(card: &str, key: &str) -> Order {
+    Order {
+        op: Op::Comment,
+        target: Some(card.to_owned()),
+        body: json!({"idempotency_key": key, "text": "from the board"}),
+        idempotency_key: key.to_owned(),
+    }
+}
+
+/// A signed `comment` on `card` for the peer, as the board host sends it.
+fn comment(pair: &Pair, card: &str, key: &str) -> Mutate {
+    Mutate::signed(
+        &signer(pair),
+        &pair.peer.host,
+        comment_order(card, key),
+        Timestamp::now(),
+    )
+}
+
+/// A link to the peer's `peer serve`, past `welcome` and the snapshot.
+fn linked(pair: &Pair) -> SyncLink {
+    let mut link = SyncLink::open(pair.peer.dir.path());
+    link.send(&hello(pair, None));
+    assert!(matches!(link.next(), Frame::Welcome(_)));
+    assert!(matches!(link.next(), Frame::Snapshot(_)));
+    link
+}
+
+impl SyncLink {
+    /// Sends `frame` and returns its `result`'s status and body.
+    fn mutate(&mut self, frame: Mutate) -> (u16, Value) {
+        let id = frame.id.clone();
+        self.send(&Frame::Mutate(Box::new(frame)));
+        loop {
+            match self.next() {
+                Frame::Result {
+                    id: answered,
+                    http_status,
+                    body,
+                } if answered == id => return (http_status, body),
+                Frame::Event(_) => {}
+                frame => panic!("expected a result, got {frame:?}"),
+            }
+        }
+    }
+}
+
+/// A 502 `peer_refused` naming `reason`, with no event written on the peer
+/// since `before`.
+#[track_caller]
+fn assert_refused(pair: &Pair, (status, body): (u16, Value), reason: &str, before: i64) {
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(body["error"]["code"], "peer_refused", "{body}");
+    assert_eq!(body["error"]["reason"], reason, "{body}");
+    assert_eq!(last_seq(&pair.peer), before, "a refused mutate wrote");
+}
+
+#[test]
+fn mutate_bad_sig_refused() {
+    let pair = pair();
+    add_card(&pair.peer, "a peer card");
+    let card = card_id(&pair.peer, "a peer card");
+    let mut link = linked(&pair);
+    let before = last_seq(&pair.peer);
+
+    // A body changed after it was signed.
+    let mut tampered = comment(&pair, &card, "k-1");
+    tampered.body["text"] = json!("not what was signed");
+    assert_refused(&pair, link.mutate(tampered), "bad_sig", before);
+
+    // Signed by a key the peer never accepted, under this link's key id.
+    let stranger = generate_key().unwrap();
+    let forged = Mutate::signed(
+        &HelloKey {
+            key: &stranger,
+            ..signer(&pair)
+        },
+        &pair.peer.host,
+        comment_order(&card, "k-2"),
+        Timestamp::now(),
+    );
+    assert_refused(&pair, link.mutate(forged), "bad_sig", before);
+
+    // An unsigned frame.
+    let mut unsigned = comment(&pair, &card, "k-3");
+    unsigned.sig.clear();
+    assert_refused(&pair, link.mutate(unsigned), "bad_sig", before);
+
+    // A refusal answers that frame only: the link still applies a good one.
+    let (status, body) = link.mutate(comment(&pair, &card, "k-4"));
+    assert_eq!(status, 200, "{body}");
+}
+
+#[test]
+fn mutate_replayed_ts_refused() {
+    let pair = pair();
+    add_card(&pair.peer, "a peer card");
+    let card = card_id(&pair.peer, "a peer card");
+    let mut link = linked(&pair);
+    let before = last_seq(&pair.peer);
+
+    // Older or newer than the 120 s skew, with a valid signature.
+    for minutes in [-10, -3, 3] {
+        let stale = Mutate::signed(
+            &signer(&pair),
+            &pair.peer.host,
+            comment_order(&card, &format!("k-{minutes}")),
+            Timestamp::now().plus_minutes(minutes),
+        );
+        assert_refused(&pair, link.mutate(stale), "clock_skew", before);
+    }
+
+    // The same fresh frame sent twice applies once: the second answer is
+    // the stored one.
+    let frame = comment(&pair, &card, "k-fresh");
+    let (status, first) = link.mutate(frame.clone());
+    assert_eq!(status, 200, "{first}");
+    let applied = last_seq(&pair.peer);
+    assert!(applied > before);
+    let (status, again) = link.mutate(frame);
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["replayed"], true, "{again}");
+    assert_eq!(again["events"], first["events"]);
+    assert_eq!(last_seq(&pair.peer), applied);
+}
+
+#[test]
+fn mutate_wrong_host_id_refused() {
+    let pair = pair();
+    add_card(&pair.peer, "a peer card");
+    let card = card_id(&pair.peer, "a peer card");
+    let mut link = linked(&pair);
+    let before = last_seq(&pair.peer);
+    let third = Fleet::new();
+    for host in [&pair.board.host, &third.host, &String::new()] {
+        let elsewhere = Mutate::signed(
+            &signer(&pair),
+            host,
+            comment_order(&card, "k-1"),
+            Timestamp::now(),
+        );
+        assert_refused(&pair, link.mutate(elsewhere), "wrong_host", before);
+    }
+}
+
+/// G26 on the peer: a marker naming another system refuses a forwarded
+/// write, and one naming `tiller` takes it again.
+#[test]
+fn owner_marker_refuses_forwarded_mutations() {
+    let pair = pair();
+    add_card(&pair.peer, "a peer card");
+    let card = card_id(&pair.peer, "a peer card");
+    let mut link = linked(&pair);
+    let before = last_seq(&pair.peer);
+    let marker = pair.peer.dir.path().join("owner");
+    std::fs::write(&marker, "other-system\n").unwrap();
+    assert_refused(
+        &pair,
+        link.mutate(comment(&pair, &card, "k-1")),
+        "owner_marker",
+        before,
+    );
+    std::fs::write(&marker, "tiller\n").unwrap();
+    let (status, body) = link.mutate(comment(&pair, &card, "k-2"));
+    assert_eq!(status, 200, "{body}");
+}
+
+/// G25 on the peer: a card in a project another host owns is not the
+/// peer's to change.
+#[test]
+fn foreign_project_refused() {
+    let pair = pair();
+    add_card(&pair.peer, "a peer card");
+    let card = card_id(&pair.peer, "a peer card");
+    let mut link = linked(&pair);
+    {
+        let store = pair.peer.open();
+        let other = "01JHOSTC0000000000000000000";
+        store
+            .conn()
+            .execute(
+                "INSERT INTO hosts (id, label, kind) VALUES (?1, 'host-c', 'remote')",
+                [other],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE projects SET owner_host_id = ?1 WHERE id = 'alpha'",
+                [other],
+            )
+            .unwrap();
+    }
+    let before = last_seq(&pair.peer);
+    assert_refused(
+        &pair,
+        link.mutate(comment(&pair, &card, "k-1")),
+        "foreign_project",
+        before,
+    );
+}
+
+/// R10 on the peer: while its daemon holds `state.db` read-only, a
+/// forwarded write gets the same 503 a local one does.
+#[test]
+fn damaged_peer_refuses_forwarded_mutations() {
+    let pair = pair();
+    add_card(&pair.peer, "a peer card");
+    let card = card_id(&pair.peer, "a peer card");
+    let mut link = linked(&pair);
+    let before = last_seq(&pair.peer);
+    std::fs::write(
+        pair.peer.dir.path().join(READ_ONLY_MARKER),
+        "quick_check: test damage",
+    )
+    .unwrap();
+    let (status, body) = link.mutate(comment(&pair, &card, "k-1"));
+    assert_eq!(status, 503, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert_eq!(body["error"]["code"], "unavailable", "{body}");
+    assert!(
+        message
+            .contains("read only: state.db failed its integrity check (quick_check: test damage)"),
+        "{body}"
+    );
+    assert_eq!(last_seq(&pair.peer), before, "a read-only peer wrote");
+}
+
+#[test]
+fn revoked_key_refused() {
+    let pair = pair();
+    add_card(&pair.peer, "a peer card");
+    let card = card_id(&pair.peer, "a peer card");
+    let mut link = linked(&pair);
+    pair.peer.open().peer_revoke(&owner(), "test-host").unwrap();
+    let before = last_seq(&pair.peer);
+
+    // The revoke lands mid-link: the mutate is refused, or the link is
+    // closed with `refused` first. Either way nothing is written.
+    let frame = comment(&pair, &card, "k-1");
+    let id = frame.id.clone();
+    let _ = link
+        .writer
+        .write_all(Frame::Mutate(Box::new(frame)).line().unwrap().as_bytes());
+    let reason = loop {
+        match link.next() {
+            Frame::Result {
+                id: answered,
+                http_status,
+                body,
+            } if answered == id => {
+                assert_eq!(http_status, 502, "{body}");
+                break body["error"]["reason"].as_str().unwrap().to_owned();
+            }
+            Frame::Refused { reason, .. } => break reason,
+            Frame::Event(_) => {}
+            frame => panic!("expected a refusal, got {frame:?}"),
+        }
+    };
+    assert_eq!(reason, "revoked");
+    assert_eq!(last_seq(&pair.peer), before);
+
+    // A new link with the revoked key is refused at `hello`.
+    let mut again = SyncLink::open(pair.peer.dir.path());
+    again.send(&hello(&pair, None));
+    assert!(
+        matches!(again.next(), Frame::Refused { reason, .. } if reason == "revoked"),
+        "a revoked key opened a link"
+    );
+}
+
+#[test]
+fn spawn_not_forwardable() {
+    let pair = pair();
+    add_card(&pair.peer, "a peer card");
+    let card = card_id(&pair.peer, "a peer card");
+    let mut link = linked(&pair);
+    let before = last_seq(&pair.peer);
+    for op in [
+        "POST /api/v1/runs",
+        "POST /api/v1/projects/{id}/stage",
+        "POST /api/v1/agents/{session}/focus",
+        "POST /api/v1/memory/proposals/{id}/decide",
+        "DELETE /api/v1/cards/{id}",
+    ] {
+        let mut frame = comment(&pair, &card, "k-1");
+        frame.op = op.to_owned();
+        frame.body = json!({"idempotency_key": "k-1", "project": "alpha", "role": "builder"});
+        frame.sign(&pair.key);
+        assert_refused(&pair, link.mutate(frame), "not_allowlisted", before);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn spawn_not_forwardable_from_the_board() {
+    // Off the allowlist, the board refuses before it looks at the link:
+    // the same 502 with no link task at all.
+    let pair = pair();
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), Peers::idle());
+    let before = (last_seq(&pair.board), last_seq(&pair.peer));
+    for (path, body) in [
+        (
+            "/api/v1/projects/alpha/stage",
+            json!({"idempotency_key": "k-1", "host": "peer", "rev": 1, "stage": "launched"}),
+        ),
+        (
+            "/api/v1/agents/w1:p1/focus",
+            json!({"idempotency_key": "k-2", "host": "peer"}),
+        ),
+    ] {
+        let answer = send(&app, mutation("POST", path, body, &[("cookie", &cookie)])).await;
+        let error = refusal(&answer, StatusCode::BAD_GATEWAY);
+        assert_eq!(error.code, "peer_refused");
+        assert_eq!(error.reason.as_deref(), Some("not_allowlisted"));
+        assert_eq!(error.host.as_deref(), Some("peer"));
+    }
+    assert_eq!((last_seq(&pair.board), last_seq(&pair.peer)), before);
+}
+
+#[test]
+fn read_scope_cannot_mutate() {
+    let pair = pair();
+    add_card(&pair.peer, "a peer card");
+    let card = card_id(&pair.peer, "a peer card");
+    pair.peer
+        .open()
+        .conn()
+        .execute("UPDATE peer_keys SET scope = 'read'", [])
+        .unwrap();
+    let mut link = linked(&pair);
+    let before = last_seq(&pair.peer);
+    assert_refused(
+        &pair,
+        link.mutate(comment(&pair, &card, "k-1")),
+        "read_scope",
+        before,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn read_scope_cannot_mutate_from_the_board() {
+    // A `read` pairing on the board host never sends a mutate at all.
+    let pair = pair();
+    add_card(&pair.peer, "a peer card");
+    let card = card_id(&pair.peer, "a peer card");
+    for fleet in [&pair.board, &pair.peer] {
+        let store = fleet.open();
+        let conn = store.conn();
+        conn.execute(
+            "UPDATE hosts SET peer_scope = 'read' WHERE peer_scope IS NOT NULL",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE peer_keys SET scope = 'read'", [])
+            .unwrap();
+    }
+    let wire = Wire::new(pair.peer.dir.path());
+    let sent = wire.sent.clone();
+    let (peers, _stop) = start(pair.board.dir.path(), wire);
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let before = (last_seq(&pair.board), last_seq(&pair.peer));
+    let answer = forward_comment(&app, &cookie, &card, "k-1").await;
+    let error = refusal(&answer, StatusCode::BAD_GATEWAY);
+    assert_eq!(error.reason.as_deref(), Some("read_scope"));
+    assert_eq!(error.host.as_deref(), Some("peer"));
+    assert_eq!((last_seq(&pair.board), last_seq(&pair.peer)), before);
+    assert!(!wire_text(&sent).contains(r#""type":"mutate""#));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn forwarded_precondition_failure_passes_through() {
+    let pair = pair();
+    add_card(&pair.peer, "a peer card");
+    add_card(&pair.board, "a local card");
+    let card = card_id(&pair.peer, "a peer card");
+    let local = card_id(&pair.board, "a local card");
+    let (peers, _stop) = start(pair.board.dir.path(), Wire::new(pair.peer.dir.path()));
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let before = last_seq(&pair.peer);
+
+    // Closing a ship card `completed` is the peer's own refusal, exactly as
+    // this host's board answers the same request for its own card.
+    let close = |id: &str, host: Option<&str>| {
+        let mut body = json!({"idempotency_key": format!("k-{id}"), "outcome": "completed"});
+        if let Some(host) = host {
+            body["host"] = json!(host);
+        }
+        mutation(
+            "POST",
+            &format!("/api/v1/cards/{id}/close"),
+            body,
+            &[("cookie", &cookie)],
+        )
+    };
+    let here = send(&app, close(&local, None)).await;
+    let there = send(&app, close(&card, Some("peer"))).await;
+    assert!(here.status.is_client_error(), "{}", here.body);
+    assert_eq!(there.status, here.status, "{}", there.body);
+    let here = refusal(&here, here.status);
+    let there = refusal(&there, there.status);
+    assert_eq!(there.code, here.code);
+    assert_eq!(there.message, here.message);
+    assert_eq!(there.host.as_deref(), Some("peer"));
+    assert_eq!(here.host, None);
+
+    // A record the peer does not have is its 404.
+    let missing = forward_comment(&app, &cookie, "01JNOSUCHCARD000000000000", "k-x").await;
+    let error = refusal(&missing, StatusCode::NOT_FOUND);
+    assert_eq!(error.host.as_deref(), Some("peer"));
+    assert_eq!(last_seq(&pair.peer), before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn same_key_twice_applies_once() {
+    let pair = pair();
+    let (peers, _stop) = start(pair.board.dir.path(), Wire::new(pair.peer.dir.path()));
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let first = forward_create(&app, &cookie, "k-1", "made from the board").await;
+    let first = applied(&first);
+    assert!(!first.replayed);
+    let again = forward_create(&app, &cookie, "k-1", "made from the board").await;
+    let again = applied(&again);
+    assert!(again.replayed);
+    assert_eq!(again.events, first.events);
+    assert_eq!(titled(&pair.peer, "made from the board"), 1);
+    assert_eq!(titled(&pair.board, "made from the board"), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retried_504_applies_once() {
+    // The peer applies the first try, and its `result` is lost on the way
+    // back: the board cannot tell, so it answers 504. The retry with the
+    // same key is the stored answer.
+    let pair = pair();
+    let wire = Wire::new(pair.peer.dir.path());
+    wire.lose_results.store(1, Ordering::SeqCst);
+    let (peers, _stop) = start(pair.board.dir.path(), wire);
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let started = Instant::now();
+    let lost = forward_create(&app, &cookie, "k-1", "sent once").await;
+    let error = refusal(&lost, StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(error.code, "forward_uncertain");
+    assert_eq!(error.host.as_deref(), Some("peer"));
+    assert!(started.elapsed() >= quick().query);
+    assert_eq!(titled(&pair.peer, "sent once"), 1);
+
+    let retried = forward_create(&app, &cookie, "k-1", "sent once").await;
+    assert!(applied(&retried).replayed);
+    assert_eq!(titled(&pair.peer, "sent once"), 1);
+    assert_eq!(titled(&pair.board, "sent once"), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unreachable_returns_503_and_queues_nothing() {
+    let pair = pair();
+    let up = Arc::new(AtomicBool::new(false));
+    let (peers, _stop) = start(
+        pair.board.dir.path(),
+        Switch {
+            home: pair.peer.dir.path().to_owned(),
+            up: up.clone(),
+        },
+    );
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let before = (last_seq(&pair.board), last_seq(&pair.peer));
+    for _ in 0..3 {
+        let started = Instant::now();
+        let answer = forward_create(&app, &cookie, "k-1", "made while down").await;
+        let error = refusal(&answer, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "peer_unreachable");
+        assert_eq!(error.host.as_deref(), Some("peer"));
+        assert!(
+            started.elapsed() < ms(500),
+            "refused after {:?}",
+            started.elapsed()
+        );
+        tokio::time::sleep(ms(100)).await;
+    }
+    assert_eq!(
+        (last_seq(&pair.board), last_seq(&pair.peer)),
+        before,
+        "{:?}",
+        events_since(&pair.board, before.0)
+    );
+
+    // The link comes up: nothing was held to send.
+    up.store(true, Ordering::SeqCst);
+    until("the snapshot", || live_with_rows(&peers)).await;
+    tokio::time::sleep(ms(300)).await;
+    assert_eq!(titled(&pair.peer, "made while down"), 0);
+    assert_eq!(last_seq(&pair.peer), before.1);
+    // The board host writes only the link's own Machines row.
+    for event in events_since(&pair.board, before.0) {
+        assert!(
+            event.starts_with("cache.refresh host.changed daemon "),
+            "{event}"
+        );
+    }
+
+    // The owner's retry from the control applies.
+    let retried = forward_create(&app, &cookie, "k-1", "made while down").await;
+    assert!(!applied(&retried).replayed);
+    assert_eq!(titled(&pair.peer, "made while down"), 1);
+    assert_eq!(titled(&pair.board, "made while down"), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn forwarded_mutation_never_writes_viewer_db() {
+    let pair = pair();
+    add_card(&pair.peer, "a peer card");
+    let card = card_id(&pair.peer, "a peer card");
+    let (peers, _stop) = start(pair.board.dir.path(), Wire::new(pair.peer.dir.path()));
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let board_before = last_seq(&pair.board);
+    let peer_before = last_seq(&pair.peer);
+
+    let created = forward_create(&app, &cookie, "k-1", "made from the board").await;
+    assert_eq!(applied(&created).host.as_deref(), Some("peer"));
+    let commented = forward_comment(&app, &cookie, &card, "k-2").await;
+    assert_eq!(applied(&commented).host.as_deref(), Some("peer"));
+    let cancelled = send(
+        &app,
+        mutation(
+            "POST",
+            &format!("/api/v1/cards/{card}/cancel"),
+            json!({"idempotency_key": "k-3", "host": "peer", "reason": "not needed"}),
+            &[("cookie", &cookie)],
+        ),
+    )
+    .await;
+    assert_eq!(applied(&cancelled).host.as_deref(), Some("peer"));
+
+    // Nothing on the board host's database; on the peer, every event is the
+    // forwarded owner's, with the key that signed it.
+    assert_eq!(last_seq(&pair.board), board_before);
+    assert_eq!(titled(&pair.board, "made from the board"), 0);
+    let store = pair.peer.open();
+    let mut statement = store
+        .conn()
+        .prepare("SELECT actor, payload FROM events WHERE seq > ?1")
+        .unwrap();
+    let events: Vec<(String, String)> = statement
+        .query_map([peer_before], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(events.len() >= 3, "{events:?}");
+    for (actor, payload) in events {
+        assert_eq!(actor, "board@test-host");
+        let payload: Value = serde_json::from_str(&payload).unwrap();
+        let via = &payload["via_peer"];
+        assert_eq!(via["key_id"], Value::from(pair.key_id.clone()), "{payload}");
+        assert_eq!(via["viewer_host_id"], Value::from(pair.board.host.clone()));
+        assert_eq!(via["viewer_label"], "test-host");
+        assert!(via["frame_id"].is_string(), "{payload}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn frames_never_carry_cookie() {
+    let pair = pair();
+    add_card(&pair.peer, "a peer card");
+    let card = card_id(&pair.peer, "a peer card");
+    let wire = Wire::new(pair.peer.dir.path());
+    let sent = wire.sent.clone();
+    let (peers, _stop) = start(pair.board.dir.path(), wire);
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    applied(&forward_comment(&app, &cookie, &card, "k-1").await);
+    applied(&forward_create(&app, &cookie, "k-2", "made from the board").await);
+    let read = get(&app, &format!("/api/v1/cards/{card}?host=peer")).await;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+
+    let text = wire_text(&sent);
+    let secret = cookie.trim_start_matches("tiller_owner=");
+    assert!(!secret.is_empty());
+    assert!(!text.contains(secret), "a frame carried the owner cookie");
+    assert!(!text.to_lowercase().contains("cookie"));
+    assert!(!text.contains("tiller_owner"));
+    let mutates: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|frame| frame["type"] == "mutate")
+        .collect();
+    assert_eq!(mutates.len(), 2, "{text}");
+    for frame in mutates {
+        // The body goes without `host`: the peer serves only its own.
+        assert!(frame["body"].get("host").is_none(), "{frame}");
+    }
+}
+
+// -- forwarding helpers -------------------------------------------------------------
+
+async fn forward_create(app: &Router, cookie: &str, key: &str, title: &str) -> Answer {
+    let body = json!({"idempotency_key": key, "host": "peer", "project": "alpha", "kind": "ship", "title": title});
+    send(
+        app,
+        mutation("POST", "/api/v1/cards", body, &[("cookie", cookie)]),
+    )
+    .await
+}
+
+async fn forward_comment(app: &Router, cookie: &str, card: &str, key: &str) -> Answer {
+    let body = json!({"idempotency_key": key, "host": "peer", "text": "from the board"});
+    let path = format!("/api/v1/cards/{card}/comment");
+    send(app, mutation("POST", &path, body, &[("cookie", cookie)])).await
+}
+
+#[track_caller]
+fn applied(answer: &Answer) -> MutationResponse {
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    serde_json::from_str(&answer.body).unwrap()
+}
+
+#[track_caller]
+fn refusal(answer: &Answer, status: StatusCode) -> ErrorDetail {
+    assert_eq!(answer.status, status, "{}", answer.body);
+    serde_json::from_str::<ErrorBody>(&answer.body)
+        .unwrap()
+        .error
+}
+
+fn wire_text(sent: &Mutex<Vec<u8>>) -> String {
+    String::from_utf8(sent.lock().unwrap().clone()).unwrap()
+}
+
+/// Dials `peer serve` over a socket pair like [`Socket`], keeps every byte
+/// the board host sends, and loses the next `lose_results` `result` frames
+/// on the way back.
+struct Wire {
+    home: PathBuf,
+    sent: Arc<Mutex<Vec<u8>>>,
+    lose_results: Arc<AtomicUsize>,
+}
+
+impl Wire {
+    fn new(home: &Path) -> Self {
+        Self {
+            home: home.to_owned(),
+            sent: Arc::default(),
+            lose_results: Arc::default(),
+        }
+    }
+}
+
+impl Connector for Wire {
+    fn connect(&self, target: &Target) -> Connecting {
+        let socket = serve_on_socket(&self.home, &target.from);
+        let sent = self.sent.clone();
+        let lose = self.lose_results.clone();
+        Box::pin(async move {
+            socket.set_nonblocking(true)?;
+            let (reader, mut writer) = tokio::net::UnixStream::from_std(socket)?.into_split();
+            let (board_out, mut wire_in) = tokio::io::duplex(1 << 20);
+            tokio::spawn(async move {
+                let mut buf = vec![0; 1 << 16];
+                while let Ok(read) = wire_in.read(&mut buf).await {
+                    if read == 0 {
+                        break;
+                    }
+                    sent.lock().unwrap().extend_from_slice(&buf[..read]);
+                    if writer.write_all(&buf[..read]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            let (board_in, mut wire_out) = tokio::io::duplex(1 << 20);
+            tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(reader).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let lost = line.starts_with(r#"{"type":"result""#)
+                        && lose
+                            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                            .is_ok();
+                    if lost {
+                        continue;
+                    }
+                    if wire_out
+                        .write_all(format!("{line}\n").as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            Ok(Connection {
+                reader: Box::new(tokio::io::BufReader::new(board_in)),
+                writer: Box::new(board_out),
+                child: None,
+            })
+        })
+    }
+}
+
+/// A peer that cannot be reached until `up` is set.
+struct Switch {
+    home: PathBuf,
+    up: Arc<AtomicBool>,
+}
+
+impl Connector for Switch {
+    fn connect(&self, target: &Target) -> Connecting {
+        if !self.up.load(Ordering::SeqCst) {
+            return Box::pin(async { Err(std::io::Error::other("no route to host")) });
+        }
+        Wire::new(&self.home).connect(target)
+    }
 }

@@ -719,6 +719,10 @@ pub struct MutationResponse {
     /// The changed entity.
     #[schema(value_type = Object)]
     pub data: Value,
+    /// The peer that applied a forwarded mutation (`protocol.md` 10.3);
+    /// absent for this host's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -734,6 +738,12 @@ pub struct ErrorDetail {
     pub current: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// `peer_refused` only: which check refused (`protocol.md` 10.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The peer a forwarded mutation was for (`protocol.md` 10.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -748,6 +758,10 @@ pub struct ErrorBody {
 #[serde(deny_unknown_fields)]
 pub struct CreateCard {
     pub idempotency_key: String,
+    /// A paired peer's label: forward the mutation to it (`protocol.md`
+    /// 7.4, 10.3). Absent means this host.
+    #[serde(default)]
+    pub host: Option<String>,
     pub project: String,
     pub kind: String,
     pub title: String,
@@ -762,6 +776,10 @@ pub struct CreateCard {
 #[serde(deny_unknown_fields)]
 pub struct EditCard {
     pub idempotency_key: String,
+    /// A paired peer's label: forward the mutation to it (`protocol.md`
+    /// 7.4, 10.3). Absent means this host.
+    #[serde(default)]
+    pub host: Option<String>,
     pub rev: i64,
     #[serde(default)]
     pub title: Option<String>,
@@ -777,6 +795,10 @@ pub struct EditCard {
 #[serde(deny_unknown_fields)]
 pub struct StageProject {
     pub idempotency_key: String,
+    /// A paired peer's label: forward the mutation to it (`protocol.md`
+    /// 7.4, 10.3). Absent means this host.
+    #[serde(default)]
+    pub host: Option<String>,
     pub rev: i64,
     /// `pre-launch` or `launched`.
     pub stage: String,
@@ -787,6 +809,10 @@ pub struct StageProject {
 #[serde(deny_unknown_fields)]
 pub struct Comment {
     pub idempotency_key: String,
+    /// A paired peer's label: forward the mutation to it (`protocol.md`
+    /// 7.4, 10.3). Absent means this host.
+    #[serde(default)]
+    pub host: Option<String>,
     pub text: String,
 }
 
@@ -795,6 +821,10 @@ pub struct Comment {
 #[serde(deny_unknown_fields)]
 pub struct HoldBody {
     pub idempotency_key: String,
+    /// A paired peer's label: forward the mutation to it (`protocol.md`
+    /// 7.4, 10.3). Absent means this host.
+    #[serde(default)]
+    pub host: Option<String>,
     /// RFC 3339.
     pub until: String,
     pub reason: String,
@@ -808,6 +838,10 @@ pub struct HoldBody {
 #[serde(deny_unknown_fields)]
 pub struct Transition {
     pub idempotency_key: String,
+    /// A paired peer's label: forward the mutation to it (`protocol.md`
+    /// 7.4, 10.3). Absent means this host.
+    #[serde(default)]
+    pub host: Option<String>,
     /// `close` only: the outcome, `completed` when omitted.
     #[serde(default)]
     pub outcome: Option<String>,
@@ -823,6 +857,10 @@ pub struct Transition {
 #[serde(deny_unknown_fields)]
 pub struct AnswerBody {
     pub idempotency_key: String,
+    /// A paired peer's label: forward the mutation to it (`protocol.md`
+    /// 7.4, 10.3). Absent means this host.
+    #[serde(default)]
+    pub host: Option<String>,
     /// The owner's exact words.
     pub answer: String,
     #[serde(default)]
@@ -834,6 +872,10 @@ pub struct AnswerBody {
 #[serde(deny_unknown_fields)]
 pub struct DecideBody {
     pub idempotency_key: String,
+    /// A paired peer's label: forward the mutation to it (`protocol.md`
+    /// 7.4, 10.3). Absent means this host.
+    #[serde(default)]
+    pub host: Option<String>,
     /// `accept` or `reject`.
     pub decision: String,
     /// The head the board showed; a mismatch is 422 with the bound head.
@@ -847,4 +889,8 @@ pub struct DecideBody {
 #[serde(deny_unknown_fields)]
 pub struct FocusBody {
     pub idempotency_key: String,
+    /// A paired peer's label: forward the mutation to it (`protocol.md`
+    /// 7.4, 10.3). Absent means this host.
+    #[serde(default)]
+    pub host: Option<String>,
 }

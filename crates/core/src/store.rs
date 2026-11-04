@@ -37,12 +37,17 @@ pub enum Actor {
     Hook,
     Import,
     Owner,
+    /// The owner on a paired board host, through a forwarded mutation that
+    /// `tiller peer serve` verified (`authority.md` section 3): the board's
+    /// row of the matrix, limited to the forwarding allowlist. Holds the
+    /// board host's label; written as `board@<label>`.
+    Peer(String),
 }
 
 impl Actor {
-    /// The owner, acting through the CLI or the board.
+    /// The owner, acting through the CLI, the board or a peer board.
     pub fn is_owner(&self) -> bool {
-        matches!(self, Actor::Owner | Actor::Board)
+        matches!(self, Actor::Owner | Actor::Board | Actor::Peer(_))
     }
 
     pub fn session_id(&self) -> Option<&str> {
@@ -62,6 +67,7 @@ impl fmt::Display for Actor {
             Actor::Hook => f.write_str("hook"),
             Actor::Import => f.write_str("import"),
             Actor::Owner => f.write_str("owner"),
+            Actor::Peer(label) => write!(f, "board@{label}"),
         }
     }
 }
@@ -76,8 +82,9 @@ impl FromStr for Actor {
             "hook" => Ok(Actor::Hook),
             "import" => Ok(Actor::Import),
             "owner" => Ok(Actor::Owner),
-            _ => match s.strip_prefix("session:") {
-                Some(id) if !id.is_empty() => Ok(Actor::Session(id.to_owned())),
+            _ => match (s.strip_prefix("session:"), s.strip_prefix("board@")) {
+                (Some(id), _) if !id.is_empty() => Ok(Actor::Session(id.to_owned())),
+                (_, Some(label)) if !label.is_empty() => Ok(Actor::Peer(label.to_owned())),
                 _ => Err(Error::Usage(format!("not an actor: {s:?}"))),
             },
         }
@@ -107,6 +114,10 @@ pub struct Ctx {
     /// key argument of its own (`protocol.md` section 6.3). An explicit key
     /// argument wins.
     pub key: Option<String>,
+    /// For a forwarded mutation ([`Actor::Peer`]): which board host and key
+    /// sent it. Every event the mutation writes carries it as
+    /// `payload.via_peer` (`authority.md` section 3).
+    pub via_peer: Option<Value>,
 }
 
 impl Ctx {
@@ -119,11 +130,17 @@ impl Ctx {
             actor,
             now,
             key: None,
+            via_peer: None,
         }
     }
 
     pub fn with_key(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());
+        self
+    }
+
+    pub fn with_via_peer(mut self, via_peer: Value) -> Self {
+        self.via_peer = Some(via_peer);
         self
     }
 }
@@ -397,7 +414,18 @@ impl Tx<'_> {
     }
 
     /// Writes one event row in this transaction and returns its `seq`.
-    pub fn event(&mut self, event: NewEvent) -> Result<i64> {
+    pub fn event(&mut self, mut event: NewEvent) -> Result<i64> {
+        if let Some(via_peer) = &self.ctx.via_peer {
+            // Payloads are objects; a bare value is kept under `value`.
+            if !event.payload.is_object() {
+                let value = event.payload.take();
+                event.payload = Value::Object(Default::default());
+                if !value.is_null() {
+                    event.payload["value"] = value;
+                }
+            }
+            event.payload["via_peer"] = via_peer.clone();
+        }
         let id = ids::new_ulid();
         self.tx.execute(
             "INSERT INTO events (id, at, txn, actor, entity, entity_id, kind, rev_after, card_id, payload, idempotency_key)

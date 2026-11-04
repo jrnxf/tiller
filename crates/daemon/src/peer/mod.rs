@@ -1,12 +1,14 @@
 //! The federated board (ADR 0003, `protocol.md` section 10): the peer side
 //! of a link ([`serve`], run by `tiller peer serve` under sshd) and the board
-//! host's link client ([`link`], one task per paired peer in the daemon).
+//! host's link client ([`link`], one task per paired peer in the daemon),
+//! and the owner's mutations forwarded over it ([`forward`]).
 //!
 //! A link is one SSH session carrying JSON lines, one [`Frame`] per line,
 //! protocol `tiller-peer/1`. The board host keeps what a peer sends in memory
 //! only ([`PeerView`]); nothing a peer owns is ever written to this host's
 //! `state.db`, apart from the link state on the peer's `hosts` row.
 
+pub mod forward;
 pub mod link;
 pub mod serve;
 
@@ -59,6 +61,8 @@ pub enum Frame {
         /// `runs/{id}`.
         path: String,
     },
+    /// A forwarded mutation, signed by the board host (10.3).
+    Mutate(Box<forward::Mutate>),
     Result {
         id: String,
         http_status: u16,
@@ -164,7 +168,8 @@ fn hello_message(hello: &Hello, peer_host_id: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// Who signs a `hello`: the board host, with the key `tiller peer add` made.
+/// Who signs a `hello` or a `mutate`: the board host, with the key `tiller
+/// peer add` made.
 pub struct HelloKey<'a> {
     pub key: &'a SigningKey,
     pub from: &'a str,

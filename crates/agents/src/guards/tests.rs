@@ -752,6 +752,78 @@ fn owner_tiller_commands_denied() {
     }
 }
 
+// -- G43: the peer link --------------------------------------------------------
+
+#[test]
+fn peer_commands_denied() {
+    for command in [
+        "tiller peer list",
+        "tiller peer add host-b --alias host-b --scope act",
+        "tiller peer accept --from host-a --key abc",
+        "tiller peer serve --from host-a",
+        "tiller peer revoke 01JABC",
+        "tiller --json peer remove host-b",
+        "/nix/store/abc-tiller-0.1.0/bin/tiller peer list",
+        "sh -c 'tiller peer list'",
+        "echo host-b | xargs tiller peer remove",
+    ] {
+        denied_for_all(command, Code::Peer);
+    }
+}
+
+#[test]
+fn ssh_remote_tiller_denied() {
+    for command in [
+        "ssh host-b tiller approve 01JABC",
+        "ssh -t host-b tiller peer accept --from host-a",
+        "sh -c 'ssh host-b tiller card close alpha-1'",
+        "ssh host-b 'tiller card comment alpha-1 hi'",
+        "ssh -p 2222 user@192.0.2.10 -- /home/user/.nix-profile/bin/tiller status",
+        "ssh host-b \"cd /home/user && tiller approve 01JABC\"",
+        "mosh host-b -- tiller approve 01JABC",
+        "et host-b -c 'tiller land 01JABC'",
+        "ssh host-b $CMD",
+        "ssh host-b ls \"$DIR\"",
+        "echo 'tiller approve 01JABC' | ssh host-b",
+        "echo 'tiller approve 01JABC' | ssh host-b bash -s",
+        "ssh host-b sh < cmds.txt",
+        "ssh host-b <<'EOF'\ntiller approve 01JABC\nEOF",
+        "ssh host-b \"ti''ller approve 01JABC\"",
+        "ssh host-b 'X=tiller; $X approve 01JABC'",
+        "ssh host-b 'eval \"$(printf til)ler approve\"'",
+        "ssh host-b 'ssh host-c tiller approve 01JABC'",
+        "ssh -o RemoteCommand='tiller status' host-b",
+        "ssh -oProxyCommand='tiller peer serve --from host-a' host-b",
+        "ssh -o \"$OPTS\" host-b",
+        "ssh --weird host-b",
+        "mosh --server='tiller peer serve' host-b",
+        "mosh --ssh 'ssh host-b tiller approve 01JABC' host-b",
+        "et host-b --command 'tiller land 01JABC'",
+    ] {
+        denied_for_all(command, Code::Peer);
+    }
+    for role in Role::ALL {
+        for command in [
+            "ssh -V",
+            "ssh -G host-b",
+            "echo ssh host-b tiller approve",
+            "ssh host-b ls /opt/tiller",
+            "ssh tiller uptime",
+            "ssh \"$HOST\" uptime",
+            "ssh -i \"$KEY\" host-b ls",
+            "ssh -p 2222 -o ServerAliveInterval=30 host-b uptime",
+            "ssh host-b -l user uptime",
+            "ssh host-b <<'EOF'\nuptime\nEOF",
+            "echo report | ssh host-b 'cat > report.txt'",
+            "mosh host-b",
+            "mosh -p 60001 host-b -- htop",
+            "et -p 2022 host-b",
+        ] {
+            allowed(role, command);
+        }
+    }
+}
+
 /// CP2 decision on G06: the orchestrator may run exactly
 /// `tiller approve <id> --ask <ask>`, and every other approve form stays
 /// denied. `tiller` refuses the bare form too (the CLI test

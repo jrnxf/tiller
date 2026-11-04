@@ -413,6 +413,7 @@ mod tests {
         "Bash(tiller import *)",
         "Bash(tiller hook *)",
         "Bash(tiller owner *)",
+        "Bash(tiller peer *)",
         "Bash(crontab *)",
         "Bash(at *)",
         "Bash(systemd-run *)",

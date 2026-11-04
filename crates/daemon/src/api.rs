@@ -22,7 +22,8 @@ use serde_json::{Value, json};
 use tiller_agents::spawn::config::SpawnConfig;
 use tiller_core::domain::Stage;
 use tiller_core::domain::{
-    AnsweredVia, Approval, CardKind, CardOutcome, HoldReleaseReason, HostKind, Session,
+    AnsweredVia, Approval, CardKind, CardOutcome, HoldReleaseReason, Host, HostKind, PeerScope,
+    Session,
 };
 use tiller_core::state::approvals::Decision;
 use tiller_core::state::cards::{CardEdit, NewCard};
@@ -34,7 +35,8 @@ use tokio::sync::watch;
 
 use crate::assets::{self, Assets};
 use crate::dto::*;
-use crate::peer::link::Peers;
+use crate::peer::forward::{Op, Order};
+use crate::peer::link::{Forwarded, Peers};
 use crate::peer::{Federation, PeerView};
 use crate::readonly::Damage;
 use crate::views::{self, Filter, LocalHealth, PaneTarget};
@@ -123,6 +125,8 @@ impl ApiError {
                     id: None,
                     current: None,
                     hint: None,
+                    reason: None,
+                    host: None,
                 },
             }),
         }
@@ -144,6 +148,62 @@ impl ApiError {
     /// The status and body, for a peer's `result` frame.
     pub(crate) fn into_parts(self) -> (StatusCode, ErrorBody) {
         (self.status, *self.body)
+    }
+
+    /// The status and JSON body, for a peer's `result` frame.
+    pub(crate) fn into_result(self) -> (u16, Value) {
+        let (status, body) = self.into_parts();
+        let body = serde_json::to_value(body).unwrap_or(Value::Null);
+        (status.as_u16(), body)
+    }
+
+    /// Names the peer that answered or refused (`protocol.md` 10.3).
+    fn host(mut self, host: &str) -> Self {
+        self.body.error.host = Some(host.to_owned());
+        self
+    }
+
+    /// A 502 `peer_refused`: the forward was refused before anything was
+    /// written, for `reason` (`protocol.md` 10.3).
+    pub(crate) fn peer_refused(reason: &str, message: impl Into<String>) -> Self {
+        let mut error = Self::new(StatusCode::BAD_GATEWAY, "peer_refused", message);
+        error.body.error.reason = Some(reason.to_owned());
+        error
+    }
+
+    /// A 503 `peer_unreachable` for a mutation: refused at once, with
+    /// nothing sent or queued (ADR 0003).
+    fn unreachable(host: &str) -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "peer_unreachable",
+            format!("{host} is unreachable; nothing was sent or queued"),
+        )
+        .hint("retry from the control once the link is live")
+        .host(host)
+    }
+
+    /// A 504 `forward_uncertain`: the frame was sent and no result came
+    /// back in time, so it may or may not have applied.
+    fn forward_uncertain(host: &str) -> Self {
+        Self::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            "forward_uncertain",
+            format!("{host} did not confirm the mutation in time; it may have applied"),
+        )
+        .hint("retry with the same idempotency key: it applies once")
+        .host(host)
+    }
+
+    /// True for the core's refusal of a decision on a head that moved.
+    fn head_moved(&self) -> bool {
+        self.body.error.message.contains(HEAD_MOVED)
+    }
+
+    /// Adds the head an approval binds now to a head-moved refusal.
+    fn with_bound_head(mut self, head: Option<String>) -> Self {
+        self.body.error.current = Some(json!({"head_sha": head}));
+        self
     }
 
     /// A 503 `peer_unreachable` for a single-entity read of a peer's record
@@ -249,7 +309,7 @@ fn uninitialized() -> ApiError {
 }
 
 /// The 503 every mutation answers while `state.db` is damaged.
-fn read_only(reason: &str) -> ApiError {
+pub(crate) fn read_only(reason: &str) -> ApiError {
     ApiError::from(Error::Unavailable(format!(
         "read only: state.db failed its integrity check ({reason}); mutations are refused until the owner restores it"
     )))
@@ -409,17 +469,7 @@ async fn mutate(
         Ok(result) => result?,
         Err(error) => return Err(Error::Internal(error.to_string()).into()),
     };
-    Ok(Json(MutationResponse {
-        ok: true,
-        replayed: done.replayed,
-        events: done.events,
-        receipt: Receipt {
-            recorded_at: Timestamp::now().to_string(),
-            outbox_id: done.outbox_id,
-            approval_id: done.approval_id,
-        },
-        data: done.data,
-    }))
+    Ok(Json(done.response()))
 }
 
 /// What a mutation hands back to [`mutate`].
@@ -440,6 +490,21 @@ impl Done {
             outbox_id: None,
             approval_id: None,
         })
+    }
+
+    fn response(self) -> MutationResponse {
+        MutationResponse {
+            ok: true,
+            replayed: self.replayed,
+            events: self.events,
+            receipt: Receipt {
+                recorded_at: Timestamp::now().to_string(),
+                outbox_id: self.outbox_id,
+                approval_id: self.approval_id,
+            },
+            data: self.data,
+            host: None,
+        }
     }
 }
 
@@ -924,154 +989,488 @@ async fn events(
 
 // -- mutations --------------------------------------------------------------------
 
+/// One parsed mutation on the forwarding allowlist (`protocol.md` 7.4):
+/// what this host's board applies for its own records, and what `peer
+/// serve` applies for a forwarded one, through the same core function.
+pub(crate) struct Mutation {
+    op: Op,
+    /// The card, attention item or approval the path names; `None` for a
+    /// new card.
+    target: Option<String>,
+    key: String,
+    host: Option<String>,
+    parsed: Parsed,
+}
+
+/// A body, with the fields its handler parses before any write.
+enum Parsed {
+    CreateCard(CreateCard, CardKind),
+    EditCard(EditCard),
+    Comment(Comment),
+    Hold(HoldBody, Timestamp),
+    ReleaseHold,
+    Close(Transition, CardOutcome),
+    Cancel(String),
+    Reopen(String),
+    Answer(AnswerBody),
+    Decide(DecideBody, bool),
+}
+
+impl Mutation {
+    /// Reads `bytes` as `op`'s body: 400 when it does not parse, and the
+    /// handler's own field checks.
+    pub(crate) fn parse(op: Op, target: Option<String>, bytes: &[u8]) -> Result<Self, ApiError> {
+        let (idempotency_key, host, parsed) = match op {
+            Op::CreateCard => {
+                let request: CreateCard = body(bytes)?;
+                let kind: CardKind = request.kind.parse()?;
+                (
+                    request.idempotency_key.clone(),
+                    request.host.clone(),
+                    Parsed::CreateCard(request, kind),
+                )
+            }
+            Op::EditCard => {
+                let request: EditCard = body(bytes)?;
+                (
+                    request.idempotency_key.clone(),
+                    request.host.clone(),
+                    Parsed::EditCard(request),
+                )
+            }
+            Op::Comment => {
+                let request: Comment = body(bytes)?;
+                (
+                    request.idempotency_key.clone(),
+                    request.host.clone(),
+                    Parsed::Comment(request),
+                )
+            }
+            Op::Hold => {
+                let request: HoldBody = body(bytes)?;
+                let until: Timestamp = request.until.parse()?;
+                (
+                    request.idempotency_key.clone(),
+                    request.host.clone(),
+                    Parsed::Hold(request, until),
+                )
+            }
+            Op::ReleaseHold => {
+                let request: Transition = body(bytes)?;
+                (request.idempotency_key, request.host, Parsed::ReleaseHold)
+            }
+            Op::Close => {
+                let request: Transition = body(bytes)?;
+                let outcome: CardOutcome =
+                    request.outcome.as_deref().unwrap_or("completed").parse()?;
+                (
+                    request.idempotency_key.clone(),
+                    request.host.clone(),
+                    Parsed::Close(request, outcome),
+                )
+            }
+            Op::Cancel | Op::Reopen => {
+                let request: Transition = body(bytes)?;
+                let reason = reason(&request)?;
+                let parsed = if op == Op::Cancel {
+                    Parsed::Cancel(reason)
+                } else {
+                    Parsed::Reopen(reason)
+                };
+                (request.idempotency_key, request.host, parsed)
+            }
+            Op::Answer => {
+                let request: AnswerBody = body(bytes)?;
+                (
+                    request.idempotency_key.clone(),
+                    request.host.clone(),
+                    Parsed::Answer(request),
+                )
+            }
+            Op::Decide => {
+                let request: DecideBody = body(bytes)?;
+                let accept = match request.decision.as_str() {
+                    "accept" => true,
+                    "reject" => false,
+                    other => {
+                        return Err(ApiError::usage(format!(
+                            "decision is accept or reject, not {other:?}"
+                        )));
+                    }
+                };
+                (
+                    request.idempotency_key.clone(),
+                    request.host.clone(),
+                    Parsed::Decide(request, accept),
+                )
+            }
+        };
+        Ok(Self {
+            op,
+            target,
+            key: key(&idempotency_key)?,
+            host,
+            parsed,
+        })
+    }
+
+    /// The body's `host`: a paired peer to forward to, or this host.
+    pub(crate) fn host(&self) -> Option<&str> {
+        self.host.as_deref()
+    }
+
+    pub(crate) fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// Runs the core function, in one transaction with its own checks.
+    fn apply(self, store: &mut Store, ctx: &Ctx) -> tiller_core::Result<Done> {
+        let key = self.key.as_str();
+        let id = self.target.as_deref().unwrap_or_default();
+        match self.parsed {
+            Parsed::CreateCard(request, kind) => {
+                let added = store.board_add(
+                    ctx,
+                    Some(key),
+                    NewCard {
+                        project_id: request.project,
+                        kind,
+                        title: request.title,
+                        body: request.body,
+                        priority: request.priority,
+                        ..NewCard::default()
+                    },
+                )?;
+                let outbox_id = added.value.message.as_ref().map(|m| m.id.clone());
+                let mut done = Done::of(added)?;
+                done.outbox_id = outbox_id;
+                Ok(done)
+            }
+            Parsed::EditCard(request) => {
+                let edit = CardEdit {
+                    title: request.title,
+                    body: request.body.map(Some),
+                    priority: request.priority,
+                    ..CardEdit::default()
+                };
+                Done::of(store.card_edit(ctx, Some(key), id, request.rev, edit)?)
+            }
+            Parsed::Comment(request) => {
+                let applied = store.card_comment(ctx, Some(key), id, &request.text)?;
+                let outbox_id = Some(applied.value.id.clone());
+                let mut done = Done::of(applied)?;
+                done.outbox_id = outbox_id;
+                Ok(done)
+            }
+            Parsed::Hold(request, until) => {
+                Done::of(store.card_hold(ctx, id, until, &request.reason)?)
+            }
+            Parsed::ReleaseHold => {
+                Done::of(store.hold_release(ctx, id, HoldReleaseReason::Removed)?)
+            }
+            Parsed::Close(request, outcome) => {
+                Done::of(store.card_close(ctx, id, outcome, request.reason.as_deref(), None)?)
+            }
+            Parsed::Cancel(reason) => Done::of(store.card_cancel(ctx, id, &reason)?),
+            Parsed::Reopen(reason) => Done::of(store.card_reopen(ctx, id, &reason)?),
+            Parsed::Answer(request) => {
+                let applied = store.attention_answer(
+                    ctx,
+                    Some(key),
+                    id,
+                    &request.answer,
+                    AnsweredVia::Board,
+                )?;
+                let outbox_id = applied.value.message.as_ref().map(|m| m.id.clone());
+                let item = views::attention_item(store, &applied.value.attention)?;
+                Ok(Done {
+                    data: serde_json::to_value(item)?,
+                    events: applied.events,
+                    replayed: applied.replayed,
+                    outbox_id,
+                    approval_id: None,
+                })
+            }
+            Parsed::Decide(request, accept) => {
+                // The head check runs in the decision's own transaction.
+                let applied = store.approval_decide_shown(
+                    ctx,
+                    Some(key),
+                    id,
+                    Decision {
+                        accept,
+                        via: AnsweredVia::Board,
+                        memory: Vec::new(),
+                        ask_id: None,
+                    },
+                    &request.head_sha,
+                )?;
+                let approval_id = Some(applied.value.approval.id.clone());
+                let mut done = Done::of(applied)?;
+                done.approval_id = approval_id;
+                Ok(done)
+            }
+        }
+    }
+
+    /// Applies on `store` at once, as `peer serve` does for a verified
+    /// frame: the response, or the refusal with what the board needs to
+    /// recover from it.
+    pub(crate) fn apply_here(
+        self,
+        store: &mut Store,
+        ctx: &Ctx,
+    ) -> Result<MutationResponse, ApiError> {
+        let (op, target) = (self.op, self.target.clone());
+        match self.apply(store, ctx) {
+            Ok(done) => Ok(done.response()),
+            Err(error) => {
+                let error = ApiError::from(error);
+                if op == Op::Decide && error.head_moved() {
+                    let head = bound_head(store, target.as_deref().unwrap_or_default());
+                    return Err(error.with_bound_head(head.ok().flatten()));
+                }
+                Err(error)
+            }
+        }
+    }
+}
+
+/// The head an approval binds now, for a 422 after the head moved.
+fn bound_head(store: &Store, approval: &str) -> tiller_core::Result<Option<String>> {
+    let id = resolve_id(store.conn(), "approvals", "approval", approval)?;
+    let approval: Approval = get_row(store.conn(), "approval", &id)?;
+    Ok(approval.head_sha)
+}
+
+/// A mutation on the forwarding allowlist (`protocol.md` 7.4): applied
+/// here, or with a peer `host`, forwarded to it (10.3).
+async fn submit(
+    state: &AppState,
+    headers: &HeaderMap,
+    op: Op,
+    target: Option<String>,
+    bytes: &[u8],
+) -> ApiResult<MutationResponse> {
+    guard(state, headers)?;
+    let mutation = Mutation::parse(op, target, bytes)?;
+    if let Some(view) = peer_for(state, mutation.host()).await? {
+        return forward(state, &view, mutation, bytes).await;
+    }
+    let lookup = mutation.target.clone().unwrap_or_default();
+    let key = mutation.key.clone();
+    let applied = mutate(state, key, move |store, ctx, _| mutation.apply(store, ctx)).await;
+    match applied {
+        Err(error) if op == Op::Decide && error.head_moved() => {
+            // Tell the board which head the approval binds now.
+            let head = read(state, move |store| bound_head(store, &lookup))
+                .await
+                .ok()
+                .flatten();
+            Err(error.with_bound_head(head))
+        }
+        other => other,
+    }
+}
+
+/// The paired peer a mutation's `host` names, or `None` for this host
+/// (absent, or its own label or id). A host that is not paired is refused:
+/// its records change only on that host (G25).
+async fn peer_for(state: &AppState, host: Option<&str>) -> Result<Option<PeerView>, ApiError> {
+    match addressed(state, host).await? {
+        Addressed::Here => Ok(None),
+        Addressed::Peer(view) => Ok(Some(view)),
+        // Paired, with no link task yet: nothing to send it over.
+        Addressed::Unlinked(label) => Err(ApiError::unreachable(&label)),
+    }
+}
+
+/// Where a mutation's `host` points.
+enum Addressed {
+    Here,
+    Peer(PeerView),
+    /// A paired peer with no link task yet, by label.
+    Unlinked(String),
+}
+
+async fn addressed(state: &AppState, host: Option<&str>) -> Result<Addressed, ApiError> {
+    let Some(host) = host else {
+        return Ok(Addressed::Here);
+    };
+    if let Some(view) = state.0.peers.federation().peer(host) {
+        return Ok(Addressed::Peer(view.clone()));
+    }
+    let named = host.to_owned();
+    let (row, local) = read(state, move |store| {
+        let id = views::host_id(store, &named)?;
+        let row: Host = get_row(store.conn(), "host", &id)?;
+        Ok((row, store.this_host()?.id))
+    })
+    .await?;
+    if row.id == local {
+        return Ok(Addressed::Here);
+    }
+    if row.peer_scope.is_some() {
+        return Ok(Addressed::Unlinked(row.label));
+    }
+    Err(ApiError::from(Error::Refused {
+        entity: "host",
+        id: row.id,
+        fact: format!(
+            "{} is not a paired peer; its records change only on that host",
+            row.label
+        ),
+    }))
+}
+
+/// Sends a mutation for a peer's record over its link (`protocol.md` 10.3)
+/// and returns the peer's answer with `host` added. Nothing is held or
+/// queued here: a peer whose link is not `live` is 503 at once, and one
+/// that does not confirm in time is 504.
+async fn forward(
+    state: &AppState,
+    view: &PeerView,
+    mutation: Mutation,
+    bytes: &[u8],
+) -> ApiResult<MutationResponse> {
+    let host = view.label.as_str();
+    if view.link != LinkState::Live {
+        return Err(ApiError::unreachable(host));
+    }
+    if view.scope != PeerScope::Act {
+        return Err(ApiError::peer_refused(
+            "read_scope",
+            format!("{host} is paired with a read scope: view only pairing"),
+        )
+        .host(host));
+    }
+    let mut body: Value = body(bytes)?;
+    if let Some(fields) = body.as_object_mut() {
+        fields.remove("host");
+    }
+    let order = Order {
+        op: mutation.op,
+        target: mutation.target,
+        body,
+        idempotency_key: mutation.key,
+    };
+    match state.0.peers.forward(&view.host_id, order).await {
+        Forwarded::Unreachable => Err(ApiError::unreachable(host)),
+        Forwarded::Uncertain => Err(ApiError::forward_uncertain(host)),
+        Forwarded::Answered(200, body) => {
+            let mut response: MutationResponse = serde_json::from_value(body).map_err(|error| {
+                ApiError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "internal",
+                    format!("{host} answered a malformed response: {error}"),
+                )
+                .host(host)
+            })?;
+            response.host = Some(host.to_owned());
+            Ok(Json(response))
+        }
+        Forwarded::Answered(status, body) => Err(ApiError::from((status, body)).host(host)),
+    }
+}
+
+/// An op off the forwarding allowlist, with a peer `host`: 502
+/// `peer_refused` before anything else (`protocol.md` 7.4).
+async fn not_forwarded(state: &AppState, host: Option<&str>, what: &str) -> Result<(), ApiError> {
+    let label = match addressed(state, host).await? {
+        Addressed::Here => return Ok(()),
+        Addressed::Peer(view) => view.label,
+        Addressed::Unlinked(label) => label,
+    };
+    Err(ApiError::peer_refused(
+        "not_allowlisted",
+        format!("{what} is not forwarded to {label}"),
+    )
+    .host(&label))
+}
+
 #[utoipa::path(post, path = "/api/v1/cards", tag = "mutations", request_body = CreateCard,
     responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody),
-              (status = 403, body = ErrorBody), (status = 422, body = ErrorBody)))]
+              (status = 403, body = ErrorBody), (status = 422, body = ErrorBody),
+              (status = 502, body = ErrorBody, description = "`peer_refused`"),
+              (status = 503, body = ErrorBody, description = "`peer_unreachable`: nothing was sent or queued"),
+              (status = 504, body = ErrorBody, description = "`forward_uncertain`: retry with the same key")))]
 async fn create_card(
     State(state): State<AppState>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
-    let request: CreateCard = body(&bytes)?;
-    let kind: CardKind = request.kind.parse()?;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, key| {
-            let added = store.board_add(
-                ctx,
-                Some(key),
-                NewCard {
-                    project_id: request.project,
-                    kind,
-                    title: request.title,
-                    body: request.body,
-                    priority: request.priority,
-                    ..NewCard::default()
-                },
-            )?;
-            let outbox_id = added.value.message.as_ref().map(|m| m.id.clone());
-            let mut done = Done::of(added)?;
-            done.outbox_id = outbox_id;
-            Ok(done)
-        },
-    )
-    .await
+    submit(&state, &headers, Op::CreateCard, None, &bytes).await
 }
 
 #[utoipa::path(patch, path = "/api/v1/cards/{id}", tag = "mutations", request_body = EditCard,
     params(("id" = String, Path)),
-    responses((status = 200, body = MutationResponse), (status = 409, body = ErrorBody)))]
+    responses((status = 200, body = MutationResponse), (status = 409, body = ErrorBody),
+              (status = 502, body = ErrorBody), (status = 503, body = ErrorBody), (status = 504, body = ErrorBody)))]
 async fn edit_card(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
-    let request: EditCard = body(&bytes)?;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, key| {
-            let edit = CardEdit {
-                title: request.title,
-                body: request.body.map(Some),
-                priority: request.priority,
-                ..CardEdit::default()
-            };
-            Done::of(store.card_edit(ctx, Some(key), &id, request.rev, edit)?)
-        },
-    )
-    .await
+    submit(&state, &headers, Op::EditCard, Some(id), &bytes).await
 }
 
 #[utoipa::path(post, path = "/api/v1/cards/{id}/comment", tag = "mutations", request_body = Comment,
-    params(("id" = String, Path)), responses((status = 200, body = MutationResponse)))]
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse),
+              (status = 502, body = ErrorBody), (status = 503, body = ErrorBody), (status = 504, body = ErrorBody)))]
 async fn comment(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
-    let request: Comment = body(&bytes)?;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, key| {
-            let applied = store.card_comment(ctx, Some(key), &id, &request.text)?;
-            let outbox_id = Some(applied.value.id.clone());
-            let mut done = Done::of(applied)?;
-            done.outbox_id = outbox_id;
-            Ok(done)
-        },
-    )
-    .await
+    submit(&state, &headers, Op::Comment, Some(id), &bytes).await
 }
 
 #[utoipa::path(post, path = "/api/v1/cards/{id}/hold", tag = "mutations", request_body = HoldBody,
-    params(("id" = String, Path)), responses((status = 200, body = MutationResponse)))]
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse),
+              (status = 502, body = ErrorBody), (status = 503, body = ErrorBody), (status = 504, body = ErrorBody)))]
 async fn hold(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
-    let request: HoldBody = body(&bytes)?;
-    let until: Timestamp = request.until.parse()?;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| Done::of(store.card_hold(ctx, &id, until, &request.reason)?),
-    )
-    .await
+    submit(&state, &headers, Op::Hold, Some(id), &bytes).await
 }
 
 #[utoipa::path(delete, path = "/api/v1/cards/{id}/hold", tag = "mutations", request_body = Transition,
-    params(("id" = String, Path)), responses((status = 200, body = MutationResponse)))]
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse),
+              (status = 502, body = ErrorBody), (status = 503, body = ErrorBody), (status = 504, body = ErrorBody)))]
 async fn release_hold(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
-    let request: Transition = body(&bytes)?;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| Done::of(store.hold_release(ctx, &id, HoldReleaseReason::Removed)?),
-    )
-    .await
+    submit(&state, &headers, Op::ReleaseHold, Some(id), &bytes).await
 }
 
 #[utoipa::path(post, path = "/api/v1/cards/{id}/close", tag = "mutations", request_body = Transition,
-    params(("id" = String, Path)), responses((status = 200, body = MutationResponse)))]
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse),
+              (status = 502, body = ErrorBody), (status = 503, body = ErrorBody), (status = 504, body = ErrorBody)))]
 async fn close(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
-    let request: Transition = body(&bytes)?;
-    let outcome: CardOutcome = request.outcome.as_deref().unwrap_or("completed").parse()?;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| {
-            Done::of(store.card_close(ctx, &id, outcome, request.reason.as_deref(), None)?)
-        },
-    )
-    .await
+    submit(&state, &headers, Op::Close, Some(id), &bytes).await
 }
 
 #[utoipa::path(post, path = "/api/v1/projects/{id}/stage", tag = "mutations", request_body = StageProject,
     params(("id" = String, Path)),
-    responses((status = 200, body = MutationResponse), (status = 409, body = ErrorBody)))]
+    responses((status = 200, body = MutationResponse), (status = 409, body = ErrorBody),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
 async fn stage_project(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1080,6 +1479,7 @@ async fn stage_project(
 ) -> ApiResult<MutationResponse> {
     guard(&state, &headers)?;
     let request: StageProject = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "a stage switch").await?;
     let stage: Stage = request.stage.parse()?;
     let home = state.0.home.clone();
     mutate(
@@ -1132,137 +1532,56 @@ fn reason(request: &Transition) -> Result<String, ApiError> {
 }
 
 #[utoipa::path(post, path = "/api/v1/cards/{id}/cancel", tag = "mutations", request_body = Transition,
-    params(("id" = String, Path)), responses((status = 200, body = MutationResponse)))]
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse),
+              (status = 502, body = ErrorBody), (status = 503, body = ErrorBody), (status = 504, body = ErrorBody)))]
 async fn cancel(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
-    let request: Transition = body(&bytes)?;
-    let reason = reason(&request)?;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| Done::of(store.card_cancel(ctx, &id, &reason)?),
-    )
-    .await
+    submit(&state, &headers, Op::Cancel, Some(id), &bytes).await
 }
 
 #[utoipa::path(post, path = "/api/v1/cards/{id}/reopen", tag = "mutations", request_body = Transition,
-    params(("id" = String, Path)), responses((status = 200, body = MutationResponse)))]
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse),
+              (status = 502, body = ErrorBody), (status = 503, body = ErrorBody), (status = 504, body = ErrorBody)))]
 async fn reopen(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
-    let request: Transition = body(&bytes)?;
-    let reason = reason(&request)?;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| Done::of(store.card_reopen(ctx, &id, &reason)?),
-    )
-    .await
+    submit(&state, &headers, Op::Reopen, Some(id), &bytes).await
 }
 
 #[utoipa::path(post, path = "/api/v1/attention/{id}/answer", tag = "mutations", request_body = AnswerBody,
     params(("id" = String, Path)),
-    responses((status = 200, body = MutationResponse), (status = 422, body = ErrorBody)))]
+    responses((status = 200, body = MutationResponse), (status = 422, body = ErrorBody),
+              (status = 502, body = ErrorBody), (status = 503, body = ErrorBody), (status = 504, body = ErrorBody)))]
 async fn answer(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
-    let request: AnswerBody = body(&bytes)?;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, key| {
-            let applied =
-                store.attention_answer(ctx, Some(key), &id, &request.answer, AnsweredVia::Board)?;
-            let outbox_id = applied.value.message.as_ref().map(|m| m.id.clone());
-            let item = views::attention_item(store, &applied.value.attention)?;
-            Ok(Done {
-                data: serde_json::to_value(item)?,
-                events: applied.events,
-                replayed: applied.replayed,
-                outbox_id,
-                approval_id: None,
-            })
-        },
-    )
-    .await
+    submit(&state, &headers, Op::Answer, Some(id), &bytes).await
 }
 
 #[utoipa::path(post, path = "/api/v1/approvals/{id}/decide", tag = "mutations", request_body = DecideBody,
     params(("id" = String, Path)),
     responses((status = 200, body = MutationResponse),
-              (status = 422, body = ErrorBody, description = "the head moved: `current.head_sha` is the bound head")))]
+              (status = 422, body = ErrorBody, description = "the head moved: `current.head_sha` is the bound head"),
+              (status = 502, body = ErrorBody), (status = 503, body = ErrorBody), (status = 504, body = ErrorBody)))]
 async fn decide(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
-    let request: DecideBody = body(&bytes)?;
-    let accept = match request.decision.as_str() {
-        "accept" => true,
-        "reject" => false,
-        other => {
-            return Err(ApiError::usage(format!(
-                "decision is accept or reject, not {other:?}"
-            )));
-        }
-    };
-    let shown = request.head_sha.clone();
-    let lookup = id.clone();
-    let decided = mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, key| {
-            // The head check runs in the decision's own transaction.
-            let applied = store.approval_decide_shown(
-                ctx,
-                Some(key),
-                &id,
-                Decision {
-                    accept,
-                    via: AnsweredVia::Board,
-                    memory: Vec::new(),
-                    ask_id: None,
-                },
-                &shown,
-            )?;
-            let approval_id = Some(applied.value.approval.id.clone());
-            let mut done = Done::of(applied)?;
-            done.approval_id = approval_id;
-            Ok(done)
-        },
-    )
-    .await;
-    match decided {
-        Err(mut error) if error.body.error.message.contains(HEAD_MOVED) => {
-            // Tell the board which head the approval binds now.
-            let head = read(&state, move |store| {
-                let id = resolve_id(store.conn(), "approvals", "approval", &lookup)?;
-                let approval: Approval = get_row(store.conn(), "approval", &id)?;
-                Ok(approval.head_sha)
-            })
-            .await
-            .ok()
-            .flatten();
-            error.body.error.current = Some(json!({"head_sha": head}));
-            Err(error)
-        }
-        other => other,
-    }
+    submit(&state, &headers, Op::Decide, Some(id), &bytes).await
 }
 
 /// The core's refusal when the approval binds another head than the one
@@ -1271,7 +1590,8 @@ const HEAD_MOVED: &str = "the head moved since it was shown";
 
 #[utoipa::path(post, path = "/api/v1/agents/{session}/focus", tag = "mutations", request_body = FocusBody,
     params(("session" = String, Path)),
-    responses((status = 200, body = MutationResponse), (status = 503, body = ErrorBody)))]
+    responses((status = 200, body = MutationResponse), (status = 503, body = ErrorBody),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
 async fn focus(
     State(state): State<AppState>,
     Path(session): Path<String>,
@@ -1279,7 +1599,8 @@ async fn focus(
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
     guard(&state, &headers)?;
-    let _: FocusBody = body(&bytes)?;
+    let request: FocusBody = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "a focus").await?;
     let target = read(&state, move |store| {
         let id = resolve_id(store.conn(), "sessions", "session", &session)?;
         let session: Session = get_row(store.conn(), "session", &id)?;
@@ -1319,6 +1640,7 @@ async fn focus(
                 approval_id: None,
             },
             data: json!({"session_id": session_id}),
+            host: None,
         })),
         Ok(Err(error)) => Err(ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1538,11 +1860,27 @@ pub(crate) mod tests {
     /// `POST /api/v1/cards` as the board sends it, with `headers` set over
     /// the board's own.
     pub(crate) fn create(headers: &[(&str, &str)]) -> Request<Body> {
-        let mut request = Request::post("/api/v1/cards").body(Body::from(
-            json!({"idempotency_key": "k-1", "project": "alpha", "kind": "ship", "title": "Undo strokes"})
-                .to_string(),
-        ))
-        .unwrap();
+        mutation(
+            "POST",
+            "/api/v1/cards",
+            json!({"idempotency_key": "k-1", "project": "alpha", "kind": "ship", "title": "Undo strokes"}),
+            headers,
+        )
+    }
+
+    /// A mutation as the board sends it, with `headers` set over the
+    /// board's own.
+    pub(crate) fn mutation(
+        method: &str,
+        path: &str,
+        body: Value,
+        headers: &[(&str, &str)],
+    ) -> Request<Body> {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Body::from(body.to_string()))
+            .unwrap();
         let origin = format!("http://{HOST}");
         let board = [
             ("host", HOST),

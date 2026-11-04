@@ -12,6 +12,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::Value;
@@ -25,6 +26,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
+use super::forward::{Mutate, Order};
 use super::{Federation, Frame, Hello, HelloKey, PeerView, Timing, peer_alias, stale_reason};
 use crate::dto::{LinkEvent, LinkHealth, LinkState, PeerEvent, PeerResetEvent};
 use crate::readonly::Damage;
@@ -42,17 +44,43 @@ pub enum PeerMessage {
     Reset(String),
 }
 
-/// A query a read handler hands to a link.
-struct QueryRequest {
-    path: String,
-    reply: oneshot::Sender<(u16, Value)>,
+/// What a handler hands to a link: a single-entity read (10.2) or a
+/// forwarded mutation (10.3).
+enum Request {
+    Query {
+        path: String,
+        reply: oneshot::Sender<(u16, Value)>,
+    },
+    Mutate {
+        order: Order,
+        /// [`PENDING`] until the link sends the frame ([`SENT`]) or the
+        /// handler gives up first ([`ABANDONED`]): whichever comes first
+        /// wins, so a mutation is never sent after its 503.
+        sent: Arc<AtomicU8>,
+        reply: oneshot::Sender<(u16, Value)>,
+    },
+}
+
+const PENDING: u8 = 0;
+const SENT: u8 = 1;
+const ABANDONED: u8 = 2;
+
+/// How a forwarded mutation ended on the board host.
+#[derive(Debug, PartialEq)]
+pub enum Forwarded {
+    /// Not sent: the link is not live, or it never took the frame. 503.
+    Unreachable,
+    /// Sent, and no `result` came in time: it may have applied. 504.
+    Uncertain,
+    /// The peer's `result`.
+    Answered(u16, Value),
 }
 
 /// Every paired peer's link, shared by the read handlers and SSE streams.
 pub struct Peers {
     /// By the peer's `hosts` row id here.
     views: Mutex<BTreeMap<String, PeerView>>,
-    queries: Mutex<HashMap<String, mpsc::Sender<QueryRequest>>>,
+    queries: Mutex<HashMap<String, mpsc::Sender<Request>>>,
     tx: broadcast::Sender<PeerMessage>,
     timing: Timing,
     /// A damaged `state.db` is never written, not even a link state
@@ -106,6 +134,50 @@ impl Peers {
     /// Sends a `query` over a live link and waits for its `result`, up to
     /// `timing.query`. `None` when the link is not live or no answer came.
     pub async fn query(&self, host_id: &str, path: String) -> Option<(u16, Value)> {
+        let sender = self.sender(host_id)?;
+        let (reply, answer) = oneshot::channel();
+        timeout(self.timing.query, async {
+            sender.send(Request::Query { path, reply }).await.ok()?;
+            answer.await.ok()
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// Forwards a mutation over a live link (`protocol.md` 10.3) and waits
+    /// up to `timing.query` for the peer's `result`. Nothing is queued: a
+    /// link that is not live, or does not take the frame in time, is
+    /// [`Forwarded::Unreachable`].
+    pub async fn forward(&self, host_id: &str, order: Order) -> Forwarded {
+        let Some(sender) = self.sender(host_id) else {
+            return Forwarded::Unreachable;
+        };
+        let sent = Arc::new(AtomicU8::new(PENDING));
+        let (reply, answer) = oneshot::channel();
+        let request = Request::Mutate {
+            order,
+            sent: Arc::clone(&sent),
+            reply,
+        };
+        let answered = timeout(self.timing.query, async {
+            sender.send(request).await.ok()?;
+            answer.await.ok()
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some((status, body)) = answered {
+            return Forwarded::Answered(status, body);
+        }
+        match sent.compare_exchange(PENDING, ABANDONED, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => Forwarded::Unreachable,
+            Err(_) => Forwarded::Uncertain,
+        }
+    }
+
+    /// A live link's request channel.
+    fn sender(&self, host_id: &str) -> Option<mpsc::Sender<Request>> {
         let live = self
             .lock_views()
             .get(host_id)
@@ -116,15 +188,7 @@ impl Peers {
             .unwrap_or_else(PoisonError::into_inner)
             .get(host_id)
             .cloned();
-        let sender = sender.filter(|_| live)?;
-        let (reply, answer) = oneshot::channel();
-        timeout(self.timing.query, async {
-            sender.send(QueryRequest { path, reply }).await.ok()?;
-            answer.await.ok()
-        })
-        .await
-        .ok()
-        .flatten()
+        sender.filter(|_| live)
     }
 
     /// The `peer_reset` for one peer: its copy as the federated reads
@@ -499,7 +563,7 @@ struct LinkTask {
 struct Registered<'a> {
     peers: &'a Peers,
     host_id: &'a str,
-    sender: mpsc::Sender<QueryRequest>,
+    sender: mpsc::Sender<Request>,
 }
 
 impl Drop for Registered<'_> {
@@ -613,17 +677,13 @@ impl LinkTask {
                 view.queries.as_ref().and(view.last_event_seq)
             })
             .flatten();
-        let hello = Hello::signed(
-            &HelloKey {
-                key: &signing,
-                from: &pairing.local_label,
-                key_id,
-                viewer_host_id: &pairing.local_host_id,
-            },
-            &pairing.peer_host_id,
-            last_seq,
-            Timestamp::now(),
-        );
+        let signer = HelloKey {
+            key: &signing,
+            from: &pairing.local_label,
+            key_id,
+            viewer_host_id: &pairing.local_host_id,
+        };
+        let hello = Hello::signed(&signer, &pairing.peer_host_id, last_seq, Timestamp::now());
         if let Err(error) = write_frame(&mut writer, &Frame::Hello(hello)).await {
             return Ended::Failed(format!("sending hello: {error}"));
         }
@@ -657,7 +717,7 @@ impl LinkTask {
             Ok(_) | Err(_) => return Ended::Failed("the peer did not answer hello".into()),
         }
         self.took_frame().await;
-        self.stream(lines, writer).await
+        self.stream(lines, writer, &signer).await
     }
 
     /// The session after `welcome`.
@@ -665,6 +725,7 @@ impl LinkTask {
         &self,
         mut lines: tokio::io::Lines<Box<dyn AsyncBufRead + Send + Unpin>>,
         writer: Box<dyn AsyncWrite + Send + Unpin>,
+        signer: &HelloKey<'_>,
     ) -> Ended {
         let timing = self.peers.timing;
         let (frames, mut outgoing) = mpsc::channel::<Frame>(64);
@@ -677,7 +738,7 @@ impl LinkTask {
             }
         });
         let _writing = AbortOnDrop(writing);
-        let (query_tx, mut queries) = mpsc::channel::<QueryRequest>(16);
+        let (query_tx, mut queries) = mpsc::channel::<Request>(16);
         self.peers
             .queries
             .lock()
@@ -771,19 +832,41 @@ impl LinkTask {
                         }
                     }
                 }
-                Some(request) = queries.recv() => {
-                    let id = ids::new_ulid();
-                    match frames.try_send(Frame::Query { id: id.clone(), path: request.path }) {
-                        // A dropped reply is a query with no answer: 503.
-                        Ok(()) => {
-                            pending.insert(id, request.reply);
-                        }
-                        Err(TrySendError::Full(_)) => {}
-                        Err(TrySendError::Closed(_)) => {
-                            return Ended::Lost("the link stopped writing".into());
+                Some(request) = queries.recv() => match request {
+                    Request::Query { path, reply } => {
+                        let id = ids::new_ulid();
+                        match frames.try_send(Frame::Query { id: id.clone(), path }) {
+                            // A dropped reply is a query with no answer: 503.
+                            Ok(()) => {
+                                pending.insert(id, reply);
+                            }
+                            Err(TrySendError::Full(_)) => {}
+                            Err(TrySendError::Closed(_)) => {
+                                return Ended::Lost("the link stopped writing".into());
+                            }
                         }
                     }
-                }
+                    Request::Mutate { order, sent, reply } => {
+                        // A frame the queue cannot take is never sent: the
+                        // dropped reply is a 503, and nothing is queued.
+                        let permit = match frames.try_reserve() {
+                            Ok(permit) => permit,
+                            Err(TrySendError::Full(())) => continue,
+                            Err(TrySendError::Closed(())) => {
+                                return Ended::Lost("the link stopped writing".into());
+                            }
+                        };
+                        // The handler gave up first and answered 503, so
+                        // the frame must not go out.
+                        let won = sent.compare_exchange(PENDING, SENT, Ordering::AcqRel, Ordering::Acquire);
+                        if won.is_err() {
+                            continue;
+                        }
+                        let frame = Mutate::signed(signer, &self.pairing.peer_host_id, order, Timestamp::now());
+                        pending.insert(frame.id.clone(), reply);
+                        permit.send(Frame::Mutate(Box::new(frame)));
+                    }
+                },
             }
         }
     }
