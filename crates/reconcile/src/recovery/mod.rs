@@ -6,7 +6,7 @@
 //! - [`timers`](Reconciler::timers): holds, date obligations, away mode.
 //! - [`sessions`]: the ladder, R02, R03, R04 (the restore), R12.
 //! - [`evidence`]: R13, R14, R15, run ownership, adoption after a restore (R10, R20).
-//! - [`approvals`]: R07, R08, R19.
+//! - [`approvals`]: R07, R08, R19, and G04's decision check (`authority.md` section 11).
 
 pub mod approvals;
 pub mod evidence;

@@ -334,3 +334,56 @@ fn fast_forward_pushed_by_run_rematches_grant() {
     assert_eq!(items.len(), 1, "{items:?}");
     assert_eq!(items[0].kind, AttentionKind::Merge);
 }
+
+/// G04 (`authority.md` section 11): the owner's decision passes the pass; a
+/// decision some other principal wrote raises the unauthorized-action
+/// trigger once, with a recovery item on the card.
+#[test]
+fn decision_by_wrong_principal_opens_recovery() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let approval = w.approve(&worker, &pr, "a1a1a1a1", true);
+    let card = w.run_of(&worker).card_id;
+    w.forge.pr(REPO, 7, open_pr("a1a1a1a1"));
+    let report = w.pass(now());
+    assert!(!report.did("G04"), "{report:?}");
+    assert!(w.breaches("G04").is_empty());
+
+    let orchestrator = w.fleet.orchestrator_session.clone();
+    w.store()
+        .conn()
+        .execute(
+            "INSERT INTO events (id, at, txn, actor, entity, entity_id, kind, card_id, payload)
+             VALUES ('01JC000000000000000000F0RG', ?1, 'approval.decide', ?2, 'approval', ?3,
+                     'approval.decided', ?4, '{\"accepted\": true}')",
+            rusqlite::params![now(), format!("session:{orchestrator}"), approval, card],
+        )
+        .unwrap();
+    let report = w.pass(now().plus_minutes(1));
+    assert!(
+        report.did(&format!(
+            "G04 approval {approval} decided by session:{orchestrator}"
+        )),
+        "{report:?}"
+    );
+    let breaches = w.breaches("G04");
+    assert_eq!(breaches.len(), 1, "{breaches:?}");
+    assert_eq!(breaches[0]["event_id"], "01JC000000000000000000F0RG");
+    let items: Vec<_> = w
+        .open_items(&card)
+        .into_iter()
+        .filter(|item| item.kind == AttentionKind::Recovery)
+        .collect();
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert!(
+        items[0].question.contains(&approval),
+        "{}",
+        items[0].question
+    );
+
+    let report = w.pass(now().plus_minutes(2));
+    assert!(!report.did("G04"), "{report:?}");
+    assert_eq!(w.breaches("G04").len(), 1);
+}

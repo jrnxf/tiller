@@ -3,6 +3,7 @@
 //! function. The CLI, the hooks, the daemon and the board API all call these
 //! functions; none of them writes SQL of its own (`protocol.md` section 1).
 
+pub mod authority;
 pub mod backup;
 pub mod domain;
 pub mod error;

@@ -2,7 +2,9 @@
 //! (R08), then stale bindings (R08, inside `pr.refresh`), then PRs merged
 //! or closed with no execution of Tiller's own (R07, R19). An execution the
 //! daemon lost track of is resolved before anything calls it an outside
-//! merge. Then the owner's answers to R07's question are carried out.
+//! merge. Then the owner's answers to R07's question are carried out. Last,
+//! decisions by the wrong principal raise the unauthorized-action trigger
+//! (G04, `authority.md` section 11).
 
 use std::path::Path;
 
@@ -43,6 +45,13 @@ impl Reconciler {
             }
         }
         self.outside_merge_answers(now, report)?;
+        let raised = self.store.raise_wrong_principal_decisions(&self.ctx(now))?;
+        for found in &raised.value {
+            report.repair(format!(
+                "G04 approval {} decided by {}: {}: unauthorized-action trigger",
+                found.approval_id, found.actor, found.why
+            ));
+        }
         Ok(())
     }
 

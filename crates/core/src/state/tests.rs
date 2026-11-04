@@ -891,7 +891,7 @@ fn daemon() -> Ctx {
 
 /// A ship card with open PR `number` at `head` and a merge approval
 /// requested on it. Returns the card and the approval.
-fn requested_merge(store: &mut Store, number: i64, head: &str) -> (Card, Approval) {
+pub(crate) fn requested_merge(store: &mut Store, number: i64, head: &str) -> (Card, Approval) {
     let card = store
         .card_create(&owner(), None, card(CardKind::Ship, "ship it"), None)
         .unwrap()
@@ -930,7 +930,7 @@ fn requested_merge(store: &mut Store, number: i64, head: &str) -> (Card, Approva
     (card, approval)
 }
 
-fn accept() -> Decision {
+pub(crate) fn accept() -> Decision {
     Decision {
         accept: true,
         via: AnsweredVia::Board,
