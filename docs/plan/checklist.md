@@ -390,7 +390,7 @@ about 3 min of the developer's time
 - [x] Role behavior evals with a holdout set; pinned judge and rubric
 - [ ] No-skill baseline per skill (deferred until tiller ships its first skill)
 - [x] Infrastructure tests kept separate
-- [ ] Check: every eval runs in CI on demand; the holdout is never used for tuning
+- [x] Check: every eval runs in CI on demand; the holdout is never used for tuning
 - [ ] Delivered
 
 ## CP5: Supervised live trial (developer, 30-45 min)
