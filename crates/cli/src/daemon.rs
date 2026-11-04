@@ -1,7 +1,8 @@
-//! `tiller daemon`: runs `tiller-daemon` with this host's tools. Both helper
-//! programs can be replaced for tests and labs: `TILLER_HERDR` and
-//! `TILLER_QUOTA_AXI` each hold a command line (a program and its leading
-//! arguments, split on whitespace).
+//! `tiller daemon`: runs `tiller-daemon` with this host's tools. herdr is the
+//! one `tiller spawn` drives: `spawn.herdr` and `spawn.herdr_socket` from
+//! `config.toml`. The helper programs can be replaced for tests and labs:
+//! `TILLER_HERDR`, `TILLER_QUOTA_AXI` and `TILLER_SSH` each hold a command
+//! line (a program and its leading arguments, split on whitespace).
 
 use std::ffi::OsString;
 use std::io::IsTerminal;
@@ -9,7 +10,8 @@ use std::process::ExitCode;
 
 use tiller_daemon::assets::Assets;
 use tiller_daemon::{Config, Ended};
-use tiller_herdr::client::Cli;
+
+use crate::cmd::spawn::configured_herdr;
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -22,12 +24,15 @@ pub struct Args {
     allow_hosts: Vec<String>,
 }
 
+/// The command line in `variable`, when it is set and not blank.
+pub fn env_command(variable: &str) -> Option<Vec<OsString>> {
+    let line = std::env::var(variable).ok()?;
+    let words: Vec<OsString> = line.split_whitespace().map(OsString::from).collect();
+    (!words.is_empty()).then_some(words)
+}
+
 pub fn command_line(variable: &str, default: &str) -> Vec<OsString> {
-    let line = std::env::var(variable)
-        .ok()
-        .filter(|line| !line.trim().is_empty())
-        .unwrap_or_else(|| default.to_owned());
-    line.split_whitespace().map(OsString::from).collect()
+    env_command(variable).unwrap_or_else(|| vec![default.into()])
 }
 
 /// The exit code for a database newer than this binary (`recovery.md` R11).
@@ -44,12 +49,18 @@ pub fn run(args: &Args) -> anyhow::Result<ExitCode> {
         // A service manager's log file gets plain text.
         .with_ansi(std::io::stderr().is_terminal())
         .try_init();
-    let home = crate::app::App::from_env(None).home;
+    let app = crate::app::App::from_env(None);
+    // A [spawn] table that does not parse stops the start: guessing the bare
+    // default could drive another session's server.
+    let herdr = configured_herdr(&app).map_err(|failure| match &failure.hint {
+        Some(hint) => anyhow::anyhow!("{}; {hint}", failure.message),
+        None => anyhow::anyhow!("{}", failure.message),
+    })?;
     let config = Config {
-        home,
+        home: app.home,
         port: args.port,
         allowed_hosts: args.allow_hosts.clone(),
-        herdr: Cli::local().program(command_line("TILLER_HERDR", "herdr")),
+        herdr,
         quota: command_line("TILLER_QUOTA_AXI", "quota-axi"),
         ssh: command_line("TILLER_SSH", "ssh"),
         assets: Assets::board(),

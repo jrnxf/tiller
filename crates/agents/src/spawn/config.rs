@@ -177,6 +177,25 @@ impl Default for Paths {
     }
 }
 
+impl Paths {
+    /// Reads only the `[spawn]` table of a parsed config file, for the
+    /// daemon and `tiller peer serve`, which need its tools and nothing the
+    /// other tables say.
+    pub fn from_table(table: &toml::Table) -> Result<Self, SpawnError> {
+        let paths: Self = match table.get("spawn") {
+            Some(spawn) => spawn
+                .clone()
+                .try_into()
+                .map_err(|e: toml::de::Error| SpawnError::Config(format!("spawn: {e}")))?,
+            None => Self::default(),
+        };
+        if paths.herdr.is_empty() {
+            return Err(SpawnError::Config("spawn: herdr names a command".into()));
+        }
+        Ok(paths)
+    }
+}
+
 impl SpawnConfig {
     /// Reads the spawn tables of a parsed config file; the file's other
     /// tables belong to other commands and are ignored.

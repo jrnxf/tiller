@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 use serde_json::json;
-use tiller_agents::spawn::config::SpawnConfig;
+use tiller_agents::spawn::config::{Paths, SpawnConfig};
 use tiller_agents::spawn::pool::Treehouse;
 use tiller_agents::spawn::trust::ClaudeConfig;
 use tiller_agents::spawn::{self as agents, Request, SpawnError, World, readings};
@@ -83,7 +83,7 @@ fn state_dir(key: &str) -> Result<PathBuf, Failure> {
         .ok_or_else(|| Failure::usage(format!("HOME is not set; set {key} in config.toml")))
 }
 
-fn words(words: &[String]) -> Vec<OsString> {
+pub(crate) fn words(words: &[String]) -> Vec<OsString> {
     words.iter().map(OsString::from).collect()
 }
 
@@ -94,13 +94,37 @@ fn absolute_home(home: &Path) -> Result<PathBuf, Failure> {
     Ok(std::path::absolute(home)?.components().collect())
 }
 
+/// The herdr `tiller spawn` drives: `spawn.herdr`, with `spawn.herdr_socket`
+/// for `workspace.move`.
+fn herdr_cli(paths: &Paths) -> Cli {
+    let herdr = Cli::local().program(words(&paths.herdr));
+    match &paths.herdr_socket {
+        Some(socket) => herdr.socket(socket),
+        None => herdr,
+    }
+}
+
+/// The herdr command the daemon, `tiller peer serve` and `tiller doctor`
+/// reach: `TILLER_HERDR` when set (tests and labs), else `spawn.herdr`.
+pub fn herdr_program(paths: &Paths) -> Vec<OsString> {
+    crate::daemon::env_command("TILLER_HERDR").unwrap_or_else(|| words(&paths.herdr))
+}
+
+/// The daemon's and `tiller peer serve`'s herdr, from the `[spawn]` table of
+/// `config.toml`: the one `tiller spawn` drives, unless `TILLER_HERDR`
+/// replaces it, socket and all.
+pub fn configured_herdr(app: &App) -> Result<Cli, Failure> {
+    let paths = Paths::from_table(&load_config(app)?).map_err(failure)?;
+    Ok(match crate::daemon::env_command("TILLER_HERDR") {
+        Some(program) => Cli::local().program(program),
+        None => herdr_cli(&paths),
+    })
+}
+
 impl Tools {
     pub fn load(app: &App) -> Result<Self, Failure> {
         let config = SpawnConfig::from_table(&load_config(app)?).map_err(failure)?;
-        let mut herdr = Cli::local().program(words(&config.spawn.herdr));
-        if let Some(socket) = &config.spawn.herdr_socket {
-            herdr = herdr.socket(socket);
-        }
+        let herdr = herdr_cli(&config.spawn);
         let scratch = match &config.spawn.scratch_root {
             Some(root) => root.clone(),
             None => state_dir("spawn.scratch_root")?.join("runs"),

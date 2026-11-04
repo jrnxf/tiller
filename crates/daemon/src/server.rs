@@ -292,6 +292,9 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         damage: damage.clone(),
     });
 
+    // Handlers first: a SIGTERM that follows the address line at once must
+    // stop the daemon cleanly, not kill it.
+    let signal = signal();
     // The address line is the readiness signal for supervisors and the smoke
     // script. A closed stdout must not take the daemon down.
     let mut stdout = std::io::stdout();
@@ -311,7 +314,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
     let mut stopped_early = stop.clone();
     let shutdown = async move {
         tokio::select! {
-            () = signal() => {}
+            () = signal => {}
             // A newer schema or a failed start stops the daemon from inside.
             _ = stopped_early.wait_for(|stop| *stop) => {}
         }
@@ -453,21 +456,24 @@ fn read_versions(tools: &Tools) -> Value {
     })
 }
 
-/// Resolves on SIGINT or SIGTERM, the signals launchd and systemd send on
-/// stop.
-async fn signal() {
+/// Installs the SIGINT and SIGTERM handlers, the signals launchd and systemd
+/// send on stop, and resolves on the first of them.
+fn signal() -> impl std::future::Future<Output = ()> {
     use tokio::signal::unix::{SignalKind, signal};
 
-    let (Ok(mut term), Ok(mut int)) = (
+    let handlers = (
         signal(SignalKind::terminate()),
         signal(SignalKind::interrupt()),
-    ) else {
-        // Without signal handlers, run until killed.
-        std::future::pending::<()>().await;
-        return;
-    };
-    tokio::select! {
-        _ = term.recv() => {}
-        _ = int.recv() => {}
+    );
+    async move {
+        let (Ok(mut term), Ok(mut int)) = handlers else {
+            // Without signal handlers, run until killed.
+            std::future::pending::<()>().await;
+            return;
+        };
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+        }
     }
 }

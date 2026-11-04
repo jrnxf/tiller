@@ -21,7 +21,6 @@ use tiller_core::state::peers::{
 use tiller_core::state::projects::meta;
 use tiller_daemon::peer::Timing;
 use tiller_daemon::peer::serve::{ServeConfig, ServeError};
-use tiller_herdr::client::Cli;
 
 use super::admin::{get_path, load_config, set_config};
 use crate::app::{App, Done, Failure, Outcome};
@@ -136,7 +135,7 @@ pub fn serve(app: &App, from: String) -> Result<ExitCode, Failure> {
         home: app.home.clone(),
         from,
         timing: Timing::default(),
-        herdr: Some(Cli::local().program(crate::daemon::command_line("TILLER_HERDR", "herdr"))),
+        herdr: Some(super::spawn::configured_herdr(app)?),
     };
     let input = std::io::BufReader::new(std::io::stdin());
     match tiller_daemon::peer::serve::serve(&config, input, std::io::stdout().lock()) {

@@ -26,7 +26,9 @@ use tiller_herdr::client::{Cli, Herdr};
 use tiller_observe::hooks::{EVENTS, Handler};
 
 use super::admin::{config_file, load_config};
+use super::spawn::{herdr_program, words};
 use crate::app::{App, Done, Failure, Outcome};
+use crate::daemon::env_command;
 
 /// The Claude Code version the hook table in `protocol.md` 4.2 was checked
 /// against (`host-capabilities.md`). A newer one is a warning: it may add
@@ -103,17 +105,6 @@ struct Report {
     ok: bool,
     checks: Vec<Check>,
     merge_gates: Vec<Gate>,
-}
-
-/// A program and its leading arguments from an environment variable.
-fn env_command(variable: &str) -> Option<Vec<OsString>> {
-    let line = std::env::var(variable).ok()?;
-    let words: Vec<OsString> = line.split_whitespace().map(OsString::from).collect();
-    (!words.is_empty()).then_some(words)
-}
-
-fn words(words: &[String]) -> Vec<OsString> {
-    words.iter().map(OsString::from).collect()
 }
 
 /// `program --version` within [`PROBE_TIMEOUT`]: the first line of stdout.
@@ -491,9 +482,7 @@ pub fn run(app: &App) -> Done {
 
     checks.push(tool("git", true, &["git".into()]));
     checks.push(tool("treehouse", true, &words(&spawn.treehouse)));
-    checks.push(herdr(
-        env_command("TILLER_HERDR").unwrap_or_else(|| words(&spawn.herdr)),
-    ));
+    checks.push(herdr(herdr_program(spawn)));
     checks.push(claude(&[OsString::from(&spawn.claude)]));
     checks.push(tool(
         "gh",

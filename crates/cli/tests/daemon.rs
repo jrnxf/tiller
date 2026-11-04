@@ -11,6 +11,7 @@ mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::os::unix::fs::PermissionsExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -26,20 +27,28 @@ struct Daemon {
 }
 
 fn spawn(world: &World) -> Child {
+    daemon_command(world)
+        .env("TILLER_HERDR", "/nonexistent/herdr")
+        .spawn()
+        .unwrap()
+}
+
+/// The daemon command without `TILLER_HERDR`, so `config.toml` names herdr.
+fn daemon_command(world: &World) -> Command {
     let empty = world.dir.path().join("empty-path");
     std::fs::create_dir_all(&empty).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_tiller"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tiller"));
+    command
         .args(["daemon", "--port", "0"])
         .env("TILLER_HOME", world.home())
         .env("PATH", &empty)
-        .env("TILLER_HERDR", "/nonexistent/herdr")
+        .env_remove("TILLER_HERDR")
         .env("TILLER_QUOTA_AXI", "/nonexistent/quota-axi")
         .env("TILLER_LOG", "warn")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::piped());
+    command
 }
 
 /// The first stdout line, or `None` when stdout closes first.
@@ -72,7 +81,12 @@ fn wait(child: &mut Child) -> ExitStatus {
         if let Some(status) = child.try_wait().unwrap() {
             return status;
         }
-        assert!(Instant::now() < deadline, "the daemon did not exit");
+        if Instant::now() >= deadline {
+            // A failed test leaves no daemon behind.
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the daemon did not exit");
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
 }
@@ -277,4 +291,73 @@ fn a_daemon_leaves_a_home_owned_by_another_system_uninitialized() {
     let (status, _) = get(daemon.port, "/api/v1/agents");
     assert_eq!(status, "HTTP/1.0 503 Service Unavailable");
     assert!(terminate(&mut daemon).success());
+}
+
+#[test]
+fn the_daemon_drives_the_herdr_spawn_names() {
+    let world = World::initialized();
+    // A herdr command with a leading argument, like a named session's
+    // wrapper; it records every call and answers none.
+    let calls = world.dir.path().join("herdr-calls");
+    let herdr = world.dir.path().join("herdr");
+    std::fs::write(
+        &herdr,
+        format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 1\n", calls.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&herdr, std::fs::Permissions::from_mode(0o755)).unwrap();
+    world.must(&[
+        "config",
+        "set",
+        "spawn.herdr",
+        &format!("[\"{}\", \"lab\"]", herdr.display()),
+    ]);
+
+    // Every failed call logs; nothing reads stderr here, so it must not fill.
+    let child = daemon_command(&world)
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut daemon = Daemon { child, port: 0 };
+    let deadline = Instant::now() + WAIT;
+    let seen = loop {
+        let seen = std::fs::read_to_string(&calls).unwrap_or_default();
+        if !seen.is_empty() || Instant::now() > deadline {
+            break seen;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(terminate(&mut daemon).success());
+    let first = seen
+        .lines()
+        .next()
+        .unwrap_or_else(|| panic!("the daemon never ran spawn.herdr"));
+    assert!(first.starts_with("lab "), "{seen}");
+}
+
+#[test]
+fn the_daemon_reads_only_spawn_and_needs_its_herdr() {
+    let world = World::initialized();
+    // Only [spawn] is read: a dispatch table spawn would refuse is no bar.
+    std::fs::write(
+        world.home().join("config.toml"),
+        "[dispatch]\nmodels = [\"haiku\"]\n[dispatch.default]\nmodel = \"opus\"\neffort = \"low\"\n",
+    )
+    .unwrap();
+    let mut daemon = start(&world);
+    assert!(terminate(&mut daemon).success());
+
+    std::fs::write(world.home().join("config.toml"), "[spawn]\nherdr = []\n").unwrap();
+    let mut daemon = daemon_command(&world).spawn().unwrap();
+    let status = wait(&mut daemon);
+    assert_eq!(status.code(), Some(1));
+    let mut stderr = String::new();
+    daemon
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(stderr.contains("spawn: herdr names a command"), "{stderr}");
+    assert!(info(&world).is_none());
 }
