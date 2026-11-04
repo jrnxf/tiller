@@ -15,3 +15,16 @@ export const answeredStore = createStore<Record<string, Answered>>({});
 export function markAnswered(item: AttentionItem, answer: string, option: string | null = null) {
   answeredStore.update((current) => ({ ...current, [item.id]: { item, answer, option } }));
 }
+
+// Items withdrawn from this tab. Like an answered item, a withdrawn one leaves
+// the open queue but stays in the inbox, with its receipt, until reload.
+export interface Withdrawn {
+  item: AttentionItem;
+  at: string;
+}
+
+export const withdrawnStore = createStore<Record<string, Withdrawn>>({});
+
+export function markWithdrawn(item: AttentionItem, at: string) {
+  withdrawnStore.update((current) => ({ ...current, [item.id]: { item, at } }));
+}

@@ -3,6 +3,7 @@ import { useCallback } from "react";
 import type { AttentionItem } from "../../lib/api-types";
 import { hostField, ownerOf } from "../../lib/peers";
 import { ActionFailure } from "./action-failure";
+import { markWithdrawn } from "./answered";
 import { sendMutation } from "./api";
 import { useAction } from "./use-action";
 
@@ -19,7 +20,13 @@ export function WithdrawButton({ item, off }: { item: AttentionItem; off: string
   );
   const host = ownerOf(item);
   const blocked = off ?? (host ? `${host} holds this item: withdraw it from that host` : null);
-  const action = useAction({ binding: item.id, receiptKey: `withdraw:${item.id}`, send });
+  const onRecorded = useCallback(() => markWithdrawn(item, new Date().toISOString()), [item]);
+  const action = useAction({
+    binding: item.id,
+    receiptKey: `withdraw:${item.id}`,
+    send,
+    onRecorded,
+  });
   return (
     <>
       <button

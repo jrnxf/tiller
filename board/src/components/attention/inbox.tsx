@@ -1,5 +1,6 @@
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
+import { useMemo } from "react";
 import type { CSSProperties, ReactNode } from "react";
 
 import type { AttentionItem, BoardRow, PermissionPrompt, Project } from "../../lib/api-types";
@@ -10,14 +11,17 @@ import { projectColor } from "../../lib/project-color";
 import { attentionQuery, boardQuery, projectsQuery } from "../../lib/queries";
 import { scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
+import { CheckIcon } from "../shell/icons";
 import { HostChip } from "../board/host-chip";
 import { useAmbiguousIds, useStanding } from "../board/peer-state";
-import { answeredStore } from "./answered";
+import { answeredStore, withdrawnStore } from "./answered";
+import type { Withdrawn } from "./answered";
 import { AnswerForm } from "./answer";
 import { ApproveBlock } from "./approve";
 import { CardActions, OpenInHerdr } from "./card-actions";
 import { tidy } from "./ansi";
 import { KIND_LABELS, PRIORITIES, formatAge, formatWhen, parseEvidence, staleText } from "./format";
+import type { ParsedEvidence } from "./format";
 import {
   BackIcon,
   ChevronIcon,
@@ -39,6 +43,7 @@ interface DecisionEntry {
   id: string;
   item: AttentionItem;
   answered: string | null;
+  withdrawn: Withdrawn | null;
 }
 
 type Entry = DecisionEntry | { type: "permission"; id: string; prompt: PermissionPrompt };
@@ -130,8 +135,15 @@ function Question({ text, projects }: { text: string; projects: Project[] }) {
   );
 }
 
-function Evidence({ item, ctx }: { item: AttentionItem; ctx: Context }) {
-  const evidence = parseEvidence(item.evidence);
+function Evidence({
+  item,
+  evidence,
+  ctx,
+}: {
+  item: AttentionItem;
+  evidence: ParsedEvidence;
+  ctx: Context;
+}) {
   const sessionId = item.subject_session_id ?? evidence.sessionId;
   const card = ctx.cards.get(item.card_id);
   // The pane is only there to open while the session is live.
@@ -173,9 +185,17 @@ function Evidence({ item, ctx }: { item: AttentionItem; ctx: Context }) {
   );
 }
 
-function Status({ item, answered }: { item: AttentionItem; answered: string | null }) {
+function Status({
+  item,
+  evidence,
+  settled,
+}: {
+  item: AttentionItem;
+  evidence: ParsedEvidence;
+  settled: boolean;
+}) {
   const standing = useStanding(item);
-  if (answered !== null) return null;
+  if (settled) return null;
   if (!item.still_current) {
     const text = staleText(item.stale);
     return (
@@ -191,7 +211,7 @@ function Status({ item, answered }: { item: AttentionItem; answered: string | nu
       </div>
     );
   }
-  const last = parseEvidence(item.evidence).lastOutputAt;
+  const last = evidence.lastOutputAt;
   return (
     <div className="waiting" data-testid="current">
       <span className="dot" />
@@ -203,12 +223,15 @@ function Status({ item, answered }: { item: AttentionItem; answered: string | nu
 function DecisionDetail({
   item,
   answered,
+  withdrawn,
   ctx,
 }: {
   item: AttentionItem;
   answered: string | null;
+  withdrawn: Withdrawn | null;
   ctx: Context;
 }) {
+  const evidence = useMemo(() => parseEvidence(item.evidence), [item.evidence]);
   const chip = (
     <span className="lab sm">
       <NeedsIcon />
@@ -229,9 +252,21 @@ function DecisionDetail({
       <h2 className="d-q">
         <Question text={item.question} projects={ctx.projects} />
       </h2>
-      <Status item={item} answered={answered} />
+      <Status item={item} evidence={evidence} settled={answered !== null || withdrawn !== null} />
+      {withdrawn ? (
+        <div className="answered" data-testid="withdrawn">
+          <CheckIcon />
+          <div className="t">
+            <b>Withdrawn.</b> {staleText(item.stale).head}
+            <div className="sub">
+              Withdrawn from the board by the owner, {formatWhen(withdrawn.at)}. Nobody is waiting
+              on it.
+            </div>
+          </div>
+        </div>
+      ) : null}
       {item.consequence ? <p className="d-ctx">{item.consequence}</p> : null}
-      <Evidence item={item} ctx={ctx} />
+      <Evidence item={item} evidence={evidence} ctx={ctx} />
       {item.recommendation ? (
         <div className="blk">
           <div className="blk-h">Recommendation</div>
@@ -245,7 +280,7 @@ function DecisionDetail({
         </div>
       ) : null}
       <div className="blk">
-        {item.approval ? (
+        {withdrawn ? null : item.approval ? (
           item.still_current ? (
             <ApproveBlock item={item} />
           ) : null
@@ -266,9 +301,7 @@ function DecisionDetail({
         </summary>
         <CardActions
           card={card}
-          sessionId={
-            tidy(parseEvidence(item.evidence).paneTail ?? "") ? null : item.opened_by_session_id
-          }
+          sessionId={tidy(evidence.paneTail ?? "") ? null : item.opened_by_session_id}
         />
       </details>
     </>
@@ -331,6 +364,7 @@ function Row({ entry, selected, ctx }: { entry: Entry; selected: boolean; ctx: C
   const project = ctx.projects[index];
   const since = entry.type === "decision" ? entry.item.opened_at : entry.prompt.since;
   const answered = entry.type === "decision" && entry.answered !== null;
+  const withdrawn = entry.type === "decision" && entry.withdrawn !== null;
   const gone = entry.type === "decision" && !entry.item.still_current && !answered;
   const title =
     entry.type === "decision"
@@ -368,6 +402,7 @@ function Row({ entry, selected, ctx }: { entry: Entry; selected: boolean; ctx: C
           <span className="sl">/</span>
           {formatAge(since)}
           {answered ? <span className="lab sm ok">answered</span> : null}
+          {withdrawn ? <span className="lab sm">withdrawn</span> : null}
           {entry.type === "decision" && entry.item.kind === "merge" && !answered ? (
             <span className="lab sm">merge</span>
           ) : null}
@@ -429,6 +464,7 @@ export function Inbox({
   const { data: projects } = useSuspenseQuery(projectsQuery());
   const prefs = useStore(prefsStore);
   const answered = useStore(answeredStore);
+  const withdrawn = useStore(withdrawnStore);
 
   const cards = new Map(board.rows.map((row) => [row.id, row]));
   const shown = new Set(
@@ -450,6 +486,7 @@ export function Inbox({
       id: item.id,
       item,
       answered: answered[item.id]?.answer ?? null,
+      withdrawn: withdrawn[item.id] ?? null,
     })),
     // Answered here: gone from the open queue, kept with its receipt.
     ...Object.values(answered)
@@ -459,6 +496,17 @@ export function Inbox({
         id: entry.item.id,
         item: entry.item,
         answered: entry.answer,
+        withdrawn: null,
+      })),
+    // Withdrawn here: likewise kept, under No longer current.
+    ...Object.values(withdrawn)
+      .filter((entry) => !openIds.has(entry.item.id) && !answered[entry.item.id])
+      .map((entry) => ({
+        type: "decision" as const,
+        id: entry.item.id,
+        item: entry.item,
+        answered: null,
+        withdrawn: entry,
       })),
   ].filter((entry) => inScope(entry.item.card_id));
   // Oldest first, as the Needs you column sorts (state.md, section 6).
@@ -508,7 +556,12 @@ export function Inbox({
         {chosen ? (
           <div className="inner" key={chosen.id}>
             {chosen.type === "decision" ? (
-              <DecisionDetail item={chosen.item} answered={chosen.answered} ctx={ctx} />
+              <DecisionDetail
+                item={chosen.item}
+                answered={chosen.answered}
+                withdrawn={chosen.withdrawn}
+                ctx={ctx}
+              />
             ) : (
               <PermissionDetail prompt={chosen.prompt} ctx={ctx} />
             )}

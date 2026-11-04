@@ -14,7 +14,7 @@ import { loadPrefs, prefsStore } from "../../lib/prefs";
 import { createQueryClient } from "../../lib/query-client";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
-import { answeredStore } from "../attention/answered";
+import { answeredStore, withdrawnStore } from "../attention/answered";
 import { resetBoardLook } from "./board-prefs";
 
 // The cards the `federated` fixture scenario gives each paired peer.
@@ -72,6 +72,7 @@ beforeEach(() => {
   prefsStore.set(loadPrefs());
   receiptsStore.set({ byKey: {}, progress: {} });
   answeredStore.set({});
+  withdrawnStore.set({});
   resetBoardLook();
   connectionStore.set("live");
   vi.stubGlobal("matchMedia", (query: string) => ({

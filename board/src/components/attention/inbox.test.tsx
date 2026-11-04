@@ -11,7 +11,7 @@ import { createQueryClient } from "../../lib/query-client";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
 import { applyChange } from "../../lib/sse";
-import { answeredStore } from "./answered";
+import { answeredStore, withdrawnStore } from "./answered";
 
 const RETRY = "01JATTN0000000000000000000";
 const MERGE = "01JATTN0000000000000000001";
@@ -82,6 +82,7 @@ beforeEach(() => {
   prefsStore.set(loadPrefs());
   receiptsStore.set({ byKey: {}, progress: {} });
   answeredStore.set({});
+  withdrawnStore.set({});
   calls = [];
   replies = [];
   release = null;
@@ -158,6 +159,9 @@ test("Withdraw sends the withdraw once", async () => {
     method: "POST",
     path: `/api/v1/attention/${QUIET}/withdraw`,
   });
+  // The pane keeps the item, with a receipt, rather than going blank.
+  expect(screen.getByTestId("withdrawn").textContent).toContain("Withdrawn.");
+  expect(screen.getByTestId(`inbox-row-${QUIET}`).textContent).toContain("withdrawn");
 });
 
 test("keys 1-3 answer, but not while typing in the note", async () => {
