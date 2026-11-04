@@ -41,10 +41,11 @@ Started Sunday 2026-11-01, Lisbon time.
 - [x] Nix flake: crane builds `tiller` with the board embedded; board derivation from `bun.lock`; dev shell with Rust, bun, sccache, sqlite3; home-manager module stub
 - [x] GitHub Actions CI: clippy, format checks, nextest, board lint, typecheck and tests
 - [x] `no-mistakes` config, MIT `LICENSE`, `README.md`, `AGENTS.md` with the hard rules and the commands for both halves
-- [ ] herdr 0.9.3 to 0.9.5 and the herdr config rows, through a dotfiles PR
+- [x] herdr 0.9.3 to 0.9.5 and the herdr config rows, through a dotfiles PR
 - [x] Check: CI green
 - [x] Check: `tiller --version` works, and `tiller daemon` serves the placeholder board from the embedded assets
 - [ ] Check: `nix build` gives one binary on macOS and on the Linux remote host
+  - Linux host passed (Wednesday 2026-11-04): `nix build` gives `result/bin/tiller` alone, `tiller --version` prints `tiller 0.1.0`, and `scripts/smoke.sh` shows `tiller daemon --port 0` serving the embedded board. The macOS run is still owed.
 - [x] Check: warm sccache rebuild of one crate in a worktree under 10 s
 - [x] Check: board build path reported (bun2nix, or the fixed-output fallback after the 1 h tripwire)
 - [ ] Delivered
