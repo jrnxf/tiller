@@ -140,6 +140,80 @@ pub enum EditOp {
     },
 }
 
+/// One observed fact for `mem.note` (`memory.md` sections 6 and 12).
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Note {
+    /// The project the fact is about. A session or a curator notes for its
+    /// own project, which this defaults to; the owner names one.
+    pub project: Option<String>,
+    /// The fact, kept as the local-only excerpt.
+    pub text: String,
+    /// The evidence kind; `observation` when not given.
+    pub kind: Option<String>,
+    /// The JSON pointer to the record; when not given, one naming the
+    /// caller's card, run, session or retro.
+    pub reference: Option<Value>,
+    /// The card it was seen on, when it is not the caller's own.
+    pub card: Option<String>,
+    /// The memory it contradicts, which comes due for review at once.
+    pub contradicts: Option<String>,
+}
+
+/// The evidence row `mem.note` wrote. The excerpt stays in `state.db`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Noted {
+    pub evidence_id: String,
+    pub project_id: String,
+    pub kind: String,
+    pub card_id: Option<String>,
+    pub independence_key: String,
+    /// The contradicted memory, now `due`.
+    pub due_memory_id: Option<String>,
+}
+
+/// One agent proposal for `mem.propose`, on an entry of a Tiller document.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ProposeOp {
+    /// A new entry at the end of `section`.
+    Add { section: String, text: String },
+    /// New text for the entry `memory`.
+    Rewrite { memory: String, text: String },
+    /// The entry `memory` taken out.
+    Retire { memory: String },
+}
+
+/// `mem.propose`: the change, the evidence rows it stands on and what it
+/// should change (`memory.md` section 6).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Propose {
+    /// The project whose document it changes, or `fleet`.
+    pub project: String,
+    pub op: ProposeOp,
+    /// Evidence ids or short forms; at least one, except for a retire.
+    pub evidence: Vec<String>,
+    /// What should change, on which kind of task; required except for a
+    /// retire.
+    pub expected_effect: Option<String>,
+    pub rationale: Option<String>,
+}
+
+const EVIDENCE_KINDS: [&str; 9] = [
+    "observation",
+    "transcript",
+    "card",
+    "review",
+    "test",
+    "ci",
+    "incident",
+    "owner_message",
+    "legacy",
+];
+
+/// Kinds only the owner (or the importer) records: an agent cannot speak
+/// for the owner or for the predecessor system.
+const OWNER_KINDS: [&str; 2] = ["owner_message", "legacy"];
+
 /// A change the owner made or approved, waiting for `mem.apply`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pending {
@@ -199,6 +273,12 @@ fn shown(file: &FileState, base_blob: &str, path: &str) -> Result<()> {
     if base_blob != file.head_blob {
         return Err(stale_view(path));
     }
+    committed(file, path)
+}
+
+/// The working tree holds what `HEAD` holds, so a change made against
+/// `HEAD` is the change that lands.
+fn committed(file: &FileState, path: &str) -> Result<()> {
     if file.work_blob != file.head_blob {
         return Err(Error::refused(
             "memory document",
@@ -235,9 +315,7 @@ fn ensure_source(tx: &mut Tx<'_>, project_id: &str) -> Result<Source> {
     if let Some(found) = source_of(tx.conn(), project_id)? {
         return Ok(found);
     }
-    let boundary = meta(tx.conn(), "boundary")?.ok_or_else(|| {
-        Error::refused("host", "local", "state.db has no boundary; run tiller init")
-    })?;
+    let boundary = host_boundary(tx.conn())?;
     let path = document_path(project_id);
     let id = ids::new_ulid();
     tx.conn().execute(
@@ -400,6 +478,240 @@ fn adopt(
     get(tx.conn(), "memory", &id)
 }
 
+/// Where an agent's memory write comes from. Empty for the owner.
+#[derive(Default)]
+struct Origin {
+    /// The caller's own project: a session's, or the retro's.
+    project: Option<String>,
+    card: Option<String>,
+    run: Option<String>,
+    session: Option<String>,
+    retro: Option<String>,
+}
+
+/// The caller of `mem.note` or `mem.propose`: a fleet session, a curator
+/// on a retro still open, or the owner on this host.
+fn origin(conn: &rusqlite::Connection, actor: &Actor, what: &str) -> Result<Origin> {
+    match actor {
+        Actor::Session(id) => {
+            let id = super::resolve_id(conn, "sessions", "session", id)?;
+            let session: crate::domain::Session = get(conn, "session", &id)?;
+            let card = match &session.run_id {
+                Some(run) => Some(get::<crate::domain::Run>(conn, "run", run)?.card_id),
+                None => None,
+            };
+            Ok(Origin {
+                project: Some(session.project_id),
+                card,
+                run: session.run_id,
+                session: Some(session.id),
+                retro: None,
+            })
+        }
+        Actor::Curator(retro) => {
+            let retro: crate::domain::Retro = get(conn, "retro", retro)?;
+            if retro.state == crate::domain::RetroState::Done {
+                return Err(Error::refused(
+                    "retro",
+                    &retro.id,
+                    "it is done; its curator writes nothing more",
+                ));
+            }
+            Ok(Origin {
+                project: Some(retro.project_id),
+                card: Some(retro.card_id),
+                run: None,
+                session: None,
+                retro: Some(retro.id),
+            })
+        }
+        Actor::Owner | Actor::Board => Ok(Origin::default()),
+        other => Err(Error::Forbidden(format!(
+            "{what} is for a fleet role, the curator or the owner; {other} may not"
+        ))),
+    }
+}
+
+pub(super) fn host_boundary(conn: &rusqlite::Connection) -> Result<String> {
+    meta(conn, "boundary")?
+        .ok_or_else(|| Error::refused("host", "local", "state.db has no boundary; run tiller init"))
+}
+
+/// One `evidence` row and its `evidence.captured` event.
+pub(super) struct NewEvidence<'a> {
+    pub project: &'a str,
+    pub boundary: &'a str,
+    pub kind: &'a str,
+    pub reference: Value,
+    pub excerpt: &'a str,
+    pub card: Option<&'a str>,
+    pub run: Option<&'a str>,
+    pub session: Option<&'a str>,
+    /// Default: the row's own id, independent of every other row.
+    pub independence: Option<&'a str>,
+    pub contradicts: Option<&'a str>,
+    pub payload: Value,
+}
+
+pub(super) fn insert_evidence(tx: &mut Tx<'_>, new: NewEvidence<'_>) -> Result<String> {
+    let id = ids::new_ulid();
+    tx.conn().execute(
+        "INSERT INTO evidence (id, project_id, boundary, kind, ref, excerpt, card_id, run_id, session_id,
+                               independence_key, captured_at, captured_by, contradicts_memory_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        params![
+            id,
+            new.project,
+            new.boundary,
+            new.kind,
+            new.reference,
+            new.excerpt,
+            new.card,
+            new.run,
+            new.session,
+            new.independence.unwrap_or(&id),
+            tx.now(),
+            tx.actor().to_string(),
+            new.contradicts,
+        ],
+    )?;
+    tx.event(
+        NewEvent::new("evidence", &id, "evidence.captured")
+            .card_opt(new.card.map(str::to_owned))
+            .payload(new.payload),
+    )?;
+    Ok(id)
+}
+
+/// The memory a note contradicts: live, on this host's boundary, and in the
+/// project's document or the fleet's.
+fn contradicted(
+    conn: &rusqlite::Connection,
+    input: &str,
+    project: &str,
+    boundary: &str,
+) -> Result<Memory> {
+    let id = super::resolve_id(conn, "memories", "memory", input)?;
+    let memory: Memory = get(conn, "memory", &id)?;
+    if memory.retired_at.is_some() {
+        return Err(Error::refused("memory", &id, "it is retired"));
+    }
+    let source: Source = get(conn, "memory source", &memory.source_id)?;
+    if source.boundary != boundary {
+        return Err(Error::refused(
+            "memory",
+            &id,
+            format!(
+                "it is in the {} boundary, not this host's {boundary}",
+                source.boundary
+            ),
+        ));
+    }
+    if source.project_id != project && source.project_id != FLEET_PROJECT {
+        return Err(Error::refused(
+            "memory",
+            &id,
+            format!("it is {}'s memory, not {project}'s", source.project_id),
+        ));
+    }
+    Ok(memory)
+}
+
+/// Marks a memory due for review because `evidence` contradicts it
+/// (`memory.md` section 5). An expired entry stays expired.
+fn mark_due(tx: &mut Tx<'_>, memory: &Memory, evidence: &str) -> Result<bool> {
+    let changed = tx.conn().execute(
+        "UPDATE memories SET review_status = 'due', due_reason = 'contradicting_evidence',
+                review_due_at = ?2, rev = rev + 1
+         WHERE id = ?1 AND review_status IN ('approved', 'unreviewed', 'due')",
+        params![memory.id, tx.now()],
+    )?;
+    if changed == 1 {
+        tx.event(
+            NewEvent::new("memory", &memory.id, "memory.due")
+                .rev(memory.rev + 1)
+                .payload(json!({"reason": "contradicting_evidence", "evidence_id": evidence})),
+        )?;
+    }
+    Ok(changed == 1)
+}
+
+/// The evidence rows a proposal cites, resolved once each: on this host's
+/// boundary, not superseded, and about the target project (any project
+/// for the fleet document).
+fn cited(
+    conn: &rusqlite::Connection,
+    inputs: &[String],
+    project: &str,
+    boundary: &str,
+) -> Result<Vec<String>> {
+    let mut ids: Vec<String> = Vec::new();
+    for input in inputs {
+        let id = super::resolve_id(conn, "evidence", "evidence", input)?;
+        let (of, on, superseded): (String, String, Option<String>) = conn.query_row(
+            "SELECT project_id, boundary, superseded_by FROM evidence WHERE id = ?1",
+            [&id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if on != boundary {
+            return Err(Error::refused(
+                "evidence",
+                &id,
+                format!("it is in the {on} boundary, not this host's {boundary}"),
+            ));
+        }
+        if let Some(later) = superseded {
+            return Err(Error::refused(
+                "evidence",
+                &id,
+                format!("it was superseded by {later}; cite that instead"),
+            ));
+        }
+        if project != FLEET_PROJECT && of != project {
+            return Err(Error::refused(
+                "evidence",
+                &id,
+                format!("it is about {of}, not {project}"),
+            ));
+        }
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
+/// The entry a live memory of `source` is in the current text.
+fn in_document<'a>(
+    conn: &rusqlite::Connection,
+    source: &Source,
+    sections: &'a [doc::Section],
+    rows: &[Vec<Option<Memory>>],
+    input: &str,
+    path: &str,
+) -> Result<(Memory, &'a Entry)> {
+    let id = super::resolve_id(conn, "memories", "memory", input)?;
+    let memory: Memory = get(conn, "memory", &id)?;
+    if memory.retired_at.is_some() {
+        return Err(Error::refused("memory", &id, "it is retired"));
+    }
+    if memory.source_id != source.id {
+        return Err(Error::refused(
+            "memory",
+            &id,
+            format!("it is not an entry of {path}"),
+        ));
+    }
+    let entry = entry_of(sections, rows, &id).ok_or_else(|| {
+        Error::refused(
+            "memory",
+            &id,
+            format!("its line is not in the current text of {path}"),
+        )
+    })?;
+    Ok((memory, entry))
+}
+
 struct NewProposal<'a> {
     source: &'a Source,
     op: &'a str,
@@ -410,12 +722,28 @@ struct NewProposal<'a> {
     expected_effect: Option<String>,
     /// The proposal this one copies the author, rationale and evidence of.
     from: Option<&'a Proposal>,
+    /// What an agent's new proposal stands on, from `mem.propose`.
+    backing: Option<Backing>,
+}
+
+/// An agent proposal's reason, author and evidence rows.
+struct Backing {
+    rationale: Option<String>,
+    session: Option<String>,
+    card: Option<String>,
+    evidence: Vec<String>,
 }
 
 fn insert_proposal(tx: &mut Tx<'_>, new: NewProposal<'_>) -> Result<Proposal> {
     let id = ids::new_ulid();
     let actor = tx.actor().to_string();
     let from = new.from;
+    let backing = new.backing.unwrap_or(Backing {
+        rationale: from.and_then(|p| p.rationale.clone()),
+        session: from.and_then(|p| p.authored_by_session_id.clone()),
+        card: from.and_then(|p| p.card_id.clone()),
+        evidence: Vec::new(),
+    });
     tx.conn().execute(
         "INSERT INTO proposals (id, project_id, boundary, target_source_id, op, memory_id, base_revision_id, base_blob,
                                 diff, diff_sha256, memory_fields, rationale, expected_effect, token_budget_after,
@@ -433,11 +761,11 @@ fn insert_proposal(tx: &mut Tx<'_>, new: NewProposal<'_>) -> Result<Proposal> {
             new.diff,
             doc::sha256_hex(new.diff.as_bytes()),
             new.fields,
-            from.and_then(|p| p.rationale.clone()),
+            backing.rationale,
             new.expected_effect.or_else(|| from.and_then(|p| p.expected_effect.clone())),
             from.and_then(|p| p.token_budget_after.clone()),
-            from.and_then(|p| p.authored_by_session_id.clone()),
-            from.and_then(|p| p.card_id.clone()),
+            backing.session,
+            backing.card,
             tx.now(),
             from.map_or(actor, |p| p.created_by.clone()),
         ],
@@ -449,13 +777,22 @@ fn insert_proposal(tx: &mut Tx<'_>, new: NewProposal<'_>) -> Result<Proposal> {
             params![id, from.id],
         )?;
     }
+    for evidence in &backing.evidence {
+        tx.conn().execute(
+            "INSERT INTO proposal_evidence (proposal_id, evidence_id) VALUES (?1, ?2)",
+            params![id, evidence],
+        )?;
+    }
     tx.event(
         NewEvent::new("proposal", &id, "proposal.created")
             .rev(1)
-            .card_opt(from.and_then(|p| p.card_id.clone()))
-            .payload(
-                json!({"op": new.op, "memory_id": new.memory_id, "from": from.map(|p| &p.id)}),
-            ),
+            .card_opt(backing.card.clone())
+            .payload(json!({
+                "op": new.op,
+                "memory_id": new.memory_id,
+                "from": from.map(|p| &p.id),
+                "evidence": backing.evidence,
+            })),
     )?;
     get(tx.conn(), "proposal", &id)
 }
@@ -827,6 +1164,7 @@ impl Store {
                     fields,
                     expected_effect: Some("Owner edit in the memory view".into()),
                     from: None,
+                    backing: None,
                 },
             )?;
             let approval = decide(tx, &proposal, true)?;
@@ -834,6 +1172,288 @@ impl Store {
                 proposal_id: proposal.id,
                 approval_id: Some(approval.id),
             })
+        })
+    }
+
+    /// `mem.note` (`memory.md` section 12): one evidence row. With
+    /// `contradicts`, that memory comes due for review in the same act.
+    pub fn mem_note(
+        &mut self,
+        ctx: &Ctx,
+        key: Option<&str>,
+        note: &Note,
+    ) -> Result<Applied<Noted>> {
+        self.write(ctx, "mem.note", key, |tx| {
+            let from = origin(tx.conn(), tx.actor(), "mem.note")?;
+            let text = note.text.trim();
+            super::required("text", text)?;
+            let kind = note.kind.as_deref().unwrap_or("observation");
+            if !EVIDENCE_KINDS.contains(&kind) {
+                return Err(Error::Usage(format!(
+                    "not an evidence kind: {kind:?} ({})",
+                    EVIDENCE_KINDS.join(", ")
+                )));
+            }
+            if !tx.actor().is_owner() && OWNER_KINDS.contains(&kind) {
+                return Err(Error::Forbidden(format!(
+                    "{kind} evidence is the owner's or the importer's; {} may not record it",
+                    tx.actor()
+                )));
+            }
+            let project = match (&from.project, &note.project) {
+                (Some(own), Some(asked)) if own != asked => {
+                    return Err(Error::Forbidden(format!(
+                        "{} notes for {own}, not {asked}",
+                        tx.actor()
+                    )));
+                }
+                (Some(own), _) => own.clone(),
+                (None, Some(asked)) => asked.clone(),
+                (None, None) => {
+                    return Err(Error::Usage("name the project the fact is about".into()));
+                }
+            };
+            get::<crate::domain::Project>(tx.conn(), "project", &project)?;
+            let card = match &note.card {
+                Some(input) => {
+                    let card = super::resolve_card(tx.conn(), input)?;
+                    if card.project_id != project {
+                        return Err(Error::refused(
+                            "card",
+                            &card.id,
+                            format!("it is in {}, not {project}", card.project_id),
+                        ));
+                    }
+                    Some(card.id)
+                }
+                None => from.card.clone(),
+            };
+            let boundary = host_boundary(tx.conn())?;
+            let due = note
+                .contradicts
+                .as_deref()
+                .map(|input| contradicted(tx.conn(), input, &project, &boundary))
+                .transpose()?;
+            // The caller's own place in the record, with what it points at
+            // under `pointers`: the shape `retro.finish --learning` writes.
+            let mut reference = serde_json::Map::new();
+            for (name, value) in [
+                ("retro", &from.retro),
+                ("card", &card),
+                ("run", &from.run),
+                ("session", &from.session),
+            ] {
+                if let Some(value) = value {
+                    reference.insert(name.into(), json!(value));
+                }
+            }
+            if let Some(pointers) = &note.reference {
+                reference.insert("pointers".into(), pointers.clone());
+            }
+            if reference.is_empty() {
+                reference.insert("by".into(), json!(tx.actor().to_string()));
+            }
+            // An agent's facts are independent by its own card or session,
+            // never by a card it names, so one session cannot make one fact
+            // look like two.
+            let independence = if tx.actor().is_owner() {
+                card.clone()
+            } else {
+                from.card.clone().or_else(|| from.session.clone())
+            };
+            let id = insert_evidence(
+                tx,
+                NewEvidence {
+                    project: &project,
+                    boundary: &boundary,
+                    kind,
+                    reference: Value::Object(reference),
+                    excerpt: text,
+                    card: card.as_deref(),
+                    run: from.run.as_deref(),
+                    session: from.session.as_deref(),
+                    independence: independence.as_deref(),
+                    contradicts: due.as_ref().map(|m| m.id.as_str()),
+                    payload: json!({
+                        "kind": kind,
+                        "project_id": project,
+                        "contradicts": due.as_ref().map(|m| &m.id),
+                    }),
+                },
+            )?;
+            let mut due_memory_id = None;
+            if let Some(memory) = due
+                && mark_due(tx, &memory, &id)?
+            {
+                due_memory_id = Some(memory.id);
+            }
+            let independence_key = independence.unwrap_or_else(|| id.clone());
+            Ok(Noted {
+                evidence_id: id,
+                project_id: project,
+                kind: kind.to_owned(),
+                card_id: card,
+                independence_key,
+                due_memory_id,
+            })
+        })
+    }
+
+    /// `mem.propose` (`memory.md` section 12): an agent's change to one
+    /// entry of a Tiller document, made against the text at `HEAD` and
+    /// standing on its evidence rows. It shows in the memory view as a
+    /// suggestion; Keep runs the holdout gate (`mem_decide`).
+    pub fn mem_propose(
+        &mut self,
+        ctx: &Ctx,
+        key: Option<&str>,
+        propose: &Propose,
+        file: &FileState,
+    ) -> Result<Applied<Proposal>> {
+        self.write(ctx, "mem.propose", key, |tx| {
+            let from = origin(tx.conn(), tx.actor(), "mem.propose")?;
+            let project = propose.project.as_str();
+            if let Some(own) = &from.project
+                && own != project
+                && project != FLEET_PROJECT
+            {
+                return Err(Error::Forbidden(format!(
+                    "{} proposes for {own} or the fleet, not {project}",
+                    tx.actor()
+                )));
+            }
+            get::<crate::domain::Project>(tx.conn(), "project", project)?;
+            let path = document_path(project);
+            committed(file, &path)?;
+            let boundary = host_boundary(tx.conn())?;
+            let source = ensure_source(tx, project)?;
+            if source.boundary != boundary {
+                return Err(Error::refused(
+                    "memory source",
+                    &source.id,
+                    format!(
+                        "it is in the {} boundary, not this host's {boundary}",
+                        source.boundary
+                    ),
+                ));
+            }
+            let base = ensure_revision(tx, &source.id, file)?;
+            let sections = doc::parse(&file.text);
+            let rows = mapped(tx.conn(), &source.id, &sections)?;
+            let line = |text: &str| {
+                let text = doc::one_line(text);
+                super::required("text", &text).map(|()| text)
+            };
+            let (op, memory, new, fields) = match &propose.op {
+                ProposeOp::Add { section, text } => {
+                    let section = &doc::one_line(section);
+                    super::required("section", section)?;
+                    let text = line(text)?;
+                    let fields = json!({
+                        "scope": scope_of(project),
+                        "class": doc::section_class(section),
+                        "validity": "durable",
+                        "section": section,
+                        "provenance": "proposal",
+                        "text": text,
+                    });
+                    ("add", None, doc::add(&file.text, section, &text), fields)
+                }
+                ProposeOp::Rewrite { memory, text } => {
+                    let text = line(text)?;
+                    let (row, entry) =
+                        in_document(tx.conn(), &source, &sections, &rows, memory, &path)?;
+                    let fields = json!({
+                        "section": row.section,
+                        "provenance": "proposal",
+                        "text": text,
+                        "old_text": entry.text,
+                    });
+                    (
+                        "rewrite",
+                        Some(row.id),
+                        doc::rewrite(&file.text, entry, &text),
+                        fields,
+                    )
+                }
+                ProposeOp::Retire { memory } => {
+                    let (row, entry) =
+                        in_document(tx.conn(), &source, &sections, &rows, memory, &path)?;
+                    let reason = propose
+                        .rationale
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|r| !r.is_empty())
+                        .unwrap_or("retired by proposal");
+                    let fields = json!({
+                        "section": row.section,
+                        "provenance": "proposal",
+                        "old_text": entry.text,
+                        "reason": reason,
+                    });
+                    ("retire", Some(row.id), doc::remove(&file.text, entry), fields)
+                }
+            };
+            let evidence = cited(tx.conn(), &propose.evidence, project, &boundary)?;
+            if evidence.is_empty() && op != "retire" {
+                return Err(Error::Usage(
+                    "a proposal cites at least one evidence row (--evidence <id>); record one with tiller mem note"
+                        .into(),
+                ));
+            }
+            let expected_effect = propose
+                .expected_effect
+                .as_deref()
+                .map(str::trim)
+                .filter(|e| !e.is_empty())
+                .map(str::to_owned);
+            if expected_effect.is_none() && op != "retire" {
+                return Err(Error::Usage(
+                    "a proposal states its expected effect (--expected-effect): what should change, on which kind of task"
+                        .into(),
+                ));
+            }
+            let diff = doc::unified_diff(&path, &file.text, &new);
+            if diff.is_empty() {
+                return Err(Error::Usage("the line already reads that way".into()));
+            }
+            let open: Option<Proposal> = find(
+                tx.conn(),
+                "target_source_id = ?1 AND state = 'proposed' AND diff_sha256 = ?2",
+                &[&source.id, &doc::sha256_hex(diff.as_bytes())],
+            )?;
+            if let Some(open) = open {
+                return Err(Error::refused(
+                    "proposal",
+                    &open.id,
+                    "it already proposes this change",
+                ));
+            }
+            let rationale = propose
+                .rationale
+                .as_deref()
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+                .map(str::to_owned);
+            insert_proposal(
+                tx,
+                NewProposal {
+                    source: &source,
+                    op,
+                    memory_id: memory.as_deref(),
+                    base: &base,
+                    diff,
+                    fields,
+                    expected_effect,
+                    from: None,
+                    backing: Some(Backing {
+                        rationale,
+                        session: from.session,
+                        card: from.card,
+                        evidence,
+                    }),
+                },
+            )
         })
     }
 
@@ -909,6 +1529,7 @@ impl Store {
                     fields,
                     expected_effect: None,
                     from: Some(&proposal),
+                    backing: None,
                 },
             )?;
             let why = format!(
@@ -969,6 +1590,7 @@ impl Store {
                             fields,
                             expected_effect: None,
                             from: Some(&proposal),
+                            backing: None,
                         },
                     )?;
                     Ok(Pending {
@@ -1038,6 +1660,7 @@ impl Store {
                             fields,
                             expected_effect: Some(format!("Undo of proposal {}", proposal.id)),
                             from: None,
+                            backing: None,
                         },
                     )?;
                     let approval = decide(tx, &inverse, true)?;
@@ -1330,6 +1953,11 @@ fn apply_rows(tx: &mut Tx<'_>, proposal: &Proposal, revision: &str) -> Result<Op
                  WHERE id = ?1",
                 params![memory.id, sha()?, due, now],
             )?;
+            tx.conn().execute(
+                "INSERT OR IGNORE INTO memory_evidence (memory_id, evidence_id)
+                 SELECT ?1, evidence_id FROM proposal_evidence WHERE proposal_id = ?2",
+                params![memory.id, proposal.id],
+            )?;
             tx.event(
                 NewEvent::new("memory", &memory.id, "memory.rewritten")
                     .rev(memory.rev + 1)
@@ -1498,13 +2126,30 @@ fn display_id(conn: &rusqlite::Connection, card: Option<&str>) -> Result<Option<
         .optional()?)
 }
 
-fn author(proposal: &Proposal) -> String {
+/// Who a proposal reads as coming from: "you" for the owner, "the curator",
+/// or "the <project> <role>" for a fleet session.
+fn author(conn: &rusqlite::Connection, proposal: &Proposal) -> Result<String> {
     match field(&proposal.memory_fields, "provenance") {
-        Some("owner_edit") => "you".to_owned(),
-        Some("legacy-import") => "carried over".to_owned(),
-        _ if proposal.created_by == "owner" || proposal.created_by == "board" => "you".to_owned(),
-        _ => proposal.created_by.clone(),
+        Some("owner_edit") => return Ok("you".to_owned()),
+        Some("legacy-import") => return Ok("carried over".to_owned()),
+        _ => {}
     }
+    if proposal.created_by == "owner" || proposal.created_by == "board" {
+        return Ok("you".to_owned());
+    }
+    if proposal.created_by.starts_with("curator:") {
+        return Ok("the curator".to_owned());
+    }
+    if let Some(id) = &proposal.authored_by_session_id
+        && let Some(session) = find::<crate::domain::Session>(conn, "id = ?1", &[id])?
+    {
+        return Ok(format!(
+            "the {} {}",
+            session.project_id,
+            session.role.as_str()
+        ));
+    }
+    Ok(proposal.created_by.clone())
 }
 
 fn suggestion(conn: &rusqlite::Connection, proposal: &Proposal, head: &str) -> Result<Suggestion> {
@@ -1515,7 +2160,7 @@ fn suggestion(conn: &rusqlite::Connection, proposal: &Proposal, head: &str) -> R
             "add" | "rewrite" => intended_text(proposal),
             _ => None,
         },
-        by: author(proposal),
+        by: author(conn, proposal)?,
         card: display_id(conn, proposal.card_id.as_deref())?,
         at: proposal.created_at,
         why: proposal
@@ -1543,7 +2188,10 @@ fn provenance(conn: &rusqlite::Connection, memory: &Memory) -> Result<Provenance
         let card = display_id(conn, last.card_id.as_deref())?;
         return Ok(Provenance {
             revision_id: revision.id,
-            note: card.is_none().then(|| author(&last)),
+            note: match card {
+                Some(_) => None,
+                None => Some(author(conn, &last)?),
+            },
             card,
             at: last.decided_at.unwrap_or(last.created_at),
         });
@@ -1577,7 +2225,8 @@ fn changes(conn: &rusqlite::Connection, source_id: &str) -> Result<Vec<Change>> 
         if undone(conn, &proposal.id)? {
             continue;
         }
-        let owner = author(&proposal) == "you";
+        let by = author(conn, &proposal)?;
+        let owner = by == "you";
         let kind = match (proposal.state.as_str(), proposal.op.as_str()) {
             ("discarded", _) => "discard",
             (_, "add") if owner => "added",
@@ -1594,7 +2243,7 @@ fn changes(conn: &rusqlite::Connection, source_id: &str) -> Result<Vec<Change>> 
             proposal_id: proposal.id.clone(),
             kind: kind.to_owned(),
             text,
-            from: card.unwrap_or_else(|| author(&proposal)),
+            from: card.unwrap_or(by),
             at: proposal.decided_at.unwrap_or(proposal.created_at),
         });
     }

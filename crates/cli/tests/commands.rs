@@ -898,7 +898,7 @@ fn exit_codes_follow_the_table() {
         vec!["agent", "resume", "alpha-1-build"],
         vec!["agent", "interrupt", "alpha-1-build"],
         vec!["agent", "focus", "alpha-1-build"],
-        vec!["mem", "note"],
+        vec!["mem", "approve", "01JC00000000000000000000P1"],
         vec!["doctor"],
         vec!["board", "--login"],
     ] {

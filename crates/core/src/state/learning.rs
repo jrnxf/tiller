@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::projects::meta;
+use super::memory::{NewEvidence, host_boundary, insert_evidence};
 use super::{find, get, list, required, resolve_card, resolve_id};
 use crate::domain::*;
 use crate::error::{Error, Result};
@@ -1120,38 +1120,28 @@ fn capture_learning(
     learning: &str,
     pointers: Option<&Value>,
 ) -> Result<String> {
-    let boundary = meta(tx.conn(), "boundary")?.ok_or_else(|| {
-        Error::refused("host", "local", "state.db has no boundary; run tiller init")
-    })?;
+    let boundary = host_boundary(tx.conn())?;
     let kind = if retro.reason == RetroReason::Incident {
         "incident"
     } else {
         "card"
     };
-    let id = ids::new_ulid();
-    let reference = json!({"retro": retro.id, "card": retro.card_id, "pointers": pointers});
-    tx.conn().execute(
-        "INSERT INTO evidence (id, project_id, boundary, kind, ref, excerpt, card_id, independence_key, captured_at, captured_by)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![
-            id,
-            retro.project_id,
-            boundary,
+    insert_evidence(
+        tx,
+        NewEvidence {
+            project: &retro.project_id,
+            boundary: &boundary,
             kind,
-            reference,
-            learning.trim(),
-            retro.card_id,
-            retro.card_id,
-            tx.now(),
-            tx.actor().to_string(),
-        ],
-    )?;
-    tx.event(
-        NewEvent::new("evidence", &id, "evidence.captured")
-            .card(&retro.card_id)
-            .payload(json!({"kind": kind, "retro": retro.id})),
-    )?;
-    Ok(id)
+            reference: json!({"retro": retro.id, "card": retro.card_id, "pointers": pointers}),
+            excerpt: learning.trim(),
+            card: Some(&retro.card_id),
+            run: None,
+            session: None,
+            independence: Some(&retro.card_id),
+            contradicts: None,
+            payload: json!({"kind": kind, "retro": retro.id}),
+        },
+    )
 }
 
 /// A retro by id or short form, or the newest retro of a card reference.

@@ -32,7 +32,10 @@ Not a learning:
 4. Decide what to write:
    - nothing: `tiller retro finish <retro> --nothing`;
    - a learning: `tiller retro finish <retro> --learning "<sentence>" --evidence '<json>'`, where the JSON points at the record (`{"events": [seq, ...], "attention": ["<id>"], "runs": ["<id>"]}`) and never quotes a transcript;
-   - a proposal, only when the learning is backed by at least two cards or one severe incident and the exact change is clear: `tiller mem propose` with the diff, the evidence ids and an `expected_effect` (what should change, on which kind of task), then `tiller retro finish <retro> --proposed <proposal>`. When `tiller mem propose` is unavailable (exit 7), record the learning as evidence instead and say so.
+   - a proposal, only when the learning is backed by at least two cards or one severe incident and the exact change is clear:
+     1. `tiller mem note --text "<sentence>" --ref '<json>'` (add `--kind incident` for an incident) records this retro's evidence and prints its id;
+     2. `tiller mem propose <project|fleet> --add "<section>" --text "<line>"` (or `--rewrite <memory> --text "<line>"`, or `--retire <memory>`) `--evidence <id> [--evidence <earlier id>] --expected-effect "<what should change, on which kind of task>"` files it and prints the proposal id;
+     3. `tiller retro finish <retro> --proposed <proposal>`.
 5. End your reply with the command you ran and its result, in one line each. No other prose is needed.
 
 ## Tools and limits

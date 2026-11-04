@@ -3,10 +3,9 @@
 //! so the command surface is complete and a wrong call is a usage error, but
 //! each answers `unavailable` (exit 7, nothing written) until the task that
 //! owns the outside half lands: orchestrator launch (T4.2), landing
-//! (T4.3), relaunch and resume (T4.5), herdr control and doctor (T2.5, T2.8),
-//! memory (T7.2).
+//! (T4.3), relaunch and resume (T4.5), herdr control and doctor (T2.5, T2.8).
 
-use clap::{Args, Subcommand};
+use clap::Subcommand;
 
 use crate::app::{App, Done, Failure};
 
@@ -34,21 +33,6 @@ pub enum AgentCmd {
     Interrupt { run: String },
     /// Focus the agent's pane in herdr
     Focus { target: String },
-}
-
-#[derive(Subcommand, Debug)]
-pub enum MemCmd {
-    Note(MemArgs),
-    Propose(MemArgs),
-    Approve(MemArgs),
-}
-
-#[derive(Args, Debug)]
-pub struct MemArgs {
-    #[arg(long)]
-    pub contradicts: Option<String>,
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    pub rest: Vec<String>,
 }
 
 fn later(what: &str, needs: &str) -> Done {
@@ -85,10 +69,6 @@ pub fn agent(_app: &App, cmd: AgentCmd) -> Done {
             "herdr to focus the pane (T2.5)",
         ),
     }
-}
-
-pub fn mem(_app: &App, _cmd: MemCmd) -> Done {
-    later("tiller mem", "the memory store (T7.2)")
 }
 
 pub fn doctor(_app: &App) -> Done {

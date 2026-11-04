@@ -60,7 +60,7 @@ The curator's job (`roles/curator.md`):
 
 1. Answer "what would a future agent still get wrong, or still do right, without a change?" (Every's counterfactual test). A fact already in approved memory, a one-off, or a thing a checkable command answers (a version, a path, a service's state) is not a learning (memory.md section 5, "checkable facts are queried").
 2. Keep at most one learning. Write it as evidence: `tiller retro finish <retro> --learning <one line> --evidence <json pointers>`.
-3. When it is backed by two cards, or one severe incident, and the exact change is clear, also propose it: `tiller mem propose` with the diff and an `expected_effect`, then `tiller retro finish <retro> --proposed <proposal>`. A mechanical rule (a path never to touch, a command never to run) is proposed as a hook or lint change on a `ship` card, not as prose.
+3. When it is backed by two cards, or one severe incident, and the exact change is clear, also propose it: `tiller mem note` records the evidence, `tiller mem propose <project|fleet> --add <section> | --rewrite <memory> | --retire <memory>` files the one-entry change against the Tiller document with `--evidence <id>...` and `--expected-effect`, then `tiller retro finish <retro> --proposed <proposal>`. A mechanical rule (a path never to touch, a command never to run) is proposed as a hook or lint change on a `ship` card, not as prose.
 4. Otherwise `tiller retro finish <retro> --nothing`. This is the normal result; the brief says so.
 
 The curator writes nothing else: its write set is its scratch directory, its tools are `Read`, `Grep`, `Glob` and Bash for `tiller retro`, `tiller mem`, `tiller card show`, `tiller run show` and `tiller events`. The actor on everything it writes is `curator:<retro id>`, which `tiller` derives from `TILLER_RETRO_ID`; it is not an owner and not a session, so a proposal it files has no `authored_by_session_id` and `created_by = curator:<retro id>`.
@@ -119,7 +119,7 @@ Role prompts, skills and settings live in this repository and reach a host throu
 
 A refusal names the failing step and the command that clears it. The memory view shows the same verdict beside each proposal (`GET /api/v1/memory`, T7.2, from `Store::learning_gate`). A legacy placement plan (memory.md section 10) is one named bundle with one holdout run, so the owner's batch approval is one gate.
 
-`mem.decide` is built by T7.2; the call to `learning_gate` is one line in its precondition list, and this document is the contract for it.
+`mem.decide` (T7.2) calls `learning_gate` as one line in its precondition list; this document is the contract for it.
 
 ## 8. Measuring and "nothing worth saving"
 
@@ -176,6 +176,7 @@ Config keys, in `[learning]` of `config.toml`: `sample_every` (5), `window_cards
 | Every spawned run carries a manifest-backed hash, and two manifests diff by part | enforced | `agents::spawn::config_hash_covers_the_manifest`, `learning::manifest_diff` |
 | `run.sh --candidate` appends the candidate to every case, on both splits | enforced | `evals/check.sh` fixture build; the appended text is visible in the generated `case.yaml` |
 | The curator keeps checkable facts out of memory and ends "nothing" on a routine card | convention: the role prompt | `evals/cases/*/curator_*` |
-| `mem.decide` calls the gate | convention until T7.2 lands the line | documented here, section 7 |
+| `mem.decide` calls the gate | enforced | `state::memory::keep_waits_for_a_passing_holdout_run`, `state::memory::a_proposal_is_filed_with_its_evidence_and_kept_only_through_the_gate` |
+| A proposal cites at least one evidence row on its project and states an `expected_effect` | enforced | `state::memory::a_proposal_without_backing_or_outside_its_project_is_refused`, `cli::mem::a_proposal_needs_evidence_and_a_line_that_passes_the_scrub` |
 
 Not provable without live data, and so listed as unverified in the done line: a curator run on a real transcript, a holdout run with a real candidate, and a window measured over ten real cards.

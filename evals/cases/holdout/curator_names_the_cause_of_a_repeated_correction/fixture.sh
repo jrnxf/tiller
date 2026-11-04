@@ -18,4 +18,5 @@ cat >transcripts/claude-build-61-2.jsonl <<'JSONL'
 {"type":"tool_use","name":"Bash","input":{"command":"tiller status done 'PR #97 green, merge requested'"}}
 JSONL
 echo "ok: retro 01JC0000000000000000000RT9 finished" | reply retro-finish
-echo "unavailable: tiller mem propose needs the memory store, which this build does not have yet" | reply mem-propose 7
+echo "ok: evidence 01JC0000000000000000000EV61 captured" | reply mem-note
+echo "ok: proposal 01JC0000000000000000000PR61 filed" | reply mem-propose

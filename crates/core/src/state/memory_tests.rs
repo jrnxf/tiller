@@ -658,3 +658,236 @@ fn a_second_suggestion_on_a_line_is_listed_apart_naming_the_line() {
     assert_eq!(apart.target.as_deref(), Some("old wording"));
     assert_ne!(apart.text, inline.text);
 }
+
+fn as_session(session: &str) -> Ctx {
+    Ctx::new(Actor::Session(session.to_owned()))
+}
+
+fn note(store: &mut Store, ctx: &Ctx, project: Option<&str>, text: &str) -> Noted {
+    let note = Note {
+        project: project.map(str::to_owned),
+        text: text.into(),
+        ..Note::default()
+    };
+    store.mem_note(ctx, None, &note).unwrap().value
+}
+
+fn add_note(text: &str, evidence: &[&str]) -> Propose {
+    Propose {
+        project: "alpha".into(),
+        op: ProposeOp::Add {
+            section: doc::NOTE_SECTION.into(),
+            text: text.into(),
+        },
+        evidence: evidence.iter().map(|e| (*e).to_owned()).collect(),
+        expected_effect: Some("no more failed runs at midnight".into()),
+        rationale: Some("Seen on two cards this week".into()),
+    }
+}
+
+#[test]
+fn a_proposal_is_filed_with_its_evidence_and_kept_only_through_the_gate() {
+    let (mut store, session) = memory_store();
+    let ctx = as_session(&session);
+    let noted = note(&mut store, &ctx, None, "The staging DB reset mid-run");
+    assert_eq!(noted.project_id, "alpha");
+    assert_eq!(noted.independence_key, session);
+    let filed = store
+        .mem_propose(
+            &ctx,
+            None,
+            &add_note("The staging DB resets at midnight", &[&noted.evidence_id]),
+            &file(""),
+        )
+        .unwrap()
+        .value;
+    assert_eq!(filed.state, "proposed");
+    assert_eq!(
+        filed.authored_by_session_id.as_deref(),
+        Some(session.as_str())
+    );
+    let cited: Vec<String> = store
+        .conn()
+        .prepare("SELECT evidence_id FROM proposal_evidence WHERE proposal_id = ?1")
+        .unwrap()
+        .query_map([&filed.id], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(cited, vec![noted.evidence_id.clone()]);
+
+    let view = store
+        .memory_view("alpha", |_| Ok(file("")), no_list)
+        .unwrap();
+    let suggestion = &notes(&view).suggestions[0];
+    assert_eq!(suggestion.proposal_id, filed.id);
+    assert_eq!(suggestion.op, "add");
+    assert_eq!(
+        suggestion.text.as_deref(),
+        Some("The staging DB resets at midnight")
+    );
+    assert_eq!(suggestion.by, "the alpha orchestrator");
+    assert!(!suggestion.gate.ok);
+
+    let error = store
+        .mem_decide(&owner(), &filed.id, true, EMPTY_BLOB, &file(""), &[])
+        .unwrap_err();
+    assert!(matches!(error, Error::Refused { .. }), "{error:?}");
+    assert_eq!(proposal(&store, &filed.id).state, "proposed");
+    measured(&mut store, "staging notes", &[&filed.id]);
+    let kept = store
+        .mem_decide(&owner(), &filed.id, true, EMPTY_BLOB, &file(""), &[])
+        .unwrap()
+        .value;
+    assert!(kept.approval_id.is_some());
+}
+
+#[test]
+fn a_contradicting_note_marks_the_memory_due_and_backs_a_rewrite() {
+    let (mut store, session) = memory_store();
+    let first = add(
+        &mut store,
+        "alpha",
+        "Deploys go out on Fridays",
+        "",
+        doc::RULE_SECTION,
+    );
+    let v1 = "## How we work here\n\n- Deploys go out on Fridays\n";
+    apply(&mut store, first.approval_id.as_deref().unwrap(), "", v1);
+    let memory: Memory = find(store.conn(), "proposal_id = ?1", &[&first.proposal_id])
+        .unwrap()
+        .unwrap();
+
+    let ctx = as_session(&session);
+    let mut contradicting = Note {
+        text: "The owner froze Friday deploys".into(),
+        kind: Some("owner_message".into()),
+        contradicts: Some(memory.id.clone()),
+        ..Note::default()
+    };
+    // An agent reports what it saw; it does not speak for the owner.
+    let error = store.mem_note(&ctx, None, &contradicting).unwrap_err();
+    assert!(matches!(error, Error::Forbidden(_)), "{error:?}");
+    contradicting.kind = Some("review".into());
+    let noted = store.mem_note(&ctx, None, &contradicting).unwrap().value;
+    assert_eq!(noted.due_memory_id.as_deref(), Some(memory.id.as_str()));
+    let (status, reason, due_at): (String, Option<String>, Option<String>) = store
+        .conn()
+        .query_row(
+            "SELECT review_status, due_reason, review_due_at FROM memories WHERE id = ?1",
+            [&memory.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (status.as_str(), reason.as_deref()),
+        ("due", Some("contradicting_evidence"))
+    );
+    assert!(due_at.is_some(), "a contradicted memory is due now");
+
+    let rewrite = Propose {
+        project: "alpha".into(),
+        op: ProposeOp::Rewrite {
+            memory: memory.id.clone(),
+            text: "Deploys go out on Thursdays".into(),
+        },
+        evidence: vec![noted.evidence_id.clone()],
+        expected_effect: Some("no Friday deploy attempts".into()),
+        rationale: None,
+    };
+    let filed = store
+        .mem_propose(&ctx, None, &rewrite, &file(v1))
+        .unwrap()
+        .value;
+    assert_eq!(filed.memory_id.as_deref(), Some(memory.id.as_str()));
+    let view = store
+        .memory_view("alpha", |_| Ok(file(v1)), no_list)
+        .unwrap();
+    let inline = view.doc.sections[0].lines[0].suggestion.as_ref().unwrap();
+    assert_eq!(inline.proposal_id, filed.id);
+    assert_eq!(inline.text.as_deref(), Some("Deploys go out on Thursdays"));
+
+    // Kept and applied, the rewritten memory stands on the new evidence too.
+    measured(&mut store, "deploy days", &[&filed.id]);
+    let head = file(v1).head_blob;
+    let kept = store
+        .mem_decide(&owner(), &filed.id, true, &head, &file(v1), &[])
+        .unwrap()
+        .value;
+    let v2 = "## How we work here\n\n- Deploys go out on Thursdays\n";
+    apply(&mut store, kept.approval_id.as_deref().unwrap(), v1, v2);
+    let backing: Vec<String> = store
+        .conn()
+        .prepare("SELECT evidence_id FROM memory_evidence WHERE memory_id = ?1")
+        .unwrap()
+        .query_map([&memory.id], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(backing.contains(&noted.evidence_id), "{backing:?}");
+}
+
+#[test]
+fn a_proposal_without_backing_or_outside_its_project_is_refused() {
+    let (mut store, session) = memory_store();
+    let ctx = as_session(&session);
+    let ours = note(&mut store, &ctx, None, "The staging DB reset mid-run");
+    let before = store.last_seq().unwrap();
+
+    let error = store
+        .mem_propose(&ctx, None, &add_note("A line", &[]), &file(""))
+        .unwrap_err();
+    assert!(matches!(error, Error::Usage(_)), "{error:?}");
+    let mut vague = add_note("A line", &[&ours.evidence_id]);
+    vague.expected_effect = None;
+    let error = store
+        .mem_propose(&ctx, None, &vague, &file(""))
+        .unwrap_err();
+    assert!(matches!(error, Error::Usage(_)), "{error:?}");
+
+    let mut elsewhere = add_note("A line", &[&ours.evidence_id]);
+    elsewhere.project = "beta".into();
+    let error = store
+        .mem_propose(&ctx, None, &elsewhere, &file(""))
+        .unwrap_err();
+    assert!(matches!(error, Error::Forbidden(_)), "{error:?}");
+    let error = store
+        .mem_note(
+            &ctx,
+            None,
+            &Note {
+                project: Some("beta".into()),
+                text: "A fact".into(),
+                ..Note::default()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::Forbidden(_)), "{error:?}");
+
+    let peer = Ctx::new(Actor::Peer("board-a".into()));
+    let error = store
+        .mem_propose(
+            &peer,
+            None,
+            &add_note("A line", &[&ours.evidence_id]),
+            &file(""),
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::Forbidden(_)), "{error:?}");
+    assert_eq!(
+        store.last_seq().unwrap(),
+        before,
+        "a refusal writes nothing"
+    );
+
+    let fleet = note(&mut store, &owner(), Some(FLEET_PROJECT), "Fleet-wide fact");
+    let error = store
+        .mem_propose(
+            &ctx,
+            None,
+            &add_note("A line", &[&fleet.evidence_id]),
+            &file(""),
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::Refused { .. }), "{error:?}");
+}

@@ -558,10 +558,10 @@ One-time owner setup, per host and repo (CP2, S03):
 `fable` high design, `opus` high build - 5-8 h
 
 - [x] Sampled retros, full retros for incidents and surprising wins
-- [ ] Evidence-backed proposals for mistakes and successes (the curator flow and the retro's evidence rows are in; `tiller mem propose` lands with T7.2)
+- [x] Evidence-backed proposals for mistakes and successes (`tiller mem note` records the evidence; `tiller mem propose` files a one-entry change to a Tiller document that cites it and shows as a suggestion in the memory view; the curator runs note, propose, then `retro finish --proposed`)
 - [x] Config hash on every run; one change at a time or a named bundle
 - [x] Holdout eval before any change is approved; "nothing worth saving" is a normal result (the gate is `Store::learning_gate`; `mem.decide` runs it before a Keep, and the memory view shows its verdict beside each suggestion)
-- [ ] Delivered
+- [x] Delivered
 
 ### T7.4 The two-week check
 `opus` high - 1 h - two weeks after the last cutover
