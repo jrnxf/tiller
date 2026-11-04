@@ -14,6 +14,7 @@ pub mod asks;
 pub mod attention;
 pub mod caches;
 pub mod cards;
+pub mod interventions;
 pub mod outbox;
 pub mod peers;
 pub mod projects;

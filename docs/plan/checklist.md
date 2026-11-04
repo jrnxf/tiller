@@ -536,10 +536,10 @@ One-time owner setup, per host and repo (CP2, S03):
 ### T7.1 Health depth
 `sonnet` high, `dataviz` skill - 2-3 h
 
-- [ ] Each time the developer was needed classified as correction, unplanned escalation or rework
-- [ ] Relabeling from "Show the numbers"; sample size on every figure
-- [ ] Same numbers computed over Firstmate's history for the T7.4 report, never shown on the Health page
-- [ ] Delivered
+- [x] Each time the developer was needed classified as correction, unplanned escalation or rework
+- [x] Relabeling from "Show the numbers"; sample size on every figure
+- [x] Same numbers computed over Firstmate's history for the T7.4 report, never shown on the Health page
+- [x] Delivered
 
 ### T7.2 Memory page
 `opus` high - 6-9 h

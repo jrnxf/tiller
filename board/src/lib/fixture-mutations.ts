@@ -2,8 +2,9 @@
 // preview servers until T2.8 lands: a keyed replay table, the stale-head
 // refusal, and the later receipt stages as change events.
 import type { ChangeEvent, Project } from "./api-types.ts";
-import type { AttentionResponse, ProjectsResponse } from "./api-types.ts";
+import type { AttentionResponse, InterventionKind, ProjectsResponse } from "./api-types.ts";
 import { FIXTURE_HEAD_SHA, fixtureResponses } from "./fixtures.ts";
+import { relabelFixture } from "./fixtures-signals.ts";
 import { attentionPath, projectsPath } from "./queries.ts";
 
 interface Reply {
@@ -174,7 +175,7 @@ function forwarded(
 ): MutationResult | null {
   const host = body.host;
   if (typeof host !== "string") return null;
-  if (/\/(stage|focus)$/.test(path) || /\/memory\//.test(path)) {
+  if (/\/(stage|focus|label)$/.test(path) || /\/memory\//.test(path)) {
     return refusal(502, "peer_refused", `${method} ${path} is not forwarded to ${host}`);
   }
   if (host === "host-e") {
@@ -274,6 +275,22 @@ function handle(method: string, path: string, body: Record<string, unknown>): Mu
         },
       ],
     };
+  }
+  const relabel = /^\/api\/v1\/interventions\/([^/]+)\/label$/.exec(path);
+  if (method === "POST" && relabel?.[1]) {
+    const label = body.label ?? null;
+    const kinds = ["correction", "unplanned_escalation", "rework", "planned"];
+    if (label !== null && !kinds.includes(String(label))) {
+      return {
+        reply: refused(422, "invalid", `label must be one of ${kinds.join(", ")}`),
+        followUps: [],
+      };
+    }
+    const done = relabelFixture(relabel[1], label as InterventionKind | null);
+    if (!done) {
+      return { reply: refused(404, "not_found", `no intervention ${relabel[1]}`), followUps: [] };
+    }
+    return { reply: recorded(done, null, null), followUps: [] };
   }
   if (method === "POST" && /^\/api\/v1\/agents\/[^/]+\/focus$/.test(path)) {
     return { reply: recorded({}, null, null), followUps: [] };

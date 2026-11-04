@@ -9,7 +9,7 @@ exit: 0
     "format": "tiller-export/v1",
     "host_id": "<id1>",
     "max_seq": 5,
-    "schema_version": 4,
+    "schema_version": 5,
     "tables": [
       {
         "file": "approvals.jsonl",
@@ -93,6 +93,12 @@ exit: 0
         "file": "idempotency_keys.jsonl",
         "name": "idempotency_keys",
         "rows": 1,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "intervention_labels.jsonl",
+        "name": "intervention_labels",
+        "rows": 0,
         "sha256": "<sha256>"
       },
       {

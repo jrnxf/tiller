@@ -1,7 +1,8 @@
 //! The Health page's counts (`protocol.md` section 7.3, `GET /api/v1/signals`):
 //! plain queries over `state.db`, one row of counts per week. Reads never
-//! write. The board turns the counts into a verdict and statuses; T7.1 later
-//! classifies why the developer was needed, which these counts do not.
+//! write. The board turns the counts into a verdict and statuses. Each time
+//! the developer was needed is also classified (`interventions.rs`), and the
+//! week carries those counts beside the plain ones.
 //!
 //! The caller picks the weeks (Monday 00:00 to Monday 00:00 Lisbon time), so
 //! the zone rule stays in one place, and every window is half open: a time on
@@ -12,6 +13,7 @@ use std::collections::BTreeMap;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
+use super::interventions::{Intervention, InterventionCounts};
 use crate::error::Result;
 use crate::store::Store;
 use crate::time::Timestamp;
@@ -40,6 +42,9 @@ pub struct WeekWindow {
     pub end: Timestamp,
 }
 
+/// How many interventions the page lists to relabel, newest first.
+const LISTED_INTERVENTIONS: usize = 40;
+
 /// Everything the page shows for one week.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WeekCounts {
@@ -53,7 +58,11 @@ pub struct WeekCounts {
     /// Your time: attention items opened that were not withdrawn, and the
     /// median minutes from opening to answer over items answered in the week.
     pub needed: i64,
+    /// How many items were answered in the week: the sample behind the median.
+    pub answered: i64,
     pub median_answer_minutes: Option<f64>,
+    /// Why the developer was needed, after the developer's own relabels.
+    pub interventions: InterventionCounts,
     /// Quality: reverts and escaped bugs are cards created in the week;
     /// rework is builder attempts beyond the first.
     pub reverts: i64,
@@ -72,7 +81,10 @@ pub struct ProjectCounts {
     pub project_id: String,
     pub accepted: i64,
     pub needed: i64,
+    /// Avoidable interventions: corrections, unplanned escalations and rework.
+    pub avoidable: i64,
     pub escaped: i64,
+    pub answered: i64,
     pub median_answer_minutes: Option<f64>,
 }
 
@@ -81,10 +93,47 @@ pub struct Signals {
     /// Oldest first; the last is the week in progress.
     pub weeks: Vec<WeekCounts>,
     pub by_project: Vec<ProjectCounts>,
+    /// The latest interventions across the weeks shown, newest first, for the
+    /// developer to relabel.
+    pub interventions: Vec<Intervention>,
     pub machines_live: i64,
     pub machines_total: i64,
 }
 
+/// The last `count` Lisbon weeks (Monday 00:00 to Monday 00:00),
+/// oldest first; the last holds `now`.
+pub fn lisbon_weeks(now: Timestamp, count: usize) -> Vec<WeekWindow> {
+    // Europe/Lisbon's own POSIX rule, so no timezone database is needed
+    // (the CLI's Lisbon times work the same way).
+    let Ok(zone) = jiff::tz::TimeZone::posix("WET0WEST,M3.5.0/1,M10.5.0") else {
+        return Vec::new();
+    };
+    let local = now.as_jiff().to_zoned(zone);
+    let days_from_monday = i64::from(local.weekday().to_monday_zero_offset());
+    let Ok(monday) = local
+        .date()
+        .checked_sub(jiff::Span::new().days(days_from_monday))
+    else {
+        return Vec::new();
+    };
+    let mut weeks = Vec::new();
+    for back in (0..count).rev() {
+        let back = i64::try_from(back).unwrap_or(0);
+        let start = monday.checked_sub(jiff::Span::new().weeks(back));
+        let end = monday.checked_sub(jiff::Span::new().weeks(back - 1));
+        let (Ok(start), Ok(end)) = (start, end) else {
+            continue;
+        };
+        let zoned = |date: jiff::civil::Date| {
+            date.to_zoned(local.time_zone().clone())
+                .map(|z| Timestamp::from_jiff(z.timestamp()))
+        };
+        if let (Ok(start), Ok(end)) = (zoned(start), zoned(end)) {
+            weeks.push(WeekWindow { start, end });
+        }
+    }
+    weeks
+}
 fn count(store: &Store, sql: &str, params: &[&dyn rusqlite::ToSql]) -> Result<i64> {
     Ok(store.conn().query_row(sql, params, |row| row.get(0))?)
 }
@@ -118,9 +167,16 @@ impl Store {
             None => Vec::new(),
         };
         let (machines_live, machines_total) = self.machines_live(now)?;
+        let mut interventions = match (windows.first(), windows.last()) {
+            (Some(first), Some(last)) => self.interventions(first.start, last.end)?,
+            _ => Vec::new(),
+        };
+        interventions.reverse();
+        interventions.truncate(LISTED_INTERVENTIONS);
         Ok(Signals {
             weeks,
             by_project,
+            interventions,
             machines_live,
             machines_total,
         })
@@ -163,7 +219,13 @@ impl Store {
                  WHERE withdrawn_at IS NULL AND opened_at >= ?1 AND opened_at < ?2",
                 params![s, e],
             )?,
+            answered: count(
+                self,
+                "SELECT COUNT(*) FROM attention WHERE answered_at >= ?1 AND answered_at < ?2",
+                params![s, e],
+            )?,
             median_answer_minutes: self.median_answer(window, None)?,
+            interventions: self.intervention_counts(s, e)?.0,
             reverts: count(
                 self,
                 "SELECT COUNT(*) FROM cards
@@ -221,12 +283,15 @@ impl Store {
                     project_id: project.id.clone(),
                     accepted: 0,
                     needed: 0,
+                    avoidable: 0,
                     escaped: 0,
+                    answered: 0,
                     median_answer_minutes: None,
                 };
                 (project.id, counts)
             })
             .collect();
+        let (_, interventions) = self.intervention_counts(window.start, window.end)?;
         for row in rows.values_mut() {
             let id = row.project_id.clone();
             row.accepted = count(
@@ -241,6 +306,15 @@ impl Store {
                 "SELECT COUNT(*) FROM attention a JOIN cards c ON c.id = a.card_id
                  WHERE a.withdrawn_at IS NULL AND a.opened_at >= ?1 AND a.opened_at < ?2
                    AND c.project_id = ?3",
+                params![window.start, window.end, id],
+            )?;
+            row.avoidable = interventions
+                .get(&id)
+                .map_or(0, InterventionCounts::avoidable);
+            row.answered = count(
+                self,
+                "SELECT COUNT(*) FROM attention a JOIN cards c ON c.id = a.card_id
+                 WHERE a.answered_at >= ?1 AND a.answered_at < ?2 AND c.project_id = ?3",
                 params![window.start, window.end, id],
             )?;
             row.escaped = self.escaped(window, Some(&id))?;
@@ -305,6 +379,24 @@ mod tests {
         store
             .signals(&[earlier(), week()], at("2026-11-01T12:00:00Z"))
             .unwrap()
+    }
+
+    #[test]
+    fn lisbon_weeks_start_on_monday_midnight_lisbon_time() {
+        // Monday 2026-11-02 15:00 UTC is 15:00 Lisbon (WET, UTC+0).
+        let now: Timestamp = "2026-11-02T15:00:00.000Z".parse().unwrap();
+        let weeks = lisbon_weeks(now, 8);
+        assert_eq!(weeks.len(), 8);
+        let last = weeks.last().unwrap();
+        assert_eq!(last.start.to_string(), "2026-11-02T00:00:00.000Z");
+        assert_eq!(last.end.to_string(), "2026-11-09T00:00:00.000Z");
+        // Seven weeks back is in summer time (WEST): that Monday's
+        // midnight is 23:00 UTC the day before.
+        let first = weeks.first().unwrap();
+        assert_eq!(first.start.to_string(), "2026-09-13T23:00:00.000Z");
+        for pair in weeks.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start);
+        }
     }
 
     #[test]
@@ -553,9 +645,11 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "answered",
                 "duplicate_dispatches",
                 "end",
                 "escaped",
+                "interventions",
                 "landed",
                 "lost_work",
                 "median_answer_minutes",

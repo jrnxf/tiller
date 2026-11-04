@@ -15,8 +15,8 @@ use serde_json::Value;
 
 use app::{App, Done, Failure};
 use cmd::{
-    admin, approval, ask, attention, backup, card, import, later, peer, read, records, review, run,
-    spawn,
+    admin, approval, ask, attention, backup, card, health, import, later, peer, read, records,
+    review, run, spawn,
 };
 
 #[derive(Parser)]
@@ -140,6 +140,9 @@ enum Command {
     Import(import::ImportArgs),
     /// Health checks
     Doctor,
+    /// The Health numbers, for the T7.4 report
+    #[command(subcommand)]
+    Health(health::Cmd),
     /// Serve the board on localhost
     Daemon(daemon::Args),
     /// Record a Claude Code hook event (reads the hook input on stdin)
@@ -199,6 +202,7 @@ fn dispatch(app: &App, command: Command) -> Done {
         Command::Migrate(cmd) => backup::migrate(app, cmd),
         Command::Import(args) => import::import(app, args),
         Command::Doctor => later::doctor(app),
+        Command::Health(cmd) => health::run(app, cmd),
         Command::Daemon(_) | Command::Hook(_) | Command::Guard(_) => Err(Failure::new(
             "internal",
             1,

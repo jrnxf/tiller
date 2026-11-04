@@ -20,11 +20,11 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tiller_agents::spawn::config::SpawnConfig;
-use tiller_core::domain::Stage;
 use tiller_core::domain::{
     AnsweredVia, Approval, CardKind, CardOutcome, HoldReleaseReason, Host, HostKind, PeerScope,
     Session,
 };
+use tiller_core::domain::{InterventionKind, Stage};
 use tiller_core::state::approvals::Decision;
 use tiller_core::state::cards::{CardEdit, NewCard};
 use tiller_core::state::{find, get as get_row, resolve_id};
@@ -533,6 +533,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/health", get(health))
         .route("/api/v1/projects", get(projects))
         .route("/api/v1/projects/{id}/stage", post(stage_project))
+        .route(
+            "/api/v1/interventions/{id}/label",
+            post(relabel_intervention),
+        )
         .route("/api/v1/signals", get(signals))
         .route("/api/v1/events", get(events))
         .route("/login/{token}", get(login))
@@ -1501,6 +1505,28 @@ async fn stage_project(
     .await
 }
 
+#[utoipa::path(post, path = "/api/v1/interventions/{id}/label", tag = "mutations", request_body = RelabelBody,
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse), (status = 404, body = ErrorBody),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn relabel_intervention(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers)?;
+    let request: RelabelBody = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "a relabel").await?;
+    let label: Option<InterventionKind> = request.label.as_deref().map(str::parse).transpose()?;
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| Done::of(store.intervention_relabel(ctx, None, &id, label)?),
+    )
+    .await
+}
+
 fn prelaunch_head(
     home: &std::path::Path,
     project: &tiller_core::domain::Project,
@@ -1736,7 +1762,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, decide, focus, stage_project
+        cancel, reopen, answer, decide, focus, stage_project, relabel_intervention
     ),
     components(schemas(ChangeEvent, ResetEvent, PeerEvent, LinkEvent, PeerResetEvent, ErrorBody, ErrorDetail)),
     tags(
@@ -2223,6 +2249,106 @@ pub(crate) mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// The Health page's relabel: an unplanned escalation relabeled `planned`
+    /// moves the week's counts, the same label again changes nothing, and a
+    /// label naming a peer is refused rather than forwarded.
+    #[tokio::test]
+    async fn board_relabels_an_intervention_and_the_week_counts_it() {
+        let fleet = Fleet::new();
+        let store = fleet.open();
+        let now = Timestamp::now();
+        store
+            .conn()
+            .execute_batch(&format!(
+                "INSERT INTO cards (id, display_id, project_id, kind, title, created_at)
+                 VALUES ('c-x', 'alpha-x', 'alpha', 'ship', 't', '{now}');
+                 INSERT INTO attention (id, card_id, kind, question, opened_at)
+                 VALUES ('a-x', 'c-x', 'credential', 'Token for the registry?', '{now}')"
+            ))
+            .unwrap();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let cookie = owner_cookie(fleet.dir.path());
+        let relabel = |key: &str, extra: Value| {
+            let mut body = json!({"idempotency_key": key});
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            mutation(
+                "POST",
+                "/api/v1/interventions/a-x/label",
+                body,
+                &[("cookie", cookie.as_str())],
+            )
+        };
+        let week = |answer: Answer| {
+            let body: Value = serde_json::from_str(&answer.body).unwrap();
+            body["weeks"].as_array().unwrap().last().unwrap().clone()
+        };
+
+        let before = week(get(&app, "/api/v1/signals").await);
+        assert_eq!(before["interventions"]["unplanned_escalation"], 1);
+        assert_eq!(before["interventions"]["planned"], 0);
+
+        let done = send(&app, relabel("k-1", json!({"label": "planned"}))).await;
+        assert_eq!(done.status, StatusCode::OK, "{}", done.body);
+        let after = get(&app, "/api/v1/signals").await;
+        let listed: Value = serde_json::from_str(&after.body).unwrap();
+        assert_eq!(listed["interventions"][0]["kind"], "planned");
+        assert_eq!(
+            listed["interventions"][0]["classified"],
+            "unplanned_escalation"
+        );
+        assert_eq!(listed["interventions"][0]["relabeled"], true);
+        let after = week(after);
+        assert_eq!(after["interventions"]["unplanned_escalation"], 0);
+        assert_eq!(after["interventions"]["planned"], 1);
+
+        let again = send(&app, relabel("k-2", json!({"label": "planned"}))).await;
+        let body: Value = serde_json::from_str(&again.body).unwrap();
+        assert_eq!(
+            (again.status, &body["replayed"]),
+            (StatusCode::OK, &json!(true))
+        );
+
+        let cleared = send(&app, relabel("k-3", json!({"label": null}))).await;
+        assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.body);
+        let now = week(get(&app, "/api/v1/signals").await);
+        assert_eq!(now["interventions"]["unplanned_escalation"], 1);
+
+        let bad = send(&app, relabel("k-4", json!({"label": "bogus"}))).await;
+        assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{}", bad.body);
+        // An unknown host label is not a pairing; the refusal for a paired peer
+        // is in `peer::tests::spawn_not_forwardable_from_the_board`.
+        let peer = send(
+            &app,
+            relabel("k-5", json!({"label": "rework", "host": "laptop"})),
+        )
+        .await;
+        assert_eq!(peer.status, StatusCode::NOT_FOUND, "{}", peer.body);
+        let unknown = send(
+            &app,
+            mutation(
+                "POST",
+                "/api/v1/interventions/nope/label",
+                json!({"idempotency_key": "k-6", "label": "rework"}),
+                &[("cookie", cookie.as_str())],
+            ),
+        )
+        .await;
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND, "{}", unknown.body);
+        let anonymous = send(
+            &app,
+            mutation(
+                "POST",
+                "/api/v1/interventions/a-x/label",
+                json!({"idempotency_key": "k-7", "label": "rework"}),
+                &[],
+            ),
+        )
+        .await;
+        assert_eq!(anonymous.status, StatusCode::FORBIDDEN);
     }
 
     /// The board's stage switch: to pre-launch it reads the default-branch

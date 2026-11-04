@@ -1021,6 +1021,7 @@ fn spawn_not_forwardable() {
     for op in [
         "POST /api/v1/runs",
         "POST /api/v1/projects/{id}/stage",
+        "POST /api/v1/interventions/{id}/label",
         "POST /api/v1/agents/{session}/focus",
         "POST /api/v1/memory/proposals/{id}/decide",
         "DELETE /api/v1/cards/{id}",
@@ -1049,6 +1050,10 @@ async fn spawn_not_forwardable_from_the_board() {
         (
             "/api/v1/agents/w1:p1/focus",
             json!({"idempotency_key": "k-2", "host": "peer"}),
+        ),
+        (
+            "/api/v1/interventions/a-1/label",
+            json!({"idempotency_key": "k-3", "host": "peer", "label": "planned"}),
         ),
     ] {
         let answer = send(&app, mutation("POST", path, body, &[("cookie", &cookie)])).await;

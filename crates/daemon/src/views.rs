@@ -12,7 +12,8 @@ use tiller_core::domain::{
     Obligation, Pane, PeerScope, Pr, QuotaWindow as QuotaRow, Review, Role, Run, RunOutcome,
     Session,
 };
-use tiller_core::state::signals::WeekWindow;
+use tiller_core::state::interventions::InterventionSource;
+use tiller_core::state::signals::lisbon_weeks;
 use tiller_core::state::{attention::still_current, find, get, list, review};
 use tiller_core::{Result, Store, Timestamp};
 use tiller_herdr::poller::Health as PollerRecord;
@@ -1241,44 +1242,9 @@ pub fn run_detail(store: &Store, reference: &str) -> Result<(RunDetail, Option<P
 
 // -- signals ------------------------------------------------------------------
 
-/// The last `SIGNAL_WEEKS` Lisbon weeks (Monday 00:00 to Monday 00:00),
-/// oldest first; the last holds `now`.
-pub fn lisbon_weeks(now: Timestamp) -> Vec<WeekWindow> {
-    // Europe/Lisbon's own POSIX rule, so no timezone database is needed
-    // (the CLI's Lisbon times work the same way).
-    let Ok(zone) = jiff::tz::TimeZone::posix("WET0WEST,M3.5.0/1,M10.5.0") else {
-        return Vec::new();
-    };
-    let local = now.as_jiff().to_zoned(zone);
-    let days_from_monday = i64::from(local.weekday().to_monday_zero_offset());
-    let Ok(monday) = local
-        .date()
-        .checked_sub(jiff::Span::new().days(days_from_monday))
-    else {
-        return Vec::new();
-    };
-    let mut weeks = Vec::new();
-    for back in (0..SIGNAL_WEEKS).rev() {
-        let back = i64::try_from(back).unwrap_or(0);
-        let start = monday.checked_sub(jiff::Span::new().weeks(back));
-        let end = monday.checked_sub(jiff::Span::new().weeks(back - 1));
-        let (Ok(start), Ok(end)) = (start, end) else {
-            continue;
-        };
-        let zoned = |date: jiff::civil::Date| {
-            date.to_zoned(local.time_zone().clone())
-                .map(|z| Timestamp::from_jiff(z.timestamp()))
-        };
-        if let (Ok(start), Ok(end)) = (zoned(start), zoned(end)) {
-            weeks.push(WeekWindow { start, end });
-        }
-    }
-    weeks
-}
-
 /// `GET /api/v1/signals`.
 pub fn signals(store: &Store, now: Timestamp) -> Result<SignalsResponse> {
-    let signals = store.signals(&lisbon_weeks(now), now)?;
+    let signals = store.signals(&lisbon_weeks(now, SIGNAL_WEEKS), now)?;
     Ok(SignalsResponse {
         weeks: signals
             .weeks
@@ -1290,7 +1256,14 @@ pub fn signals(store: &Store, now: Timestamp) -> Result<SignalsResponse> {
                 reported: week.reported,
                 merged_prs: week.merged_prs,
                 needed: week.needed,
+                answered: week.answered,
                 median_answer_minutes: week.median_answer_minutes,
+                interventions: SignalsInterventions {
+                    correction: week.interventions.correction,
+                    unplanned_escalation: week.interventions.unplanned_escalation,
+                    rework: week.interventions.rework,
+                    planned: week.interventions.planned,
+                },
                 reverts: week.reverts,
                 escaped: week.escaped,
                 rework: week.rework,
@@ -1306,8 +1279,30 @@ pub fn signals(store: &Store, now: Timestamp) -> Result<SignalsResponse> {
                 project_id: project.project_id,
                 accepted: project.accepted,
                 needed: project.needed,
+                avoidable: project.avoidable,
                 escaped: project.escaped,
+                answered: project.answered,
                 median_answer_minutes: project.median_answer_minutes,
+            })
+            .collect(),
+        interventions: signals
+            .interventions
+            .into_iter()
+            .map(|item| SignalsIntervention {
+                id: item.id,
+                source: match item.source {
+                    InterventionSource::Attention => "attention",
+                    InterventionSource::Note => "note",
+                }
+                .to_owned(),
+                card_id: item.card_id,
+                display_id: item.display_id,
+                project_id: item.project_id,
+                at: at(item.at),
+                summary: item.summary,
+                classified: item.classified.to_string(),
+                kind: item.kind.to_string(),
+                relabeled: item.relabeled,
             })
             .collect(),
         machines_live: signals.machines_live,
@@ -1835,24 +1830,6 @@ fn entity_state(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn lisbon_weeks_start_on_monday_midnight_lisbon_time() {
-        // Monday 2026-11-02 15:00 UTC is 15:00 Lisbon (WET, UTC+0).
-        let now: Timestamp = "2026-11-02T15:00:00.000Z".parse().unwrap();
-        let weeks = lisbon_weeks(now);
-        assert_eq!(weeks.len(), SIGNAL_WEEKS);
-        let last = weeks.last().unwrap();
-        assert_eq!(last.start.to_string(), "2026-11-02T00:00:00.000Z");
-        assert_eq!(last.end.to_string(), "2026-11-09T00:00:00.000Z");
-        // Seven weeks back is in summer time (WEST): that Monday's
-        // midnight is 23:00 UTC the day before.
-        let first = weeks.first().unwrap();
-        assert_eq!(first.start.to_string(), "2026-09-13T23:00:00.000Z");
-        for pair in weeks.windows(2) {
-            assert_eq!(pair[0].end, pair[1].start);
-        }
-    }
 
     #[test]
     fn slug_is_display_id_then_title_words() {

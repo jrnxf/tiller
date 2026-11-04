@@ -1136,6 +1136,64 @@
         }
       }
     },
+    "/api/v1/interventions/{id}/label": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "relabel_intervention",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RelabelBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines": {
       "get": {
         "tags": [
@@ -3453,6 +3511,33 @@
           }
         }
       },
+      "RelabelBody": {
+        "type": "object",
+        "description": "`POST /api/v1/interventions/{id}/label`: the developer's label for an\nintervention. Local to this host; it is not forwarded to a peer.",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label. Refused: a relabel is not forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`correction`, `unplanned_escalation`, `rework` or `planned`; absent\nor null clears the label so the classifier's own counts again."
+          }
+        },
+        "additionalProperties": false
+      },
       "ResetEvent": {
         "type": "object",
         "description": "One `event: reset` message: the client refetches the snapshot.",
@@ -3542,18 +3627,108 @@
           }
         }
       },
+      "SignalsIntervention": {
+        "type": "object",
+        "description": "One time the developer was needed, with the label it counts under.",
+        "required": [
+          "id",
+          "source",
+          "card_id",
+          "display_id",
+          "project_id",
+          "at",
+          "summary",
+          "classified",
+          "kind",
+          "relabeled"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "card_id": {
+            "type": "string"
+          },
+          "classified": {
+            "type": "string",
+            "description": "What the rules said: `correction`, `unplanned_escalation`, `rework`\nor `planned`."
+          },
+          "display_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "What counts: the developer's label when there is one, else `classified`."
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "relabeled": {
+            "type": "boolean"
+          },
+          "source": {
+            "type": "string",
+            "description": "`attention` or `note`."
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      },
+      "SignalsInterventions": {
+        "type": "object",
+        "description": "Interventions of each kind in one week. `planned` is the routine share\nand is never counted as avoidable.",
+        "required": [
+          "correction",
+          "unplanned_escalation",
+          "rework",
+          "planned"
+        ],
+        "properties": {
+          "correction": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "planned": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "rework": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "unplanned_escalation": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "SignalsProject": {
         "type": "object",
         "required": [
           "project_id",
           "accepted",
           "needed",
-          "escaped"
+          "avoidable",
+          "escaped",
+          "answered"
         ],
         "properties": {
           "accepted": {
             "type": "integer",
             "format": "int64"
+          },
+          "answered": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "avoidable": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Avoidable interventions: corrections, unplanned escalations, rework."
           },
           "escaped": {
             "type": "integer",
@@ -3581,6 +3756,7 @@
         "required": [
           "weeks",
           "by_project",
+          "interventions",
           "machines_live",
           "machines_total"
         ],
@@ -3590,6 +3766,13 @@
             "items": {
               "$ref": "#/components/schemas/SignalsProject"
             }
+          },
+          "interventions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SignalsIntervention"
+            },
+            "description": "The latest interventions across the weeks, newest first, to relabel."
           },
           "machines_live": {
             "type": "integer",
@@ -3617,6 +3800,8 @@
           "reported",
           "merged_prs",
           "needed",
+          "answered",
+          "interventions",
           "reverts",
           "escaped",
           "rework",
@@ -3625,6 +3810,11 @@
           "unauthorized"
         ],
         "properties": {
+          "answered": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Items answered in the week: the sample behind the median."
+          },
           "duplicate_dispatches": {
             "type": "integer",
             "format": "int64"
@@ -3635,6 +3825,10 @@
           "escaped": {
             "type": "integer",
             "format": "int64"
+          },
+          "interventions": {
+            "$ref": "#/components/schemas/SignalsInterventions",
+            "description": "Why the developer was needed, after the developer's own relabels."
           },
           "landed": {
             "type": "integer",

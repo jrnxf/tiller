@@ -393,6 +393,32 @@ export interface Snapshot {
 
 // `GET /api/v1/signals`: the Health page's counts, one entry per Lisbon week,
 // oldest first, the last being the week in progress (protocol.md section 7.3).
+// Why the developer was needed. Corrections, unplanned escalations and rework
+// are avoidable; planned attention (merges, reviews, reports) is not.
+export type InterventionKind = "correction" | "unplanned_escalation" | "rework" | "planned";
+
+export interface InterventionCounts {
+  correction: number;
+  unplanned_escalation: number;
+  rework: number;
+  planned: number;
+}
+
+// One time the developer was needed, with the label it counts under: the
+// developer's own relabel when there is one, else what the rules said.
+export interface SignalsIntervention {
+  id: string;
+  source: "attention" | "note";
+  card_id: string;
+  display_id: string;
+  project_id: string;
+  at: string;
+  summary: string;
+  classified: InterventionKind;
+  kind: InterventionKind;
+  relabeled: boolean;
+}
+
 export interface SignalsWeek {
   start: string;
   end: string;
@@ -400,7 +426,10 @@ export interface SignalsWeek {
   reported: number;
   merged_prs: number;
   needed: number;
+  // Items answered in the week: the sample behind the median.
+  answered: number;
   median_answer_minutes: number | null;
+  interventions: InterventionCounts;
   reverts: number;
   escaped: number;
   rework: number;
@@ -413,13 +442,17 @@ interface SignalsProject {
   project_id: string;
   accepted: number;
   needed: number;
+  avoidable: number;
   escaped: number;
+  answered: number;
   median_answer_minutes: number | null;
 }
 
 export interface SignalsResponse {
   weeks: SignalsWeek[];
   by_project: SignalsProject[];
+  // The latest interventions across the weeks, newest first, to relabel.
+  interventions: SignalsIntervention[];
   machines_live: number;
   machines_total: number;
 }

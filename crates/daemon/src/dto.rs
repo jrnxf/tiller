@@ -499,7 +499,11 @@ pub struct SignalsWeek {
     pub reported: i64,
     pub merged_prs: i64,
     pub needed: i64,
+    /// Items answered in the week: the sample behind the median.
+    pub answered: i64,
     pub median_answer_minutes: Option<f64>,
+    /// Why the developer was needed, after the developer's own relabels.
+    pub interventions: SignalsInterventions,
     pub reverts: i64,
     pub escaped: i64,
     pub rework: i64,
@@ -508,12 +512,44 @@ pub struct SignalsWeek {
     pub unauthorized: i64,
 }
 
+/// Interventions of each kind in one week. `planned` is the routine share
+/// and is never counted as avoidable.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct SignalsInterventions {
+    pub correction: i64,
+    pub unplanned_escalation: i64,
+    pub rework: i64,
+    pub planned: i64,
+}
+
+/// One time the developer was needed, with the label it counts under.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct SignalsIntervention {
+    pub id: String,
+    /// `attention` or `note`.
+    pub source: String,
+    pub card_id: String,
+    pub display_id: String,
+    pub project_id: String,
+    pub at: String,
+    pub summary: String,
+    /// What the rules said: `correction`, `unplanned_escalation`, `rework`
+    /// or `planned`.
+    pub classified: String,
+    /// What counts: the developer's label when there is one, else `classified`.
+    pub kind: String,
+    pub relabeled: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SignalsProject {
     pub project_id: String,
     pub accepted: i64,
     pub needed: i64,
+    /// Avoidable interventions: corrections, unplanned escalations, rework.
+    pub avoidable: i64,
     pub escaped: i64,
+    pub answered: i64,
     pub median_answer_minutes: Option<f64>,
 }
 
@@ -523,6 +559,8 @@ pub struct SignalsProject {
 pub struct SignalsResponse {
     pub weeks: Vec<SignalsWeek>,
     pub by_project: Vec<SignalsProject>,
+    /// The latest interventions across the weeks, newest first, to relabel.
+    pub interventions: Vec<SignalsIntervention>,
     pub machines_live: i64,
     pub machines_total: i64,
 }
@@ -802,6 +840,21 @@ pub struct StageProject {
     pub rev: i64,
     /// `pre-launch` or `launched`.
     pub stage: String,
+}
+
+/// `POST /api/v1/interventions/{id}/label`: the developer's label for an
+/// intervention. Local to this host; it is not forwarded to a peer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RelabelBody {
+    pub idempotency_key: String,
+    /// A paired peer's label. Refused: a relabel is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// `correction`, `unplanned_escalation`, `rework` or `planned`; absent
+    /// or null clears the label so the classifier's own counts again.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 /// `POST /api/v1/cards/{id}/comment`.

@@ -1,18 +1,26 @@
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { useState } from "react";
 
-import type { SignalsResponse } from "../../lib/api-types";
-import { serverNow } from "../../lib/clock";
+import type { InterventionKind, SignalsIntervention, SignalsResponse } from "../../lib/api-types";
+import { formatLisbon, serverNow } from "../../lib/clock";
 import { prefsStore, visibleProjects } from "../../lib/prefs";
 import { projectColor } from "../../lib/project-color";
-import { projectsQuery, quotaQuery, signalsQuery } from "../../lib/queries";
+import {
+  projectsQuery,
+  queryKeyFor,
+  quotaQuery,
+  signalsPath,
+  signalsQuery,
+} from "../../lib/queries";
 import { useStore } from "../../lib/store";
+import { ActionError, sendMutation } from "../attention/api";
+import { ulid } from "../attention/ulid";
 import { ChevronDownIcon, ChevronRightIcon, WarnIcon } from "../board/icons";
 import { CheckIcon } from "../shell/icons";
-import { BarChart, LineChart, Spark } from "./charts";
+import { BarChart, LineChart, Spark, StackedBarChart } from "./charts";
 import type { Point } from "./charts";
 import { lisbonShortDay, lisbonWeekLabel } from "./lisbon";
-import { accepted, projectRows, quotaBlockOf, signalsOf, verdictOf } from "./model";
+import { accepted, projectRows, quotaBlockOf, sampleLines, signalsOf, verdictOf } from "./model";
 import type { QuotaBlock, Signal } from "./model";
 import "../board/board.css";
 import "./health.css";
@@ -154,6 +162,108 @@ function Quota({ block }: { block: QuotaBlock | null }) {
   );
 }
 
+const AVOIDABLE_PARTS = [
+  { className: "b-cor", label: "Corrections" },
+  { className: "b-esc", label: "Unplanned escalations" },
+  { className: "b-rew", label: "Rework" },
+];
+
+const KINDS: { kind: InterventionKind; label: string }[] = [
+  { kind: "correction", label: "Correction" },
+  { kind: "unplanned_escalation", label: "Unplanned escalation" },
+  { kind: "rework", label: "Rework" },
+  { kind: "planned", label: "Planned" },
+];
+const kindLabel = (kind: InterventionKind) =>
+  KINDS.find((candidate) => candidate.kind === kind)?.label ?? kind;
+
+// One time you were needed. The rules label it when it is read; the select
+// lets you say what it really was, and Reset hands it back to the rules.
+function InterventionRow({ item }: { item: SignalsIntervention }) {
+  const queryClient = useQueryClient();
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<ActionError | null>(null);
+
+  const relabel = (label: InterventionKind | null) => {
+    setPending(true);
+    setError(null);
+    sendMutation("POST", `/api/v1/interventions/${item.id}/label`, {
+      label,
+      idempotency_key: ulid(),
+    })
+      .then(() => queryClient.invalidateQueries({ queryKey: queryKeyFor(signalsPath) }))
+      .catch((caught: unknown) => {
+        setError(caught instanceof ActionError ? caught : null);
+      })
+      .finally(() => setPending(false));
+  };
+
+  return (
+    <li className="iv" data-kind={item.kind}>
+      <div className="iv-main">
+        <span className="iv-sum">{item.summary}</span>
+        <span className="iv-meta">
+          {item.display_id} &middot; {item.source === "note" ? "your note" : "asked you"} &middot;{" "}
+          {formatLisbon(item.at) ?? item.at}
+          {item.relabeled ? ` · the rules said ${kindLabel(item.classified).toLowerCase()}` : ""}
+        </span>
+        {error ? (
+          <span className="refusal" role="alert">
+            {error.message}
+          </span>
+        ) : null}
+      </div>
+      <select
+        className="iv-sel"
+        aria-label={`Why you were needed: ${item.summary}`}
+        value={item.kind}
+        disabled={pending}
+        onChange={(event) => relabel(event.target.value as InterventionKind)}
+      >
+        {KINDS.map((candidate) => (
+          <option key={candidate.kind} value={candidate.kind}>
+            {candidate.label}
+          </option>
+        ))}
+      </select>
+      {item.relabeled ? (
+        <button type="button" className="btn sm" disabled={pending} onClick={() => relabel(null)}>
+          Reset
+        </button>
+      ) : null}
+    </li>
+  );
+}
+
+function Interventions({ items }: { items: SignalsIntervention[] }) {
+  const counted = items.filter((item) => item.kind !== "planned").length;
+  return (
+    <section className="cpanel ivs" aria-label="Times you were needed">
+      <div className="ch">
+        <div>
+          <h3>Times you were needed, and why</h3>
+          <p className="cs">
+            Each is labeled by rule: a correction, an unplanned escalation, rework, or planned
+            attention. Change a label if it is wrong; the charts follow.
+          </p>
+        </div>
+      </div>
+      {items.length === 0 ? (
+        <p className="n">You have not been needed in these weeks.</p>
+      ) : (
+        <>
+          <ul className="iv-list">
+            {items.map((item) => (
+              <InterventionRow key={item.id} item={item} />
+            ))}
+          </ul>
+          <p className="n">{`The latest ${items.length}, ${counted} of them avoidable.`}</p>
+        </>
+      )}
+    </section>
+  );
+}
+
 const ratio = (value: number) => Number(value.toFixed(2)).toString();
 const whole = (value: number) => String(Math.round(value));
 const tenth = (value: number) => Number(value.toFixed(1)).toString();
@@ -172,6 +282,7 @@ function Numbers({ data, shown }: { data: SignalsResponse; shown: Set<string> })
     }));
   const latest = data.weeks.at(-1);
   const rows = projectRows(data, shown);
+  const samples = sampleLines(data);
   return (
     <div className="num-body">
       <div className="charts">
@@ -188,20 +299,36 @@ function Numbers({ data, shown }: { data: SignalsResponse; shown: Set<string> })
             format={whole}
             unit="accepted"
           />
+          {samples ? <p className="n">{samples.accepted}</p> : null}
         </div>
         <div className="cpanel">
           <div className="ch">
             <div>
-              <h3>Times you were needed per accepted outcome</h3>
-              <p className="cs">Times you were needed, divided by outcomes accepted that week.</p>
+              <h3>Avoidable interventions per accepted outcome</h3>
+              <p className="cs">
+                Times you had to step in, divided by outcomes accepted that week.
+              </p>
             </div>
           </div>
-          <BarChart
-            title="Times you were needed per accepted outcome"
-            points={series((week) => (accepted(week) > 0 ? week.needed / accepted(week) : null))}
+          <StackedBarChart
+            title="Avoidable interventions per accepted outcome"
+            parts={AVOIDABLE_PARTS}
+            points={data.weeks.map((week, index) => ({
+              label: weeks[index]?.label ?? "",
+              start: weeks[index]?.start ?? "",
+              values:
+                accepted(week) > 0
+                  ? [
+                      week.interventions.correction / accepted(week),
+                      week.interventions.unplanned_escalation / accepted(week),
+                      week.interventions.rework / accepted(week),
+                    ]
+                  : null,
+            }))}
             format={ratio}
             unit="per outcome"
           />
+          {samples ? <p className="n">{samples.avoidable}</p> : null}
         </div>
         <div className="cpanel">
           <div className="ch">
@@ -218,6 +345,7 @@ function Numbers({ data, shown }: { data: SignalsResponse; shown: Set<string> })
             format={whole}
             unit="escaped"
           />
+          {samples ? <p className="n">{samples.escaped}</p> : null}
         </div>
         <div className="cpanel">
           <div className="ch">
@@ -232,6 +360,7 @@ function Numbers({ data, shown }: { data: SignalsResponse; shown: Set<string> })
             format={tenth}
             unit="min"
           />
+          {samples ? <p className="n">{samples.attention}</p> : null}
         </div>
       </div>
       <div className="tbl-wrap">
@@ -244,7 +373,7 @@ function Numbers({ data, shown }: { data: SignalsResponse; shown: Set<string> })
                   : "By project"}
               </th>
               <th className="r">Accepted</th>
-              <th className="r">Needed per outcome</th>
+              <th className="r">Avoidable per outcome</th>
               <th className="r">Escaped defects</th>
               <th className="r">Median attention</th>
             </tr>
@@ -272,10 +401,15 @@ function Numbers({ data, shown }: { data: SignalsResponse; shown: Set<string> })
                     <td className="r">{row.accepted}</td>
                     <td className="r">
                       {row.perOutcome === null ? "none" : row.perOutcome.toFixed(2)}
+                      <small>{`${row.avoidable} of ${row.accepted} outcomes`}</small>
                     </td>
-                    <td className="r">{row.escaped}</td>
+                    <td className="r">
+                      {row.escaped}
+                      <small>{`of ${row.accepted} outcomes`}</small>
+                    </td>
                     <td className="r">
                       {row.median === null ? "none" : `${tenth(row.median)} min`}
+                      <small>{`${row.answered} answered`}</small>
                     </td>
                   </tr>
                 );
@@ -284,6 +418,7 @@ function Numbers({ data, shown }: { data: SignalsResponse; shown: Set<string> })
           </tbody>
         </table>
       </div>
+      <Interventions items={data.interventions} />
     </div>
   );
 }

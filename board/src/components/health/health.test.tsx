@@ -35,7 +35,9 @@ function week(over: Partial<SignalsWeek> = {}): SignalsWeek {
     reported: 1,
     merged_prs: 3,
     needed: 4,
+    answered: 3,
     median_answer_minutes: 6,
+    interventions: { correction: 1, unplanned_escalation: 0, rework: 1, planned: 2 },
     reverts: 0,
     escaped: 0,
     rework: 1,
@@ -57,6 +59,7 @@ function counts(
       week(over),
     ],
     by_project: [],
+    interventions: [],
     machines_live: 2,
     machines_total: 2,
   };
@@ -101,9 +104,13 @@ test("your time reads the median answer time against the last one", () => {
     "time",
   );
   expect(faster.read).toBe("You answered faster: about 5.2 minutes, down from 7.");
-  expect(faster.facts).toEqual(["median 5.2 min to answer"]);
+  expect(faster.facts).toEqual(["median 5.2 min to answer", "0.5 avoidable per outcome (2 of 4)"]);
   expect(faster.big).toBe(8);
-  const none = signal(counts({ needed: 0, median_answer_minutes: null }), "time");
+  const nobody = { correction: 0, unplanned_escalation: 0, rework: 0, planned: 0 };
+  const none = signal(
+    counts({ needed: 0, median_answer_minutes: null, interventions: nobody }),
+    "time",
+  );
   expect(none.read).toBe("You have not been needed yet.");
   expect(none.facts).toEqual([]);
 });
@@ -123,7 +130,12 @@ test("quality counts reverts and escaped bugs as problems and shows rework per l
   const fine = signal(counts({ landed: 8, reported: 2, rework: 2 }), "quality");
   expect(fine.state).toBe("good");
   expect(fine.read).toBe("No reverts. No escaped bugs.");
-  expect(fine.facts).toEqual(["rework 0.20 per card", "0 reverts", "0 escaped bugs"]);
+  expect(fine.facts).toEqual([
+    "rework 0.20 per card",
+    "0 reverts",
+    "0 escaped bugs",
+    "0.2 avoidable per outcome (2 of 10)",
+  ]);
 
   const slipped = signal(counts({ reverts: 1, escaped: 0 }), "quality");
   expect(slipped.state).toBe("watch");
@@ -255,7 +267,9 @@ test("the fixture has exactly the fields the daemon's signals query returns", ()
       "reported",
       "merged_prs",
       "needed",
+      "answered",
       "median_answer_minutes",
+      "interventions",
       "reverts",
       "escaped",
       "rework",
@@ -344,16 +358,99 @@ test("Show the numbers opens the weekly charts and the per-project table", async
   const table = page.querySelector(".tbl-wrap table");
   if (!(table instanceof HTMLElement)) throw new Error("no table");
   const rows = within(table).getAllByRole("row").slice(1);
+  // Each figure says what it rests on under it.
   const cells = rows.map((row) =>
     within(row)
       .getAllByRole("cell")
-      .map((cell) => cell.textContent),
+      .map((cell) => [
+        [...cell.childNodes]
+          .filter((node) => node.nodeName !== "SMALL")
+          .map((node) => node.textContent)
+          .join(""),
+        cell.querySelector("small")?.textContent,
+      ]),
   );
   expect(cells).toEqual([
-    ["alpha", "4", "0.75", "0", "6.1 min"],
-    ["beta", "5", "0.60", "0", "4.4 min"],
-    ["gamma", "3", "0.67", "0", "3.2 min"],
+    [
+      ["alpha", undefined],
+      ["4", undefined],
+      ["0.25", "1 of 4 outcomes"],
+      ["0", "of 4 outcomes"],
+      ["6.1 min", "3 answered"],
+    ],
+    [
+      ["beta", undefined],
+      ["5", undefined],
+      ["0.40", "2 of 5 outcomes"],
+      ["0", "of 5 outcomes"],
+      ["4.4 min", "2 answered"],
+    ],
+    [
+      ["gamma", undefined],
+      ["3", undefined],
+      ["0.33", "1 of 3 outcomes"],
+      ["0", "of 3 outcomes"],
+      ["3.2 min", "2 answered"],
+    ],
   ]);
+});
+
+test("every chart under Show the numbers says how many outcomes, items or weeks it rests on", async () => {
+  await renderHealth();
+  const page = screen.getByTestId("health");
+  fireEvent.click(within(page).getByRole("button", { name: /Show the numbers/ }));
+  const notes = [...page.querySelectorAll(".charts .cpanel .n")].map((note) => note.textContent);
+  expect(notes).toEqual([
+    "12 accepted outcomes this week, 64 in the 8 weeks shown.",
+    "This week 4 avoidable interventions over 12 accepted outcomes; 55 over 64 in 8 weeks.",
+    "This week 0 escaped defects over 12 accepted outcomes; 7 over 64 in 8 weeks.",
+    "This week's median is over 7 answered items; 77 answered in 8 weeks.",
+  ]);
+  const stacked = within(page).getByRole("img", {
+    name: /^Avoidable interventions per accepted outcome, W37 to W44/,
+  });
+  expect(stacked.getAttribute("aria-label")).toContain("Latest week: 0.33 per outcome");
+  expect(page.querySelectorAll(".legend span")).toHaveLength(3);
+});
+
+test("a time you were needed can be relabeled from the list, and Reset gives it back to the rules", async () => {
+  const sent: { url: string; body: Record<string, unknown> }[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        sent.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> });
+        return Promise.resolve(
+          Response.json({
+            ok: true,
+            replayed: false,
+            events: [],
+            receipt: {
+              recorded_at: "2026-11-01T18:00:00.000Z",
+              outbox_id: null,
+              approval_id: null,
+            },
+            data: {},
+          }),
+        );
+      }
+      return Promise.reject(new Error(`no read of ${url}`));
+    }),
+  );
+  await renderHealth();
+  const page = screen.getByTestId("health");
+  fireEvent.click(within(page).getByRole("button", { name: /Show the numbers/ }));
+  const list = within(page).getByRole("region", { name: "Times you were needed" });
+  expect(within(list).getAllByRole("listitem")).toHaveLength(8);
+  const select = within(list).getByLabelText(
+    "Why you were needed: Use the existing date helper, not a new one",
+  );
+  expect((select as HTMLSelectElement).value).toBe("correction");
+  fireEvent.change(select, { target: { value: "planned" } });
+  await vi.waitFor(() => expect(sent).toHaveLength(1));
+  expect(sent[0]?.url).toBe("/api/v1/interventions/01JNOTE0000000000000000B18/label");
+  expect(sent[0]?.body).toMatchObject({ label: "planned" });
+  expect(String(sent[0]?.body.idempotency_key)).toMatch(/^[0-9A-Z]{26}$/);
 });
 
 test("the per-project table follows the view knob", async () => {

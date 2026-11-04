@@ -160,3 +160,54 @@ fn import_is_owner_only_and_refuses_a_tampered_bundle() {
         out.json
     );
 }
+
+#[test]
+fn health_baseline_reads_a_bundle_and_numbers_reads_the_database() {
+    let world = World::initialized();
+    let bundle = world.dir.path().join("bundle");
+    std::fs::create_dir(&bundle).unwrap();
+    write_bundle(&bundle);
+    let path = bundle.to_str().unwrap();
+
+    // The bundle has no baseline folder: refused, not read as zero touches.
+    let refused = world.run(&["health", "baseline", path]);
+    assert!(!refused.ok());
+    assert!(
+        refused.json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("touches.jsonl")
+    );
+
+    std::fs::create_dir(bundle.join("baseline")).unwrap();
+    let touches = [
+        json!({"card": "beta-one", "classification": "correction", "quote": "use the other API"}),
+        json!({"card": "beta-one", "classification": "routine", "quote": "merge it"}),
+    ]
+    .iter()
+    .map(|row| format!("{row}\n"))
+    .collect::<String>();
+    std::fs::write(bundle.join("baseline").join("touches.jsonl"), touches).unwrap();
+    let baseline = world.must(&["health", "baseline", path]);
+    let data = baseline.data();
+    // The one landed card is from 2026-10-02, outside the 21 days before the
+    // bundle's 2026-11-01, so it and its touches are not counted.
+    assert_eq!(data["source"], "firstmate");
+    assert_eq!(data["from"], "2026-10-12");
+    assert_eq!(data["to"], "2026-11-01");
+    assert_eq!(data["accepted"]["landed"], 0);
+    assert_eq!(data["interventions"]["correction"], 0);
+    assert_eq!(data["avoidable_per_outcome"]["value"], Value::Null);
+    assert!(
+        data["caveats"]
+            .to_string()
+            .contains("2 messages name no card landed")
+    );
+
+    let own = world.must(&["health", "numbers", "--weeks", "2"]);
+    let data = own.data();
+    assert_eq!(data["source"], "tiller");
+    assert_eq!(data["accepted"]["landed"], 0);
+    assert_eq!(data["avoidable_per_outcome"]["value"], Value::Null);
+    assert_eq!(data["avoidable_per_outcome"]["sample"], 0);
+}

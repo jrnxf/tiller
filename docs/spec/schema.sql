@@ -259,6 +259,17 @@ CREATE TABLE attention (
 CREATE INDEX attention_open ON attention(card_id, opened_at)
   WHERE answered_at IS NULL AND withdrawn_at IS NULL;
 
+-- The owner's relabels of the Health page's intervention classifier (T7.1).
+-- The classifier is computed from the rows it reads and stores nothing; only
+-- the labels the owner set over it live here.
+CREATE TABLE intervention_labels (
+  ref_id      TEXT PRIMARY KEY,          -- an attention id, or the id of an owner note in the outbox
+  label       TEXT NOT NULL CHECK (label IN
+                ('correction', 'unplanned_escalation', 'rework', 'planned')),
+  labeled_at  TEXT NOT NULL,
+  labeled_by  TEXT NOT NULL              -- the actor, as in events.actor
+) STRICT;
+
 -- ---------------------------------------------------------------------------
 -- Runs, PRs, approvals, reservations
 -- ---------------------------------------------------------------------------

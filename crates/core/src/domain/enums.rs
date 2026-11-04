@@ -249,6 +249,18 @@ text_enum!(AttentionKind {
     Report = "report",
 });
 
+text_enum!(
+    /// Why the owner was needed, on the Health page (build-plan T7.1). The
+    /// first three are the avoidable interventions; `planned` is the routine
+    /// approvals and briefings that are not.
+    InterventionKind {
+        Correction = "correction",
+        UnplannedEscalation = "unplanned_escalation",
+        Rework = "rework",
+        Planned = "planned",
+    }
+);
+
 text_enum!(AnsweredVia { Board = "board", Chat = "chat", Cli = "cli" });
 
 text_enum!(PrState { Open = "open", Merged = "merged", Closed = "closed" });

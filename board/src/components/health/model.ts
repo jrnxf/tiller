@@ -37,6 +37,19 @@ export const BUSY_WEEK_FACTOR = 2;
 const BUSY_WEEK_MINIMUM = 5;
 
 export const accepted = (week: SignalsWeek) => week.landed + week.reported;
+// The times you stepped in that were not planned: corrections, unplanned
+// escalations and rework. Planned attention (merges, reviews) is not counted.
+const avoidable = (week: SignalsWeek) =>
+  week.interventions.correction +
+  week.interventions.unplanned_escalation +
+  week.interventions.rework;
+const rate = (value: number) => Number(value.toFixed(2)).toString();
+// "0.33 avoidable per accepted outcome (4 of 12)": the sample is always said.
+function avoidableFact(week: SignalsWeek): string {
+  const outcomes = accepted(week);
+  if (outcomes === 0) return "no accepted outcome to count against yet";
+  return `${rate(avoidable(week) / outcomes)} avoidable per outcome (${avoidable(week)} of ${outcomes})`;
+}
 const problems = (week: SignalsWeek) => week.reverts + week.escaped;
 const incidents = (week: SignalsWeek) =>
   week.lost_work + week.duplicate_dispatches + week.unauthorized;
@@ -131,7 +144,10 @@ function yourTime(response: SignalsResponse): Signal | null {
     big: now.needed,
     unit: now.needed === 1 ? "time you were needed" : "times you were needed",
     read,
-    facts: median === null ? [] : [`median ${minutes(median)} min to answer`],
+    facts: [
+      ...(median === null ? [] : [`median ${minutes(median)} min to answer`]),
+      ...(now.needed === 0 && avoidable(now) === 0 ? [] : [avoidableFact(now)]),
+    ],
     reason,
     values: response.weeks.map((week) => week.needed),
     last: weeks.before ? `last week: ${weeks.before.needed}` : "no earlier week",
@@ -166,6 +182,7 @@ function quality(response: SignalsResponse): Signal | null {
       done > 0 ? `rework ${(now.rework / done).toFixed(2)} per card` : "no rework rate yet",
       count(now.reverts, "revert"),
       count(now.escaped, "escaped bug"),
+      ...(done > 0 ? [avoidableFact(now)] : []),
     ],
     reason: total > 0 ? `${listed.join(" and ")} this week` : null,
     values: response.weeks.map(problems),
@@ -344,8 +361,10 @@ function lisbonLong(iso: string): string {
 export interface ProjectRow {
   project_id: string;
   accepted: number;
+  avoidable: number;
   perOutcome: number | null;
   escaped: number;
+  answered: number;
   median: number | null;
 }
 
@@ -355,8 +374,34 @@ export function projectRows(response: SignalsResponse, shown: Set<string>): Proj
     .map((row) => ({
       project_id: row.project_id,
       accepted: row.accepted,
-      perOutcome: row.accepted > 0 ? row.needed / row.accepted : null,
+      avoidable: row.avoidable,
+      perOutcome: row.accepted > 0 ? row.avoidable / row.accepted : null,
       escaped: row.escaped,
+      answered: row.answered,
       median: row.median_answer_minutes,
     }));
+}
+
+// What each figure under "Show the numbers" rests on, said under its chart:
+// the newest week and all the weeks shown.
+export interface SampleLines {
+  accepted: string;
+  avoidable: string;
+  escaped: string;
+  attention: string;
+}
+
+export function sampleLines(response: SignalsResponse): SampleLines | null {
+  const now = response.weeks.at(-1);
+  if (!now) return null;
+  const sum = (pick: (week: SignalsWeek) => number) =>
+    response.weeks.reduce((total, week) => total + pick(week), 0);
+  const weeks = count(response.weeks.length, "week");
+  const outcomes = (n: number) => count(n, "accepted outcome");
+  return {
+    accepted: `${outcomes(accepted(now))} this week, ${sum(accepted)} in the ${weeks} shown.`,
+    avoidable: `This week ${count(avoidable(now), "avoidable intervention")} over ${outcomes(accepted(now))}; ${sum(avoidable)} over ${sum(accepted)} in ${weeks}.`,
+    escaped: `This week ${count(now.escaped, "escaped defect")} over ${outcomes(accepted(now))}; ${sum((week) => week.escaped)} over ${sum(accepted)} in ${weeks}.`,
+    attention: `This week's median is over ${count(now.answered, "answered item")}; ${sum((week) => week.answered)} answered in ${weeks}.`,
+  };
 }

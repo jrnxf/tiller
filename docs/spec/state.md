@@ -240,6 +240,18 @@ Rules:
 - The board's SSE stream carries `seq`, `entity`, `entity_id` and `rev_after`, so a client ignores an event older than what it holds and resumes from `seq` after a gap.
 - Firstmate's fleet ledger events map onto these: `task.dispatched` is `run.started`, `task.status` is `run.status`, `task.pr_ready` is `pr.linked`, `task.merged` is `approval.succeeded` or `card.closed` with `landed`, `task.cleaned_up` is `run.cleaned`.
 
+### Intervention
+
+An intervention is a time the developer was needed: an attention item that was answered, an owner or board note, or a rework. It is not stored. The classifier (`tiller-core` `Store::interventions`, T7.1) computes it on read from `attention`, the outbox and `events`, and costs no tokens. First match wins:
+
+1. Merge, review and report attention is `planned`.
+2. A rework (a reverted or re-run attempt) is `rework`.
+3. An owner or board note is `planned` when no run of the card had started, `correction` after.
+4. A decision answered against its recommendation is a `correction`.
+5. Everything else is an `unplanned_escalation`.
+
+`intervention_labels`: only the owner's overrides are stored. `ref_id` (an attention id or the id of an owner note in the outbox; primary key), `label` (`correction`, `unplanned_escalation`, `rework`, `planned`), `labeled_at`, `labeled_by`. The Health page counts `correction`, `unplanned_escalation` and `rework` as avoidable and reports them per accepted outcome. Removing a label hands the item back to the classifier. Because the classifier stores nothing, improving a rule changes the numbers for history too, and a relabel is never lost.
+
 ### Obligation
 
 `obligations`: a promise tied to an event (P15, P16). "Report it ready once CI passes" is a row, not a memory.
@@ -452,6 +464,7 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `peer.pair` | owner, on the board host, inside `tiller peer add`, after the peer's `peer.accept` succeeded | label free, or a row with that label whose `peer_scope` is null (never paired, or removed) or whose `peer_host_id` is the same; the key file was written first | `hosts` (`kind = remote`, `herdr_machine`, `peer_scope`, `peer_host_id`) | `host.added` or `host.edited` |
 | `peer.remove` | owner, on the board host (`tiller peer remove <label>`) | `peer_scope` set | `hosts.peer_scope` and `peer_host_id` null (the row stays as a herdr machine); the key file is deleted after the commit | `host.edited` |
 | `config.set` | owner | key known; value valid | the config file, outside `state.db` | `config.changed` |
+| `health.relabel` | owner, on this host only (`Actor::Peer` is refused; it is not in the forwarding allowlist) | the intervention exists; a label equal to the current one writes nothing | `intervention_labels` (set, or deleted when the label is cleared) | `intervention.relabeled` (`from`, `to`, `classified`, `cleared`) |
 | `import.apply` | `tiller import` | manifest valid; `meta.import_manifest_sha256` differs (a second import is a no-op) | every table, with `legacy_id` set | one `import.applied` plus the per-row events, all under `actor = import` |
 
 Every row in the events table names its mutation, so a timeline query answers "who changed this, under which transaction, with which preconditions".

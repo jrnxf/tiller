@@ -191,6 +191,130 @@ export function BarChart(props: ChartProps) {
   );
 }
 
+interface StackPart {
+  // The class that paints it: "b-cor", "b-esc" or "b-rew".
+  className: string;
+  label: string;
+}
+
+export interface StackPoint {
+  label: string;
+  start: string;
+  // One value per part, bottom up; null when the week has no outcome to
+  // divide by.
+  values: number[] | null;
+}
+
+interface StackProps {
+  title: string;
+  parts: StackPart[];
+  points: StackPoint[];
+  format: (value: number) => string;
+  unit: string;
+}
+
+const total = (point: StackPoint) => point.values?.reduce((sum, value) => sum + value, 0) ?? null;
+
+// A bar per week split into its parts, with a 1 px surface gap between the
+// segments and the week's total on top. The legend names the parts, and every
+// value is in the hidden table and in each segment's tooltip.
+export function StackedBarChart({ title, parts, points, format, unit }: StackProps) {
+  const ref = useRef<HTMLDivElement>(null);
+  const width = useWidth(ref, 240);
+  const f = frame(width);
+  const { top, step } = niceAxis(Math.max(0, ...points.map((p) => total(p) ?? 0)));
+  const slot = f.pw / Math.max(1, points.length);
+  const bar = Math.min(34, slot * 0.58);
+  const last = points.length - 1;
+  const flat = points.map((point) => ({
+    ...point,
+    value: total(point),
+  }));
+  return (
+    <div className="chart-stack">
+      <div className="legend">
+        {parts.map((part) => (
+          <span key={part.label}>
+            <i className={`sw ${part.className}`} />
+            {part.label}
+          </span>
+        ))}
+      </div>
+      <div className="chart" ref={ref}>
+        <svg
+          viewBox={`0 0 ${width} ${HEIGHT}`}
+          width={width}
+          height={HEIGHT}
+          role="img"
+          aria-label={summary({ title, points: flat, format, unit })}
+        >
+          <Axis f={f} top={top} step={step} format={format} />
+          {points.map((point, index) => {
+            const sum = total(point);
+            if (point.values === null || sum === null) return null;
+            const x = f.l + slot * index + (slot - bar) / 2;
+            let y = f.b;
+            const segments = point.values.map((value, part) => {
+              const h = (f.ph * value) / top;
+              y -= h;
+              if (value === 0) return null;
+              return (
+                <rect
+                  key={parts[part]?.label}
+                  className={parts[part]?.className}
+                  x={x}
+                  y={y}
+                  width={bar}
+                  height={Math.max(h - 1, 0.5)}
+                  rx={1.5}
+                >
+                  <title>{`${point.label} (${point.start}): ${format(value)} ${parts[part]?.label.toLowerCase()}`}</title>
+                </rect>
+              );
+            });
+            return (
+              <g key={point.start}>
+                {sum === 0 ? (
+                  <rect className="b-acc" x={x} y={f.b - 2} width={bar} height={2} rx={1} />
+                ) : null}
+                {segments}
+                <text
+                  x={x + bar / 2}
+                  y={y - 5}
+                  textAnchor="middle"
+                  className={index === last ? "hl" : undefined}
+                >
+                  {format(sum)}
+                </text>
+              </g>
+            );
+          })}
+          <WeekLabels f={f} points={flat} />
+        </svg>
+        <table className="sr-only">
+          <caption>{title}</caption>
+          <tbody>
+            {points.map((point) => (
+              <tr key={point.start}>
+                <th scope="row">{`${point.label}, week of ${point.start}`}</th>
+                <td>
+                  {point.values === null
+                    ? "no data"
+                    : `${format(total(point) ?? 0)} ${unit}: ${point.values
+                        .map(
+                          (value, part) => `${format(value)} ${parts[part]?.label.toLowerCase()}`,
+                        )
+                        .join(", ")}`}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export function LineChart(props: ChartProps) {
   const ref = useRef<HTMLDivElement>(null);
   const width = useWidth(ref, 240);

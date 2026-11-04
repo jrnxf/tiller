@@ -8,6 +8,7 @@ pub mod domain;
 pub mod error;
 #[cfg(test)]
 mod events;
+pub mod health;
 pub mod ids;
 pub mod import;
 pub mod migrate;

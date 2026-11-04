@@ -27,6 +27,13 @@ static MIGRATIONS: &[M<'static>] = &[
     M::up(include_str!("../migrations/0004_peer_pairing/up.sql"))
         .down(include_str!("../migrations/0004_peer_pairing/down.sql"))
         .foreign_key_check(),
+    M::up(include_str!(
+        "../migrations/0005_intervention_labels/up.sql"
+    ))
+    .down(include_str!(
+        "../migrations/0005_intervention_labels/down.sql"
+    ))
+    .foreign_key_check(),
 ];
 
 fn migrations() -> Migrations<'static> {
