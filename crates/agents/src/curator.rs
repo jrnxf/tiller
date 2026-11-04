@@ -42,7 +42,7 @@ pub fn model_alias() -> &'static str {
         .map_or("sonnet", str::trim)
 }
 
-/// The settings fragment with its two placeholders filled. Both must be
+/// The settings fragment with its three placeholders filled. Each must be
 /// absolute paths without a trailing slash or a quote, and `<tiller>` a
 /// [`crate::guards::plain_path`], since the prompt tells the curator to type it.
 pub fn render_settings(
