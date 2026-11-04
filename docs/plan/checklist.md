@@ -473,10 +473,10 @@ ADR 0003, accepted Tuesday 2026-11-03. The owner approved it; runs in one or two
 ### F6 Two-host end to end
 `sonnet` high - 1.5-2 h - after F4 and F5
 
-- [ ] Two homes on one machine joined through an SSH shim; a board with both hosts' cards
-- [ ] A forwarded answer reaches the peer's orchestrator through its outbox
-- [ ] Check: with the peer frozen (`SIGSTOP`), the local board, its writes and its SSE are unaffected and the peer's cards show "as of"
-- [ ] Delivered
+- [x] Two homes on one machine joined through an SSH shim; a board with both hosts' cards
+- [x] A forwarded answer reaches the peer's orchestrator through its outbox
+- [x] Check: with the peer frozen (`SIGSTOP`), the local board, its writes and its SSE are unaffected and the peer's cards show "as of"
+- [x] Delivered
 
 ## CP-F: Federated board (developer, 15 min)
 
