@@ -280,7 +280,7 @@ about 3 min of the developer's time
 - [x] Single-instance lock; runs pollers, reconcile loop and the quota feed
 - [x] axum board API: HTTP plus one SSE stream; `index.html` with the boot snapshot; hashed assets with `Cache-Control: immutable`
 - [x] `contract/openapi.json` through utoipa, CI fails when stale; localhost health endpoint
-- [ ] home-manager module: launchd on macOS, systemd user unit on Linux, through a dotfiles PR
+- [x] home-manager module: launchd on macOS, systemd user unit on Linux, through a dotfiles PR
 - [ ] Check: survives a kill and a reboot on both personal hosts
 - [x] Check: idle CPU and memory measured and reported
 - [x] Check: browsers resume SSE after a daemon restart, no reload, no missed event
