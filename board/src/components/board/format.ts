@@ -60,6 +60,13 @@ export function shortSha(sha: string | null): string {
   return sha ? sha.slice(0, 7) : "";
 }
 
+// A card's number, from its display id `<project>-<n>`. A project id may hold
+// hyphens but its words never start with a digit (state.md section 2), so the
+// number is whatever follows the last hyphen.
+export function cardNumber(displayId: string): string {
+  return displayId.slice(displayId.lastIndexOf("-") + 1);
+}
+
 // How long something ran: to `to`, or to now while it is still running.
 export function durationSeconds(from: string, to: string | null, now = serverNow()): number | null {
   const start = Date.parse(from);

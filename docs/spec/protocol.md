@@ -99,8 +99,10 @@ tiller inbox <ULID>[ # <kind>[ <display id>]]
 for example `tiller inbox 01JC2ZB6N0E2K4M6P8R0S2T4V6 # steer alpha-42`. The comment is for the person watching the pane; it carries no data. The grammar, as a regex on the whole submitted prompt with surrounding whitespace trimmed:
 
 ```
-^tiller inbox [0-9A-HJKMNP-TV-Z]{26}( # (wake|steer|answer|note)( [a-z][a-z0-9]{1,15}-[0-9]+)?)?$
+^tiller inbox [0-9A-HJKMNP-TV-Z]{26}( # (wake|steer|answer|note)( [a-z][a-z0-9]*(-[a-z][a-z0-9]*)*-[0-9]+)?)?$
 ```
+
+The project part of the display id is also 2 to 32 characters (`state.md` section 2).
 
 ### 3.2 How hooks recognize it
 

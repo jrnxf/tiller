@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 
-import { durationSeconds, formatAge, formatLisbonMoment, shortSha } from "./format";
+import { cardNumber, durationSeconds, formatAge, formatLisbonMoment, shortSha } from "./format";
 
 test("ages read in the coarsest unit that is not zero", () => {
   expect(formatAge(7)).toBe("7 s");
@@ -19,6 +19,13 @@ test("times are Lisbon time, with the weekday once the day is not today", () => 
   expect(formatLisbonMoment("2026-07-01T08:15:00.000Z", now)).toBe("Wed 1 Jul, 09:15");
   expect(formatLisbonMoment(null, now)).toBeNull();
   expect(formatLisbonMoment("not a date", now)).toBeNull();
+});
+
+test("a card's number follows the last hyphen, whatever the project id holds", () => {
+  expect(cardNumber("alpha-42")).toBe("42");
+  expect(cardNumber("web2staging-7")).toBe("7");
+  expect(cardNumber("acme-web2-staging-1")).toBe("1");
+  expect(cardNumber("my-app2-130")).toBe("130");
 });
 
 test("a run that is still going lasts until now", () => {

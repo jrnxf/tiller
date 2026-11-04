@@ -85,7 +85,10 @@ CREATE TABLE peer_keys (
 CREATE UNIQUE INDEX peer_keys_one_live ON peer_keys(viewer_host_id) WHERE revoked_at IS NULL;
 
 CREATE TABLE projects (
-  id             TEXT PRIMARY KEY CHECK (id GLOB '[a-z][a-z0-9]*' AND length(id) BETWEEN 2 AND 16),
+  -- words of [a-z0-9] joined by single hyphens, each starting with a letter (state.md section 2)
+  id             TEXT PRIMARY KEY CHECK (id GLOB '[a-z]*' AND id NOT GLOB '*[^a-z0-9-]*'
+                   AND id NOT GLOB '*-' AND id NOT GLOB '*--*' AND id NOT GLOB '*-[0-9]*'
+                   AND length(id) BETWEEN 2 AND 32),
   name           TEXT NOT NULL,
   repo           TEXT,                     -- owner/name; null for local-only
   remote         TEXT,                     -- git remote URL

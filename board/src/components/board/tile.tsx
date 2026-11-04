@@ -6,6 +6,7 @@ import type { DotKind } from "./activity";
 import { ownerOf, shownId } from "../../lib/peers";
 import { Ago } from "./ago";
 import { badgeText, badgeTone, statusMark } from "./badge";
+import { cardNumber } from "./format";
 import { AsOf, HostChip } from "./host-chip";
 import { HelpIcon, PrIcon, Status } from "./icons";
 import { useAmbiguousIds, useStanding } from "./peer-state";
@@ -157,7 +158,7 @@ export function MiniTile({ row }: { row: BoardRow }) {
       className="mini-card"
       title={`${row.host && row.link ? `${row.host} \u00b7 ` : ""}${row.display_id}: ${row.title}`}
     >
-      {row.display_id.split("-").pop()}
+      {cardNumber(row.display_id)}
     </Link>
   );
 }

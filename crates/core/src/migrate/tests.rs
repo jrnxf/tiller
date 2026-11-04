@@ -228,6 +228,86 @@ fn pairing_columns_and_keys_after_0004() {
     assert_eq!(hosts, 3, "a paired host stays, as a herdr machine");
 }
 
+/// Migration 7: the `projects.id` check accepts exactly the ids
+/// `validate_project_id` accepts, and going back down refuses while a project
+/// needs the wider rule.
+#[test]
+fn hyphenated_project_ids_after_0007() {
+    let mut conn = connection();
+    to_version(&mut conn, 6).unwrap();
+    conn.execute_batch(&format!("BEGIN; {FIXTURE_V1} COMMIT;"))
+        .unwrap();
+    to_version(&mut conn, 7).unwrap();
+    let insert = |conn: &Connection, id: &str| {
+        conn.execute(
+            "INSERT INTO projects (id, name, delivery, owner_host_id, added_at)
+             VALUES (?1, ?1, 'local-only', '01JC00000000000000000HOST1', '2026-11-04T09:00:00.000Z')",
+            [id],
+        )
+    };
+
+    // every id of up to 6 characters over a small alphabet, and the length bounds
+    let alphabet = ['a', '1', '-', 'A', '_'];
+    let mut ids = vec![String::new()];
+    for len in 1..=6 {
+        let mut next = Vec::new();
+        for id in ids.iter().filter(|id| id.len() == len - 1) {
+            for c in alphabet {
+                next.push(format!("{id}{c}"));
+            }
+        }
+        ids.extend(next);
+    }
+    ids.extend(["a".repeat(31), "a".repeat(32), "a".repeat(33)]);
+    ids.push(format!("{}-{}", "a".repeat(15), "b".repeat(16)));
+    ids.push(format!("{}-{}", "a".repeat(16), "b".repeat(16)));
+    conn.execute_batch("BEGIN").unwrap();
+    for id in &ids {
+        let valid = crate::ids::validate_project_id(id).is_ok();
+        let stored = insert(&conn, id).is_ok();
+        assert_eq!(stored, valid, "{id:?}");
+    }
+    conn.execute_batch("ROLLBACK").unwrap();
+
+    for wide in ["web2-staging", "abcdefghijklmnopq"] {
+        insert(&conn, wide).unwrap();
+        let error = to_version(&mut conn, 6).unwrap_err().to_string();
+        assert!(error.contains(wide), "{error}");
+        assert_eq!(current_version(&conn).unwrap(), 7);
+        conn.execute("DELETE FROM projects WHERE id = ?1", [wide])
+            .unwrap();
+    }
+    to_version(&mut conn, 6).unwrap();
+    // the old check, reloaded on this connection, again caps the length
+    assert!(insert(&conn, "abcdefghijklmnopq").is_err());
+    insert(&conn, "web2staging").unwrap();
+}
+
+/// The old check let some ids through that the new one refuses; migration 7
+/// refuses rather than keep them, and names each.
+#[test]
+fn up_to_0007_refuses_a_stored_id_the_new_check_fails() {
+    let mut conn = connection();
+    to_version(&mut conn, 6).unwrap();
+    conn.execute_batch(&format!("BEGIN; {FIXTURE_V1} COMMIT;"))
+        .unwrap();
+    conn.execute(
+        "INSERT INTO projects (id, name, delivery, owner_host_id, added_at)
+         VALUES ('ab_c', 'ab_c', 'local-only', '01JC00000000000000000HOST1', '2026-11-04T09:00:00.000Z')",
+        [],
+    )
+    .unwrap();
+    let error = to_version(&mut conn, 7).unwrap_err();
+    assert!(matches!(error, Error::Refused { .. }), "{error:?}");
+    assert!(error.to_string().contains("ab_c"), "{error}");
+    assert_eq!(current_version(&conn).unwrap(), 6);
+}
+
+#[test]
+fn latest_is_the_last_migration() {
+    assert_eq!(list().len(), LATEST);
+}
+
 /// `recovery.md` R11: an older binary never writes to a newer database.
 #[test]
 fn older_binary_refuses_newer_schema_without_writing() {

@@ -2,8 +2,9 @@
 //! `UserPromptSubmit` hook and the transcript tailer recognize.
 
 /// The outbox id when `prompt` is exactly a wake-up line:
-/// `^tiller inbox [0-9A-HJKMNP-TV-Z]{26}( # (wake|steer|answer|note)( [a-z][a-z0-9]{1,15}-[0-9]+)?)?$`
-/// on the prompt with surrounding whitespace trimmed.
+/// `^tiller inbox [0-9A-HJKMNP-TV-Z]{26}( # (wake|steer|answer|note)( [a-z][a-z0-9]*(-[a-z][a-z0-9]*)*-[0-9]+)?)?$`
+/// on the prompt with surrounding whitespace trimmed, the project part of the
+/// display id also holding [`tiller_core::ids::validate_project_id`].
 pub fn outbox_id(prompt: &str) -> Option<&str> {
     let rest = prompt.trim().strip_prefix("tiller inbox ")?;
     let (id, comment) = match rest.split_once(' ') {
@@ -44,11 +45,7 @@ fn valid_display_id(display: &str) -> bool {
     let Some((project, number)) = display.rsplit_once('-') else {
         return false;
     };
-    let mut chars = project.bytes();
-    let first_ok = chars.next().is_some_and(|b| b.is_ascii_lowercase());
-    first_ok
-        && (2..=16).contains(&project.len())
-        && chars.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    tiller_core::ids::validate_project_id(project).is_ok()
         && !number.is_empty()
         && number.bytes().all(|b| b.is_ascii_digit())
 }
@@ -66,6 +63,7 @@ mod tests {
             format!("  tiller inbox {ID} # wake\n"),
             format!("tiller inbox {ID} # steer alpha-42"),
             format!("tiller inbox {ID} # note a1-7"),
+            format!("tiller inbox {ID} # steer acme-web2-staging-12"),
         ] {
             assert_eq!(outbox_id(&line), Some(ID), "{line:?}");
         }
@@ -81,6 +79,9 @@ mod tests {
             format!("tiller inbox {ID} # steer Alpha-42"),
             format!("tiller inbox {ID} # steer a-42"),
             format!("tiller inbox {ID} # steer alpha-"),
+            format!("tiller inbox {ID} # steer alpha--42"),
+            format!("tiller inbox {ID} # steer alpha-2-42"),
+            format!("tiller inbox {ID} # steer web2-staging-"),
             format!("tiller inbox {ID} please"),
             format!("please run tiller inbox {ID}"),
             format!("tiller inbox {ID}\nand also this"),

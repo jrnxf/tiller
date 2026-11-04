@@ -1392,8 +1392,11 @@ a.card:hover {
 }
 .cp-nav {
   display: flex;
+  /* wrap between crumbs, so a hyphenated id moves down whole on a phone
+     rather than breaking at a hyphen */
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 4px 8px;
   margin: 0 0 18px;
   color: var(--fg-3);
 }

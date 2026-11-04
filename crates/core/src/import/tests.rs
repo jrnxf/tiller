@@ -641,6 +641,65 @@ fn cards_keep_the_lifecycle_rules() {
     );
 }
 
+/// A hyphenated legacy id is kept as its own slug, unless an import from
+/// before project ids could hold a hyphen already gave it a hyphen-free one.
+#[test]
+fn long_or_hyphenated_legacy_ids_keep_their_slug_or_their_earlier_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store();
+    let host = crate::state::projects::local_host_id(store.conn()).unwrap();
+    store
+        .conn()
+        .execute(
+            "INSERT INTO projects (id, name, delivery, owner_host_id, added_at)
+             VALUES ('oldsite', 'old-site', 'local-only', ?1, '2026-10-10T09:00:00.000Z'),
+                    ('abcdefghijklmnop', 'abcdefghijklmnopq', 'local-only', ?1, '2026-10-10T09:00:00.000Z')",
+            [&host],
+        )
+        .unwrap();
+    let mut records = records();
+    records
+        .cards
+        .push(card("hy1", "new-site", "ship", "queued"));
+    records
+        .cards
+        .push(card("hy2", "old-site", "ship", "queued"));
+    // a 17-character id an earlier import cut to 16
+    records
+        .cards
+        .push(card("hy3", "abcdefghijklmnopq", "ship", "queued"));
+    // a plain id naming the slug old-site already holds gives way
+    records.cards.push(card("hy4", "oldsite", "ship", "queued"));
+    write_bundle(dir.path(), &records, "dry");
+    let plan = store
+        .import_plan(&Bundle::read(dir.path()).unwrap(), Timestamp::now())
+        .unwrap();
+    let slug = |legacy: &str| {
+        let p = plan
+            .projects
+            .iter()
+            .find(|p| p.legacy_id == legacy)
+            .unwrap();
+        (p.id.clone(), p.action)
+    };
+    assert_eq!(slug("new-site"), ("new-site".to_owned(), Action::Create));
+    assert_eq!(slug("old-site"), ("oldsite".to_owned(), Action::Exists));
+    assert_eq!(
+        slug("abcdefghijklmnopq"),
+        ("abcdefghijklmnop".to_owned(), Action::Exists)
+    );
+    assert_eq!(slug("oldsite"), ("oldsite2".to_owned(), Action::Create));
+    let display = |legacy: &str| {
+        plan.cards
+            .iter()
+            .find(|c| c.legacy_id == legacy)
+            .map(|c| c.display_id.clone())
+            .unwrap()
+    };
+    assert_eq!(display("hy1"), "new-site-1");
+    assert_eq!(display("hy2"), "oldsite-1");
+}
+
 /// A later bundle meets what the first import and the owner left in `state.db`.
 #[test]
 fn a_later_bundle_reads_state_db_as_it_now_is() {

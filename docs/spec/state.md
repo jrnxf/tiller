@@ -26,7 +26,9 @@ Every entity's primary key is a ULID: 26 characters of Crockford base32, time-or
 
 Cards get a display id for chat and the board: `<project>-<n>`, for example `alpha-42`. `n` is `projects.next_card_seq`, read and incremented inside the `card.create` transaction, so two concurrent creates cannot mint the same id. A display id is unique per host (`cards.display_id` is unique), never reused, and survives the card's whole life, including import and a deleted project's id being added again (section 8, Deleting a project): an imported Firstmate task keeps its original id as `legacy_id` and gets a fresh display id.
 
-Project ids are short lowercase slugs (`^[a-z][a-z0-9]{1,15}$`). The id `fleet` is reserved on every host for host-level work that belongs to no project.
+Project ids are short lowercase slugs, 2 to 32 characters: words of lowercase letters and digits joined by single hyphens, each word starting with a letter (`^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$`), so an id can match its repo, as in `acme-web2-staging`. The id `fleet` is reserved on every host for host-level work that belongs to no project.
+
+No word of a project id starts with a digit, so the first hyphen-separated part of a display id that does is its card number: `acme-web2-staging-12` is card 12 of `acme-web2-staging`, and `acme-web2-staging-12-build-2` is that card's second build. A display id splits at its last hyphen, and `foo-12` is never a project id. Ids from before schema 7 had no hyphen and at most 16 characters; they still parse unchanged.
 
 Runs are addressed through their card and role: `alpha-42 build`. The herdr agent name is `<display id>-<role>`, `alpha-42-build`; a second run of the same role on the same card appends its attempt number, `alpha-42-build-2` (`runs.attempt`).
 

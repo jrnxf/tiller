@@ -313,10 +313,16 @@ fn check(name: &str, manifest: usize, planned: usize) -> Check {
 }
 
 /// Maps every project id the bundle names (in `projects.json`, on a card or
-/// in a memory scope) to a Tiller slug. A valid slug is kept; any other id is
-/// lowercased, stripped to letters and digits and cut to 16 characters, with
-/// a number added when that collides, including with a project in `state.db`
-/// that an earlier import of the same id did not create.
+/// in a memory scope) to a Tiller slug. A valid slug is kept, unless an
+/// earlier import, from before ids could hold a hyphen or pass 16
+/// characters, already gave it another one, which it keeps; any other id,
+/// or a valid one whose slug is taken, is lowercased, stripped to letters
+/// and digits and cut to 16 characters, with a number added when that
+/// collides, including with a project in `state.db` that an earlier import of
+/// the same id did not create.
+/// The project id length limit before schema 7.
+const OLD_PROJECT_ID_MAX: usize = 16;
+
 fn project_slugs(conn: &Connection, bundle: &Bundle) -> Result<BTreeMap<String, String>> {
     let mut named: Vec<String> = bundle.projects.iter().map(|p| p.id.clone()).collect();
     let mut extra = BTreeSet::new();
@@ -336,9 +342,26 @@ fn project_slugs(conn: &Connection, bundle: &Bundle) -> Result<BTreeMap<String, 
 
     let mut taken: BTreeSet<String> = BTreeSet::from([FLEET_PROJECT.to_owned()]);
     let mut slugs = BTreeMap::new();
+    // An id the old rule (hyphen-free, at most 16 characters) rejected was
+    // given another slug by any earlier import, which kept the legacy id as
+    // the project's name. That slug wins over a plain id that names it too.
     for id in &named {
-        if id == FLEET_PROJECT || ids::validate_project_id(id).is_ok() {
-            taken.insert(id.clone());
+        if ids::validate_project_id(id).is_ok()
+            && (id.contains('-') || id.len() > OLD_PROJECT_ID_MAX)
+            && let Some(earlier) = find::<Project>(conn, "name = ?1 AND id <> ?1", &[id])?
+            && taken.insert(earlier.id.clone())
+        {
+            slugs.insert(id.clone(), earlier.id);
+        }
+    }
+    for id in &named {
+        if id == FLEET_PROJECT {
+            slugs.insert(id.clone(), id.clone());
+        } else if !slugs.contains_key(id)
+            && ids::validate_project_id(id).is_ok()
+            && taken.insert(id.clone())
+        {
+            // an imported project keeps its legacy id as its name
             slugs.insert(id.clone(), id.clone());
         }
     }

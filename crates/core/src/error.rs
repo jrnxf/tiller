@@ -182,6 +182,14 @@ impl From<rusqlite_migration::Error> for Error {
     fn from(error: rusqlite_migration::Error) -> Self {
         match error {
             rusqlite_migration::Error::RusqliteError { err, .. } => err.into(),
+            // a hook refuses a step whose precondition the rows do not meet;
+            // any other hook error is a bug or a damaged schema
+            rusqlite_migration::Error::Hook(fact) => {
+                match fact.strip_prefix(crate::migrate::HOOK_REFUSAL) {
+                    Some(fact) => Error::refused("schema", "migration", fact),
+                    None => Error::Internal(format!("migration: {fact}")),
+                }
+            }
             other => Error::Internal(format!("migration: {other}")),
         }
     }

@@ -48,16 +48,27 @@ pub fn is_short(text: &str) -> bool {
     text.len() == SHORT_LEN && text.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
-/// Checks a project id: `^[a-z][a-z0-9]{1,15}$` (`state.md` section 2).
+/// The longest project id: room for a repo-style name such as
+/// `acme-web2-staging` (`state.md` section 2).
+pub const PROJECT_ID_MAX: usize = 32;
+
+/// Checks a project id (`state.md` section 2): 2 to [`PROJECT_ID_MAX`]
+/// characters, one or more segments joined by single hyphens, each a
+/// lowercase letter followed by lowercase letters or digits, so
+/// `^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$`. No segment starts with a digit, so in
+/// a card id (`alpha-42`) or a run's agent name (`alpha-42-build-2`) the first
+/// segment that starts with a digit is always the card number.
 pub fn validate_project_id(id: &str) -> Result<()> {
-    let mut bytes = id.bytes();
-    let first_ok = bytes.next().is_some_and(|b| b.is_ascii_lowercase());
-    let rest_ok = bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
-    if first_ok && rest_ok && (2..=16).contains(&id.len()) {
+    let segments_ok = id.split('-').all(|segment| {
+        let mut bytes = segment.bytes();
+        bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+            && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    });
+    if segments_ok && (2..=PROJECT_ID_MAX).contains(&id.len()) {
         Ok(())
     } else {
         Err(Error::Usage(format!(
-            "project id {id:?} must be 2 to 16 characters: a lowercase letter, then lowercase letters or digits"
+            "project id {id:?} must be 2 to {PROJECT_ID_MAX} characters: words of lowercase letters and digits joined by single hyphens, each word starting with a letter (e.g. alpha or my-app2)"
         )))
     }
 }
@@ -68,15 +79,22 @@ pub fn display_id(project: &str, seq: i64) -> String {
 }
 
 /// Splits a display id into its project and sequence number, when it is one.
+/// The split is at the last hyphen: a project id may hold hyphens, but never
+/// a segment that starts with a digit.
 pub fn parse_display_id(text: &str) -> Option<(&str, i64)> {
     let (project, seq) = text.rsplit_once('-')?;
     validate_project_id(project).ok()?;
+    if seq.starts_with('0') || !seq.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
     let n: i64 = seq.parse().ok()?;
-    (n >= 1 && !seq.starts_with('0')).then_some((project, n))
+    (n >= 1).then_some((project, n))
 }
 
 #[cfg(test)]
 mod tests {
+    use proptest::strategy::Strategy as _;
+
     use super::*;
 
     #[test]
@@ -92,6 +110,10 @@ mod tests {
     fn display_ids_parse_only_canonical_forms() {
         assert_eq!(parse_display_id("alpha-42"), Some(("alpha", 42)));
         assert_eq!(
+            parse_display_id("acme-web2-staging-1"),
+            Some(("acme-web2-staging", 1))
+        );
+        assert_eq!(
             parse_display_id(&display_id("fleet", 1)),
             Some(("fleet", 1))
         );
@@ -103,8 +125,65 @@ mod tests {
             "alpha-",
             "alpha",
             "alpha-x",
+            "alpha--1",
+            "alpha-2-3",
+            "alpha-42-build",
+            "-alpha-1",
+            "alpha-+1",
         ] {
             assert_eq!(parse_display_id(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn project_ids_allow_single_hyphens_between_letter_led_words() {
+        for good in [
+            "ab",
+            "web2staging",
+            "web2-staging",
+            "acme-web2-staging",
+            "a-b",
+            "fleet",
+            "abcdefghijklmnopqrstuvwxyz012345",
+        ] {
+            assert!(validate_project_id(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "a",
+            "",
+            "-ab",
+            "ab-",
+            "a--b",
+            "ab-12",
+            "ab-1c",
+            "5ab",
+            "Ab",
+            "a_b",
+            "a.b",
+            "a b",
+            "abcdefghijklmnopqrstuvwxyz0123456",
+        ] {
+            let error = validate_project_id(bad).unwrap_err().to_string();
+            assert!(error.contains("joined by single hyphens"), "{bad}: {error}");
+        }
+    }
+
+    fn project_id() -> impl proptest::strategy::Strategy<Value = String> {
+        proptest::string::string_regex("[a-z][a-z0-9]{0,7}(-[a-z][a-z0-9]{0,7}){0,3}")
+            .unwrap()
+            .prop_filter("2 to 32 characters", |id| {
+                (2..=PROJECT_ID_MAX).contains(&id.len())
+            })
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn display_ids_round_trip(project in project_id(), seq in 1..=i64::MAX) {
+            proptest::prop_assert!(validate_project_id(&project).is_ok());
+            let display = display_id(&project, seq);
+            proptest::prop_assert_eq!(parse_display_id(&display), Some((project.as_str(), seq)));
+            // the card id itself is never a project id
+            proptest::prop_assert!(validate_project_id(&display).is_err());
         }
     }
 
