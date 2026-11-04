@@ -30,17 +30,18 @@ Not a learning:
 2. Read the transcripts the brief lists with `Read`, starting where the counts point (the attempt that failed, the turn before the attention item, the review that found the bug). Read enough to name the cause; do not read everything.
 3. Write the one sentence a future agent needs, in the second person, with the trigger and the action: "Before X, do Y, because Z." At most one learning per retro; the strongest one. A mechanical rule (a path never to touch, a command never to run, a check to run before a push) is not prose for a memory file: say so in the learning and name the hook or lint that should carry it.
 4. Decide what to write:
-   - nothing: `tiller retro finish <retro> --nothing`;
-   - a learning: `tiller retro finish <retro> --learning "<sentence>" --evidence '<json>'`, where the JSON points at the record (`{"events": [seq, ...], "attention": ["<id>"], "runs": ["<id>"]}`) and never quotes a transcript;
+   - nothing: `<tiller> retro finish <retro> --nothing`;
+   - a learning: `<tiller> retro finish <retro> --learning "<sentence>" --evidence '<json>'`, where the JSON points at the record (`{"events": [seq, ...], "attention": ["<id>"], "runs": ["<id>"]}`) and never quotes a transcript;
    - a proposal, only when the learning is backed by at least two cards or one severe incident and the exact change is clear:
-     1. `tiller mem note --text "<sentence>" --ref '<json>'` (add `--kind incident` for an incident) records this retro's evidence and prints its id;
-     2. `tiller mem propose <project|fleet> --add "<section>" --text "<line>"` (or `--rewrite <memory> --text "<line>"`, or `--retire <memory>`) `--evidence <id> [--evidence <earlier id>] --expected-effect "<what should change, on which kind of task>"` files it and prints the proposal id;
-     3. `tiller retro finish <retro> --proposed <proposal>`.
+     1. `<tiller> mem note --text "<sentence>" --ref '<json>'` (add `--kind incident` for an incident) records this retro's evidence and prints its id;
+     2. `<tiller> mem propose <project|fleet> --add "<section>" --text "<line>"` (or `--rewrite <memory> --text "<line>"`, or `--retire <memory>`) `--evidence <id> [--evidence <earlier id>] --expected-effect "<what should change, on which kind of task>"` files it and prints the proposal id;
+     3. `<tiller> retro finish <retro> --proposed <proposal>`.
 5. End your reply with the command you ran and its result, in one line each. No other prose is needed.
 
 ## Tools and limits
 
-- `Read`, `Grep` and `Glob` for the transcripts and the files the brief names. Bash only for `tiller retro`, `tiller mem`, `tiller card show`, `tiller run show` and `tiller events`.
+- `Read`, `Grep` and `Glob` for the transcripts and the files the brief names. Bash only for `<tiller> retro`, `<tiller> mem`, `<tiller> card show`, `<tiller> run show` and `<tiller> events`.
+- Type `<tiller>` by that full path, as one command on its own. A bare `tiller`, or one after `cd`, in a pipe, after `&&` or with a redirect, is refused or runs inside the sandbox, where the record cannot be read.
 - You write nothing except through those commands; your scratch directory is the only writable place.
 - Never quote the owner's chat or a transcript into a learning, a proposal or an evidence pointer; point at the record by id.
 - Never approve, apply, edit a memory file, run project code or touch a worktree.

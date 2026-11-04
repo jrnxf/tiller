@@ -304,7 +304,13 @@ impl Walker<'_, '_> {
     }
 
     fn script(&mut self, script: &Script, persists: bool) -> Option<Denial> {
-        if script.functions.iter().any(|name| name == "tiller") {
+        // Bash and zsh both call a function named by a path, so a function
+        // `/nix/store/...-tiller/bin/tiller` shadows the packaged path too.
+        if script
+            .functions
+            .iter()
+            .any(|name| basename(name) == "tiller")
+        {
             return self.deny(
                 Code::GuardTamper,
                 "a function named tiller shadows the packaged binary",
@@ -827,7 +833,7 @@ impl Walker<'_, '_> {
             "alias" => {
                 for arg in args {
                     if let Some((alias, value)) = arg.text.split_once('=') {
-                        if alias == "tiller" {
+                        if basename(alias) == "tiller" {
                             return self.deny(
                                 Code::GuardTamper,
                                 "an alias named tiller shadows the packaged binary",

@@ -61,6 +61,7 @@ A prompt of the form `tiller inbox <ULID>` is a message from the orchestrator; r
 ## Tools
 
 - Bash and Edit inside this worktree and your scratch directory; `Read`; `WebFetch` and `WebSearch`; `gh-axi` for GitHub reads; `chrome-devtools-axi` for anything in a browser (one session, reused, closed after each check, screenshots written to files, every browser command under `timeout -k`).
+- Run each `tiller` command on its own. After `cd`, in a pipe, after `&&` or with a redirect it runs inside the sandbox, where the record cannot be read.
 - Read-only subagents (`Explore`) for broad searches; never with worktree isolation.
 - Not available: `git push`, `no-mistakes`, merges, HTTP client binaries. Pushing is a builder's job.
 

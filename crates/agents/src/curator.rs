@@ -20,8 +20,7 @@ const FILE: &str = include_str!("../../../roles/curator.md");
 const SETTINGS: &str = include_str!("../../../roles/curator.settings.json");
 
 /// The first prompt the curator gets; the brief is in its instructions.
-pub const FIRST_PROMPT: &str =
-    "Run the retro named at the end of your instructions, then finish it with tiller retro finish.";
+pub const FIRST_PROMPT: &str = "Run the retro named at the end of your instructions, then finish it with the retro finish command they give.";
 
 /// The prompt body of `roles/curator.md`, without its frontmatter.
 pub fn prompt_body() -> &'static str {
@@ -44,11 +43,18 @@ pub fn model_alias() -> &'static str {
 }
 
 /// The settings fragment with its two placeholders filled. Both must be
-/// absolute paths without a trailing slash or a quote.
+/// absolute paths without a trailing slash or a quote, and `<tiller>` a
+/// [`crate::guards::plain_path`], since the prompt tells the curator to type it.
 pub fn render_settings(tiller: &Path, scratch: &Path) -> Result<Value, SpawnError> {
     let mut text = SETTINGS.to_owned();
     for (placeholder, path) in [("<tiller>", tiller), ("<scratch>", scratch)] {
         let value = path.to_string_lossy();
+        if placeholder == "<tiller>" && !crate::guards::plain_path(&value) {
+            return Err(SpawnError::Usage(format!(
+                "<tiller> for the curator must be {}, not {value:?}",
+                crate::roles::TILLER_PATH_REQUIREMENT
+            )));
+        }
         if !path.is_absolute() || value.ends_with('/') || value.contains(['\'', '"', '\\']) {
             return Err(SpawnError::Usage(format!(
                 "{placeholder} for the curator must be an absolute path without a trailing slash or a quote, not {value:?}"
@@ -103,9 +109,13 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
     fs::set_permissions(spec.scratch, fs::Permissions::from_mode(0o700))?;
     let fragment = render_settings(spec.tiller, spec.scratch)?;
     let fragment = serde_json::to_vec_pretty(&fragment)?;
+    // The curator has no hooks to rewrite a bare `tiller`, so its prompt
+    // names the packaged path the sandbox exempts.
     let prompt = format!(
         "{}\n\n# Your brief\n\n{}\n",
-        prompt_body().trim_end(),
+        prompt_body()
+            .trim_end()
+            .replace("<tiller>", &spec.tiller.to_string_lossy()),
         spec.brief.trim()
     );
     let launch_prompt = spec.scratch.join("prompt.md");
@@ -187,14 +197,14 @@ mod tests {
             assert!(deny.contains(&tool), "{tool} must be denied");
         }
         assert!(!allow.contains(&"Bash"), "no bare Bash allow");
-        assert!(allow.contains(&"Bash(tiller retro *)"));
-        assert!(allow.contains(&"Bash(tiller mem propose *)"));
-        assert!(
-            !allow
-                .iter()
-                .any(|rule| rule.starts_with("Bash(tiller mem *"))
-        );
+        // No hook rewrites a bare `tiller` here, so the allow rules name only
+        // the packaged path the sandbox exempts, and each deny has both forms.
+        assert!(allow.contains(&"Bash(/nix/store/x/bin/tiller retro *)"));
+        assert!(allow.contains(&"Bash(/nix/store/x/bin/tiller mem propose *)"));
+        assert!(!allow.iter().any(|rule| rule.starts_with("Bash(tiller ")
+            || rule.starts_with("Bash(/nix/store/x/bin/tiller mem *")));
         assert!(deny.contains(&"Bash(tiller learn *)"));
+        assert!(deny.contains(&"Bash(/nix/store/x/bin/tiller learn *)"));
         // The curator reads untrusted transcripts, so every dot directory
         // in the home (keys, tokens, the state directory) is closed to Read.
         for path in ["~/.tiller/**", "~/.claude/**", "**/.ssh/**", "**/id_*"] {
@@ -236,6 +246,8 @@ mod tests {
         .unwrap();
         let prompt = fs::read_to_string(&launch.prompt).unwrap();
         assert!(prompt.starts_with("# Curator"));
+        assert!(prompt.contains("`/nix/store/x/bin/tiller retro finish <retro> --nothing`"));
+        assert!(!prompt.contains("<tiller>"));
         assert!(prompt.ends_with("# Your brief\n\nretro: 01JC00000000000000000000R1\n"));
         assert_eq!(launch.argv[0..3], ["claude", "-p", FIRST_PROMPT]);
         assert!(launch.argv.contains(&"--permission-mode".to_owned()));

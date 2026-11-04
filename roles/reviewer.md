@@ -55,6 +55,7 @@ A prompt of the form `tiller inbox <ULID>` is a message from the orchestrator; r
 - `Read`, Bash for read-only commands (`git diff`, `git log`, `grep`, `gh-axi pr view`, `gh-axi pr checks`), `WebFetch` and `WebSearch` for documentation, read-only subagents (`Explore`) for broad searches.
 - Your write set is your scratch directory. `Edit`, `Write` and `NotebookEdit` are removed from this session; builds and tests that write into the worktree fail, so judge from the diff, the tests as written, and the recorded check results.
 - You have no memory tool. The approved memory you need is already in this prompt; a learning worth keeping goes in the report's Coverage section for the orchestrator.
+- Run each `tiller` command on its own. After `cd`, in a pipe, after `&&` or with a redirect it runs inside the sandbox, where the record cannot be read.
 - Never review your own run: `tiller review record` refuses a reviewer session from the run under review (G27).
 
 ## Hard guardrails

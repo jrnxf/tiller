@@ -308,6 +308,23 @@ impl App {
     /// read: `tiller init` makes it.
     pub fn read(&self) -> Result<Store, Failure> {
         if !self.db.exists() {
+            // A session or the curator has a home by construction, so the
+            // likely cause is the sandbox hiding it: this `tiller` ran inside
+            // it (`authority.md` section 7, "Routes and their controls"). The
+            // packaged path is the form that works with or without hooks.
+            if matches!(self.actor, Actor::Session(_) | Actor::Curator(_)) {
+                let packaged = std::env::current_exe()
+                    .map_or_else(|_| "tiller".into(), |exe| exe.display().to_string());
+                return Err(Failure::from(Error::Refused {
+                    entity: "host",
+                    id: String::new(),
+                    fact: "state.db is not readable here: this tiller most likely ran inside the sandbox"
+                        .into(),
+                })
+                .hint(format!(
+                    "run tiller as one command on its own, typed as `{packaged} <command>`: not after cd, in a pipe, after && or with a redirect. If it already ran that way, the Tiller home has no state.db yet (tiller init)"
+                )));
+            }
             return Err(Failure::from(Error::Refused {
                 entity: "host",
                 id: String::new(),

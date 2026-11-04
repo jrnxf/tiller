@@ -46,6 +46,7 @@ A prompt of the form `tiller inbox <ULID>` is a message from the orchestrator; r
 - Bash and Edit inside this worktree and your scratch directory; `Read`; `WebFetch` and `WebSearch`; subagents for bounded reads and reviews (never with worktree isolation; treehouse owns worktrees).
 - `gh-axi` for every GitHub operation (PR create, view, checks, run logs). Plain `gh` only for `gh pr create|edit --attach` uploads.
 - `chrome-devtools-axi` for browser checks: one session at a time, reused, closed after each check, output to files, every command under `timeout -k` so a hung browser cannot hold the run (P56).
+- Run each `tiller` command on its own. After `cd`, in a pipe, after `&&` or with a redirect it runs inside the sandbox, where the record cannot be read.
 - Review pages for the owner are recorded with `tiller artifact add <card> --kind page --title <t> --url <u>`; their feedback reaches you as inbox messages.
 - Not available: merges, default-branch pushes, force pushes, raw GitHub API calls, HTTP client binaries, worktree and pane administration, `~/.tiller`, `.claude/` settings. The deny rules refuse them; a refusal is a fact to report, never something to work around.
 

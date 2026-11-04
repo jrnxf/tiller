@@ -1,7 +1,8 @@
 //! `tiller guard pretool` end to end: the real binary, the hook payload on
 //! stdin, and the transport Claude Code reads (`authority.md` section 9): a
 //! deny exits 2 with the decision JSON on stderr and nothing on stdout, an
-//! allow exits 0 and prints nothing.
+//! allow exits 0 and prints nothing, and an allowed bare `tiller ...` exits 0
+//! with the call rewritten to the packaged path on stdout.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -77,6 +78,23 @@ fn assert_allowed(output: &Output) {
     assert!(output.stderr.is_empty(), "{output:?}");
 }
 
+#[track_caller]
+fn assert_rewritten(output: &Output, command: &str) {
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let answer: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let packaged = env!("CARGO_BIN_EXE_tiller");
+    assert_eq!(
+        answer,
+        json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "updatedInput": {"command": format!("{packaged}{command}")},
+            },
+        })
+    );
+}
+
 #[test]
 fn deny_exits_two_with_the_decision_on_stderr() {
     let home = tempfile::tempdir().unwrap();
@@ -101,6 +119,35 @@ fn allow_exits_zero_and_prints_nothing() {
     ));
     // An unknown role is a broken fragment: allowed, like any broken hook.
     assert_allowed(&guard(home.path(), "pirate", "gh pr merge 12"));
+}
+
+/// The sandbox exempts only the packaged path (`authority.md` section 7,
+/// "Routes and their controls"), so an allowed lone bare `tiller` is handed
+/// back naming it, each argument quoted; anything around it is left alone
+/// and runs sandboxed.
+#[test]
+fn bare_tiller_is_rewritten_to_the_running_binary() {
+    let home = tempfile::tempdir().unwrap();
+    for role in ["orchestrator", "builder", "scout", "reviewer", "verifier"] {
+        assert_rewritten(
+            &guard(home.path(), role, "tiller handoff show"),
+            " 'handoff' 'show'",
+        );
+        assert_rewritten(&guard(home.path(), role, "tiller"), "");
+        for command in [
+            "cd /home/user && tiller handoff show",
+            "tiller handoff show | cat",
+            "tiller handoff show > /home/user/out",
+            "FOO=1 tiller handoff show",
+        ] {
+            assert_allowed(&guard(home.path(), role, command));
+        }
+    }
+    // A denied bare call is denied, never rewritten.
+    assert_denied(
+        &guard(home.path(), "builder", "tiller grant 01JABC"),
+        "owner-only",
+    );
 }
 
 /// Exit 2 would deny every tool call of the session, so a command line the
@@ -137,11 +184,23 @@ fn orchestrator_bare_approve_is_refused_by_the_hook() {
         &guard(home.path(), "orchestrator", "tiller approve 01JABC"),
         "owner-only",
     );
-    assert_allowed(&guard(
-        home.path(),
-        "orchestrator",
-        "tiller approve 01JABC --ask 01JASK",
-    ));
+    assert_rewritten(
+        &guard(
+            home.path(),
+            "orchestrator",
+            "tiller approve 01JABC --ask 01JASK",
+        ),
+        " 'approve' '01JABC' '--ask' '01JASK'",
+    );
+    let packaged = env!("CARGO_BIN_EXE_tiller");
+    assert_denied(
+        &guard(
+            home.path(),
+            "orchestrator",
+            &format!("{packaged} approve 01JABC"),
+        ),
+        "owner-only",
+    );
     assert_denied(
         &guard(home.path(), "builder", "tiller approve 01JABC --ask 01JASK"),
         "owner-only",

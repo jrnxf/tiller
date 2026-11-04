@@ -232,6 +232,10 @@ impl Role {
     }
 }
 
+/// What `<tiller>` must be: a [`crate::guards::plain_path`].
+pub const TILLER_PATH_REQUIREMENT: &str =
+    "an absolute path of letters, digits and /._+-@,:%= without a trailing slash";
+
 impl Placeholders {
     /// Each string placeholder with its value, in [`STRING_PLACEHOLDERS`] order.
     fn strings(&self) -> [(&'static str, &str); 7] {
@@ -258,6 +262,10 @@ impl Placeholders {
             }
             let ok = if placeholder == "<default>" {
                 !value.is_empty() && !value.contains(char::is_whitespace)
+            } else if placeholder == "<tiller>" {
+                // The guard rewrites a bare `tiller` to this path and the
+                // sandbox exempts it by text, so it must stay one plain word.
+                crate::guards::plain_path(value)
             } else {
                 // The guard command quotes the orchestrator's roots, so a
                 // path may hold a space but not a quote.
@@ -272,6 +280,8 @@ impl Placeholders {
                     placeholder,
                     requirement: if placeholder == "<default>" {
                         "a branch name"
+                    } else if placeholder == "<tiller>" {
+                        TILLER_PATH_REQUIREMENT
                     } else {
                         "an absolute path without a trailing slash or a quote"
                     },
@@ -406,14 +416,23 @@ mod tests {
         "Bash(claude *)",
         "Bash(npx *claude-code*)",
         "Bash(tiller approve *)",
+        "Bash(<tiller> approve *)",
         "Bash(tiller grant *)",
+        "Bash(<tiller> grant *)",
         "Bash(tiller away *)",
+        "Bash(<tiller> away *)",
         "Bash(tiller land *)",
+        "Bash(<tiller> land *)",
         "Bash(tiller board*)",
+        "Bash(<tiller> board*)",
         "Bash(tiller import *)",
+        "Bash(<tiller> import *)",
         "Bash(tiller hook *)",
+        "Bash(<tiller> hook *)",
         "Bash(tiller owner *)",
+        "Bash(<tiller> owner *)",
         "Bash(tiller peer *)",
+        "Bash(<tiller> peer *)",
         "Bash(crontab *)",
         "Bash(at *)",
         "Bash(systemd-run *)",
@@ -459,7 +478,7 @@ mod tests {
                 "Bash(no-mistakes *)",
             ],
             allow: &[
-                "Bash(tiller *)",
+                "Bash(<tiller> *)",
                 "Bash(gh-axi pr view *)",
                 "Bash(gh-axi pr list *)",
                 "Bash(gh-axi pr checks *)",
@@ -574,13 +593,16 @@ mod tests {
 
     /// The common deny list as `role` carries it: the orchestrator alone may
     /// run the chat approval form `tiller approve <id> --ask <ask>`, so its
-    /// list leaves out `Bash(tiller approve *)` and the backstop denies every
+    /// list leaves out both forms of `Bash(tiller approve *)` and the backstop denies every
     /// other approve form (CP2 decision on G06, `authority.md` section 8).
     fn common_deny(role: Role) -> Vec<&'static str> {
         COMMON_DENY
             .iter()
             .copied()
-            .filter(|rule| role != Role::Orchestrator || *rule != "Bash(tiller approve *)")
+            .filter(|rule| {
+                role != Role::Orchestrator
+                    || !matches!(*rule, "Bash(tiller approve *)" | "Bash(<tiller> approve *)")
+            })
             .collect()
     }
 
@@ -1141,6 +1163,19 @@ mod tests {
                 ..
             })
         ));
+        // The guard rewrites bare `tiller` to `<tiller>`, so a path it could
+        // not type unquoted is refused rather than left sandboxed.
+        let mut spaced_tiller = sample_fill(Role::Builder);
+        spaced_tiller.tiller = "/home/user/my tiller/tiller".into();
+        assert_eq!(
+            render_settings(Role::Builder, &spaced_tiller),
+            Err(RoleError::InvalidPlaceholder {
+                role: Role::Builder,
+                placeholder: "<tiller>",
+                requirement: TILLER_PATH_REQUIREMENT,
+                value: "/home/user/my tiller/tiller".into(),
+            })
+        );
         let mut no_branch = sample_fill(Role::Builder);
         no_branch.default_branch = String::new();
         assert!(matches!(

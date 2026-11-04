@@ -888,7 +888,9 @@ fn tiller_shadowing_denied() {
         "export PATH=/tmp/bin:$PATH",
         "tiller() { echo fake; }; tiller status x",
         "function tiller { echo fake; }",
+        "function /nix/store/abc-tiller-0.1.0/bin/tiller { echo fake; }; /nix/store/abc-tiller-0.1.0/bin/tiller status x",
         "alias tiller=/tmp/tiller",
+        "alias /nix/store/abc-tiller-0.1.0/bin/tiller=/tmp/tiller",
         "./tiller status x",
         "/tmp/bin/tiller status x",
         "LD_PRELOAD=/tmp/x.so tiller status x",
@@ -1272,17 +1274,205 @@ fn approve_deny_rule_is_lifted_only_for_the_orchestrator() {
     for role in Role::ALL {
         let fragment = rendered(role);
         let deny = rules(&fragment, "deny");
-        assert_eq!(
-            deny.contains(&"Bash(tiller approve *)"),
-            role != Role::Orchestrator,
-            "{role}"
-        );
         for rule in [
-            "Bash(tiller grant *)",
-            "Bash(tiller land *)",
-            "Bash(tiller hook *)",
+            "Bash(tiller approve *)".to_owned(),
+            format!("Bash({TILLER} approve *)"),
         ] {
-            assert!(deny.contains(&rule), "{role}: {rule}");
+            assert_eq!(
+                deny.contains(&rule.as_str()),
+                role != Role::Orchestrator,
+                "{role}: {rule}"
+            );
+        }
+        for verb in ["grant", "land", "hook"] {
+            for rule in [
+                format!("Bash(tiller {verb} *)"),
+                format!("Bash({TILLER} {verb} *)"),
+            ] {
+                assert!(deny.contains(&rule.as_str()), "{role}: {rule}");
+            }
         }
     }
+}
+
+fn packaged(command: &str) -> Option<String> {
+    let input = json!({ "command": command, "description": "Read the handoff" });
+    let updated = packaged_form("Bash", &input, Some(Path::new(TILLER)))?;
+    assert_eq!(updated["description"], "Read the handoff", "{command}");
+    Some(updated["command"].as_str().unwrap().to_owned())
+}
+
+#[test]
+fn bare_tiller_is_rewritten_to_the_packaged_path() {
+    for (command, want) in [
+        ("tiller handoff show", format!("{TILLER} 'handoff' 'show'")),
+        ("tiller", TILLER.to_owned()),
+        ("  tiller owner show", format!("{TILLER} 'owner' 'show'")),
+        ("tiller\tcard list", format!("{TILLER} 'card' 'list'")),
+        (
+            "tiller status working 'a line; with | marks'",
+            format!("{TILLER} 'status' 'working' 'a line; with | marks'"),
+        ),
+        (
+            "tiller status working \"it's done\"",
+            format!("{TILLER} 'status' 'working' 'it'\\''s done'"),
+        ),
+        ("tiller card list # mine", format!("{TILLER} 'card' 'list'")),
+        (
+            "tiller status working 'two\nlines'",
+            format!("{TILLER} 'status' 'working' 'two\nlines'"),
+        ),
+        (
+            "tiller card list --since=2026-11-04",
+            format!("{TILLER} 'card' 'list' '--since=2026-11-04'"),
+        ),
+        (
+            "tiller config path ~",
+            format!("{TILLER} 'config' 'path' ~"),
+        ),
+        (
+            "tiller import ~/.cache/bundle.json",
+            format!("{TILLER} 'import' ~/'.cache/bundle.json'"),
+        ),
+    ] {
+        assert_eq!(packaged(command), Some(want), "{command}");
+    }
+}
+
+/// A global alias in the owner's zsh snapshot (`alias -g G='| grep'`) or an
+/// `=word` expands only in an unquoted word, so every argument is quoted:
+/// otherwise the exempt call could run a pipe outside the sandbox.
+#[test]
+fn rewrite_quotes_words_zsh_would_expand() {
+    assert_eq!(
+        packaged("tiller card list G token"),
+        Some(format!("{TILLER} 'card' 'list' 'G' 'token'"))
+    );
+    assert_eq!(
+        packaged("tiller card list =cat"),
+        Some(format!("{TILLER} 'card' 'list' '=cat'"))
+    );
+}
+
+/// The packaged path typed by hand gets the same quoting, so a role that
+/// types it cannot reach an unquoted global alias either.
+#[test]
+fn a_lone_packaged_call_is_requoted() {
+    assert_eq!(
+        packaged(&format!("{TILLER} handoff show")),
+        Some(format!("{TILLER} 'handoff' 'show'"))
+    );
+    assert_eq!(packaged(TILLER), Some(TILLER.to_owned()));
+    for command in [
+        format!("cd /tmp && {TILLER} handoff show"),
+        format!("{TILLER}x handoff show"),
+        format!("'{TILLER}' handoff show"),
+        format!("{TILLER} handoff show > /home/user/out"),
+    ] {
+        assert_eq!(packaged(&command), None, "{command}");
+    }
+}
+
+#[test]
+fn only_a_lone_literal_tiller_is_rewritten() {
+    for command in [
+        "cd /tmp && tiller handoff show",
+        "tiller handoff show | cat",
+        "tiller handoff show && cat ~/.tiller/state.db",
+        "tiller handoff show; cat ~/.tiller/state.db",
+        "tiller handoff show\ncat ~/.tiller/state.db",
+        "tiller handoff show &",
+        "(tiller handoff show)",
+        "{ tiller handoff show; }",
+        "FOO=1 tiller handoff show",
+        "tiller handoff show > /home/user/out",
+        "tiller handoff show 2>&1",
+        "tiller handoff show <<< x",
+        "tiller \"$(touch /home/user/out)\"",
+        "tiller $(touch /home/user/out)",
+        "tiller `touch /home/user/out`",
+        "tiller $VAR",
+        "tiller *",
+        "\"tiller\" handoff show",
+        "\\tiller handoff show",
+        "tillerx handoff show",
+        "tiller-x handoff show",
+        "tiller() { cat ~/.tiller/state.db; }; tiller",
+        "/home/user/bin/tiller handoff show",
+        "command tiller handoff show",
+        "tiller config path ~user",
+        "tiller status working $'\\xe2\\x82\\xac'",
+        "tiller status working $\"a b\"",
+        "tiller status working $'\\0'",
+        "tiller status working 'a\rb'",
+        "tiller 'unterminated",
+    ] {
+        assert_eq!(packaged(command), None, "{command}");
+    }
+}
+
+#[test]
+fn rewrite_needs_bash_and_a_plain_packaged_path() {
+    let input = json!({ "command": "tiller handoff show" });
+    assert_eq!(packaged_form("Read", &input, Some(Path::new(TILLER))), None);
+    assert_eq!(packaged_form("Bash", &input, None), None);
+    for path in [
+        "bin/tiller",
+        "/",
+        "/home/user/bin/",
+        "/home/user/my tiller/tiller",
+        "/home/user/*/tiller",
+        "/home/user/a?b/tiller",
+        "/home/user/$(x)/tiller",
+        "/home/user/a;b/tiller",
+        "/home/user/'q'/tiller",
+    ] {
+        assert_eq!(
+            packaged_form("Bash", &input, Some(Path::new(path))),
+            None,
+            "{path}"
+        );
+    }
+    for path in [
+        "/nix/store/abc-tiller-0.1.0/bin/tiller",
+        "/home/user/src/tiller@main/target/debug/tiller",
+        "/home/user/a,b:c%d=e/tiller",
+    ] {
+        assert!(plain_path(path), "{path}");
+    }
+}
+
+#[test]
+fn rewrite_answer_carries_only_the_updated_input() {
+    let updated = json!({ "command": format!("{TILLER} handoff show") });
+    let answer: Value = serde_json::from_str(&render_rewrite(&updated)).unwrap();
+    assert_eq!(
+        answer,
+        json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "updatedInput": updated,
+            },
+        })
+    );
+}
+
+#[test]
+fn tiller_rules_name_both_forms() {
+    for role in Role::ALL {
+        let fragment = rendered(role);
+        let deny = rules(&fragment, "deny");
+        for rule in deny.iter().filter(|rule| rule.starts_with("Bash(tiller ")) {
+            let packaged = rule.replacen("Bash(tiller ", &format!("Bash({TILLER} "), 1);
+            assert!(deny.contains(&packaged.as_str()), "{role}: {packaged}");
+        }
+        let allow = rules(&fragment, "allow");
+        assert!(
+            !allow.iter().any(|rule| rule.starts_with("Bash(tiller")),
+            "{role}: a bare allow never matches the rewritten call"
+        );
+    }
+    let orchestrator = rendered(Role::Orchestrator);
+    let allow = rules(&orchestrator, "allow");
+    assert!(allow.contains(&format!("Bash({TILLER} *)").as_str()));
 }

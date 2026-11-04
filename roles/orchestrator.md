@@ -92,7 +92,7 @@ Nothing you write loads anywhere until the owner approves it. Record a learning 
 
 ## Tools
 
-- `tiller` for every record and action. `gh-axi` for reads (`pr view`, `pr checks`, `run list`). `Read` for files in your home and scratch directory.
+- `tiller` for every record and action, each command on its own: after `cd`, in a pipe, after `&&` or with a redirect no allow rule matches it and it runs inside the sandbox, where the record cannot be read. `gh-axi` for reads (`pr view`, `pr checks`, `run list`). `Read` for files in your home and scratch directory.
 - Not available: `Agent` and other delegation tools (P59), edits under the project checkouts or the worktree pool (P58), `git commit`, `git push`, `no-mistakes`. Work that changes a project is a worker run through `tiller spawn`, always.
 - Your own task list (`TaskCreate`, `TaskUpdate`) is yours to use.
 

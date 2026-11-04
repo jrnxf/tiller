@@ -991,6 +991,34 @@ fn exit_codes_follow_the_table() {
     assert!(!empty.db().exists(), "a read never creates state.db");
 }
 
+/// A session's home always exists, so a missing `state.db` under a session
+/// most likely means the sandbox hid it: the refusal names the packaged path,
+/// the form that runs outside it with or without hooks (`authority.md`
+/// section 7, "Routes and their controls").
+#[test]
+fn a_session_that_cannot_see_state_db_is_told_it_ran_sandboxed() {
+    let empty = World::new();
+    let out = empty.run_as("01JSESSION", &["handoff", "show"]);
+    assert_eq!((out.code, out.error_code()), (5, "refused"), "{}", out.json);
+    let error = out.json["error"].to_string();
+    let packaged = format!("`{} <command>`", env!("CARGO_BIN_EXE_tiller"));
+    assert!(error.contains("inside the sandbox"), "{error}");
+    assert!(error.contains(&packaged), "{error}");
+    assert!(error.contains("tiller init"), "{error}");
+    empty.set_env("TILLER_RETRO_ID", "01JRETRO");
+    let out = empty.run(&["retro", "show", "01JRETRO"]);
+    assert_eq!((out.code, out.error_code()), (5, "refused"), "{}", out.json);
+    let error = out.json["error"].to_string();
+    assert!(error.contains("inside the sandbox"), "{error}");
+    assert!(error.contains(&packaged), "{error}");
+    let out = World::new().run(&["handoff", "show"]);
+    assert!(
+        out.json["error"].to_string().contains("run tiller init"),
+        "{}",
+        out.json
+    );
+}
+
 #[test]
 fn orchestrator_start_needs_the_project_checkout_configured() {
     let world = World::initialized();

@@ -29,6 +29,7 @@ use tiller_core::state::runs::NewObservation;
 use tiller_core::{Actor, Ctx, Store, Timestamp};
 
 use crate::roles::Role;
+use crate::spawn::launch::sh_quote;
 
 /// The stable deny codes (`authority.md` section 9, "Output").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -441,8 +442,8 @@ pub(crate) fn is_secret_path(text: &str) -> bool {
 
 /// The hook transport for Claude Code (pinned against the installed CLI at
 /// T4.3, `docs/design/host-capabilities.md`): a deny exits 2 with this JSON
-/// on stderr and nothing on stdout; an allow exits 0 with no output, so the
-/// normal permission flow still runs.
+/// on stderr and nothing on stdout; an allow exits 0 with no output (or a
+/// [`render_rewrite`]), so the normal permission flow still runs.
 pub fn render_deny(denial: &Denial) -> String {
     let message = denial.message();
     json!({
@@ -452,6 +453,108 @@ pub fn render_deny(denial: &Denial) -> String {
             "permissionDecisionReason": message,
         },
         "systemMessage": message,
+    })
+    .to_string()
+}
+
+/// A tiller path the rewrite can type and the sandbox can exempt: absolute,
+/// no trailing slash, and only characters no shell splits, quotes or expands
+/// in the middle of a word. Spawn refuses a `<tiller>` that is not one, so the
+/// bare form is never silently left sandboxed.
+pub fn plain_path(text: &str) -> bool {
+    text.len() > 1
+        && text.starts_with('/')
+        && !text.ends_with('/')
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._+-@,:%=".contains(c))
+}
+
+/// The Bash call to run in place of an allowed `tiller ...`
+/// (`authority.md` section 7, "Routes and their controls"): the packaged
+/// path, which is what the sandbox exempts, followed by each argument in
+/// single quotes. Only one top-level simple command is rewritten: its first
+/// word the literal, unquoted `tiller` or the packaged path, every word
+/// static, and no assignment or redirection, so nothing but tiller itself
+/// runs outside the sandbox. The quotes keep the Bash tool's zsh from
+/// expanding a global alias or an `=word` in an argument. The result is a
+/// command the role could have typed itself, so the rewrite grants nothing
+/// new. A packaged path that is not a [`plain_path`] is never written.
+pub fn packaged_form(tool: &str, input: &Value, packaged: Option<&Path>) -> Option<Value> {
+    if tool != "Bash" {
+        return None;
+    }
+    let packaged = packaged?.to_str()?;
+    if !plain_path(packaged) {
+        return None;
+    }
+    let command = input.get("command")?.as_str()?;
+    let trimmed = command.trim_start();
+    let rest = trimmed
+        .strip_prefix(packaged)
+        .or_else(|| trimmed.strip_prefix("tiller"))?;
+    if !(rest.is_empty() || rest.starts_with([' ', '\t'])) {
+        return None;
+    }
+    let script = shell::parse(command).ok()?;
+    let [simple] = script.commands.as_slice() else {
+        return None;
+    };
+    let (first, args) = simple.words.split_first()?;
+    if !script.functions.is_empty()
+        || !simple.persists
+        || !simple.assigns.is_empty()
+        || !simple.redirects.is_empty()
+        || !(first.text == "tiller" || first.text == packaged)
+        || first.quoted
+        || simple.words.iter().any(|word| word.dynamic)
+        // The parser's value for `$'..'` and `$"..."` can differ from zsh's,
+        // and a control character may not survive the trip: such a call is
+        // left to run sandboxed rather than with an argument nobody judged.
+        || command.contains("$'")
+        || command.contains("$\"")
+        || args.iter().any(|arg| {
+            arg.text
+                .chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\t')
+        })
+    {
+        return None;
+    }
+    let mut line = packaged.to_owned();
+    for arg in args {
+        line.push(' ');
+        line.push_str(&quoted_arg(arg)?);
+    }
+    let mut updated = input.clone();
+    updated["command"] = Value::String(line);
+    Some(updated)
+}
+
+/// One static argument in single quotes. A leading `~` or `~/` stays
+/// unquoted so it still expands; `~user` is not rewritten.
+fn quoted_arg(word: &shell::Word) -> Option<String> {
+    if !word.tilde {
+        return Some(sh_quote(&word.text));
+    }
+    match word.text.as_str() {
+        "~" | "~/" => Some(word.text.clone()),
+        text => text
+            .strip_prefix("~/")
+            .map(|tail| format!("~/{}", sh_quote(tail))),
+    }
+}
+
+/// The PreToolUse answer that runs `updated` in place of the call: exit 0
+/// with this JSON on stdout and no decision, so the permission rules and the
+/// sandbox's `excludedCommands` judge the updated command (observed on
+/// Claude Code 2.1.312, `docs/design/host-capabilities.md`).
+pub fn render_rewrite(updated: &Value) -> String {
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "updatedInput": updated,
+        },
     })
     .to_string()
 }

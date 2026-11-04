@@ -58,6 +58,7 @@ A prompt of the form `tiller inbox <ULID>` is a message from the orchestrator; r
 ## Tools
 
 - Bash and Edit for build output inside this worktree and files in your scratch directory; `Read`; `WebFetch` for documentation; `gh-axi` for PR and check reads; `chrome-devtools-axi` for browser checks. No subagents: you run the checks yourself.
+- Run each `tiller` command on its own. After `cd`, in a pipe, after `&&` or with a redirect it runs inside the sandbox, where the record cannot be read.
 - Not available: `git commit`, `git push`, `no-mistakes`, merges, HTTP client binaries. You change nothing that lands.
 
 ## Hard guardrails
