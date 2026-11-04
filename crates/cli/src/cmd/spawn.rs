@@ -100,6 +100,16 @@ impl Tools {
         })
     }
 
+    /// The run scratch root, which the curator's retro directories sit beside.
+    pub fn scratch_root(&self) -> &Path {
+        &self.scratch
+    }
+
+    /// The packaged `tiller` binary.
+    pub fn tiller(&self) -> &Path {
+        &self.tiller
+    }
+
     pub fn world(&self, ram_free_mb: Option<i64>, disk_free_mb: Option<i64>) -> World<'_> {
         World {
             config: &self.config,

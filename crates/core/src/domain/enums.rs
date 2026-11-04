@@ -503,3 +503,37 @@ mod tests {
         assert_eq!(RunRole::from_short_name("orchestrator"), None);
     }
 }
+
+// The learning loop (docs/design/learning-loop.md, T7.3).
+
+text_enum!(
+    /// How deep a retro goes: `light` is counts only, done at once; `full`
+    /// gets a curator session.
+    RetroDepth { Light = "light", Full = "full" }
+);
+
+text_enum!(
+    /// Why a retro got its depth.
+    RetroReason {
+        Incident = "incident",
+        SurprisingWin = "surprising_win",
+        Sample = "sample",
+        Routine = "routine",
+    }
+);
+
+text_enum!(RetroState { Pending = "pending", Done = "done" });
+
+text_enum!(
+    /// How a retro ended. `nothing` is the normal result.
+    RetroOutcome {
+        Nothing = "nothing",
+        Evidence = "evidence",
+        Proposed = "proposed",
+        Unfinished = "unfinished",
+    }
+);
+
+text_enum!(ChangeSetState { Open = "open", Measuring = "measuring", Closed = "closed" });
+
+text_enum!(ChangeSetClose { WindowComplete = "window_complete", Abandoned = "abandoned" });

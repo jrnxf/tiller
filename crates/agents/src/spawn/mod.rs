@@ -367,6 +367,7 @@ fn place(
     if run.role == RunRole::Builder {
         brief.push_str(&delivery_line(project));
     }
+    let claude_version = launch::claude_version(&world.config.spawn.claude);
     let launched = launch::write(&LaunchSpec {
         role,
         session_id: &session.id,
@@ -381,7 +382,12 @@ fn place(
         network_allow: &world.config.spawn.network_allow,
         no_mistakes_socket: world.config.spawn.no_mistakes_socket.as_deref(),
         claude: &world.config.spawn.claude,
+        claude_version: claude_version.as_deref(),
+        memory: &[],
     })?;
+    // The manifest first, so a hash on a run always resolves to its parts.
+    let recorded = store.config_manifest_record(ctx, &launched.config_hash, &launched.manifest)?;
+    made.events.extend(recorded.events);
     let placed = store.run_place(
         ctx,
         &run.id,

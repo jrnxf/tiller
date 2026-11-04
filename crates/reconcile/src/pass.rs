@@ -38,6 +38,8 @@ pub struct Config {
     /// The owner's forge login (CP2, C08), named on an outside merge.
     pub forge_login: Option<String>,
     pub thresholds: Thresholds,
+    /// The learning loop's `[learning]` keys, for the retro sweep (step 5a).
+    pub learning: tiller_core::state::learning::Learning,
 }
 
 impl Config {
@@ -49,6 +51,7 @@ impl Config {
             project_paths: HashMap::new(),
             forge_login: None,
             thresholds: Thresholds::default(),
+            learning: tiller_core::state::learning::Learning::default(),
         }
     }
 }
@@ -236,6 +239,28 @@ impl Reconciler {
         // Step 5: runs and evidence.
         if let Err(error) = self.evidence(now, &mut report) {
             report.error("evidence", &error);
+        }
+        // Step 5a: the learning loop's sweep: a retro per closed card and
+        // the change set transitions (`docs/design/learning-loop.md`).
+        match self
+            .store
+            .learning_sweep(&self.ctx(now), &self.config.learning)
+        {
+            Ok(swept) => {
+                for retro in &swept.value.scheduled {
+                    report.repair(format!(
+                        "retro scheduled for card {}: {} ({})",
+                        retro.card_id, retro.depth, retro.reason
+                    ));
+                }
+                for set in &swept.value.measuring {
+                    report.repair(format!("change set {set} is measuring"));
+                }
+                for set in &swept.value.closed {
+                    report.repair(format!("change set {set} closed: window complete"));
+                }
+            }
+            Err(error) => report.error("learning sweep", &error),
         }
         // Step 6: approvals and PRs.
         if let Err(error) = self.approvals(now, &mut report) {

@@ -292,7 +292,10 @@ impl App {
         let db = db.unwrap_or_else(|| home.join("state.db"));
         let actor = match std::env::var("TILLER_SESSION_ID") {
             Ok(id) if !id.is_empty() => Actor::Session(id),
-            _ => Actor::Owner,
+            _ => match std::env::var("TILLER_RETRO_ID") {
+                Ok(retro) if !retro.is_empty() => Actor::Curator(retro),
+                _ => Actor::Owner,
+            },
         };
         Self { home, db, actor }
     }

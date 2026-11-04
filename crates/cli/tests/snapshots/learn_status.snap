@@ -1,0 +1,17 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "measuring": null,
+    "open_sets": [],
+    "pending": [],
+    "retros": {
+      "full:incident:evidence": 1,
+      "light:routine:nothing": 1
+    },
+    "sessions_without_hash": 2
+  },
+  "ok": true
+}

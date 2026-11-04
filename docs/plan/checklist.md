@@ -554,10 +554,10 @@ One-time owner setup, per host and repo (CP2, S03):
 ### T7.3 Learning loop
 `fable` high design, `opus` high build - 5-8 h
 
-- [ ] Sampled retros, full retros for incidents and surprising wins
-- [ ] Evidence-backed proposals for mistakes and successes
-- [ ] Config hash on every run; one change at a time or a named bundle
-- [ ] Holdout eval before any change is approved; "nothing worth saving" is a normal result
+- [x] Sampled retros, full retros for incidents and surprising wins
+- [ ] Evidence-backed proposals for mistakes and successes (the curator flow and the retro's evidence rows are in; `tiller mem propose` lands with T7.2)
+- [x] Config hash on every run; one change at a time or a named bundle
+- [x] Holdout eval before any change is approved; "nothing worth saving" is a normal result (the gate is `Store::learning_gate`; `mem.decide` calls it when T7.2 lands)
 - [ ] Delivered
 
 ### T7.4 The two-week check

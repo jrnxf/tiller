@@ -1,0 +1,19 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "change_set": null,
+    "eval_run": null,
+    "hint": "tiller learn eval --proposal <id1>",
+    "measuring": null,
+    "ok": false,
+    "proposal": "<id1>",
+    "reason": "the proposal is in no change set"
+  },
+  "help": [
+    "tiller learn eval --proposal <id1>"
+  ],
+  "ok": true
+}

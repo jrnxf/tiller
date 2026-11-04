@@ -996,13 +996,77 @@ fn worker_launch_has_remote_control_off() {
     let fragment: Value = serde_json::from_slice(&settings).unwrap();
     assert_eq!(fragment["disableRemoteControl"], true);
     assert_eq!(fragment["remoteControlAtStartup"], false);
-    // The run records the hash of the fragment it launched with.
+    // The run records the hash of a manifest whose settings part is the
+    // fragment it launched with (learning-loop.md, section 5).
     use sha2::Digest;
-    let hash: String = sha2::Sha256::digest(&settings)
+    let fragment_hash: String = sha2::Sha256::digest(&settings)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    assert_eq!(rig.run(&spawned.run.id).config_hash, Some(hash));
+    let hash = rig.run(&spawned.run.id).config_hash.unwrap();
+    let manifest: tiller_core::domain::ConfigManifest =
+        tiller_core::state::find(rig.fleet.store.conn(), "config_hash = ?1", &[&hash])
+            .unwrap()
+            .unwrap();
+    assert_eq!(manifest.parts["settings"], fragment_hash);
+    assert_eq!(hash, launch::hash_of(&manifest.parts));
+}
+
+/// Every spawned run carries a manifest-backed hash, and the parts are what
+/// the design names; a different model is a different hash in exactly the
+/// `model` part.
+#[test]
+fn config_hash_covers_the_manifest() {
+    let mut rig = Rig::new();
+    let card = rig.card(CardKind::Ship, None);
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    let hash = rig.run(&spawned.run.id).config_hash.unwrap();
+    let manifest: tiller_core::domain::ConfigManifest =
+        tiller_core::state::find(rig.fleet.store.conn(), "config_hash = ?1", &[&hash])
+            .unwrap()
+            .unwrap();
+    let keys: Vec<&String> = manifest.parts.as_object().unwrap().keys().collect();
+    assert_eq!(
+        keys,
+        [
+            "claude", "effort", "mcp", "memory", "model", "role", "settings", "tiller"
+        ]
+    );
+    assert_eq!(manifest.parts["tiller"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(manifest.parts["model"], spawned.run.model);
+    assert_eq!(rig.events("config.manifest_recorded", &hash), 1);
+
+    use crate::roles::Role;
+    let other = launch::manifest(
+        Role::Builder,
+        b"{}",
+        "other-model",
+        spawned.run.effort,
+        None,
+        &[],
+    );
+    let diff = tiller_core::state::learning::manifest_diff(&manifest.parts, &other);
+    assert!(diff.contains_key("model") && diff.contains_key("settings"));
+    assert!(!diff.contains_key("role") && !diff.contains_key("tiller"));
+    // The memory part follows the rendered revisions, in any order.
+    let a = launch::manifest(
+        Role::Builder,
+        b"{}",
+        "m",
+        Effort::High,
+        None,
+        &[("s1".into(), "b1".into()), ("s2".into(), "b2".into())],
+    );
+    let b = launch::manifest(
+        Role::Builder,
+        b"{}",
+        "m",
+        Effort::High,
+        None,
+        &[("s2".into(), "b2".into()), ("s1".into(), "b1".into())],
+    );
+    assert_eq!(a["memory"], b["memory"]);
+    assert_ne!(a["memory"], other["memory"]);
 }
 
 #[test]

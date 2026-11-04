@@ -42,6 +42,10 @@ pub enum Actor {
     /// row of the matrix, limited to the forwarding allowlist. Holds the
     /// board host's label; written as `board@<label>`.
     Peer(String),
+    /// The curator finishing one retro (`docs/design/learning-loop.md`,
+    /// section 4): not a fleet role and not the owner. Holds the retro id;
+    /// written as `curator:<retro>`.
+    Curator(String),
 }
 
 impl Actor {
@@ -68,6 +72,7 @@ impl fmt::Display for Actor {
             Actor::Import => f.write_str("import"),
             Actor::Owner => f.write_str("owner"),
             Actor::Peer(label) => write!(f, "board@{label}"),
+            Actor::Curator(retro) => write!(f, "curator:{retro}"),
         }
     }
 }
@@ -82,9 +87,14 @@ impl FromStr for Actor {
             "hook" => Ok(Actor::Hook),
             "import" => Ok(Actor::Import),
             "owner" => Ok(Actor::Owner),
-            _ => match (s.strip_prefix("session:"), s.strip_prefix("board@")) {
-                (Some(id), _) if !id.is_empty() => Ok(Actor::Session(id.to_owned())),
-                (_, Some(label)) if !label.is_empty() => Ok(Actor::Peer(label.to_owned())),
+            _ => match (
+                s.strip_prefix("session:"),
+                s.strip_prefix("board@"),
+                s.strip_prefix("curator:"),
+            ) {
+                (Some(id), _, _) if !id.is_empty() => Ok(Actor::Session(id.to_owned())),
+                (_, Some(label), _) if !label.is_empty() => Ok(Actor::Peer(label.to_owned())),
+                (_, _, Some(retro)) if !retro.is_empty() => Ok(Actor::Curator(retro.to_owned())),
                 _ => Err(Error::Usage(format!("not an actor: {s:?}"))),
             },
         }

@@ -13,9 +13,15 @@
 # count and model, and this script prints only its aggregate. Its full
 # results stay under <out>/sealed/. See evals/README.md.
 #
+# --candidate FILE appends the file to every case's system prompt after the
+# role body, under a "# Memory (candidate)" heading, the way the launcher
+# renders approved memory. It is what `tiller learn eval` measures a memory
+# change with (docs/design/learning-loop.md, section 7), so it is allowed on
+# the holdout.
+#
 # Usage: evals/run.sh [--split tuning|holdout] [--case GLOB] [--runs N]
 #                     [--model M] [--out DIR] [--threshold T]
-#                     [--max-cost-usd USD] [-j N] [--keep]
+#                     [--max-cost-usd USD] [-j N] [--keep] [--candidate FILE]
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -30,6 +36,7 @@ threshold=0.8
 max_cost=""
 concurrency=1
 keep=0
+candidate=""
 
 usage() { sed -n '/^# Usage:/,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 need() { [ "$2" -ge 2 ] || { echo "evals/run.sh: $1 needs a value" >&2; exit 2; }; }
@@ -45,6 +52,7 @@ while [ $# -gt 0 ]; do
 	--max-cost-usd) need "$1" $#; max_cost=$2; shift 2 ;;
 	-j | --concurrency) need "$1" $#; concurrency=$2; shift 2 ;;
 	--keep) keep=1; shift ;;
+	--candidate) need "$1" $#; candidate=$2; shift 2 ;;
 	-h | --help) usage; exit 0 ;;
 	*) echo "evals/run.sh: unknown option: $1" >&2; usage >&2; exit 2 ;;
 	esac
@@ -63,6 +71,11 @@ holdout)
 	;;
 *) echo "evals/run.sh: --split must be tuning or holdout" >&2; exit 2 ;;
 esac
+
+if [ -n "$candidate" ] && [ ! -s "$candidate" ]; then
+	echo "evals/run.sh: --candidate $candidate is missing or empty" >&2
+	exit 2
+fi
 
 # The offline checks guard what a score depends on: a stale judge lock or a
 # malformed case refuses the run before any model call.
@@ -132,6 +145,10 @@ for src in "$here/cases/$split"/*/; do
 		printf 'context:\n  scaffold_script: scaffold.sh\n'
 		printf 'execution:\n  model: %s\n  append_system_prompt: |\n' "$case_model"
 		role_body "$role" | sed 's/^/    /'
+		if [ -n "$candidate" ]; then
+			printf '\n    # Memory (candidate)\n\n'
+			sed 's/^/    /' "$candidate"
+		fi
 	} >"$dst/case.yaml"
 done
 
@@ -166,6 +183,8 @@ export TMPDIR="$work"
 
 rc=0
 if [ "$split" = holdout ]; then
+	# An earlier run's result in a reused --out must not pass for this one.
+	rm -rf "$out/sealed"
 	mkdir -p "$out/sealed"
 	claude "${args[@]}" --output-dir "$out/sealed" --json "$out/sealed/result.json" >/dev/null 2>"$out/sealed/stderr.log" || rc=$?
 	node -e '

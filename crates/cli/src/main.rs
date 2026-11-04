@@ -15,8 +15,8 @@ use serde_json::Value;
 
 use app::{App, Done, Failure};
 use cmd::{
-    admin, approval, ask, attention, backup, card, health, import, later, peer, read, records,
-    review, run, spawn,
+    admin, approval, ask, attention, backup, card, health, import, later, learn, peer, read,
+    records, review, run, spawn,
 };
 
 #[derive(Parser)]
@@ -64,6 +64,12 @@ enum Command {
     /// Memory notes and proposals
     #[command(subcommand)]
     Mem(later::MemCmd),
+    /// Retros: one per closed card, full ones run by the curator
+    #[command(subcommand)]
+    Retro(learn::RetroCmd),
+    /// The learning loop: change sets, the holdout gate, status
+    #[command(subcommand)]
+    Learn(learn::LearnCmd),
     /// Start a project's orchestrator
     #[command(subcommand)]
     Orchestrator(later::OrchestratorCmd),
@@ -171,6 +177,8 @@ fn dispatch(app: &App, command: Command) -> Done {
         Command::Grant(cmd) => approval::run_grant(app, cmd),
         Command::Away(cmd) => approval::run_away(app, cmd),
         Command::Mem(cmd) => later::mem(app, cmd),
+        Command::Retro(cmd) => learn::retro(app, cmd),
+        Command::Learn(cmd) => learn::learn(app, cmd),
         Command::Orchestrator(cmd) => later::orchestrator(app, cmd),
         Command::Spawn(args) => spawn::spawn(app, args),
         Command::Status(args) => run::status(app, args),

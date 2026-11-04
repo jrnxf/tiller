@@ -15,4 +15,4 @@ pub mod plan;
 mod tests;
 
 pub use bundle::Bundle;
-pub use plan::{Action, Placement, Plan, Wait, plan};
+pub use plan::{Action, EMPTY_BLOB, Placement, Plan, Wait, plan};

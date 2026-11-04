@@ -11,6 +11,7 @@ pub mod card;
 pub mod health;
 pub mod import;
 pub mod later;
+pub mod learn;
 pub mod peer;
 pub mod read;
 pub mod records;

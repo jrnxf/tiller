@@ -9,7 +9,7 @@ exit: 0
     "format": "tiller-export/v1",
     "host_id": "<id1>",
     "max_seq": 5,
-    "schema_version": 5,
+    "schema_version": 6,
     "tables": [
       {
         "file": "approvals.jsonl",
@@ -51,6 +51,30 @@ exit: 0
         "file": "cards.jsonl",
         "name": "cards",
         "rows": 2,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "change_set_members.jsonl",
+        "name": "change_set_members",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "change_sets.jsonl",
+        "name": "change_sets",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "config_manifests.jsonl",
+        "name": "config_manifests",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "eval_runs.jsonl",
+        "name": "eval_runs",
+        "rows": 0,
         "sha256": "<sha256>"
       },
       {
@@ -194,6 +218,12 @@ exit: 0
       {
         "file": "reservations.jsonl",
         "name": "reservations",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "retros.jsonl",
+        "name": "retros",
         "rows": 0,
         "sha256": "<sha256>"
       },

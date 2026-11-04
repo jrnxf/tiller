@@ -2,6 +2,8 @@
 
 The five roles Tiller launches: one `orchestrator` per project and four worker roles (`scout`, `builder`, `reviewer`, `verifier`) that run on one card each. Each role is one prompt file and one settings fragment template here; `crates/agents/src/roles.rs` embeds them so a launch reads nothing from disk, and `tiller spawn` (T4.2) renders them per run.
 
+`curator.md` and `curator.settings.json` are not a fleet role: the curator is the headless session `tiller retro run` launches for one full retro (`docs/design/learning-loop.md`, section 4). It has no run, no pane and no hooks, reads what fleet roles never see, and is embedded by `crates/agents/src/curator.rs`. It sits here so the evals cover it like the rest.
+
 Specs: `docs/spec/authority.md` (role matrix, launch form, deny rules), `docs/spec/memory.md` (what a role loads), `docs/spec/protocol.md` (status lines, `tiller` commands), `docs/spec/recovery.md` (what the orchestrator does when a worker goes quiet, blocks or reports done). The role standard is `docs/design/plan.md` section 12, amended by `docs/design/plan-v2.md` points 24, 30 and 31.
 
 ## Files

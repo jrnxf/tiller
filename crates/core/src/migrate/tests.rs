@@ -20,6 +20,28 @@ const FIXTURE_V4: &str = "
             '2026-11-03T10:00:00.000Z', NULL);
 ";
 
+/// The rows of migration 6's tables, loaded on top of [`FIXTURE_V1`]: a
+/// light retro on the closed scout card, a change set holding the fixture's
+/// proposal with one holdout run, and the manifest behind the fixture's
+/// config hash.
+const FIXTURE_V6: &str = "
+    INSERT INTO retros (id, card_id, project_id, closed_at, depth, reason, counts, config_hashes, state, outcome,
+                        finished_at, finished_by, created_at)
+    VALUES ('01JC0000000000000000000RT1', '01JC0000000000000000000CA2', 'alpha', '2026-11-02T10:00:00.000Z',
+            'light', 'routine', '{\"elapsed_minutes\": 55}', '[\"cfg-1\"]', 'done', 'nothing',
+            '2026-11-02T10:00:05.000Z', 'daemon', '2026-11-02T10:00:05.000Z');
+    INSERT INTO change_sets (id, name, state, window_cards, opened_at, opened_by)
+    VALUES ('01JC0000000000000000000CS1', 'tighter briefs', 'open', 10, '2026-11-02T11:00:00.000Z', 'owner');
+    INSERT INTO change_set_members (change_set_id, proposal_id, added_at)
+    VALUES ('01JC0000000000000000000CS1', '01JC0000000000000000000PP1', '2026-11-02T11:00:00.000Z');
+    INSERT INTO eval_runs (id, change_set_id, split, members_sha256, cases_total, cases_passed, overall_score,
+                           cost_usd, partial, passed, claude_version, judge_model, ran_at, recorded_by)
+    VALUES ('01JC0000000000000000000ER1', '01JC0000000000000000000CS1', 'holdout', 'members-1', 4, 4, 0.95,
+            1.25, 0, 1, '2.1.0', 'judge-model', '2026-11-02T11:30:00.000Z', 'owner');
+    INSERT INTO config_manifests (config_hash, parts, first_seen_at)
+    VALUES ('cfg-1', '{\"role\": \"r\", \"settings\": \"s\"}', '2026-11-02T09:10:00.000Z');
+";
+
 fn connection() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
@@ -87,6 +109,13 @@ fn migrations_run_both_ways_on_fixture() {
         if version == 4 {
             // migration 4 runs down over a paired host and accepted keys
             conn.execute_batch(&format!("BEGIN; {FIXTURE_V4} COMMIT;"))
+                .unwrap();
+            assert_eq!(foreign_key_violations(&conn), 0);
+        }
+        if version == 6 {
+            // migration 6 runs down over a retro, a change set with its
+            // run, and a manifest
+            conn.execute_batch(&format!("BEGIN; {FIXTURE_V6} COMMIT;"))
                 .unwrap();
             assert_eq!(foreign_key_violations(&conn), 0);
         }

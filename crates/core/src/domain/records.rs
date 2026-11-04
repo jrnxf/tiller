@@ -503,6 +503,86 @@ impl CardColumn {
     }
 }
 
+record!(
+    /// One retro of one closed card (docs/design/learning-loop.md, section 3).
+    Retro in "retros" {
+        id: String,
+        card_id: String,
+        project_id: String,
+        closed_at: Timestamp,
+        trigger: Option<String>,
+        depth: RetroDepth,
+        reason: RetroReason,
+        counts: Value,
+        config_hashes: Value,
+        state: RetroState,
+        outcome: Option<RetroOutcome>,
+        learning: Option<String>,
+        evidence_id: Option<String>,
+        proposal_id: Option<String>,
+        curator_session: Option<String>,
+        curator_started_at: Option<Timestamp>,
+        finished_at: Option<Timestamp>,
+        finished_by: Option<String>,
+        created_at: Timestamp,
+        rev: i64,
+    }
+);
+
+record!(
+    /// One change, or a named bundle, measured as one (learning-loop.md,
+    /// section 6).
+    ChangeSet in "change_sets" {
+        id: String,
+        name: String,
+        state: ChangeSetState,
+        window_cards: i64,
+        opened_at: Timestamp,
+        opened_by: String,
+        measuring_from: Option<Timestamp>,
+        closed_at: Option<Timestamp>,
+        close_reason: Option<ChangeSetClose>,
+        rev: i64,
+    }
+);
+
+record!(ChangeSetMember in "change_set_members" {
+    change_set_id: String,
+    proposal_id: String,
+    added_at: Timestamp,
+});
+
+record!(
+    /// One holdout run recorded for a change set (learning-loop.md, section 7).
+    EvalRun in "eval_runs" {
+        id: String,
+        change_set_id: String,
+        split: String,
+        members_sha256: String,
+        candidate_sha256: Option<String>,
+        cases_total: i64,
+        cases_passed: i64,
+        overall_score: Option<f64>,
+        cost_usd: Option<f64>,
+        partial: i64,
+        passed: i64,
+        claude_version: Option<String>,
+        judge_model: Option<String>,
+        result_path: Option<String>,
+        ran_at: Timestamp,
+        recorded_by: String,
+    }
+);
+
+record!(
+    /// The parts behind one `config_hash` (learning-loop.md, section 5).
+    ConfigManifest in "config_manifests" {
+        config_hash: String,
+        parts: Value,
+        first_seen_at: Timestamp,
+    }
+);
+
 /// One row of the `capacity` view: free run slots on a local host.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HostCapacity {

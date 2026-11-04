@@ -1,0 +1,14 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "closed": [],
+    "measuring": [],
+    "scheduled": []
+  },
+  "events": [],
+  "ok": true,
+  "replayed": true
+}

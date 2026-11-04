@@ -1,0 +1,25 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "close_reason": null,
+    "closed_at": null,
+    "id": "<id3>",
+    "measuring_from": null,
+    "name": "tighter briefs",
+    "opened_at": "<time>",
+    "opened_by": "owner",
+    "rev": 1,
+    "short": "<id3.short>",
+    "state": "open",
+    "window_cards": 3
+  },
+  "events": [
+    "<seq>",
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

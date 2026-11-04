@@ -1,0 +1,636 @@
+//! `tiller retro` and `tiller learn` end to end: the real binary and one
+//! `state.db` (`docs/design/learning-loop.md`, sections 10 and 11).
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+mod common;
+
+use std::os::unix::fs::PermissionsExt;
+use std::process::Command;
+
+use common::{Out, World, snap};
+use serde_json::{Value, json};
+
+const PROPOSAL: &str = "01JC00000000000000000000P1";
+const OTHER: &str = "01JC00000000000000000000P2";
+
+fn card(world: &World, title: &str) -> (String, String) {
+    let out = world.must(&[
+        "card", "create", "alpha", "--kind", "ship", "--title", title,
+    ]);
+    (
+        out.data()["id"].as_str().unwrap().to_owned(),
+        out.data()["display_id"].as_str().unwrap().to_owned(),
+    )
+}
+
+/// Closes a card straight in the table, the way a landed one ends up.
+fn close(world: &World, id: &str, outcome: &str) {
+    world
+        .store()
+        .conn()
+        .execute(
+            "UPDATE cards SET state = 'closed', outcome = ?2, closed_at = '2026-11-03T10:00:00.000Z',
+                 created_at = '2026-11-03T08:00:00.000Z', closed_by = 'owner' WHERE id = ?1",
+            rusqlite::params![id, outcome],
+        )
+        .unwrap();
+}
+
+/// A proposal in `proposed` state on a memory source of `alpha`.
+fn proposal(world: &World, id: &str, diff: &str) {
+    use sha2::Digest;
+    let sha: String = sha2::Sha256::digest(diff.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    world
+        .store()
+        .conn()
+        .execute_batch(&format!(
+            "INSERT OR IGNORE INTO memory_sources (id, project_id, boundary, kind, loaded_path, canonical_repo, canonical_path,
+                                        apply_method, load_mode, added_at)
+             VALUES ('src', 'alpha', 'personal', 'tiller_doc', 'alpha.md', '/home/user/memory', 'alpha.md',
+                     'tiller_commit', 'rendered', '2026-11-01T00:00:00.000Z');
+             INSERT OR IGNORE INTO memory_revisions (id, source_id, blob_sha, review, provenance, scrub, recorded_at, recorded_by)
+             VALUES ('rev', 'src', 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391', 'approved', 'baseline', 'passed',
+                     '2026-11-01T00:00:00.000Z', 'owner');
+             INSERT INTO proposals (id, project_id, boundary, target_source_id, op, base_revision_id, base_blob, diff,
+                                    diff_sha256, expected_effect, created_at, created_by)
+             VALUES ('{id}', 'alpha', 'personal', 'src', 'add', 'rev', 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391',
+                     '{diff}', '{sha}', 'fewer corrections', '2026-11-02T00:00:00.000Z', 'owner');"
+        ))
+        .unwrap();
+}
+
+/// Runs `tiller --json` as the curator of `retro`.
+fn run_as_curator(world: &World, retro: &str, args: &[&str]) -> Out {
+    let output = Command::new(env!("CARGO_BIN_EXE_tiller"))
+        .env("TILLER_HOME", world.home())
+        .env("TILLER_RETRO_ID", retro)
+        .env_remove("TILLER_SESSION_ID")
+        .env_remove("CLAUDECODE")
+        .arg("--json")
+        .args(args)
+        .output()
+        .unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    Out {
+        code: output.status.code().unwrap(),
+        json: serde_json::from_str(&text).unwrap_or_else(|e| panic!("{args:?}: {e}: {text}")),
+    }
+}
+
+#[test]
+fn a_sweep_schedules_retros_and_the_curator_finishes_one() {
+    let world = World::initialized();
+    world.must(&["config", "set", "learning.sample_every", "1000000"]);
+    let (landed, landed_tag) = card(&world, "the login page");
+    let (failed, failed_tag) = card(&world, "the export");
+    let (_, open_tag) = card(&world, "still open");
+    close(&world, &landed, "landed");
+    close(&world, &failed, "failed");
+
+    let swept = world.must(&["retro", "sweep"]);
+    let scheduled = swept.data()["scheduled"].as_array().unwrap();
+    assert_eq!(scheduled.len(), 2);
+    let by_card = |id: &str| -> Value {
+        scheduled
+            .iter()
+            .find(|r| r["card_id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(by_card(&landed)["depth"], "light");
+    assert_eq!(by_card(&landed)["outcome"], "nothing");
+    assert_eq!(by_card(&failed)["depth"], "full");
+    assert_eq!(by_card(&failed)["reason"], "incident");
+    assert_eq!(by_card(&failed)["state"], "pending");
+    snap(
+        &world,
+        "retro_sweep_again",
+        &world.must(&["retro", "sweep"]),
+    );
+
+    let listed = world.must(&["retro", "list", "--pending"]);
+    assert_eq!(listed.data()["retros"].as_array().unwrap().len(), 1);
+    snap(&world, "retro_list_pending", &listed);
+
+    // The brief: the owner and the curator read it; a fleet session may not.
+    let retro = by_card(&failed)["id"].as_str().unwrap().to_owned();
+    let shown = world.must(&["retro", "show", &failed_tag]);
+    assert_eq!(shown.data()["retro"]["id"], retro);
+    assert_eq!(shown.data()["card"]["tag"], format!("[{failed_tag}]"));
+    assert!(
+        shown.data()["finish"]["nothing"]
+            .as_str()
+            .unwrap()
+            .contains(&retro)
+    );
+    snap(&world, "retro_show", &shown);
+    let orchestrator = world.orchestrator();
+    let refused = world.run_as(&orchestrator, &["retro", "show", &retro]);
+    assert_eq!((refused.code, refused.error_code()), (6, "forbidden"));
+    let (_, worker) = world.builder_run(&open_tag);
+    let refused = world.run_as(&worker, &["retro", "show", &retro]);
+    assert_eq!(refused.code, 6, "{}", refused.json);
+    let refused = world.run_as(&worker, &["retro", "finish", &retro, "--nothing"]);
+    assert_eq!(refused.code, 6, "{}", refused.json);
+    let no_retro = world.run(&["retro", "show", &open_tag]);
+    assert_eq!(no_retro.code, 3, "{}", no_retro.json);
+
+    // A light retro cannot be finished.
+    let light = world.run(&["retro", "finish", &landed_tag, "--nothing"]);
+    assert_eq!((light.code, light.error_code()), (5, "refused"));
+    let no_verdict = world.run(&["retro", "finish", &retro]);
+    assert_eq!(no_verdict.code, 2, "{}", no_verdict.json);
+
+    // The curator keeps one learning, which becomes an evidence row.
+    let done = run_as_curator(
+        &world,
+        &retro,
+        &[
+            "retro",
+            "finish",
+            &retro,
+            "--learning",
+            "Before a push, check that the branch was not already pushed; a rebase of a pushed branch loses the reviewer's comments.",
+            "--evidence",
+            r#"{"events": [3, 4]}"#,
+        ],
+    );
+    assert!(done.ok(), "{}", done.json);
+    assert_eq!(done.data()["outcome"], "evidence");
+    assert_eq!(done.data()["finished_by"], format!("curator:{retro}"));
+    let evidence_id = done.data()["evidence_id"].as_str().unwrap().to_owned();
+    let (kind, by): (String, String) = world
+        .store()
+        .conn()
+        .query_row(
+            "SELECT kind, captured_by FROM evidence WHERE id = ?1",
+            [&evidence_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (kind.as_str(), by.as_str()),
+        ("incident", format!("curator:{retro}").as_str())
+    );
+    // Finishing again with another verdict is refused, and a curator of
+    // another retro is not this retro's curator.
+    let again = run_as_curator(&world, &retro, &["retro", "finish", &retro, "--nothing"]);
+    assert_eq!(again.code, 5, "{}", again.json);
+    let other = run_as_curator(
+        &world,
+        "01JC00000000000000000000R9",
+        &["retro", "finish", &retro, "--nothing"],
+    );
+    assert_eq!(
+        (other.code, other.error_code()),
+        (6, "forbidden"),
+        "{}",
+        other.json
+    );
+    let listed = world.run_as(&worker, &["retro", "list"]);
+    assert_eq!(listed.code, 6, "{}", listed.json);
+    let status = world.run_as(&worker, &["learn", "status"]);
+    assert_eq!(status.code, 6, "{}", status.json);
+    let status = world.must(&["learn", "status"]);
+    assert_eq!(status.data()["retros"]["full:incident:evidence"], 1);
+    assert_eq!(status.data()["retros"]["light:routine:nothing"], 1);
+    assert!(status.data()["pending"].as_array().unwrap().is_empty());
+    snap(&world, "learn_status", &status);
+    let _ = landed_tag;
+}
+
+#[test]
+fn retro_run_launches_the_curator_headless() {
+    let world = World::initialized();
+    world.must(&["config", "set", "learning.sample_every", "1"]);
+    let scratch = world.dir.path().join("scratch");
+    world.must(&[
+        "config",
+        "set",
+        "spawn.scratch_root",
+        scratch.to_str().unwrap(),
+    ]);
+    // A stand-in claude: it records its arguments and finishes the retro
+    // the way the curator does, through tiller with TILLER_RETRO_ID.
+    let fake = world.dir.path().join("claude");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/claude-args\"\n\
+             \"{tiller}\" retro finish \"$TILLER_RETRO_ID\" --nothing >/dev/null\n\
+             printf '{{\"type\":\"result\",\"session_id\":\"stub\",\"result\":\"nothing worth saving\"}}\\n'\n",
+            tiller = env!("CARGO_BIN_EXE_tiller")
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    world.must(&["config", "set", "spawn.claude", fake.to_str().unwrap()]);
+
+    let (id, tag) = card(&world, "a sampled card");
+    close(&world, &id, "landed");
+    world.must(&["retro", "sweep"]);
+    let retro = world.must(&["retro", "show", &tag]).data()["retro"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let dry = world.must(&["retro", "run", &retro, "--dry-run"]);
+    assert_eq!(dry.data()["dry_run"], true);
+    let argv: Vec<String> = dry.data()["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(argv[0], fake.to_str().unwrap());
+    assert!(argv.contains(&"--append-system-prompt-file".to_owned()));
+    assert!(argv.contains(&"--session-id".to_owned()));
+    let prompt = std::fs::read_to_string(dry.data()["prompt"].as_str().unwrap()).unwrap();
+    assert!(prompt.starts_with("# Curator"));
+    assert!(prompt.contains(&format!("Retro `{retro}` of card [{tag}]")));
+    assert!(prompt.contains("\"finish\""));
+    let settings: Value = serde_json::from_str(
+        &std::fs::read_to_string(dry.data()["settings"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(settings["env"]["TILLER_ROLE"], "curator");
+    // Nothing ran, nothing changed.
+    assert_eq!(
+        world.must(&["retro", "show", &tag]).data()["retro"]["state"],
+        "pending"
+    );
+
+    let ran = world.must(&["retro", "run", &retro]);
+    assert_eq!(ran.data()["exit"], 0, "{}", ran.json);
+    assert_eq!(ran.data()["retro"]["state"], "done");
+    assert_eq!(ran.data()["retro"]["outcome"], "nothing");
+    assert_eq!(
+        ran.data()["retro"]["curator_session"],
+        ran.data()["session_id"]
+    );
+    let args = std::fs::read_to_string(world.dir.path().join("claude-args")).unwrap();
+    assert!(args.contains("--permission-mode\ndontAsk"), "{args}");
+    assert!(args.contains("--output-format\njson"), "{args}");
+    // A done retro is not run again.
+    let again = world.run(&["retro", "run", &retro]);
+    assert_eq!((again.code, again.error_code()), (5, "refused"));
+
+    // A curator that exits without finishing leaves the retro unfinished.
+    std::fs::write(&fake, "#!/bin/sh\nexit 3\n").unwrap();
+    let (id2, tag2) = card(&world, "another sampled card");
+    close(&world, &id2, "landed");
+    world.must(&["retro", "sweep"]);
+    let retro2 = world.must(&["retro", "show", &tag2]).data()["retro"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let ran = world.must(&["retro", "run", &retro2]);
+    assert_eq!(ran.data()["exit"], 3);
+    assert_eq!(ran.data()["retro"]["outcome"], "unfinished");
+    assert!(
+        ran.data()["retro"]["learning"]
+            .as_str()
+            .unwrap()
+            .contains("exited 3")
+    );
+    assert!(
+        ran.json["warning"]
+            .as_str()
+            .unwrap()
+            .contains("did not finish")
+    );
+}
+
+#[test]
+fn change_sets_eval_runs_and_the_gate() {
+    let world = World::initialized();
+    proposal(
+        &world,
+        PROPOSAL,
+        "--- a/alpha.md\n+++ b/alpha.md\n@@ -0,0 +1 @@\n+- say which branch was pushed\n",
+    );
+    proposal(
+        &world,
+        OTHER,
+        "--- a/alpha.md\n+++ b/alpha.md\n@@ -0,0 +1 @@\n+- other\n",
+    );
+
+    let gate = world.must(&["learn", "gate", PROPOSAL]);
+    assert_eq!(gate.data()["ok"], false);
+    assert!(
+        gate.data()["reason"]
+            .as_str()
+            .unwrap()
+            .contains("no change set")
+    );
+    snap(&world, "learn_gate_no_set", &gate);
+
+    let set = world.must(&[
+        "learn",
+        "bundle",
+        "tighter briefs",
+        PROPOSAL,
+        "--window",
+        "3",
+    ]);
+    assert_eq!(set.data()["name"], "tighter briefs");
+    assert_eq!(set.data()["window_cards"], 3);
+    snap(&world, "learn_bundle", &set);
+    let dup = world.run(&["learn", "bundle", "tighter briefs"]);
+    assert_eq!((dup.code, dup.error_code()), (5, "refused"));
+
+    // A run recorded from a result file made elsewhere.
+    let result = world.dir.path().join("result.json");
+    std::fs::write(
+        &result,
+        json!({"aggregates": {"casesTotal": 4, "casesPassed": 3, "overallScore": 0.81}, "costUsd": 1.5, "partial": false})
+            .to_string(),
+    )
+    .unwrap();
+    let failed = world.must(&[
+        "learn",
+        "eval",
+        "tighter briefs",
+        "--result",
+        result.to_str().unwrap(),
+    ]);
+    assert_eq!(failed.data()["eval_run"]["passed"], 0);
+    assert_eq!(failed.data()["eval_run"]["cases_passed"], 3);
+    assert!(
+        failed.json["help"][0]
+            .as_str()
+            .unwrap()
+            .contains("did not pass")
+    );
+    let gate = world.must(&["learn", "gate", PROPOSAL]);
+    assert_eq!(gate.data()["ok"], false);
+    assert!(
+        gate.data()["reason"]
+            .as_str()
+            .unwrap()
+            .contains("did not pass")
+    );
+
+    std::fs::write(
+        &result,
+        json!({"aggregates": {"casesTotal": 4, "casesPassed": 4, "overallScore": 0.97}, "costUsd": 1.6, "partial": false})
+            .to_string(),
+    )
+    .unwrap();
+    let passed = world.must(&[
+        "learn",
+        "eval",
+        "tighter briefs",
+        "--result",
+        result.to_str().unwrap(),
+    ]);
+    assert_eq!(passed.data()["eval_run"]["passed"], 1);
+    // The result path is a temp file here, so the shape is asserted, not
+    // snapshotted.
+    assert_eq!(passed.data()["eval_run"]["cases_total"], 4);
+    assert_eq!(passed.data()["eval_run"]["overall_score"], 0.97);
+    assert_eq!(passed.data()["eval_run"]["split"], "holdout");
+    assert_eq!(passed.data()["change_set"]["name"], "tighter briefs");
+    assert!(passed.json["help"][0].as_str().unwrap().contains("passed"));
+    let gate = world.must(&["learn", "gate", PROPOSAL]);
+    assert_eq!(gate.data()["ok"], true, "{}", gate.json);
+    snap(&world, "learn_gate_ok", &gate);
+
+    // Adding a member makes the run stale.
+    world.must(&["learn", "add", "tighter briefs", OTHER]);
+    let gate = world.must(&["learn", "gate", PROPOSAL]);
+    assert_eq!(gate.data()["ok"], false);
+    assert!(
+        gate.data()["reason"]
+            .as_str()
+            .unwrap()
+            .contains("other members")
+    );
+    // The members are a read of the record, so the same proposal cannot
+    // join a second set.
+    let other = world.run(&["learn", "bundle", "second", OTHER]);
+    assert_eq!(other.code, 5, "{}", other.json);
+
+    // A lone proposal already in an open set evals that set; without a
+    // result file or an evals dir there is nothing to run. Once its set is
+    // abandoned it gets a set of one, named after it.
+    let lone = world.run(&["learn", "eval", "--proposal", OTHER]);
+    assert_eq!(
+        (lone.code, lone.error_code()),
+        (2, "usage"),
+        "{}",
+        lone.json
+    );
+    assert!(
+        lone.json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("evals_dir")
+    );
+    let status = world.must(&["learn", "status"]);
+    assert_eq!(status.data()["open_sets"].as_array().unwrap().len(), 1);
+    world.must(&["learn", "abandon", "tighter briefs"]);
+    let closed = world.run(&[
+        "learn",
+        "eval",
+        "tighter briefs",
+        "--result",
+        result.to_str().unwrap(),
+    ]);
+    assert_eq!(closed.code, 3, "{}", closed.json);
+    let lone = world.run(&["learn", "eval", "--proposal", OTHER]);
+    assert_eq!(
+        (lone.code, lone.error_code()),
+        (2, "usage"),
+        "{}",
+        lone.json
+    );
+    let status = world.must(&["learn", "status"]);
+    assert_eq!(status.data()["open_sets"].as_array().unwrap().len(), 1);
+    assert_eq!(status.data()["open_sets"][0]["name"], "00000P2");
+    // The gate reads the open set, so the abandoned run no longer counts.
+    let gate = world.must(&["learn", "gate", PROPOSAL]);
+    assert_eq!(gate.data()["ok"], false);
+    assert!(
+        gate.data()["reason"]
+            .as_str()
+            .unwrap()
+            .contains("no change set")
+    );
+}
+
+#[test]
+fn the_eval_runner_appends_the_candidate_and_records_the_run() {
+    let world = World::initialized();
+    proposal(
+        &world,
+        PROPOSAL,
+        "--- a/alpha.md\n+++ b/alpha.md\n@@ -0,0 +1 @@\n+- say which branch was pushed\n",
+    );
+    world.must(&["learn", "bundle", "briefs", PROPOSAL]);
+    // A stand-in evals/run.sh that checks its arguments and writes the
+    // sealed result the real one leaves.
+    let evals = world.dir.path().join("checkout");
+    std::fs::create_dir_all(evals.join("evals")).unwrap();
+    std::fs::write(
+        evals.join("evals/pins.env"),
+        "CLAUDE_CODE_VERSION=2.1.0\nJUDGE_MODEL=judge-model\n",
+    )
+    .unwrap();
+    let runner = evals.join("evals/run.sh");
+    std::fs::write(
+        &runner,
+        "#!/bin/sh\nset -e\n[ \"$1\" = --split ] && [ \"$2\" = holdout ] && [ \"$3\" = --candidate ] || exit 9\n\
+         grep -q 'say which branch was pushed' \"$4\" || exit 8\n\
+         [ \"$5\" = --out ] || exit 7\n\
+         mkdir -p \"$6/sealed\"\n\
+         printf '%s' '{\"aggregates\":{\"casesTotal\":2,\"casesPassed\":2,\"overallScore\":0.9},\"costUsd\":0.4,\"partial\":false}' > \"$6/sealed/result.json\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+    world.must(&[
+        "config",
+        "set",
+        "learning.evals_dir",
+        evals.to_str().unwrap(),
+    ]);
+
+    // No canonical repo exists for the fixture's source, so the candidate
+    // comes from a file here; rendering from members is the git path.
+    let candidate = world.dir.path().join("candidate.md");
+    std::fs::write(&candidate, "## alpha.md\n\n- say which branch was pushed\n").unwrap();
+    let out = world.dir.path().join("out");
+    let ran = world.must(&[
+        "learn",
+        "eval",
+        "briefs",
+        "--candidate-file",
+        candidate.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(ran.data()["eval_run"]["passed"], 1, "{}", ran.json);
+    assert_eq!(ran.data()["eval_run"]["claude_version"], "2.1.0");
+    assert_eq!(ran.data()["eval_run"]["judge_model"], "judge-model");
+    assert!(
+        ran.data()["eval_run"]["candidate_sha256"]
+            .as_str()
+            .unwrap()
+            .len()
+            == 64
+    );
+    assert!(
+        ran.data()["eval_run"]["result_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("sealed/result.json")
+    );
+    assert_eq!(world.must(&["learn", "gate", PROPOSAL]).data()["ok"], true);
+
+    // A runner that leaves no result records nothing.
+    std::fs::write(&runner, "#!/bin/sh\nexit 1\n").unwrap();
+    let out2 = world.dir.path().join("out2");
+    // A stale sealed result in a reused --out is not read either.
+    std::fs::create_dir_all(out2.join("sealed")).unwrap();
+    std::fs::write(
+        out2.join("sealed/result.json"),
+        r#"{"aggregates":{"casesTotal":1,"casesPassed":1}}"#,
+    )
+    .unwrap();
+    let none = world.run(&[
+        "learn",
+        "eval",
+        "briefs",
+        "--candidate-file",
+        candidate.to_str().unwrap(),
+        "--out",
+        out2.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        (none.code, none.error_code()),
+        (7, "unavailable"),
+        "{}",
+        none.json
+    );
+    let runs: i64 = world
+        .store()
+        .conn()
+        .query_row("SELECT COUNT(*) FROM eval_runs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(runs, 1);
+    // A run whose runner exits non-zero but writes a result is not recorded.
+    std::fs::write(
+        &runner,
+        "#!/bin/sh\nmkdir -p \"$6/sealed\"\nprintf '%s' '{\"aggregates\":{\"casesTotal\":2,\"casesPassed\":2}}' > \"$6/sealed/result.json\"\nexit 1\n",
+    )
+    .unwrap();
+    let half = world.run(&[
+        "learn",
+        "eval",
+        "briefs",
+        "--candidate-file",
+        candidate.to_str().unwrap(),
+        "--out",
+        out2.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        (half.code, half.error_code()),
+        (7, "unavailable"),
+        "{}",
+        half.json
+    );
+    assert!(
+        half.json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("its result is at")
+    );
+    let both = world.run(&[
+        "learn",
+        "eval",
+        "briefs",
+        "--result",
+        out2.join("sealed/result.json").to_str().unwrap(),
+        "--candidate-file",
+        candidate.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        (both.code, both.error_code()),
+        (2, "usage"),
+        "{}",
+        both.json
+    );
+}
+
+#[test]
+fn config_manifests_diff_by_part() {
+    let world = World::initialized();
+    let mut store = world.store();
+    store
+        .config_manifest_record(
+            &world.owner_ctx(),
+            "aaa",
+            &json!({"role": "r1", "settings": "s1", "model": "opus", "claude": "2.1.0"}),
+        )
+        .unwrap();
+    store
+        .config_manifest_record(
+            &world.owner_ctx(),
+            "bbb",
+            &json!({"role": "r1", "settings": "s2", "model": "opus", "claude": "2.1.1"}),
+        )
+        .unwrap();
+    let one = world.must(&["learn", "config", "aaa"]);
+    assert_eq!(one.data()["parts"]["model"], "opus");
+    snap(&world, "learn_config", &one);
+    let diff = world.must(&["learn", "config", "aaa", "bbb"]);
+    assert_eq!(diff.data()["differs"], json!(["claude", "settings"]));
+    assert_eq!(diff.data()["parts"]["settings"]["b"], "s2");
+    snap(&world, "learn_config_diff", &diff);
+    let missing = world.run(&["learn", "config", "ccc"]);
+    assert_eq!((missing.code, missing.error_code()), (3, "not_found"));
+}

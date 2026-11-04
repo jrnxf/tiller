@@ -1,0 +1,17 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "config_hash": "aaa",
+    "first_seen_at": "<time>",
+    "parts": {
+      "claude": "2.1.0",
+      "model": "opus",
+      "role": "r1",
+      "settings": "s1"
+    }
+  },
+  "ok": true
+}

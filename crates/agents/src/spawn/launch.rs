@@ -5,14 +5,21 @@
 //! The role body and the brief go into one file passed with
 //! `--append-system-prompt-file`, so the brief survives compaction and a
 //! resume passes it again with the same flags. The settings fragment is the
-//! role's template rendered for this run (T4.1) and its SHA-256 is the run's
-//! `config_hash`. The MCP config is the packaged one (G35).
+//! role's template rendered for this run (T4.1). The run's `config_hash` is
+//! the SHA-256 of a manifest over the role file, the fragment, the MCP
+//! config, the model, the effort, the tiller and Claude Code versions and the
+//! memory revisions rendered (`docs/design/learning-loop.md`, section 5),
+//! so two runs can be compared part by part. The MCP config is the packaged
+//! one (G35).
 
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tiller_core::domain::Effort;
 
@@ -40,6 +47,12 @@ pub struct LaunchSpec<'a> {
     pub no_mistakes_socket: Option<&'a str>,
     /// The Claude Code command.
     pub claude: &'a str,
+    /// The Claude Code version, for the manifest ([`claude_version`]).
+    pub claude_version: Option<&'a str>,
+    /// The memory revisions rendered into the prompt, as `(source id, blob
+    /// sha)` pairs (`memory.md` section 7). Empty until the renderer passes
+    /// them.
+    pub memory: &'a [(String, String)],
 }
 
 /// The files written for a launch, and the line that starts it.
@@ -49,10 +62,97 @@ pub struct Launch {
     pub settings: PathBuf,
     pub mcp: PathBuf,
     pub script: PathBuf,
-    /// The SHA-256 of the settings fragment as written.
+    /// The SHA-256 of [`Launch::manifest`] in its canonical JSON form.
     pub config_hash: String,
+    /// The parts behind the hash: `role`, `settings`, `mcp`, `model`,
+    /// `effort`, `tiller`, `claude` and `memory`.
+    pub manifest: Value,
     /// What spawn types into the pane, followed by Enter.
     pub line: String,
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The manifest behind a run's `config_hash` (learning-loop.md, section 5).
+pub fn manifest(
+    role: Role,
+    fragment: &[u8],
+    model: &str,
+    effort: Effort,
+    claude_version: Option<&str>,
+    memory: &[(String, String)],
+) -> Value {
+    let mut pairs: Vec<String> = memory
+        .iter()
+        .map(|(source, blob)| format!("{source} {blob}"))
+        .collect();
+    pairs.sort();
+    pairs.dedup();
+    json!({
+        "role": sha256_hex(role.file().as_bytes()),
+        "settings": sha256_hex(fragment),
+        "mcp": sha256_hex(MCP_CONFIG.as_bytes()),
+        "model": model,
+        "effort": effort.as_str(),
+        "tiller": env!("CARGO_PKG_VERSION"),
+        "claude": claude_version.unwrap_or("unknown"),
+        "memory": sha256_hex(pairs.join("\n").as_bytes()),
+    })
+}
+
+/// The hash of a manifest: SHA-256 of its canonical JSON (sorted keys, no
+/// spaces), which `serde_json` prints for a `Value` object.
+pub fn hash_of(manifest: &Value) -> String {
+    sha256_hex(manifest.to_string().as_bytes())
+}
+
+/// The Claude Code version `claude --version` prints, read once per
+/// process and given two seconds; `None` when it does not answer. Spawns
+/// run in a short-lived `tiller` process, so the cache never outlives an
+/// upgrade. The variable `TILLER_CLAUDE_VERSION` overrides it, for tests and
+/// for a host that pins the version elsewhere.
+pub fn claude_version(command: &str) -> Option<String> {
+    static VERSION: OnceLock<Option<String>> = OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            if let Ok(pinned) = std::env::var("TILLER_CLAUDE_VERSION") {
+                return (!pinned.trim().is_empty()).then(|| pinned.trim().to_owned());
+            }
+            read_version(command, Duration::from_secs(2))
+        })
+        .clone()
+}
+
+fn read_version(command: &str, timeout: Duration) -> Option<String> {
+    let mut child = std::process::Command::new(command)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) => return None,
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut text).ok()?;
+    let line = text.lines().next()?.trim();
+    (!line.is_empty()).then(|| line.chars().take(64).collect())
 }
 
 /// Quotes one word for `sh`.
@@ -148,8 +248,15 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
         },
     )?;
     let fragment = serde_json::to_vec_pretty(&fragment)?;
-    let digest = Sha256::digest(&fragment);
-    let config_hash = digest.iter().map(|b| format!("{b:02x}")).collect();
+    let manifest = manifest(
+        spec.role,
+        &fragment,
+        spec.model,
+        spec.effort,
+        spec.claude_version,
+        spec.memory,
+    );
+    let config_hash = hash_of(&manifest);
 
     let dir = spec.scratch;
     let mut launch = Launch {
@@ -158,6 +265,7 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
         mcp: dir.join("mcp.json"),
         script: dir.join("launch.sh"),
         config_hash,
+        manifest,
         line: String::new(),
     };
     write_new(&launch.prompt, prompt.as_bytes(), 0o600)?;

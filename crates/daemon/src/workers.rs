@@ -36,6 +36,8 @@ pub struct Settings {
     pub quota_providers: Vec<String>,
     /// `forge_login` (CP2, C08).
     pub forge_login: Option<String>,
+    /// `[learning]`, for the retro sweep (`docs/design/learning-loop.md`).
+    pub learning: tiller_core::state::learning::Learning,
 }
 
 impl Settings {
@@ -59,9 +61,15 @@ impl Settings {
             .get("forge_login")
             .and_then(toml::Value::as_str)
             .map(str::to_owned);
+        let learning =
+            tiller_core::state::learning::Learning::from_table(&table).unwrap_or_else(|error| {
+                tracing::warn!(%error, "config.toml [learning] does not parse; using the defaults");
+                tiller_core::state::learning::Learning::default()
+            });
         Self {
             quota_providers,
             forge_login,
+            learning,
         }
     }
 }
@@ -351,6 +359,7 @@ pub fn start(
     let mut config = ReconcileConfig::new(&local, home);
     config.boot_id = boot_id();
     config.forge_login = settings.forge_login.clone();
+    config.learning = settings.learning.clone();
     let sources = Sources {
         herdr: Box::new(tools.herdr.clone()),
         probe: Box::new(HerdrStatusProbe),

@@ -15,6 +15,7 @@ pub mod attention;
 pub mod caches;
 pub mod cards;
 pub mod interventions;
+pub mod learning;
 pub mod outbox;
 pub mod peers;
 pub mod projects;

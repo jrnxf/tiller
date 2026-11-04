@@ -1,0 +1,25 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "a": "aaa",
+    "b": "bbb",
+    "differs": [
+      "claude",
+      "settings"
+    ],
+    "parts": {
+      "claude": {
+        "a": "2.1.0",
+        "b": "2.1.1"
+      },
+      "settings": {
+        "a": "s1",
+        "b": "s2"
+      }
+    }
+  },
+  "ok": true
+}

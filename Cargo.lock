@@ -1437,6 +1437,7 @@ dependencies = [
  "anyhow",
  "base64",
  "clap",
+ "getrandom",
  "insta",
  "jiff",
  "nix",
@@ -1471,6 +1472,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "toml",
  "tracing",
  "ulid",
 ]

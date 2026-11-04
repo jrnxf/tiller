@@ -34,6 +34,9 @@ static MIGRATIONS: &[M<'static>] = &[
         "../migrations/0005_intervention_labels/down.sql"
     ))
     .foreign_key_check(),
+    M::up(include_str!("../migrations/0006_learning_loop/up.sql"))
+        .down(include_str!("../migrations/0006_learning_loop/down.sql"))
+        .foreign_key_check(),
 ];
 
 fn migrations() -> Migrations<'static> {

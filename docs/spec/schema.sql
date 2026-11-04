@@ -603,6 +603,10 @@ CREATE TABLE quota_windows (              -- owner: quota-axi; never an account 
 -- in memory.md, section 11, and load after this file. evidence and
 -- proposals are never loaded into an agent's context.
 
+-- Learning loop tables (retros, change_sets, change_set_members, eval_runs,
+-- config_manifests) are defined in docs/design/learning-loop.md and added by
+-- migration 6 (T7.3). None is ever loaded into an agent's context.
+
 -- ---------------------------------------------------------------------------
 -- Derived views: the only place a board column exists
 -- ---------------------------------------------------------------------------

@@ -1,0 +1,93 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "attention": [],
+    "card": {
+      "acceptance": null,
+      "body": null,
+      "category": null,
+      "closed_at": "<time>",
+      "created_at": "<time>",
+      "fixes_card_id": null,
+      "id": "<id1>",
+      "kind": "ship",
+      "outcome": "failed",
+      "project": "alpha",
+      "short": "<id1.short>",
+      "size": null,
+      "tag": "[alpha-2]",
+      "title": "the export"
+    },
+    "earlier_retros": [],
+    "events": [
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "entity": "card",
+        "entity_id": "<id1>",
+        "kind": "card.created",
+        "seq": "<seq>"
+      },
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "entity": "retro",
+        "entity_id": "<id3>",
+        "kind": "retro.scheduled",
+        "seq": "<seq>"
+      }
+    ],
+    "events_truncated": false,
+    "evidence": [],
+    "finish": {
+      "learning": "tiller retro finish <id3> --learning <one sentence> --evidence '<json>'",
+      "nothing": "tiller retro finish <id3> --nothing",
+      "proposed": "tiller retro finish <id3> --proposed <proposal>"
+    },
+    "fix_cards": [],
+    "retro": {
+      "card_id": "<id1>",
+      "closed_at": "<time>",
+      "config_hashes": [],
+      "counts": {
+        "attempts": {},
+        "attention": {},
+        "elapsed_minutes": 120,
+        "findings": {
+          "high": 0,
+          "low": 0,
+          "medium": 0
+        },
+        "fix_cards": 0,
+        "guard_breaches": 0,
+        "models": [],
+        "run_outcomes": {},
+        "runs": 0,
+        "status_lines": 0
+      },
+      "created_at": "<time>",
+      "curator_session": null,
+      "curator_started_at": null,
+      "depth": "full",
+      "evidence_id": null,
+      "finished_at": null,
+      "finished_by": null,
+      "id": "<id3>",
+      "learning": null,
+      "outcome": null,
+      "project_id": "alpha",
+      "proposal_id": null,
+      "reason": "incident",
+      "rev": 1,
+      "short": "<id3.short>",
+      "state": "pending",
+      "trigger": null
+    },
+    "reviews": [],
+    "runs": []
+  },
+  "ok": true
+}

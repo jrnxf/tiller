@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "deny": [
+      "Edit",
+      "Write",
+      "NotebookEdit",
+      "WebFetch",
+      "WebSearch",
+      "Agent",
+      "EnterWorktree",
+      "ExitWorktree",
+      "CronCreate",
+      "CronDelete",
+      "ScheduleWakeup",
+      "RemoteTrigger",
+      "Workflow",
+      "PushNotification",
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(**/.envrc)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(~/.tiller/**)",
+      "Read(~/.claude/**)",
+      "Read(~/.config/**)",
+      "Read(**/.ssh/**)",
+      "Read(**/.aws/**)",
+      "Read(**/.gnupg/**)",
+      "Read(**/.netrc)",
+      "Read(**/id_*)",
+      "Read(**/credentials*)",
+      "Bash(tiller approve *)",
+      "Bash(tiller mem approve *)",
+      "Bash(tiller grant *)",
+      "Bash(tiller away *)",
+      "Bash(tiller land *)",
+      "Bash(tiller spawn *)",
+      "Bash(tiller import *)",
+      "Bash(tiller hook *)",
+      "Bash(tiller owner *)",
+      "Bash(tiller peer *)",
+      "Bash(tiller retro run *)",
+      "Bash(tiller retro sweep*)",
+      "Bash(tiller learn *)"
+    ],
+    "allow": [
+      "Read",
+      "Grep",
+      "Glob",
+      "Bash(tiller retro *)",
+      "Bash(tiller mem note *)",
+      "Bash(tiller mem propose *)",
+      "Bash(tiller card show *)",
+      "Bash(tiller run show *)",
+      "Bash(tiller events *)"
+    ]
+  },
+  "claudeMdExcludes": [
+    "**/CLAUDE.md",
+    "**/CLAUDE.local.md",
+    "**/AGENTS.md",
+    "**/.claude/rules/**"
+  ],
+  "autoMemoryEnabled": false,
+  "disableClaudeAiConnectors": true,
+  "disableRemoteControl": true,
+  "remoteControlAtStartup": false,
+  "env": {
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    "TILLER_ROLE": "curator"
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "autoAllowBashIfSandboxed": false,
+    "excludedCommands": [
+      "<tiller>",
+      "<tiller> *"
+    ],
+    "filesystem": {
+      "allowWrite": [
+        "<scratch>"
+      ],
+      "denyWrite": [
+        "~/.tiller",
+        "~/.claude"
+      ],
+      "denyRead": [
+        "~/.tiller"
+      ]
+    },
+    "network": {
+      "allowedDomains": [],
+      "allowLocalBinding": false
+    }
+  }
+}

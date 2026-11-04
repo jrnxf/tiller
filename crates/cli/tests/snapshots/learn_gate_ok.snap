@@ -1,0 +1,16 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "change_set": "<id3>",
+    "eval_run": "<id5>",
+    "hint": null,
+    "measuring": null,
+    "ok": true,
+    "proposal": "<id1>",
+    "reason": null
+  },
+  "ok": true
+}
