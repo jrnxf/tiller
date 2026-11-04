@@ -1,12 +1,13 @@
 //! Reads: the derived views and the event log (`state.md` sections 6 and 9).
 //! Reads never write and need no transaction of their own.
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 use super::{get, list, resolve_card};
 use crate::domain::*;
 use crate::error::Result;
 use crate::store::Store;
+use crate::time::Timestamp;
 
 /// An unresolved ask with its age (the `asked` view).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -89,6 +90,33 @@ impl Store {
     /// Every event on one card, oldest first.
     pub fn timeline(&self, card_id: &str) -> Result<Vec<Event>> {
         list(self.conn(), "card_id = ?1 ORDER BY seq", &[&card_id])
+    }
+
+    /// When the daemon's ruleset check last moved a project's merge gate, or
+    /// `None` when it never has (`tiller doctor`).
+    pub fn merge_gate_changed_at(&self, project_id: &str) -> Result<Option<Timestamp>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT at FROM events WHERE entity = 'project' AND entity_id = ?1
+                   AND kind = 'project.merge_gate_changed' ORDER BY seq DESC LIMIT 1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// When the newest `config.changed` event was written, or `None` when no
+    /// `tiller config set` ever recorded one (`tiller doctor`).
+    pub fn config_changed_at(&self) -> Result<Option<Timestamp>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT at FROM events WHERE kind = 'config.changed' ORDER BY seq DESC LIMIT 1",
+                params![],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
 
     /// The newest event `seq`, or 0 on an empty log.

@@ -8,6 +8,7 @@ pub mod ask;
 pub mod attention;
 pub mod backup;
 pub mod card;
+pub mod doctor;
 pub mod health;
 pub mod import;
 pub mod later;

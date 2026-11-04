@@ -297,7 +297,7 @@ pub fn host(app: &App, cmd: HostCmd) -> Done {
 
 // -- config.toml -----------------------------------------------------------
 
-fn config_file(app: &App) -> std::path::PathBuf {
+pub(crate) fn config_file(app: &App) -> std::path::PathBuf {
     app.home.join("config.toml")
 }
 

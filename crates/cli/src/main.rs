@@ -15,8 +15,8 @@ use serde_json::Value;
 
 use app::{App, Done, Failure};
 use cmd::{
-    admin, approval, ask, attention, backup, card, health, import, later, learn, mem, peer, read,
-    records, review, run, spawn,
+    admin, approval, ask, attention, backup, card, doctor, health, import, later, learn, mem, peer,
+    read, records, review, run, spawn,
 };
 
 #[derive(Parser)]
@@ -209,7 +209,7 @@ fn dispatch(app: &App, command: Command) -> Done {
         Command::Export(args) => backup::export(app, args),
         Command::Migrate(cmd) => backup::migrate(app, cmd),
         Command::Import(args) => import::import(app, args),
-        Command::Doctor => later::doctor(app),
+        Command::Doctor => doctor::run(app),
         Command::Health(cmd) => health::run(app, cmd),
         Command::Daemon(_) | Command::Hook(_) | Command::Guard(_) => Err(Failure::new(
             "internal",

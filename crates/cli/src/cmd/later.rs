@@ -3,8 +3,7 @@
 //! so the command surface is complete and a wrong call is a usage error.
 //! `orchestrator start` and `agent focus` run (`spawn.rs`); the rest answer
 //! `unavailable` (exit 7, nothing written) until the task that owns the
-//! outside half lands: relaunch and resume (T4.5), interrupt and doctor
-//! (T2.5, T2.8).
+//! outside half lands: relaunch and resume (T4.5), interrupt (T2.5).
 
 use clap::Subcommand;
 
@@ -64,11 +63,4 @@ pub fn agent(app: &App, cmd: AgentCmd) -> Done {
         ),
         AgentCmd::Focus { target } => super::spawn::focus(app, &target),
     }
-}
-
-pub fn doctor(_app: &App) -> Done {
-    later(
-        "tiller doctor",
-        "the health checks (tool versions, herdr, hook registration; T2.8)",
-    )
 }
