@@ -215,7 +215,7 @@ Rules:
 `outbox`: every message to a session, stored before anything is typed (plan v2, point 13).
 
 - `id`, `target_session_id`, `target_pane_id` (cache at enqueue time), `kind` (`wake`, `steer`, `answer`, `note`), `body`, `card_id`, `reply_to` (an ask or attention id), `idempotency_key`.
-- `state`: `pending` (stored, not yet delivered), `delivered` (the wake-up line reached the pane and herdr confirmed the session is the target), `acked` (the target ran `tiller inbox <id>`, which reads the body and acks in one transaction), `failed` (attempts exhausted, or the target session is gone and no successor exists).
+- `state`: `pending` (stored, not yet delivered), `delivered` (herdr confirmed the session is the target and the wake-up line was submitted: it left the composer after Enter), `acked` (the target ran `tiller inbox <id>`, which reads the body and acks in one transaction), `failed` (attempts exhausted, or the target session is gone and no successor exists).
 - `attempts`, `next_attempt_at`, `delivered_at`, `acked_at`, `failed_at`, `failure_reason`.
 - `rev`.
 

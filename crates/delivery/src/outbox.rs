@@ -6,8 +6,10 @@
 //! never typed: the only line that reaches a pane is
 //! `tiller inbox <id> # <kind> <card>`, and only after the pane's herdr
 //! metadata names the target session and its composer reads as empty. A
-//! message is `delivered` only once herdr took the keystrokes. A line typed
-//! but not submitted is finished with Enter, never typed again.
+//! message is `delivered` only once its line has left the composer: the pass
+//! waits a moment between the line and Enter, reads the composer back, and
+//! presses Enter again while the line is still there. A line typed but not
+//! submitted is finished with Enter, never typed again.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -42,10 +44,42 @@ pub const HELD_MINUTES: i64 = 10;
 /// after it was stored with no session to take it, goes to the owner.
 pub const ANSWER_MINUTES: i64 = 60;
 
+/// How many times one pass presses Enter on a wake-up line that stays in
+/// the composer.
+pub const SUBMIT_PRESSES: u32 = 4;
+/// How many passes press Enter on a wake-up line that stays in the
+/// composer; after them it is left like someone's text.
+pub const SUBMIT_PASSES: u32 = 3;
+/// How many times one pass reads the composer after an Enter.
+const SUBMIT_READS: u32 = 2 * SUBMIT_PRESSES;
+
 /// How long a remote lane's messages are left alone between looks.
 const QUIET_REMOTE_MINUTES: i64 = 5;
 /// The deferral reason for a composer holding someone's text.
 const HELD: &str = "composer holds text";
+/// The deferral reason for a wake-up line Enter did not submit.
+const UNSUBMITTED: &str = "wake line typed but not submitted";
+
+/// The pauses that let a pane's agent take a typed line as one prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pacing {
+    /// Between typing the line and the first Enter. Claude Code can read an
+    /// Enter that arrives right after typed text as part of it, so the Enter
+    /// adds a newline instead of submitting; a Claude just relaunched in the
+    /// same pane does this every time.
+    pub settle: Duration,
+    /// Between an Enter and the read that checks the line left the composer.
+    pub recheck: Duration,
+}
+
+impl Default for Pacing {
+    fn default() -> Self {
+        Self {
+            settle: Duration::from_millis(500),
+            recheck: Duration::from_millis(500),
+        }
+    }
+}
 
 /// How often `message` has been rung at its current target, and when the
 /// first of those rings was: `attempts` and `delivered_at` count every
@@ -76,15 +110,16 @@ pub fn wake_line(message: &OutboxMessage, card: Option<&Card>) -> String {
     }
 }
 
-/// The message id a held composer's text names, when the text is a wake-up
-/// line this pass may finish with Enter.
-fn wake_line_id(text: &str) -> Option<&str> {
-    let id = text
-        .trim()
-        .strip_prefix("tiller inbox ")?
-        .split(' ')
-        .next()?;
-    ids::is_ulid(id).then_some(id)
+/// Whether the composer holds exactly one of `lines`, however its rows
+/// wrapped: only such a line is this pass's to finish with Enter, never a
+/// draft that merely starts with one.
+fn holds_line(composer: &Composer, lines: &[String]) -> bool {
+    let Composer::Holds(text) = composer else {
+        return false;
+    };
+    let squeeze = |s: &str| s.split_whitespace().collect::<String>();
+    let text = squeeze(text);
+    lines.iter().any(|line| squeeze(line) == text)
 }
 
 fn plus_secs(at: Timestamp, secs: i64) -> Timestamp {
@@ -130,6 +165,18 @@ type Result<T, E = DeliveryError> = std::result::Result<T, E>;
 struct Defer {
     secs: i64,
     reason: String,
+    /// The composer holds text this pass did not submit.
+    held: bool,
+}
+
+/// How a typed line's submit went.
+enum Submit {
+    /// The line left the composer, or the target acked the batch.
+    Left,
+    /// The line is still in the composer after every press.
+    Held,
+    /// herdr failed, so the composer could not be checked.
+    Failed(tiller_herdr::client::HerdrError),
 }
 
 impl Defer {
@@ -137,6 +184,14 @@ impl Defer {
         Self {
             secs,
             reason: reason.into(),
+            held: false,
+        }
+    }
+
+    fn held(reason: &str) -> Self {
+        Self {
+            held: true,
+            ..Self::new(BUSY_DEFER_SECS, reason)
         }
     }
 }
@@ -146,8 +201,11 @@ pub struct Deliverer<H: Herdr> {
     store: Store,
     herdr: H,
     host_id: String,
+    pacing: Pacing,
     /// When each message's composer was first seen holding someone's text.
     held_since: HashMap<String, Timestamp>,
+    /// Passes that left each message's wake-up line in the composer.
+    unsubmitted: HashMap<String, u32>,
     /// `(message, target session)` pairs already reported as unread.
     reported: HashSet<(String, String)>,
     /// Messages this daemon cannot act on yet (a remote lane, a successor
@@ -161,10 +219,19 @@ impl<H: Herdr> Deliverer<H> {
             store,
             herdr,
             host_id: host_id.into(),
+            pacing: Pacing::default(),
             held_since: HashMap::new(),
+            unsubmitted: HashMap::new(),
             reported: HashSet::new(),
             quiet_until: HashMap::new(),
         }
+    }
+
+    /// Replaces the default pauses around Enter.
+    #[must_use]
+    pub fn pacing(mut self, pacing: Pacing) -> Self {
+        self.pacing = pacing;
+        self
     }
 
     pub fn store(&self) -> &Store {
@@ -238,10 +305,11 @@ impl<H: Herdr> Deliverer<H> {
         }
 
         let rung = self.ring(&session, &unacked, now)?;
-        if !matches!(&rung, Err(defer) if defer.reason == HELD) {
-            // The composer is no longer known to hold someone's text.
+        if !matches!(&rung, Err(defer) if defer.held) {
+            // The composer is no longer known to hold text.
             for message in &unacked {
                 self.held_since.remove(&message.id);
+                self.unsubmitted.remove(&message.id);
             }
         }
         match rung {
@@ -278,7 +346,8 @@ impl<H: Herdr> Deliverer<H> {
     }
 
     /// Checks the pane and its composer, then types the line (or Enter
-    /// alone for a line already typed). Returns the pane rung, or why not.
+    /// alone for a line already typed) and submits it. Returns the pane
+    /// rung, or why not.
     fn ring(
         &mut self,
         session: &Session,
@@ -326,27 +395,32 @@ impl<H: Herdr> Deliverer<H> {
             Ok(screen) => screen,
             Err(error) => return Ok(Err(Defer::new(BUSY_DEFER_SECS, error.to_string()))),
         };
+        // Every line a pass may have typed for this batch.
+        let mut lines = Vec::with_capacity(unacked.len());
+        for message in unacked {
+            let card = match &message.card_id {
+                Some(id) => find::<Card>(self.store.conn(), "id = ?1", &[id])?,
+                None => None,
+            };
+            lines.push(wake_line(message, card.as_ref()));
+        }
+        let stuck = unacked.iter().any(|m| {
+            self.unsubmitted
+                .get(&m.id)
+                .is_some_and(|n| *n >= SUBMIT_PASSES)
+        });
         let typed = match classify(&screen) {
             Composer::Empty => {
-                let card = match &oldest.card_id {
-                    Some(id) => find::<Card>(self.store.conn(), "id = ?1", &[id])?,
-                    None => None,
-                };
-                let line = wake_line(oldest, card.as_ref());
-                self.herdr
-                    .send_text(&pane_id, &line)
-                    .and_then(|()| self.herdr.send_enter(&pane_id))
-            }
-            Composer::Holds(text)
-                if wake_line_id(&text).is_some_and(|id| unacked.iter().any(|m| m.id == id)) =>
-            {
-                self.herdr.send_enter(&pane_id)
-            }
-            Composer::Holds(_) => {
-                for message in unacked {
-                    self.held_since.entry(message.id.clone()).or_insert(now);
+                let typed = self.herdr.send_text(&pane_id, &lines[0]);
+                if typed.is_ok() {
+                    std::thread::sleep(self.pacing.settle);
                 }
-                return Ok(Err(Defer::new(BUSY_DEFER_SECS, HELD)));
+                typed
+            }
+            composer @ Composer::Holds(_) if !stuck && holds_line(&composer, &lines) => Ok(()),
+            Composer::Holds(_) => {
+                self.mark_held(unacked, now);
+                return Ok(Err(Defer::held(HELD)));
             }
             Composer::Busy => return Ok(Err(Defer::new(BUSY_DEFER_SECS, "busy"))),
             Composer::Dialog => return Ok(Err(Defer::new(DIALOG_DEFER_SECS, "dialog showing"))),
@@ -354,10 +428,69 @@ impl<H: Herdr> Deliverer<H> {
                 return Ok(Err(Defer::new(BUSY_DEFER_SECS, "composer unreadable")));
             }
         };
-        Ok(match typed {
-            Ok(()) => Ok(pane_id),
-            Err(error) => Err(Defer::new(BUSY_DEFER_SECS, error.to_string())),
+        if let Err(error) = typed {
+            return Ok(Err(Defer::new(BUSY_DEFER_SECS, error.to_string())));
+        }
+        Ok(match self.submit(&pane_id, oldest, &lines)? {
+            Submit::Left => Ok(pane_id),
+            // Still pending, so the next pass finishes it with Enter; a line
+            // stuck there for long is reported like held text.
+            Submit::Held => {
+                for message in unacked {
+                    *self.unsubmitted.entry(message.id.clone()).or_default() += 1;
+                }
+                self.mark_held(unacked, now);
+                Err(Defer::held(UNSUBMITTED))
+            }
+            Submit::Failed(error) => Err(Defer::new(BUSY_DEFER_SECS, error.to_string())),
         })
+    }
+
+    fn mark_held(&mut self, unacked: &[OutboxMessage], now: Timestamp) {
+        for message in unacked {
+            self.held_since.entry(message.id.clone()).or_insert(now);
+        }
+    }
+
+    /// Presses Enter until the line has left the composer or the target's
+    /// hook acked the batch, at most [`SUBMIT_PRESSES`] times. Only a
+    /// composer read as empty, busy or behind a dialog shows the line left;
+    /// other text or an unreadable screen is read again, never pressed.
+    fn submit(&self, pane_id: &str, oldest: &OutboxMessage, lines: &[String]) -> Result<Submit> {
+        if let Err(error) = self.herdr.send_enter(pane_id) {
+            return Ok(Submit::Failed(error));
+        }
+        let mut presses = 1;
+        let mut failed = None;
+        for _ in 0..SUBMIT_READS {
+            std::thread::sleep(self.pacing.recheck);
+            let message: OutboxMessage = get(self.store.conn(), "outbox message", &oldest.id)?;
+            if message.state == OutboxState::Acked {
+                return Ok(Submit::Left);
+            }
+            let composer = match self.herdr.read_visible(pane_id) {
+                Ok(screen) => classify(&screen),
+                Err(error) => {
+                    failed = Some(error);
+                    continue;
+                }
+            };
+            failed = None;
+            match composer {
+                Composer::Empty | Composer::Busy | Composer::Dialog => return Ok(Submit::Left),
+                held if holds_line(&held, lines) => {
+                    if presses == SUBMIT_PRESSES {
+                        return Ok(Submit::Held);
+                    }
+                    if let Err(error) = self.herdr.send_enter(pane_id) {
+                        return Ok(Submit::Failed(error));
+                    }
+                    presses += 1;
+                }
+                Composer::Holds(_) | Composer::Unknown => {}
+            }
+        }
+        Ok(failed.map_or(Submit::Held, Submit::Failed))
     }
 
     fn defer(
@@ -539,7 +672,7 @@ impl<H: Herdr> Deliverer<H> {
             None => None,
         };
         let why = if held {
-            format!("its composer has held other text for {HELD_MINUTES} minutes")
+            format!("its composer has held text for {HELD_MINUTES} minutes")
         } else {
             format!("after {} rings", RINGS_MINUTES.len())
         };

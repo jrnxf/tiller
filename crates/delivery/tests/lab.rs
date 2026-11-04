@@ -3,7 +3,8 @@
 //! `TILLER_HERDR_LAB` is `<wrapper>|<session>|<socket>`, where `<wrapper>`
 //! runs `herdr` in an isolated session (`<wrapper> run <session> <args>`);
 //! `TILLER_HERDR_LAB_CLAUDE` names the Claude Code command to start in the
-//! worker's pane.
+//! worker's pane, and `TILLER_HERDR_LAB_RELAUNCHES` how many times to
+//! relaunch it in the same pane and deliver again (default 3).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::time::{Duration, Instant};
@@ -40,12 +41,29 @@ fn owner_key(pane_id: &str, key: &str) {
     assert!(status.success());
 }
 
-fn wait_for(what: &str, limit: Duration, mut done: impl FnMut() -> bool) {
+fn wait_for(what: &str, limit: Duration, done: impl FnMut() -> bool) {
+    wait_every(what, limit, Duration::from_millis(500), done);
+}
+
+fn wait_every(what: &str, limit: Duration, every: Duration, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + limit;
     while !done() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(every);
     }
+}
+
+/// Waits until the line naming `message` has been submitted: it shows on
+/// screen and the composer no longer holds it.
+fn wait_submitted(herdr: &Cli, pane_id: &str, message: &str) {
+    let line = format!("tiller inbox {message} # steer");
+    wait_for("the submitted line", Duration::from_secs(30), || {
+        let screen = herdr.read_visible(pane_id).unwrap();
+        if let Ok(dump) = std::env::var("TILLER_HERDR_LAB_DUMP") {
+            std::fs::write(format!("{dump}.after"), &screen).unwrap();
+        }
+        screen.contains(&line) && !matches!(classify(&screen), Composer::Holds(_))
+    });
 }
 
 #[test]
@@ -158,12 +176,56 @@ fn real_herdr_layout_tokens_and_delivery() {
     assert_eq!(report.rung, std::slice::from_ref(&message.id), "{report:?}");
     let delivered: OutboxMessage = get(fleet.store.conn(), "outbox message", &message.id).unwrap();
     assert_eq!(delivered.state, OutboxState::Delivered);
-    let line = format!("tiller inbox {} # steer", message.id);
-    wait_for("the submitted line", Duration::from_secs(30), || {
-        let screen = herdr.read_visible(&worker.pane_id).unwrap();
-        if let Ok(dump) = std::env::var("TILLER_HERDR_LAB_DUMP") {
-            std::fs::write(format!("{dump}.after"), &screen).unwrap();
-        }
-        screen.contains(&line) && !matches!(classify(&screen), Composer::Holds(_))
-    });
+    wait_submitted(&herdr, &worker.pane_id, &message.id);
+
+    // A Claude relaunched in the same pane reads an Enter sent right after
+    // typed text as a newline: the steer the CP5 trial left typed but not
+    // submitted. Each relaunch's first delivery must still submit.
+    let relaunches: usize =
+        std::env::var("TILLER_HERDR_LAB_RELAUNCHES").map_or(3, |n| n.parse().unwrap());
+    let mut acked = message.id;
+    for round in 0..relaunches {
+        let worker_ctx = Ctx::new(Actor::Session(session.clone()));
+        fleet.store.outbox_ack(&worker_ctx, &acked).unwrap();
+        let agent = || herdr.pane(&worker.pane_id).unwrap().unwrap();
+        wait_for("the turn to end", Duration::from_secs(120), || {
+            agent().agent_status.as_deref() != Some("working")
+        });
+        herdr.send_text(&worker.pane_id, "/exit").unwrap();
+        // The owner's own pace: an Enter right after the text can be read
+        // as a newline by this freshly relaunched Claude.
+        std::thread::sleep(Duration::from_secs(1));
+        herdr.send_enter(&worker.pane_id).unwrap();
+        wait_for("Claude to exit", Duration::from_secs(30), || {
+            agent().agent.is_none()
+        });
+        herdr.send_text(&worker.pane_id, &claude).unwrap();
+        herdr.send_enter(&worker.pane_id).unwrap();
+        wait_every(
+            "the relaunched composer",
+            Duration::from_secs(90),
+            Duration::from_millis(20),
+            || classify(&herdr.read_visible(&worker.pane_id).unwrap()) == Composer::Empty,
+        );
+        let steer = fleet
+            .store
+            .outbox_enqueue(
+                &Ctx::new(Actor::Daemon),
+                None,
+                NewMessage {
+                    target_session_id: session.clone(),
+                    kind: OutboxKind::Steer,
+                    body: format!("lab steer after relaunch {round}"),
+                    card_id: None,
+                    reply_to: None,
+                },
+            )
+            .unwrap()
+            .value;
+        let report = deliverer.pass(Timestamp::now()).unwrap();
+        eprintln!("relaunch {round}: {report:?}");
+        assert_eq!(report.rung, std::slice::from_ref(&steer.id), "{report:?}");
+        wait_submitted(&herdr, &worker.pane_id, &steer.id);
+        acked = steer.id;
+    }
 }

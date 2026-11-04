@@ -16,7 +16,9 @@ use tiller_core::state::outbox::NewMessage;
 use tiller_core::state::runs::{Bind, EndRun, NewOrchestrator, NewRun, Relaunch, SpawnChecks};
 use tiller_core::state::{get, list};
 use tiller_core::{Actor, Ctx, Store, Timestamp};
-use tiller_delivery::outbox::{Deliverer, RINGS_MINUTES, Report};
+use tiller_delivery::outbox::{
+    Deliverer, Pacing, RINGS_MINUTES, Report, SUBMIT_PASSES, SUBMIT_PRESSES,
+};
 use tiller_herdr::client::Herdr;
 use tiller_herdr::fake::{FakeHerdr, PAUSE_ENV, Screen};
 use tiller_herdr::poller::{HerdrSource, Registry};
@@ -40,7 +42,10 @@ impl World {
         let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
         fleet.place(&herdr);
         let world = Self {
-            deliverer: Deliverer::new(fleet.open(), herdr.clone(), &fleet.host),
+            deliverer: Deliverer::new(fleet.open(), herdr.clone(), &fleet.host).pacing(Pacing {
+                settle: Duration::ZERO,
+                recheck: Duration::ZERO,
+            }),
             fleet,
             herdr,
             worker,
@@ -105,10 +110,14 @@ impl World {
     }
 
     fn typed(&self) -> usize {
+        self.calls("send_text")
+    }
+
+    fn calls(&self, prefix: &str) -> usize {
         self.herdr
             .calls()
             .iter()
-            .filter(|c| c.starts_with("send_text"))
+            .filter(|c| c.starts_with(prefix))
             .count()
     }
 }
@@ -139,6 +148,100 @@ fn idle_pane_gets_one_wake_line_naming_the_message() {
             .iter()
             .any(|c| c.contains("rebase onto main")),
         "the body is never typed"
+    );
+}
+
+/// The CP5 trial's stuck steer: a Claude relaunched in the same pane reads
+/// the Enter after the line as a newline, so the line sat typed but never
+/// submitted.
+#[test]
+fn enter_read_as_a_newline_is_pressed_again_until_the_line_submits() {
+    let mut w = World::new();
+    let message = w.send(None, OutboxKind::Steer, at(1));
+    w.herdr.enter_as_newline("w2:p1", 2);
+    let report = w.pass(at(2));
+    assert_eq!(report.rung, std::slice::from_ref(&message.id));
+    assert_eq!(w.typed(), 1);
+    assert_eq!(w.calls("send_enter"), 3);
+    let submitted = w.submitted();
+    assert_eq!(submitted.len(), 1);
+    assert_eq!(submitted[0].trim_end(), line(&message, &w.card()));
+    assert_eq!(w.herdr.fake_pane("w2:p1").composer, "");
+    assert_eq!(w.message(&message.id).state, OutboxState::Delivered);
+}
+
+#[test]
+fn a_line_enter_never_submits_stays_pending_and_is_finished_not_retyped() {
+    let mut w = World::new();
+    let message = w.send(None, OutboxKind::Steer, at(1));
+    w.herdr.enter_as_newline("w2:p1", SUBMIT_PRESSES + 1);
+    let report = w.pass(at(2));
+    assert!(report.rung.is_empty());
+    assert_eq!(
+        report.deferred,
+        [(
+            message.id.clone(),
+            "wake line typed but not submitted".to_owned()
+        )]
+    );
+    let held = w.message(&message.id);
+    assert_eq!(held.state, OutboxState::Pending);
+    assert_eq!(held.attempts, 0);
+    assert_eq!(held.next_attempt_at, Some(at(32)));
+    assert!(w.submitted().is_empty());
+
+    let report = w.pass(at(32));
+    assert_eq!(report.rung, std::slice::from_ref(&message.id));
+    assert_eq!(
+        w.typed(),
+        1,
+        "a held wake line is finished, never typed again"
+    );
+    assert_eq!(w.submitted().len(), 1);
+    assert_eq!(w.message(&message.id).state, OutboxState::Delivered);
+}
+
+#[test]
+fn a_line_that_never_submits_is_left_like_held_text_after_three_passes() {
+    let mut w = World::new();
+    let message = w.send(None, OutboxKind::Steer, at(1));
+    w.herdr.enter_as_newline("w2:p1", 100);
+    let mut now = 2;
+    for _ in 0..SUBMIT_PASSES {
+        let report = w.pass(at(now));
+        assert_eq!(report.deferred[0].1, "wake line typed but not submitted");
+        now += 30;
+    }
+    let pressed = w.calls("send_enter");
+    assert_eq!(pressed, (SUBMIT_PASSES * SUBMIT_PRESSES) as usize);
+    let report = w.pass(at(now));
+    assert_eq!(report.deferred[0].1, "composer holds text");
+    assert_eq!(w.calls("send_enter"), pressed, "no more Enters");
+    assert_eq!(w.typed(), 1);
+    assert_eq!(w.message(&message.id).state, OutboxState::Pending);
+}
+
+#[test]
+fn a_wrapped_wake_line_is_finished_but_a_draft_starting_with_one_is_not() {
+    let mut w = World::new();
+    let message = w.send(None, OutboxKind::Steer, at(1));
+    // A crash after typing left the line, wrapped across two rows.
+    let wrapped = line(&message, &w.card()).replacen(" # ", "\n# ", 1);
+    w.herdr.type_draft("w2:p1", &wrapped);
+    assert_eq!(w.pass(at(2)).rung, std::slice::from_ref(&message.id));
+    assert_eq!(w.typed(), 0);
+    assert_eq!(w.submitted().len(), 1);
+
+    let second = w.send(None, OutboxKind::Steer, at(3));
+    let draft = format!("{} and also rebase first", line(&second, &w.card()));
+    w.herdr.type_draft("w2:p1", &draft);
+    let report = w.pass(at(4));
+    assert_eq!(report.deferred[0].1, "composer holds text");
+    assert_eq!(w.herdr.fake_pane("w2:p1").composer, draft);
+    assert_eq!(
+        w.calls("send_enter"),
+        1,
+        "the owner's draft is never submitted"
     );
 }
 

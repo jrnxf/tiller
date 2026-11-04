@@ -57,6 +57,11 @@ struct World {
     /// Panes whose Claude takes `/exit` and stays up.
     #[serde(default)]
     stubborn: Vec<String>,
+    /// Enters each pane's Claude reads as a newline in the composer, as one
+    /// just relaunched in the same pane does with an Enter sent right after
+    /// typed text.
+    #[serde(default)]
+    newline_enters: BTreeMap<String, u32>,
 }
 
 /// A handle on the fake server's file. Clones share the server.
@@ -218,6 +223,14 @@ impl FakeHerdr {
         self.edit(|w| w.stubborn.push(pane_id.into()));
     }
 
+    /// Makes the next `n` Enters that reach text in `pane_id`'s composer add
+    /// a newline instead of submitting it.
+    pub fn enter_as_newline(&self, pane_id: &str, n: u32) {
+        self.edit(|w| {
+            w.newline_enters.insert(pane_id.into(), n);
+        });
+    }
+
     pub fn set_unreachable(&self, down: bool) {
         self.edit(|w| w.unreachable = down);
     }
@@ -352,11 +365,20 @@ impl Herdr for FakeHerdr {
 
     fn send_enter(&self, pane_id: &str) -> Result<()> {
         self.call("send_enter", format!("send_enter {pane_id}"))?;
-        let stubborn = self.load().stubborn.iter().any(|p| p == pane_id);
-        self.with_pane(pane_id, |p| {
+        // One edit, as herdr delivers one keystroke at a time.
+        self.edit(|w| {
+            let stubborn = w.stubborn.iter().any(|p| p == pane_id);
+            let p = w.panes.iter_mut().find(|p| p.pane_id == pane_id)?;
+            let newline = w
+                .newline_enters
+                .get_mut(pane_id)
+                .filter(|n| **n > 0 && p.screen == Screen::Idle && !p.composer.is_empty());
             // Claude takes a line at its composer, a shell runs one.
             let takes = matches!(p.screen, Screen::Idle | Screen::Shell);
-            if takes && !p.composer.is_empty() {
+            if let Some(n) = newline {
+                *n -= 1;
+                p.composer.push('\n');
+            } else if takes && !p.composer.is_empty() {
                 let line = std::mem::take(&mut p.composer);
                 // Claude's `/exit` leaves the pane at a shell.
                 if line == "/exit" && !stubborn {
@@ -364,6 +386,11 @@ impl Herdr for FakeHerdr {
                 }
                 p.submitted.push(line);
             }
+            Some(())
+        })
+        .ok_or_else(|| HerdrError::NotFound {
+            what: "pane",
+            id: pane_id.into(),
         })?;
         self.pause_point("send_enter.after");
         Ok(())
