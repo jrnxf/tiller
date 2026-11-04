@@ -8,8 +8,27 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[[bin]]
+name = "tiller-replay"
+path = "src/main.rs"
+
 [dependencies]
+anyhow.workspace = true
+clap.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tiller-agents.workspace = true
 tiller-core.workspace = true
+# The fake herdr stands in for every pane: spawn's pane opens and sends land
+# in its call log, never on a real herdr server.
+tiller-herdr = { workspace = true, features = ["testing"] }
+tiller-observe.workspace = true
+tiller-reconcile.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true

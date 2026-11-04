@@ -1550,7 +1550,20 @@ dependencies = [
 name = "tiller-replay"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "clap",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tiller-agents",
  "tiller-core",
+ "tiller-herdr",
+ "tiller-observe",
+ "tiller-reconcile",
+ "toml",
 ]
 
 [[package]]

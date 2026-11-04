@@ -404,10 +404,10 @@ about 3 min of the developer's time
 ### T5.1 Replay harness
 `opus` high - 2-3 h - after M4 - critical path
 
-- [ ] Asks from `baseline/replay.jsonl` fed through intake and the orchestrator in sandbox mode
-- [ ] Dispatch, landing and pane sends stubbed; every decision recorded
-- [ ] Check: 30-50 asks with no side effects, proved by a sandbox audit
-- [ ] Delivered
+- [x] Asks from `baseline/replay.jsonl` fed through intake and the orchestrator in sandbox mode
+- [x] Dispatch, landing and pane sends stubbed; every decision recorded
+- [x] Check: 30-50 asks with no side effects, proved by a sandbox audit
+- [x] Delivered
 
 ### T5.2 Replay run and difference report
 `opus` high, pinned judge - 1.5-2 h - after T5.1
