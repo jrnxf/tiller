@@ -1213,6 +1213,271 @@
         }
       }
     },
+    "/api/v1/memory": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "view",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "description": "The document to show: a project id, or `fleet` (the default) for\n\"All projects (shared)\".",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/changes/{proposal}/undo": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "undo",
+        "parameters": [
+          {
+            "name": "proposal",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryUndo"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "already undone, the document changed, or the revert conflicts with a later edit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/edits": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "edit",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryEdit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "the document changed since the board showed it, or the scrub flagged the line",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/proposals/decide": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "decide",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryDecide"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a proposal is not open, the document changed, or a Keep is over the startup budget; earlier decisions in the batch stand",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/revisions/{id}": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "revision",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The revision behind a provenance hint",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryRevision"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects": {
       "get": {
         "tags": [
@@ -3033,6 +3298,622 @@
             }
           }
         }
+      },
+      "MemoryChange": {
+        "type": "object",
+        "description": "One entry in \"Recent changes\".",
+        "required": [
+          "proposal_id",
+          "kind",
+          "from",
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "from": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`added`, `kept`, `edit`, `remove` or `discard`."
+          },
+          "proposal_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemoryDecide": {
+        "type": "object",
+        "description": "`POST /api/v1/memory/proposals/decide`: Keep or Discard on agent\nproposals, each with its own approval row, applied in order.",
+        "required": [
+          "idempotency_key",
+          "decisions"
+        ],
+        "properties": {
+          "decisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemoryDecision"
+            }
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "idempotency_key": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemoryDecision": {
+        "type": "object",
+        "description": "One Keep or Discard.",
+        "required": [
+          "proposal",
+          "decision",
+          "base_blob"
+        ],
+        "properties": {
+          "base_blob": {
+            "type": "string",
+            "description": "The blob the board showed the proposal against."
+          },
+          "decision": {
+            "type": "string",
+            "description": "`keep` or `discard`."
+          },
+          "proposal": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemoryDocSummary": {
+        "type": "object",
+        "description": "One document in the list.",
+        "required": [
+          "project_id",
+          "name",
+          "lines",
+          "suggestions"
+        ],
+        "properties": {
+          "lines": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "`fleet` for \"All projects (shared)\"."
+          },
+          "suggestions": {
+            "type": "integer",
+            "description": "Open agent proposals against it.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemoryDocument": {
+        "type": "object",
+        "required": [
+          "project_id",
+          "name",
+          "path",
+          "blob",
+          "dirty",
+          "sections",
+          "changes"
+        ],
+        "properties": {
+          "blob": {
+            "type": "string",
+            "description": "The blob at `HEAD`; every change sends it back as `base_blob`."
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemoryChange"
+            }
+          },
+          "dirty": {
+            "type": "boolean",
+            "description": "The working tree differs from `HEAD`: changes are refused until it is\ncommitted or reset."
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "sections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemorySection"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemoryEdit": {
+        "type": "object",
+        "description": "`POST /api/v1/memory/edits`: one owner edit, committed at once.",
+        "required": [
+          "idempotency_key",
+          "project",
+          "op",
+          "section",
+          "base_blob"
+        ],
+        "properties": {
+          "base_blob": {
+            "type": "string",
+            "description": "The blob the board showed; another is 422."
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Refused unless absent or this host: memory is never forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The line's position in its section, for `rewrite` and `remove`.",
+            "minimum": 0
+          },
+          "op": {
+            "type": "string",
+            "description": "`add`, `rewrite` or `remove`."
+          },
+          "project": {
+            "type": "string"
+          },
+          "section": {
+            "type": "string"
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The new text, for `add` and `rewrite`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemoryGate": {
+        "type": "object",
+        "description": "`learning.gate` on a proposal (learning-loop.md, section 7), with a\nproposal made against another text refused as stale.",
+        "required": [
+          "proposal",
+          "ok"
+        ],
+        "properties": {
+          "change_set": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "eval_run": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The command that clears it."
+          },
+          "measuring": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MemoryMeasuring",
+                "description": "The set that is measuring and blocks every other, with cards to go."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "proposal": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The failing step, when not ok."
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemoryLine": {
+        "type": "object",
+        "required": [
+          "index",
+          "text"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "description": "Its position in the section, as edits name it.",
+            "minimum": 0
+          },
+          "memory_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provenance": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MemoryProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "suggestion": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MemorySuggestion",
+                "description": "A rewrite or removal of this line."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemoryLoad": {
+        "type": "object",
+        "description": "A session that loaded a revision.",
+        "required": [
+          "session_id",
+          "role",
+          "project_id",
+          "trigger",
+          "loaded_at"
+        ],
+        "properties": {
+          "card": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "loaded_at": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "trigger": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemoryMeasuring": {
+        "type": "object",
+        "required": [
+          "change_set",
+          "name",
+          "cards_closed",
+          "window_cards"
+        ],
+        "properties": {
+          "cards_closed": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "change_set": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "window_cards": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemoryProvenance": {
+        "type": "object",
+        "description": "Where a line came from: the revision that last changed it.",
+        "required": [
+          "revision_id",
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "card": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The card's display id, when a card is behind it."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`you`, `carried over`, `outside Tiller` or the proposing session."
+          },
+          "revision_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemoryResponse": {
+        "type": "object",
+        "description": "`GET /api/v1/memory`.",
+        "required": [
+          "docs",
+          "doc"
+        ],
+        "properties": {
+          "doc": {
+            "$ref": "#/components/schemas/MemoryDocument"
+          },
+          "docs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemoryDocSummary"
+            },
+            "description": "Fleet first."
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemoryRevision": {
+        "type": "object",
+        "description": "`GET /api/v1/memory/revisions/{id}`.",
+        "required": [
+          "id",
+          "project_id",
+          "path",
+          "blob_sha",
+          "review",
+          "provenance",
+          "recorded_at",
+          "approval",
+          "sessions"
+        ],
+        "properties": {
+          "approval": {
+            "type": "object",
+            "description": "The approval row that applied it."
+          },
+          "blob_sha": {
+            "type": "string"
+          },
+          "card": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "commit_sha": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "proposal_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provenance": {
+            "type": "string"
+          },
+          "recorded_at": {
+            "type": "string"
+          },
+          "review": {
+            "type": "string",
+            "description": "`approved`, `unreviewed` or `revoked`."
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemoryLoad"
+            }
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The file's text at this revision; absent once the blob is gone."
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemorySection": {
+        "type": "object",
+        "required": [
+          "title",
+          "class",
+          "lines",
+          "suggestions"
+        ],
+        "properties": {
+          "class": {
+            "type": "string",
+            "description": "`rule`, `note` or `preference`."
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemoryLine"
+            }
+          },
+          "suggestions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemorySuggestion"
+            },
+            "description": "New lines suggested for the section, and suggestions whose line is\ngone."
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemorySuggestion": {
+        "type": "object",
+        "description": "An agent proposal shown inline.",
+        "required": [
+          "proposal_id",
+          "op",
+          "by",
+          "at",
+          "token_budget_after",
+          "gate"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "by": {
+            "type": "string"
+          },
+          "card": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "gate": {
+            "$ref": "#/components/schemas/MemoryGate",
+            "description": "The holdout gate's verdict on keeping it; Keep waits until it passes."
+          },
+          "op": {
+            "type": "string",
+            "description": "`add`, `rewrite` or `retire`."
+          },
+          "proposal_id": {
+            "type": "string"
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The current text of the line a rewrite or removal names, while the\nfile has it."
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "token_budget_after": {
+            "type": "object"
+          },
+          "why": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemoryUndo": {
+        "type": "object",
+        "description": "`POST /api/v1/memory/changes/{proposal}/undo`.",
+        "required": [
+          "idempotency_key",
+          "base_blob"
+        ],
+        "properties": {
+          "base_blob": {
+            "type": "string",
+            "description": "The blob the board showed."
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "idempotency_key": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "MutationResponse": {
         "type": "object",

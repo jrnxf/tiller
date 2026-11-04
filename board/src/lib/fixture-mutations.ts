@@ -3,6 +3,7 @@
 // refusal, and the later receipt stages as change events.
 import type { ChangeEvent, Project } from "./api-types.ts";
 import type { AttentionResponse, InterventionKind, ProjectsResponse } from "./api-types.ts";
+import { memoryMutation } from "./fixtures-memory.ts";
 import { FIXTURE_HEAD_SHA, fixtureResponses } from "./fixtures.ts";
 import { relabelFixture } from "./fixtures-signals.ts";
 import { attentionPath, projectsPath } from "./queries.ts";
@@ -291,6 +292,33 @@ function handle(method: string, path: string, body: Record<string, unknown>): Mu
       return { reply: refused(404, "not_found", `no intervention ${relabel[1]}`), followUps: [] };
     }
     return { reply: recorded(done, null, null), followUps: [] };
+  }
+  const memory = memoryMutation(method, path, body);
+  if (memory) {
+    if (!memory.ok) {
+      return {
+        reply: refused(memory.status, memory.code, memory.message, memory.current),
+        followUps: [],
+      };
+    }
+    // The commit records a revision, which every open memory view refetches.
+    return {
+      reply: recorded(memory.data, null, memory.approvalId),
+      followUps: [
+        {
+          delayMs: 100,
+          event: {
+            kind: "memory_revision.recorded",
+            txn: "mem.apply",
+            entity: "memory_revision",
+            entity_id: path,
+            rev_after: null,
+            card_id: null,
+            entity_state: null,
+          },
+        },
+      ],
+    };
   }
   if (method === "POST" && /^\/api\/v1\/agents\/[^/]+\/focus$/.test(path)) {
     return { reply: recorded({}, null, null), followUps: [] };

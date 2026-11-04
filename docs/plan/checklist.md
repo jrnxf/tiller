@@ -544,12 +544,12 @@ One-time owner setup, per host and repo (CP2, S03):
 ### T7.2 Memory page
 `opus` high - 6-9 h
 
-- [ ] One editable document per project, "All projects (shared)" first
-- [ ] Sections with one line of prose per entry; provenance hint (card id, date) opening source file, approval and loaded-by sessions
-- [ ] Click to edit, add or remove a line; each change commits the real file under git through the scrub hook
-- [ ] Agent proposals inline with Keep and Discard, no separate queue
-- [ ] "Recent changes" rail with Undo, which reverts that commit; retiring keeps history
-- [ ] Delivered
+- [x] One editable document per project, "All projects (shared)" first
+- [x] Sections with one line of prose per entry; provenance hint (card id, date) opening source file, approval and loaded-by sessions
+- [x] Click to edit, add or remove a line; each change commits the real file under git through the scrub hook
+- [x] Agent proposals inline with Keep and Discard, no separate queue
+- [x] "Recent changes" rail with Undo, which reverts that commit; retiring keeps history
+- [x] Delivered
 
 ### T7.3 Learning loop
 `fable` high design, `opus` high build - 5-8 h
@@ -557,7 +557,7 @@ One-time owner setup, per host and repo (CP2, S03):
 - [x] Sampled retros, full retros for incidents and surprising wins
 - [ ] Evidence-backed proposals for mistakes and successes (the curator flow and the retro's evidence rows are in; `tiller mem propose` lands with T7.2)
 - [x] Config hash on every run; one change at a time or a named bundle
-- [x] Holdout eval before any change is approved; "nothing worth saving" is a normal result (the gate is `Store::learning_gate`; `mem.decide` calls it when T7.2 lands)
+- [x] Holdout eval before any change is approved; "nothing worth saving" is a normal result (the gate is `Store::learning_gate`; `mem.decide` runs it before a Keep, and the memory view shows its verdict beside each suggestion)
 - [ ] Delivered
 
 ### T7.4 The two-week check

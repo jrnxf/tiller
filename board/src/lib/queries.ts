@@ -7,6 +7,8 @@ import type {
   BoardResponse,
   CardDetail,
   MachinesResponse,
+  MemoryResponse,
+  MemoryRevision,
   ProjectsResponse,
   QuotaResponse,
   RunDetail,
@@ -135,3 +137,11 @@ const runPath = (runId: string, owner?: string): QueryPath =>
   withParams(`/api/v1/runs/${runId}`, { host: owner });
 export const runQuery = (runId: string, owner?: string) =>
   readQuery<RunDetail>(runPath(runId, owner));
+
+// The memory view: the document list and one document, `fleet` for the shared
+// one (protocol.md section 7.3). Memory is local, so there is no `host`.
+const memoryPath = (scope?: string): QueryPath => withParams("/api/v1/memory", { scope });
+export const memoryQuery = (scope?: string) => readQuery<MemoryResponse>(memoryPath(scope));
+
+export const revisionQuery = (id: string) =>
+  readQuery<MemoryRevision>(`/api/v1/memory/revisions/${id}`);

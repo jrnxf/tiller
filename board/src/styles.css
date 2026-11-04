@@ -1173,20 +1173,6 @@ kbd {
   color: var(--fg-3);
 }
 
-/* Screens that are not built yet */
-
-.placeholder h2 {
-  margin: 0 0 4px;
-  font-size: var(--fs-small);
-  font-weight: var(--w-semibold);
-  color: var(--fg-1);
-}
-
-.placeholder p {
-  margin: 0;
-  color: var(--fg-3);
-}
-
 /* Phones: the sidebar becomes a drawer */
 
 @media (max-width: 820px) {

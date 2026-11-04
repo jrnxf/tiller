@@ -465,3 +465,142 @@ export interface DaemonHealth {
   // False until `tiller init` has made state.db.
   initialized: boolean;
 }
+
+// `GET /api/v1/memory?scope=`: the document list and the chosen document
+// (memory.md section 7, protocol.md section 7.3).
+export interface MemoryDocSummary {
+  // `fleet` for "All projects (shared)".
+  project_id: string;
+  name: string;
+  lines: number;
+  // Open agent proposals against it.
+  suggestions: number;
+}
+
+// The revision that last changed a line.
+export interface MemoryProvenance {
+  revision_id: string;
+  card: string | null;
+  // `you`, `carried over`, `outside Tiller` or the proposing session.
+  note: string | null;
+  at: string;
+}
+
+// `learning.gate` on a proposal, with one made against another text refused
+// as stale.
+interface MemoryGate {
+  proposal: string;
+  ok: boolean;
+  // The failing step, when not ok.
+  reason: string | null;
+  // The command that clears it.
+  hint: string | null;
+  change_set: string | null;
+  eval_run: string | null;
+  // The set that is measuring and blocks every other, with cards to go.
+  measuring: {
+    change_set: string;
+    name: string;
+    cards_closed: number;
+    window_cards: number;
+  } | null;
+}
+
+export interface MemorySuggestion {
+  proposal_id: string;
+  op: "add" | "rewrite" | "retire";
+  // The new text, for `add` and `rewrite`.
+  text: string | null;
+  by: string;
+  card: string | null;
+  at: string;
+  why: string | null;
+  // Tokens each role's prompt would carry once it is kept.
+  token_budget_after: Record<string, number> | null;
+  // The holdout gate's verdict on keeping it; Keep waits until it passes.
+  gate: MemoryGate;
+  // The current text of the line a rewrite or removal names, while the file
+  // has it.
+  target: string | null;
+}
+
+export interface MemoryLine {
+  // Its position in the section, as edits name it.
+  index: number;
+  text: string;
+  memory_id: string | null;
+  provenance: MemoryProvenance | null;
+  // A rewrite or removal of this line.
+  suggestion: MemorySuggestion | null;
+}
+
+export interface MemorySection {
+  title: string;
+  class: string;
+  lines: MemoryLine[];
+  // New lines, and suggestions whose line is gone.
+  suggestions: MemorySuggestion[];
+}
+
+export interface MemoryChange {
+  proposal_id: string;
+  kind: "added" | "kept" | "edit" | "remove" | "discard";
+  text: string | null;
+  from: string;
+  at: string;
+}
+
+export interface MemoryDocument {
+  project_id: string;
+  name: string;
+  path: string;
+  // The blob at `HEAD`; every change sends it back as `base_blob`.
+  blob: string;
+  // The working tree differs from `HEAD`: changes are refused until it is
+  // committed or reset.
+  dirty: boolean;
+  sections: MemorySection[];
+  changes: MemoryChange[];
+}
+
+export interface MemoryResponse {
+  // Fleet first.
+  docs: MemoryDocSummary[];
+  doc: MemoryDocument;
+}
+
+// A session that loaded a revision.
+interface MemoryLoad {
+  session_id: string;
+  role: string;
+  project_id: string;
+  run_id: string | null;
+  card: string | null;
+  trigger: string;
+  loaded_at: string;
+}
+
+// `GET /api/v1/memory/revisions/{id}`.
+export interface MemoryRevision {
+  id: string;
+  project_id: string;
+  path: string;
+  blob_sha: string;
+  commit_sha: string | null;
+  review: "approved" | "unreviewed" | "revoked";
+  provenance: string;
+  recorded_at: string;
+  approval: Record<string, unknown> | null;
+  proposal_id: string | null;
+  card: string | null;
+  sessions: MemoryLoad[];
+  // The file's text at this revision; absent once the blob is gone.
+  text: string | null;
+}
+
+// What one memory change came to.
+export interface MemoryLanded {
+  proposal_id: string;
+  approval_id: string | null;
+  blob: string;
+}

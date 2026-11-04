@@ -16,6 +16,7 @@ pub mod caches;
 pub mod cards;
 pub mod interventions;
 pub mod learning;
+pub mod memory;
 pub mod outbox;
 pub mod peers;
 pub mod projects;

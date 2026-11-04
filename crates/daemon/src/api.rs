@@ -40,14 +40,14 @@ use crate::peer::link::{Forwarded, Peers};
 use crate::peer::{Federation, PeerView};
 use crate::readonly::Damage;
 use crate::views::{self, Filter, LocalHealth, PaneTarget};
-use crate::{auth, sse};
+use crate::{auth, memory, sse};
 
 /// Lines of a pane the run detail shows.
 const PANE_TAIL: usize = 40;
 
 /// What every handler shares.
 #[derive(Clone)]
-pub struct AppState(Arc<Inner>);
+pub struct AppState(pub(crate) Arc<Inner>);
 
 pub struct Inner {
     /// `~/.tiller`: `state.db` and the board credential.
@@ -80,7 +80,7 @@ impl AppState {
         Self(Arc::new(inner))
     }
 
-    fn db(&self) -> PathBuf {
+    pub(crate) fn db(&self) -> PathBuf {
         self.0.home.join("state.db")
     }
 
@@ -136,7 +136,7 @@ impl ApiError {
         Self::new(StatusCode::FORBIDDEN, "forbidden", message)
     }
 
-    fn usage(message: impl Into<String>) -> Self {
+    pub(crate) fn usage(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "usage", message)
     }
 
@@ -295,13 +295,13 @@ impl IntoResponse for ApiError {
     }
 }
 
-type ApiResult<T> = Result<Json<T>, ApiError>;
+pub(crate) type ApiResult<T> = Result<Json<T>, ApiError>;
 
 /// The command that makes `state.db`, named in every answer before it exists.
 pub const INIT_HINT: &str = "tiller init --host-label <label> --lane-capacity <n>";
 
 /// The 503 every read and write answers before `tiller init`.
-fn uninitialized() -> ApiError {
+pub(crate) fn uninitialized() -> ApiError {
     ApiError::from(Error::Unavailable(
         "state.db is not initialized; run tiller init".into(),
     ))
@@ -317,7 +317,7 @@ pub(crate) fn read_only(reason: &str) -> ApiError {
 }
 
 /// Runs `read` on the blocking pool against a fresh read connection.
-async fn read<T: Send + 'static>(
+pub(crate) async fn read<T: Send + 'static>(
     state: &AppState,
     read: impl FnOnce(&Store) -> tiller_core::Result<T> + Send + 'static,
 ) -> Result<T, ApiError> {
@@ -386,7 +386,7 @@ async fn host_check(State(state): State<AppState>, request: Request, next: Next)
 }
 
 /// The checks every mutation passes before its body is read.
-fn guard(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+pub(crate) fn guard(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     let text = |name: header::HeaderName| headers.get(name).and_then(|v| v.to_str().ok());
     let json_body = text(header::CONTENT_TYPE).is_some_and(|value| {
         value
@@ -428,11 +428,11 @@ fn guard(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
 }
 
 /// A JSON body, refused as 400 when it does not parse.
-fn body<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, ApiError> {
+pub(crate) fn body<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, ApiError> {
     serde_json::from_slice(bytes).map_err(|error| ApiError::usage(format!("bad body: {error}")))
 }
 
-fn key(idempotency_key: &str) -> Result<String, ApiError> {
+pub(crate) fn key(idempotency_key: &str) -> Result<String, ApiError> {
     let key = idempotency_key.trim();
     if key.is_empty() {
         return Err(ApiError::usage("idempotency_key is required"));
@@ -537,6 +537,11 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/interventions/{id}/label",
             post(relabel_intervention),
         )
+        .route("/api/v1/memory", get(memory::view))
+        .route("/api/v1/memory/edits", post(memory::edit))
+        .route("/api/v1/memory/proposals/decide", post(memory::decide))
+        .route("/api/v1/memory/changes/{proposal}/undo", post(memory::undo))
+        .route("/api/v1/memory/revisions/{id}", get(memory::revision))
         .route("/api/v1/signals", get(signals))
         .route("/api/v1/events", get(events))
         .route("/login/{token}", get(login))
@@ -1379,7 +1384,11 @@ async fn forward(
 
 /// An op off the forwarding allowlist, with a peer `host`: 502
 /// `peer_refused` before anything else (`protocol.md` 7.4).
-async fn not_forwarded(state: &AppState, host: Option<&str>, what: &str) -> Result<(), ApiError> {
+pub(crate) async fn not_forwarded(
+    state: &AppState,
+    host: Option<&str>,
+    what: &str,
+) -> Result<(), ApiError> {
     let label = match addressed(state, host).await? {
         Addressed::Here => return Ok(()),
         Addressed::Peer(view) => view.label,
@@ -1762,7 +1771,8 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, decide, focus, stage_project, relabel_intervention
+        cancel, reopen, answer, decide, focus, stage_project, relabel_intervention, memory::view, memory::revision,
+        memory::edit, memory::decide, memory::undo
     ),
     components(schemas(ChangeEvent, ResetEvent, PeerEvent, LinkEvent, PeerResetEvent, ErrorBody, ErrorDetail)),
     tags(

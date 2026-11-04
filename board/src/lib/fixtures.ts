@@ -30,6 +30,7 @@ import {
   peerRows,
   peerSnapshot,
 } from "./fixtures-federated.ts";
+import { memoryResource } from "./fixtures-memory.ts";
 import { signalsFor } from "./fixtures-signals.ts";
 import { isPeerRow } from "./peers.ts";
 import {
@@ -1096,6 +1097,7 @@ export function fixtureResource(
   if (detail?.[1]) return cardDetailFor(board, detail[1], now) ?? undefined;
   const run = /^\/api\/v1\/runs\/([^/]+)$/.exec(url.pathname);
   if (run?.[1]) return runDetailFor(run[1], now);
+  if (url.pathname.startsWith("/api/v1/memory")) return memoryResource(url);
   return undefined;
 }
 

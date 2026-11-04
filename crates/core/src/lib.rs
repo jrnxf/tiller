@@ -11,6 +11,7 @@ mod events;
 pub mod health;
 pub mod ids;
 pub mod import;
+pub mod memory;
 pub mod migrate;
 pub mod state;
 pub mod store;
