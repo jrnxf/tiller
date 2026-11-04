@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tiller_core::domain::{
-    Activity, Card, Effort, Host, ObservationSource, Project, Run, RunRole, Session,
+    Activity, Card, Delivery, Effort, Host, ObservationSource, Project, Run, RunRole, Session,
 };
 use tiller_core::state::get;
 use tiller_core::state::runs::{
@@ -744,6 +744,7 @@ fn start_again(
                 default_branch: &project.default_branch,
                 network_allow: &world.config.spawn.network_allow,
                 no_mistakes_socket: world.config.spawn.no_mistakes_socket.as_deref(),
+                gh_login_readable: project.effective_delivery() == Delivery::NoMistakes,
                 claude: &world.config.spawn.claude,
                 claude_config: world.claude_config,
                 claude_version: claude_version.as_deref(),

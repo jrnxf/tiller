@@ -9,7 +9,7 @@ exit: 0
     "format": "tiller-export/v1",
     "host_id": "<id1>",
     "max_seq": 5,
-    "schema_version": 8,
+    "schema_version": 9,
     "tables": [
       {
         "file": "approvals.jsonl",
@@ -206,6 +206,12 @@ exit: 0
       {
         "file": "prs.jsonl",
         "name": "prs",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "publishes.jsonl",
+        "name": "publishes",
         "rows": 0,
         "sha256": "<sha256>"
       },

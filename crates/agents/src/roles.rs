@@ -96,6 +96,11 @@ pub struct Placeholders {
     /// The `no-mistakes` daemon socket, when the project uses it. Expands the
     /// `<no_mistakes_socket>` list entry; `None` removes it.
     pub no_mistakes_socket: Option<String>,
+    /// The worker may read the owner's GitHub login (`~/.config/gh`): only
+    /// on a `no-mistakes` project, whose gate runs inside the sandbox. Off,
+    /// `<gh_login_rule>` and `<gh_login_path>` expand to the deny entries
+    /// that keep it out; on, they are removed.
+    pub gh_login_readable: bool,
 }
 
 /// The packaged MCP config: no servers. Tiller ships no MCP server in v1.
@@ -116,7 +121,17 @@ pub const STRING_PLACEHOLDERS: [&str; 8] = [
 
 /// The list placeholders: a list entry that is exactly one of these is
 /// replaced by zero or more entries.
-pub const LIST_PLACEHOLDERS: [&str; 2] = ["<network_allow>", "<no_mistakes_socket>"];
+pub const LIST_PLACEHOLDERS: [&str; 4] = [
+    "<network_allow>",
+    "<no_mistakes_socket>",
+    "<gh_login_rule>",
+    "<gh_login_path>",
+];
+
+/// What `<gh_login_rule>` and `<gh_login_path>` expand to while the owner's
+/// GitHub login is hidden: a file tool deny rule and a sandbox read deny.
+pub const GH_LOGIN_RULE: &str = "Read(~/.config/gh/**)";
+pub const GH_LOGIN_PATH: &str = "~/.config/gh";
 
 impl Role {
     /// Every role, orchestrator first.
@@ -307,8 +322,8 @@ impl fmt::Display for Role {
 /// Render the role's settings fragment for one run.
 ///
 /// Every string in the template has its placeholders replaced. A list entry
-/// that is exactly `<network_allow>` or `<no_mistakes_socket>` is replaced by
-/// the corresponding list (zero or more entries). A path the template needs
+/// that is exactly one of [`LIST_PLACEHOLDERS`] is replaced by the
+/// corresponding list (zero or more entries). A path the template needs
 /// that is empty, relative or ends with a slash is refused before anything is
 /// rendered, and a placeholder that is still present afterwards is an error,
 /// so a run never starts with a half-filled or over-wide fragment.
@@ -347,6 +362,16 @@ fn fill_value(value: &mut Value, fill: &Placeholders) {
                     }
                     Some("<no_mistakes_socket>") => {
                         filled.extend(fill.no_mistakes_socket.iter().cloned().map(Value::String));
+                    }
+                    Some("<gh_login_rule>") => {
+                        if !fill.gh_login_readable {
+                            filled.push(Value::String(GH_LOGIN_RULE.into()));
+                        }
+                    }
+                    Some("<gh_login_path>") => {
+                        if !fill.gh_login_readable {
+                            filled.push(Value::String(GH_LOGIN_PATH.into()));
+                        }
                     }
                     _ => {
                         let mut item = item;
@@ -518,7 +543,10 @@ mod tests {
         RoleRow {
             role: Role::Builder,
             mode: "dontAsk",
-            extra_deny: &[],
+            // The daemon pushes and opens a direct-pr PR as the owner, so a
+            // builder needs the owner's GitHub login only for the
+            // no-mistakes gate (`authority.md` section 8).
+            extra_deny: &["<gh_login_rule>"],
             allow: &[
                 "Bash",
                 "Edit(/<worktree>/**)",
@@ -699,6 +727,7 @@ mod tests {
             default_branch: "main".into(),
             network_allow: vec!["github.com".into(), "api.github.com".into()],
             no_mistakes_socket: Some("/run/user/1000/no-mistakes.sock".into()),
+            gh_login_readable: false,
         }
     }
 
@@ -1260,6 +1289,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The daemon pushes and opens a direct-pr PR as the owner, so a builder
+    /// needs the owner's GitHub login only for a no-mistakes gate: otherwise
+    /// its file tools and its shell are both kept out of it.
+    #[test]
+    fn the_builder_cannot_read_the_owners_github_login() {
+        let mut fill = sample_fill(Role::Builder);
+        let hidden = render_settings(Role::Builder, &fill).unwrap();
+        assert!(strings(&hidden["permissions"]["deny"]).contains(&GH_LOGIN_RULE));
+        assert!(strings(&hidden["sandbox"]["filesystem"]["denyRead"]).contains(&GH_LOGIN_PATH));
+
+        fill.gh_login_readable = true;
+        let readable = render_settings(Role::Builder, &fill).unwrap();
+        assert!(!strings(&readable["permissions"]["deny"]).contains(&GH_LOGIN_RULE));
+        assert!(!strings(&readable["sandbox"]["filesystem"]["denyRead"]).contains(&GH_LOGIN_PATH));
+        assert_eq!(
+            strings(&hidden["permissions"]["deny"]).len(),
+            strings(&readable["permissions"]["deny"]).len() + 1
+        );
     }
 
     #[test]

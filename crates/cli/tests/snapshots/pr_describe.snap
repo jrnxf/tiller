@@ -1,0 +1,24 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "attempted_at": null,
+    "attempted_sha": null,
+    "body": "Reads the board code.",
+    "described_at": "<time>",
+    "error": null,
+    "pr_id": null,
+    "pushed_at": null,
+    "pushed_sha": null,
+    "rev": 1,
+    "run_id": "<id35>",
+    "title": "Board: read the code"
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

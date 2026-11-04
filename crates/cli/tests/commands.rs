@@ -37,6 +37,14 @@ fn step_as(world: &World, session: &str, name: &str, args: &[&str]) -> common::O
     out
 }
 
+fn fails_as(world: &World, session: &str, code: i32, name: &str, args: &[&str]) -> common::Out {
+    let out = world.run_as(session, args);
+    assert_eq!(out.code, code, "{name}: {}", out.json);
+    assert!(!out.ok());
+    snap(world, name, &out);
+    out
+}
+
 fn id(out: &common::Out, path: &str) -> String {
     out.json
         .pointer(path)
@@ -430,6 +438,34 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
         &worker,
         "pr_link",
         &["pr", "link", "https://example.com/example/alpha/pull/7"],
+    );
+    // Direct-pr delivery: the worker describes its PR before it reports done,
+    // and the daemon pushes the branch and opens the PR from that description.
+    fails_as(
+        &world,
+        &worker,
+        5,
+        "status_done_undescribed",
+        &["status", "done", "ready in branch alpha-1-build"],
+    );
+    step_as(
+        &world,
+        &worker,
+        "pr_describe",
+        &[
+            "pr",
+            "describe",
+            "--title",
+            "Board: read the code",
+            "--body",
+            "Reads the board code.",
+        ],
+    );
+    step_as(
+        &world,
+        &worker,
+        "status_done",
+        &["status", "done", "ready in branch alpha-1-build"],
     );
     step(
         &world,

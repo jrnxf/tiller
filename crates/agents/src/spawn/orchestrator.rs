@@ -143,6 +143,7 @@ pub fn start(
         default_branch: &project.default_branch,
         network_allow: &world.config.spawn.network_allow,
         no_mistakes_socket: world.config.spawn.no_mistakes_socket.as_deref(),
+        gh_login_readable: false,
         claude: &world.config.spawn.claude,
         claude_config: world.claude_config,
         claude_version: claude_version.as_deref(),

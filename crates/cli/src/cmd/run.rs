@@ -4,16 +4,17 @@
 use clap::{Args, Subcommand};
 use serde_json::json;
 use tiller_core::domain::{
-    Artifact, ArtifactKind, Card, OutboxKind, OutboxMessage, Pr, PrState, Review, Run, RunOutcome,
-    RunRole, StatusState,
+    Artifact, ArtifactKind, Card, Delivery, OutboxKind, OutboxMessage, Pr, PrState, Project,
+    Review, Run, RunOutcome, RunRole, StatusState,
 };
 use tiller_core::state::approvals::NewPr;
 use tiller_core::state::outbox::NewMessage;
+use tiller_core::state::publishes::publish;
 use tiller_core::state::{find, get, list, resolve_card, resolve_id};
 
 use super::card::herdr_name;
 use super::{KeyArg, resolve_run, resolve_session};
-use crate::app::{App, Done, Failure, Outcome, text_input};
+use crate::app::{App, Done, Failure, Outcome, body_input, text_input};
 use crate::lisbon;
 
 #[derive(Args, Debug)]
@@ -71,6 +72,17 @@ pub enum Pr_ {
         #[arg(long)]
         card: Option<String>,
     },
+    /// Give the title and body the daemon opens the run's PR with
+    /// (direct-pr delivery: the worker commits, the daemon pushes and opens)
+    Describe {
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        body: Option<String>,
+        /// A file holding the body, or - for standard input
+        #[arg(long)]
+        body_file: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -109,6 +121,9 @@ pub fn status(app: &App, args: Status) -> Done {
     let run_id = session
         .run_id
         .ok_or_else(|| Failure::refused("the calling session has no run"))?;
+    if args.state == StatusState::Done {
+        undescribed(&store, &run_id)?;
+    }
     let keyed = app.key(
         &store,
         "run.status",
@@ -128,6 +143,30 @@ pub fn status(app: &App, args: Status) -> Done {
         applied.value = paused.value;
     }
     Ok(Outcome::applied(applied))
+}
+
+/// A direct-pr builder reports done only once its PR is described: the
+/// daemon pushes the branch and opens the PR from that description, and
+/// without one it would have nothing to open.
+fn undescribed(store: &tiller_core::store::Store, run_id: &str) -> Result<(), Failure> {
+    let run: Run = get(store.conn(), "run", run_id)?;
+    if run.role != RunRole::Builder || run.ended_at.is_some() {
+        return Ok(());
+    }
+    let project: Project = get(
+        store.conn(),
+        "project",
+        &store.card(&run.card_id)?.project_id,
+    )?;
+    if project.effective_delivery() != Delivery::DirectPr
+        || publish(store.conn(), &run.id)?.is_some()
+    {
+        return Ok(());
+    }
+    Err(Failure::refused(
+        "describe the PR first: tiller pr describe --title <t> --body-file <f>; \
+         the daemon pushes the branch and opens the PR when you report done",
+    ))
 }
 
 pub fn run_cmd(app: &App, cmd: RunCmd) -> Done {
@@ -256,7 +295,29 @@ fn default_outcome(store: &tiller_core::Store, run: &Run) -> Result<RunOutcome, 
 }
 
 pub fn pr_cmd(app: &App, cmd: Pr_) -> Done {
-    let Pr_::Link { url, card } = cmd;
+    match cmd {
+        Pr_::Link { url, card } => pr_link(app, url, card),
+        Pr_::Describe {
+            title,
+            body,
+            body_file,
+        } => {
+            let body = body_input(body, body_file.as_deref())?
+                .ok_or_else(|| Failure::usage("give the PR body with --body or --body-file"))?;
+            let mut store = app.write()?;
+            let run_id = app
+                .session(&store)?
+                .and_then(|session| session.run_id)
+                .ok_or_else(|| {
+                    Failure::forbidden("tiller pr describe is run by a worker session")
+                })?;
+            let applied = store.pr_describe(&app.ctx(), &run_id, &title, &body)?;
+            Ok(Outcome::applied(applied))
+        }
+    }
+}
+
+fn pr_link(app: &App, url: String, card: Option<String>) -> Done {
     let number = pr_number(&url)?;
     let mut store = app.write()?;
     let session = app.session(&store)?;

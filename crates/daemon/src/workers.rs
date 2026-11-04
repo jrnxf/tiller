@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use tiller_agents::intake::{HostConfig, IntakeSource};
 use tiller_agents::land::forge::{GhForge, NoApp};
+use tiller_agents::land::publish::Published;
 use tiller_agents::land::scrub::ScrubList;
 use tiller_agents::land::{DaemonLock, Landed, Lander};
 use tiller_agents::spawn::readings;
@@ -81,6 +82,8 @@ pub struct Tools {
     pub herdr: Cli,
     /// `quota-axi`, with any leading arguments.
     pub quota: Vec<OsString>,
+    /// The GitHub CLI program.
+    pub gh: String,
 }
 
 /// The host's boot id, when the OS reports one (R04).
@@ -205,6 +208,57 @@ impl Source for Land {
                 }
                 _ => {}
             }
+        }
+        Ok(())
+    }
+}
+
+/// The publish loop of direct-pr runs (`authority.md` section 6): pushes
+/// the branch of each run that reports done and opens its PR. Its own
+/// source, so a slow remote never holds up landing. Only the holder of the
+/// single-instance lock publishes.
+pub struct Publish {
+    store: Store,
+    lock: Arc<DaemonLock>,
+    forge: GhForge,
+}
+
+impl Source for Publish {
+    fn name(&self) -> String {
+        "publish".to_owned()
+    }
+
+    fn interval(&self) -> Duration {
+        Duration::from_secs(15)
+    }
+
+    fn poll(&mut self, _now: Timestamp) -> Result<(), PollError> {
+        let lander = Lander {
+            forge: &self.forge,
+            app: &NoApp,
+            scrub: ScrubList::default(),
+        };
+        // One run that errors is logged and skipped.
+        let pass = lander
+            .publish_ready(&self.lock, &mut self.store)
+            .map_err(|error| PollError::State(tiller_core::Error::Internal(error.to_string())))?;
+        for published in pass.published {
+            match published {
+                Published::Done {
+                    run,
+                    sha,
+                    url,
+                    opened,
+                } => {
+                    tracing::info!(run, sha, url, opened, "published");
+                }
+                Published::Failed { run, sha, error } => {
+                    tracing::warn!(run, ?sha, %error, "publish failed");
+                }
+            }
+        }
+        for (run, error) in pass.errors {
+            tracing::warn!(run, %error, "publish errored");
         }
         Ok(())
     }
@@ -376,11 +430,16 @@ pub fn start(
         harness: Box::new(NoHarness),
     };
     let reconcile = Reconcile(Reconciler::new(open()?, config, sources));
+    let publish = Publish {
+        store: open()?,
+        lock: lock.clone(),
+        forge: GhForge::new(tools.gh.clone()),
+    };
     let land = Land {
         home: home.to_owned(),
         store: open()?,
         lock,
-        forge: GhForge::default(),
+        forge: GhForge::new(tools.gh.clone()),
     };
     let transcripts = Transcripts {
         store: open()?,
@@ -395,6 +454,7 @@ pub fn start(
     spawn(registry, machines, stop, &mut handles);
     spawn(registry, delivery, stop, &mut handles);
     spawn(registry, reconcile, stop, &mut handles);
+    spawn(registry, publish, stop, &mut handles);
     spawn(registry, land, stop, &mut handles);
     spawn(registry, transcripts, stop, &mut handles);
     spawn(registry, quota, stop, &mut handles);

@@ -5,26 +5,31 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 
 use serde_json::{Value, json};
 use tiller_core::domain::{
-    AnsweredVia, Approval, ApprovalAction, ApprovalKind, ApprovalState, Attention, Boundary, Card,
-    CardKind, Checks, Coverage, Delivery, Effort, GrantKind, MergeGate, Mergeable, PipelineState,
-    PrState, ReviewDecision, Reviewer, RunRole, Stage, Verdict,
+    AnsweredVia, Approval, ApprovalAction, ApprovalKind, ApprovalState, Attention, AttentionKind,
+    Boundary, Card, CardKind, Checks, Coverage, Delivery, Effort, GrantKind, MergeGate, Mergeable,
+    OutboxMessage, PipelineState, Pr, PrState, Publish, ReviewDecision, Reviewer, Run, RunRole,
+    Stage, StatusState, Verdict,
 };
 use tiller_core::state::approvals::{Decision, NewApproval, NewGrant, NewPr, PrFetch};
 use tiller_core::state::cards::NewCard;
 use tiller_core::state::projects::{Init, NewProject};
+use tiller_core::state::publishes::publish;
 use tiller_core::state::records::NewReview;
-use tiller_core::state::runs::{NewOrchestrator, NewRun, SpawnChecks};
+use tiller_core::state::runs::{NewOrchestrator, NewRun, SpawnChecks, live_session};
 use tiller_core::state::{find, get, list};
 use tiller_core::{Actor, Ctx, Store};
 
 use super::forge::{
-    AppToken, AppTokens, Forge, ForgeError, Identity, MergeOutcome, MergeRequest, NoApp, PullView,
+    AppToken, AppTokens, Forge, ForgeError, Identity, MergeOutcome, MergeRequest, NewPull, NoApp,
+    PullRef, PullText, PullView,
 };
+use super::publish::{Published, RETRY_MINUTES, waiting};
 use super::scrub::ScrubList;
 use super::*;
 
@@ -40,6 +45,16 @@ struct FakeForge {
     reads: RefCell<usize>,
     /// The head a push between the re-read and the merge leaves on the PR.
     push_before_merge: RefCell<Option<String>>,
+    /// The open PRs by head branch, as a publish finds or opens them.
+    pulls: RefCell<Vec<(String, PullRef)>>,
+    opened: RefCell<Vec<NewPull>>,
+    /// What the next `open_pull` fails with, and whether the PR is opened
+    /// anyway (a reply lost after GitHub created it).
+    open_error: RefCell<Option<(String, bool)>>,
+    /// Each PR's state, title and body by number, as `pull_text` reads them.
+    texts: RefCell<HashMap<i64, PullText>>,
+    /// Every `edit_pull`: the number, title and body.
+    edits: RefCell<Vec<(i64, String, String)>>,
 }
 
 impl FakeForge {
@@ -59,7 +74,26 @@ impl FakeForge {
             merges: RefCell::new(Vec::new()),
             reads: RefCell::new(0),
             push_before_merge: RefCell::new(None),
+            pulls: RefCell::new(Vec::new()),
+            opened: RefCell::new(Vec::new()),
+            open_error: RefCell::new(None),
+            texts: RefCell::new(HashMap::new()),
+            edits: RefCell::new(Vec::new()),
         }
+    }
+
+    fn edits(&self) -> Vec<(i64, String, String)> {
+        self.edits.borrow().clone()
+    }
+
+    fn set_state(&self, number: i64, state: PrState) {
+        if let Some(text) = self.texts.borrow_mut().get_mut(&number) {
+            text.state = state;
+        }
+    }
+
+    fn opened(&self) -> Vec<NewPull> {
+        self.opened.borrow().clone()
     }
 
     fn set(&self, edit: impl FnOnce(&mut PullView)) {
@@ -96,6 +130,96 @@ impl Forge for FakeForge {
             );
         }
         self.outcome.borrow().clone()
+    }
+
+    fn find_pull(
+        &self,
+        _repo: &str,
+        branch: &str,
+    ) -> std::result::Result<Option<PullRef>, ForgeError> {
+        Ok(self
+            .pulls
+            .borrow()
+            .iter()
+            .find(|(head, _)| head == branch)
+            .map(|(_, pull)| pull.clone()))
+    }
+
+    fn open_pull(&self, pull: &NewPull) -> std::result::Result<PullRef, ForgeError> {
+        let error = self.open_error.borrow_mut().take();
+        let created = PullRef {
+            number: 40 + self.opened.borrow().len() as i64,
+            url: format!(
+                "https://example.com/{}/pull/{}",
+                pull.repo,
+                40 + self.opened.borrow().len()
+            ),
+            head_sha: HEAD.into(),
+            base_ref: pull.base.clone(),
+        };
+        let text = PullText {
+            state: PrState::Open,
+            title: pull.title.clone(),
+            body: pull.body.clone(),
+        };
+        if let Some((error, created_anyway)) = error {
+            if created_anyway {
+                self.texts.borrow_mut().insert(created.number, text);
+                self.pulls.borrow_mut().push((pull.head.clone(), created));
+            }
+            return Err(ForgeError::Write(error));
+        }
+        if self
+            .pulls
+            .borrow()
+            .iter()
+            .any(|(head, _)| *head == pull.head)
+        {
+            return Err(ForgeError::Write(
+                "A pull request already exists for example:fm/alpha-1. (HTTP 422)".into(),
+            ));
+        }
+        self.opened.borrow_mut().push(pull.clone());
+        self.texts.borrow_mut().insert(created.number, text);
+        self.pulls
+            .borrow_mut()
+            .push((pull.head.clone(), created.clone()));
+        Ok(created)
+    }
+
+    /// A PR the test seeded without a text reads as open and undescribed.
+    fn pull_text(&self, _repo: &str, number: i64) -> std::result::Result<PullText, ForgeError> {
+        Ok(self
+            .texts
+            .borrow()
+            .get(&number)
+            .cloned()
+            .unwrap_or(PullText {
+                state: PrState::Open,
+                title: String::new(),
+                body: String::new(),
+            }))
+    }
+
+    fn edit_pull(
+        &self,
+        _repo: &str,
+        number: i64,
+        title: &str,
+        body: &str,
+    ) -> std::result::Result<(), ForgeError> {
+        self.edits
+            .borrow_mut()
+            .push((number, title.into(), body.into()));
+        let mut texts = self.texts.borrow_mut();
+        let text = texts.entry(number).or_insert(PullText {
+            state: PrState::Open,
+            title: String::new(),
+            body: String::new(),
+        });
+        text.title = title.into();
+        text.body = body.into();
+        Ok(())
     }
 }
 
@@ -1472,4 +1596,560 @@ fn local_only_land_fast_forwards_the_checkout() {
         "{advanced:?}"
     );
     assert_eq!(git(main.path(), &["rev-parse", "refs/heads/main"]), raced);
+}
+
+// -- publish ------------------------------------------------------------------
+
+/// A builder run working in `work` on `fm/alpha-1` with its PR described.
+/// Returns the card, the run and its worker session.
+fn described(world: &mut World, work: &Path) -> (Card, String, String) {
+    let card = world.card("publish it");
+    let run = world.builder(&card, Some(work), "fm/alpha-1");
+    let session = live_session(world.store.conn(), &run).unwrap().unwrap().id;
+    world
+        .store
+        .pr_describe(
+            &Ctx::new(Actor::Session(session.clone())),
+            &run,
+            "Publish it",
+            "Adds the feature.",
+        )
+        .unwrap();
+    (card, run, session)
+}
+
+/// One publish pass that records every run it takes.
+fn publish_pass(forge: &FakeForge, lock: &DaemonLock, world: &mut World) -> Vec<Published> {
+    let pass = lander(forge).publish_ready(lock, &mut world.store).unwrap();
+    assert!(pass.errors.is_empty(), "{:?}", pass.errors);
+    pass.published
+}
+
+fn report_done(world: &mut World, run: &str, session: &str) {
+    world
+        .store
+        .run_status(
+            &Ctx::new(Actor::Session(session.into())),
+            run,
+            StatusState::Done,
+            "ready in branch fm/alpha-1",
+        )
+        .unwrap();
+}
+
+fn notes(world: &World, session: &str) -> Vec<String> {
+    list::<OutboxMessage>(
+        world.store.conn(),
+        "target_session_id = ?1 ORDER BY rowid",
+        &[&session],
+    )
+    .unwrap()
+    .into_iter()
+    .map(|message| message.body)
+    .collect()
+}
+
+fn record(world: &World, run: &str) -> Publish {
+    publish(world.store.conn(), run).unwrap().unwrap()
+}
+
+fn remote_branch(remote: &Path) -> String {
+    git(
+        remote,
+        &["branch", "--list", "--format=%(objectname)", "fm/alpha-1"],
+    )
+}
+
+/// The worker only commits: on done the daemon pushes the branch and opens
+/// one PR from the worker's description, and a second pass or a later done
+/// at a new head keeps that PR.
+#[test]
+fn publish_pushes_the_branch_and_opens_one_pr() {
+    let (remote, work, head) = repos();
+    let mut world = World::new(Delivery::DirectPr);
+    let lock = world.lock();
+    let forge = FakeForge::new();
+    let (card, run, session) = described(&mut world, work.path());
+
+    // Not done yet: nothing moves.
+    let passed = publish_pass(&forge, &lock, &mut world);
+    assert!(passed.is_empty(), "{passed:?}");
+    assert_eq!(remote_branch(remote.path()), "");
+
+    report_done(&mut world, &run, &session);
+    let passed = publish_pass(&forge, &lock, &mut world);
+    let url = "https://example.com/example/alpha/pull/40".to_owned();
+    assert_eq!(
+        passed,
+        vec![Published::Done {
+            run: run.clone(),
+            sha: head.clone(),
+            url: url.clone(),
+            opened: true,
+        }]
+    );
+    assert_eq!(remote_branch(remote.path()), head);
+    let opened = forge.opened();
+    assert_eq!(opened.len(), 1);
+    assert_eq!(
+        (
+            opened[0].repo.as_str(),
+            opened[0].head.as_str(),
+            opened[0].base.as_str(),
+            opened[0].title.as_str(),
+            opened[0].body.as_str(),
+        ),
+        (
+            "example/alpha",
+            "fm/alpha-1",
+            "main",
+            "Publish it",
+            "Adds the feature."
+        )
+    );
+    let published = record(&world, &run);
+    assert_eq!(published.pushed_sha.as_deref(), Some(head.as_str()));
+    let pr: Pr = get(
+        world.store.conn(),
+        "pr",
+        published.pr_id.as_deref().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        (pr.number, pr.card_id.as_str(), pr.run_id.as_deref()),
+        (40, card.id.as_str(), Some(run.as_str()))
+    );
+    let told = notes(&world, &session);
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(told[0].contains(&url), "{told:?}");
+
+    // Idempotent: a second pass, as after a daemon restart, does nothing.
+    let passed = publish_pass(&forge, &lock, &mut world);
+    assert!(passed.is_empty(), "{passed:?}");
+    assert_eq!(forge.opened().len(), 1);
+    assert_eq!(notes(&world, &session).len(), 1);
+
+    // New commits and a new done: pushed to the same PR.
+    let later = commit(work.path(), "review fixes");
+    report_done(&mut world, &run, &session);
+    let passed = publish_pass(&forge, &lock, &mut world);
+    assert_eq!(
+        passed,
+        vec![Published::Done {
+            run: run.clone(),
+            sha: later.clone(),
+            url,
+            opened: false,
+        }]
+    );
+    assert_eq!(remote_branch(remote.path()), later);
+    assert_eq!(forge.opened().len(), 1);
+    assert_eq!(record(&world, &run).pr_id, published.pr_id);
+    assert_eq!(notes(&world, &session).len(), 2);
+    assert!(world.attention(&card).is_empty());
+}
+
+/// A crash after the PR was opened but before it was recorded, or a reply
+/// lost after GitHub created it: the next pass finds the open PR on the
+/// branch and records it instead of opening a second one.
+#[test]
+fn a_pr_opened_before_a_crash_is_found_not_opened_again() {
+    let (_remote, work, head) = repos();
+    let mut world = World::new(Delivery::DirectPr);
+    let lock = world.lock();
+    let forge = FakeForge::new();
+    forge.pulls.borrow_mut().push((
+        "fm/alpha-1".into(),
+        PullRef {
+            number: 12,
+            url: "https://example.com/example/alpha/pull/12".into(),
+            head_sha: head.clone(),
+            base_ref: "main".into(),
+        },
+    ));
+    let (_card, run, session) = described(&mut world, work.path());
+    report_done(&mut world, &run, &session);
+    let passed = publish_pass(&forge, &lock, &mut world);
+    assert!(
+        matches!(&passed[..], [Published::Done { url, .. }] if url.ends_with("/pull/12")),
+        "{passed:?}"
+    );
+    assert!(forge.opened().is_empty());
+
+    let (_remote, work, _head) = repos();
+    let mut world = World::new(Delivery::DirectPr);
+    let lock = world.lock();
+    let forge = FakeForge::new();
+    *forge.open_error.borrow_mut() = Some(("error connecting to api.github.com".into(), true));
+    let (_card, run, session) = described(&mut world, work.path());
+    report_done(&mut world, &run, &session);
+    let passed = publish_pass(&forge, &lock, &mut world);
+    assert!(
+        matches!(&passed[..], [Published::Done { url, .. }] if url.ends_with("/pull/40")),
+        "{passed:?}"
+    );
+    assert_eq!(forge.pulls.borrow().len(), 1);
+    let prs: Vec<Pr> = list(world.store.conn(), "run_id = ?1", &[&run]).unwrap();
+    assert_eq!(prs.len(), 1);
+}
+
+/// A failure is an owner-facing attention item with the real error, and a
+/// note to the worker, once per head and step; the same head waits out the
+/// backoff unless the worker reports done again, and a later success
+/// withdraws the item.
+#[test]
+fn a_failed_publish_raises_the_real_error_once() {
+    let (_remote, work, head) = repos();
+    let mut world = World::new(Delivery::DirectPr);
+    let lock = world.lock();
+    let forge = FakeForge::new();
+    let raw = "HTTP 403: Resource not accessible by integration";
+    *forge.open_error.borrow_mut() = Some((raw.into(), false));
+    let error = format!("forge write failed: {raw}");
+    let error = error.as_str();
+    let (card, run, session) = described(&mut world, work.path());
+    report_done(&mut world, &run, &session);
+
+    let passed = publish_pass(&forge, &lock, &mut world);
+    assert_eq!(
+        passed,
+        vec![Published::Failed {
+            run: run.clone(),
+            sha: Some(head.clone()),
+            error: error.into(),
+        }]
+    );
+    let items = world.attention(&card);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].kind, AttentionKind::Recovery);
+    assert!(items[0].question.contains(error), "{}", items[0].question);
+    assert_eq!(items[0].opened_by_run_id.as_deref(), Some(run.as_str()));
+    let evidence: Value = serde_json::from_str(items[0].evidence.as_deref().unwrap()).unwrap();
+    assert_eq!(evidence["step"], "pr");
+    assert_eq!(evidence["error"], error);
+    let told = notes(&world, &session);
+    assert!(told.len() == 1 && told[0].contains(error), "{told:?}");
+    let failed = record(&world, &run);
+    assert_eq!(failed.error.as_deref(), Some(error));
+    assert_eq!(failed.attempted_sha.as_deref(), Some(head.as_str()));
+    assert_eq!(failed.pr_id, None);
+
+    // The same head waits out the backoff: no second item, no second note.
+    let passed = publish_pass(&forge, &lock, &mut world);
+    assert!(passed.is_empty(), "{passed:?}");
+    assert_eq!(world.attention(&card).len(), 1);
+    assert_eq!(notes(&world, &session).len(), 1);
+    let current: Run = get(world.store.conn(), "run", &run).unwrap();
+    let at = failed.attempted_at.unwrap();
+    assert!(waiting(&current, &failed, Some(&head), at));
+    assert!(!waiting(
+        &current,
+        &failed,
+        Some(&head),
+        at.plus_minutes(RETRY_MINUTES)
+    ));
+    assert!(!waiting(&current, &failed, Some("another head"), at));
+
+    // A new done report tries again at once; this time GitHub opens it.
+    report_done(&mut world, &run, &session);
+    let passed = publish_pass(&forge, &lock, &mut world);
+    assert!(
+        matches!(&passed[..], [Published::Done { opened: true, .. }]),
+        "{passed:?}"
+    );
+    assert!(world.attention(&card).is_empty());
+    let done = record(&world, &run);
+    assert_eq!(done.error, None);
+    assert_eq!(done.pushed_sha.as_deref(), Some(head.as_str()));
+}
+
+/// A worktree with uncommitted changes to tracked files is not pushed: the
+/// owner and the worker hear which files, and nothing reaches the remote
+/// until they are committed. Untracked files do not count: the sandbox's
+/// empty read-only placeholders show up there while a command runs.
+#[test]
+fn a_dirty_worktree_is_not_published() {
+    let (remote, work, _head) = repos();
+    let mut world = World::new(Delivery::DirectPr);
+    let lock = world.lock();
+    let forge = FakeForge::new();
+    let (card, run, session) = described(&mut world, work.path());
+    std::fs::write(work.path().join("feature"), "half done").unwrap();
+    let placeholder = work.path().join(".bashrc");
+    std::fs::write(&placeholder, "").unwrap();
+    let mut readonly = std::fs::metadata(&placeholder).unwrap().permissions();
+    readonly.set_readonly(true);
+    std::fs::set_permissions(&placeholder, readonly).unwrap();
+    report_done(&mut world, &run, &session);
+    let passed = publish_pass(&forge, &lock, &mut world);
+    assert!(
+        matches!(&passed[..], [Published::Failed { error, .. }]
+            if error.contains("M feature") && !error.contains(".bashrc")),
+        "{passed:?}"
+    );
+    assert_eq!(remote_branch(remote.path()), "");
+    assert!(forge.opened().is_empty());
+    let items = world.attention(&card);
+    assert_eq!(items.len(), 1, "{items:?}");
+    let evidence: Value = serde_json::from_str(items[0].evidence.as_deref().unwrap()).unwrap();
+    assert_eq!(evidence["step"], "worktree");
+
+    git(work.path(), &["commit", "-q", "-am", "finish the feature"]);
+    let head = git(work.path(), &["rev-parse", "HEAD"]);
+    report_done(&mut world, &run, &session);
+    let passed = publish_pass(&forge, &lock, &mut world);
+    assert!(
+        matches!(&passed[..], [Published::Done { sha, .. }] if *sha == head),
+        "{passed:?}"
+    );
+    assert_eq!(remote_branch(remote.path()), head);
+    assert!(world.attention(&card).is_empty());
+    assert_eq!(git(work.path(), &["ls-files", ".bashrc"]), "");
+}
+
+/// Every later done publishes again and tells the worker what changed: an
+/// unchanged run is up to date, a new description becomes the PR's title
+/// and body, and a new head is pushed with no edit.
+#[test]
+fn every_done_report_publishes_what_changed() {
+    let (remote, work, head) = repos();
+    let mut world = World::new(Delivery::DirectPr);
+    let lock = world.lock();
+    let forge = FakeForge::new();
+    let (_card, run, session) = described(&mut world, work.path());
+    report_done(&mut world, &run, &session);
+    publish_pass(&forge, &lock, &mut world);
+    assert_eq!(notes(&world, &session).len(), 1);
+
+    report_done(&mut world, &run, &session);
+    let passed = publish_pass(&forge, &lock, &mut world);
+    assert!(
+        matches!(&passed[..], [Published::Done { opened: false, sha, .. }] if *sha == head),
+        "{passed:?}"
+    );
+    let told = notes(&world, &session);
+    assert!(told[1].contains("is up to date"), "{told:?}");
+    assert!(forge.edits().is_empty());
+    assert!(publish_pass(&forge, &lock, &mut world).is_empty());
+
+    world
+        .store
+        .pr_describe(
+            &Ctx::new(Actor::Session(session.clone())),
+            &run,
+            "Publish it, renamed",
+            "Adds the feature, and says why.",
+        )
+        .unwrap();
+    report_done(&mut world, &run, &session);
+    publish_pass(&forge, &lock, &mut world);
+    assert_eq!(
+        forge.edits(),
+        vec![(
+            40,
+            "Publish it, renamed".to_owned(),
+            "Adds the feature, and says why.".to_owned()
+        )]
+    );
+    let told = notes(&world, &session);
+    assert!(told[2].contains("set the title and body"), "{told:?}");
+
+    let later = commit(work.path(), "more");
+    report_done(&mut world, &run, &session);
+    publish_pass(&forge, &lock, &mut world);
+    assert_eq!(remote_branch(remote.path()), later);
+    assert_eq!(forge.edits().len(), 1);
+    let told = notes(&world, &session);
+    assert!(
+        told[3].contains("pushed fm/alpha-1") && !told[3].contains("title"),
+        "{told:?}"
+    );
+    assert_eq!(forge.opened().len(), 1);
+}
+
+/// A run has one PR: once it is merged or closed, a later done pushes
+/// nothing and the owner hears why.
+#[test]
+fn a_merged_pr_gets_no_push() {
+    let (remote, work, head) = repos();
+    let mut world = World::new(Delivery::DirectPr);
+    let lock = world.lock();
+    let forge = FakeForge::new();
+    let (card, run, session) = described(&mut world, work.path());
+    report_done(&mut world, &run, &session);
+    publish_pass(&forge, &lock, &mut world);
+    forge.set_state(40, PrState::Merged);
+
+    commit(work.path(), "after the merge");
+    report_done(&mut world, &run, &session);
+    let passed = publish_pass(&forge, &lock, &mut world);
+    assert!(
+        matches!(&passed[..], [Published::Failed { error, .. }] if error.contains("/pull/40 is merged")),
+        "{passed:?}"
+    );
+    assert_eq!(remote_branch(remote.path()), head);
+    let items = world.attention(&card);
+    assert_eq!(items.len(), 1, "{items:?}");
+    let evidence: Value = serde_json::from_str(items[0].evidence.as_deref().unwrap()).unwrap();
+    assert_eq!(evidence["step"], "pr");
+    assert_eq!(forge.opened().len(), 1);
+}
+
+/// One open item per head and step: the worker's next done report hears
+/// the failure again but the owner gets no second item, and once the owner
+/// closes the item the same failure raises a new one.
+#[test]
+fn a_repeated_failure_keeps_one_open_item() {
+    let (_remote, work, _head) = repos();
+    let mut world = World::new(Delivery::DirectPr);
+    let lock = world.lock();
+    let forge = FakeForge::new();
+    let (card, run, session) = described(&mut world, work.path());
+    std::fs::write(work.path().join("feature"), "half done").unwrap();
+    report_done(&mut world, &run, &session);
+    publish_pass(&forge, &lock, &mut world);
+    assert_eq!(world.attention(&card).len(), 1);
+    assert_eq!(notes(&world, &session).len(), 1);
+
+    report_done(&mut world, &run, &session);
+    let passed = publish_pass(&forge, &lock, &mut world);
+    assert!(
+        matches!(&passed[..], [Published::Failed { .. }]),
+        "{passed:?}"
+    );
+    let items = world.attention(&card);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(notes(&world, &session).len(), 2);
+
+    world
+        .store
+        .attention_withdraw(&owner(), &items[0].id, "seen")
+        .unwrap();
+    report_done(&mut world, &run, &session);
+    publish_pass(&forge, &lock, &mut world);
+    let reopened = world.attention(&card);
+    assert_eq!(reopened.len(), 1, "{reopened:?}");
+    assert_ne!(reopened[0].id, items[0].id);
+    assert_eq!(notes(&world, &session).len(), 3);
+}
+
+/// The daemon's git runs as the owner in a repository the worker writes,
+/// so none of the repository's hooks, filter drivers or fsmonitor runs,
+/// and a push URL that names a command transport is refused. Plain git in
+/// the same repository runs them, so the setup is live.
+#[test]
+fn the_daemons_git_runs_nothing_the_worktree_names() {
+    let (remote, work, head) = repos();
+    let marks = tempfile::tempdir().unwrap();
+    let script = |name: &str| {
+        let path = marks.path().join(format!("{name}.sh"));
+        let mark = marks.path().join(name);
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\ntouch '{}'\ncat\n", mark.display()),
+        )
+        .unwrap();
+        let mut mode = std::fs::metadata(&path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
+        std::fs::set_permissions(&path, mode).unwrap();
+        path.display().to_string()
+    };
+    std::fs::write(work.path().join(".gitattributes"), "* filter=x\n").unwrap();
+    git(work.path(), &["add", ".gitattributes"]);
+    git(work.path(), &["commit", "-q", "-m", "attributes"]);
+    let head = {
+        let _ = head;
+        git(work.path(), &["rev-parse", "HEAD"])
+    };
+    let fsmonitor = script("fsmonitor");
+    let filter = script("filter");
+    let hook = script("pre-push");
+    git(work.path(), &["config", "core.fsmonitor", &fsmonitor]);
+    git(work.path(), &["config", "filter.x.clean", &filter]);
+    let hooks = work.path().join(".git/hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::copy(&hook, hooks.join("pre-push")).unwrap();
+    // Same size, new mtime: git has to hash it through the filter.
+    std::fs::write(work.path().join("base"), "base").unwrap();
+    std::fs::write(work.path().join("feature"), "changed").unwrap();
+
+    let listed = direct::uncommitted(work.path(), &head).unwrap();
+    assert!(listed.contains("M feature"), "{listed:?}");
+    assert!(!listed.contains("base"), "{listed:?}");
+    let pushed = direct::push(work.path(), "origin", &head, "fm/alpha-1", &Identity::Owner);
+    assert_eq!(pushed, direct::Pushed::Done);
+    assert_eq!(remote_branch(remote.path()), head);
+    git(
+        work.path(),
+        &["remote", "add", "evil", "ext::sh -c touch% evil"],
+    );
+    let refused = direct::push(work.path(), "evil", &head, "fm/alpha-1", &Identity::Owner);
+    assert!(
+        matches!(&refused, direct::Pushed::Refused(error) if error.contains("refused")),
+        "{refused:?}"
+    );
+    assert!(!work.path().join("evil").exists());
+    for mark in ["fsmonitor", "filter", "pre-push"] {
+        assert!(!marks.path().join(mark).exists(), "{mark} ran");
+    }
+
+    git(work.path(), &["status", "--porcelain"]);
+    git(
+        work.path(),
+        &["push", "-q", "origin", "HEAD:refs/heads/plain"],
+    );
+    for mark in ["fsmonitor", "filter", "pre-push"] {
+        assert!(marks.path().join(mark).exists(), "{mark} is not live");
+    }
+}
+
+/// Only described, done, direct-pr builder runs are published, and only the
+/// daemon records a publish.
+#[test]
+fn publish_takes_only_described_direct_pr_runs() {
+    let forge = FakeForge::new();
+    for delivery in [Delivery::DirectPush, Delivery::LocalOnly] {
+        let (remote, work, _head) = repos();
+        let mut world = World::new(delivery);
+        let lock = world.lock();
+        let (_card, run, session) = described(&mut world, work.path());
+        report_done(&mut world, &run, &session);
+        let passed = publish_pass(&forge, &lock, &mut world);
+        assert!(passed.is_empty(), "{delivery}: {passed:?}");
+        assert_eq!(remote_branch(remote.path()), "");
+    }
+
+    let (remote, work, _head) = repos();
+    let mut world = World::new(Delivery::DirectPr);
+    let lock = world.lock();
+    let card = world.card("undescribed");
+    let run = world.builder(&card, Some(work.path()), "fm/alpha-1");
+    let session = live_session(world.store.conn(), &run).unwrap().unwrap().id;
+    report_done(&mut world, &run, &session);
+    let passed = publish_pass(&forge, &lock, &mut world);
+    assert!(passed.is_empty(), "{passed:?}");
+    assert_eq!(remote_branch(remote.path()), "");
+
+    let (other_card, pr) = world.pr();
+    assert!(
+        world
+            .store
+            .publish_done(&owner(), &run, "abc", &pr)
+            .is_err()
+    );
+    world
+        .store
+        .pr_describe(&Ctx::new(Actor::Session(session)), &run, "T", "B")
+        .unwrap();
+    let daemon = lock.ctx();
+    world.store.publish_done(&daemon, &run, "abc", &pr).unwrap();
+    // A run has one PR: another is refused.
+    let (_, second) = world.pr_numbered(8);
+    assert!(
+        world
+            .store
+            .publish_done(&daemon, &run, "abc", &second)
+            .is_err()
+    );
+    assert_ne!(other_card.id, card.id);
 }

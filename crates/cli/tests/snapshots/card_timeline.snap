@@ -11,8 +11,8 @@ exit: 0
         "at": "<time>",
         "card_id": "<id11>",
         "entity": "reservation",
-        "entity_id": "<id71>",
-        "id": "<id85>",
+        "entity_id": "<id73>",
+        "id": "<id87>",
         "idempotency_key": null,
         "kind": "reservation.released",
         "payload": {
@@ -21,7 +21,7 @@ exit: 0
         },
         "rev_after": null,
         "seq": "<seq>",
-        "short": "<id85.short>",
+        "short": "<id87.short>",
         "txn": "run.end"
       },
       {
@@ -30,7 +30,7 @@ exit: 0
         "card_id": "<id11>",
         "entity": "run",
         "entity_id": "<id35>",
-        "id": "<id87>",
+        "id": "<id89>",
         "idempotency_key": null,
         "kind": "run.ended",
         "payload": {
@@ -38,9 +38,9 @@ exit: 0
           "outcome": "abandoned",
           "role": "builder"
         },
-        "rev_after": 6,
+        "rev_after": 7,
         "seq": "<seq>",
-        "short": "<id87.short>",
+        "short": "<id89.short>",
         "txn": "run.end"
       },
       {
@@ -48,18 +48,18 @@ exit: 0
         "at": "<time>",
         "card_id": "<id11>",
         "entity": "outbox",
-        "entity_id": "<id89>",
-        "id": "<id91>",
+        "entity_id": "<id91>",
+        "id": "<id93>",
         "idempotency_key": "ok-1",
         "kind": "outbox.enqueued",
         "payload": {
           "kind": "answer",
-          "reply_to": "<id83>",
+          "reply_to": "<id85>",
           "target_session_id": "<id9>"
         },
         "rev_after": 1,
         "seq": "<seq>",
-        "short": "<id91.short>",
+        "short": "<id93.short>",
         "txn": "approval.decide"
       },
       {
@@ -67,8 +67,8 @@ exit: 0
         "at": "<time>",
         "card_id": "<id11>",
         "entity": "attention",
-        "entity_id": "<id83>",
-        "id": "<id93>",
+        "entity_id": "<id85>",
+        "id": "<id95>",
         "idempotency_key": "ok-1",
         "kind": "attention.answered",
         "payload": {
@@ -78,7 +78,7 @@ exit: 0
         },
         "rev_after": 2,
         "seq": "<seq>",
-        "short": "<id93.short>",
+        "short": "<id95.short>",
         "txn": "approval.decide"
       }
     ]

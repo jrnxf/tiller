@@ -16,7 +16,7 @@ exit: 0
     "finished_at": null,
     "grant_id": null,
     "head_sha": "0123456789abcdef0123456789abcdef01234567",
-    "id": "<id59>",
+    "id": "<id61>",
     "kind": "merge",
     "linked_approval_id": null,
     "memory_paths": null,
@@ -29,7 +29,7 @@ exit: 0
     "rev": 1,
     "run_id": "<id35>",
     "scope": null,
-    "short": "<id59.short>",
+    "short": "<id61.short>",
     "state": "requested"
   },
   "events": [

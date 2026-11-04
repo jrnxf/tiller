@@ -13,12 +13,12 @@ exit: 0
     },
     "granted_at": "<time>",
     "granted_by": "owner",
-    "id": "<id61>",
+    "id": "<id63>",
     "kind": "merge",
     "project_id": "alpha",
     "revoke_reason": null,
     "revoked_at": null,
-    "short": "<id61.short>"
+    "short": "<id63.short>"
   },
   "events": [
     "<seq>"

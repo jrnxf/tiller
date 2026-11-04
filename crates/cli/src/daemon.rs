@@ -2,7 +2,9 @@
 //! one `tiller spawn` drives: `spawn.herdr` and `spawn.herdr_socket` from
 //! `config.toml`. The helper programs can be replaced for tests and labs:
 //! `TILLER_HERDR`, `TILLER_QUOTA_AXI` and `TILLER_SSH` each hold a command
-//! line (a program and its leading arguments, split on whitespace).
+//! line (a program and its leading arguments, split on whitespace), and
+//! `TILLER_GH` names the GitHub CLI program the land loop and the direct-pr
+//! publish run.
 //! `[herdr] terminal` names the terminal app the board's "Open in herdr"
 //! brings to the front (`protocol.md` 7.4); it is a macOS app, so other
 //! systems ignore it.
@@ -115,6 +117,7 @@ pub fn run(args: &Args) -> anyhow::Result<ExitCode> {
         terminal: terminal.map(|app| Arc::new(app) as _),
         quota: command_line("TILLER_QUOTA_AXI", "quota-axi"),
         ssh: command_line("TILLER_SSH", "ssh"),
+        gh: std::env::var("TILLER_GH").unwrap_or_else(|_| "gh".into()),
         assets: Assets::board(),
     };
     match tiller_daemon::run(config)? {

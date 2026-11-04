@@ -19,7 +19,7 @@ exit: 0
     },
     "conclusions": "dark mode is under way",
     "decisions": [],
-    "handoff_id": "<id57>",
+    "handoff_id": "<id59>",
     "next_action": "review the PR",
     "project_id": "alpha",
     "unresolved": [],
@@ -27,7 +27,7 @@ exit: 0
       {
         "card": "alpha-1",
         "ended": false,
-        "line": "paused: waiting for CI",
+        "line": "done: ready in branch alpha-1-build",
         "outcome": null,
         "role": "builder",
         "run_id": "<id35>",

@@ -13,15 +13,16 @@ exit: 0
         "entity": "run",
         "entity_id": "<id35>",
         "id": "<id41>",
-        "idempotency_key": null,
-        "kind": "run.paused",
+        "idempotency_key": "auto:<id39>:run.status:36daff82f0a9e1e1b014e4ec4933ae65426ee25196360d5c2f027aca21268637:0",
+        "kind": "run.status",
         "payload": {
-          "until": "<time>"
+          "line": "ready in branch alpha-1-build",
+          "state": "done"
         },
-        "rev_after": 4,
+        "rev_after": 5,
         "seq": "<seq>",
         "short": "<id41.short>",
-        "txn": "run.pause"
+        "txn": "run.status"
       },
       {
         "actor": "session:<id39>",
@@ -30,16 +31,15 @@ exit: 0
         "entity": "run",
         "entity_id": "<id35>",
         "id": "<id43>",
-        "idempotency_key": "auto:<id39>:run.status:668b700aa860e18372bde2a7dd9c536c70c0763fa20243552816dc90ec3780ee:0",
-        "kind": "run.status",
+        "idempotency_key": null,
+        "kind": "run.paused",
         "payload": {
-          "line": "waiting for CI",
-          "state": "paused"
+          "until": "<time>"
         },
-        "rev_after": 3,
+        "rev_after": 4,
         "seq": "<seq>",
         "short": "<id43.short>",
-        "txn": "run.status"
+        "txn": "run.pause"
       },
       {
         "actor": "session:<id39>",
@@ -48,6 +48,24 @@ exit: 0
         "entity": "run",
         "entity_id": "<id35>",
         "id": "<id45>",
+        "idempotency_key": "auto:<id39>:run.status:668b700aa860e18372bde2a7dd9c536c70c0763fa20243552816dc90ec3780ee:0",
+        "kind": "run.status",
+        "payload": {
+          "line": "waiting for CI",
+          "state": "paused"
+        },
+        "rev_after": 3,
+        "seq": "<seq>",
+        "short": "<id45.short>",
+        "txn": "run.status"
+      },
+      {
+        "actor": "session:<id39>",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "run",
+        "entity_id": "<id35>",
+        "id": "<id47>",
         "idempotency_key": "auto:<id39>:run.status:f000821af44b1199a8177a5e061e62490611d0621146b0d0739ad9d3298ae147:0",
         "kind": "run.status",
         "payload": {
@@ -56,7 +74,7 @@ exit: 0
         },
         "rev_after": 2,
         "seq": "<seq>",
-        "short": "<id45.short>",
+        "short": "<id47.short>",
         "txn": "run.status"
       },
       {
@@ -65,7 +83,7 @@ exit: 0
         "card_id": "<id11>",
         "entity": "run",
         "entity_id": "<id35>",
-        "id": "<id47>",
+        "id": "<id49>",
         "idempotency_key": null,
         "kind": "run.started",
         "payload": {
@@ -92,7 +110,7 @@ exit: 0
         },
         "rev_after": 1,
         "seq": "<seq>",
-        "short": "<id47.short>",
+        "short": "<id49.short>",
         "txn": "run.start"
       }
     ],
@@ -115,13 +133,13 @@ exit: 0
       "id": "<id35>",
       "idempotency_key": null,
       "last_status_at": "<time>",
-      "last_status_line": "paused: waiting for CI",
+      "last_status_line": "done: ready in branch alpha-1-build",
       "model": "test-model",
       "outcome": null,
       "outcome_note": null,
       "pause_until": "<time>",
       "predecessor_run_id": null,
-      "rev": 4,
+      "rev": 5,
       "role": "builder",
       "short": "<id35.short>",
       "started_at": "<time>",

@@ -94,6 +94,51 @@ fn ship_card_stays_working_without_pr() {
     let _ = pr;
 }
 
+/// R13 waits for the daemon on a direct-pr run: a described PR the daemon
+/// has not opened yet is the expected state after "done", not a claim
+/// without evidence. Once the daemon records the PR, the usual note runs.
+#[test]
+fn a_direct_pr_run_waiting_on_its_publish_gets_no_note() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let run = w.run_of(&worker);
+    w.store_mut()
+        .pr_describe(
+            &session_ctx(&worker),
+            &run.id,
+            "Add a greeting",
+            "One line.",
+        )
+        .unwrap();
+    w.store_mut()
+        .run_status(
+            &session_ctx(&worker),
+            &run.id,
+            StatusState::Done,
+            "ready in branch fm/work",
+        )
+        .unwrap();
+    let report = w.pass(now());
+    assert!(!report.did("R13"), "{report:?}");
+    assert!(w.notes().is_empty(), "{:?}", w.notes());
+
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    w.store_mut()
+        .publish_done(&daemon(), &run.id, "a1a1a1a1", &pr)
+        .unwrap();
+    w.forge.pr(REPO, 7, open_pr("a1a1a1a1"));
+    let report = w.pass(now().plus_minutes(1));
+    assert!(report.did("R13"), "{report:?}");
+    assert!(
+        w.notes()
+            .iter()
+            .any(|n| n.body.contains("PR #7 is open, not merged")),
+        "{:?}",
+        w.notes()
+    );
+}
+
 /// The board shape: every column present, cards in theirs, asks separate,
 /// the thresholds the client ages with.
 #[test]

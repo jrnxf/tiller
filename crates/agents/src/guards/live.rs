@@ -125,6 +125,7 @@ impl Lab {
             default_branch: "main".into(),
             network_allow: vec!["github.com".into()],
             no_mistakes_socket: None,
+            gh_login_readable: false,
         };
         let fragment = render_settings(role, &fill).unwrap();
         fs::write(

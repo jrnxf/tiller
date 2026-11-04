@@ -21,6 +21,7 @@ pub mod memory;
 pub mod outbox;
 pub mod peers;
 pub mod projects;
+pub mod publishes;
 pub mod reads;
 pub mod records;
 pub mod review;

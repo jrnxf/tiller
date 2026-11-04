@@ -15,6 +15,7 @@
 pub mod direct;
 pub mod forge;
 pub mod grants;
+pub mod publish;
 pub mod scrub;
 
 #[cfg(test)]

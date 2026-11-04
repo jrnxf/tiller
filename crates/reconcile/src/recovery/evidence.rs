@@ -9,10 +9,13 @@
 use std::path::Path;
 
 use serde_json::json;
-use tiller_core::domain::{Card, OutboxMessage, Pane, Reservation, Run, RunOutcome, Session};
+use tiller_core::domain::{
+    Card, Delivery, OutboxMessage, Pane, Project, Reservation, Run, RunOutcome, Session,
+};
 use tiller_core::state::attention::NewAttention;
 use tiller_core::state::caches::PaneReading;
 use tiller_core::state::outbox::live_orchestrator;
+use tiller_core::state::publishes::publish;
 use tiller_core::state::runs::{Bind, EndRun, live_session};
 use tiller_core::state::{find, get, list};
 use tiller_core::{Result, Timestamp};
@@ -543,7 +546,8 @@ impl Reconciler {
 
     /// R13: a builder on a ship card whose status says done while no merge
     /// is recorded gets a note; the column stays Working (the view) and
-    /// `run.end landed` stays refused (the core).
+    /// `run.end landed` stays refused (the core). A direct-pr run the daemon
+    /// has not yet published gets none: the PR is the daemon's to open.
     fn done_without_evidence(&mut self, now: Timestamp, report: &mut Report) -> Result<()> {
         let runs: Vec<Run> = list(
             self.conn(),
@@ -566,6 +570,9 @@ impl Reconciler {
             }
             let open_pr: Option<tiller_core::domain::Pr> =
                 find(self.conn(), "card_id = ?1 AND state = 'open'", &[&card.id])?;
+            if open_pr.is_none() && self.publishing(&run, &card)? {
+                continue;
+            }
             let record = match &open_pr {
                 Some(pr) => format!(
                     "PR #{} is open, not merged (checks {}, pipeline {})",
@@ -592,6 +599,18 @@ impl Reconciler {
             }
         }
         Ok(())
+    }
+
+    /// Whether the daemon still owes a direct-pr run its PR: the run's done
+    /// report is what starts the push and the PR, so "no PR is linked" is
+    /// the expected state until then, and a failed publish is already an
+    /// owner item (`authority.md`, "Publishing a direct-pr run").
+    fn publishing(&self, run: &Run, card: &Card) -> Result<bool> {
+        let project: Project = get(self.conn(), "project", &card.project_id)?;
+        if project.effective_delivery() != Delivery::DirectPr {
+            return Ok(false);
+        }
+        Ok(publish(self.conn(), &run.id)?.is_some_and(|record| record.pr_id.is_none()))
     }
 
     /// R14: a run the harness itself recorded as cut ends `cut` with a note

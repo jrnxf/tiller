@@ -341,6 +341,24 @@ CREATE TABLE prs (
 CREATE INDEX prs_run ON prs(run_id);
 CREATE INDEX prs_card_open ON prs(card_id) WHERE state = 'open';
 
+-- A direct-pr builder run's publish (state.md, Publish): the PR title and
+-- body its worker described, and what the daemon last pushed and opened.
+CREATE TABLE publishes (
+  run_id        TEXT PRIMARY KEY NOT NULL REFERENCES runs(id),
+  title         TEXT NOT NULL,
+  body          TEXT NOT NULL,
+  described_at  TEXT NOT NULL,
+  pushed_sha    TEXT,                     -- the head the daemon last pushed
+  pushed_at     TEXT,
+  pr_id         TEXT REFERENCES prs(id),  -- the PR it opened or found
+  attempted_sha TEXT,                     -- the head of the last failed try
+  attempted_at  TEXT,
+  error         TEXT,                     -- the last failure, cleared on success
+  rev           INTEGER NOT NULL DEFAULT 1,
+  CHECK ((pushed_sha IS NULL) = (pushed_at IS NULL)),
+  CHECK ((error IS NULL) OR (attempted_at IS NOT NULL))
+) STRICT;
+
 CREATE TABLE grants (
   id          TEXT PRIMARY KEY,
   project_id  TEXT NOT NULL REFERENCES projects(id),

@@ -73,7 +73,8 @@
       "RemoteTrigger",
       "Workflow",
       "PushNotification",
-      "Agent(isolation:*)"
+      "Agent(isolation:*)",
+      "<gh_login_rule>"
     ],
     "allow": [
       "Bash",
@@ -365,7 +366,8 @@
       "denyRead": [
         "<tiller_home>",
         "<worktree>/.env",
-        "<worktree>/.envrc"
+        "<worktree>/.envrc",
+        "<gh_login_path>"
       ]
     },
     "network": {

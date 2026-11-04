@@ -11,7 +11,7 @@ exit: 0
         "card_id": "<id11>",
         "entity": "card",
         "entity_id": "<id11>",
-        "id": "<id77>",
+        "id": "<id79>",
         "idempotency_key": null,
         "kind": "card.created",
         "payload": {
@@ -24,7 +24,7 @@ exit: 0
         },
         "rev_after": 1,
         "seq": "<seq>",
-        "short": "<id77.short>",
+        "short": "<id79.short>",
         "txn": "ask.resolve"
       },
       {
@@ -33,7 +33,7 @@ exit: 0
         "card_id": "<id11>",
         "entity": "card",
         "entity_id": "<id11>",
-        "id": "<id79>",
+        "id": "<id81>",
         "idempotency_key": null,
         "kind": "card.linked",
         "payload": {
@@ -42,7 +42,7 @@ exit: 0
         },
         "rev_after": null,
         "seq": "<seq>",
-        "short": "<id79.short>",
+        "short": "<id81.short>",
         "txn": "ask.resolve"
       },
       {
@@ -51,7 +51,7 @@ exit: 0
         "card_id": "<id11>",
         "entity": "ask",
         "entity_id": "<id17>",
-        "id": "<id81>",
+        "id": "<id83>",
         "idempotency_key": null,
         "kind": "ask.resolved",
         "payload": {
@@ -60,7 +60,7 @@ exit: 0
         },
         "rev_after": null,
         "seq": "<seq>",
-        "short": "<id81.short>",
+        "short": "<id83.short>",
         "txn": "ask.resolve"
       }
     ],

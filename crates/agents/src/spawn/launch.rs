@@ -75,6 +75,9 @@ pub struct LaunchSpec<'a> {
     pub default_branch: &'a str,
     pub network_allow: &'a [String],
     pub no_mistakes_socket: Option<&'a str>,
+    /// The worker may read the owner's GitHub login: a builder on a
+    /// `no-mistakes` project ([`Placeholders::gh_login_readable`]).
+    pub gh_login_readable: bool,
     /// The Claude Code command.
     pub claude: &'a str,
     /// Where Claude Code keeps the user config the trust is recorded in.
@@ -445,6 +448,7 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
             default_branch: spec.default_branch.into(),
             network_allow: spec.network_allow.to_vec(),
             no_mistakes_socket: spec.no_mistakes_socket.map(str::to_owned),
+            gh_login_readable: spec.gh_login_readable,
         },
     )?;
     let (mode, mode_note) = effective_mode(spec.claude, &front.permission_mode);

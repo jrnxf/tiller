@@ -11,8 +11,8 @@ exit: 0
         "card_id": "<id11>",
         "entity": "attention",
         "entity_id": "<id33>",
-        "id": "<id65>",
-        "idempotency_key": "shell:<id67>",
+        "id": "<id67>",
+        "idempotency_key": "shell:<id69>",
         "kind": "attention.opened",
         "payload": {
           "kind": "report",
@@ -21,7 +21,7 @@ exit: 0
         },
         "rev_after": 1,
         "seq": "<seq>",
-        "short": "<id65.short>",
+        "short": "<id67.short>",
         "txn": "attention.open"
       },
       {
@@ -30,7 +30,7 @@ exit: 0
         "card_id": "<id11>",
         "entity": "attention",
         "entity_id": "<id33>",
-        "id": "<id69>",
+        "id": "<id71>",
         "idempotency_key": null,
         "kind": "attention.withdrawn",
         "payload": {
@@ -38,7 +38,7 @@ exit: 0
         },
         "rev_after": 2,
         "seq": "<seq>",
-        "short": "<id69.short>",
+        "short": "<id71.short>",
         "txn": "attention.withdraw"
       },
       {
@@ -46,8 +46,8 @@ exit: 0
         "at": "<time>",
         "card_id": "<id11>",
         "entity": "reservation",
-        "entity_id": "<id71>",
-        "id": "<id73>",
+        "entity_id": "<id73>",
+        "id": "<id75>",
         "idempotency_key": null,
         "kind": "reservation.reserved",
         "payload": {
@@ -57,7 +57,7 @@ exit: 0
         },
         "rev_after": null,
         "seq": "<seq>",
-        "short": "<id73.short>",
+        "short": "<id75.short>",
         "txn": "run.start"
       },
       {
@@ -66,7 +66,7 @@ exit: 0
         "card_id": "<id11>",
         "entity": "run",
         "entity_id": "<id35>",
-        "id": "<id47>",
+        "id": "<id49>",
         "idempotency_key": null,
         "kind": "run.started",
         "payload": {
@@ -93,7 +93,7 @@ exit: 0
         },
         "rev_after": 1,
         "seq": "<seq>",
-        "short": "<id47.short>",
+        "short": "<id49.short>",
         "txn": "run.start"
       },
       {
@@ -102,7 +102,7 @@ exit: 0
         "card_id": "<id11>",
         "entity": "session",
         "entity_id": "<id39>",
-        "id": "<id75>",
+        "id": "<id77>",
         "idempotency_key": null,
         "kind": "session.started",
         "payload": {
@@ -111,7 +111,7 @@ exit: 0
         },
         "rev_after": 1,
         "seq": "<seq>",
-        "short": "<id75.short>",
+        "short": "<id77.short>",
         "txn": "run.start"
       }
     ],

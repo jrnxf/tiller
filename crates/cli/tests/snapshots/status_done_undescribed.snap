@@ -1,0 +1,11 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 5
+{
+  "error": {
+    "code": "refused",
+    "message": "describe the PR first: tiller pr describe --title <t> --body-file <f>; the daemon pushes the branch and opens the PR when you report done"
+  },
+  "ok": false
+}

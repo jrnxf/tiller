@@ -34,7 +34,7 @@ exit: 0
                 "effort": "medium",
                 "herdr_name": "alpha-1-build",
                 "last_status_at": "<time>",
-                "last_status_line": "paused: waiting for CI",
+                "last_status_line": "done: ready in branch alpha-1-build",
                 "model": "test-model",
                 "pane_id": null,
                 "project_id": "alpha",

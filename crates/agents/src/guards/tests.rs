@@ -1140,6 +1140,7 @@ fn fill(role: Role) -> Placeholders {
         default_branch: "main".into(),
         network_allow: vec!["github.com".into()],
         no_mistakes_socket: None,
+        gh_login_readable: false,
     }
 }
 

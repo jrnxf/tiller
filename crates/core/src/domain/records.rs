@@ -262,6 +262,24 @@ record!(Pr in "prs" {
     pipeline_state: PipelineState,
 });
 
+record!(
+    /// What the daemon publishes for one direct-pr builder run: the PR title
+    /// and body the worker described, and the last push and PR it recorded.
+    Publish in "publishes" {
+        run_id: String,
+        title: String,
+        body: String,
+        described_at: Timestamp,
+        pushed_sha: Option<String>,
+        pushed_at: Option<Timestamp>,
+        pr_id: Option<String>,
+        attempted_sha: Option<String>,
+        attempted_at: Option<Timestamp>,
+        error: Option<String>,
+        rev: i64,
+    }
+);
+
 record!(Grant in "grants" {
     id: String,
     project_id: String,

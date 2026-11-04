@@ -71,6 +71,7 @@ pub(crate) const UNLINKED: &[(&str, &str)] = &[
     ("proposals", "authored_by_session_id"),
     ("proposals", "memory_id"),
     ("prs", "run_id"),
+    ("publishes", "pr_id"),
     ("retros", "proposal_id"),
     ("retros", "evidence_id"),
     ("retros", "trigger"),

@@ -213,7 +213,7 @@ fn load_session(tx: &Tx<'_>, session: &str) -> Result<Session> {
     get(tx.conn(), "session", &id)
 }
 
-fn require_active(run: &Run) -> Result<()> {
+pub(crate) fn require_active(run: &Run) -> Result<()> {
     match run.outcome {
         None => Ok(()),
         Some(outcome) => Err(Error::refused(

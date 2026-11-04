@@ -1,6 +1,8 @@
 //! The forge seam of the land sequence (`authority.md` section 6): the PR
 //! re-read of step 2, the commit checks a grant or a direct push needs, and
 //! the one merge call of step 6, made with the bound SHA as a precondition.
+//! The publish of a direct-pr run uses it too, to find, open, read and edit
+//! the run's PR.
 //!
 //! [`GhForge`] talks to GitHub through `gh api`: the land sequence needs the
 //! REST merge call's `sha` precondition and machine-readable replies, which
@@ -17,6 +19,8 @@ use tiller_core::domain::{ApprovalAction, Checks, Mergeable, PrState};
 pub enum ForgeError {
     #[error("forge read failed: {0}")]
     Read(String),
+    #[error("forge write failed: {0}")]
+    Write(String),
     /// The merge App is not set up for this repo (an owner setup step on the
     /// cutover checklist), so an enforced project cannot land yet.
     #[error("the merge App cannot act on {repo}: {why}")]
@@ -35,6 +39,33 @@ pub struct PullView {
     pub body: String,
     /// Every path the PR changes, for grant `exclude_paths`.
     pub files: Vec<String>,
+}
+
+/// A PR the publish opened or found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRef {
+    pub number: i64,
+    pub url: String,
+    pub head_sha: String,
+    pub base_ref: String,
+}
+
+/// What a publish reads of a PR it recorded before it pushes to it again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullText {
+    pub state: PrState,
+    pub title: String,
+    pub body: String,
+}
+
+/// The PR a direct-pr publish opens: `head` is a branch of `repo` itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewPull {
+    pub repo: String,
+    pub head: String,
+    pub base: String,
+    pub title: String,
+    pub body: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,6 +125,15 @@ pub trait Forge {
     /// The combined checks of one commit.
     fn checks(&self, repo: &str, sha: &str) -> Result<Checks, ForgeError>;
     fn merge(&self, request: &MergeRequest, identity: &Identity) -> MergeOutcome;
+    /// The open PR whose head is `branch` of `repo`, if there is one.
+    fn find_pull(&self, repo: &str, branch: &str) -> Result<Option<PullRef>, ForgeError>;
+    /// Opens a PR as the owner's login.
+    fn open_pull(&self, pull: &NewPull) -> Result<PullRef, ForgeError>;
+    /// One PR's state, title and body: a single call, unlike [`Forge::pull`].
+    fn pull_text(&self, repo: &str, number: i64) -> Result<PullText, ForgeError>;
+    /// Sets a PR's title and body as the owner's login.
+    fn edit_pull(&self, repo: &str, number: i64, title: &str, body: &str)
+    -> Result<(), ForgeError>;
 }
 
 /// Mints the merge App's installation token for one repo.
@@ -157,6 +197,33 @@ impl GhForge {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
+    /// A write as the owner's login: `-f key=value` fields, so a value is
+    /// always sent as a string.
+    fn send(
+        &self,
+        method: &str,
+        path: &str,
+        fields: &[(&str, &str)],
+    ) -> Result<Output, ForgeError> {
+        let fields: Vec<String> = fields
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        let mut args = vec!["-X", method, path];
+        for field in &fields {
+            args.extend(["-f", field.as_str()]);
+        }
+        let output = self
+            .api(&args, &Identity::Owner)
+            .map_err(|error| ForgeError::Write(format!("run gh: {error}")))?;
+        if !output.status.success() {
+            return Err(ForgeError::Write(
+                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            ));
+        }
+        Ok(output)
+    }
+
     fn json(&self, path: &str) -> Result<Value, ForgeError> {
         serde_json::from_str(&self.get(&[path])?)
             .map_err(|error| ForgeError::Read(format!("{path}: {error}")))
@@ -167,6 +234,25 @@ impl GhForge {
     fn pages(&self, path: &str) -> Result<Vec<Value>, ForgeError> {
         let text = self.get(&["--paginate", "--slurp", path])?;
         serde_json::from_str(&text).map_err(|error| ForgeError::Read(format!("{path}: {error}")))
+    }
+}
+
+fn pull_ref(pull: &Value) -> Option<PullRef> {
+    Some(PullRef {
+        number: pull.get("number")?.as_i64()?,
+        url: pull.get("html_url")?.as_str()?.to_owned(),
+        head_sha: text(pull, "/head/sha"),
+        base_ref: text(pull, "/base/ref"),
+    })
+}
+
+fn pull_state(pull: &Value) -> PrState {
+    if pull.get("merged").and_then(Value::as_bool) == Some(true) {
+        PrState::Merged
+    } else if text(pull, "/state") == "open" {
+        PrState::Open
+    } else {
+        PrState::Closed
     }
 }
 
@@ -254,13 +340,7 @@ fn status_result(status: &Value) -> Checks {
 impl Forge for GhForge {
     fn pull(&self, repo: &str, number: i64) -> Result<PullView, ForgeError> {
         let pull = self.json(&format!("repos/{repo}/pulls/{number}"))?;
-        let state = if pull.get("merged").and_then(Value::as_bool) == Some(true) {
-            PrState::Merged
-        } else if text(&pull, "/state") == "open" {
-            PrState::Open
-        } else {
-            PrState::Closed
-        };
+        let state = pull_state(&pull);
         let head_sha = text(&pull, "/head/sha");
         let files = self
             .get(&[
@@ -331,6 +411,75 @@ impl Forge for GhForge {
                 String::from_utf8_lossy(&output.stdout).trim()
             )),
         }
+    }
+
+    fn find_pull(&self, repo: &str, branch: &str) -> Result<Option<PullRef>, ForgeError> {
+        let owner = repo.split_once('/').map_or(repo, |(owner, _)| owner);
+        let pages = self.pages(&format!(
+            "repos/{repo}/pulls?state=open&head={owner}:{branch}&per_page=100"
+        ))?;
+        let pulls: Vec<&Value> = pages
+            .iter()
+            .filter_map(Value::as_array)
+            .flatten()
+            .filter(|pull| text(pull, "/head/ref") == branch)
+            .collect();
+        match pulls.as_slice() {
+            [] => Ok(None),
+            [pull] => pull_ref(pull)
+                .map(Some)
+                .ok_or_else(|| ForgeError::Read(format!("unreadable PR of {repo}:{branch}"))),
+            more => Err(ForgeError::Read(format!(
+                "{} open PRs have head {repo}:{branch}",
+                more.len()
+            ))),
+        }
+    }
+
+    fn open_pull(&self, pull: &NewPull) -> Result<PullRef, ForgeError> {
+        let output = self.send(
+            "POST",
+            &format!("repos/{}/pulls", pull.repo),
+            &[
+                ("title", &pull.title),
+                ("body", &pull.body),
+                ("head", &pull.head),
+                ("base", &pull.base),
+            ],
+        )?;
+        serde_json::from_slice::<Value>(&output.stdout)
+            .ok()
+            .as_ref()
+            .and_then(pull_ref)
+            .ok_or_else(|| {
+                ForgeError::Write(format!(
+                    "unreadable PR reply: {}",
+                    String::from_utf8_lossy(&output.stdout).trim()
+                ))
+            })
+    }
+    fn pull_text(&self, repo: &str, number: i64) -> Result<PullText, ForgeError> {
+        let pull = self.json(&format!("repos/{repo}/pulls/{number}"))?;
+        Ok(PullText {
+            state: pull_state(&pull),
+            title: text(&pull, "/title"),
+            body: text(&pull, "/body"),
+        })
+    }
+
+    fn edit_pull(
+        &self,
+        repo: &str,
+        number: i64,
+        title: &str,
+        body: &str,
+    ) -> Result<(), ForgeError> {
+        self.send(
+            "PATCH",
+            &format!("repos/{repo}/pulls/{number}"),
+            &[("title", title), ("body", body)],
+        )
+        .map(|_| ())
     }
 }
 

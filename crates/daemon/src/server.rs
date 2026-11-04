@@ -72,6 +72,9 @@ pub struct Config {
     /// (`[herdr] terminal`); none means a focus only.
     pub terminal: Option<Arc<dyn Terminal>>,
     pub quota: Vec<OsString>,
+    /// The GitHub CLI the land loop and the direct-pr publish run as the
+    /// owner's login: `gh`, or `TILLER_GH`.
+    pub gh: String,
     /// The SSH client peer links run (`protocol.md` 10.2): `ssh`, or
     /// `TILLER_SSH` split on whitespace.
     pub ssh: Vec<OsString>,
@@ -245,6 +248,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
     let tools = Tools {
         herdr: config.herdr.clone(),
         quota: config.quota.clone(),
+        gh: config.gh.clone(),
     };
     let workers = tokio::spawn(start_workers(
         config.home.clone(),

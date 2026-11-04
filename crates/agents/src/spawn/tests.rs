@@ -1620,3 +1620,47 @@ fn an_orchestrator_launch_that_fails_ends_its_session_and_closes_its_pane() {
     assert_eq!(rig.workspace_ids(), before, "the new workspace is gone");
     assert!(!rig.scratch.exists() || std::fs::read_dir(&rig.scratch).unwrap().next().is_none());
 }
+
+fn delivery_project(delivery: &str, stage: &str) -> Project {
+    serde_json::from_value(serde_json::json!({
+        "id": "alpha",
+        "name": "Alpha",
+        "repo": "example/alpha",
+        "remote": null,
+        "default_branch": "main",
+        "delivery": delivery,
+        "checks": [],
+        "capacity": 1,
+        "deploy_workflow": null,
+        "deploy_environment": null,
+        "deploy_timeout_minutes": 30,
+        "merge_gate": "detect",
+        "owner_host_id": "host",
+        "added_at": "2026-11-02T10:00:00Z",
+        "next_card_seq": 1,
+        "retired_at": null,
+        "rev": 1,
+        "stage": stage,
+        "reviewed_through_sha": null,
+        "stage_changed_at": null,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn a_direct_pr_brief_tells_the_worker_to_commit_and_never_push() {
+    let commit_only = "Commit only, never push: describe the PR with `tiller pr describe`";
+    for (delivery, stage) in [("direct-pr", "launched"), ("no-mistakes", "pre-launch")] {
+        let line = delivery_line(&delivery_project(delivery, stage));
+        assert!(line.contains("Delivery: direct-pr."), "{line}");
+        assert!(line.contains(commit_only), "{line}");
+        assert!(
+            line.contains("the daemon pushes the branch and opens the PR"),
+            "{line}"
+        );
+    }
+    for (delivery, stage) in [("no-mistakes", "launched"), ("local-only", "pre-launch")] {
+        let line = delivery_line(&delivery_project(delivery, stage));
+        assert!(!line.contains(commit_only), "{line}");
+    }
+}

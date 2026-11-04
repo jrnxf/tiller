@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::Value;
 use tiller_core::domain::{
-    Card, Effort, Project, Reservation, Run, RunOutcome, RunRole, Session, Worktree,
+    Card, Delivery, Effort, Project, Reservation, Run, RunOutcome, RunRole, Session, Worktree,
 };
 use tiller_core::state::caches::WorktreeReading;
 use tiller_core::state::projects::meta;
@@ -120,17 +120,25 @@ pub fn card_brief(card: &Card) -> String {
 }
 
 /// The delivery line a builder's brief ends with: the project's effective
-/// delivery (`docs/design/pre-launch-validation.md` section 2).
+/// delivery (`docs/design/pre-launch-validation.md` section 2). A direct-pr
+/// worker only commits; the daemon pushes and opens the PR (`authority.md`
+/// G12).
 pub fn delivery_line(project: &Project) -> String {
     let effective = project.effective_delivery();
-    if effective == project.delivery {
-        format!("\nDelivery: {effective}.\n")
-    } else {
-        format!(
-            "\nDelivery: {effective}. The project is {}: skip no-mistakes, keep your own /code-review, push the branch and open the PR.\n",
+    let mut line = format!("\nDelivery: {effective}.");
+    if effective != project.delivery {
+        line.push_str(&format!(
+            " The project is {}: skip no-mistakes and keep your own /code-review.",
             project.stage
-        )
+        ));
     }
+    if effective == Delivery::DirectPr {
+        line.push_str(
+            " Commit only, never push: describe the PR with `tiller pr describe` and report done; the daemon pushes the branch and opens the PR.",
+        );
+    }
+    line.push('\n');
+    line
 }
 
 /// The world a spawn, a `tiller done` and a cleanup act on.
@@ -391,6 +399,7 @@ fn place(
         default_branch: &project.default_branch,
         network_allow: &world.config.spawn.network_allow,
         no_mistakes_socket: world.config.spawn.no_mistakes_socket.as_deref(),
+        gh_login_readable: project.effective_delivery() == Delivery::NoMistakes,
         claude: &world.config.spawn.claude,
         claude_config: world.claude_config,
         claude_version: claude_version.as_deref(),

@@ -3,32 +3,85 @@
 //! SHA as a plain fast-forward. The remote refuses anything else, so a moved
 //! default branch fails the land instead of being overwritten.
 //!
+//! The publish of a direct-pr run (`publish.rs`) pushes the run's branch with
+//! the same [`push`].
+//!
 //! A `local-only` project (P12) has no remote: the same checks run against
 //! the local default branch, which [`advance`] fast-forwards in the
 //! repository the run's worktree shares.
+//!
+//! Every call here runs as the owner, outside the sandbox, in a repository a
+//! worker can write. So no call runs a hook or an fsmonitor, and [`push`] and
+//! [`uncommitted`] run in a [`CleanRoom`]: the repository's own config never
+//! applies to them, since a filter driver, `core.sshCommand` or a credential
+//! helper written there would run as a command too.
 
-use std::path::Path;
-use std::process::Command;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use super::forge::{AppToken, Identity};
 
-/// What one `git` call printed, or why it could not run.
-fn git(repo: &Path, args: &[&str], identity: &Identity) -> Result<String, String> {
+/// How long one push may run before the daemon stops it: a remote that
+/// never answers must not hold the publish or the land pass.
+pub const PUSH_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Config every call carries, above the repository's own: no hook and no
+/// fsmonitor runs.
+const HARDENED: [(&str, &str); 2] = [("core.hooksPath", "/dev/null"), ("core.fsmonitor", "false")];
+
+/// A `git` command with no repository chosen for it by the environment.
+fn command() -> Command {
     let mut command = Command::new("git");
+    for name in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+    ] {
+        command.env_remove(name);
+    }
+    command
+}
+
+/// What one `git` call in `repo` printed, or why it could not run.
+fn git(repo: &Path, args: &[&str], identity: &Identity) -> Result<String, String> {
+    let mut command = command();
     command.arg("-C").arg(repo).args(args);
+    run(command, identity, None)
+}
+
+/// Runs `command` with the hardened config, and `identity`'s token when it
+/// has one; `timeout` stops a call that runs over.
+fn run(
+    mut command: Command,
+    identity: &Identity,
+    timeout: Option<Duration>,
+) -> Result<String, String> {
     // Never prompt; never pick up a credential helper's interactive login.
-    command.env("GIT_TERMINAL_PROMPT", "0");
+    command.env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null());
+    let mut config: Vec<(&str, String)> = HARDENED
+        .iter()
+        .map(|(key, value)| (*key, (*value).to_owned()))
+        .collect();
     if let Identity::App(token) = identity {
         // The token goes in the environment, not on the command line, so the
         // process list never shows it.
-        command
-            .env("GIT_CONFIG_COUNT", "1")
-            .env("GIT_CONFIG_KEY_0", "http.https://github.com/.extraheader")
-            .env("GIT_CONFIG_VALUE_0", basic_header(token));
+        config.push(("http.https://github.com/.extraheader", basic_header(token)));
     }
-    let output = command
-        .output()
-        .map_err(|error| format!("run git: {error}"))?;
+    command.env("GIT_CONFIG_COUNT", config.len().to_string());
+    for (i, (key, value)) in config.iter().enumerate() {
+        command
+            .env(format!("GIT_CONFIG_KEY_{i}"), key)
+            .env(format!("GIT_CONFIG_VALUE_{i}"), value);
+    }
+    let output = match timeout {
+        None => command
+            .output()
+            .map_err(|error| format!("run git: {error}"))?,
+        Some(limit) => within(command, limit)?,
+    };
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     } else {
@@ -38,6 +91,106 @@ fn git(repo: &Path, args: &[&str], identity: &Identity) -> Result<String, String
         Err(format!("{}\n{}", stdout.trim(), stderr.trim())
             .trim()
             .to_owned())
+    }
+}
+
+/// `command`'s output, or an error once it has run for `limit`; the child
+/// is killed then. A call that could not start reads `run git: ...`.
+fn within(mut command: Command, limit: Duration) -> Result<Output, String> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("run git: {error}"))?;
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+    );
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= limit => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("git ran past {}s and was stopped", limit.as_secs()));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(error) => return Err(format!("wait for git: {error}")),
+        }
+    };
+    Ok(Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
+/// A bare git dir only the daemon writes, which borrows a repository's
+/// objects through `objects/info/alternates`. Git in it reads the owner's
+/// global and system config and its own, never the repository's config,
+/// hooks or `info/attributes`. Removed on drop.
+struct CleanRoom {
+    dir: tempfile::TempDir,
+    /// The repository's own git dir, which holds the worktree's index.
+    git_dir: PathBuf,
+}
+
+impl CleanRoom {
+    fn open(repo: &Path) -> Result<Self, String> {
+        let dirs = git(
+            repo,
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-dir",
+                "--git-common-dir",
+            ],
+            &Identity::Owner,
+        )?;
+        let mut lines = dirs.lines();
+        let (Some(git_dir), Some(common)) = (lines.next(), lines.next()) else {
+            return Err(format!("git rev-parse printed {dirs:?}"));
+        };
+        let dir = tempfile::Builder::new()
+            .prefix("tiller-git-")
+            .tempdir()
+            .map_err(|error| format!("create a clean git dir: {error}"))?;
+        let mut init = command();
+        init.args(["init", "--bare", "--quiet"]).arg(dir.path());
+        run(init, &Identity::Owner, None)?;
+        std::fs::write(
+            dir.path().join("objects/info/alternates"),
+            format!("{common}/objects\n"),
+        )
+        .map_err(|error| format!("write the clean git dir's alternates: {error}"))?;
+        Ok(Self {
+            dir,
+            git_dir: PathBuf::from(git_dir),
+        })
+    }
+
+    fn command(&self) -> Command {
+        let mut command = command();
+        command.arg("--git-dir").arg(self.dir.path());
+        command
     }
 }
 
@@ -125,10 +278,21 @@ pub enum Pushed {
     Unknown(String),
 }
 
-/// `git push <remote> <sha>:refs/heads/<default>`, never forced.
-pub fn push(repo: &Path, remote: &str, sha: &str, default: &str, identity: &Identity) -> Pushed {
-    let refspec = format!("{sha}:refs/heads/{default}");
-    match git(repo, &["push", "--porcelain", remote, &refspec], identity) {
+/// `git push <remote> <sha>:refs/heads/<branch>`, never forced, from a
+/// [`CleanRoom`]. `remote` is a remote of `repo` or a URL.
+pub fn push(repo: &Path, remote: &str, sha: &str, branch: &str, identity: &Identity) -> Pushed {
+    let url = match push_url(repo, remote) {
+        Ok(url) => url,
+        Err(error) => return Pushed::Refused(error),
+    };
+    let room = match CleanRoom::open(repo) {
+        Ok(room) => room,
+        Err(error) => return Pushed::Refused(format!("nothing was sent: {error}")),
+    };
+    let refspec = format!("{sha}:refs/heads/{branch}");
+    let mut command = room.command();
+    command.args(["push", "--porcelain", "--", &url, &refspec]);
+    match run(command, identity, Some(PUSH_TIMEOUT)) {
         Ok(_) => Pushed::Done,
         Err(error) if error.starts_with("run git:") => Pushed::Refused(error),
         Err(error)
@@ -141,6 +305,55 @@ pub fn push(repo: &Path, remote: &str, sha: &str, default: &str, identity: &Iden
         }
         Err(error) => Pushed::Unknown(error),
     }
+}
+
+/// Where a push to `remote` goes: its push URL when `repo` names it, else
+/// `remote` itself. A URL that would read as an option or names a transport
+/// helper (`ext::`, `fd::`), which runs a command, is refused.
+fn push_url(repo: &Path, remote: &str) -> Result<String, String> {
+    let url = git(
+        repo,
+        &["remote", "get-url", "--push", remote],
+        &Identity::Owner,
+    )
+    .unwrap_or_else(|_| remote.to_owned());
+    let helper = url.split_once("::").is_some_and(|(transport, _)| {
+        !transport.is_empty()
+            && transport
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    });
+    if url.is_empty() || url.starts_with('-') || helper {
+        return Err(format!("nothing was sent: the push URL {url:?} is refused"));
+    }
+    Ok(url)
+}
+
+/// The tracked files a worktree changed and did not commit against `head`,
+/// as `git status --porcelain` lists them; empty when there are none. It
+/// runs in a [`CleanRoom`] on the worktree's index, without taking its lock,
+/// so no filter driver or fsmonitor the repository names runs. Untracked
+/// files are left out: while a sandboxed command runs, the sandbox keeps
+/// empty read-only placeholders (`.bashrc`, `.gitconfig`, `.mcp.json` and
+/// the like) in its working directory, and the host sees them there.
+pub fn uncommitted(repo: &Path, head: &str) -> Result<String, String> {
+    let room = CleanRoom::open(repo)?;
+    let mut point = room.command();
+    point.args(["update-ref", "--no-deref", "HEAD", head]);
+    run(point, &Identity::Owner, None)?;
+    let mut status = room.command();
+    status
+        .arg("--work-tree")
+        .arg(repo)
+        .arg("--no-optional-locks")
+        .args([
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+            "--ignore-submodules=all",
+        ])
+        .env("GIT_INDEX_FILE", room.git_dir.join("index"));
+    run(status, &Identity::Owner, None)
 }
 
 /// The local default branch's head.

@@ -177,6 +177,16 @@ A run's sessions are in `sessions` (`run_id`). A resume after a reboot that keep
 
 A run may have several PRs (a replacement PR). The newest open one is the run's PR for column derivation.
 
+### Publish
+
+`publishes`: one row per direct-pr builder run whose worker described its PR (`authority.md` section 6, "Publishing a direct-pr run"). The worker only commits; the daemon pushes the branch and opens the PR.
+
+- `run_id` (primary key), `title`, `body`, `described_at`: the PR the worker described with `tiller pr describe`.
+- `pushed_sha`, `pushed_at`: the head the daemon last pushed. `pr_id`: the PR it opened or found, never replaced by another.
+- `attempted_sha`, `attempted_at`, `error`: the last failed publish and its real error, cleared by the next success.
+
+The record is current for a head when that head is pushed, `pr_id` is set, `error` is null, and both `described_at` and the run's `last_status_at` are earlier than `pushed_at`. `publish.done` on a current record writes nothing; the daemon publishes a run again when it is not.
+
 ### Approval
 
 `approvals`: a bound decision to execute one action (plan v2, point 16).
@@ -429,6 +439,9 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `run.clean` | daemon cleanup after `tiller done`, `tiller run clean` | run ended; `worktrees.unlanded_commits = 0` and fresh; pane process not alive or pane closed | `worktrees.gone_at`, `panes.gone_at` | `run.cleaned` |
 | `observation.record` | `tiller hook`, tailer, pollers | none (append) | `observations`; `sessions.activity*` when newer | `observation.recorded` (only when the verdict changed; raw rows are not events) |
 | `pr.link` | worker (`tiller pr link`), reconcile | run active or card open | `prs` | `pr.linked` |
+| `pr.describe` | builder (`tiller pr describe`) | run active; role `builder` | `publishes` (title, body) | `pr.described` |
+| `publish.done` | daemon only | a described run; the PR is the recorded one or none is recorded; natural when the record is current | `publishes` (pushed head and time, PR; error cleared) | `publish.done` |
+| `publish.failed` | daemon only | a described run | `publishes` (attempted head, error) | `publish.failed` |
 | `pr.refresh` | daemon poller | PR exists | `prs` cache columns; `approvals.state = stale` for every `requested` or `accepted` approval on the PR when the head moved or the PR closed or merged | `pr.changed` (only on a change), `approval.stale` |
 | `approval.request` | orchestrator, daemon (PR green, no grant) | card open; binding complete; no open approval with the same binding | `approvals` (`requested`), `attention` (`merge`) | `approval.requested`, `attention.opened` |
 | `approval.decide` | board, `tiller approve`, grant match | approval `requested`; key new or identical; binding still matches the cache | `approvals` (`accepted` or `rejected`), `attention` answered | `approval.decided` (carrying the cited `ask_id` for a chat decision, G06), `attention.answered` |

@@ -50,6 +50,7 @@ Workers report with status lines (`working`, `needs-decision`, `blocked`, `pause
 - `paused ... until <date>`: nothing to do until the date; the daemon silences alarms until then.
 - Silent worker (the daemon's note with the last tool call): `tiller agent interrupt <run>`, `tiller agent relaunch <run> --note <t>`, or `tiller run pause <run> --until <date> --reason <t>` for a legitimate wait (R12). Never kill a process by hand.
 - `done` on a ship card: the record decides, not the line. The PR exists, checks are green, and a review row exists before you request a merge. A `no-mistakes` ask-user finding goes to the owner as an attention item; nobody answers it for them (P09).
+- `done` from a `direct-pr` builder: the daemon pushes and opens the PR. A failure is a `merge` item with the real error. Never tell a builder to push.
 - Worker crashed: `tiller done <run> --outcome failed` after reading the worktree state, then relaunch with a note or start a new attempt (`--new-attempt --brief-file`). Unlanded work in the worktree stays there (G18, G19).
 
 Every stage change is reported to the owner under the card's tag, not only PR open and merge (P40).
