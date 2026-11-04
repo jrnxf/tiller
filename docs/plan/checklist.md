@@ -73,12 +73,12 @@ Started Sunday 2026-11-01, Lisbon time.
 ### T0.4 Firstmate dry-run export (scout)
 first mate, Part C scout `opus` medium - 1-1.5 h per host - after CP0
 
-- [ ] Fleet ledger switched on first, if approved at CP0
-- [ ] Export run with `MODE=dry` on the personal Mac, Part C included (baseline and replay set)
-- [ ] Export run with `MODE=dry` on the remote host
-- [ ] Bundle kept local under `~/.tiller/import/`, never committed
+- [x] Fleet ledger switched on first, if approved at CP0
+- [x] Export run with `MODE=dry` on the personal Mac, Part C included (baseline and replay set)
+- [x] Export run with `MODE=dry` on the remote host
+- [x] Bundle kept local under `~/.tiller/import/`, never committed
 - [ ] Check: every Part G check passes, shown in the report
-- [ ] Open questions listed for CP1
+- [x] Open questions listed for CP1
 
 ### T0.5 Throwaway board demo
 `sonnet` medium - 1-1.25 h - after CP0
@@ -86,7 +86,7 @@ first mate, Part C scout `opus` medium - 1-1.5 h per host - after CP0
 - [x] One-command local server in `demo/` polling Firstmate's fleet snapshot and herdr (local and the saved machine)
 - [x] SSE into one Linear-styled page with all projects visible, read-only, jump-to-pane for local panes
 - [x] Check: real backlog data shows
-- [ ] Check: screenshots in both themes attached
+- [x] Check: screenshots in both themes attached
 - [x] Left running as the interim board until cutover
 - [ ] Delivered
 
@@ -110,7 +110,7 @@ about 3 min of the developer's time
 - [ ] Dry-run bundle's open questions answered
 - [ ] Board demo used
 - [x] Minimum common behavior across hosts agreed (approved as the baseline at CP2, Monday 2026-11-02, H01; host C still has to run the probe, and any fallback it needs is a separate decision)
-- [ ] Parity matrix: every proposed drop approved or sent back
+- [x] Parity matrix: every proposed drop approved or sent back
 
 ---
 
