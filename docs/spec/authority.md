@@ -247,7 +247,7 @@ From the outside in. A guarantee in section 9 names the layers that hold it.
 2. **Run fragment.** `tiller spawn` generates the settings fragment per run from the role template in `roles/` (T4.1), with absolute paths for the worktree, the scratch directory and the protected roots filled in. Its SHA-256 goes into `config_hash`. It carries the deny and allow rules (section 8), the PreToolUse hook, and the sandbox settings. It is passed with `--settings`, never written to the project's tracked `.claude/settings.json`: tracked project settings follow the repo into every worktree and would disarm or over-arm other sessions (Firstmate's subagent-guard learned this). If T4.3 finds flag-scope PreToolUse does not fire on a host, the fallback is the worktree's untracked `.claude/settings.local.json`, written by spawn.
 3. **Permission rules.** Deny rules per role, plus `dontAsk` with narrow allow rules for workers. They are cheap, apply in every mode, and catch the canonical forms.
 4. **PreToolUse backstop** (section 9's mechanism for alternate forms). One decision owner, `tiller guard pretool`, sees every tool call of every fleet role.
-5. **OS sandbox.** For every fleet role: `sandbox.enabled`, `failIfUnavailable: true`, `allowUnsandboxedCommands: false`. Write set: the role's write set from section 8. `denyRead` and `denyWrite` on `~/.tiller` and the secret patterns. Network: an allow list per project (the forge, the package registries its checks need); no localhost. Unix sockets: only the `no-mistakes` daemon socket. `excludedCommands` names only the packaged `tiller` binary by its absolute Nix-store path, so `tiller` reaches `state.db`, and `tiller` checks its own caller (layer 6). Roles type bare `tiller`; the backstop (layer 4) writes the packaged path in for a lone call, with every argument quoted. Why this one exception is safe, and what it does not cover, is "Routes and their controls" below.
+5. **OS sandbox.** For every fleet role: `sandbox.enabled`, `failIfUnavailable: true`, `allowUnsandboxedCommands: false`. Write set: the role's write set from section 8. `denyRead` and `denyWrite` on the Tiller home (`<tiller_home>`: `TILLER_HOME` when set, else `~/.tiller`) and the secret patterns. Every launch also exports `TILLER_HOME`, so the session's `tiller` and its backstop hook find that same home. Network: an allow list per project (the forge, the package registries its checks need); no localhost. Unix sockets: only the `no-mistakes` daemon socket. `excludedCommands` names only the packaged `tiller` binary by its absolute Nix-store path, so `tiller` reaches `state.db`, and `tiller` checks its own caller (layer 6). Roles type bare `tiller`; the backstop (layer 4) writes the packaged path in for a lone call, with every argument quoted. Why this one exception is safe, and what it does not cover, is "Routes and their controls" below.
 6. **`tiller` self-checks.** Every mutation resolves its principal (section 3) and checks the role matrix (section 4) inside its transaction, before its preconditions. Owner-only commands refuse any call that is not the owner principal. This layer holds whatever the harness does.
 7. **Forge and git preconditions.** The merge carries the bound SHA; a default-branch push is fast-forward only.
 8. **Detection.** Reconcile and the audit trail (section 11). Detection never makes a row enforced, but it bounds how long a breach stays unseen: one reconcile cycle.
@@ -307,7 +307,7 @@ The policy has one owner, `tiller guard`, and each harness adapter only carries 
 
 ## 8. Deny rules per role
 
-The fragments are written in Claude Code's rule syntax. `<tiller>`, `<worktree>`, `<scratch>`, `<home>`, `<pool>`, `<checkouts>` and `<default>` are filled in by spawn: the packaged `tiller` binary by its absolute path, the run's worktree, its scratch directory (outside the repo and outside `~/.tiller`), the orchestrator's home, the treehouse pool root, the root of the project checkouts, and the project's default branch. The backstop covers every Bash rule below in its alternate forms; the rules are the first layer, not the only one.
+The fragments are written in Claude Code's rule syntax. `<tiller>`, `<tiller_home>`, `<worktree>`, `<scratch>`, `<home>`, `<pool>`, `<checkouts>` and `<default>` are filled in by spawn: the packaged `tiller` binary by its absolute path, the effective Tiller home (`TILLER_HOME` when set, else `~/.tiller`; the `~/.tiller` below is that default), the run's worktree, its scratch directory (outside the repo and outside `~/.tiller`), the orchestrator's home, the treehouse pool root, the root of the project checkouts, and the project's default branch. The backstop covers every Bash rule below in its alternate forms; the rules are the first layer, not the only one.
 
 ### Every fleet role
 
@@ -315,7 +315,7 @@ The fragments are written in Claude Code's rule syntax. `<tiller>`, `<worktree>`
 {
   "permissions": {
     "deny": [
-      "Read(~/.tiller/**)", "Edit(~/.tiller/**)",
+      "Read(/<tiller_home>/**)", "Edit(/<tiller_home>/**)",
       "Edit(~/.claude/**)", "Edit(<worktree>/.claude/**)",
       "Read(**/.env)", "Read(**/.env.*)", "Read(**/.envrc)", "Read(**/*.pem)", "Read(**/*.key)",
       "Bash(gh pr merge *)", "Bash(gh-axi pr merge *)",

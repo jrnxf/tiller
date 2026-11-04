@@ -3,8 +3,8 @@
   "permissions": {
     "defaultMode": "dontAsk",
     "deny": [
-      "Read(~/.tiller/**)",
-      "Edit(~/.tiller/**)",
+      "Read(/<tiller_home>/**)",
+      "Edit(/<tiller_home>/**)",
       "Edit(~/.claude/**)",
       "Edit(/<worktree>/.claude/**)",
       "Read(**/.env)",
@@ -357,13 +357,13 @@
         "<scratch>"
       ],
       "denyWrite": [
-        "~/.tiller",
+        "<tiller_home>",
         "~/.claude",
         "<worktree>/.claude",
         "<worktree>/.git/hooks"
       ],
       "denyRead": [
-        "~/.tiller",
+        "<tiller_home>",
         "<worktree>/.env",
         "<worktree>/.envrc"
       ]

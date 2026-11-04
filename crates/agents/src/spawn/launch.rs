@@ -61,6 +61,9 @@ pub struct LaunchSpec<'a> {
     pub run_id: &'a str,
     pub worktree: &'a Path,
     pub scratch: &'a Path,
+    /// The effective Tiller home, hidden from the sandbox and exported as
+    /// `TILLER_HOME`.
+    pub tiller_home: &'a Path,
     pub model: &'a str,
     pub effort: Effort,
     /// A worker's brief; `None` for the orchestrator.
@@ -95,6 +98,8 @@ pub struct AgainSpec<'a> {
     pub run_id: &'a str,
     pub worktree: &'a Path,
     pub scratch: &'a Path,
+    /// The effective Tiller home, exported as `TILLER_HOME`.
+    pub tiller_home: &'a Path,
     pub model: &'a str,
     pub effort: Effort,
     pub claude: &'a str,
@@ -320,6 +325,7 @@ struct Command<'a> {
     session_id: &'a str,
     run_id: &'a str,
     worktree: &'a Path,
+    tiller_home: &'a Path,
     claude: &'a str,
     claude_config: &'a ClaudeConfig,
     model: &'a str,
@@ -363,6 +369,12 @@ fn env(command: &Command<'_>) -> Vec<(&'static str, String)> {
         ("TILLER_SESSION_ID", command.session_id.into()),
         ("TILLER_RUN_ID", command.run_id.into()),
         ("TILLER_ROLE", command.role.name().into()),
+        // The session's `tiller` and its guard hook find the Tiller home by
+        // this, and a herdr pane does not inherit the daemon's environment.
+        (
+            "TILLER_HOME",
+            command.tiller_home.to_string_lossy().into_owned(),
+        ),
     ];
     if let Some(dir) = command.claude_config.forwarded() {
         env.push(("CLAUDE_CONFIG_DIR", dir.to_string_lossy().into_owned()));
@@ -398,6 +410,7 @@ fn script(command: &Command<'_>, launch: &Launch) -> String {
 pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
     let worktree = absolute("the worktree", spec.worktree)?;
     let scratch = absolute("the scratch directory", spec.scratch)?;
+    let tiller_home = absolute("the Tiller home", spec.tiller_home)?;
     let tiller = absolute("the tiller binary", spec.tiller)?;
     if let Some(parent) = spec.scratch.parent() {
         fs::create_dir_all(parent)?;
@@ -423,6 +436,7 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
         spec.role,
         &Placeholders {
             tiller,
+            tiller_home,
             worktree,
             scratch,
             home,
@@ -475,6 +489,7 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
             session_id: spec.session_id,
             run_id: spec.run_id,
             worktree: spec.worktree,
+            tiller_home: spec.tiller_home,
             claude: spec.claude,
             claude_config: spec.claude_config,
             model: spec.model,
@@ -541,6 +556,7 @@ pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<String, Spa
             session_id: spec.session_id,
             run_id: spec.run_id,
             worktree: spec.worktree,
+            tiller_home: spec.tiller_home,
             claude: spec.claude,
             claude_config: spec.claude_config,
             model: spec.model,
@@ -614,6 +630,7 @@ mod tests {
                 session_id: "s1",
                 run_id: "r1",
                 worktree: Path::new("/home/user/work"),
+                tiller_home: Path::new("/home/user/.tiller"),
                 claude: "claude",
                 claude_config,
                 model: "sonnet",
@@ -623,6 +640,12 @@ mod tests {
             },
             &launch,
         )
+    }
+
+    #[test]
+    fn the_session_finds_the_tiller_home_by_its_environment() {
+        let set = text(&ClaudeConfig::default());
+        assert!(set.contains("TILLER_HOME='/home/user/.tiller'"), "{set}");
     }
 
     #[test]

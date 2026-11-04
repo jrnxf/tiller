@@ -206,6 +206,7 @@ impl Sandbox {
             scanner: &self.scanner,
             tiller: &self.tiller,
             scratch_root: &self.scratch,
+            tiller_home: &self.home,
             claude_config: &self.claude,
             ram_free_mb: Some(FREE_MB),
             disk_free_mb: Some(FREE_MB),

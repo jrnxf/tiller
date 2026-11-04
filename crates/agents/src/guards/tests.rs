@@ -1123,6 +1123,7 @@ fn fill(role: Role) -> Placeholders {
         }
         .into(),
         scratch: "/home/user/scratch/alpha-1".into(),
+        tiller_home: "/home/user/.tiller".into(),
         home: if orchestrator {
             "/home/user/tiller-homes/alpha"
         } else {
@@ -1255,7 +1256,7 @@ fn secret_reads_denied() {
             "Read(**/.envrc)",
             "Read(**/*.pem)",
             "Read(**/*.key)",
-            "Read(~/.tiller/**)",
+            "Read(//home/user/.tiller/**)",
         ] {
             assert!(deny.contains(&rule), "{role}: {rule}");
         }
@@ -1265,7 +1266,7 @@ fn secret_reads_denied() {
             .iter()
             .filter_map(Value::as_str)
             .collect();
-        assert!(deny_read.contains(&"~/.tiller"), "{role}");
+        assert!(deny_read.contains(&"/home/user/.tiller"), "{role}");
     }
 }
 

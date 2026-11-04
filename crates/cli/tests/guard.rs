@@ -237,3 +237,22 @@ fn deny_is_recorded_when_the_home_has_a_database() {
     assert_eq!(payload["role"], "scout");
     assert_eq!(payload["claude_session_id"], "claude-1");
 }
+
+#[test]
+fn a_custom_tiller_home_is_protected_like_the_default() {
+    let home = tempfile::tempdir().unwrap();
+    let db = home.path().join("state.db");
+    assert_denied(
+        &guard(home.path(), "builder", &format!("cat {}", db.display())),
+        "state-write",
+    );
+    assert_denied(
+        &guard(
+            home.path(),
+            "builder",
+            &format!("sqlite3 {} .dump", db.display()),
+        ),
+        "state-write",
+    );
+    assert_allowed(&guard(home.path(), "builder", "git status"));
+}

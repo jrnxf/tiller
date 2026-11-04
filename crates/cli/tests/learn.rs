@@ -258,6 +258,22 @@ fn retro_run_launches_the_curator_headless() {
     )
     .unwrap();
     assert_eq!(settings["env"]["TILLER_ROLE"], "curator");
+    // The sandbox hides this home, not the default `~/.tiller`, and the
+    // curator's `tiller` finds it again by the environment.
+    let home = world.home().to_string_lossy().into_owned();
+    for key in ["denyRead", "denyWrite"] {
+        let paths = settings["sandbox"]["filesystem"][key].as_array().unwrap();
+        assert!(paths.contains(&json!(home)), "{key}: {paths:?}");
+    }
+    assert!(!settings.to_string().contains(".tiller"), "{settings}");
+    assert!(
+        dry.data()["env"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(["TILLER_HOME", home])),
+        "{}",
+        dry.data()["env"]
+    );
     // Nothing ran, nothing changed.
     assert_eq!(
         world.must(&["retro", "show", &tag]).data()["retro"]["state"],

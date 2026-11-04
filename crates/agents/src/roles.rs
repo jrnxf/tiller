@@ -77,8 +77,11 @@ pub struct Placeholders {
     /// The session's working directory: the run's worktree, or for the
     /// orchestrator the project checkout it runs in.
     pub worktree: String,
-    /// The run's scratch directory, outside the repository and `~/.tiller`.
+    /// The run's scratch directory, outside the repository and the Tiller home.
     pub scratch: String,
+    /// The effective Tiller home (`TILLER_HOME`, else `~/.tiller`): the
+    /// directory the sandbox hides and the deny rules close.
+    pub tiller_home: String,
     /// The orchestrator's home directory (orchestrator only; empty otherwise).
     pub home: String,
     /// The treehouse pool root (orchestrator only; empty otherwise).
@@ -100,8 +103,9 @@ pub const MCP_CONFIG: &str = include_str!("../../../roles/mcp.json");
 
 /// The string placeholders a template may carry, each replaced inside the
 /// strings that hold it. All but `<default>` are absolute paths.
-pub const STRING_PLACEHOLDERS: [&str; 7] = [
+pub const STRING_PLACEHOLDERS: [&str; 8] = [
     "<tiller>",
+    "<tiller_home>",
     "<worktree>",
     "<scratch>",
     "<home>",
@@ -238,9 +242,10 @@ pub const TILLER_PATH_REQUIREMENT: &str =
 
 impl Placeholders {
     /// Each string placeholder with its value, in [`STRING_PLACEHOLDERS`] order.
-    fn strings(&self) -> [(&'static str, &str); 7] {
+    fn strings(&self) -> [(&'static str, &str); 8] {
         [
             ("<tiller>", &self.tiller),
+            ("<tiller_home>", &self.tiller_home),
             ("<worktree>", &self.worktree),
             ("<scratch>", &self.scratch),
             ("<home>", &self.home),
@@ -381,8 +386,8 @@ mod tests {
     /// Every fleet role's deny list, from `authority.md` section 8, "Every
     /// fleet role", in order, plus the one T4.1 addition at the end.
     const COMMON_DENY: &[&str] = &[
-        "Read(~/.tiller/**)",
-        "Edit(~/.tiller/**)",
+        "Read(/<tiller_home>/**)",
+        "Edit(/<tiller_home>/**)",
         "Edit(~/.claude/**)",
         "Edit(/<worktree>/.claude/**)",
         "Read(**/.env)",
@@ -632,6 +637,39 @@ mod tests {
             .collect()
     }
 
+    /// The sandbox and the deny rules name the effective Tiller home, not
+    /// `~/.tiller`: a host that sets `TILLER_HOME` is hidden at that path.
+    #[test]
+    fn the_effective_tiller_home_is_hidden() {
+        for role in Role::ALL {
+            let mut fill = sample_fill(role);
+            fill.tiller_home = "/data/tiller".into();
+            let rendered = render_settings(role, &fill).unwrap();
+            let text = rendered.to_string();
+            assert!(!text.contains(".tiller"), "{role}: default home named");
+            let sandbox = &rendered["sandbox"]["filesystem"];
+            for key in ["denyRead", "denyWrite"] {
+                assert!(
+                    strings(&sandbox[key]).contains(&"/data/tiller"),
+                    "{role}: {key}"
+                );
+            }
+            let deny = strings(&rendered["permissions"]["deny"]);
+            for rule in ["Read(//data/tiller/**)", "Edit(//data/tiller/**)"] {
+                assert!(deny.contains(&rule), "{role}: {rule}");
+            }
+        }
+        let mut relative = sample_fill(Role::Builder);
+        relative.tiller_home = ".tiller".into();
+        assert!(matches!(
+            render_settings(Role::Builder, &relative),
+            Err(RoleError::InvalidPlaceholder {
+                placeholder: "<tiller_home>",
+                ..
+            })
+        ));
+    }
+
     fn sample_fill(role: Role) -> Placeholders {
         let orchestrator = role == Role::Orchestrator;
         Placeholders {
@@ -642,6 +680,7 @@ mod tests {
                 "/home/user/pool/3/alpha".into()
             },
             scratch: "/home/user/scratch/alpha-42-build".into(),
+            tiller_home: "/home/user/.tiller".into(),
             home: if orchestrator {
                 "/home/user/tiller-homes/alpha".into()
             } else {
@@ -947,8 +986,8 @@ mod tests {
             );
             let deny_read = strings(&sandbox["filesystem"]["denyRead"]);
             assert!(
-                deny_read.contains(&"~/.tiller"),
-                "{role}: ~/.tiller readable"
+                deny_read.contains(&"<tiller_home>"),
+                "{role}: the Tiller home readable"
             );
             let deny_write = strings(&sandbox["filesystem"]["denyWrite"]);
             assert!(

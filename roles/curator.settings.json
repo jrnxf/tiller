@@ -22,7 +22,7 @@
       "Read(**/.envrc)",
       "Read(**/*.pem)",
       "Read(**/*.key)",
-      "Read(~/.tiller/**)",
+      "Read(/<tiller_home>/**)",
       "Read(~/.claude/**)",
       "Read(~/.config/**)",
       "Read(**/.ssh/**)",
@@ -98,11 +98,11 @@
         "<scratch>"
       ],
       "denyWrite": [
-        "~/.tiller",
+        "<tiller_home>",
         "~/.claude"
       ],
       "denyRead": [
-        "~/.tiller"
+        "<tiller_home>"
       ]
     },
     "network": {

@@ -45,9 +45,17 @@ pub fn model_alias() -> &'static str {
 /// The settings fragment with its two placeholders filled. Both must be
 /// absolute paths without a trailing slash or a quote, and `<tiller>` a
 /// [`crate::guards::plain_path`], since the prompt tells the curator to type it.
-pub fn render_settings(tiller: &Path, scratch: &Path) -> Result<Value, SpawnError> {
+pub fn render_settings(
+    tiller: &Path,
+    scratch: &Path,
+    tiller_home: &Path,
+) -> Result<Value, SpawnError> {
     let mut text = SETTINGS.to_owned();
-    for (placeholder, path) in [("<tiller>", tiller), ("<scratch>", scratch)] {
+    for (placeholder, path) in [
+        ("<tiller>", tiller),
+        ("<scratch>", scratch),
+        ("<tiller_home>", tiller_home),
+    ] {
         let value = path.to_string_lossy();
         if placeholder == "<tiller>" && !crate::guards::plain_path(&value) {
             return Err(SpawnError::Usage(format!(
@@ -70,6 +78,9 @@ pub struct LaunchSpec<'a> {
     pub retro_id: &'a str,
     pub scratch: &'a Path,
     pub tiller: &'a Path,
+    /// The effective Tiller home, hidden from the sandbox and exported as
+    /// `TILLER_HOME`.
+    pub tiller_home: &'a Path,
     pub claude: &'a str,
     pub model: &'a str,
     pub brief: &'a str,
@@ -107,7 +118,7 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
     }
     fs::create_dir(spec.scratch)?;
     fs::set_permissions(spec.scratch, fs::Permissions::from_mode(0o700))?;
-    let fragment = render_settings(spec.tiller, spec.scratch)?;
+    let fragment = render_settings(spec.tiller, spec.scratch, spec.tiller_home)?;
     let fragment = serde_json::to_vec_pretty(&fragment)?;
     // The curator has no hooks to rewrite a bare `tiller`, so its prompt
     // names the packaged path the sandbox exempts.
@@ -148,6 +159,10 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
         ("CLAUDE_CODE_DISABLE_AUTO_MEMORY".into(), "1".into()),
         ("TILLER_ROLE".into(), "curator".into()),
         ("TILLER_RETRO_ID".into(), spec.retro_id.into()),
+        (
+            "TILLER_HOME".into(),
+            spec.tiller_home.to_string_lossy().into_owned(),
+        ),
     ];
     let line = format!(
         "env {} {}",
@@ -179,6 +194,7 @@ mod tests {
         let fragment = render_settings(
             Path::new("/nix/store/x/bin/tiller"),
             Path::new("/home/user/s"),
+            Path::new("/data/tiller"),
         )
         .unwrap();
         let deny: Vec<&str> = fragment["permissions"]["deny"]
@@ -207,8 +223,12 @@ mod tests {
         assert!(deny.contains(&"Bash(/nix/store/x/bin/tiller learn *)"));
         // The curator reads untrusted transcripts, so every dot directory
         // in the home (keys, tokens, the state directory) is closed to Read.
-        for path in ["~/.tiller/**", "~/.claude/**", "**/.ssh/**", "**/id_*"] {
-            assert!(deny.contains(&format!("Read({path})").as_str()), "{path}");
+        for path in ["/data/tiller/**", "~/.claude/**", "**/.ssh/**", "**/id_*"] {
+            let rule = match path.strip_prefix('/') {
+                Some(absolute) => format!("Read(//{absolute})"),
+                None => format!("Read({path})"),
+            };
+            assert!(deny.contains(&rule.as_str()), "{path}");
         }
         assert_eq!(fragment["env"]["TILLER_ROLE"], "curator");
         assert_eq!(fragment["env"]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"], "1");
@@ -239,6 +259,7 @@ mod tests {
             retro_id: "01JC00000000000000000000R1",
             scratch: &scratch,
             tiller: Path::new("/nix/store/x/bin/tiller"),
+            tiller_home: Path::new("/home/user/.tiller"),
             claude: "claude",
             model: "claude-sonnet-5-5",
             brief: "retro: 01JC00000000000000000000R1",
@@ -266,6 +287,7 @@ mod tests {
                 retro_id: "x",
                 scratch: &scratch,
                 tiller: Path::new("/nix/store/x/bin/tiller"),
+                tiller_home: Path::new("/home/user/.tiller"),
                 claude: "claude",
                 model: "m",
                 brief: "b",

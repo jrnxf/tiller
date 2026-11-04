@@ -44,6 +44,7 @@ Model and effort are the role's defaults; the `[dispatch]` rules in the config d
 |---|---|
 | `<tiller>` | the packaged `tiller` binary, by its absolute Nix store path |
 | `<worktree>` | the session's working directory: the run's worktree for a worker; for the orchestrator the directory `tiller orchestrator start` (T4.2) launches it in, which the specs name twice (`recovery.md` R02: the project checkout; `authority.md` section 8 and P58: its home). The fragment covers either, since the checkout is denied for edits and the orchestrator's cwd gets the same `.env` and `.claude` sandbox entries as a worktree |
+| `<tiller_home>` | the effective Tiller home: `TILLER_HOME` when set, else `~/.tiller` |
 | `<scratch>` | the run's scratch directory, outside the repository and outside `~/.tiller` |
 | `<home>`, `<pool>`, `<checkouts>` | the orchestrator's home, the treehouse pool root, the root of the project checkouts (orchestrator only) |
 | `<default>` | the project's default branch |

@@ -130,6 +130,7 @@ pub fn start(
         run_id: "",
         worktree: &places.checkout,
         scratch: &scratch,
+        tiller_home: world.tiller_home,
         model: &front.model,
         effort,
         brief: None,

@@ -339,6 +339,7 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
         retro_id: &retro.id,
         scratch: &scratch,
         tiller: tools.tiller(),
+        tiller_home: tools.tiller_home(),
         claude: &tools.config.spawn.claude,
         model: &config.curator_model,
         brief: &brief_text,

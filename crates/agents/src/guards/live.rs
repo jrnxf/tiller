@@ -106,6 +106,7 @@ impl Lab {
             tiller: lab.bin.clone(),
             worktree: lab.shown("work"),
             scratch: lab.shown("scratch"),
+            tiller_home: lab.shown("home"),
             home: if orchestrator {
                 lab.shown("home")
             } else {
@@ -144,18 +145,6 @@ impl Lab {
             .status()
             .unwrap();
         assert!(status.success());
-    }
-
-    /// Hides the lab's Tiller home from the sandbox, as `~/.tiller` is on a
-    /// host: the fragment's `denyRead` names `~/.tiller`, not the lab.
-    fn hide_home(&self) {
-        let path = self.path("settings.json");
-        let mut fragment: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        fragment["sandbox"]["filesystem"]["denyRead"]
-            .as_array_mut()
-            .unwrap()
-            .push(Value::String(self.shown("home")));
-        fs::write(&path, serde_json::to_string_pretty(&fragment).unwrap()).unwrap();
     }
 
     /// Which system owns the lab's host, as `tiller owner show` reports it.
@@ -639,7 +628,6 @@ fn tiller_exemption_covers_only_the_packaged_binary() {
 fn bare_tiller_reads_the_record_the_sandbox_hides() {
     let lab = Lab::new(Role::Builder);
     lab.init();
-    lab.hide_home();
     let read = lab.bash("tiller machines");
     assert!(
         !read.is_error && read.result.contains("local,live"),

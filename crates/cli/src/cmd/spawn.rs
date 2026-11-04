@@ -70,6 +70,7 @@ pub struct Tools {
     herdr: Cli,
     scanner: GitScanner,
     tiller: PathBuf,
+    tiller_home: PathBuf,
     scratch: PathBuf,
     claude: ClaudeConfig,
 }
@@ -84,6 +85,13 @@ fn state_dir(key: &str) -> Result<PathBuf, Failure> {
 
 fn words(words: &[String]) -> Vec<OsString> {
     words.iter().map(OsString::from).collect()
+}
+
+/// The Tiller home as the launch fragments name it: absolute (a relative
+/// `TILLER_HOME` is anchored at the current directory) and without a
+/// trailing slash.
+fn absolute_home(home: &Path) -> Result<PathBuf, Failure> {
+    Ok(std::path::absolute(home)?.components().collect())
 }
 
 impl Tools {
@@ -102,6 +110,7 @@ impl Tools {
             herdr,
             scanner: GitScanner::new(),
             tiller: std::env::current_exe()?,
+            tiller_home: absolute_home(&app.home)?,
             scratch,
             claude: ClaudeConfig::from_env(),
             config,
@@ -118,6 +127,11 @@ impl Tools {
         &self.tiller
     }
 
+    /// The effective Tiller home, absolute and without a trailing slash.
+    pub fn tiller_home(&self) -> &Path {
+        &self.tiller_home
+    }
+
     pub fn world(&self, ram_free_mb: Option<i64>, disk_free_mb: Option<i64>) -> World<'_> {
         World {
             config: &self.config,
@@ -126,6 +140,7 @@ impl Tools {
             scanner: &self.scanner,
             tiller: &self.tiller,
             scratch_root: &self.scratch,
+            tiller_home: &self.tiller_home,
             claude_config: &self.claude,
             ram_free_mb,
             disk_free_mb,

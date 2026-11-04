@@ -143,6 +143,9 @@ pub struct World<'a> {
     pub tiller: &'a Path,
     /// The run scratch root; each run gets `<root>/<run id>`.
     pub scratch_root: &'a Path,
+    /// The effective Tiller home: hidden from every session's sandbox and
+    /// exported to it as `TILLER_HOME`.
+    pub tiller_home: &'a Path,
     /// Where Claude Code keeps the user config launches record trust in.
     pub claude_config: &'a ClaudeConfig,
     /// Free RAM and disk, read just before `run.start`.
@@ -379,6 +382,7 @@ fn place(
         run_id: &run.id,
         worktree: &worktree,
         scratch: &scratch,
+        tiller_home: world.tiller_home,
         model: &run.model,
         effort: run.effort,
         brief: Some(&brief),
