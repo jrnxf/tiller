@@ -64,9 +64,11 @@ impl Default for Choice {
 }
 
 impl Default for Dispatch {
-    /// Firstmate's four rules from the P02 evidence: small work on haiku at
-    /// low effort, large work on opus at high, medium work on opus at
-    /// medium, and sonnet at medium for everything else.
+    /// The shipped rules: small work on haiku at low effort, medium work on
+    /// sonnet at medium, large work on opus at medium, and sonnet at medium
+    /// for everything else. Cards have no field that marks work as hard to
+    /// undo, so no rule sends anything to opus at high; the owner raises one
+    /// card with `--dispatch`.
     fn default() -> Self {
         let rule = |name: &str, size, model: &str, effort| Rule {
             name: name.into(),
@@ -81,8 +83,8 @@ impl Default for Dispatch {
                 .into(),
             rules: vec![
                 rule("small", Size::S, "haiku", Effort::Low),
-                rule("large", Size::L, "opus", Effort::High),
-                rule("medium", Size::M, "opus", Effort::Medium),
+                rule("large", Size::L, "opus", Effort::Medium),
+                rule("medium", Size::M, "sonnet", Effort::Medium),
             ],
             default: Choice::default(),
         }

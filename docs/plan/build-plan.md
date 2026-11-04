@@ -642,7 +642,7 @@ The sidebar has:
 
   Each role gets a matching settings fragment with its deny rules.
 - **Depends on:** CP2. Drafting can start in wave C.
-- **Model, effort:** `fable` high for the orchestrator, `opus` high for the rest.
+- **Model, effort:** `opus` medium for the orchestrator, `opus` high for the rest.
 - **Estimate:** 4-6 h.
 - **Owns:** `roles/`.
 - **Acceptance:**

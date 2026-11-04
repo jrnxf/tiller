@@ -496,8 +496,8 @@ fn dispatch_resolves_model_effort_from_rules() {
     let mut rig = Rig::new();
     for (size, model, effort) in [
         (Some(Size::S), "haiku", Effort::Low),
-        (Some(Size::M), "opus", Effort::Medium),
-        (Some(Size::L), "opus", Effort::High),
+        (Some(Size::M), "sonnet", Effort::Medium),
+        (Some(Size::L), "opus", Effort::Medium),
         (None, "sonnet", Effort::Medium),
     ] {
         let card = rig.card(CardKind::Ship, size);
@@ -539,12 +539,12 @@ fn orchestrator_downgrade_refused() {
     let mut request = Rig::request(&card, RunRole::Builder);
 
     // Lower model, or the same model at lower effort: refused, nothing made.
-    for asked in [("haiku", Effort::High), ("opus", Effort::Medium)] {
+    for asked in [("haiku", Effort::High), ("opus", Effort::Low)] {
         request.asked = Some((asked.0.into(), asked.1));
         let error = rig.try_spawn(&ctx, request.clone()).unwrap_err();
         assert!(matches!(error, SpawnError::Downgrade(_)), "{error}");
         assert!(refusal(&error).contains("needs the owner"), "{error}");
-        assert!(refusal(&error).contains("opus:high"), "{error}");
+        assert!(refusal(&error).contains("opus:medium"), "{error}");
     }
     let runs: i64 = rig
         .fleet

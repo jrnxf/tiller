@@ -660,13 +660,13 @@ mod tests {
         for role in Role::ALL {
             let fm = role.frontmatter().unwrap();
             assert_eq!(fm.name, role.name(), "{role}: name");
-            let (model, mode) = if role == Role::Orchestrator {
-                ("fable", "default")
+            let (model, effort, mode) = if role == Role::Orchestrator {
+                ("opus", "medium", "default")
             } else {
-                ("opus", "dontAsk")
+                ("opus", "high", "dontAsk")
             };
             assert_eq!(fm.model, model, "{role}: model");
-            assert_eq!(fm.effort, "high", "{role}: effort");
+            assert_eq!(fm.effort, effort, "{role}: effort");
             assert_eq!(fm.permission_mode, mode, "{role}: permission mode");
         }
     }

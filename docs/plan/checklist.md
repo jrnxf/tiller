@@ -246,7 +246,7 @@ about 3 min of the developer's time
 - [x] Delivered
 
 ### T4.1 Roles (drafting can start here)
-`fable` high for the orchestrator, `opus` high for the rest - 4-6 h - final after CP2
+`opus` medium for the orchestrator, `opus` high for the rest - 4-6 h - final after CP2
 
 - [x] `roles/`: orchestrator, scout, builder, reviewer, verifier, each with job, tools, model and effort defaults, done evidence, handoff format
 - [x] Orchestrator never edits project code; reviewer has no memory tool

@@ -30,7 +30,7 @@ with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `TILLER_SESSION_ID`, `TILLER_RUN_ID` a
 
 | Role | Model | Effort | Mode | Write set | Ends with |
 |---|---|---|---|---|---|
-| orchestrator | `fable` | high | `default` | its home, its scratch directory | never; it supervises until the owner clears it |
+| orchestrator | `opus` | medium | `default` | its home, its scratch directory | never; it supervises until the owner clears it |
 | scout | `opus` | high | `dontAsk` | its worktree, its scratch directory | a report artifact, `tiller done` (`reported`) |
 | builder | `opus` | high | `dontAsk` | its worktree, its scratch directory | the merge (`landed`), or `tiller done --outcome failed\|abandoned` |
 | reviewer | `opus` | high | `dontAsk` | its scratch directory only | a `code-review` review row, `tiller done` (`reported`) |
