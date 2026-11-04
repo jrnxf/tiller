@@ -7,7 +7,8 @@
 # therefore changes the launchd plist and the systemd unit, and home-manager's
 # activation reloads the agent or restarts the unit, so the daemon runs the
 # new binary. A rebuild that keeps the package leaves both untouched and the
-# daemon running. `checks.moduleRestartsDaemon` in the flake guards this.
+# daemon running. `checks.moduleRestartsDaemon` in the flake guards this, and
+# the service PATH (Homebrew on macOS only).
 #
 # Both service managers restart the daemon when it dies (a crash, a kill, or
 # exit 3 for a database newer than the binary, `recovery.md` R11) and leave it
@@ -30,10 +31,16 @@ let
     (toString cfg.daemon.port)
   ];
   environment = {
-    # herdr, git, gh and quota-axi come from the profile or the system.
+    # herdr, git, gh and quota-axi come from the profile, extraPath, the
+    # nix-darwin and NixOS system profiles, Homebrew (macOS) or the system.
     PATH = lib.concatStringsSep ":" (
       [ profileBin ]
       ++ cfg.daemon.extraPath
+      ++ [
+        "/etc/profiles/per-user/${config.home.username}/bin"
+        "/run/current-system/sw/bin"
+      ]
+      ++ lib.optional pkgs.stdenv.hostPlatform.isDarwin "/opt/homebrew/bin"
       ++ [
         "/nix/var/nix/profiles/default/bin"
         "/usr/bin"
@@ -79,10 +86,13 @@ in
       extraPath = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [ ];
-        example = [ "/opt/homebrew/bin" ];
+        example = [ "/home/user/.local/bin" ];
         description = ''
           Directories on the daemon's PATH after the home-manager profile, for
-          herdr, git, gh or quota-axi installed elsewhere.
+          herdr, git, gh or quota-axi installed elsewhere. The PATH also has
+          `/etc/profiles/per-user/<user>/bin` and `/run/current-system/sw/bin`
+          after these, and `/opt/homebrew/bin` on macOS, so tools from
+          nix-darwin, NixOS and Homebrew resolve without this option.
         '';
       };
       environment = lib.mkOption {

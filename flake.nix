@@ -192,6 +192,7 @@
                               home.packages = lib.mkOption { type = lib.types.listOf lib.types.package; };
                               home.profileDirectory = lib.mkOption { type = lib.types.str; };
                               home.homeDirectory = lib.mkOption { type = lib.types.str; };
+                              home.username = lib.mkOption { type = lib.types.str; };
                               launchd.agents = lib.mkOption {
                                 type = lib.types.attrsOf lib.types.anything;
                                 default = { };
@@ -204,6 +205,7 @@
                             config = {
                               home.profileDirectory = "/home/user/.nix-profile";
                               home.homeDirectory = "/home/user";
+                              home.username = "user";
                               programs.tiller = {
                                 enable = true;
                                 inherit package;
@@ -217,17 +219,40 @@
                         };
                       }).config;
                   in
-                  builtins.toJSON (
-                    if isDarwin then config.launchd.agents.tiller else config.systemd.user.services.tiller
-                  );
+                  if isDarwin then config.launchd.agents.tiller else config.systemd.user.services.tiller;
+                pathFor =
+                  isDarwin:
+                  let
+                    service = serviceFor isDarwin (stubPackage "tiller-a");
+                  in
+                  if isDarwin then
+                    service.config.EnvironmentVariables.PATH
+                  else
+                    lib.removePrefix "PATH=" (
+                      lib.findFirst (lib.hasPrefix "PATH=") "" (
+                        map (lib.removeSuffix "\"" ) (map (lib.removePrefix "\"") service.Service.Environment)
+                      )
+                    );
+                hasDir = isDarwin: dir: builtins.elem dir (lib.splitString ":" (pathFor isDarwin));
                 follows =
                   isDarwin:
-                  serviceFor isDarwin (stubPackage "tiller-a") != serviceFor isDarwin (stubPackage "tiller-b");
+                  builtins.toJSON (serviceFor isDarwin (stubPackage "tiller-a"))
+                  != builtins.toJSON (serviceFor isDarwin (stubPackage "tiller-b"));
               in
               assert lib.assertMsg (follows true)
                 "nix/module.nix: the launchd agent does not change with the package, so a rebuild leaves the old daemon running";
               assert lib.assertMsg (follows false)
                 "nix/module.nix: the systemd unit does not change with the package, so a rebuild leaves the old daemon running";
+              assert lib.assertMsg (hasDir true "/opt/homebrew/bin")
+                "nix/module.nix: the launchd agent's PATH lacks /opt/homebrew/bin, so Homebrew tools such as herdr are not found";
+              assert lib.assertMsg (!hasDir false "/opt/homebrew/bin")
+                "nix/module.nix: the systemd unit's PATH has /opt/homebrew/bin, which only macOS has";
+              assert lib.assertMsg (
+                hasDir true "/run/current-system/sw/bin" && hasDir false "/run/current-system/sw/bin"
+              ) "nix/module.nix: a service PATH lacks /run/current-system/sw/bin";
+              assert lib.assertMsg (
+                hasDir true "/etc/profiles/per-user/user/bin" && hasDir false "/etc/profiles/per-user/user/bin"
+              ) "nix/module.nix: a service PATH lacks /etc/profiles/per-user/<user>/bin";
               pkgs.runCommand "tiller-module-restarts-daemon" { } "touch $out";
           };
 
