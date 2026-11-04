@@ -57,7 +57,7 @@ Started Sunday 2026-11-01, Lisbon time.
 - [x] `docs/adr/0001-replace-firstmate.md` and `docs/adr/0002-sqlite-authority.md` written
 - [x] `scripts/scrub-check.sh` written and running in CI
 - [x] Check: the scrub check finds nothing
-- [ ] Delivered
+- [x] Delivered
 
 ### T0.3 Capability probe
 `opus` high - 1-1.5 h, plus about 10 min per host - no dependency
@@ -97,7 +97,7 @@ first mate, Part C scout `opus` medium - 1-1.5 h per host - after CP0
 - [x] One row per capability actually used, with evidence (how often, last used)
 - [x] Each row has an owner task and a test name, or is a proposed drop with its reason
 - [x] Check: every capability in the bundle maps to a row
-- [ ] Delivered
+- [x] Delivered
 
 ### T0.x herdr layout demo (optional)
 about 3 min of the developer's time
@@ -296,7 +296,7 @@ about 3 min of the developer's time
 - [x] Check: 4 projects and 40 cards fit at 1440x900 without page scroll, both densities
 - [x] Check: "Open in herdr" focuses the right pane, local and remote
 - [x] Check: live updates with no reload or flicker; no pending state between views
-- [ ] Delivered
+- [x] Delivered
 
 ### T3.3 Attention inbox and actions
 `opus` medium - 3-4 h - after T3.1 and T2.2
@@ -325,7 +325,7 @@ about 3 min of the developer's time
 - [x] `tiller land`, daemon only, merges after a bound approval, rechecks the head SHA just before merging
 - [x] Check: every alternate path tested, blocked or documented as convention
 - [x] Check: a push after approval invalidates the approval
-- [ ] Delivered
+- [x] Delivered
 
 ### T4.4 Intake wiring
 `opus` medium - 2-3 h - after T2.6 and T1.3
