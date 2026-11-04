@@ -139,22 +139,17 @@ test("Escape closes the palette", async () => {
 });
 
 test("density switches the attribute on <html>", async () => {
-  await renderApp();
-  openSettings();
-  fireEvent.keyDown(screen.getByRole("listbox", { name: "Settings" }), { key: "ArrowDown" });
-  fireEvent.keyDown(screen.getByRole("listbox", { name: "Settings" }), { key: "Enter" });
-  fireEvent.click(screen.getByRole("option", { name: /Compact/ }));
+  await renderApp("default", "/settings");
+  fireEvent.click(within(screen.getByRole("group", { name: "Density" })).getByText("Compact"));
   await vi.waitFor(() => expect(document.documentElement.dataset.density).toBe("compact"));
   expect(localStorage.getItem("tiller-density")).toBe("compact");
 });
 
 test("the system theme is followed until a theme is chosen", async () => {
   stubMedia(true);
-  await renderApp();
+  await renderApp("default", "/settings");
   await vi.waitFor(() => expect(document.documentElement.dataset.theme).toBe("dark"));
-  openSettings();
-  fireEvent.keyDown(screen.getByRole("listbox", { name: "Settings" }), { key: "Enter" });
-  fireEvent.click(screen.getByRole("option", { name: /Light/ }));
+  fireEvent.click(within(screen.getByRole("group", { name: "Theme" })).getByText("Light"));
   await vi.waitFor(() => expect(document.documentElement.dataset.theme).toBe("light"));
 });
 
@@ -256,72 +251,45 @@ test("the quota card shows the runway reason and a row per model", async () => {
   ).toEqual([expect.stringContaining("week"), expect.stringContaining("Fable")]);
 });
 
-function openSettings() {
-  fireEvent.click(screen.getByRole("button", { name: "Settings" }));
-  return screen.getByRole("listbox", { name: "Settings" });
-}
-
-test("Settings sits under the quota card and lists Theme and Density", async () => {
+test("Settings is a screen item right under Health and opens the page", async () => {
   await renderApp();
-  const button = screen.getByRole("button", { name: "Settings" });
-  const footer = screen.getByTestId("quota-footer");
-  expect(footer.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  const list = openSettings();
-  expect(
-    within(list)
-      .getAllByRole("option")
-      .map((option) => option.textContent),
-  ).toEqual([expect.stringContaining("Theme"), expect.stringContaining("Density")]);
-});
+  const nav = screen.getByRole("navigation", { name: "Screens" });
+  const names = within(nav)
+    .getAllByRole("link")
+    .map((link) => link.textContent);
+  expect(names.indexOf("Settings")).toBe(names.findIndex((name) => name?.startsWith("Health")) + 1);
 
-test("Enter opens the Theme sub-page, arrows preview it live, Escape reverts", async () => {
-  await renderApp();
-  const list = openSettings();
-  fireEvent.keyDown(list, { key: "Enter" });
-  const options = screen.getByRole("listbox", { name: "Theme" });
-  expect(within(options).getAllByRole("option")).toHaveLength(3);
-
-  fireEvent.keyDown(options, { key: "ArrowDown" });
-  fireEvent.keyDown(options, { key: "ArrowDown" });
-  await vi.waitFor(() => expect(document.documentElement.dataset.theme).toBe("dark"));
-  expect(localStorage.getItem("tiller-theme")).toBeNull();
-
-  fireEvent.keyDown(options, { key: "Escape" });
-  await vi.waitFor(() => expect(document.documentElement.dataset.theme).toBe("light"));
-  expect(screen.getByRole("listbox", { name: "Settings" })).toBeTruthy();
-  expect(localStorage.getItem("tiller-theme")).toBeNull();
-});
-
-test("hovering a density previews it and leaving Settings reverts it", async () => {
-  await renderApp();
-  openSettings();
-  fireEvent.keyDown(screen.getByRole("listbox", { name: "Settings" }), { key: "ArrowDown" });
-  fireEvent.keyDown(screen.getByRole("listbox", { name: "Settings" }), { key: "Enter" });
-  fireEvent.mouseMove(screen.getByRole("option", { name: /Compact/ }));
-  await vi.waitFor(() => expect(document.documentElement.dataset.density).toBe("compact"));
-
-  fireEvent.keyDown(screen.getByRole("listbox", { name: "Density" }), { key: "Escape" });
-  fireEvent.keyDown(screen.getByRole("listbox", { name: "Settings" }), { key: "Escape" });
+  fireEvent.click(within(nav).getByRole("link", { name: "Settings" }));
+  await vi.waitFor(() => expect(screen.getByTestId("settings")).toBeTruthy());
+  expect(screen.getByRole("heading", { level: 1, name: "Settings" })).toBeTruthy();
+  expect(within(nav).getByRole("link", { name: "Settings" }).getAttribute("aria-current")).toBe(
+    "page",
+  );
   expect(screen.queryByRole("dialog")).toBeNull();
-  await vi.waitFor(() => expect(document.documentElement.dataset.density).toBe("comfortable"));
 });
 
-test("choosing an option saves it, as the old toggles did", async () => {
-  await renderApp();
-  openSettings();
-  fireEvent.keyDown(screen.getByRole("listbox", { name: "Settings" }), { key: "Enter" });
-  fireEvent.click(screen.getByRole("option", { name: /Dark/ }));
-  await vi.waitFor(() => expect(document.documentElement.dataset.theme).toBe("dark"));
-  expect(localStorage.getItem("tiller-theme")).toBe("dark");
-  // Back on the list, which now reads the saved value.
-  expect(screen.getByRole("option", { name: /Theme/ }).textContent).toContain("Dark");
-  fireEvent.keyDown(screen.getByRole("listbox", { name: "Settings" }), { key: "Escape" });
-  expect(document.documentElement.dataset.theme).toBe("dark");
+test("the Settings page shows the saved choices and saves a new one at once", async () => {
+  localStorage.setItem("tiller-theme", "dark");
+  prefsStore.set(loadPrefs());
+  await renderApp("default", "/settings");
+  const theme = screen.getByRole("group", { name: "Theme" });
+  expect(within(theme).getByText("Dark").getAttribute("aria-pressed")).toBe("true");
+  expect(
+    within(screen.getByRole("group", { name: "Density" }))
+      .getByText("Comfortable")
+      .getAttribute("aria-pressed"),
+  ).toBe("true");
+
+  fireEvent.click(within(theme).getByText("System"));
+  expect(localStorage.getItem("tiller-theme")).toBe("system");
+  expect(within(theme).getByText("System").getAttribute("aria-pressed")).toBe("true");
 });
 
-test("Cmd+K does nothing while Settings is open", async () => {
+test("the palette goes to Settings", async () => {
   await renderApp();
-  openSettings();
   fireEvent.keyDown(window, { key: "k", metaKey: true });
-  expect(screen.queryByRole("combobox")).toBeNull();
+  const input = screen.getByRole("combobox");
+  fireEvent.change(input, { target: { value: "settings" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+  await vi.waitFor(() => expect(screen.getByTestId("settings")).toBeTruthy());
 });

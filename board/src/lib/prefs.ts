@@ -103,24 +103,6 @@ export function updatePrefs(change: Partial<Prefs>) {
   });
 }
 
-// A look that is shown but not saved: Settings previews an option while it is
-// hovered or focused. It sits on top of the saved prefs and is cleared when the
-// choice is made or the sub-page is left.
-export interface AppearancePreview {
-  theme?: ThemePreference;
-  density?: Density;
-}
-
-export const previewStore = createStore<AppearancePreview>({});
-
-export function previewAppearance(preview: AppearancePreview) {
-  previewStore.set(preview);
-}
-
-export function clearAppearancePreview() {
-  previewStore.set({});
-}
-
 export function toggleProjectHidden(projectId: string) {
   const { hiddenProjects } = prefsStore.get();
   updatePrefs({

@@ -19,6 +19,7 @@ import {
   MemoryIcon,
   PulseIcon,
   ServerIcon,
+  SettingsIcon,
 } from "./icons";
 
 interface PaletteProps {
@@ -41,6 +42,8 @@ function iconFor(command: Command) {
       return <MemoryIcon />;
     case "go-health":
       return <PulseIcon />;
+    case "go-settings":
+      return <SettingsIcon />;
     case "view-all":
       return <LayersIcon />;
     case "view-focus":
@@ -63,7 +66,7 @@ function useCommands(activeHost: string | undefined, close: () => void): Command
   const prefs = useStore(prefsStore);
 
   return useMemo(() => {
-    const go = (to: "/" | "/agents" | "/inbox" | "/memory" | "/health") => () =>
+    const go = (to: "/" | "/agents" | "/inbox" | "/memory" | "/health" | "/settings") => () =>
       void navigate({ to, search: (prev) => prev });
     const commands: Command[] = [
       { id: "go-board", group: "Go to", label: "Board", run: go("/") },
@@ -77,6 +80,13 @@ function useCommands(activeHost: string | undefined, close: () => void): Command
       },
       { id: "go-memory", group: "Go to", label: "Memory", run: go("/memory") },
       { id: "go-health", group: "Go to", label: "Health", keywords: "quota", run: go("/health") },
+      {
+        id: "go-settings",
+        group: "Go to",
+        label: "Settings",
+        keywords: "theme density appearance",
+        run: go("/settings"),
+      },
       {
         id: "theme-system",
         group: "Theme",

@@ -19,6 +19,7 @@ const TITLES: Record<string, string> = {
   "/inbox": "Inbox",
   "/memory": "Memory",
   "/health": "Health",
+  "/settings": "Settings",
 };
 
 interface HeaderProps {

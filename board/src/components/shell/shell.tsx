@@ -1,26 +1,24 @@
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { applyAppearance, prefsStore, previewStore } from "../../lib/prefs";
+import { applyAppearance, prefsStore } from "../../lib/prefs";
 import { useStore } from "../../lib/store";
 import { CommandPalette } from "./command-palette";
 import { Header } from "./header";
-import { SettingsDialog } from "./settings";
 import { Sidebar } from "./sidebar";
 
 // Keeps <html> in step with the theme and density preferences, and with the
 // system theme while the preference is "system".
 export function useAppearance() {
   const saved = useStore(prefsStore);
-  const preview = useStore(previewStore);
   useEffect(() => {
-    const prefs = { ...saved, ...preview };
+    const prefs = saved;
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const apply = () => applyAppearance(prefs, media.matches, document.documentElement);
     apply();
     media.addEventListener("change", apply);
     return () => media.removeEventListener("change", apply);
-  }, [saved, preview]);
+  }, [saved]);
 }
 
 export function Shell({
@@ -31,28 +29,26 @@ export function Shell({
   children: ReactNode;
 }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const shellRef = useRef<HTMLDivElement>(null);
   const menuWasOpen = useRef(false);
   useAppearance();
 
   const closePalette = useCallback(() => setPaletteOpen(false), []);
-  const closeSettings = useCallback(() => setSettingsOpen(false), []);
   const closeMenu = useCallback(() => setMenuOpen(false), []);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        if (!settingsOpen) setPaletteOpen((open) => !open);
+        setPaletteOpen((open) => !open);
       } else if (event.key === "Escape") {
         setMenuOpen(false);
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [settingsOpen]);
+  }, []);
 
   // The drawer only exists on a phone-width layout; widening the window while
   // it is open must not leave the screen behind it inert.
@@ -87,14 +83,12 @@ export function Shell({
         activeHost={activeHost}
         onNavigate={closeMenu}
         onOpenPalette={() => setPaletteOpen(true)}
-        onOpenSettings={() => setSettingsOpen(true)}
       />
       <div className="nav-scrim" onClick={closeMenu} aria-hidden="true" />
       <div className="main" inert={menuOpen}>
         <Header activeHost={activeHost} menuOpen={menuOpen} onOpenMenu={() => setMenuOpen(true)} />
         <main className="content">{children}</main>
       </div>
-      <SettingsDialog open={settingsOpen} onClose={closeSettings} />
       <CommandPalette open={paletteOpen} onClose={closePalette} activeHost={activeHost} />
     </div>
   );

@@ -22,7 +22,7 @@ import { ProjectsSection } from "./projects-section";
 import { QuotaFooter, QuotaUnavailable } from "./quota-footer";
 
 const NAV: {
-  to: "/" | "/agents" | "/inbox" | "/memory" | "/health";
+  to: "/" | "/agents" | "/inbox" | "/memory" | "/health" | "/settings";
   label: string;
   icon: ReactNode;
 }[] = [
@@ -31,6 +31,7 @@ const NAV: {
   { to: "/inbox", label: "Inbox", icon: <InboxIcon /> },
   { to: "/memory", label: "Memory", icon: <MemoryIcon /> },
   { to: "/health", label: "Health", icon: <PulseIcon /> },
+  { to: "/settings", label: "Settings", icon: <SettingsIcon /> },
 ];
 
 // The ids of the projects the current view and machine filter show.
@@ -105,12 +106,10 @@ export function Sidebar({
   activeHost,
   onNavigate,
   onOpenPalette,
-  onOpenSettings,
 }: {
   activeHost: string | undefined;
   onNavigate: () => void;
   onOpenPalette: () => void;
-  onOpenSettings: () => void;
 }) {
   return (
     <aside className="side" aria-label="Sidebar">
@@ -159,18 +158,6 @@ export function Sidebar({
           <QuotaFooter />
         </Section>
       </div>
-      <button
-        type="button"
-        className="nav settings-btn"
-        aria-haspopup="dialog"
-        onClick={() => {
-          onNavigate();
-          onOpenSettings();
-        }}
-      >
-        <SettingsIcon />
-        <span className="lbl">Settings</span>
-      </button>
     </aside>
   );
 }

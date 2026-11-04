@@ -14,6 +14,7 @@ import { Route as AgentsRouteImport } from './routes/agents'
 import { Route as HealthRouteImport } from './routes/health'
 import { Route as InboxRouteImport } from './routes/inbox'
 import { Route as MemoryRouteImport } from './routes/memory'
+import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as CardsCardIdRouteImport } from './routes/cards.$cardId'
 
 const IndexRoute = IndexRouteImport.update({
@@ -41,6 +42,11 @@ const MemoryRoute = MemoryRouteImport.update({
   path: '/memory',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SettingsRoute = SettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const CardsCardIdRoute = CardsCardIdRouteImport.update({
   id: '/cards/$cardId',
   path: '/cards/$cardId',
@@ -53,6 +59,7 @@ export interface FileRoutesByFullPath {
   '/health': typeof HealthRoute
   '/inbox': typeof InboxRoute
   '/memory': typeof MemoryRoute
+  '/settings': typeof SettingsRoute
   '/cards/$cardId': typeof CardsCardIdRoute
 }
 export interface FileRoutesByTo {
@@ -61,6 +68,7 @@ export interface FileRoutesByTo {
   '/health': typeof HealthRoute
   '/inbox': typeof InboxRoute
   '/memory': typeof MemoryRoute
+  '/settings': typeof SettingsRoute
   '/cards/$cardId': typeof CardsCardIdRoute
 }
 export interface FileRoutesById {
@@ -70,14 +78,28 @@ export interface FileRoutesById {
   '/health': typeof HealthRoute
   '/inbox': typeof InboxRoute
   '/memory': typeof MemoryRoute
+  '/settings': typeof SettingsRoute
   '/cards/$cardId': typeof CardsCardIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    '/' | '/agents' | '/health' | '/inbox' | '/memory' | '/cards/$cardId'
+    | '/'
+    | '/agents'
+    | '/health'
+    | '/inbox'
+    | '/memory'
+    | '/settings'
+    | '/cards/$cardId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/agents' | '/health' | '/inbox' | '/memory' | '/cards/$cardId'
+  to:
+    | '/'
+    | '/agents'
+    | '/health'
+    | '/inbox'
+    | '/memory'
+    | '/settings'
+    | '/cards/$cardId'
   id:
     | '__root__'
     | '/'
@@ -85,6 +107,7 @@ export interface FileRouteTypes {
     | '/health'
     | '/inbox'
     | '/memory'
+    | '/settings'
     | '/cards/$cardId'
   fileRoutesById: FileRoutesById
 }
@@ -94,6 +117,7 @@ export interface RootRouteChildren {
   HealthRoute: typeof HealthRoute
   InboxRoute: typeof InboxRoute
   MemoryRoute: typeof MemoryRoute
+  SettingsRoute: typeof SettingsRoute
   CardsCardIdRoute: typeof CardsCardIdRoute
 }
 
@@ -134,6 +158,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof MemoryRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/settings': {
+      id: '/settings'
+      path: '/settings'
+      fullPath: '/settings'
+      preLoaderRoute: typeof SettingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/cards/$cardId': {
       id: '/cards/$cardId'
       path: '/cards/$cardId'
@@ -150,6 +181,7 @@ const rootRouteChildren: RootRouteChildren = {
   HealthRoute: HealthRoute,
   InboxRoute: InboxRoute,
   MemoryRoute: MemoryRoute,
+  SettingsRoute: SettingsRoute,
   CardsCardIdRoute: CardsCardIdRoute,
 }
 export const routeTree = rootRouteImport
