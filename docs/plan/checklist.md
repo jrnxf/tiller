@@ -41,11 +41,12 @@ Started Sunday 2026-11-01, Lisbon time.
 - [x] Nix flake: crane builds `tiller` with the board embedded; board derivation from `bun.lock`; dev shell with Rust, bun, sccache, sqlite3; home-manager module stub
 - [x] GitHub Actions CI: clippy, format checks, nextest, board lint, typecheck and tests
 - [x] `no-mistakes` config, MIT `LICENSE`, `README.md`, `AGENTS.md` with the hard rules and the commands for both halves
-- [x] herdr 0.9.3 to 0.9.5 and the herdr config rows, through a dotfiles PR
+- [ ] herdr 0.9.3 to 0.9.5 and the herdr config rows, through a dotfiles PR
+  - Only Linux moved to 0.9.5. The Mac is still on 0.9.3, pending a dotfiles change.
 - [x] Check: CI green
 - [x] Check: `tiller --version` works, and `tiller daemon` serves the placeholder board from the embedded assets
-- [ ] Check: `nix build` gives one binary on macOS and on the Linux remote host
-  - Linux host passed (Wednesday 2026-11-04): `nix build` gives `result/bin/tiller` alone, `tiller --version` prints `tiller 0.1.0`, and `scripts/smoke.sh` shows `tiller daemon --port 0` serving the embedded board. The macOS run is still owed.
+- [x] Check: `nix build` gives one binary on macOS and on the Linux remote host
+  - Linux host passed (Wednesday 2026-11-04): `nix build` gives `result/bin/tiller` alone, `tiller --version` prints `tiller 0.1.0`, and `scripts/smoke.sh` shows `tiller daemon --port 0` serving the embedded board. The Mac run passed too (Wednesday 2026-11-04).
 - [x] Check: warm sccache rebuild of one crate in a worktree under 10 s
 - [x] Check: board build path reported (bun2nix, or the fixed-output fallback after the 1 h tripwire)
 - [ ] Delivered
@@ -283,6 +284,7 @@ about 3 min of the developer's time
 - [x] `contract/openapi.json` through utoipa, CI fails when stale; localhost health endpoint
 - [x] home-manager module: launchd on macOS, systemd user unit on Linux, through a dotfiles PR
 - [ ] Check: survives a kill and a reboot on both personal hosts
+  - Mac reboot passed (Wednesday 2026-11-04): the daemon restarted on its own, the board answered 200, and health was ok once herdr was up. The Linux host reboot check is still owed.
 - [x] Check: idle CPU and memory measured and reported
 - [x] Check: browsers resume SSE after a daemon restart, no reload, no missed event
 - [ ] Delivered

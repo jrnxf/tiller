@@ -3,7 +3,8 @@
 //!
 //! A [`Poller`] owns its source and runs it on one task, so a slow poll
 //! delays the next one instead of overlapping it. A failed poll backs off
-//! 5 s, 15 s, 60 s, then every 5 minutes, and changes nothing a successful
+//! 5 s, 15 s, 60 s, then every 5 minutes (the local source holds at 15 s),
+//! and changes nothing a successful
 //! read would: absence of evidence is never `gone` (`recovery.md`, principle
 //! 3). [`Registry`] refuses a second poller for a source and serves each
 //! poller's [`Health`] to `/health` and the board.
@@ -33,6 +34,10 @@ pub const BACKOFF: [Duration; 4] = [
     Duration::from_secs(300),
 ];
 
+/// The longest wait for the local herdr source: it runs on this host, so a
+/// late herdr start should be noticed in seconds, not minutes.
+pub const LOCAL_BACKOFF_CAP: Duration = Duration::from_secs(15);
+
 /// Failures in a row before a herdr source marks its host stale.
 pub const STALE_AFTER: u32 = 3;
 
@@ -58,6 +63,10 @@ pub trait Source: Send + 'static {
     /// Unique among the daemon's pollers, such as `herdr:local`.
     fn name(&self) -> String;
     fn interval(&self) -> Duration;
+    /// The wait after `failures` failed polls in a row.
+    fn retry_after(&self, failures: u32) -> Duration {
+        backoff(failures)
+    }
     fn poll(&mut self, now: Timestamp) -> Result<(), PollError>;
     /// Told after every failed poll, with the count of failures in a row.
     fn failed(&mut self, _now: Timestamp, _failures: u32, _error: &PollError) {}
@@ -169,7 +178,7 @@ impl<S: Source> Poller<S> {
                 drop(health);
                 tracing::warn!(source = %self.name, failures, %error, "poll failed");
                 self.source.failed(now, failures, &error);
-                backoff(failures)
+                self.source.retry_after(failures)
             }
         }
     }
@@ -375,6 +384,14 @@ impl<H: Herdr + Send + 'static> Source for HerdrSource<H> {
         }
     }
 
+    fn retry_after(&self, failures: u32) -> Duration {
+        let wait = backoff(failures);
+        match self.machine {
+            None => wait.min(LOCAL_BACKOFF_CAP),
+            Some(_) => wait,
+        }
+    }
+
     /// One full snapshot replaces the host's pane cache in one transaction;
     /// panes it positively lacks are gone. The local server then gets its
     /// tokens re-reported and its layout repaired, which is a no-op when
@@ -469,6 +486,33 @@ mod tests {
     #[test]
     fn backoff_steps_then_holds_at_five_minutes() {
         let waits: Vec<u64> = (1..=6).map(|n| backoff(n).as_secs()).collect();
+        assert_eq!(waits, [5, 15, 60, 300, 300, 300]);
+    }
+
+    #[test]
+    fn local_source_backoff_holds_at_fifteen_seconds() {
+        let fleet = Fleet::new();
+        let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
+        herdr.set_unreachable(true);
+        let registry = Registry::new();
+        let mut poller = registry
+            .register(HerdrSource::local(herdr, fleet.open(), &fleet.host))
+            .unwrap();
+        let waits: Vec<u64> = (0..6).map(|n| poller.poll_once(at(n)).as_secs()).collect();
+        assert_eq!(waits, [5, 15, 15, 15, 15, 15]);
+    }
+
+    #[test]
+    fn remote_source_backoff_keeps_the_full_schedule() {
+        let fleet = Fleet::new();
+        let remote = fleet.remote_host("peer");
+        let herdr = FakeHerdr::new(fleet.dir.path().join("remote.json"));
+        herdr.set_unreachable(true);
+        let registry = Registry::new();
+        let mut poller = registry
+            .register(HerdrSource::remote(herdr, fleet.open(), &remote, "peer"))
+            .unwrap();
+        let waits: Vec<u64> = (0..6).map(|n| poller.poll_once(at(n)).as_secs()).collect();
         assert_eq!(waits, [5, 15, 60, 300, 300, 300]);
     }
 
