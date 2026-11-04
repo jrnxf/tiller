@@ -4,6 +4,8 @@
 //! wire. Times are RFC 3339 UTC strings with milliseconds, as `state.db`
 //! stores them.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
@@ -840,6 +842,34 @@ pub struct StageProject {
     pub rev: i64,
     /// `pre-launch` or `launched`.
     pub stage: String,
+}
+
+/// `GET /api/v1/projects/{id}/delete`: what a project delete would remove,
+/// without removing anything (`state.md`, Deleting a project).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ProjectDeletePreview {
+    pub project: String,
+    /// Rows per table the delete removes, the project row and its events
+    /// included.
+    pub removed: BTreeMap<String, i64>,
+    /// `table.column` references on rows that stay, set to `NULL`.
+    pub unlinked: BTreeMap<String, i64>,
+    /// Why the delete is refused now (a live run or session, the fleet
+    /// project, a project another host owns); absent when it would apply.
+    pub refused: Option<String>,
+}
+
+/// `POST /api/v1/projects/{id}/delete`: the hard delete of one project.
+/// Local to the owning host; it is not forwarded to a peer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteProject {
+    pub idempotency_key: String,
+    /// A paired peer's label. Refused: a project delete is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// The project id typed again: the delete applies only when it matches.
+    pub confirm: String,
 }
 
 /// `POST /api/v1/interventions/{id}/label`: the developer's label for an

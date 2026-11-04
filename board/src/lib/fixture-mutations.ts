@@ -2,9 +2,16 @@
 // preview servers until T2.8 lands: a keyed replay table, the stale-head
 // refusal, and the later receipt stages as change events.
 import type { ChangeEvent, Project } from "./api-types.ts";
-import type { AttentionResponse, InterventionKind, ProjectsResponse } from "./api-types.ts";
+import type {
+  AttentionResponse,
+  BoardResponse,
+  InterventionKind,
+  ProjectDeletePreview,
+  ProjectsResponse,
+} from "./api-types.ts";
 import { memoryMutation } from "./fixtures-memory.ts";
-import { FIXTURE_HEAD_SHA, fixtureResponses } from "./fixtures.ts";
+import { FIXTURE_HEAD_SHA, fixtureResource, fixtureResponses } from "./fixtures.ts";
+import type { Scenario } from "./fixtures.ts";
 import { relabelFixture } from "./fixtures-signals.ts";
 import { attentionPath, projectsPath } from "./queries.ts";
 
@@ -117,6 +124,45 @@ function currentProject(id: string): Project | undefined {
   return switched.get(id) ?? known.find((project) => project.id === id);
 }
 
+// The projects deleted since the server started: the stand-in server leaves
+// them out of every read it answers.
+const deleted = new Set<string>();
+
+// A read the stand-in server answers, without the deleted projects' rows; a
+// deleted project's own delete preview is gone (a 404).
+export function withoutDeleted(path: string, body: unknown, scenario: Scenario): unknown {
+  if (deleted.size === 0 || body === undefined) return body;
+  const pathname = new URL(path, "http://localhost").pathname;
+  const preview = /^\/api\/v1\/projects\/([^/]+)\/delete$/.exec(pathname);
+  if (preview?.[1] && deleted.has(preview[1])) return undefined;
+  if (pathname === "/api/v1/projects") {
+    const { projects } = body as ProjectsResponse;
+    return { projects: projects.filter((project) => project.host || !deleted.has(project.id)) };
+  }
+  if (pathname === "/api/v1/board") {
+    const board = body as BoardResponse;
+    return {
+      ...board,
+      rows: board.rows.filter((row) => row.host || !deleted.has(row.project_id)),
+    };
+  }
+  if (pathname === "/api/v1/attention") {
+    // An item names its card, and the card its project.
+    const board = fixtureResource("/api/v1/board?filter=all", scenario) as BoardResponse;
+    const cards = new Set(
+      board.rows.filter((row) => deleted.has(row.project_id)).map((row) => row.id),
+    );
+    const attention = body as AttentionResponse;
+    return {
+      items: attention.items.filter((item) => item.host || !cards.has(item.card_id)),
+      permission_prompts: attention.permission_prompts.filter(
+        (prompt) => prompt.host || !cards.has(prompt.card_id),
+      ),
+    };
+  }
+  return body;
+}
+
 const lisbonHour = new Intl.DateTimeFormat("en-GB", {
   timeZone: "Europe/Lisbon",
   hour: "numeric",
@@ -176,7 +222,7 @@ function forwarded(
 ): MutationResult | null {
   const host = body.host;
   if (typeof host !== "string") return null;
-  if (/\/(stage|focus|label)$/.test(path) || /\/memory\//.test(path)) {
+  if (/\/(stage|focus|label|delete)$/.test(path) || /\/memory\//.test(path)) {
     return refusal(502, "peer_refused", `${method} ${path} is not forwarded to ${host}`);
   }
   if (host === "host-e") {
@@ -272,6 +318,38 @@ function handle(method: string, path: string, body: Record<string, unknown>): Mu
             rev_after: next.rev,
             card_id: null,
             entity_state: next,
+          },
+        },
+      ],
+    };
+  }
+  const deletion = /^\/api\/v1\/projects\/([^/]+)\/delete$/.exec(path);
+  if (method === "POST" && deletion?.[1]) {
+    const id = deletion[1];
+    const preview = deleted.has(id)
+      ? undefined
+      : (fixtureResource(path, "default") as ProjectDeletePreview | undefined);
+    if (!preview) return refusal(404, "not_found", `no project ${id}`);
+    if (body.confirm !== id) return refusal(400, "usage", `type ${id} to delete the project`);
+    if (preview.refused) return refusal(422, "refused", `project ${id}: ${preview.refused}`);
+    deleted.add(id);
+    return {
+      reply: recorded(
+        { project: id, removed: preview.removed, unlinked: preview.unlinked },
+        null,
+        null,
+      ),
+      followUps: [
+        {
+          delayMs: 100,
+          event: {
+            kind: "project.deleted",
+            txn: "project.delete",
+            entity: "project",
+            entity_id: id,
+            rev_after: null,
+            card_id: null,
+            entity_state: null,
           },
         },
       ],

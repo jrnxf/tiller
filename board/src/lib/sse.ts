@@ -130,6 +130,20 @@ function writeProject(queryClient: QueryClient, project: Project) {
   );
 }
 
+// A deleted project leaves this host's list at once; a peer's row of the same
+// id is another project and stays. Its cards, runs, sessions and items went
+// with it, so every read that may still show one is fetched again.
+export function onProjectDeleted(queryClient: QueryClient, projectId: string) {
+  queryClient.setQueryData<ProjectsResponse | undefined>(queryKeyFor(projectsPath), (old) =>
+    old
+      ? {
+          projects: old.projects.filter((other) => other.id !== projectId || isPeerRow(other)),
+        }
+      : old,
+  );
+  void queryClient.invalidateQueries({ queryKey: API_KEY_PREFIX, refetchType: "active" });
+}
+
 // Entities whose API shape is a join of several tables: the event says
 // something moved, and the quiet refetch fetches the joined answer.
 const REFETCH_ENTITIES = new Set(["session", "run", "pane", "observation", "worktree"]);
@@ -148,7 +162,8 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
       if (state) writeQuota(queryClient, state as QuotaWindow);
       break;
     case "project":
-      if (state) writeProject(queryClient, state as Project);
+      if (event.kind === "project.deleted") onProjectDeleted(queryClient, event.entity_id);
+      else if (state) writeProject(queryClient, state as Project);
       break;
     case "review_pass":
     case "obligation":

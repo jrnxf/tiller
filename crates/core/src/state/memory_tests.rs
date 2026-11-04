@@ -891,3 +891,98 @@ fn a_proposal_without_backing_or_outside_its_project_is_refused() {
         .unwrap_err();
     assert!(matches!(error, Error::Refused { .. }), "{error:?}");
 }
+
+/// `project.delete` takes the project's memory with it (sources, revisions,
+/// memories, evidence, proposals, change set members) and only unlinks the
+/// fleet memory one of its sessions wrote.
+#[test]
+fn deleting_a_project_removes_its_memory_and_unlinks_the_fleet_one() {
+    let (mut store, session) = memory_store();
+    let own = add(
+        &mut store,
+        "alpha",
+        "Deploys go out on Fridays",
+        "",
+        doc::RULE_SECTION,
+    );
+    let v1 = "## How we work here\n\n- Deploys go out on Fridays\n";
+    apply(&mut store, own.approval_id.as_deref().unwrap(), "", v1);
+    let shared = add(
+        &mut store,
+        "fleet",
+        "Ask before force pushing",
+        "",
+        doc::RULE_SECTION,
+    );
+    let fleet_v1 = "## How we work here\n\n- Ask before force pushing\n";
+    apply(
+        &mut store,
+        shared.approval_id.as_deref().unwrap(),
+        "",
+        fleet_v1,
+    );
+    let fleet_memory: Memory = find(store.conn(), "proposal_id = ?1", &[&shared.proposal_id])
+        .unwrap()
+        .unwrap();
+    store
+        .conn()
+        .execute(
+            "UPDATE memories SET authored_by_session_id = ?1 WHERE id = ?2",
+            [&session, &fleet_memory.id],
+        )
+        .unwrap();
+    let ctx = as_session(&session);
+    let noted = note(&mut store, &ctx, None, "The staging DB reset mid-run");
+    let filed = store
+        .mem_propose(
+            &ctx,
+            None,
+            &add_note("The staging DB resets at midnight", &[&noted.evidence_id]),
+            &file(v1),
+        )
+        .unwrap()
+        .value;
+    measured(&mut store, "staging notes", &[&filed.id]);
+    store.session_end(&owner(), &session, "exit").unwrap();
+
+    let deleted = store.project_delete(&owner(), "alpha").unwrap().value;
+    for table in [
+        "memory_sources",
+        "memory_revisions",
+        "memories",
+        "evidence",
+        "proposals",
+        "change_set_members",
+    ] {
+        assert!(
+            deleted.removed.get(table).copied().unwrap_or(0) > 0,
+            "{table}: {deleted:?}"
+        );
+    }
+    assert_eq!(deleted.unlinked["memories.authored_by_session_id"], 1);
+    let author: Option<String> = store
+        .conn()
+        .query_row(
+            "SELECT authored_by_session_id FROM memories WHERE id = ?1",
+            [&fleet_memory.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(author, None, "the fleet memory stays, unlinked");
+    let left: i64 = store
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM memory_sources WHERE project_id = 'alpha'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(left, 0);
+    let broken: i64 = store
+        .conn()
+        .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(broken, 0);
+}

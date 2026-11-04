@@ -195,3 +195,84 @@
   opacity: 0.45;
   pointer-events: none;
 }
+
+/* The project delete: a quiet control under the stage switch, and its dialog */
+
+.btn.project-delete {
+  justify-content: center;
+  color: var(--red-text);
+}
+
+.btn.project-delete:hover {
+  color: var(--red-text);
+  background: color-mix(in srgb, var(--red) 9%, transparent);
+}
+
+.btn.project-delete[disabled] {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.delete-counts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 16px;
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  list-style: none;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r8);
+  background: var(--bg-card);
+}
+
+.delete-counts li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--fs-mini);
+  color: var(--fg-2);
+}
+
+.delete-counts span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.delete-counts b {
+  color: var(--fg-1);
+  font-weight: var(--w-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+.dialog .delete-note {
+  margin-top: 10px;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.delete-confirm {
+  margin-top: 14px;
+}
+
+.delete-confirm label {
+  font-size: var(--fs-mini);
+  font-weight: var(--w-medium);
+  color: var(--fg-2);
+}
+
+.delete-confirm code {
+  font-family: var(--mono);
+  color: var(--fg-1);
+}
+
+.dialog-actions .btn.danger {
+  color: var(--red-text);
+  border-color: color-mix(in srgb, var(--red) 45%, var(--line-2));
+  background: color-mix(in srgb, var(--red) 9%, transparent);
+}
+
+.dialog-actions .btn.danger:hover {
+  background: color-mix(in srgb, var(--red) 16%, transparent);
+}

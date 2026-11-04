@@ -14,7 +14,7 @@ use crate::domain::*;
 use crate::error::{Error, Result};
 use crate::ids::{self, FLEET_PROJECT};
 use crate::state::find;
-use crate::state::projects::meta;
+use crate::state::projects::{first_card_seq, meta};
 use crate::time::Timestamp;
 
 /// The git blob of an empty file: the base every legacy placement diff is
@@ -810,8 +810,10 @@ fn assign_display_ids(
     cards: &mut [CardPlan],
 ) -> Result<()> {
     for project in projects {
-        let first =
-            find::<Project>(conn, "id = ?1", &[&project.id])?.map_or(1, |p| p.next_card_seq);
+        let first = match find::<Project>(conn, "id = ?1", &[&project.id])? {
+            Some(existing) => existing.next_card_seq,
+            None => first_card_seq(conn, &project.id)?,
+        };
         let mut order: Vec<usize> = (0..cards.len())
             .filter(|&i| cards[i].project_id == project.id && cards[i].action == Action::Create)
             .collect();

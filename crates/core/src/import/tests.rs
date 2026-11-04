@@ -804,3 +804,38 @@ fn a_placement_into_a_document_with_content_is_refused() {
         "{error}"
     );
 }
+
+#[test]
+fn a_deleted_projects_id_numbers_on_from_its_tombstone() {
+    let dir = tempfile::tempdir().unwrap();
+    let bundle = bundle(dir.path());
+    let mut store = store();
+    // As `project.delete` leaves it: alpha's rows are gone, its tombstone stays.
+    store
+        .conn()
+        .execute(
+            "INSERT INTO events (id, at, txn, actor, entity, entity_id, kind, payload)
+             VALUES ('ev-1', '2026-10-01T00:00:00.000Z', 'project.delete', 'owner', 'project',
+                     'alpha', 'project.deleted', '{\"next_card_seq\": 40}')",
+            [],
+        )
+        .unwrap();
+
+    store.import_apply(&import_ctx(), &bundle).unwrap();
+    assert_eq!(
+        count(
+            &store,
+            "SELECT next_card_seq FROM projects WHERE id = 'alpha'"
+        ),
+        48
+    );
+    assert_eq!(
+        count(
+            &store,
+            "SELECT count(*) FROM cards WHERE project_id = 'alpha'
+             AND CAST(substr(display_id, 7) AS INTEGER) < 40"
+        ),
+        0,
+        "no display id of the deleted project is reused"
+    );
+}

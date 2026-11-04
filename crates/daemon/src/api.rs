@@ -533,6 +533,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/projects", get(projects))
         .route("/api/v1/projects/{id}/stage", post(stage_project))
         .route(
+            "/api/v1/projects/{id}/delete",
+            get(project_delete_preview).post(delete_project),
+        )
+        .route(
             "/api/v1/interventions/{id}/label",
             post(relabel_intervention),
         )
@@ -1513,6 +1517,47 @@ async fn stage_project(
     .await
 }
 
+#[utoipa::path(get, path = "/api/v1/projects/{id}/delete", tag = "reads",
+    params(("id" = String, Path)),
+    responses((status = 200, body = ProjectDeletePreview), (status = 404, body = ErrorBody)))]
+async fn project_delete_preview(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<ProjectDeletePreview> {
+    let preview = read(&state, move |store| store.project_delete_preview(&id)).await?;
+    Ok(Json(ProjectDeletePreview {
+        project: preview.deletion.project,
+        removed: preview.deletion.removed,
+        unlinked: preview.deletion.unlinked,
+        refused: preview.refused,
+    }))
+}
+
+#[utoipa::path(post, path = "/api/v1/projects/{id}/delete", tag = "mutations", request_body = DeleteProject,
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "`refused`: a live run or session, the fleet project, or another host's project"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn delete_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers)?;
+    let request: DeleteProject = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "a project delete").await?;
+    if request.confirm.trim() != id {
+        return Err(ApiError::usage(format!("type {id} to delete the project")));
+    }
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| Done::of(store.project_delete(ctx, &id)?),
+    )
+    .await
+}
+
 #[utoipa::path(post, path = "/api/v1/interventions/{id}/label", tag = "mutations", request_body = RelabelBody,
     params(("id" = String, Path)),
     responses((status = 200, body = MutationResponse), (status = 404, body = ErrorBody),
@@ -1755,7 +1800,8 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, decide, focus, stage_project, relabel_intervention, memory::view, memory::revision,
+        cancel, reopen, answer, decide, focus, stage_project, project_delete_preview, delete_project,
+        relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo
     ),
     components(schemas(ChangeEvent, ResetEvent, PeerEvent, LinkEvent, PeerResetEvent, ErrorBody, ErrorDetail)),
@@ -2453,6 +2499,129 @@ pub(crate) mod tests {
         assert_eq!(body["replayed"], true, "{body}");
         let stale = send(&app, stage("k-stage-3", rev, "pre-launch")).await;
         assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.body);
+    }
+
+    /// The board's project delete: the preview counts what goes, the delete
+    /// needs the id typed again, a live session refuses it, and only the
+    /// owner may send it.
+    #[tokio::test]
+    async fn board_project_delete_previews_confirms_and_frees_the_id() {
+        let mut fleet = Fleet::new();
+        fleet
+            .store
+            .project_add(
+                &Ctx::new(Actor::Owner),
+                tiller_core::state::projects::NewProject {
+                    id: "gamma".into(),
+                    name: "Gamma".into(),
+                    repo: None,
+                    remote: None,
+                    default_branch: None,
+                    delivery: tiller_core::domain::Delivery::DirectPr,
+                    checks: None,
+                    capacity: None,
+                    deploy_workflow: None,
+                    deploy_environment: None,
+                    deploy_timeout_minutes: None,
+                },
+            )
+            .unwrap();
+        fleet
+            .store
+            .card_create(
+                &Ctx::new(Actor::Owner),
+                None,
+                tiller_core::state::cards::NewCard {
+                    project_id: "gamma".into(),
+                    kind: tiller_core::domain::CardKind::Ship,
+                    title: "doomed".into(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+        let home = fleet.dir.path();
+        let app = app(home, Assets::of::<Fixture>());
+        let cookie = owner_cookie(home);
+        let delete = |id: &str, key: &str, confirm: &str, cookie: &str| {
+            let headers: Vec<(&str, &str)> = if cookie.is_empty() {
+                vec![]
+            } else {
+                vec![("cookie", cookie)]
+            };
+            mutation(
+                "POST",
+                &format!("/api/v1/projects/{id}/delete"),
+                json!({"idempotency_key": key, "confirm": confirm}),
+                &headers,
+            )
+        };
+
+        let preview = get(&app, "/api/v1/projects/gamma/delete").await;
+        assert_eq!(preview.status, StatusCode::OK, "{}", preview.body);
+        let body: Value = serde_json::from_str(&preview.body).unwrap();
+        assert_eq!(body["project"], "gamma");
+        assert_eq!(body["removed"]["projects"], 1);
+        assert_eq!(body["removed"]["cards"], 1);
+        assert_eq!(body["refused"], Value::Null, "{body}");
+
+        // alpha's orchestrator is live: the preview names it, the delete
+        // refuses and removes nothing.
+        let live = get(&app, "/api/v1/projects/alpha/delete").await;
+        let body: Value = serde_json::from_str(&live.body).unwrap();
+        assert!(
+            body["refused"].as_str().unwrap().contains("session"),
+            "{body}"
+        );
+        let refused = send(&app, delete("alpha", "k-del-1", "alpha", &cookie)).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            refused.body
+        );
+
+        let anonymous = send(&app, delete("gamma", "k-del-2", "gamma", "")).await;
+        assert_eq!(anonymous.status, StatusCode::FORBIDDEN);
+        let mistyped = send(&app, delete("gamma", "k-del-3", "gama", &cookie)).await;
+        assert_eq!(
+            mistyped.status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            mistyped.body
+        );
+        let peer = send(
+            &app,
+            mutation(
+                "POST",
+                "/api/v1/projects/gamma/delete",
+                json!({"idempotency_key": "k-del-4", "confirm": "gamma", "host": "laptop"}),
+                &[("cookie", cookie.as_str())],
+            ),
+        )
+        .await;
+        assert_ne!(peer.status, StatusCode::OK, "{}", peer.body);
+
+        let deleted = send(&app, delete("gamma", "k-del-5", "gamma", &cookie)).await;
+        assert_eq!(deleted.status, StatusCode::OK, "{}", deleted.body);
+        let body: Value = serde_json::from_str(&deleted.body).unwrap();
+        assert_eq!(body["data"]["removed"]["cards"], 1, "{body}");
+        let gone = get(&app, "/api/v1/projects/gamma/delete").await;
+        assert_eq!(gone.status, StatusCode::NOT_FOUND, "{}", gone.body);
+        let replay = send(&app, delete("gamma", "k-del-5", "gamma", &cookie)).await;
+        assert_eq!(replay.status, StatusCode::OK, "{}", replay.body);
+        let body: Value = serde_json::from_str(&replay.body).unwrap();
+        assert_eq!(body["replayed"], true, "{body}");
+        let alpha = fleet
+            .open()
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM projects WHERE id = 'alpha'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(alpha, 1);
     }
 
     #[test]

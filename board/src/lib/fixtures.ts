@@ -14,6 +14,7 @@ import type {
   Machine,
   MachinesResponse,
   Project,
+  ProjectDeletePreview,
   ProjectsResponse,
   QuotaDot,
   QuotaResponse,
@@ -1095,6 +1096,39 @@ export function serverResponses(scenario: Scenario = "default", now: number = Da
   return fixtureResponses(serverScenario(scenario), now);
 }
 
+// What deleting a fixture project would remove, counted from its board rows.
+// A project with a card in Working has a live run, so the delete is refused.
+function deletePreviewFor(
+  scenario: Scenario,
+  board: BoardResponse,
+  projectId: string,
+  now: number,
+): ProjectDeletePreview | undefined {
+  const known = projectsFor(scenario, now).projects.some(
+    (project) => project.id === projectId && !project.host,
+  );
+  if (!known) return undefined;
+  const rows = board.rows.filter((row) => row.project_id === projectId && !row.host);
+  const started = rows.filter((row) => row.column !== "queued");
+  const live = rows.find((row) => row.column === "working");
+  return {
+    project: projectId,
+    removed: {
+      projects: 1,
+      cards: rows.length,
+      runs: started.length,
+      sessions: started.length + 1,
+      attention: rows.filter((row) => row.column === "needs_you").length,
+      artifacts: started.length * 2,
+      memories: 3,
+      memory_revisions: 4,
+      events: rows.length * 9 + 6,
+    },
+    unlinked: projectId === "gamma" ? { "cards.fixes_card_id": 1 } : {},
+    refused: live ? `builder run on ${live.display_id} is live; end it first` : null,
+  };
+}
+
 // Anything the stand-in server can answer: the board's lists, a card, its
 // timeline, a run. `undefined` means no such resource (a 404).
 export function fixtureResource(
@@ -1116,6 +1150,8 @@ export function fixtureResource(
   }
   const detail = /^\/api\/v1\/cards\/([^/]+)$/.exec(url.pathname);
   if (detail?.[1]) return cardDetailFor(board, detail[1], now) ?? undefined;
+  const deletion = /^\/api\/v1\/projects\/([^/]+)\/delete$/.exec(url.pathname);
+  if (deletion?.[1]) return deletePreviewFor(served, board, deletion[1], now);
   const run = /^\/api\/v1\/runs\/([^/]+)$/.exec(url.pathname);
   if (run?.[1]) return runDetailFor(run[1], now);
   if (url.pathname.startsWith("/api/v1/memory")) return memoryResource(url);

@@ -514,17 +514,30 @@ fn project_matches(existing: &Project, new: &NewProject) -> bool {
             .is_none_or(|n| n == existing.deploy_timeout_minutes)
 }
 
+/// The `next_card_seq` a new project with this id starts at: 1, or where a
+/// deleted project of the same id stopped, so display ids are never reused
+/// (state.md, invariant 9). `project.add` and import both start here.
+pub(crate) fn first_card_seq(conn: &rusqlite::Connection, project_id: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT coalesce(max(json_extract(payload, '$.next_card_seq')), 1) FROM events
+         WHERE kind = 'project.deleted' AND entity = 'project' AND entity_id = ?1",
+        [project_id],
+        |row| row.get(0),
+    )?)
+}
+
 fn insert_project(tx: &mut Tx<'_>, new: &NewProject, host_id: &str) -> Result<()> {
     let capacity = new.capacity.unwrap_or(2);
     positive("capacity", capacity)?;
     let timeout = new.deploy_timeout_minutes.unwrap_or(60);
     positive("deploy timeout", timeout)?;
     let checks = new.checks.clone().unwrap_or_else(|| json!([]));
+    let first_seq = first_card_seq(tx.conn(), &new.id)?;
     tx.conn().execute(
         "INSERT INTO projects (id, name, repo, remote, default_branch, delivery, checks, capacity,
                                deploy_workflow, deploy_environment, deploy_timeout_minutes,
-                               owner_host_id, added_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                               owner_host_id, added_at, next_card_seq)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             new.id,
             new.name,
@@ -539,6 +552,7 @@ fn insert_project(tx: &mut Tx<'_>, new: &NewProject, host_id: &str) -> Result<()
             timeout,
             host_id,
             tx.now(),
+            first_seq,
         ],
     )?;
     tx.event(

@@ -24,7 +24,7 @@ Every entity's primary key is a ULID: 26 characters of Crockford base32, time-or
 
 ### Display ids
 
-Cards get a display id for chat and the board: `<project>-<n>`, for example `alpha-42`. `n` is `projects.next_card_seq`, read and incremented inside the `card.create` transaction, so two concurrent creates cannot mint the same id. A display id is unique per host (`cards.display_id` is unique), never reused, and survives the card's whole life, including import: an imported Firstmate task keeps its original id as `legacy_id` and gets a fresh display id.
+Cards get a display id for chat and the board: `<project>-<n>`, for example `alpha-42`. `n` is `projects.next_card_seq`, read and incremented inside the `card.create` transaction, so two concurrent creates cannot mint the same id. A display id is unique per host (`cards.display_id` is unique), never reused, and survives the card's whole life, including import and a deleted project's id being added again (section 8, Deleting a project): an imported Firstmate task keeps its original id as `legacy_id` and gets a fresh display id.
 
 Project ids are short lowercase slugs (`^[a-z][a-z0-9]{1,15}$`). The id `fleet` is reserved on every host for host-level work that belongs to no project.
 
@@ -68,6 +68,8 @@ The owner marker is a file, `~/.tiller/owner`, not a row (plan v2, point 15). `t
 - `tiller init` creates one `ops` card in `fleet` per host, display id `fleet-1`, titled "Host health". Host-level recovery items (T1.2: backups, migrations, resource floors, a crashing orchestrator) attach to it, so `attention.card_id` stays required. It never closes: `card.close` and `card.cancel` refuse it.
 
 Ownership moves between hosts only through export and import (M6). There is no in-place reassignment in v1.
+
+A project ends in one of two ways. `project.retire` sets `retired_at` and keeps every row: the project stays listed as retired and its id stays taken. `project.delete` removes the row and everything recorded for it on this host, which frees the id for a later `project.add` (section 8, Deleting a project).
 
 ### Session
 
@@ -236,7 +238,7 @@ Rules:
 `events`: the append-only log, one or more rows per mutation, written in the mutation's transaction.
 
 - `seq` (integer, autoincrement; the SSE `Last-Event-ID`), `id` (ULID), `at`, `txn` (the mutation name from section 8), `actor` (`session:<id>`, `board`, `board@<viewer label>`, `daemon`, `hook`, `import`, `owner`; `owner` is the developer acting through the CLI or the board, see T1.4; `board@<viewer label>` is the owner acting through a paired board host, ADR 0003), `entity` (`ask`, `card`, `run`, ...), `entity_id`, `kind` (`card.created`, `run.ended`, ...), `rev_after` (the entity's rev after the write, null for append-only entities), `card_id` (denormalized for timeline queries), `payload` (JSON, the fields that changed and the preconditions checked), `idempotency_key`.
-- Events are never updated or deleted. They are exported in the JSONL export (T2.3).
+- Events are never updated or deleted, with one exception: `project.delete` removes the events of the project it deletes, so that project's audit trail is gone for good, and writes one `project.deleted` tombstone in their place (section 8, Deleting a project). They are exported in the JSONL export (T2.3).
 - The board's SSE stream carries `seq`, `entity`, `entity_id` and `rev_after`, so a client ignores an event older than what it holds and resumes from `seq` after a gap.
 - Firstmate's fleet ledger events map onto these: `task.dispatched` is `run.started`, `task.status` is `run.status`, `task.pr_ready` is `pr.linked`, `task.merged` is `approval.succeeded` or `card.closed` with `landed`, `task.cleaned_up` is `run.cleaned`.
 
@@ -453,6 +455,7 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `daemon.start`, `daemon.stop` | daemon | single-instance lock held | `meta.boot_id` (written last in a reboot restore); `approvals` `executing` to `uncertain` at start | `daemon.started` (with tool versions), `daemon.stopped`; `host.degraded` and `host.recovered` from the host checks |
 | `guard.breach` | reconcile, `tiller land` | a breach detected per authority.md section 11 or recovery.md R19 | nothing but the event | `guard.breached` |
 | `project.add`, `project.edit`, `project.retire` | owner | id free (add); `expected_rev` matches (edit); no open card (retire) | `projects` | `project.added`, `project.edited`, `project.retired` |
+| `project.delete` | owner, on this host only (`tiller project delete`, board; `Actor::Peer` is refused and it is not in the forwarding allowlist) | not `fleet`; this host owns the project; no live run or session and no executing approval among its rows; no row of another project depends on one of its rows, except a link | removes the project row, every row that belongs to it and its events, and link rows to rows that stay; sets nullable references from rows that stay to null (see Deleting a project) | `project.deleted` |
 | `project.merge_gate` | daemon only: its ruleset check at `project.add` and hourly (`authority.md`, Enforced merge gate) | project not retired; the value changes | `projects.merge_gate`, `rev`; on a move to `detect`, `attention` (`recovery` on `fleet-1`) | `project.merge_gate_changed`, `host.degraded` and `attention.opened` on a move to `detect` |
 | `project.stage` | owner (`tiller project stage`, board) | `expected_rev` matches; not `fleet`, not retired; the same stage is a no-op. To `pre-launch`: a default-branch head is given and no pass is live. | `projects.stage`, `stage_changed_at`, `rev`; to `pre-launch`: `reviewed_through_sha` and the first weekly `date` obligation. To `launched`: open weekly obligations cancelled; a pending weekly pass abandoned (card closed `superseded`) and a pending `final` pass with its card opened, unless a weekly pass is running (its finish opens the final pass) | `project.staged`; `obligation.opened`, `obligation.cancelled`, `review_pass.created`, `card.created`, `card.closed` as they apply |
 | `review_pass.start` | orchestrator, owner (`tiller review start`) | a pending final pass, or a pre-launch project with a met weekly obligation no pass started from; a running pass with the same head and plan is a no-op | `review_passes` (`running`, `head_sha`, `chunks`, `started_at`); for a weekly pass, its card and row first | `review_pass.started`; `card.created`, `review_pass.created` for a weekly pass |
@@ -466,6 +469,17 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `config.set` | owner | key known; value valid | the config file, outside `state.db` | `config.changed` |
 | `health.relabel` | owner, on this host only (`Actor::Peer` is refused; it is not in the forwarding allowlist) | the intervention exists; a label equal to the current one writes nothing | `intervention_labels` (set, or deleted when the label is cleared) | `intervention.relabeled` (`from`, `to`, `classified`, `cleared`) |
 | `import.apply` | `tiller import` | manifest valid; `meta.import_manifest_sha256` differs (a second import is a no-op) | every table, with `legacy_id` set | one `import.applied` plus the per-row events, all under `actor = import` |
+
+### Deleting a project
+
+`project.delete` is the hard delete. It is for a project added by mistake or one the owner wants gone, and it is the only mutation that removes history. A project that is merely finished is retired instead.
+
+- **What goes.** The project row and every row that belongs to it. A row belongs to the project when a `NOT NULL` foreign key of it points at a row that does: its cards, asks, runs, sessions, attention, approvals, artifacts, memories and their revisions, proposals, evidence, obligations, review passes and the rest, followed transitively. Observations and memory evidence go with their sessions and runs, and cached worktree rows go with the project. The rows to remove are found from the schema's foreign keys, not from a table list, so a new table is covered the day its migration lands; a nullable or unchecked reference must be sorted as owning, pointing or kept before the build passes (`core::state::deletion::every_reference_is_classified`).
+- **The audit trail.** The events about the project, its cards and every removed row, and the idempotency keys and intervention labels that name them, are removed in the same transaction. This is the one exception to the append-only events table (section 3, Event). What remains is one `project.deleted` event, the tombstone: its payload holds the project's name, its `next_card_seq`, and the rows removed and unlinked per table. Tombstones of earlier deletes of the same id stay.
+- **What stays.** A row of another project or of `fleet` that only points at a removed row keeps its place with that column set to null (for example `cards.fixes_card_id`, or `memories.authored_by_session_id` on a host-wide memory a removed session wrote). A link row that ties a removed row to one that stays is removed: a dependency between one of the project's cards and another project's card (`card_deps`, either way), an ask linked to another project's card (`ask_cards`), and the evidence, session-load and change-set links of host-wide memories and proposals. Both kinds are counted per `table.column` as `unlinked`, so the owner sees them before confirming. `memories.proposal_id` keeps naming a removed proposal, because the memory's own revisions carry its text. Nothing outside `state.db` is touched: the checkout, its worktrees, the forge repository and `checkouts.<id>` in `config.toml` stay as they are, and the CLI says that the key remains.
+- **Preconditions.** Nothing may be in flight: a live run, a live session (the orchestrator included) or an executing approval refuses the delete with the one it found. v1 has no command that stops them for the owner, so they must end on their own first. Any other row of another project that requires one of the project's rows (a `NOT NULL` reference across projects that is not a link) refuses it too, naming the table. `fleet` and a project another host owns are refused before any row is counted.
+- **Confirmation.** The CLI refuses without `--yes` and prints the counts it would remove; on a terminal it may instead ask the owner to type the id. The board shows the same counts (`GET /api/v1/projects/{id}/delete`) and sends the typed id as `confirm` (`protocol.md` section 7.4).
+- **The id afterwards.** `project.add` may take the id again. Its cards number on from the tombstone's `next_card_seq`, and so do an import's cards for that id, so a display id of the deleted project is never minted again (section 2, Display ids).
 
 Every row in the events table names its mutation, so a timeline query answers "who changed this, under which transaction, with which preconditions".
 
@@ -517,13 +531,13 @@ Tests in T2.1 and T2.7 prove each one.
 
 1. One owner per fact: no column in `schema.sql` duplicates another table's fact except the labelled caches (`sessions.activity*`, `prs.*`, `panes`, `worktrees`, `quota_windows`, `hosts.last_seen_at`) and denormalized `card_id` keys.
 2. No stored column: `cards` has no column named for a board column, and the only definition of a column is the `card_column` view.
-3. Every mutation has an event: a transaction that changes a row in an authoritative table and commits without an `events` row with that `txn` fails the property test `core::events::every_mutation_writes_its_event`.
+3. Every mutation has an event: a transaction that changes a row in an authoritative table and commits without an `events` row with that `txn` fails the property test `core::events::every_mutation_writes_its_event`. Events are removed only by `project.delete`, and only the deleted project's.
 4. A closed card has no open attention and no active run.
 5. At most one open hold per card; at most one active run per card and role; at most one live session per run; at most one open reservation per run; at most one live orchestrator session per project.
 6. Two concurrent `run.start` calls on a full host or project cannot both succeed.
 7. An `accepted` approval whose PR head differs from `head_sha` is `stale` before any execution starts.
 8. An outbox message in `acked` has a `delivered_at` or a recorded poll pickup; a `failed` answer always has a `recovery` attention item.
-9. Display ids are unique per host and never reused, including across import.
+9. Display ids are unique per host and never reused, including across import and across a deleted project's id being added again.
 10. A mutation carrying a known idempotency key returns the stored response and writes nothing.
 11. No row in `state.db` belongs to a project another host owns: every `cards.project_id` names a project whose `owner_host_id = meta.host_id` (ADR 0003 keeps principle 1).
 12. Every event with `actor = board@<label>` carries `payload.via_peer.key_id`, which names an `act` row of `peer_keys` that was unrevoked when the event was written.

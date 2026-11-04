@@ -10,6 +10,7 @@ import { sendMutation } from "../attention/api";
 import { InlineReceipt } from "../attention/receipt";
 import { useAction } from "../attention/use-action";
 import { lisbonDay, lisbonShortDay } from "../health/lisbon";
+import { DeleteProject } from "./project-delete";
 import "./project-stage.css";
 
 type Stage = Project["stage"];
@@ -217,7 +218,8 @@ function ConfirmStage({
   );
 }
 
-// What opens under a project row: its stage facts and the stage switch.
+// What opens under a project row: its stage facts, the stage switch and the
+// delete.
 export function ProjectDetail({ project, id }: { project: Project; id: string }) {
   const [confirming, setConfirming] = useState(false);
   const [receipt, setReceipt] = useState<{ key: string; text: string } | null>(null);
@@ -255,6 +257,7 @@ export function ProjectDetail({ project, id }: { project: Project; id: string })
       {confirming ? (
         <ConfirmStage project={project} target={target} onClose={close} onRecorded={onRecorded} />
       ) : null}
+      <DeleteProject project={project} owner={owner} />
     </div>
   );
 }

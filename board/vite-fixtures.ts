@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import type { Connect, Plugin } from "vite";
 
 import type { BoardRow } from "./src/lib/api-types.ts";
-import { fixtureMutation } from "./src/lib/fixture-mutations.ts";
+import { fixtureMutation, withoutDeleted } from "./src/lib/fixture-mutations.ts";
 import { SCENARIOS, bootScript, fixtureResource, fixtureSnapshot } from "./src/lib/fixtures.ts";
 import type { Scenario } from "./src/lib/fixtures.ts";
 
@@ -19,6 +19,16 @@ function scenarioOf(url: string | undefined, referer: string | undefined): Scena
     if (name && (SCENARIOS as readonly string[]).includes(name)) return name as Scenario;
   }
   return "default";
+}
+
+// The boot snapshot as the stand-in server has it now: no deleted project.
+function snapshotOf(scenario: Scenario) {
+  const snapshot = fixtureSnapshot(scenario);
+  const queries = Object.entries(snapshot.queries).map(([path, body]) => [
+    path,
+    withoutDeleted(path, body, scenario),
+  ]);
+  return { ...snapshot, queries: Object.fromEntries(queries) as typeof snapshot.queries };
 }
 
 function sendJson(res: ServerResponse, body: unknown) {
@@ -126,9 +136,9 @@ function apiMiddleware(): Connect.NextHandleFunction {
       });
       return;
     }
-    if (url === "/api/v1/snapshot") return sendJson(res, fixtureSnapshot(scenario));
+    if (url === "/api/v1/snapshot") return sendJson(res, snapshotOf(scenario));
 
-    const resource = fixtureResource(url, scenario);
+    const resource = withoutDeleted(url, fixtureResource(url, scenario), scenario);
     if (resource !== undefined) return sendJson(res, resource);
     res.statusCode = 404;
     sendJson(res, { ok: false, error: "not found" });
@@ -146,7 +156,7 @@ export function tillerFixtures(): Plugin {
       handler(html, ctx) {
         if (!ctx.server) return html;
         const scenario = scenarioOf(ctx.originalUrl, undefined);
-        return html.replace("</head>", `${bootScript(fixtureSnapshot(scenario))}</head>`);
+        return html.replace("</head>", `${bootScript(snapshotOf(scenario))}</head>`);
       },
     },
     configurePreviewServer(server) {
@@ -159,7 +169,7 @@ export function tillerFixtures(): Plugin {
           .then((html) => {
             const scenario = scenarioOf(req.url, undefined);
             res.setHeader("content-type", "text/html");
-            res.end(html.replace("</head>", `${bootScript(fixtureSnapshot(scenario))}</head>`));
+            res.end(html.replace("</head>", `${bootScript(snapshotOf(scenario))}</head>`));
           })
           .catch(next);
       });

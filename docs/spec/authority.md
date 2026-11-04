@@ -100,6 +100,7 @@ What each principal may do. "Own" means only on its own run, card or worktree. E
 | Apply a memory change | after a `memory` approval (T1.5) | no | no | no | no | no | no | no |
 | Read secrets | owner's own business | no | no | no | no | no | no | no |
 | Spawn subagents | yes | no | no (P59) | read-only helpers | yes, never with worktree isolation | read-only helpers | read-only helpers | no |
+| Delete a project (`project.delete`) | on its owning host only, in a terminal or on that host's board | no | no | no | no | no | no | no |
 | Mutate another host's records | only through a peer board, on the forwarding allowlist, verified by the owning host (G41) | no | no | no | no | no | no | no |
 
 Notes:

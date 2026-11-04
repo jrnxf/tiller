@@ -1511,6 +1511,119 @@
         }
       }
     },
+    "/api/v1/projects/{id}/delete": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "project_delete_preview",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectDeletePreview"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "delete_project",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteProject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`refused`: a live run or session, the fleet project, or another host's project",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{id}/stage": {
       "post": {
         "tags": [
@@ -2796,6 +2909,31 @@
               "null"
             ],
             "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DeleteProject": {
+        "type": "object",
+        "description": "`POST /api/v1/projects/{id}/delete`: the hard delete of one project.\nLocal to the owning host; it is not forwarded to a peer.",
+        "required": [
+          "idempotency_key",
+          "confirm"
+        ],
+        "properties": {
+          "confirm": {
+            "type": "string",
+            "description": "The project id typed again: the delete applies only when it matches."
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label. Refused: a project delete is not forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
           }
         },
         "additionalProperties": false
@@ -4249,6 +4387,49 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "ProjectDeletePreview": {
+        "type": "object",
+        "description": "`GET /api/v1/projects/{id}/delete`: what a project delete would remove,\nwithout removing anything (`state.md`, Deleting a project).",
+        "required": [
+          "project",
+          "removed",
+          "unlinked"
+        ],
+        "properties": {
+          "project": {
+            "type": "string"
+          },
+          "refused": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the delete is refused now (a live run or session, the fleet\nproject, a project another host owns); absent when it would apply."
+          },
+          "removed": {
+            "type": "object",
+            "description": "Rows per table the delete removes, the project row and its events\nincluded.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "unlinked": {
+            "type": "object",
+            "description": "`table.column` references on rows that stay, set to `NULL`.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           }
         }
       },

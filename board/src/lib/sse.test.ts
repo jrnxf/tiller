@@ -7,6 +7,7 @@ import type {
   BoardRow,
   ChangeEvent,
   MachinesResponse,
+  ProjectsResponse,
   QuotaResponse,
 } from "./api-types";
 import { connectionStore } from "./connection";
@@ -390,6 +391,32 @@ test("a session or run event marks the agents and run details stale", () => {
 
   expect(queryClient.getQueryState(run)?.isInvalidated).toBe(true);
   expect(queryClient.getQueryState(queryKeyFor("/api/v1/agents"))?.isInvalidated).toBe(true);
+});
+
+test("a deleted project leaves the list and every read is marked stale", () => {
+  const queryClient = seededClient();
+  const peerGamma = {
+    ...(queryClient.getQueryData<ProjectsResponse>(queryKeyFor(projectsPath))
+      ?.projects[0] as ProjectsResponse["projects"][number]),
+    id: "gamma",
+    host: "host-d",
+    link: "live" as const,
+  };
+  queryClient.setQueryData<ProjectsResponse>(queryKeyFor(projectsPath), (old) => ({
+    projects: [...(old?.projects ?? []), peerGamma],
+  }));
+
+  applyChange(
+    queryClient,
+    event({ kind: "project.deleted", entity: "project", entity_id: "gamma" }),
+  );
+
+  const projects = queryClient.getQueryData<ProjectsResponse>(queryKeyFor(projectsPath));
+  // This host's gamma is gone; the peer's project of the same id stays.
+  expect(projects?.projects.filter((project) => project.id === "gamma")).toEqual([peerGamma]);
+  expect(projects?.projects.map((project) => project.id)).toContain("alpha");
+  expect(queryClient.getQueryState(queryKeyFor(boardPath()))?.isInvalidated).toBe(true);
+  expect(queryClient.getQueryState(queryKeyFor(attentionPath))?.isInvalidated).toBe(true);
 });
 
 test("a review pass or obligation event marks the projects stale", () => {

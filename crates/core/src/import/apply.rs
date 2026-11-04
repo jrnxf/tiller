@@ -15,7 +15,7 @@ use crate::domain::*;
 use crate::error::{Error, Result};
 use crate::ids::{self, FLEET_PROJECT};
 use crate::state::attention::{NewAttention, open_attention};
-use crate::state::projects::{local_host_id, meta};
+use crate::state::projects::{first_card_seq, local_host_id, meta};
 use crate::store::{Applied, Ctx, NewEvent, Store, Tx};
 
 /// The host's memory repo, as `memory_sources` records it (`memory.md` section 3).
@@ -63,8 +63,9 @@ fn write_plan(tx: &mut Tx<'_>, bundle: &Bundle, plan: &Plan) -> Result<()> {
 
     for project in plan.projects.iter().filter(|p| p.action == Action::Create) {
         tx.conn().execute(
-            "INSERT INTO projects (id, name, repo, remote, default_branch, delivery, capacity, owner_host_id, added_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO projects (id, name, repo, remote, default_branch, delivery, capacity, owner_host_id,
+                                   added_at, next_card_seq)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 project.id,
                 project.legacy_id,
@@ -75,6 +76,7 @@ fn write_plan(tx: &mut Tx<'_>, bundle: &Bundle, plan: &Plan) -> Result<()> {
                 project.capacity.unwrap_or(2),
                 host_id,
                 project.added_at.unwrap_or(now),
+                first_card_seq(tx.conn(), &project.id)?,
             ],
         )?;
         tx.event(

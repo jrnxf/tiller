@@ -19,6 +19,7 @@ import { createQueryClient } from "../../lib/query-client";
 import { boardPath, projectsPath, queryKeyFor } from "../../lib/queries";
 import { createAppRouter } from "../../lib/router";
 import { applyChange } from "../../lib/sse";
+import { DeleteProject } from "../shell/project-delete";
 import { resetBoardLook } from "./board-prefs";
 
 const HOST_B = "01JHOSTB00000000000000000B";
@@ -651,6 +652,70 @@ test("switching stage asks first, says what changes, and sends the rev it read",
   expect(posted[0]?.body).toMatchObject({ rev: 1, stage: "launched" });
   expect(typeof posted[0]?.body.idempotency_key).toBe("string");
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+// ---- Project delete ----
+
+test("deleting a project shows what goes and arms only once the id is typed", async () => {
+  const posted = stubApi("default");
+  await renderApp();
+
+  fireEvent.click(within(projectsRegion()).getByRole("button", { name: "Stage of gamma" }));
+  fireEvent.click(screen.getByRole("button", { name: "Delete project" }));
+  const dialog = screen.getByRole("dialog", { name: "Delete gamma?" });
+  expect(dialog.textContent).toContain(
+    "The checkout, its worktrees and the GitHub repository are left as they are.",
+  );
+  const counts = await within(dialog).findByRole("list", { name: "Rows removed" });
+  expect(counts.textContent).toContain("cards2");
+  expect(counts.textContent).toContain("events24");
+  expect(counts.textContent).toContain("memory revisions4");
+  expect(dialog.textContent).toContain("1 link with another project's records is cleared.");
+
+  const confirm = within(dialog).getByRole("button", { name: "Delete project" });
+  const typed = within(dialog).getByLabelText("Type gamma to confirm");
+  expect(confirm).toHaveProperty("disabled", true);
+  fireEvent.change(typed, { target: { value: "gam" } });
+  expect(confirm).toHaveProperty("disabled", true);
+  fireEvent.click(confirm);
+  expect(posted).toHaveLength(0);
+
+  fireEvent.change(typed, { target: { value: "gamma" } });
+  expect(confirm).toHaveProperty("disabled", false);
+  fireEvent.click(confirm);
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]?.path).toBe("/api/v1/projects/gamma/delete");
+  expect(posted[0]?.method).toBe("POST");
+  expect(posted[0]?.body).toMatchObject({ confirm: "gamma" });
+  expect(typeof posted[0]?.body.idempotency_key).toBe("string");
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+test("the fleet project has no delete control", () => {
+  const projects = fixtureResource(projectsPath) as ProjectsResponse;
+  const gamma = projects.projects.find((project) => project.id === "gamma");
+  if (!gamma) throw new Error("the fixtures lost gamma");
+  render(<DeleteProject project={{ ...gamma, id: "fleet", name: "Fleet" }} owner={undefined} />);
+  expect(screen.queryByRole("button", { name: "Delete project" })).toBeNull();
+});
+
+test("a project with a live run says why it cannot be deleted and asks for nothing", async () => {
+  const posted = stubApi("default");
+  await renderApp();
+
+  fireEvent.click(within(projectsRegion()).getByRole("button", { name: "Stage of alpha" }));
+  fireEvent.click(screen.getByRole("button", { name: "Delete project" }));
+  const dialog = screen.getByRole("dialog", { name: "Delete alpha?" });
+  const why = await within(dialog).findByRole("alert");
+  expect(why.textContent).toMatch(/^builder run on alpha-\d+ is live; end it first$/);
+  expect(within(dialog).queryByRole("textbox")).toBeNull();
+  expect(within(dialog).getByRole("button", { name: "Delete project" })).toHaveProperty(
+    "disabled",
+    true,
+  );
+  fireEvent.keyDown(dialog, { key: "Escape" });
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(posted).toHaveLength(0);
 });
 
 test("the switch to pre-launch says validation is skipped and a Saturday review runs", async () => {

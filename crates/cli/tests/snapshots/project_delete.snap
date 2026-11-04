@@ -1,0 +1,22 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "project": "gamma",
+    "removed": {
+      "cards": 1,
+      "events": 2,
+      "idempotency_keys": 1,
+      "projects": 1
+    },
+    "unlinked": {}
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false,
+  "warning": "config.toml still has checkouts.gamma = \"/home/user/gamma\"; the checkout and that key are left as they are"
+}

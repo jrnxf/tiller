@@ -2,7 +2,7 @@
 //! (`protocol.md` section 6.4, Projects, hosts and config). `tiller peer` is
 //! [`super::peer`].
 
-use std::io::Write;
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
 
 use clap::{Args, Subcommand};
@@ -46,8 +46,20 @@ pub enum ProjectCmd {
     Stage(ProjectStage),
     /// Retire a project
     Retire { id: String },
+    /// Delete a project and every record of it on this host, its events
+    /// included; never its checkout, worktrees or repository
+    Delete(ProjectDelete),
     /// List projects
     List,
+}
+
+#[derive(Args, Debug)]
+pub struct ProjectDelete {
+    pub id: String,
+    /// Delete without asking. Without it, tiller prints what would be removed
+    /// and refuses, or asks for the id on a terminal
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Args, Debug)]
@@ -235,7 +247,80 @@ pub fn project(app: &App, cmd: ProjectCmd) -> Done {
         }
         ProjectCmd::Stage(args) => project_stage(app, &mut store, args),
         ProjectCmd::Retire { id } => Ok(Outcome::applied(store.project_retire(&app.ctx(), &id)?)),
+        ProjectCmd::Delete(args) => project_delete(app, &mut store, args),
     }
+}
+
+/// `tiller project delete`: refuses without `--yes`, printing the counts it
+/// would remove, unless the owner types the id at a terminal prompt.
+fn project_delete(app: &App, store: &mut Store, args: ProjectDelete) -> Done {
+    let preview = store.project_delete_preview(&args.id)?;
+    if let Some(fact) = &preview.refused {
+        let mut failure = Failure::refused(format!("project {}: {fact}", args.id));
+        failure.entity = Some("project".into());
+        failure.id = Some(args.id.clone());
+        failure.current = Some(json!(preview.deletion));
+        return Err(failure);
+    }
+    let summary = removal_summary(&preview.deletion.removed);
+    if !args.yes {
+        let terminal = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+        if !terminal || !typed_id(&args.id, &summary)? {
+            let mut failure = Failure::refused(format!(
+                "project {}: deleting it removes {summary}; nothing was deleted",
+                args.id
+            ))
+            .hint(format!("tiller project delete {} --yes", args.id));
+            failure.entity = Some("project".into());
+            failure.id = Some(args.id.clone());
+            failure.current = Some(json!(preview.deletion));
+            return Err(failure);
+        }
+    }
+    // Read before the delete, so a config.toml that does not parse turns into
+    // a warning on a delete that happened, not a failure after it.
+    let warning = match load_config(app) {
+        Ok(table) => table
+            .get("checkouts")
+            .and_then(|checkouts| checkouts.get(&args.id))
+            .and_then(toml::Value::as_str)
+            .map(|path| {
+                format!(
+                    "config.toml still has checkouts.{} = {path:?}; the checkout and that key are left as they are",
+                    args.id
+                )
+            }),
+        Err(failure) => Some(format!(
+            "{}; any checkouts.{} key in it is left as it is",
+            failure.message, args.id
+        )),
+    };
+    let applied = store.project_delete(&app.ctx(), &args.id)?;
+    Ok(Outcome::applied(applied).with_warning(warning))
+}
+
+/// "events: 37, cards: 4, projects: 1": the tables with rows, largest first.
+fn removal_summary(removed: &std::collections::BTreeMap<String, i64>) -> String {
+    let mut tables: Vec<_> = removed.iter().collect();
+    tables.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    tables
+        .iter()
+        .map(|(table, n)| format!("{table}: {n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Asks the owner to type the project id; true when they did.
+fn typed_id(id: &str, summary: &str) -> Result<bool, Failure> {
+    eprint!(
+        "Deleting project {id} removes these rows from this host's state.db, events included:\n  {summary}\n\
+         The checkout, worktrees and repository are not touched.\n\
+         Type {id} to delete it: "
+    );
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    Ok(answer.trim() == id)
 }
 
 fn project_stage(app: &App, store: &mut Store, args: ProjectStage) -> Done {

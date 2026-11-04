@@ -327,6 +327,16 @@ export interface ProjectsResponse {
   projects: Project[];
 }
 
+// What deleting a project would remove (state.md, Deleting a project): rows
+// per table, the `table.column` references elsewhere that are set to null, and
+// why the delete is refused right now, if it is.
+export interface ProjectDeletePreview {
+  project: string;
+  removed: Record<string, number>;
+  unlinked: Record<string, number>;
+  refused: string | null;
+}
+
 // The change events on `GET /api/v1/events` (protocol.md section 7.5).
 export interface ChangeEvent {
   seq: number;

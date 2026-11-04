@@ -1,0 +1,24 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 5
+{
+  "error": {
+    "code": "refused",
+    "current": {
+      "project": "gamma",
+      "removed": {
+        "cards": 1,
+        "events": 2,
+        "idempotency_keys": 1,
+        "projects": 1
+      },
+      "unlinked": {}
+    },
+    "entity": "project",
+    "hint": "tiller project delete gamma --yes",
+    "id": "gamma",
+    "message": "project gamma: deleting it removes events: 2, cards: 1, idempotency_keys: 1, projects: 1; nothing was deleted"
+  },
+  "ok": false
+}

@@ -9,6 +9,7 @@ import type {
   MachinesResponse,
   MemoryResponse,
   MemoryRevision,
+  ProjectDeletePreview,
   ProjectsResponse,
   QuotaResponse,
   RunDetail,
@@ -117,6 +118,15 @@ export const signalsQuery = () => readQuery<SignalsResponse>(signalsPath);
 
 export const projectsPath: QueryPath = "/api/v1/projects";
 export const projectsQuery = () => readQuery<ProjectsResponse>(projectsPath);
+
+// Counted fresh each time the delete dialog opens: it is never in the boot
+// snapshot and never shared with another read.
+export const projectDeleteQuery = (projectId: string) =>
+  queryOptions({
+    ...readQuery<ProjectDeletePreview>(`/api/v1/projects/${projectId}/delete`),
+    staleTime: 0,
+    gcTime: 0,
+  });
 
 // A single-entity read takes `?host=<label>` for a peer's record; absent means
 // this host (protocol.md section 7.3).

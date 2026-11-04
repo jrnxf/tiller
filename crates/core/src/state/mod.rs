@@ -14,6 +14,7 @@ pub mod asks;
 pub mod attention;
 pub mod caches;
 pub mod cards;
+pub mod deletion;
 pub mod interventions;
 pub mod learning;
 pub mod memory;

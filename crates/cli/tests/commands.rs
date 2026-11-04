@@ -827,6 +827,47 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
         "project_stage_launched",
         &["project", "stage", "alpha", "launched", "--rev", &rev()],
     );
+
+    // A hard delete: refused without --yes, and the id is free afterwards.
+    let gamma = [
+        "project",
+        "add",
+        "gamma",
+        "--name",
+        "Gamma",
+        "--delivery",
+        "local-only",
+    ];
+    world.run(&gamma);
+    world.run(&[
+        "card",
+        "create",
+        "gamma",
+        "--kind",
+        "ship",
+        "--title",
+        "short-lived",
+    ]);
+    world.run(&["config", "set", "checkouts.gamma", "/home/user/gamma"]);
+    fails(
+        &world,
+        5,
+        "project_delete_unconfirmed",
+        &["project", "delete", "gamma"],
+    );
+    step(
+        &world,
+        "project_delete",
+        &["project", "delete", "gamma", "--yes"],
+    );
+    let again = world.run(&gamma);
+    assert_eq!(again.code, 0, "{}", again.json);
+    fails(
+        &world,
+        5,
+        "project_delete_fleet",
+        &["project", "delete", "fleet", "--yes"],
+    );
 }
 
 /// Each exit code of `protocol.md` section 6.2 is reached by a real command.

@@ -1,0 +1,18 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 5
+{
+  "error": {
+    "code": "refused",
+    "current": {
+      "project": "fleet",
+      "removed": {},
+      "unlinked": {}
+    },
+    "entity": "project",
+    "id": "fleet",
+    "message": "project fleet: the fleet project is never deleted"
+  },
+  "ok": false
+}
