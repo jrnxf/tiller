@@ -40,19 +40,22 @@ pub struct WrongPrincipal {
 /// a grant id. Oldest first.
 pub fn decisions_by_wrong_principal(conn: &Connection) -> Result<Vec<WrongPrincipal>> {
     // `owner`, `board` and a grant's `daemon` decisions are settled here, so
-    // the rows read are the forwarded ones and the suspects.
+    // the rows read are the forwarded ones and the suspects. A payload that
+    // is not JSON reads as one with no fields, so it can neither carry a
+    // grant id nor a key.
     let mut stmt = conn.prepare(
-        "SELECT e.id, e.seq, e.at, e.actor, e.entity_id, e.card_id, json_extract(e.payload, '$.via_peer')
+        "SELECT e.id, e.seq, e.at, e.actor, e.entity_id, e.card_id,
+                CASE WHEN json_valid(e.payload) THEN e.payload -> '$.via_peer' END
          FROM events e
          WHERE e.kind = 'approval.decided'
            AND e.actor NOT IN ('owner', 'board')
            AND NOT (e.actor = 'daemon'
-                    AND substr(coalesce(json_extract(e.payload, '$.decided_by'), ''), 1, 6) = 'grant:'
-                    AND length(coalesce(json_extract(e.payload, '$.decided_by'), '')) > 6)
+                    AND coalesce(CASE WHEN json_valid(e.payload) THEN json_extract(e.payload, '$.decided_by') END, '')
+                        GLOB 'grant:?*')
            AND NOT EXISTS (
              SELECT 1 FROM events b
              WHERE b.entity = 'guard' AND b.entity_id = ?1 AND b.kind = 'guard.breached'
-               AND json_extract(b.payload, '$.event_id') = e.id)
+               AND CASE WHEN json_valid(b.payload) THEN json_extract(b.payload, '$.event_id') END = e.id)
          ORDER BY e.seq",
     )?;
     let rows = stmt.query_map(params![DECISION_GUARD], |row| {
@@ -74,6 +77,7 @@ pub fn decisions_by_wrong_principal(conn: &Connection) -> Result<Vec<WrongPrinci
     let mut found = Vec::new();
     for row in rows {
         let (mut event, via_peer) = row?;
+        // `->` returns JSON text, so this parses whatever `via_peer` holds.
         event.via_peer = via_peer
             .map(|text| serde_json::from_str(&text))
             .transpose()?;
@@ -118,24 +122,50 @@ fn why_not(conn: &Connection, event: &WrongPrincipal) -> Result<Option<String>> 
             key.scope
         )));
     }
-    if key.accepted_at > event.at {
+    // "When the event was written" is the log's order: the key's
+    // `peer.accepted` and `peer.revoked` events against the decision's `seq`,
+    // which a shared millisecond cannot blur. The columns stand in for an
+    // event the log lacks.
+    let (accepted_seq, revoked_seq) = key_events(conn, key_id)?;
+    if key.accepted_at > event.at || accepted_seq.is_some_and(|seq| seq > event.seq) {
         return Ok(Some(format!(
             "key {key_id} was accepted at {}, after the decision",
             key.accepted_at
         )));
     }
-    Ok(key
-        .revoked_at
-        .filter(|revoked| *revoked <= event.at)
-        .map(|revoked| format!("key {key_id} was revoked at {revoked}, before the decision")))
+    let revoked = match revoked_seq {
+        Some(seq) => seq < event.seq,
+        None => key.revoked_at.is_some_and(|revoked| revoked <= event.at),
+    };
+    Ok(revoked.then(|| {
+        format!(
+            "key {key_id} was revoked at {}, before the decision",
+            key.revoked_at
+                .map_or_else(|| "an unknown time".to_owned(), |at| at.to_string())
+        )
+    }))
+}
+
+/// The `seq` of a key's first `peer.accepted` and first `peer.revoked`
+/// events, when the log has them.
+fn key_events(conn: &Connection, key_id: &str) -> Result<(Option<i64>, Option<i64>)> {
+    Ok(conn.query_row(
+        "SELECT (SELECT min(seq) FROM events
+                 WHERE entity = 'peer_key' AND entity_id = ?1 AND kind = 'peer.accepted'),
+                (SELECT min(seq) FROM events
+                 WHERE entity = 'peer_key' AND entity_id = ?1 AND kind = 'peer.revoked')",
+        [key_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?)
 }
 
 impl Store {
     /// The detector for decisions by the wrong principal: for each event
     /// [`decisions_by_wrong_principal`] finds, a `guard.breach` of
     /// [`DECISION_GUARD`] and a `recovery` item on the approval's card, or on
-    /// `fleet-1` when the card is gone or closed. An event is raised once.
-    /// Writes nothing when nothing is found.
+    /// `fleet-1` when the card is gone or closed (the breach alone when
+    /// neither is open). An event is raised once. Writes nothing when
+    /// nothing is found.
     pub fn raise_wrong_principal_decisions(
         &mut self,
         ctx: &Ctx,
@@ -164,19 +194,26 @@ impl Store {
                             "why": event.why,
                         })),
                 )?;
+                // The approval's card while it is open, else `fleet-1`. With
+                // neither, the breach alone still counts.
+                let open_card = |reference: &str, column: &str| -> Result<Option<String>> {
+                    Ok(find::<crate::domain::Card>(
+                        tx.conn(),
+                        &format!("{column} = ?1"),
+                        &[&reference],
+                    )?
+                    .filter(|card| card.state == CardState::Open)
+                    .map(|card| card.id))
+                };
                 let card = match &event.card_id {
-                    Some(id) => find::<crate::domain::Card>(tx.conn(), "id = ?1", &[id])?
-                        .filter(|card| card.state == CardState::Open)
-                        .map(|card| card.id),
+                    Some(id) => open_card(id, "id")?,
                     None => None,
                 };
-                let card = match card {
-                    Some(card) => card,
-                    None => {
-                        find::<crate::domain::Card>(tx.conn(), "display_id = ?1", &[&HOST_HEALTH_CARD])?
-                            .map(|card| card.id)
-                            .unwrap_or_else(|| HOST_HEALTH_CARD.to_owned())
-                    }
+                let Some(card) = (match card {
+                    Some(card) => Some(card),
+                    None => open_card(HOST_HEALTH_CARD, "display_id")?,
+                }) else {
+                    continue;
                 };
                 let approval = get::<crate::domain::Approval>(tx.conn(), "approval", &event.approval_id).ok();
                 open_attention(
@@ -217,7 +254,7 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::params;
+    use rusqlite::{ToSql, params};
     use serde_json::{Value, json};
 
     use super::*;
@@ -260,7 +297,7 @@ mod tests {
 
     /// An `approval.decided` event as a writer of `state.db` would leave it,
     /// whether or not a mutation allows that writer.
-    fn decided(store: &Store, when: &str, actor: &str, payload: Value) -> String {
+    fn decided(store: &Store, when: &str, actor: &str, payload: impl ToSql) -> String {
         let id = ids::new_ulid();
         store
             .conn()
@@ -401,23 +438,45 @@ mod tests {
                 "board@board-a",
                 via(&act),
             ),
+            // A payload that is not JSON, or a `via_peer` that is not an
+            // object, carries no grant id and no key.
+            decided(&store, "2026-11-02T11:00:00.000Z", "daemon", "grant:01JC"),
+            decided(
+                &store,
+                "2026-11-02T11:00:00.000Z",
+                "board@board-a",
+                json!({"via_peer": 42}),
+            ),
+            decided(
+                &store,
+                "2026-11-02T11:00:00.000Z",
+                "board@board-a",
+                json!({"via_peer": act}),
+            ),
         ];
+        decided(&store, "2026-11-02T11:00:00.000Z", "owner", "not json");
 
-        // A second key from the same board host revokes the first: a
-        // decision under the first key before then stands, one after does
-        // not.
+        // A second key from the same board host revokes the first. A
+        // decision under the first key written before then stands, even in
+        // the same millisecond; one written after does not.
+        decided(
+            &store,
+            "2026-11-02T11:59:59.999Z",
+            "board@board-a",
+            via(&act),
+        );
+        decided(
+            &store,
+            "2026-11-02T12:00:00.000Z",
+            "board@board-a",
+            via(&act),
+        );
         let next = accept_key(
             &mut store,
             "2026-11-02T12:00:00.000Z",
             "board-a",
             BOARD_HOST,
             PeerScope::Act,
-        );
-        decided(
-            &store,
-            "2026-11-02T11:59:59.999Z",
-            "board@board-a",
-            via(&act),
         );
         decided(
             &store,
@@ -452,6 +511,9 @@ mod tests {
                 format!("key {read} has read scope, not act").as_str(),
                 format!("key {act} was accepted at 2026-11-02T10:00:00.000Z, after the decision")
                     .as_str(),
+                "daemon decided with no grant id",
+                "board@board-a decided with no via_peer.key_id",
+                "board@board-a decided with no via_peer.key_id",
                 format!("key {act} was revoked at 2026-11-02T12:00:00.000Z, before the decision")
                     .as_str(),
             ]
@@ -486,7 +548,7 @@ mod tests {
     }
 
     /// Every way the mutations decide an approval passes the detector: the
-    /// owner, the board, a forwarded decision and a grant.
+    /// owner, the board, a forwarded decision, a grant and away mode.
     #[test]
     fn mutation_decisions_are_not_raised() {
         let mut store = Store::open_in_memory().unwrap();
@@ -564,6 +626,12 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(by_grant.state, ApprovalState::Accepted);
+        store
+            .away_start(
+                &owner(),
+                json!({"until_at": "2099-01-01T00:00:00.000Z", "projects": ["alpha"]}),
+            )
+            .unwrap();
 
         let decided: i64 = store
             .conn()
@@ -573,7 +641,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(decided, 4);
+        assert_eq!(decided, 5);
         assert_eq!(
             decisions_by_wrong_principal(store.conn()).unwrap(),
             Vec::new()
@@ -582,5 +650,35 @@ mod tests {
             .raise_wrong_principal_decisions(&Ctx::new(Actor::Daemon))
             .unwrap();
         assert!(raised.value.is_empty() && raised.events.is_empty());
+    }
+
+    /// With neither the approval's card nor `fleet-1` open, the breach is
+    /// still written: the trigger never waits on a card.
+    #[test]
+    fn breach_stands_without_an_open_card() {
+        let mut store = Store::open_in_memory().unwrap();
+        setup(&mut store);
+        store
+            .conn()
+            .execute(
+                "UPDATE cards SET state = 'closed', outcome = 'completed', closed_at = ?1",
+                params![at("2026-11-02T10:00:00.000Z")],
+            )
+            .unwrap();
+        let forged = decided(
+            &store,
+            "2026-11-02T11:00:00.000Z",
+            "hook",
+            json!({"accepted": true}),
+        );
+        let raised = store
+            .raise_wrong_principal_decisions(&Ctx::at(
+                Actor::Daemon,
+                at("2026-11-02T12:00:00.000Z"),
+            ))
+            .unwrap();
+        assert_eq!(raised.value.len(), 1);
+        assert_eq!(breaches(&store)[0]["event_id"], Value::from(forged));
+        assert_eq!(recovery_items(&store), 0);
     }
 }

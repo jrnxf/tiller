@@ -44,7 +44,9 @@ impl Reconciler {
                 report.error(&format!("default branch of {}", project.id), &error);
             }
         }
-        self.outside_merge_answers(now, report)?;
+        // The detector runs even when an answer fails to apply: it raises
+        // the rollback trigger, so nothing else may hold it back.
+        let answers = self.outside_merge_answers(now, report);
         let raised = self.store.raise_wrong_principal_decisions(&self.ctx(now))?;
         for found in &raised.value {
             report.repair(format!(
@@ -52,7 +54,7 @@ impl Reconciler {
                 found.approval_id, found.actor, found.why
             ));
         }
-        Ok(())
+        answers
     }
 
     /// Every PR of the project that still matters: open, or carrying an
