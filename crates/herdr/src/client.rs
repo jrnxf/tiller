@@ -107,6 +107,8 @@ pub trait Herdr {
     /// Types literal text into the pane, with no Enter.
     fn send_text(&self, pane_id: &str, text: &str) -> Result<()>;
     fn send_enter(&self, pane_id: &str) -> Result<()>;
+    /// Escape: cancels a working turn (`tiller agent interrupt`).
+    fn send_escape(&self, pane_id: &str) -> Result<()>;
     /// Reports Tiller's row tokens on the pane; herdr merges them with the
     /// tokens already reported under the same source.
     fn report_tokens(&self, pane_id: &str, tokens: &BTreeMap<String, String>) -> Result<()>;
@@ -464,6 +466,10 @@ impl Herdr for Cli {
 
     fn send_enter(&self, pane_id: &str) -> Result<()> {
         self.run(&["pane", "send-keys", pane_id, "enter"]).map(drop)
+    }
+
+    fn send_escape(&self, pane_id: &str) -> Result<()> {
+        self.run(&["pane", "send-keys", pane_id, "esc"]).map(drop)
     }
 
     fn report_tokens(&self, pane_id: &str, tokens: &BTreeMap<String, String>) -> Result<()> {

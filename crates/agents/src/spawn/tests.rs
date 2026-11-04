@@ -17,7 +17,7 @@ use tiller_reconcile::git::GitScanner;
 
 use super::*;
 
-fn git(dir: &Path, args: &[&str]) -> String {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -43,7 +43,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
 
 /// A bare origin, a clone that pushes to it as other people do, and the
 /// project checkout treehouse cuts worktrees from.
-struct Repo {
+pub(crate) struct Repo {
     root: TempDir,
     origin: PathBuf,
     upstream: PathBuf,
@@ -98,18 +98,18 @@ struct PoolLog {
 /// without fetching, as a pool whose refs are stale does, so spawn's own
 /// fetch is what brings it to the head of origin.
 #[derive(Clone)]
-struct FakePool {
+pub(crate) struct FakePool {
     slots: PathBuf,
     origin: PathBuf,
     log: Arc<Mutex<PoolLog>>,
 }
 
 impl FakePool {
-    fn taken(&self) -> Vec<(PathBuf, String, String, String)> {
+    pub(crate) fn taken(&self) -> Vec<(PathBuf, String, String, String)> {
         self.log.lock().unwrap().taken.clone()
     }
 
-    fn returned(&self) -> Vec<(PathBuf, String)> {
+    pub(crate) fn returned(&self) -> Vec<(PathBuf, String)> {
         self.log.lock().unwrap().returned.clone()
     }
 }
@@ -194,16 +194,16 @@ fn config(checkout: &Path, extra: &str) -> SpawnConfig {
 
 /// Project `alpha` with a live orchestrator in pane `w1:p1`, its checkout,
 /// a pool, a herdr laid out as a fresh server, and a scanner over git.
-struct Rig {
-    fleet: Fleet,
-    repo: Repo,
-    pool: FakePool,
-    herdr: FakeHerdr,
-    scanner: GitScanner,
-    config: SpawnConfig,
-    tiller: PathBuf,
-    scratch: PathBuf,
-    disk_free_mb: Option<i64>,
+pub(crate) struct Rig {
+    pub(crate) fleet: Fleet,
+    pub(crate) repo: Repo,
+    pub(crate) pool: FakePool,
+    pub(crate) herdr: FakeHerdr,
+    pub(crate) scanner: GitScanner,
+    pub(crate) config: SpawnConfig,
+    pub(crate) tiller: PathBuf,
+    pub(crate) scratch: PathBuf,
+    pub(crate) disk_free_mb: Option<i64>,
 }
 
 macro_rules! world {
@@ -220,13 +220,14 @@ macro_rules! world {
         }
     };
 }
+pub(crate) use world;
 
 impl Rig {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with_config("")
     }
 
-    fn with_config(extra: &str) -> Self {
+    pub(crate) fn with_config(extra: &str) -> Self {
         let fleet = Fleet::new();
         let repo = Repo::new();
         let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
@@ -249,11 +250,11 @@ impl Rig {
         }
     }
 
-    fn orchestrator(&self) -> Ctx {
+    pub(crate) fn orchestrator(&self) -> Ctx {
         Ctx::new(Actor::Session(self.fleet.orchestrator_session.clone()))
     }
 
-    fn card(&mut self, kind: CardKind, size: Option<Size>) -> Card {
+    pub(crate) fn card(&mut self, kind: CardKind, size: Option<Size>) -> Card {
         self.fleet
             .store
             .card_create(
@@ -272,7 +273,7 @@ impl Rig {
             .value
     }
 
-    fn request(card: &Card, role: RunRole) -> Request {
+    pub(crate) fn request(card: &Card, role: RunRole) -> Request {
         Request {
             card: card.display_id.clone(),
             role,
@@ -286,7 +287,7 @@ impl Rig {
         spawn(&mut self.fleet.store, ctx, None, &world, request).map(|a| a.value)
     }
 
-    fn spawn(&mut self, card: &Card, role: RunRole) -> Spawned {
+    pub(crate) fn spawn(&mut self, card: &Card, role: RunRole) -> Spawned {
         let ctx = self.orchestrator();
         match self.try_spawn(&ctx, Self::request(card, role)).unwrap() {
             Outcome::Spawned(spawned) => *spawned,
@@ -294,7 +295,7 @@ impl Rig {
         }
     }
 
-    fn run(&self, id: &str) -> Run {
+    pub(crate) fn run(&self, id: &str) -> Run {
         get(self.fleet.store.conn(), "run", id).unwrap()
     }
 
@@ -316,7 +317,7 @@ impl Rig {
         cleanup(&mut self.fleet.store, &owner(), &world, &run).map(|a| a.value)
     }
 
-    fn workspace_ids(&self) -> Vec<String> {
+    pub(crate) fn workspace_ids(&self) -> Vec<String> {
         self.herdr
             .snapshot()
             .unwrap()
@@ -326,7 +327,7 @@ impl Rig {
             .collect()
     }
 
-    fn events(&self, kind: &str, entity: &str) -> i64 {
+    pub(crate) fn events(&self, kind: &str, entity: &str) -> i64 {
         self.fleet
             .store
             .conn()
@@ -338,7 +339,7 @@ impl Rig {
             .unwrap()
     }
 
-    fn sql(&self, statement: &str) {
+    pub(crate) fn sql(&self, statement: &str) {
         self.fleet.store.conn().execute(statement, []).unwrap();
     }
 

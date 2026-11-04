@@ -16,7 +16,8 @@ use crate::client::{Created, Herdr, HerdrError, PaneInfo, Result, Snapshot, Work
 /// Set to `<point>:<n>:<marker path>`, makes the `n`th time the fake reaches
 /// `<point>` (counted across processes, from 1) write the marker and hang,
 /// so a test can kill the process there. A point is a call's name (before
-/// it does anything) or `<name>.after` for `send_text` and `send_enter`.
+/// it does anything) or `<name>.after` for `send_text`, `send_enter` and
+/// `send_escape`.
 pub const PAUSE_ENV: &str = "TILLER_FAKE_HERDR_PAUSE";
 
 /// What a pane shows.
@@ -53,6 +54,9 @@ struct World {
     refused: Vec<String>,
     calls: Vec<String>,
     counts: BTreeMap<String, u32>,
+    /// Panes whose Claude takes `/exit` and stays up.
+    #[serde(default)]
+    stubborn: Vec<String>,
 }
 
 /// A handle on the fake server's file. Clones share the server.
@@ -65,7 +69,7 @@ impl FakeHerdr {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let fake = Self { path: path.into() };
         if !fake.path.exists() {
-            fake.save(&World::default());
+            fake.locked(|| fake.save(&World::default()));
         }
         fake
     }
@@ -79,9 +83,27 @@ impl FakeHerdr {
         &self.path
     }
 
-    #[allow(clippy::unwrap_used, clippy::expect_used)]
     fn load(&self) -> World {
+        self.locked(|| self.read())
+    }
+
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    fn read(&self) -> World {
         serde_json::from_slice(&std::fs::read(&self.path).expect("fake herdr state")).unwrap()
+    }
+
+    /// Runs `f` holding the server's lock, as herdr serves one call at a
+    /// time: a test's own threads and processes share the file.
+    #[allow(clippy::expect_used)]
+    fn locked<T>(&self, f: impl FnOnce() -> T) -> T {
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.path.with_extension("lock"))
+            .expect("open fake herdr lock");
+        lock.lock().expect("lock fake herdr");
+        f()
     }
 
     #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -92,10 +114,12 @@ impl FakeHerdr {
     }
 
     fn edit<T>(&self, f: impl FnOnce(&mut World) -> T) -> T {
-        let mut world = self.load();
-        let out = f(&mut world);
-        self.save(&world);
-        out
+        self.locked(|| {
+            let mut world = self.read();
+            let out = f(&mut world);
+            self.save(&world);
+            out
+        })
     }
 
     /// Counts a pause point and hangs there when [`PAUSE_ENV`] names it.
@@ -187,6 +211,11 @@ impl FakeHerdr {
                 p.tokens = tokens;
             }
         });
+    }
+
+    /// Makes the Claude in `pane_id` ignore `/exit`.
+    pub fn ignore_exit(&self, pane_id: &str) {
+        self.edit(|w| w.stubborn.push(pane_id.into()));
     }
 
     pub fn set_unreachable(&self, down: bool) {
@@ -323,12 +352,31 @@ impl Herdr for FakeHerdr {
 
     fn send_enter(&self, pane_id: &str) -> Result<()> {
         self.call("send_enter", format!("send_enter {pane_id}"))?;
+        let stubborn = self.load().stubborn.iter().any(|p| p == pane_id);
         self.with_pane(pane_id, |p| {
-            if p.screen == Screen::Idle && !p.composer.is_empty() {
-                p.submitted.push(std::mem::take(&mut p.composer));
+            // Claude takes a line at its composer, a shell runs one.
+            let takes = matches!(p.screen, Screen::Idle | Screen::Shell);
+            if takes && !p.composer.is_empty() {
+                let line = std::mem::take(&mut p.composer);
+                // Claude's `/exit` leaves the pane at a shell.
+                if line == "/exit" && !stubborn {
+                    p.screen = Screen::Shell;
+                }
+                p.submitted.push(line);
             }
         })?;
         self.pause_point("send_enter.after");
+        Ok(())
+    }
+
+    fn send_escape(&self, pane_id: &str) -> Result<()> {
+        self.call("send_escape", format!("send_escape {pane_id}"))?;
+        self.with_pane(pane_id, |p| {
+            if p.screen == Screen::Working {
+                p.screen = Screen::Idle;
+            }
+        })?;
+        self.pause_point("send_escape.after");
         Ok(())
     }
 

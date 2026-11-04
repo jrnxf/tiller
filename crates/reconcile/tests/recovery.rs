@@ -122,6 +122,8 @@ fn orchestrator_crash_resumes_and_retargets_outbox() {
                 note: "picking it back up".into(),
                 new_attempt: false,
                 stop_proof: None,
+                model: None,
+                checks: None,
             },
         )
         .unwrap()

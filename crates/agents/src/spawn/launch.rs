@@ -40,6 +40,15 @@ pub struct Roots<'a> {
     pub checkouts: &'a Path,
 }
 
+/// The first prompt of a relaunched session, which carries the relaunch
+/// note: the progress the new session picks up from (P24).
+pub fn relaunch_prompt(note: &str) -> String {
+    format!(
+        "{FIRST_PROMPT} You were relaunched in the same worktree, which keeps the earlier session's work. Note from the relaunch: {}",
+        note.trim()
+    )
+}
+
 /// What one launch needs.
 #[derive(Clone, Debug)]
 pub struct LaunchSpec<'a> {
@@ -68,6 +77,31 @@ pub struct LaunchSpec<'a> {
     /// sha)` pairs (`memory.md` section 7). Empty until the renderer passes
     /// them.
     pub memory: &'a [(String, String)],
+    /// The relaunch note of a new attempt, which goes into its first prompt.
+    pub note: Option<&'a str>,
+}
+
+/// A later session of a run, started from the files [`write`] left in the
+/// run's scratch directory (`tiller agent relaunch` and `resume`).
+#[derive(Clone, Debug)]
+pub struct AgainSpec<'a> {
+    pub role: Role,
+    pub session_id: &'a str,
+    pub run_id: &'a str,
+    pub worktree: &'a Path,
+    pub scratch: &'a Path,
+    pub model: &'a str,
+    pub effort: Effort,
+    pub claude: &'a str,
+}
+
+/// How that later session starts.
+#[derive(Clone, Copy, Debug)]
+pub enum Start<'a> {
+    /// A new session on the same run, with the relaunch note.
+    Fresh { note: &'a str },
+    /// `claude --resume <claude session id>`.
+    Resume { claude_session_id: &'a str },
 }
 
 /// The files written for a launch, and the line that starts it.
@@ -198,40 +232,72 @@ fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), SpawnError> {
     Ok(())
 }
 
+/// What one launch script runs.
+struct Command<'a> {
+    role: Role,
+    session_id: &'a str,
+    run_id: &'a str,
+    worktree: &'a Path,
+    claude: &'a str,
+    model: &'a str,
+    effort: Effort,
+    mode: &'a str,
+    /// The words after the flags: the first prompt, or `--resume <id>`.
+    start: Vec<String>,
+}
+
 /// The command the script runs, word by word.
-fn argv(spec: &LaunchSpec<'_>, launch: &Launch, mode: &str) -> Vec<String> {
+fn argv(command: &Command<'_>, launch: &Launch) -> Vec<String> {
     let mut words: Vec<String> = [
-        spec.claude,
+        command.claude,
         "--append-system-prompt-file",
         &launch.prompt.to_string_lossy(),
         "--settings",
         &launch.settings.to_string_lossy(),
         "--permission-mode",
-        mode,
+        command.mode,
         "--strict-mcp-config",
         "--mcp-config",
         &launch.mcp.to_string_lossy(),
         "--model",
-        spec.model,
+        command.model,
         "--effort",
-        spec.effort.as_str(),
+        command.effort.as_str(),
     ]
     .map(str::to_owned)
     .into();
-    if spec.brief.is_some() {
-        words.push(FIRST_PROMPT.to_owned());
-    }
+    words.extend(command.start.iter().cloned());
     words
 }
 
 /// The environment every fleet launch sets (`authority.md` section 7).
-fn env(spec: &LaunchSpec<'_>) -> Vec<(&'static str, String)> {
+fn env(command: &Command<'_>) -> Vec<(&'static str, String)> {
     vec![
         ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1".into()),
-        ("TILLER_SESSION_ID", spec.session_id.into()),
-        ("TILLER_RUN_ID", spec.run_id.into()),
-        ("TILLER_ROLE", spec.role.name().into()),
+        ("TILLER_SESSION_ID", command.session_id.into()),
+        ("TILLER_RUN_ID", command.run_id.into()),
+        ("TILLER_ROLE", command.role.name().into()),
     ]
+}
+
+/// The launch script's text.
+fn script(command: &Command<'_>, launch: &Launch) -> String {
+    let env: Vec<String> = env(command)
+        .into_iter()
+        .map(|(k, v)| format!("{k}={}", sh_quote(&v)))
+        .collect();
+    let words: Vec<String> = argv(command, launch).iter().map(|w| sh_quote(w)).collect();
+    let what = match command.run_id {
+        "" => format!("session {}", command.session_id),
+        run => format!("run {run}"),
+    };
+    format!(
+        "#!/bin/sh\n# tiller: {what}, {role}. Regenerated on every launch; edits are lost.\ncd {cwd} || exit 1\nexec env {env} \\\n  {argv}\n",
+        role = command.role.name(),
+        cwd = sh_quote(&command.worktree.to_string_lossy()),
+        env = env.join(" "),
+        argv = words.join(" "),
+    )
 }
 
 /// Writes the prompt, the fragment, the MCP config and the launch script
@@ -299,26 +365,88 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
     write_new(&launch.settings, &fragment, 0o600)?;
     write_new(&launch.mcp, MCP_CONFIG.as_bytes(), 0o600)?;
 
-    let env: Vec<String> = env(spec)
-        .into_iter()
-        .map(|(k, v)| format!("{k}={}", sh_quote(&v)))
-        .collect();
-    let words: Vec<String> = argv(spec, &launch, &front.permission_mode)
-        .iter()
-        .map(|w| sh_quote(w))
-        .collect();
-    let what = match spec.run_id {
-        "" => format!("session {}", spec.session_id),
-        run => format!("run {run}"),
+    // The orchestrator has no brief, so no first prompt.
+    let start = match (spec.brief, spec.note) {
+        (None, _) => Vec::new(),
+        (Some(_), Some(note)) => vec![relaunch_prompt(note)],
+        (Some(_), None) => vec![FIRST_PROMPT.to_owned()],
     };
-    let script = format!(
-        "#!/bin/sh\n# tiller: {what}, {role}. Regenerated on every launch; edits are lost.\ncd {cwd} || exit 1\nexec env {env} \\\n  {argv}\n",
-        role = spec.role.name(),
-        cwd = sh_quote(&spec.worktree.to_string_lossy()),
-        env = env.join(" "),
-        argv = words.join(" "),
+    let text = script(
+        &Command {
+            role: spec.role,
+            session_id: spec.session_id,
+            run_id: spec.run_id,
+            worktree: spec.worktree,
+            claude: spec.claude,
+            model: spec.model,
+            effort: spec.effort,
+            mode: &front.permission_mode,
+            start,
+        },
+        &launch,
     );
-    write_new(&launch.script, script.as_bytes(), 0o700)?;
+    write_new(&launch.script, text.as_bytes(), 0o700)?;
     launch.line = format!("sh {}", sh_quote(&launch.script.to_string_lossy()));
     Ok(launch)
+}
+
+/// Writes the script of a later session into the run's scratch directory,
+/// beside the prompt, fragment and MCP config [`write`] left there, which it
+/// reuses unchanged: the run's brief and hash stay what they were. The
+/// script is named for the session and how it starts
+/// (`relaunch-<session>.sh`, `resume-<session>.sh`) and replaces only an
+/// earlier script of that same name. Returns the line to type.
+pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<String, SpawnError> {
+    absolute("the worktree", spec.worktree)?;
+    absolute("the scratch directory", spec.scratch)?;
+    let launch = Launch {
+        prompt: spec.scratch.join("prompt.md"),
+        settings: spec.scratch.join("settings.json"),
+        mcp: spec.scratch.join("mcp.json"),
+        script: spec.scratch.join(match start {
+            Start::Fresh { .. } => format!("relaunch-{}.sh", spec.session_id),
+            Start::Resume { .. } => format!("resume-{}.sh", spec.session_id),
+        }),
+        config_hash: String::new(),
+        manifest: Value::Null,
+        line: String::new(),
+    };
+    for file in [&launch.prompt, &launch.settings, &launch.mcp] {
+        if !file.is_file() {
+            return Err(SpawnError::Refused(format!(
+                "{} is missing, so the run's launch cannot be repeated",
+                file.display()
+            )));
+        }
+    }
+    let front = spec.role.frontmatter()?;
+    let start = match start {
+        Start::Fresh { note } => vec![relaunch_prompt(note)],
+        Start::Resume { claude_session_id } => {
+            vec!["--resume".to_owned(), claude_session_id.to_owned()]
+        }
+    };
+    let text = script(
+        &Command {
+            role: spec.role,
+            session_id: spec.session_id,
+            run_id: spec.run_id,
+            worktree: spec.worktree,
+            claude: spec.claude,
+            model: spec.model,
+            effort: spec.effort,
+            mode: &front.permission_mode,
+            start,
+        },
+        &launch,
+    );
+    // Written beside, then renamed over, so a script is never half there.
+    let partial = launch.script.with_extension("sh.partial");
+    match fs::remove_file(&partial) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
+    }
+    write_new(&partial, text.as_bytes(), 0o700)?;
+    fs::rename(&partial, &launch.script)?;
+    Ok(format!("sh {}", sh_quote(&launch.script.to_string_lossy())))
 }

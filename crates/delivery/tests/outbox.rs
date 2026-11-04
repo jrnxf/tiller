@@ -366,6 +366,8 @@ fn message_to_dead_session_is_retargeted_to_successor() {
                 note: "pane closed".into(),
                 new_attempt: false,
                 stop_proof: None,
+                model: None,
+                checks: None,
             },
         )
         .unwrap()
@@ -697,6 +699,9 @@ impl Herdr for AckOnSubmit {
             .outbox_ack(&ctx, &self.message)
             .unwrap();
         Ok(())
+    }
+    fn send_escape(&self, id: &str) -> tiller_herdr::client::Result<()> {
+        self.inner.send_escape(id)
     }
     fn report_tokens(
         &self,

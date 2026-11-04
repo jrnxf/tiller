@@ -1,5 +1,5 @@
 //! `tiller spawn` and `tiller orchestrator start`, and the tools they,
-//! `tiller done`, `tiller run clean` and `tiller agent focus` reach outside
+//! `tiller done`, `tiller run clean` and `tiller agent` reach outside
 //! `state.db` with (T4.2): treehouse, herdr and git.
 
 use std::ffi::OsString;
@@ -129,7 +129,7 @@ impl Tools {
     }
 }
 
-fn read_brief(path: &Path) -> Result<String, Failure> {
+pub(crate) fn read_brief(path: &Path) -> Result<String, Failure> {
     let brief = std::fs::read_to_string(path)
         .map_err(|error| Failure::usage(format!("--brief-file {}: {error}", path.display())))?;
     if brief.trim().is_empty() {

@@ -73,6 +73,8 @@ fn cut_fix_agent_reports_partial_work() {
                 note: "finish the lint".into(),
                 new_attempt: true,
                 stop_proof: Some("cut".into()),
+                model: None,
+                checks: None,
             },
         )
         .unwrap()

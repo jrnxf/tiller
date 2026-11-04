@@ -1216,6 +1216,8 @@ fn a_relaunched_attempt_takes_the_live_orchestrator() {
         note: "fresh brief".into(),
         new_attempt: true,
         stop_proof: Some("pane exited".into()),
+        model: None,
+        checks: None,
     };
     store
         .session_end(&owner(), &orchestrator, "restarted")

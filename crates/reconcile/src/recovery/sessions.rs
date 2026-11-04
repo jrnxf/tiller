@@ -20,11 +20,33 @@ use crate::pass::{Reconciler, Report, minutes_since, ts};
 /// life is a hook's bind, never the launcher's own.
 pub const LAUNCH_BIND_SOURCE: &str = "resume_launch";
 
+/// The `checks.reason` of a resume `tiller agent resume` attempted. The
+/// automatic path never wakes, retries or escalates one: the caller reports
+/// its own result. The ladder leaves the session alone for the bind window,
+/// then judges it as usual (R03).
+pub const MANUAL_RESUME_REASON: &str = "manual";
+
 /// One `session.resume_attempted` event.
 #[derive(Clone, Debug)]
 pub(crate) struct Attempt {
     pub at: Timestamp,
     pub payload: Value,
+}
+
+impl Attempt {
+    /// Whether `tiller agent resume` made it, not the daemon.
+    fn manual(&self) -> bool {
+        self.payload
+            .get("checks")
+            .and_then(|c| c.get("reason"))
+            .and_then(Value::as_str)
+            == Some(MANUAL_RESUME_REASON)
+    }
+}
+
+/// The daemon's own attempts: a manual resume never uses up its two.
+fn automatic(attempts: &[Attempt]) -> usize {
+    attempts.iter().filter(|a| !a.manual()).count()
 }
 
 impl Reconciler {
@@ -733,6 +755,12 @@ impl Reconciler {
             .and_then(Value::as_str)
             .unwrap_or("crash")
             .to_owned();
+        if reason == MANUAL_RESUME_REASON {
+            // Its bind window is the launch's grace; after it, or once a
+            // hook shows up, the ladder judges the session.
+            return Ok(!self.hook_seen_after(&session.id, newest.at)?
+                && newest.at.plus_minutes(self.config.thresholds.bind_window) > now);
+        }
         if self.hook_seen_after(&session.id, newest.at)? {
             self.resumed(session, &reason, &wake_key, now, report)?;
             return Ok(false);
@@ -744,7 +772,7 @@ impl Reconciler {
         if newest.at.plus_minutes(self.config.thresholds.bind_window) > now {
             return Ok(true);
         }
-        if attempts.len() < 2 {
+        if automatic(&attempts) < 2 {
             if let Some(cwd) = self.resume_cwd(session)? {
                 self.attempt_resume(session, &cwd, false, &reason, now, report)?;
             }
@@ -766,7 +794,7 @@ impl Reconciler {
                             "The {} orchestrator could not be resumed after a {reason}: two attempts bound no session. Relaunch it, or hold the project?",
                             session.project_id
                         ),
-                        evidence: Self::json_text(json!({"session_id": session.id, "attempts": attempts.len()})),
+                        evidence: Self::json_text(json!({"session_id": session.id, "attempts": automatic(&attempts)})),
                         options: Some(json!(["Relaunch", "Hold the project"])),
                         ..NewAttention::default()
                     },
@@ -789,7 +817,7 @@ impl Reconciler {
                             run.role.short_name(),
                             run.id
                         ),
-                        evidence: Self::json_text(json!({"session_id": session.id, "attempts": attempts.len()})),
+                        evidence: Self::json_text(json!({"session_id": session.id, "attempts": automatic(&attempts)})),
                         options: Some(json!(["Relaunch", "Abandon", "Wait"])),
                         ..NewAttention::default()
                     },
@@ -973,7 +1001,7 @@ impl Reconciler {
                         pending = true;
                         continue;
                     }
-                    if attempts.len() < 2 {
+                    if automatic(&attempts) < 2 {
                         if let Ok(cwd) = self.restore_target(&session, run.as_ref())? {
                             self.attempt_resume(&session, &cwd, false, "reboot", now, report)?;
                         }
@@ -1213,5 +1241,33 @@ pub struct InFlight {
 impl InFlight {
     pub fn any(self) -> bool {
         self.runs > 0 || self.messages > 0 || self.asks > 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_manual_resume_never_uses_up_the_daemons_attempts() {
+        let attempt = |reason: &str| Attempt {
+            at: Timestamp::now(),
+            payload: json!({ "checks": { "reason": reason } }),
+        };
+        let attempts = [
+            attempt("crash"),
+            attempt(MANUAL_RESUME_REASON),
+            attempt(MANUAL_RESUME_REASON),
+        ];
+        assert_eq!(automatic(&attempts), 1);
+        assert_eq!(
+            automatic(&[Attempt {
+                at: Timestamp::now(),
+                payload: json!({})
+            }]),
+            1
+        );
     }
 }

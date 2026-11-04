@@ -145,6 +145,7 @@ pub fn start(
         claude: &world.config.spawn.claude,
         claude_version: claude_version.as_deref(),
         memory: &[],
+        note: None,
     })?;
     let mut events = Vec::new();
     let opened = Opened {

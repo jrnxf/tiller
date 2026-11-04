@@ -284,6 +284,29 @@ impl Store {
         self.write_as(ctx, txn, txn, key, f)
     }
 
+    /// Runs a mutation's body in a transaction that always rolls back, so a
+    /// caller can learn whether it would apply before slow or outside work
+    /// it cannot undo. Writes nothing, keys nothing.
+    pub fn rehearse<T, F>(&mut self, ctx: &Ctx, txn: &'static str, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut Tx<'_>) -> Result<T>,
+    {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut work = Tx {
+            tx,
+            ctx,
+            txn,
+            key: None,
+            events: Vec::new(),
+            first_entity: None,
+            rebuildable: false,
+        };
+        // Dropping the transaction rolls it back.
+        f(&mut work)
+    }
+
     /// [`Store::write`] for a command whose response differs from that of the
     /// mutation it opens with: `command` names it in `idempotency_keys`, so
     /// its key never replays as a plain `txn` (or the other way round).

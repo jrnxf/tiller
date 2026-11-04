@@ -905,11 +905,32 @@ fn exit_codes_follow_the_table() {
     let out = world.run(&["agent", "focus", &orchestrator]);
     assert_eq!((out.code, out.error_code()), (5, "refused"), "{}", out.json);
 
-    // 7: the daemon is needed and absent, and nothing was written.
+    // Agent control needs a known run, and a relaunch's own model goes
+    // with a new attempt only.
     for args in [
         vec!["agent", "relaunch", "alpha-1-build", "--note", "x"],
         vec!["agent", "resume", "alpha-1-build"],
         vec!["agent", "interrupt", "alpha-1-build"],
+    ] {
+        let out = world.run(&args);
+        assert_eq!((out.code, out.error_code()), (3, "not_found"), "{args:?}");
+    }
+    let out = world.run(&[
+        "agent",
+        "relaunch",
+        "alpha-1-build",
+        "--note",
+        "x",
+        "--model",
+        "opus",
+        "--effort",
+        "high",
+    ]);
+    assert_eq!((out.code, out.error_code()), (2, "usage"), "{}", out.json);
+    assert_eq!(world.store().last_seq().unwrap(), seq);
+
+    // 7: the daemon is needed and absent, and nothing was written.
+    for args in [
         vec!["mem", "approve", "01JC00000000000000000000P1"],
         vec!["board", "--login"],
     ] {

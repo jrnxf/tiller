@@ -33,7 +33,7 @@ pub mod pool;
 pub mod readings;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::path::{Path, PathBuf};
 
@@ -195,7 +195,7 @@ fn holder(run: &Run) -> String {
     format!("tiller:{}", run.id)
 }
 
-fn role_of(role: RunRole) -> Result<roles::Role> {
+pub(crate) fn role_of(role: RunRole) -> Result<roles::Role> {
     roles::Role::parse(role.as_str())
         .ok_or_else(|| SpawnError::Usage(format!("no packaged role for {role}")))
 }
@@ -210,7 +210,7 @@ pub fn quota_floor(config: &SpawnConfig, role: RunRole) -> Option<f64> {
     })
 }
 
-fn local_host(store: &Store) -> Result<String> {
+pub(crate) fn local_host(store: &Store) -> Result<String> {
     meta(store.conn(), "host_id")?
         .ok_or_else(|| SpawnError::Usage("this host is not initialized; run tiller init".into()))
 }
@@ -386,6 +386,7 @@ fn place(
         claude: &world.config.spawn.claude,
         claude_version: claude_version.as_deref(),
         memory: &[],
+        note: None,
     })?;
     // The manifest first, so a hash on a run always resolves to its parts.
     let recorded = store.config_manifest_record(ctx, &launched.config_hash, &launched.manifest)?;
@@ -444,7 +445,7 @@ fn place(
 /// One layout pass: tokens, then renames, then moves. A herdr that refuses
 /// `workspace.move` leaves correct labels in the wrong order, which is still
 /// usable (`herdr-layout.md`, Known limits), so the caller only reports it.
-fn relayout(herdr: &dyn Herdr, bindings: &[layout::Binding]) -> Result<(), String> {
+pub(crate) fn relayout(herdr: &dyn Herdr, bindings: &[layout::Binding]) -> Result<(), String> {
     let snapshot = herdr.snapshot().map_err(|e| e.to_string())?;
     layout::repair(herdr, &snapshot, bindings)
         .map(drop)
@@ -507,7 +508,7 @@ fn merged_heads(store: &Store, run: &Run, path: &str) -> Result<Vec<String>> {
 
 /// Scans a run's worktree now and records the reading; returns the scan
 /// and the events the record wrote.
-fn scan_and_record(
+pub(crate) fn scan_and_record(
     store: &mut Store,
     ctx: &Ctx,
     scanner: &dyn Scanner,
@@ -538,12 +539,12 @@ fn scan_and_record(
     Ok((scan, events))
 }
 
-fn project_of(store: &Store, run: &Run) -> Result<Project> {
+pub(crate) fn project_of(store: &Store, run: &Run) -> Result<Project> {
     let card: Card = get(store.conn(), "card", &run.card_id)?;
     Ok(get(store.conn(), "project", &card.project_id)?)
 }
 
-fn require_local(store: &Store, run: &Run) -> Result<()> {
+pub(crate) fn require_local(store: &Store, run: &Run) -> Result<()> {
     if run.host_id == local_host(store)? {
         Ok(())
     } else {

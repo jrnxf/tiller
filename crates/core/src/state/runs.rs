@@ -119,6 +119,21 @@ pub struct Relaunch {
     /// How the old session was proven stopped (the ladder's dead verdict or a
     /// confirmed exit); required when the run has a live session.
     pub stop_proof: Option<String>,
+    /// The model a new attempt runs on, as dispatch resolved it; `None`
+    /// keeps the old attempt's. A same-run relaunch keeps the run's model.
+    pub model: Option<AttemptModel>,
+    /// The spawn readings a new attempt is checked against, as `run.start`
+    /// checks a spawn; `None` checks capacity alone.
+    #[serde(default)]
+    pub checks: Option<SpawnChecks>,
+}
+
+/// A new attempt's model and effort, and the dispatch rule behind them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AttemptModel {
+    pub model: String,
+    pub effort: Effort,
+    pub dispatch: Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -402,6 +417,174 @@ fn check_capacity(conn: &Connection, host: &Host, project: &Project) -> Result<(
     Ok((host_reserved, project_reserved))
 }
 
+/// `run.relaunch`'s transaction body, shared with its rehearsal.
+fn relaunch_in(tx: &mut Tx<'_>, run: &str, relaunch: &Relaunch) -> Result<Relaunched> {
+    let run = load_run(tx, run)?;
+    match tx.actor() {
+        Actor::Owner | Actor::Board => {}
+        Actor::Session(id) if *id == run.supervisor_session_id => {}
+        other => {
+            return Err(Error::Forbidden(format!(
+                "{other} may not relaunch run {}; its supervisor or the owner does",
+                run.id
+            )));
+        }
+    }
+    if run.worktree_path.is_none() {
+        return Err(Error::refused(
+            "run",
+            &run.id,
+            "run has no worktree to relaunch in",
+        ));
+    }
+    let card: Card = get(tx.conn(), "card", &run.card_id)?;
+    let mut ended_session = None;
+    if let Some(session) = live_session(tx.conn(), &run.id)? {
+        let Some(proof) = &relaunch.stop_proof else {
+            return Err(Error::refused(
+                "session",
+                &session.id,
+                "the live session is not proven stopped",
+            ));
+        };
+        end_session(tx, &session, &format!("relaunched ({proof})"))?;
+        ended_session = Some(session.id);
+    }
+    let (target, checks) = if relaunch.new_attempt {
+        // A new attempt is a new run: it passes the spawn checks that
+        // still apply to it, and the project's live orchestrator
+        // supervises it, not the one that started the old attempt.
+        if card.state != CardState::Open {
+            return Err(Error::refused("card", &card.display_id, "card is closed"));
+        }
+        let project: Project = get(tx.conn(), "project", &card.project_id)?;
+        if project.retired_at.is_some() {
+            return Err(Error::refused("project", &project.id, "project is retired"));
+        }
+        if let Some(active) = find::<Run>(
+            tx.conn(),
+            "card_id = ?1 AND role = ?2 AND ended_at IS NULL AND id != ?3",
+            &[&card.id, &run.role, &run.id],
+        )? {
+            return Err(Error::refused(
+                "card",
+                &card.display_id,
+                format!("{} run {} is already active", run.role, active.id),
+            ));
+        }
+        let supervisor = live_orchestrator(tx.conn(), &project.id)?.ok_or_else(|| {
+            Error::refused(
+                "project",
+                &project.id,
+                "no live orchestrator to supervise the run",
+            )
+        })?;
+        // The new attempt is its supervisor's to place, so only that
+        // orchestrator or the owner starts it.
+        if let Actor::Session(id) = tx.actor()
+            && *id != supervisor.id
+        {
+            return Err(Error::Forbidden(format!(
+                "the new attempt would be supervised by {}, the project's live orchestrator; relaunch it from that session or as the owner",
+                supervisor.id
+            )));
+        }
+        if run.outcome.is_none() {
+            end_run(
+                tx,
+                &run,
+                EndRun {
+                    outcome: RunOutcome::Relaunched,
+                    note: Some(relaunch.note.clone()),
+                },
+            )?;
+        }
+        let host: Host = get(tx.conn(), "host", &run.host_id)?;
+        let checks = match &relaunch.checks {
+            Some(checks) => Some(check_spawn(tx.conn(), &host, &project, checks, tx.now())?),
+            None => {
+                check_capacity(tx.conn(), &host, &project)?;
+                None
+            }
+        };
+        let id = ids::new_ulid();
+        let attempt = next_attempt(tx.conn(), &card.id, run.role)?;
+        let (model, effort) = match &relaunch.model {
+            Some(m) => (m.model.clone(), m.effort),
+            None => (run.model.clone(), run.effort),
+        };
+        // The new brief means new launch files: the caller records
+        // their hash with `run.place`.
+        tx.conn().execute(
+                "INSERT INTO runs (id, card_id, role, attempt, predecessor_run_id, model, effort, host_id,
+                                   worktree_path, branch, base_branch, base_sha, supervisor_session_id,
+                                   started_at)
+                 SELECT ?1, card_id, role, ?2, id, ?6, ?7, host_id, worktree_path, branch, base_branch,
+                        base_sha, ?5, ?3
+                 FROM runs WHERE id = ?4",
+                params![id, attempt, tx.now(), run.id, supervisor.id, model, effort],
+            )?;
+        let new_run: Run = get(tx.conn(), "run", &id)?;
+        reserve(tx, &host, &project, &new_run)?;
+        (new_run, checks)
+    } else {
+        require_active(&run)?;
+        (run.clone(), None)
+    };
+    tx.event(
+        NewEvent::new("run", &target.id, "run.relaunched")
+            .rev(target.rev)
+            .card(&card.id)
+            .payload(json!({
+                "note": relaunch.note,
+                "new_attempt": relaunch.new_attempt,
+                "predecessor_run_id": target.predecessor_run_id,
+                "stop_proof": relaunch.stop_proof,
+                "model": target.model,
+                "effort": target.effort,
+                "dispatch": relaunch.model.as_ref().map(|m| &m.dispatch),
+                "checks": checks,
+            })),
+    )?;
+    let session = insert_run_session(tx, &target, &card.project_id, target.config_hash.as_deref())?;
+    if let Some(supervisor) = live_supervisor(tx.conn(), &target)? {
+        enqueue(
+            tx,
+            &NewMessage {
+                target_session_id: supervisor,
+                kind: OutboxKind::Note,
+                body: format!(
+                    "[{}] {} relaunched: {}",
+                    card.display_id,
+                    run.role.short_name(),
+                    relaunch.note
+                ),
+                card_id: Some(card.id.clone()),
+                reply_to: None,
+            },
+        )?;
+    }
+    Ok(Relaunched {
+        run: get(tx.conn(), "run", &target.id)?,
+        session,
+        ended_session,
+    })
+}
+
+/// Why a RAM or disk reading fails its floor, if it does. An unknown
+/// reading under a set floor fails closed.
+pub fn floor_refusal(name: &str, floor: Option<i64>, free: Option<i64>) -> Option<String> {
+    match (floor, free) {
+        (Some(floor), Some(free)) if free < floor => Some(format!(
+            "{name} free is {free} MB, under the {floor} MB floor"
+        )),
+        (Some(floor), None) => Some(format!(
+            "{name} free is unknown; the {floor} MB floor fails closed"
+        )),
+        _ => None,
+    }
+}
+
 fn check_spawn(
     conn: &Connection,
     host: &Host,
@@ -411,18 +594,9 @@ fn check_spawn(
 ) -> Result<Value> {
     let (host_reserved, project_reserved) = check_capacity(conn, host, project)?;
     let floor = |name: &str, floor: Option<i64>, free: Option<i64>| -> Result<()> {
-        match (floor, free) {
-            (Some(floor), Some(free)) if free < floor => Err(Error::refused(
-                "host",
-                &host.label,
-                format!("{name} free is {free} MB, under the {floor} MB floor"),
-            )),
-            (Some(floor), None) => Err(Error::refused(
-                "host",
-                &host.label,
-                format!("{name} free is unknown; the {floor} MB floor fails closed"),
-            )),
-            _ => Ok(()),
+        match floor_refusal(name, floor, free) {
+            Some(why) => Err(Error::refused("host", &host.label, why)),
+            None => Ok(()),
         }
     };
     floor("RAM", host.ram_floor_mb, checks.ram_free_mb)?;
@@ -934,20 +1108,45 @@ impl Store {
         })
     }
 
-    /// `session.resume`, the attempt half: the daemon is about to launch
-    /// `claude --resume`; the hook's bind or end completes it.
+    /// `session.resume`, the attempt half: the daemon (reconcile) or
+    /// `tiller agent resume` is about to launch `claude --resume`; the hook's
+    /// bind or end completes it. The daemon, the owner and the run's
+    /// supervisor may; a session is resumed only while its row is live, and
+    /// a worker's only while its run is active with a worktree.
     pub fn session_resume_attempted(
         &mut self,
         ctx: &Ctx,
         session: &str,
         readings: Value,
     ) -> Result<Applied<Session>> {
-        require_daemon(&ctx.actor, "session.resume")?;
         self.write(ctx, "session.resume", None, |tx| {
             let session = load_session(tx, session)?;
+            if session.ended_at.is_some() {
+                return Err(Error::refused("session", &session.id, "session has ended"));
+            }
             let card = match &session.run_id {
-                Some(run) => Some(get::<Run>(tx.conn(), "run", run)?.card_id),
-                None => None,
+                Some(run) => {
+                    let run: Run = get(tx.conn(), "run", run)?;
+                    match tx.actor() {
+                        Actor::Owner | Actor::Board | Actor::Daemon => {}
+                        Actor::Session(id) if *id == run.supervisor_session_id => {}
+                        other => {
+                            return Err(Error::Forbidden(format!(
+                                "{other} may not resume session {}; its run's supervisor, the owner or the daemon does",
+                                session.id
+                            )));
+                        }
+                    }
+                    require_active(&run)?;
+                    if run.worktree_path.is_none() {
+                        return Err(Error::refused("run", &run.id, "run has no worktree to resume in"));
+                    }
+                    Some(run.card_id)
+                }
+                None => {
+                    require_daemon(tx.actor(), "session.resume of an orchestrator")?;
+                    None
+                }
             };
             tx.event(
                 NewEvent::new("session", &session.id, "session.resume_attempted")
@@ -1078,108 +1277,32 @@ impl Store {
         relaunch: Relaunch,
     ) -> Result<Applied<Relaunched>> {
         required("note", &relaunch.note)?;
+        if relaunch.model.is_some() && !relaunch.new_attempt {
+            return Err(Error::Usage(
+                "a model goes with a new attempt; a relaunch on the same run keeps its model"
+                    .into(),
+            ));
+        }
         self.write(ctx, "run.relaunch", None, |tx| {
-            let run = load_run(tx, run)?;
-            if run.worktree_path.is_none() {
-                return Err(Error::refused("run", &run.id, "run has no worktree to relaunch in"));
-            }
-            let card: Card = get(tx.conn(), "card", &run.card_id)?;
-            let mut ended_session = None;
-            if let Some(session) = live_session(tx.conn(), &run.id)? {
-                let Some(proof) = &relaunch.stop_proof else {
-                    return Err(Error::refused(
-                        "session",
-                        &session.id,
-                        "the live session is not proven stopped",
-                    ));
-                };
-                end_session(tx, &session, &format!("relaunched ({proof})"))?;
-                ended_session = Some(session.id);
-            }
-            let target = if relaunch.new_attempt {
-                // A new attempt is a new run: it passes the spawn checks that
-                // still apply to it, and the project's live orchestrator
-                // supervises it, not the one that started the old attempt.
-                if card.state != CardState::Open {
-                    return Err(Error::refused("card", &card.display_id, "card is closed"));
-                }
-                let project: Project = get(tx.conn(), "project", &card.project_id)?;
-                if project.retired_at.is_some() {
-                    return Err(Error::refused("project", &project.id, "project is retired"));
-                }
-                if let Some(active) = find::<Run>(
-                    tx.conn(),
-                    "card_id = ?1 AND role = ?2 AND ended_at IS NULL AND id != ?3",
-                    &[&card.id, &run.role, &run.id],
-                )? {
-                    return Err(Error::refused(
-                        "card",
-                        &card.display_id,
-                        format!("{} run {} is already active", run.role, active.id),
-                    ));
-                }
-                let supervisor = live_orchestrator(tx.conn(), &project.id)?.ok_or_else(|| {
-                    Error::refused("project", &project.id, "no live orchestrator to supervise the run")
-                })?;
-                if run.outcome.is_none() {
-                    end_run(
-                        tx,
-                        &run,
-                        EndRun {
-                            outcome: RunOutcome::Relaunched,
-                            note: Some(relaunch.note.clone()),
-                        },
-                    )?;
-                }
-                let host: Host = get(tx.conn(), "host", &run.host_id)?;
-                check_capacity(tx.conn(), &host, &project)?;
-                let id = ids::new_ulid();
-                let attempt = next_attempt(tx.conn(), &card.id, run.role)?;
-                tx.conn().execute(
-                    "INSERT INTO runs (id, card_id, role, attempt, predecessor_run_id, model, effort, host_id,
-                                       worktree_path, branch, base_branch, base_sha, supervisor_session_id,
-                                       started_at, config_hash)
-                     SELECT ?1, card_id, role, ?2, id, model, effort, host_id, worktree_path, branch, base_branch,
-                            base_sha, ?5, ?3, config_hash
-                     FROM runs WHERE id = ?4",
-                    params![id, attempt, tx.now(), run.id, supervisor.id],
-                )?;
-                let new_run: Run = get(tx.conn(), "run", &id)?;
-                reserve(tx, &host, &project, &new_run)?;
-                new_run
-            } else {
-                require_active(&run)?;
-                run.clone()
-            };
-            tx.event(
-                NewEvent::new("run", &target.id, "run.relaunched")
-                    .rev(target.rev)
-                    .card(&card.id)
-                    .payload(json!({
-                        "note": relaunch.note,
-                        "new_attempt": relaunch.new_attempt,
-                        "predecessor_run_id": target.predecessor_run_id,
-                        "stop_proof": relaunch.stop_proof,
-                    })),
-            )?;
-            let session = insert_run_session(tx, &target, &card.project_id, target.config_hash.as_deref())?;
-            if let Some(supervisor) = live_supervisor(tx.conn(), &target)? {
-                enqueue(
-                    tx,
-                    &NewMessage {
-                        target_session_id: supervisor,
-                        kind: OutboxKind::Note,
-                        body: format!("[{}] {} relaunched: {}", card.display_id, run.role.short_name(), relaunch.note),
-                        card_id: Some(card.id.clone()),
-                        reply_to: None,
-                    },
-                )?;
-            }
-            Ok(Relaunched {
-                run: get(tx.conn(), "run", &target.id)?,
-                session,
-                ended_session,
-            })
+            relaunch_in(tx, run, &relaunch)
+        })
+    }
+
+    /// Runs `run.relaunch` with a stop assumed proven, then rolls it back: a
+    /// relaunch checks every precondition before it stops the live session,
+    /// so a refusal never leaves an agent killed and nothing recorded.
+    pub fn run_relaunch_rehearse(
+        &mut self,
+        ctx: &Ctx,
+        run: &str,
+        relaunch: &Relaunch,
+    ) -> Result<()> {
+        let relaunch = Relaunch {
+            stop_proof: Some("rehearsal".into()),
+            ..relaunch.clone()
+        };
+        self.rehearse(ctx, "run.relaunch", |tx| {
+            relaunch_in(tx, run, &relaunch).map(drop)
         })
     }
 

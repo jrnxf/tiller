@@ -5,6 +5,7 @@
 //! binary so a launch never reads a role file from disk, and the per-run
 //! rendering of their settings fragments.
 
+pub mod control;
 pub mod curator;
 pub mod guards;
 pub mod handoff;
