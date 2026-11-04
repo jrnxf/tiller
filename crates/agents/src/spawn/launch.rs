@@ -208,22 +208,23 @@ fn read_version(command: &str, timeout: Duration) -> Option<String> {
 }
 
 /// Whether this Claude Code offers auto mode: its `--help` lists `auto` among
-/// the `--permission-mode` choices. Read once per process and given two
-/// seconds. `TILLER_CLAUDE_AUTO_MODE` overrides it (`0` for unavailable, for
-/// tests and for a host that knows better). When the answer cannot be read
-/// the mode is assumed available: Claude Code itself then refuses a mode it
+/// the `--permission-mode` choices. Given two seconds. `TILLER_CLAUDE_AUTO_MODE`
+/// overrides it (`0`, `false`, `no`, `off` or empty for unavailable). When the
+/// answer cannot be read the mode is assumed available: Claude Code itself then refuses a mode it
 /// lacks, visibly, rather than tiller guessing a downgrade.
 fn claude_offers_auto(command: &str) -> bool {
-    static OFFERED: OnceLock<bool> = OnceLock::new();
-    *OFFERED.get_or_init(|| {
-        if let Ok(pinned) = std::env::var("TILLER_CLAUDE_AUTO_MODE") {
-            return pinned.trim() != "0";
-        }
-        read_help(command, Duration::from_secs(2)).is_none_or(|help| help_lists_auto(&help))
-    })
+    if let Ok(pinned) = std::env::var("TILLER_CLAUDE_AUTO_MODE") {
+        let pinned = pinned.trim().to_ascii_lowercase();
+        return !["", "0", "false", "no", "off"].contains(&pinned.as_str());
+    }
+    read_help(command, Duration::from_secs(2)).is_none_or(|help| help_lists_auto(&help))
 }
 
 fn help_lists_auto(help: &str) -> bool {
+    // A help without the option at all is a layout this does not know.
+    if !help.contains("--permission-mode") {
+        return true;
+    }
     help.lines()
         .skip_while(|line| !line.contains("--permission-mode"))
         .enumerate()
@@ -502,6 +503,12 @@ pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<String, Spa
     }
     let front = spec.role.frontmatter()?;
     let (mode, _) = effective_mode(spec.claude, &front.permission_mode);
+    // The fragment must name the mode the flag does.
+    let mut fragment: Value = serde_json::from_slice(&fs::read(&launch.settings)?)?;
+    if fragment["permissions"]["defaultMode"] != mode.as_str() {
+        fragment["permissions"]["defaultMode"] = Value::String(mode.clone());
+        fs::write(&launch.settings, serde_json::to_vec_pretty(&fragment)?)?;
+    }
     let start = match start {
         Start::Fresh { note } => vec![relaunch_prompt(note)],
         Start::Resume { claude_session_id } => {
@@ -544,6 +551,21 @@ mod tests {
     fn help_parser_reads_the_permission_mode_choices() {
         assert!(help_lists_auto(HELP_WITH_AUTO));
         assert!(!help_lists_auto(HELP_WITHOUT_AUTO));
+    }
+
+    #[test]
+    fn auto_falls_back_to_default_when_claude_lacks_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("claude");
+        fs::write(
+            &claude,
+            format!("#!/bin/sh\ncat <<'EOF'\n{HELP_WITHOUT_AUTO}EOF\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+        let (mode, note) = effective_mode(&claude.to_string_lossy(), "auto");
+        assert_eq!(mode, "default");
+        assert!(note.unwrap().contains("not available"));
     }
 
     #[test]

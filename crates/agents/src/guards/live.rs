@@ -41,6 +41,8 @@ struct Lab {
     bin: String,
     /// The `--permission-mode` of a session: the role's own.
     mode: String,
+    /// Auto mode's classifier is not offered on the small model.
+    model: &'static str,
 }
 
 /// One tool call of the session and what came back.
@@ -62,7 +64,13 @@ impl Lab {
         fs::create_dir_all(&base).unwrap();
         let root = tempfile::tempdir_in(base).unwrap();
         let mode = role.frontmatter().unwrap().permission_mode;
-        let lab = Self { root, bin, mode };
+        let model = if mode == "auto" { "sonnet" } else { MODEL };
+        let lab = Self {
+            root,
+            bin,
+            mode,
+            model,
+        };
         for dir in ["work", "scratch", "home", "outside", "other"] {
             fs::create_dir_all(lab.path(dir)).unwrap();
         }
@@ -213,7 +221,9 @@ impl Lab {
     /// with the lab's fragment; returns its `stream-json`.
     fn launch(&self, prompt: &str, extra: &[&str]) -> String {
         let output = Command::new("timeout")
-            .args(["-k", "10", "240", "claude", "-p", prompt, "--model", MODEL])
+            .args([
+                "-k", "10", "240", "claude", "-p", prompt, "--model", self.model,
+            ])
             .arg("--settings")
             .arg(self.path("settings.json"))
             .args(["--permission-mode", &self.mode, "--strict-mcp-config"])

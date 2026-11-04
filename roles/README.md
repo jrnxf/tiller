@@ -30,7 +30,7 @@ with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `TILLER_SESSION_ID`, `TILLER_RUN_ID` a
 
 | Role | Model | Effort | Mode | Write set | Ends with |
 |---|---|---|---|---|---|
-| orchestrator | `opus` | medium | `default` | its home, its scratch directory | never; it supervises until the owner clears it |
+| orchestrator | `opus` | medium | `auto` | its home, its scratch directory | never; it supervises until the owner clears it |
 | scout | `opus` | high | `dontAsk` | its worktree, its scratch directory | a report artifact, `tiller done` (`reported`) |
 | builder | `opus` | high | `dontAsk` | its worktree, its scratch directory | the merge (`landed`), or `tiller done --outcome failed\|abandoned` |
 | reviewer | `opus` | high | `dontAsk` | its scratch directory only | a `code-review` review row, `tiller done` (`reported`) |
@@ -58,7 +58,7 @@ Rule paths are written `/<worktree>/**` in the template so the filled rule is `E
 - `claudeMdExcludes` for every memory file kind (`**/CLAUDE.md`, `**/CLAUDE.local.md`, `**/AGENTS.md`, `**/.claude/rules/**`), so nothing loads natively and spawn renders the approved revisions instead (`memory.md` section 2). Spawn appends per-run paths when the launch check finds one these globs miss.
 - `autoMemoryEnabled: false` and the `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` variable, `disableClaudeAiConnectors`, `remoteControlAtStartup: false`, and `disableRemoteControl` for workers (P68; the orchestrator keeps it available because the owner may want to reach it from the Claude app).
 - Hooks: `tiller hook <event>` for every event `protocol.md` 4.2 maps to a handler, and `tiller guard pretool --role <role>` on `PreToolUse` for every tool.
-- The sandbox: on, failing closed, with no unsandboxed retry; sandboxed Bash auto-approved for workers (they hold a bare `Bash` allow rule anyway) and not for the orchestrator, whose `default` mode must still prompt the owner for a command outside `tiller` and the `gh-axi` reads; the role's write set; `~/.tiller` and `~/.claude` unwritable and `~/.tiller` unreadable from the shell; `tiller` the only excluded command; the network allow list per project and no localhost binding.
+- The sandbox: on, failing closed, with no unsandboxed retry; sandboxed Bash auto-approved for workers (they hold a bare `Bash` allow rule anyway) and not for the orchestrator, whose `auto` mode leaves a command outside `tiller` and the `gh-axi` reads to the classifier; the role's write set; `~/.tiller` and `~/.claude` unwritable and `~/.tiller` unreadable from the shell; `tiller` the only excluded command; the network allow list per project and no localhost binding.
 
 What the fragments do not hold, by design: the Read deny globs (`**/*.pem`, `**/*.key`) have no sandbox equivalent because sandbox paths are paths, not globs, so the sandbox denies the concrete `.env` and `.envrc` of the worktree and the Read rules carry the patterns for the file tools; the forge credential stores are not denied anywhere, because denying them would stop `git push` and `gh-axi` inside the sandbox too (`authority.md` section 8, notes).
 

@@ -1160,9 +1160,8 @@ mod tests {
     /// The orchestrator's Bash is not auto-approved by the sandbox: its allow
     /// rules stay narrow, and the auto mode classifier, not the sandbox,
     /// decides what they do not cover. Workers hold a bare `Bash` allow rule,
-    /// so the auto-approval changes nothing for them. Every
-    /// role's working directory gets the same shell-level secret and settings
-    /// protection.
+    /// so the auto-approval changes nothing for them. Every role's working
+    /// directory gets the same shell-level secret and settings protection.
     #[test]
     fn only_workers_auto_approve_sandboxed_bash() {
         for role in Role::ALL {
