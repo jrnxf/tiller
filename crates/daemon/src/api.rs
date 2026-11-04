@@ -27,15 +27,17 @@ use tiller_core::domain::{
 use tiller_core::state::approvals::Decision;
 use tiller_core::state::cards::{CardEdit, NewCard};
 use tiller_core::state::{find, get as get_row, resolve_id};
-use tiller_core::{Actor, Applied, Ctx, Error, Store, Timestamp};
+use tiller_core::{Actor, Applied, Ctx, Error, Store, Timestamp, ids};
 use tiller_herdr::client::{Cli, Herdr};
 use tiller_herdr::poller::Registry;
 use tokio::sync::watch;
 
 use crate::assets::{self, Assets};
 use crate::dto::*;
+use crate::peer::link::Peers;
+use crate::peer::{Federation, PeerView};
 use crate::readonly::Damage;
-use crate::views::{self, Filter, LocalHealth};
+use crate::views::{self, Filter, LocalHealth, PaneTarget};
 use crate::{auth, sse};
 
 /// Lines of a pane the run detail shows.
@@ -59,6 +61,8 @@ pub struct Inner {
     /// Turns true when the daemon stops; open streams end on it.
     pub stop: watch::Receiver<bool>,
     pub pollers: Registry,
+    /// Every paired peer's link (`protocol.md` 10.2).
+    pub peers: Arc<Peers>,
     /// The local herdr server, for focus and pane tails.
     pub herdr: Cli,
     pub started_at: Timestamp,
@@ -79,12 +83,12 @@ impl AppState {
     }
 
     fn own_health(&self) -> LocalHealth {
-        local_health(&self.0.pollers)
+        local_health(&self.0.pollers, &self.0.peers)
     }
 }
 
-/// The pollers whose last poll failed.
-pub fn local_health(pollers: &Registry) -> LocalHealth {
+/// The pollers whose last poll failed, and every peer as it is now.
+pub fn local_health(pollers: &Registry, peers: &Peers) -> LocalHealth {
     LocalHealth {
         failing_pollers: pollers
             .health()
@@ -92,6 +96,7 @@ pub fn local_health(pollers: &Registry) -> LocalHealth {
             .filter(|health| health.consecutive_failures > 0)
             .map(|health| health.source)
             .collect(),
+        peers: peers.federation(),
     }
 }
 
@@ -134,6 +139,41 @@ impl ApiError {
     fn hint(mut self, hint: &str) -> Self {
         self.body.error.hint = Some(hint.to_owned());
         self
+    }
+
+    /// The status and body, for a peer's `result` frame.
+    pub(crate) fn into_parts(self) -> (StatusCode, ErrorBody) {
+        (self.status, *self.body)
+    }
+
+    /// A 503 `peer_unreachable` for a single-entity read of a peer's record
+    /// (`protocol.md` 7.3), with the cached board row when there is one.
+    fn peer_unreachable(host: &str, current: Option<Value>) -> Self {
+        let mut error = Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "peer_unreachable",
+            format!("{host} is unreachable; its link is not live"),
+        );
+        error.body.error.current = current;
+        error.hint("the board shows its cached row; try again once the link is live")
+    }
+}
+
+impl From<(u16, Value)> for ApiError {
+    /// A peer's error `result`, passed on as it came.
+    fn from((status, body): (u16, Value)) -> Self {
+        let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+        match serde_json::from_value::<ErrorBody>(body) {
+            Ok(body) => Self {
+                status,
+                body: Box::new(body),
+            },
+            Err(error) => Self::new(
+                StatusCode::BAD_GATEWAY,
+                "internal",
+                format!("the peer answered a malformed error: {error}"),
+            ),
+        }
     }
 }
 
@@ -466,9 +506,11 @@ async fn board(
     Query(query): Query<BoardQuery>,
 ) -> ApiResult<BoardResponse> {
     let filter: Filter = query.filter.as_deref().unwrap_or("all").parse()?;
+    let peers = state.0.peers.federation();
     read(&state, move |store| {
-        views::board(
+        views::federated_board(
             store,
+            &peers,
             query.project.as_deref(),
             filter,
             query.host.as_deref(),
@@ -479,31 +521,154 @@ async fn board(
 }
 
 #[utoipa::path(get, path = "/api/v1/cards/{id}", tag = "reads",
-    params(("id" = String, Path, description = "ULID, short form or display id")),
-    responses((status = 200, body = CardDetail), (status = 404, body = ErrorBody)))]
-async fn card(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<CardDetail> {
-    read(&state, move |store| views::card_detail(store, &id))
-        .await
-        .map(Json)
+    params(("id" = String, Path, description = "ULID, short form or display id"), HostQuery),
+    responses((status = 200, body = CardDetail), (status = 404, body = ErrorBody),
+              (status = 503, body = ErrorBody, description = "`peer_unreachable`: the cached card row is in `current`")))]
+async fn card(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<HostQuery>,
+) -> ApiResult<CardDetail> {
+    let peers = state.0.peers.federation();
+    if let Some(view) = query.host.as_deref().and_then(|host| peers.peer(host)) {
+        return peer_read(&state, view, format!("cards/{id}"), &id)
+            .await
+            .map(Json);
+    }
+    unique(
+        &state,
+        &peers,
+        query.host.as_deref(),
+        id,
+        views::card_detail,
+    )
+    .await
+    .map(Json)
+}
+
+/// A single-entity read of a peer's record (`protocol.md` 7.3): sent over
+/// the link as a `query` and answered from the peer's `state.db`. With no
+/// answer it is 503 `peer_unreachable`, with the cached row of `card` (an
+/// id or display id) in `current`.
+async fn peer_read<T: for<'de> Deserialize<'de>>(
+    state: &AppState,
+    view: &PeerView,
+    path: String,
+    card: &str,
+) -> Result<T, ApiError> {
+    let Some((status, body)) = state.0.peers.query(&view.host_id, path).await else {
+        let cached = views::peer_board(view, None, Filter::All)
+            .rows
+            .into_iter()
+            .find(|row| names(row, card));
+        let current = cached.and_then(|row| serde_json::to_value(row).ok());
+        return Err(ApiError::peer_unreachable(&view.label, current));
+    };
+    if status != StatusCode::OK.as_u16() {
+        return Err(ApiError::from((status, body)));
+    }
+    serde_json::from_value(body).map_err(|error| {
+        ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "internal",
+            format!("{} answered a malformed record: {error}", view.label),
+        )
+    })
+}
+
+/// Whether a card reference (ULID, short form or display id) names `row`.
+fn names(row: &BoardRow, reference: &str) -> bool {
+    let reference = reference.trim();
+    row.display_id == reference
+        || row.id.eq_ignore_ascii_case(reference)
+        || (ids::is_short(reference) && ids::short(&row.id).eq_ignore_ascii_case(reference))
+}
+
+/// A card read with no `?host=`: this host's record, unless the reference
+/// also names a card in a peer's copy. Then it is 404 listing every host's
+/// match, host-qualified (`protocol.md` 7.3).
+async fn unique<T: Send + 'static>(
+    state: &AppState,
+    peers: &Federation,
+    host: Option<&str>,
+    reference: String,
+    read_one: impl FnOnce(&Store, &str) -> tiller_core::Result<T> + Send + 'static,
+) -> Result<T, ApiError> {
+    if let Some(host) = host {
+        // A `host` that names no peer must name a host of this one: a
+        // mistyped label is 404, never this host's card of the same id.
+        let host = host.to_owned();
+        read(state, move |store| views::host_id(store, &host)).await?;
+    }
+    let elsewhere: Vec<String> = match host {
+        Some(_) => Vec::new(),
+        None => peers
+            .peers
+            .iter()
+            .filter_map(|view| {
+                let rows = &view.queries.as_ref()?.board.rows;
+                let row = rows.iter().find(|row| names(row, &reference))?;
+                Some(format!("{} · {}", view.label, row.display_id))
+            })
+            .collect(),
+    };
+    let id = reference.clone();
+    let local = read(state, move |store| read_one(store, &id)).await;
+    if elsewhere.is_empty() {
+        return local;
+    }
+    if let Err(error) = &local
+        && error.status != StatusCode::NOT_FOUND
+    {
+        return local;
+    }
+    let mut candidates = Vec::new();
+    if local.is_ok() {
+        let label = read(state, |store| store.this_host().map(|host| host.label)).await?;
+        candidates.push(format!("{label} · {reference}"));
+    }
+    candidates.extend(elsewhere);
+    Err(ApiError::from(Error::NotFound {
+        entity: "card",
+        id: reference,
+        candidates,
+    })
+    .hint("name the host with ?host=<label>"))
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct TimelineQuery {
     /// Only events older than this `seq`.
     pub before: Option<i64>,
+    /// A peer's label for a peer's card; absent means this host.
+    pub host: Option<String>,
 }
 
 #[utoipa::path(get, path = "/api/v1/cards/{id}/timeline", tag = "reads",
     params(("id" = String, Path), TimelineQuery),
-    responses((status = 200, body = TimelineResponse), (status = 404, body = ErrorBody)))]
+    responses((status = 200, body = TimelineResponse), (status = 404, body = ErrorBody),
+              (status = 503, body = ErrorBody, description = "`peer_unreachable`: the cached card row is in `current`")))]
 async fn timeline(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<TimelineQuery>,
 ) -> ApiResult<TimelineResponse> {
-    read(&state, move |store| {
-        views::timeline(store, &id, query.before)
-    })
+    let peers = state.0.peers.federation();
+    if let Some(view) = query.host.as_deref().and_then(|host| peers.peer(host)) {
+        let path = match query.before {
+            Some(before) => format!("cards/{id}/timeline?before={before}"),
+            None => format!("cards/{id}/timeline"),
+        };
+        return peer_read(&state, view, path, &id).await.map(Json);
+    }
+    let before = query.before;
+    unique(
+        &state,
+        &peers,
+        query.host.as_deref(),
+        id,
+        move |store, id| views::timeline(store, id, before),
+    )
     .await
     .map(Json)
 }
@@ -512,6 +677,8 @@ async fn timeline(
 pub struct AttentionQuery {
     /// Only `open` is served.
     pub state: Option<String>,
+    /// A host id or label.
+    pub host: Option<String>,
 }
 
 #[utoipa::path(get, path = "/api/v1/attention", tag = "reads", params(AttentionQuery),
@@ -523,7 +690,12 @@ async fn attention(
     if query.state.as_deref().is_some_and(|s| s != "open") {
         return Err(ApiError::usage("attention is served with state=open only"));
     }
-    read(&state, views::attention).await.map(Json)
+    let peers = state.0.peers.federation();
+    read(&state, move |store| {
+        views::federated_attention(store, &peers, query.host.as_deref())
+    })
+    .await
+    .map(Json)
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -538,28 +710,52 @@ async fn agents(
     State(state): State<AppState>,
     Query(query): Query<HostQuery>,
 ) -> ApiResult<AgentsResponse> {
+    let peers = state.0.peers.federation();
     read(&state, move |store| {
-        views::agents(store, query.host.as_deref())
+        views::federated_agents(store, &peers, query.host.as_deref())
     })
     .await
     .map(Json)
 }
 
-#[utoipa::path(get, path = "/api/v1/runs/{id}", tag = "reads", params(("id" = String, Path)),
-    responses((status = 200, body = RunDetail), (status = 404, body = ErrorBody)))]
-async fn run(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<RunDetail> {
+#[utoipa::path(get, path = "/api/v1/runs/{id}", tag = "reads",
+    params(("id" = String, Path), HostQuery),
+    responses((status = 200, body = RunDetail), (status = 404, body = ErrorBody),
+              (status = 503, body = ErrorBody, description = "`peer_unreachable`: the cached card row is in `current`")))]
+async fn run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<HostQuery>,
+) -> ApiResult<RunDetail> {
+    let peers = state.0.peers.federation();
+    if let Some(view) = query.host.as_deref().and_then(|host| peers.peer(host)) {
+        // `alpha-42 build`: the card is the part before the role.
+        let card = id.split(' ').next().unwrap_or_default();
+        return peer_read(&state, view, format!("runs/{id}"), card)
+            .await
+            .map(Json);
+    }
     let (mut detail, pane) = read(&state, move |store| views::run_detail(store, &id)).await?;
     if let Some(target) = pane {
-        let herdr = match target.machine {
-            Some(machine) => state.0.herdr.clone().on_machine(machine),
-            None => state.0.herdr.clone(),
-        };
-        let tail = tokio::task::spawn_blocking(move || herdr.read_visible(&target.pane).ok()).await;
-        if let Ok(Some(screen)) = tail {
-            detail.pane_tail = pane_tail(&screen);
+        let herdr = state.0.herdr.clone();
+        if let Ok(tail) = tokio::task::spawn_blocking(move || pane_tail_of(herdr, target)).await {
+            detail.pane_tail = tail;
         }
     }
     Ok(Json(detail))
+}
+
+/// A pane's tail read through herdr, or nothing when herdr cannot read it.
+/// It blocks.
+pub(crate) fn pane_tail_of(herdr: Cli, target: PaneTarget) -> Vec<String> {
+    let herdr = match target.machine {
+        Some(machine) => herdr.on_machine(machine),
+        None => herdr,
+    };
+    herdr
+        .read_visible(&target.pane)
+        .map(|screen| pane_tail(&screen))
+        .unwrap_or_default()
 }
 
 /// The last non-empty lines of a pane read, without terminal escapes.
@@ -628,12 +824,18 @@ async fn quota(State(state): State<AppState>) -> ApiResult<QuotaResponse> {
         .map(Json)
 }
 
-#[utoipa::path(get, path = "/api/v1/projects", tag = "reads",
+#[utoipa::path(get, path = "/api/v1/projects", tag = "reads", params(HostQuery),
     responses((status = 200, body = ProjectsResponse)))]
-async fn projects(State(state): State<AppState>) -> ApiResult<ProjectsResponse> {
-    read(&state, |store| views::projects(store, Timestamp::now()))
-        .await
-        .map(Json)
+async fn projects(
+    State(state): State<AppState>,
+    Query(query): Query<HostQuery>,
+) -> ApiResult<ProjectsResponse> {
+    let peers = state.0.peers.federation();
+    read(&state, move |store| {
+        views::federated_projects(store, &peers, query.host.as_deref(), Timestamp::now())
+    })
+    .await
+    .map(Json)
 }
 
 #[utoipa::path(get, path = "/api/v1/signals", tag = "reads",
@@ -676,6 +878,7 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
         last_event_seq: seq.and_then(Result::ok).unwrap_or(0),
         pollers: views::poller_health(pollers),
         tools,
+        links: state.0.peers.links(),
     })
 }
 
@@ -687,12 +890,14 @@ pub struct EventsQuery {
 }
 
 /// The change stream: `event: change` with a [`ChangeEvent`] per `events`
-/// row, `event: reset` with a [`ResetEvent`] when a resume is impossible.
+/// row, `event: reset` with a [`ResetEvent`] when a resume is impossible,
+/// and, once a peer is paired, `event: peer`, `event: link` and
+/// `event: peer_reset` from the peer links (`protocol.md` 7.6), with no id.
 #[utoipa::path(get, path = "/api/v1/events", tag = "stream", params(EventsQuery,
         ("Last-Event-ID" = Option<i64>, Header, description = "the last seq the client applied")),
     responses(
         (status = 200, content_type = "text/event-stream", body = ChangeEvent,
-         description = "`change` messages carry a ChangeEvent; `reset` messages a ResetEvent"),
+         description = "`change` messages carry a ChangeEvent; `reset` messages a ResetEvent; `peer` messages a PeerEvent, `link` messages a LinkEvent and `peer_reset` messages a PeerResetEvent"),
         (status = 503, body = ErrorBody)))]
 async fn events(
     State(state): State<AppState>,
@@ -705,12 +910,14 @@ async fn events(
     let last = headers.get("last-event-id").and_then(|v| v.to_str().ok());
     let after = sse::start(last, query.since);
     let pollers = state.0.pollers.clone();
+    let peers = state.0.peers.clone();
     sse::stream(
         state.db(),
         after,
         state.0.newest.clone(),
         state.0.stop.clone(),
-        move || local_health(&pollers),
+        peers.clone(),
+        move || local_health(&pollers, &peers),
     )
     .into_response()
 }
@@ -1209,7 +1416,7 @@ async fn app_shell(
         projects, signals, events, create_card, edit_card, comment, hold, release_hold, close,
         cancel, reopen, answer, decide, focus, stage_project
     ),
-    components(schemas(ChangeEvent, ResetEvent, ErrorBody, ErrorDetail)),
+    components(schemas(ChangeEvent, ResetEvent, PeerEvent, LinkEvent, PeerResetEvent, ErrorBody, ErrorDetail)),
     tags(
         (name = "reads", description = "Reads, served to any request that passes the Host check"),
         (name = "mutations", description = "Mutations: owner cookie, JSON body, same origin"),
@@ -1251,6 +1458,20 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn app_with(home: &std::path::Path, assets: Assets, damage: Damage) -> Router {
+        app_full(home, assets, damage, Peers::idle())
+    }
+
+    /// The board API with these peer links.
+    pub(crate) fn app_with_peers(home: &std::path::Path, peers: Arc<Peers>) -> Router {
+        app_full(home, Assets::of::<Fixture>(), Damage::default(), peers)
+    }
+
+    fn app_full(
+        home: &std::path::Path,
+        assets: Assets,
+        damage: Damage,
+        peers: Arc<Peers>,
+    ) -> Router {
         let (_newest_tx, newest) = watch::channel(0);
         let (_stop_tx, stop) = watch::channel(false);
         router(AppState::new(Inner {
@@ -1261,6 +1482,7 @@ pub(crate) mod tests {
             newest,
             stop,
             pollers: Registry::new(),
+            peers,
             herdr: Cli::local(),
             started_at: Timestamp::now(),
             tools: Arc::new(Mutex::new(Value::Null)),

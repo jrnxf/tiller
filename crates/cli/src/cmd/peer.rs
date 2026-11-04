@@ -1,10 +1,12 @@
 //! `tiller peer`: pairing for the federated board (ADR 0003; `protocol.md`
 //! sections 6.4 and 10.1). `add` runs on the board host and reaches the
 //! peer's `accept` over `ssh -t`; both need the owner at a terminal.
+//! `serve` is the peer's half of a link (10.2), started by sshd for the
+//! board host's daemon.
 
 use std::io::{BufRead, IsTerminal, Read, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitCode, Stdio};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
@@ -17,6 +19,9 @@ use tiller_core::state::peers::{
     self, KeyFile, NewPairing, NewPeerKey, PEER_PROTOCOL, check_label, parse_public_key,
 };
 use tiller_core::state::projects::meta;
+use tiller_daemon::peer::Timing;
+use tiller_daemon::peer::serve::{ServeConfig, ServeError};
+use tiller_herdr::client::Cli;
 
 use super::admin::{get_path, load_config, set_config};
 use crate::app::{App, Done, Failure, Outcome};
@@ -60,6 +65,13 @@ pub enum PeerCmd {
         /// The board host's label, or the key id
         viewer: String,
     },
+    /// Serve this host's records to a paired board host over stdin and
+    /// stdout; the board host's daemon runs it over ssh
+    Serve {
+        /// The board host's label
+        #[arg(long)]
+        from: String,
+    },
 }
 
 pub fn run(app: &App, cmd: PeerCmd) -> Done {
@@ -99,7 +111,79 @@ pub fn run(app: &App, cmd: PeerCmd) -> Done {
             let applied = store.peer_revoke(&app.ctx(), &viewer)?;
             Ok(Outcome::applied_as(applied, key_json))
         }
+        PeerCmd::Serve { .. } => Err(Failure::new(
+            "internal",
+            1,
+            "peer serve is run before dispatch",
+        )),
     }
+}
+
+// -- serve, on the peer ----------------------------------------------------
+
+/// `tiller peer serve --from <label>` (`protocol.md` 10.2). Once the start
+/// check passes, stdout is the link: nothing else is printed there, and an
+/// error goes to stderr.
+pub fn serve(app: &App, from: String) -> Result<ExitCode, Failure> {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    serve_start_check(
+        set("TILLER_SESSION_ID"),
+        set("CLAUDECODE"),
+        set("SSH_CONNECTION"),
+        ancestors,
+    )?;
+    let config = ServeConfig {
+        home: app.home.clone(),
+        from,
+        timing: Timing::default(),
+        herdr: Some(Cli::local().program(crate::daemon::command_line("TILLER_HERDR", "herdr"))),
+    };
+    let input = std::io::BufReader::new(std::io::stdin());
+    match tiller_daemon::peer::serve::serve(&config, input, std::io::stdout().lock()) {
+        Ok(()) => Ok(ExitCode::SUCCESS),
+        Err(error @ ServeError::Refused { .. }) => {
+            eprintln!("tiller peer serve: {error}");
+            Ok(ExitCode::from(6))
+        }
+        Err(error) => {
+            eprintln!("tiller peer serve: {error}");
+            Ok(ExitCode::from(1))
+        }
+    }
+}
+
+/// `peer serve` starts only when sshd started it for the owner
+/// (`authority.md` G44): `SSH_CONNECTION` set, no `TILLER_SESSION_ID`, no
+/// `CLAUDECODE` and no Claude Code process among its ancestors.
+fn serve_start_check(
+    session: bool,
+    claudecode: bool,
+    ssh_connection: bool,
+    ancestors: impl FnOnce() -> std::io::Result<Vec<Process>>,
+) -> Result<(), Failure> {
+    let refuse = |why: String| {
+        Failure::forbidden(format!(
+            "tiller peer serve runs only under sshd for the owner: {why}"
+        ))
+        .hint("a paired board host's daemon starts it over ssh; never run it from an agent")
+    };
+    if session {
+        return Err(refuse("TILLER_SESSION_ID is set".into()));
+    }
+    if claudecode {
+        return Err(refuse("CLAUDECODE is set".into()));
+    }
+    if !ssh_connection {
+        return Err(refuse("SSH_CONNECTION is not set".into()));
+    }
+    let chain = ancestors().map_err(|error| refuse(format!("the parent chain: {error}")))?;
+    if let Some(claude) = chain.iter().find(|process| is_claude_code(process)) {
+        return Err(refuse(format!(
+            "Claude Code (pid {}) is among its ancestors",
+            claude.pid
+        )));
+    }
+    Ok(())
 }
 
 // -- add, on the board host ------------------------------------------------
@@ -705,6 +789,32 @@ mod tests {
         let unreadable =
             owner_principal("x", false, true, || Err(std::io::Error::other("gone"))).unwrap_err();
         assert_eq!(unreadable.exit, 6, "an unreadable chain is not the owner");
+    }
+
+    #[test]
+    fn serve_refuses_session_and_claude_ancestor() {
+        let sshd = vec![
+            process("sshd", "sshd: user@notty"),
+            process("sshd", "/usr/sbin/sshd -D"),
+        ];
+        serve_start_check(false, false, true, chain(sshd.clone())).unwrap();
+
+        let refused = |session, claudecode, ssh, processes| {
+            let failure =
+                serve_start_check(session, claudecode, ssh, chain(processes)).unwrap_err();
+            assert_eq!(failure.exit, 6);
+            failure.message.clone()
+        };
+        assert!(refused(true, false, true, sshd.clone()).contains("TILLER_SESSION_ID"));
+        assert!(refused(false, true, true, sshd.clone()).contains("CLAUDECODE"));
+        assert!(refused(false, false, false, sshd.clone()).contains("SSH_CONNECTION"));
+        let mut under_claude = sshd.clone();
+        under_claude.insert(0, process("claude", "claude"));
+        assert!(refused(false, false, true, under_claude).contains("Claude Code"));
+        let unreadable =
+            serve_start_check(false, false, true, || Err(std::io::Error::other("gone")))
+                .unwrap_err();
+        assert_eq!(unreadable.exit, 6, "an unreadable chain never serves");
     }
 
     #[test]

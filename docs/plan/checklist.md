@@ -446,11 +446,11 @@ ADR 0003, accepted Tuesday 2026-11-03. The owner approved it; runs in one or two
 ### F3 Peer link and federated reads
 `opus` high - 3-4 h - after F2
 
-- [ ] `tiller peer serve`: start check, hello and welcome, snapshot, events, beats, `query`
-- [ ] Daemon link client: one task per peer, link states, backoff, resume from `last_seq`, 2 s coalesced snapshot refresh, clock offset
-- [ ] Federated reads tag `host`; `?host=`; snapshot `peers`; SSE `peer`, `link`, `peer_reset`; Machines row from the link; OpenAPI regenerated
-- [ ] Check: `daemon::peer::snapshot_then_events_fill_cache`, `resume_from_last_seq_replays_gap`, `gap_over_5000_sends_snapshot`, `link_states_follow_frame_age`, `frozen_serve_reaches_down_and_reconnects`, `serve_never_opens_onward_link`, `cli::peer::serve_refuses_session_and_claude_ancestor`
-- [ ] Delivered
+- [x] `tiller peer serve`: start check, hello and welcome, snapshot, events, beats, `query`
+- [x] Daemon link client: one task per peer, link states, backoff, resume from `last_seq`, 2 s coalesced snapshot refresh, clock offset
+- [x] Federated reads tag `host`; `?host=`; snapshot `peers`; SSE `peer`, `link`, `peer_reset`; Machines row from the link; OpenAPI regenerated
+- [x] Check: `daemon::peer::snapshot_then_events_fill_cache`, `resume_from_last_seq_replays_gap`, `gap_over_5000_sends_snapshot`, `link_states_follow_frame_age`, `frozen_serve_reaches_down_and_reconnects`, `serve_never_opens_onward_link`, `cli::peer::serve_refuses_session_and_claude_ancestor`
+- [x] Delivered
 
 ### F4 Forwarded mutations
 `opus` high - 3-4 h - after F3

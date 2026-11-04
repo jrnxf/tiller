@@ -598,6 +598,7 @@ One SSH session per paired peer, opened by the board host's daemon: `ssh -T -o B
 | `snapshot` | peer | `server_time`, `last_event_seq`, and `queries`: the peer's own `board?filter=all`, `attention?state=open`, `agents`, `projects` and its local `machines` row, built by the same handlers as 7.6, in one read transaction |
 | `event` | peer | one `events` row in the SSE change shape (7.5), in `seq` order |
 | `beat` | peer | `server_time`, `last_event_seq`, every 10 s |
+| `refresh` | board host | nothing: asks for a fresh `snapshot` (Fresh, below) |
 | `query` / `result` | board host / peer | `id`, an allowlisted single-entity GET (`cards/{id}`, `cards/{id}/timeline`, `runs/{id}`); `id`, `http_status`, `body` |
 | `mutate` / `result` | board host / peer | section 10.3 |
 

@@ -9,7 +9,8 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use tiller_core::domain::{
     Approval, Artifact, Attention, Card, CardDep, CardState, Checks, Event, Hold, HostKind,
-    Obligation, Pane, Pr, QuotaWindow as QuotaRow, Review, Role, Run, RunOutcome, Session,
+    Obligation, Pane, PeerScope, Pr, QuotaWindow as QuotaRow, Review, Role, Run, RunOutcome,
+    Session,
 };
 use tiller_core::state::signals::WeekWindow;
 use tiller_core::state::{attention::still_current, find, get, list, review};
@@ -17,6 +18,7 @@ use tiller_core::{Result, Store, Timestamp};
 use tiller_herdr::poller::Health as PollerRecord;
 
 use crate::dto::*;
+use crate::peer::{Federation, PeerView};
 
 /// A quota window older than this is stale (`protocol.md` section 8).
 pub const QUOTA_STALE_MINUTES: i64 = 15;
@@ -51,6 +53,17 @@ impl std::str::FromStr for Filter {
             other => Err(tiller_core::Error::Usage(format!(
                 "filter is all, active or needs, not {other:?}"
             ))),
+        }
+    }
+}
+
+impl Filter {
+    /// Whether a row in `column` passes the filter.
+    fn keeps(self, column: &str) -> bool {
+        match self {
+            Filter::All => true,
+            Filter::Active => matches!(column, "working" | "landing"),
+            Filter::Needs => matches!(column, "needs_you" | "asked"),
         }
     }
 }
@@ -144,6 +157,9 @@ pub fn board_row(store: &Store, card_id: &str) -> Result<Option<BoardRow>> {
         model,
         pr_number,
         observed_at,
+        host: None,
+        as_of: None,
+        link: None,
     }))
 }
 
@@ -158,12 +174,7 @@ pub fn board(
     let host_id = host.map(|host| host_id(store, host)).transpose()?;
     let mut rows = Vec::new();
     for column in store.card_columns(project)? {
-        let keep = match filter {
-            Filter::All => true,
-            Filter::Active => matches!(column.column.as_str(), "working" | "landing"),
-            Filter::Needs => matches!(column.column.as_str(), "needs_you" | "asked"),
-        };
-        if !keep {
+        if !filter.keeps(column.column.as_str()) {
             continue;
         }
         if let Some(host_id) = &host_id {
@@ -189,12 +200,15 @@ pub fn board(
             session_id: row.ask.session_id,
             received_at: at(row.ask.received_at),
             age_seconds: row.age_seconds.round(),
+            host: None,
+            as_of: None,
+            link: None,
         })
         .collect();
     Ok(BoardResponse { rows, asked })
 }
 
-fn host_id(store: &Store, host: &str) -> Result<String> {
+pub(crate) fn host_id(store: &Store, host: &str) -> Result<String> {
     store
         .hosts()?
         .into_iter()
@@ -262,6 +276,10 @@ pub fn attention_item(store: &Store, item: &Attention) -> Result<AttentionItem> 
         answered_at: at_opt(item.answered_at),
         withdrawn_at: at_opt(item.withdrawn_at),
         rev: item.rev,
+        host_id: None,
+        host: None,
+        as_of: None,
+        link: None,
     })
 }
 
@@ -328,6 +346,9 @@ pub fn attention(store: &Store) -> Result<AttentionResponse> {
             // Tool inputs are never stored (`protocol.md` 4.1).
             detail: None,
             since: at_opt(session.activity_observed_at).unwrap_or_else(|| at(session.started_at)),
+            host: None,
+            as_of: None,
+            link: None,
         });
     }
     Ok(AttentionResponse {
@@ -405,6 +426,9 @@ fn agent_row(store: &Store, session: &Session) -> Result<AgentRow> {
         pane_id: session.pane_id.clone(),
         workspace_label: pane.and_then(|pane| pane.workspace_label),
         state_since: at_opt(state_since),
+        host: None,
+        as_of: None,
+        link: None,
     })
 }
 
@@ -477,6 +501,8 @@ pub fn agents(store: &Store, host: Option<&str>) -> Result<AgentsResponse> {
 pub struct LocalHealth {
     /// Pollers whose last poll failed.
     pub failing_pollers: Vec<String>,
+    /// Every paired peer's link and cached rows (`protocol.md` 10.2).
+    pub peers: Federation,
 }
 
 /// `GET /api/v1/machines` (`protocol.md` section 9).
@@ -502,6 +528,15 @@ pub fn machines(store: &Store, local: &LocalHealth, now: Timestamp) -> Result<Ma
                 |row| row.get(0),
             )?
         };
+        if let Some(peer) = local
+            .peers
+            .peers
+            .iter()
+            .find(|peer| peer.host_id == host.id)
+        {
+            machines.push(peer_machine(&host, peer));
+            continue;
+        }
         let slots = capacity.iter().find(|row| row.host_id == host.id);
         let (health, stale_reason, last_seen_at) = if is_local {
             let degraded =
@@ -553,6 +588,9 @@ pub fn machines(store: &Store, local: &LocalHealth, now: Timestamp) -> Result<Ma
             },
             last_seen_at: at_opt(last_seen_at),
             stale_reason,
+            link: None,
+            peer_scope: None,
+            link_reason: None,
             rev: host.rev,
         });
     }
@@ -687,6 +725,10 @@ fn project_shape(
         delivery: project.delivery.to_string(),
         capacity: project.capacity,
         rev: project.rev,
+        host_id: None,
+        host: None,
+        as_of: None,
+        link: None,
     })
 }
 
@@ -792,6 +834,9 @@ pub fn card_detail(store: &Store, reference: &str) -> Result<CardDetail> {
             model: None,
             pr_number: None,
             observed_at: None,
+            host: None,
+            as_of: None,
+            link: None,
         },
     };
     let runs: Vec<Run> = list(conn, "card_id = ?1 ORDER BY started_at, id", &[&card.id])?;
@@ -1283,6 +1328,362 @@ pub fn poller_health(records: Vec<PollerRecord>) -> Vec<PollerHealth> {
         .collect()
 }
 
+// -- federation -----------------------------------------------------------------
+
+/// Whose rows these are, once a peer is paired (`protocol.md` 7.3). This
+/// host's rows get its label and id. A peer's rows also get the peer's
+/// `as_of` and `link`, and every host id in them becomes the peer's `hosts`
+/// row id here, the id its Machines row carries and the board filters by.
+struct Owner {
+    host: String,
+    host_id: String,
+    /// A peer's `as_of` and link state; `None` for this host.
+    peer: Option<(Option<String>, LinkState)>,
+}
+
+impl Owner {
+    fn local(store: &Store) -> Result<Self> {
+        let host = store.this_host()?;
+        Ok(Self {
+            host: host.label,
+            host_id: host.id,
+            peer: None,
+        })
+    }
+
+    fn peer(view: &PeerView) -> Self {
+        Self {
+            host: view.label.clone(),
+            host_id: view.host_id.clone(),
+            peer: Some((view.as_of.clone(), view.link)),
+        }
+    }
+
+    /// `host`, `as_of` and `link`.
+    fn tag(&self) -> (Option<String>, Option<String>, Option<LinkState>) {
+        match &self.peer {
+            None => (Some(self.host.clone()), None, None),
+            Some((as_of, link)) => (Some(self.host.clone()), as_of.clone(), Some(*link)),
+        }
+    }
+
+    fn board(&self, response: &mut BoardResponse) {
+        for row in &mut response.rows {
+            self.board_row(row);
+        }
+        for row in &mut response.asked {
+            (row.host, row.as_of, row.link) = self.tag();
+        }
+    }
+
+    fn board_row(&self, row: &mut BoardRow) {
+        (row.host, row.as_of, row.link) = self.tag();
+        if self.peer.is_some() {
+            row.host_id = Some(self.host_id.clone());
+        }
+    }
+
+    fn attention(&self, response: &mut AttentionResponse) {
+        for item in &mut response.items {
+            (item.host, item.as_of, item.link) = self.tag();
+            item.host_id = Some(self.host_id.clone());
+        }
+        for prompt in &mut response.permission_prompts {
+            (prompt.host, prompt.as_of, prompt.link) = self.tag();
+        }
+    }
+
+    fn agents(&self, response: &mut AgentsResponse) {
+        for row in &mut response.orchestrators {
+            self.agent_row(row);
+        }
+    }
+
+    fn agent_row(&self, row: &mut AgentRow) {
+        (row.host, row.as_of, row.link) = self.tag();
+        if self.peer.is_some() {
+            row.host_id.clone_from(&self.host_id);
+        }
+        for worker in &mut row.workers {
+            self.agent_row(worker);
+        }
+    }
+
+    fn projects(&self, response: &mut ProjectsResponse) {
+        for project in &mut response.projects {
+            (project.host, project.as_of, project.link) = self.tag();
+            project.host_id = Some(self.host_id.clone());
+        }
+    }
+
+    /// Tags an SSE change's `entity_state` where its shape carries a host.
+    fn entity_state(&self, entity: &str, state: &mut Value) {
+        if !matches!(entity, "attention" | "project") {
+            return;
+        }
+        let Some(fields) = state.as_object_mut() else {
+            return;
+        };
+        let (host, as_of, link) = self.tag();
+        fields.insert("host_id".into(), json!(self.host_id));
+        fields.insert("host".into(), json!(host));
+        if let Some(as_of) = as_of {
+            fields.insert("as_of".into(), json!(as_of));
+        }
+        if let Some(link) = link {
+            fields.insert("link".into(), json!(link));
+        }
+    }
+}
+
+/// Which rows a federated read returns for its `?host=`.
+enum Scope<'a> {
+    /// No `host`: this host's rows and every peer's.
+    Everyone,
+    /// A `host` that names no peer: this host's rows, filtered as before.
+    Local,
+    /// A `host` that names a peer: that peer's cached rows only.
+    Peer(&'a PeerView),
+}
+
+fn scope<'a>(peers: &'a Federation, host: Option<&str>) -> Scope<'a> {
+    match host {
+        None => Scope::Everyone,
+        Some(host) => peers.peer(host).map_or(Scope::Local, Scope::Peer),
+    }
+}
+
+/// A peer's cached board rows, filtered and tagged.
+pub fn peer_board(view: &PeerView, project: Option<&str>, filter: Filter) -> BoardResponse {
+    let in_project = |id: &str| project.is_none_or(|project| project == id);
+    let mut response = BoardResponse {
+        rows: Vec::new(),
+        asked: Vec::new(),
+    };
+    if let Some(queries) = &view.queries {
+        response.rows = (queries.board.rows.iter())
+            .filter(|row| filter.keeps(&row.column) && in_project(&row.project_id))
+            .cloned()
+            .collect();
+        response.asked = (queries.board.asked.iter())
+            .filter(|row| in_project(&row.project_id))
+            .cloned()
+            .collect();
+    }
+    Owner::peer(view).board(&mut response);
+    response
+}
+
+fn peer_attention(view: &PeerView) -> AttentionResponse {
+    let mut response = view.queries.as_ref().map_or_else(
+        || AttentionResponse {
+            items: Vec::new(),
+            permission_prompts: Vec::new(),
+        },
+        |queries| queries.attention.clone(),
+    );
+    Owner::peer(view).attention(&mut response);
+    response
+}
+
+fn peer_agents(view: &PeerView) -> AgentsResponse {
+    let mut response = view.queries.as_ref().map_or_else(
+        || AgentsResponse {
+            orchestrators: Vec::new(),
+        },
+        |queries| queries.agents.clone(),
+    );
+    Owner::peer(view).agents(&mut response);
+    response
+}
+
+fn peer_projects(view: &PeerView) -> ProjectsResponse {
+    let mut response = view.queries.as_ref().map_or_else(
+        || ProjectsResponse {
+            projects: Vec::new(),
+        },
+        |queries| queries.projects.clone(),
+    );
+    Owner::peer(view).projects(&mut response);
+    response
+}
+
+/// `GET /api/v1/board` across hosts (`protocol.md` 7.3).
+pub fn federated_board(
+    store: &Store,
+    peers: &Federation,
+    project: Option<&str>,
+    filter: Filter,
+    host: Option<&str>,
+) -> Result<BoardResponse> {
+    let scope = scope(peers, host);
+    if let Scope::Peer(view) = scope {
+        return Ok(peer_board(view, project, filter));
+    }
+    let mut response = board(store, project, filter, host)?;
+    if peers.peers.is_empty() {
+        return Ok(response);
+    }
+    Owner::local(store)?.board(&mut response);
+    if let Scope::Everyone = scope {
+        for view in &peers.peers {
+            let theirs = peer_board(view, project, filter);
+            response.rows.extend(theirs.rows);
+            response.asked.extend(theirs.asked);
+        }
+    }
+    Ok(response)
+}
+
+/// `GET /api/v1/attention?state=open` across hosts.
+pub fn federated_attention(
+    store: &Store,
+    peers: &Federation,
+    host: Option<&str>,
+) -> Result<AttentionResponse> {
+    let scope = scope(peers, host);
+    if let Scope::Peer(view) = scope {
+        return Ok(peer_attention(view));
+    }
+    let mut response = attention(store)?;
+    if peers.peers.is_empty() {
+        return Ok(response);
+    }
+    Owner::local(store)?.attention(&mut response);
+    if let Scope::Everyone = scope {
+        for view in &peers.peers {
+            let theirs = peer_attention(view);
+            response.items.extend(theirs.items);
+            response
+                .permission_prompts
+                .extend(theirs.permission_prompts);
+        }
+    }
+    Ok(response)
+}
+
+/// `GET /api/v1/agents` across hosts.
+pub fn federated_agents(
+    store: &Store,
+    peers: &Federation,
+    host: Option<&str>,
+) -> Result<AgentsResponse> {
+    let scope = scope(peers, host);
+    if let Scope::Peer(view) = scope {
+        return Ok(peer_agents(view));
+    }
+    let mut response = agents(store, host)?;
+    if peers.peers.is_empty() {
+        return Ok(response);
+    }
+    Owner::local(store)?.agents(&mut response);
+    if let Scope::Everyone = scope {
+        for view in &peers.peers {
+            response
+                .orchestrators
+                .extend(peer_agents(view).orchestrators);
+        }
+    }
+    Ok(response)
+}
+
+/// `GET /api/v1/projects` across hosts.
+pub fn federated_projects(
+    store: &Store,
+    peers: &Federation,
+    host: Option<&str>,
+    now: Timestamp,
+) -> Result<ProjectsResponse> {
+    let scope = scope(peers, host);
+    if let Scope::Peer(view) = scope {
+        return Ok(peer_projects(view));
+    }
+    let mut response = projects(store, now)?;
+    if peers.peers.is_empty() {
+        return Ok(response);
+    }
+    Owner::local(store)?.projects(&mut response);
+    if let Scope::Everyone = scope {
+        for view in &peers.peers {
+            response.projects.extend(peer_projects(view).projects);
+        }
+    }
+    Ok(response)
+}
+
+/// A paired peer's Machines row (`protocol.md` section 9): its `hosts` row
+/// here, with the link's state and the counts from the peer's own row.
+fn peer_machine(host: &tiller_core::domain::Host, view: &PeerView) -> Machine {
+    let cached = (view.queries.as_ref()).and_then(|queries| queries.machines.machines.first());
+    let health = match (view.link, cached) {
+        (LinkState::Live, Some(row)) => row.health.clone(),
+        (LinkState::Live, None) => "ok".to_owned(),
+        _ => "stale".to_owned(),
+    };
+    let stale_reason = match view.link {
+        LinkState::Never => Some("never_seen".to_owned()),
+        _ => view.stale_reason().map(str::to_owned),
+    };
+    Machine {
+        id: host.id.clone(),
+        label: host.label.clone(),
+        kind: host.kind.to_string(),
+        view_only: view.scope == PeerScope::Read,
+        health,
+        running_agents: cached.and_then(|row| row.running_agents),
+        capacity: cached.and_then(|row| row.capacity),
+        free_slots: cached.and_then(|row| row.free_slots),
+        last_seen_at: at_opt(view.last_frame_at.max(host.last_seen_at)),
+        stale_reason,
+        link: Some(view.link),
+        peer_scope: Some(view.scope.to_string()),
+        link_reason: view.link_reason.clone(),
+        rev: host.rev,
+    }
+}
+
+fn snapshot_peer(view: &PeerView) -> SnapshotPeer {
+    SnapshotPeer {
+        host: view.label.clone(),
+        host_id: view.host_id.clone(),
+        link: view.link,
+        as_of: view.as_of.clone(),
+        server_time_offset_ms: view.offset_ms,
+        scope: view.scope.to_string(),
+        last_event_seq: view.last_event_seq,
+    }
+}
+
+/// A peer's cached rows by snapshot path, tagged as the federated reads
+/// return them: the `queries` of an SSE `peer_reset`.
+pub fn peer_queries(view: &PeerView) -> Value {
+    json!({
+        SNAPSHOT_PATHS[0]: peer_board(view, None, Filter::All),
+        SNAPSHOT_PATHS[1]: peer_attention(view),
+        SNAPSHOT_PATHS[2]: peer_agents(view),
+        SNAPSHOT_PATHS[5]: peer_projects(view),
+    })
+}
+
+/// A peer's change as the board gets it (`event: peer`): its card and
+/// entity tagged as the peer's. A host entity points at the peer's Machines
+/// row here with no state, so the board refetches the federated row.
+pub fn peer_change(view: &PeerView, mut change: ChangeEvent) -> ChangeEvent {
+    let owner = Owner::peer(view);
+    if let Some(card) = &mut change.card {
+        owner.board_row(card);
+    }
+    if change.entity == "host" {
+        if change.entity_id == view.peer_host_id {
+            change.entity_id.clone_from(&view.host_id);
+        }
+        change.entity_state = Value::Null;
+    } else {
+        owner.entity_state(&change.entity, &mut change.entity_state);
+    }
+    change
+}
+
 // -- snapshot -----------------------------------------------------------------
 
 /// The paths the boot snapshot carries, as the board's query option
@@ -1314,13 +1715,14 @@ pub fn snapshot(store: &Store, local: &LocalHealth, now: Timestamp) -> Result<Sn
     store.conn().execute_batch("BEGIN")?;
     let built = (|| -> Result<Snapshot> {
         let last_event_seq = store.last_seq()?;
+        let peers = &local.peers;
         let queries = json!({
-            SNAPSHOT_PATHS[0]: board(store, None, Filter::All, None)?,
-            SNAPSHOT_PATHS[1]: attention(store)?,
-            SNAPSHOT_PATHS[2]: agents(store, None)?,
+            SNAPSHOT_PATHS[0]: federated_board(store, peers, None, Filter::All, None)?,
+            SNAPSHOT_PATHS[1]: federated_attention(store, peers, None)?,
+            SNAPSHOT_PATHS[2]: federated_agents(store, peers, None)?,
             SNAPSHOT_PATHS[3]: machines(store, local, now)?,
             SNAPSHOT_PATHS[4]: quota(store, now)?,
-            SNAPSHOT_PATHS[5]: projects(store, now)?,
+            SNAPSHOT_PATHS[5]: federated_projects(store, peers, None, now)?,
         });
         Ok(Snapshot {
             v: 1,
@@ -1328,6 +1730,7 @@ pub fn snapshot(store: &Store, local: &LocalHealth, now: Timestamp) -> Result<Sn
             last_event_seq,
             thresholds: thresholds(),
             queries,
+            peers: peers.peers.iter().map(snapshot_peer).collect(),
         })
     })();
     let ended = store.conn().execute_batch("COMMIT");
@@ -1349,13 +1752,22 @@ pub fn change(store: &Store, local: &LocalHealth, event: &Event, now: Timestamp)
         tracing::warn!(seq = event.seq, %error, "change sent without its entity");
         Value::Null
     });
-    let card = match &event.card_id {
+    let mut card = match &event.card_id {
         Some(card_id) => board_row(store, card_id).unwrap_or_else(|error| {
             tracing::warn!(seq = event.seq, %error, "change sent without its card");
             None
         }),
         None => None,
     };
+    let mut entity_state = entity_state;
+    if !local.peers.peers.is_empty()
+        && let Ok(owner) = Owner::local(store)
+    {
+        if let Some(card) = &mut card {
+            owner.board_row(card);
+        }
+        owner.entity_state(&event.entity, &mut entity_state);
+    }
     ChangeEvent {
         seq: event.seq,
         at: at(event.at),

@@ -6,17 +6,25 @@
 //! connection of its own ([`watch_changes`]). Each stream reads the rows
 //! after its cursor straight from `state.db`, so a restarted daemon replays
 //! exactly what a browser missed.
+//!
+//! Paired peers' changes and link states come from their link tasks
+//! ([`Peers::subscribe`]) and go out with no `id`: a peer's `seq` is not
+//! this host's. Each connect sends every peer's cached rows as
+//! `peer_reset` after the replay, so a browser's gap never needs them.
 
 use std::convert::Infallible;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::Stream;
 use serde_json::json;
 use tiller_core::{Store, Timestamp};
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{mpsc, watch};
 
+use crate::peer::link::{PeerMessage, Peers};
 use crate::views::{self, LocalHealth};
 
 /// How often the feed asks SQLite whether another connection committed.
@@ -132,15 +140,42 @@ fn read_batch(
     Ok(batch)
 }
 
+/// A link's message as SSE: `peer`, `link` or `peer_reset`, with no `id`.
+fn peer_event(peers: &Peers, message: PeerMessage) -> Option<Event> {
+    let (name, data) = match message {
+        PeerMessage::Change(change) => ("peer", serde_json::to_string(&change)),
+        PeerMessage::Link(link) => ("link", serde_json::to_string(&link)),
+        PeerMessage::Reset(host_id) => (
+            "peer_reset",
+            serde_json::to_string(&peers.reset_event(&host_id)?),
+        ),
+    };
+    Some(Event::default().event(name).data(data.ok()?))
+}
+
+/// A `peer_reset` for every peer.
+fn peer_resets(peers: &Peers) -> Vec<Event> {
+    peers
+        .federation()
+        .peers
+        .iter()
+        .filter_map(|view| peer_event(peers, PeerMessage::Reset(view.host_id.clone())))
+        .collect()
+}
+
 /// One browser's stream. `local` is read per batch, for host rows.
 pub fn stream(
     db: PathBuf,
     after: Option<i64>,
     mut newest: watch::Receiver<i64>,
     mut stop: watch::Receiver<bool>,
+    peers: Arc<Peers>,
     local: impl Fn() -> LocalHealth + Send + Sync + 'static,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (tx, mut rx) = mpsc::channel::<Event>(64);
+    // Subscribed before the replay: what a link sends meanwhile waits here
+    // and follows the `peer_reset`s.
+    let mut from_peers = peers.subscribe();
     tokio::spawn(async move {
         if tx
             .send(Event::default().retry(RETRY).comment("tiller"))
@@ -167,6 +202,7 @@ pub fn stream(
                 newest
             }
         };
+        let mut replaying = true;
         loop {
             let local_now = local();
             let read = tokio::task::spawn_blocking(move || {
@@ -215,14 +251,36 @@ pub fn stream(
             if full {
                 continue;
             }
-            // Wait for a commit; a dropped feed ends the stream, and the
-            // browser reconnects with its `Last-Event-ID`.
-            tokio::select! {
-                changed = newest.changed() => if changed.is_err() { return; },
-                () = tx.closed() => return,
-                // A stopping daemon ends every stream so the server can
-                // drain; the browser resumes from `Last-Event-ID`.
-                _ = stop.wait_for(|stop| *stop) => return,
+            if replaying {
+                replaying = false;
+                for event in peer_resets(&peers) {
+                    if tx.send(event).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            // Wait for a commit, passing on what the links send meanwhile;
+            // a dropped feed ends the stream, and the browser reconnects
+            // with its `Last-Event-ID`.
+            loop {
+                let events = tokio::select! {
+                    changed = newest.changed() => if changed.is_err() { return; } else { break },
+                    message = from_peers.recv() => match message {
+                        Ok(message) => peer_event(&peers, message).into_iter().collect(),
+                        // Too far behind the links: send their rows whole.
+                        Err(RecvError::Lagged(_)) => peer_resets(&peers),
+                        Err(RecvError::Closed) => return,
+                    },
+                    () = tx.closed() => return,
+                    // A stopping daemon ends every stream so the server can
+                    // drain; the browser resumes from `Last-Event-ID`.
+                    _ = stop.wait_for(|stop| *stop) => return,
+                };
+                for event in events {
+                    if tx.send(event).await.is_err() {
+                        return;
+                    }
+                }
             }
         }
     });
@@ -264,6 +322,7 @@ mod tests {
             newest,
             stop: stop.clone(),
             pollers: Registry::new(),
+            peers: crate::peer::link::Peers::idle(),
             herdr: Cli::local(),
             started_at: Timestamp::now(),
             tools: Arc::new(Mutex::new(serde_json::Value::Null)),

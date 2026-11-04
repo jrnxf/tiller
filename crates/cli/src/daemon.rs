@@ -22,7 +22,7 @@ pub struct Args {
     allow_hosts: Vec<String>,
 }
 
-fn command_line(variable: &str, default: &str) -> Vec<OsString> {
+pub fn command_line(variable: &str, default: &str) -> Vec<OsString> {
     let line = std::env::var(variable)
         .ok()
         .filter(|line| !line.trim().is_empty())
@@ -51,6 +51,7 @@ pub fn run(args: &Args) -> anyhow::Result<ExitCode> {
         allowed_hosts: args.allow_hosts.clone(),
         herdr: Cli::local().program(command_line("TILLER_HERDR", "herdr")),
         quota: command_line("TILLER_QUOTA_AXI", "quota-axi"),
+        ssh: command_line("TILLER_SSH", "ssh"),
         assets: Assets::board(),
     };
     match tiller_daemon::run(config)? {

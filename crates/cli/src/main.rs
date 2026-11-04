@@ -259,6 +259,18 @@ fn main() -> ExitCode {
     if let Command::Guard(cmd) = &cli.command {
         return guard::run(cmd);
     }
+    // `peer serve` owns stdout once it starts: the link's frames go there.
+    if let Command::Peer(peer::PeerCmd::Serve { from }) = &cli.command {
+        let app = App::from_env(cli.db.clone());
+        return match peer::serve(&app, from.clone()) {
+            Ok(code) => code,
+            Err(failure) => {
+                let exit = failure.exit;
+                emit(failure.into_response(), cli.json);
+                ExitCode::from(exit)
+            }
+        };
+    }
     if let Command::Daemon(args) = &cli.command {
         return match daemon::run(args) {
             Ok(code) => code,

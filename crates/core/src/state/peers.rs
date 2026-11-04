@@ -19,6 +19,7 @@ use crate::domain::*;
 use crate::error::{Error, Result};
 use crate::ids;
 use crate::store::{Applied, Ctx, NewEvent, Store, Tx};
+use crate::time::Timestamp;
 
 /// The peer link protocol this build speaks (`protocol.md` 10.2).
 pub const PEER_PROTOCOL: &str = "tiller-peer/1";
@@ -206,6 +207,39 @@ impl Store {
     /// Every host this board host is paired with, by label.
     pub fn paired_hosts(&self) -> Result<Vec<Host>> {
         list(self.conn(), "peer_scope IS NOT NULL ORDER BY label", &[])
+    }
+
+    /// `cache.refresh` of a paired peer's link, on the board host
+    /// (`protocol.md` 10.2): `seen` moves `last_seen_at` to the frame's
+    /// arrival, and `stale_reason` is the link's (`peer_link_down`,
+    /// `peer_refused`, `peer_version`, or none while live). Every call is a
+    /// link state change, so every call writes `host.changed`.
+    pub fn peer_link(
+        &mut self,
+        ctx: &Ctx,
+        host_id: &str,
+        link: &str,
+        stale_reason: Option<&str>,
+        seen: Option<Timestamp>,
+    ) -> Result<Applied<Host>> {
+        self.write(ctx, "cache.refresh", None, |tx| {
+            tx.rebuildable();
+            let host: Host = get(tx.conn(), "host", host_id)?;
+            tx.conn().execute(
+                "UPDATE hosts SET stale_reason = ?2,
+                    last_seen_at = CASE WHEN ?3 IS NULL OR last_seen_at > ?3 THEN last_seen_at ELSE ?3 END
+                 WHERE id = ?1",
+                params![host.id, stale_reason, seen],
+            )?;
+            tx.event(
+                NewEvent::new("host", &host.id, "host.changed").payload(json!({
+                    "link": link,
+                    "stale_reason": stale_reason,
+                    "was": host.stale_reason,
+                })),
+            )?;
+            get(tx.conn(), "host", &host.id)
+        })
     }
 
     /// Every board host this peer accepted, live or revoked, oldest first.

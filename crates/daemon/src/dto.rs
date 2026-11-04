@@ -36,6 +36,17 @@ pub struct BoardRow {
     pub pr_number: Option<i64>,
     /// When the newest observation of the card's active run was made.
     pub observed_at: Option<String>,
+    /// The owning host's label, on every row once a peer is paired
+    /// (`protocol.md` 7.3); absent on a host with none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// A peer row's freshness: the peer's `server_time` of the newest frame
+    /// its cache took. Absent on this host's rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<String>,
+    /// A peer row's link state; absent on this host's rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<LinkState>,
 }
 
 /// An unresolved ask, from the `asked` view.
@@ -46,6 +57,17 @@ pub struct AskedRow {
     pub session_id: Option<String>,
     pub received_at: String,
     pub age_seconds: f64,
+    /// The owning host's label, on every row once a peer is paired
+    /// (`protocol.md` 7.3); absent on a host with none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// A peer row's freshness: the peer's `server_time` of the newest frame
+    /// its cache took. Absent on this host's rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<String>,
+    /// A peer row's link state; absent on this host's rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<LinkState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -92,6 +114,20 @@ pub struct AttentionItem {
     pub answered_at: Option<String>,
     pub withdrawn_at: Option<String>,
     pub rev: i64,
+    /// The owning host's id, once a peer is paired; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
+    /// The owning host's label, on every row once a peer is paired
+    /// (`protocol.md` 7.3); absent on a host with none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// A peer row's freshness: the peer's `server_time` of the newest frame
+    /// its cache took. Absent on this host's rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<String>,
+    /// A peer row's link state; absent on this host's rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<LinkState>,
 }
 
 /// A session waiting on a permission prompt.
@@ -103,6 +139,17 @@ pub struct PermissionPrompt {
     /// What the tool wants to run, from the session's newest observation.
     pub detail: Option<String>,
     pub since: String,
+    /// The owning host's label, on every row once a peer is paired
+    /// (`protocol.md` 7.3); absent on a host with none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// A peer row's freshness: the peer's `server_time` of the newest frame
+    /// its cache took. Absent on this host's rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<String>,
+    /// A peer row's link state; absent on this host's rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<LinkState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -134,6 +181,17 @@ pub struct AgentRow {
     pub workspace_label: Option<String>,
     /// When the session entered its current activity.
     pub state_since: Option<String>,
+    /// The owning host's label, on every row once a peer is paired
+    /// (`protocol.md` 7.3); absent on a host with none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// A peer row's freshness: the peer's `server_time` of the newest frame
+    /// its cache took. Absent on this host's rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<String>,
+    /// A peer row's link state; absent on this host's rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<LinkState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -339,6 +397,18 @@ pub struct Machine {
     /// `herdr_link_down`, `host_asleep`, `poll_failed` or `never_seen`; for a
     /// paired peer also `peer_link_down`, `peer_refused` or `peer_version`.
     pub stale_reason: Option<String>,
+    /// A paired peer's link state (`protocol.md` 10.2); absent for this
+    /// host and for a herdr-only machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<LinkState>,
+    /// `read` or `act`, for a paired peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_scope: Option<String>,
+    /// Why the peer refused the link: `revoked`, `unknown_key`, `bad_sig`,
+    /// `clock_skew`, `version`, `accept_off`, or `host_changed` when its
+    /// `host_id` is not the paired one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_reason: Option<String>,
     pub rev: i64,
 }
 
@@ -399,6 +469,20 @@ pub struct Project {
     pub review_overdue: bool,
     /// `weekly` or `final` while a review pass is pending or running.
     pub review_open: Option<String>,
+    /// The owning host's id, once a peer is paired; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
+    /// The owning host's label, on every row once a peer is paired
+    /// (`protocol.md` 7.3); absent on a host with none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// A peer row's freshness: the peer's `server_time` of the newest frame
+    /// its cache took. Absent on this host's rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<String>,
+    /// A peer row's link state; absent on this host's rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<LinkState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -470,6 +554,10 @@ pub struct Health {
     /// Tool versions read at start, by tool name; null when not found.
     #[schema(value_type = Object)]
     pub tools: Value,
+    /// Each peer link's last success and last error (`protocol.md` 10.4);
+    /// absent on a host with no peers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<LinkHealth>,
 }
 
 /// The inlined `<script id="tiller-boot">` body and `GET /api/v1/snapshot`.
@@ -486,6 +574,64 @@ pub struct Snapshot {
     /// and query string.
     #[schema(value_type = Object)]
     pub queries: Value,
+    /// One entry per paired peer (`protocol.md` 7.6); absent on a host with
+    /// none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<SnapshotPeer>,
+}
+
+/// A peer link's state (`protocol.md` 10.2): `live` with a frame in the last
+/// 25 s, `lagging` up to 2 min, `down` after that or while reconnecting
+/// fails, `refused` after a refused `hello` or a changed `host_id`, `never`
+/// before the first `welcome`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkState {
+    Live,
+    Lagging,
+    Down,
+    Refused,
+    Never,
+}
+
+impl LinkState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Lagging => "lagging",
+            Self::Down => "down",
+            Self::Refused => "refused",
+            Self::Never => "never",
+        }
+    }
+}
+
+/// One paired peer in the boot snapshot (`protocol.md` 7.6).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct SnapshotPeer {
+    /// The peer's label.
+    pub host: String,
+    /// The peer's `hosts` row id here, the id its Machines row carries.
+    pub host_id: String,
+    pub link: LinkState,
+    pub as_of: Option<String>,
+    /// The peer's clock minus this host's, from its newest `welcome` or
+    /// `beat`; staleness of its agents is computed against its clock.
+    pub server_time_offset_ms: i64,
+    /// `read` or `act`.
+    pub scope: String,
+    /// The peer `seq` this host last applied.
+    pub last_event_seq: Option<i64>,
+}
+
+/// One peer link in `GET /api/v1/health`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct LinkHealth {
+    pub host: String,
+    pub link: LinkState,
+    /// When the link last took a frame.
+    pub last_success_at: Option<String>,
+    pub last_error: Option<String>,
 }
 
 // -- the event stream -------------------------------------------------------
@@ -518,6 +664,39 @@ pub struct ChangeEvent {
 pub struct ResetEvent {
     pub seq: i64,
     pub server_time: String,
+}
+
+/// One `event: peer` message: a paired peer's change, with no SSE `id`, since
+/// a peer's `seq` is not this host's.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct PeerEvent {
+    pub host: String,
+    pub host_id: String,
+    pub as_of: Option<String>,
+    pub change: ChangeEvent,
+}
+
+/// One `event: link` message: a peer link changed state.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct LinkEvent {
+    pub host: String,
+    pub link: LinkState,
+    pub as_of: Option<String>,
+    /// `peer_link_down`, `peer_refused` or `peer_version`; null while live.
+    pub stale_reason: Option<String>,
+}
+
+/// One `event: peer_reset` message, sent per peer after a reconnecting
+/// stream's replay: the peer's cached rows replace what the board holds.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct PeerResetEvent {
+    pub host: String,
+    pub host_id: String,
+    pub link: LinkState,
+    pub as_of: Option<String>,
+    /// The peer's rows by snapshot path, as the federated reads return them.
+    #[schema(value_type = Object)]
+    pub queries: Value,
 }
 
 // -- mutations --------------------------------------------------------------

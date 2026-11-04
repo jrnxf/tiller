@@ -158,6 +158,18 @@
                 "null"
               ]
             }
+          },
+          {
+            "name": "host",
+            "in": "query",
+            "description": "A host id or label.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -366,6 +378,18 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "host",
+            "in": "query",
+            "description": "A host id or label.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -379,6 +403,16 @@
             }
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`peer_unreachable`: the cached card row is in `current`",
             "content": {
               "application/json": {
                 "schema": {
@@ -695,6 +729,18 @@
               ],
               "format": "int64"
             }
+          },
+          {
+            "name": "host",
+            "in": "query",
+            "description": "A peer's label for a peer's card; absent means this host.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -715,6 +761,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "`peer_unreachable`: the cached card row is in `current`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -724,7 +780,7 @@
         "tags": [
           "stream"
         ],
-        "summary": "The change stream: `event: change` with a [`ChangeEvent`] per `events`\nrow, `event: reset` with a [`ResetEvent`] when a resume is impossible.",
+        "summary": "The change stream: `event: change` with a [`ChangeEvent`] per `events`\nrow, `event: reset` with a [`ResetEvent`] when a resume is impossible,\nand, once a peer is paired, `event: peer`, `event: link` and\n`event: peer_reset` from the peer links (`protocol.md` 7.6), with no id.",
         "operationId": "events",
         "parameters": [
           {
@@ -756,7 +812,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`change` messages carry a ChangeEvent; `reset` messages a ResetEvent",
+            "description": "`change` messages carry a ChangeEvent; `reset` messages a ResetEvent; `peer` messages a PeerEvent, `link` messages a LinkEvent and `peer_reset` messages a PeerResetEvent",
             "content": {
               "text/event-stream": {
                 "schema": {
@@ -822,6 +878,20 @@
           "reads"
         ],
         "operationId": "projects",
+        "parameters": [
+          {
+            "name": "host",
+            "in": "query",
+            "description": "A host id or label.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -916,6 +986,18 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "host",
+            "in": "query",
+            "description": "A host id or label.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -929,6 +1011,16 @@
             }
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`peer_unreachable`: the cached card row is in `current`",
             "content": {
               "application/json": {
                 "schema": {
@@ -1014,6 +1106,13 @@
               "null"
             ]
           },
+          "as_of": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A peer row's freshness: the peer's `server_time` of the newest frame\nits cache took. Absent on this host's rows."
+          },
           "card_id": {
             "type": [
               "string",
@@ -1026,6 +1125,13 @@
               "null"
             ]
           },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The owning host's label, on every row once a peer is paired\n(`protocol.md` 7.3); absent on a host with none."
+          },
           "host_id": {
             "type": "string"
           },
@@ -1033,6 +1139,17 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "link": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinkState",
+                "description": "A peer row's link state; absent on this host's rows."
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "model": {
@@ -1186,8 +1303,33 @@
             "type": "number",
             "format": "double"
           },
+          "as_of": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A peer row's freshness: the peer's `server_time` of the newest frame\nits cache took. Absent on this host's rows."
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The owning host's label, on every row once a peer is paired\n(`protocol.md` 7.3); absent on a host with none."
+          },
           "id": {
             "type": "string"
+          },
+          "link": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinkState",
+                "description": "A peer row's link state; absent on this host's rows."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "project_id": {
             "type": "string"
@@ -1231,6 +1373,13 @@
               }
             ]
           },
+          "as_of": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A peer row's freshness: the peer's `server_time` of the newest frame\nits cache took. Absent on this host's rows."
+          },
           "card_id": {
             "type": "string"
           },
@@ -1247,12 +1396,37 @@
             ],
             "description": "Text, or a JSON list of pointers (event ids, artifact ids, PR urls)."
           },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The owning host's label, on every row once a peer is paired\n(`protocol.md` 7.3); absent on a host with none."
+          },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The owning host's id, once a peer is paired; absent otherwise."
+          },
           "id": {
             "type": "string"
           },
           "kind": {
             "type": "string",
             "description": "`decision`, `credential`, `merge`, `review`, `recovery` or `report`."
+          },
+          "link": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinkState",
+                "description": "A peer row's link state; absent on this host's rows."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "opened_at": {
             "type": "string"
@@ -1375,6 +1549,13 @@
           "rev"
         ],
         "properties": {
+          "as_of": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A peer row's freshness: the peer's `server_time` of the newest frame\nits cache took. Absent on this host's rows."
+          },
           "badge": {
             "type": "string"
           },
@@ -1397,6 +1578,13 @@
           "display_id": {
             "type": "string"
           },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The owning host's label, on every row once a peer is paired\n(`protocol.md` 7.3); absent on a host with none."
+          },
           "host_id": {
             "type": [
               "string",
@@ -1409,6 +1597,17 @@
           },
           "kind": {
             "type": "string"
+          },
+          "link": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinkState",
+                "description": "A peer row's link state; absent on this host's rows."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "model": {
             "type": [
@@ -2150,6 +2349,13 @@
             "type": "integer",
             "format": "int64"
           },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinkHealth"
+            },
+            "description": "Each peer link's last success and last error (`protocol.md` 10.4);\nabsent on a host with no peers."
+          },
           "ok": {
             "type": "boolean"
           },
@@ -2237,6 +2443,75 @@
           }
         }
       },
+      "LinkEvent": {
+        "type": "object",
+        "description": "One `event: link` message: a peer link changed state.",
+        "required": [
+          "host",
+          "link"
+        ],
+        "properties": {
+          "as_of": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host": {
+            "type": "string"
+          },
+          "link": {
+            "$ref": "#/components/schemas/LinkState"
+          },
+          "stale_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`peer_link_down`, `peer_refused` or `peer_version`; null while live."
+          }
+        }
+      },
+      "LinkHealth": {
+        "type": "object",
+        "description": "One peer link in `GET /api/v1/health`.",
+        "required": [
+          "host",
+          "link"
+        ],
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_success_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the link last took a frame."
+          },
+          "link": {
+            "$ref": "#/components/schemas/LinkState"
+          }
+        }
+      },
+      "LinkState": {
+        "type": "string",
+        "description": "A peer link's state (`protocol.md` 10.2): `live` with a frame in the last\n25 s, `lagging` up to 2 min, `down` after that or while reconnecting\nfails, `refused` after a refused `hello` or a changed `host_id`, `never`\nbefore the first `welcome`.",
+        "enum": [
+          "live",
+          "lagging",
+          "down",
+          "refused",
+          "never"
+        ]
+      },
       "Machine": {
         "type": "object",
         "description": "One host the board shows (`protocol.md` section 9).",
@@ -2282,6 +2557,31 @@
               "string",
               "null"
             ]
+          },
+          "link": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinkState",
+                "description": "A paired peer's link state (`protocol.md` 10.2); absent for this\nhost and for a herdr-only machine."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "link_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the peer refused the link: `revoked`, `unknown_key`, `bad_sig`,\n`clock_skew`, `version`, `accept_off`, or `host_changed` when its\n`host_id` is not the paired one."
+          },
+          "peer_scope": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`read` or `act`, for a paired peer."
           },
           "rev": {
             "type": "integer",
@@ -2391,6 +2691,63 @@
           }
         }
       },
+      "PeerEvent": {
+        "type": "object",
+        "description": "One `event: peer` message: a paired peer's change, with no SSE `id`, since\na peer's `seq` is not this host's.",
+        "required": [
+          "host",
+          "host_id",
+          "change"
+        ],
+        "properties": {
+          "as_of": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "change": {
+            "$ref": "#/components/schemas/ChangeEvent"
+          },
+          "host": {
+            "type": "string"
+          },
+          "host_id": {
+            "type": "string"
+          }
+        }
+      },
+      "PeerResetEvent": {
+        "type": "object",
+        "description": "One `event: peer_reset` message, sent per peer after a reconnecting\nstream's replay: the peer's cached rows replace what the board holds.",
+        "required": [
+          "host",
+          "host_id",
+          "link",
+          "queries"
+        ],
+        "properties": {
+          "as_of": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host": {
+            "type": "string"
+          },
+          "host_id": {
+            "type": "string"
+          },
+          "link": {
+            "$ref": "#/components/schemas/LinkState"
+          },
+          "queries": {
+            "type": "object",
+            "description": "The peer's rows by snapshot path, as the federated reads return them."
+          }
+        }
+      },
       "PermissionPrompt": {
         "type": "object",
         "description": "A session waiting on a permission prompt.",
@@ -2401,6 +2758,13 @@
           "since"
         ],
         "properties": {
+          "as_of": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A peer row's freshness: the peer's `server_time` of the newest frame\nits cache took. Absent on this host's rows."
+          },
           "card_id": {
             "type": "string"
           },
@@ -2410,6 +2774,24 @@
               "null"
             ],
             "description": "What the tool wants to run, from the session's newest observation."
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The owning host's label, on every row once a peer is paired\n(`protocol.md` 7.3); absent on a host with none."
+          },
+          "link": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinkState",
+                "description": "A peer row's link state; absent on this host's rows."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "session_id": {
             "type": "string"
@@ -2471,6 +2853,13 @@
           "review_overdue"
         ],
         "properties": {
+          "as_of": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A peer row's freshness: the peer's `server_time` of the newest frame\nits cache took. Absent on this host's rows."
+          },
           "capacity": {
             "type": "integer",
             "format": "int64"
@@ -2482,8 +2871,33 @@
             "type": "string",
             "description": "The mode builders and the land loop follow: `delivery`, or\n`direct-pr` for a pre-launch project that otherwise runs `no-mistakes`."
           },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The owning host's label, on every row once a peer is paired\n(`protocol.md` 7.3); absent on a host with none."
+          },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The owning host's id, once a peer is paired; absent otherwise."
+          },
           "id": {
             "type": "string"
+          },
+          "link": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LinkState",
+                "description": "A peer row's link state; absent on this host's rows."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "name": {
             "type": "string"
@@ -2918,6 +3332,13 @@
             "type": "integer",
             "format": "int64"
           },
+          "peers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SnapshotPeer"
+            },
+            "description": "One entry per paired peer (`protocol.md` 7.6); absent on a host with\nnone."
+          },
           "queries": {
             "type": "object",
             "description": "Each entry is exactly the response of that GET, keyed by its path\nand query string."
@@ -2934,6 +3355,53 @@
             "format": "int32",
             "description": "Always 1.",
             "minimum": 0
+          }
+        }
+      },
+      "SnapshotPeer": {
+        "type": "object",
+        "description": "One paired peer in the boot snapshot (`protocol.md` 7.6).",
+        "required": [
+          "host",
+          "host_id",
+          "link",
+          "server_time_offset_ms",
+          "scope"
+        ],
+        "properties": {
+          "as_of": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host": {
+            "type": "string",
+            "description": "The peer's label."
+          },
+          "host_id": {
+            "type": "string",
+            "description": "The peer's `hosts` row id here, the id its Machines row carries."
+          },
+          "last_event_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The peer `seq` this host last applied."
+          },
+          "link": {
+            "$ref": "#/components/schemas/LinkState"
+          },
+          "scope": {
+            "type": "string",
+            "description": "`read` or `act`."
+          },
+          "server_time_offset_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The peer's clock minus this host's, from its newest `welcome` or\n`beat`; staleness of its agents is computed against its clock."
           }
         }
       },

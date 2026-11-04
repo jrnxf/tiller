@@ -4,6 +4,7 @@ pub mod api;
 pub mod assets;
 pub mod auth;
 pub mod dto;
+pub mod peer;
 pub mod quota;
 pub mod readonly;
 pub mod server;

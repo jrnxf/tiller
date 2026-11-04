@@ -27,6 +27,8 @@ use tokio::sync::watch;
 
 use crate::api::{self, AppState, Inner};
 use crate::assets::Assets;
+use crate::peer::Timing;
+use crate::peer::link::{Peers, SshConnector};
 use crate::readonly::Damage;
 use crate::workers::{self, Tools};
 
@@ -66,6 +68,9 @@ pub struct Config {
     pub allowed_hosts: Vec<String>,
     pub herdr: Cli,
     pub quota: Vec<OsString>,
+    /// The SSH client peer links run (`protocol.md` 10.2): `ssh`, or
+    /// `TILLER_SSH` split on whitespace.
+    pub ssh: Vec<OsString>,
     pub assets: Assets,
 }
 
@@ -256,6 +261,17 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         });
     }
 
+    // One link task per paired peer; none waits on another or on a request.
+    let peers = Peers::start(
+        config.home.clone(),
+        Arc::new(SshConnector {
+            program: config.ssh.clone(),
+        }),
+        Timing::default(),
+        damage.clone(),
+        stop.clone(),
+    );
+
     let state = AppState::new(Inner {
         home: config.home.clone(),
         port: bound.port(),
@@ -269,6 +285,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         newest,
         stop: stop.clone(),
         pollers: registry,
+        peers,
         herdr: config.herdr,
         started_at,
         tools: tool_versions,

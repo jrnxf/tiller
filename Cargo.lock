@@ -1467,6 +1467,8 @@ name = "tiller-daemon"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
+ "ed25519-dalek",
  "futures-util",
  "jiff",
  "rusqlite",
