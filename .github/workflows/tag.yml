@@ -1,0 +1,47 @@
+name: Tag
+
+# Checks a pushed tag. It builds nothing and publishes nothing: no GitHub release, no release
+# assets, no Homebrew tap. Tiller is private, and Nix users pin the tag (docs/releasing.md).
+#
+# Valid tags are v<base>-pre.N, where <base> is Cargo.toml's version and N counts up from 1 with
+# no leading zero. A full release tag (v<base>) fails until tiller goes public.
+#
+# A tag passes only when its commit is on main, its PRERELEASE file holds the tag's version
+# (the Nix build stamps that into `tiller --version`), and ci.yml's checks pass on it.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Checks
+    uses: ./.github/workflows/ci.yml
+
+  tag:
+    name: Tag is valid
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Check the tag, its stamp and its place on main
+        run: |
+          base=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          version=${GITHUB_REF_NAME#v}
+          [[ $version =~ ^${base//./\\.}-pre\.[1-9][0-9]*$ ]] || {
+            echo "::error::$GITHUB_REF_NAME is not v$base-pre.N (N from 1, no leading zero)"
+            exit 1
+          }
+          [ "$(cat PRERELEASE)" = "$version" ] || {
+            echo "::error::PRERELEASE holds '$(cat PRERELEASE)', not $version"
+            exit 1
+          }
+          git fetch --quiet origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "::error::$GITHUB_REF_NAME points at $GITHUB_SHA, which is not on main"
+            exit 1
+          }

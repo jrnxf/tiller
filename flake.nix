@@ -74,7 +74,7 @@
           };
           board = pkgs.stdenv.mkDerivation {
             pname = "tiller-board";
-            version = "0.1.0";
+            version = baseVersion;
             src = boardSrc;
             # vite runs on real node, not bun's node shim.
             nativeBuildInputs = [
@@ -117,18 +117,35 @@
               ./roles
             ];
           };
+          # The version the binary reports. Cargo.toml keeps the base version; the
+          # build stamps this one into Cargo.toml and Cargo.lock. A flake cannot see
+          # the tag it was fetched at (self has the rev, never the ref), so the
+          # commit a v<base>-pre.N tag points at carries the stamp in PRERELEASE
+          # (docs/releasing.md). An unstamped build reports <base>-dev+<rev>.
+          baseVersion = (fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+          stamp = lib.removeSuffix "\n" (builtins.readFile ./PRERELEASE);
+          version =
+            if stamp != "" then
+              stamp
+            else
+              "${baseVersion}-dev+${self.shortRev or self.dirtyShortRev or "unknown"}";
           commonArgs = {
             inherit src;
             pname = "tiller";
-            version = (fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+            version = baseVersion;
             strictDeps = true;
           };
           cargoArtifacts = craneLib.buildDepsOnly commonArgs;
           tiller = craneLib.buildPackage (
             commonArgs
             // {
-              inherit cargoArtifacts;
+              inherit cargoArtifacts version;
               cargoExtraArgs = "--package tiller-cli";
+              # The dependency build keeps the base version, so a new tag reuses it.
+              postPatch = ''
+                sed -i 's/^version = ".*"/version = "${version}"/' Cargo.toml
+                sed -i '/^name = "tiller-/{n;s/^version = ".*"/version = "${version}"/}' Cargo.lock
+              '';
               doCheck = false;
               preBuild = ''
                 mkdir -p board
