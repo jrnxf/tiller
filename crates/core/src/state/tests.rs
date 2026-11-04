@@ -1166,6 +1166,32 @@ fn a_claude_id_moves_from_an_ended_session_only() {
     assert_eq!(old.claude_session_id, None);
 }
 
+/// An orchestrator start may name the session id its launch files carry,
+/// and only a ULID.
+#[test]
+fn an_orchestrator_session_takes_the_id_its_caller_minted() {
+    let (mut store, orchestrator) = memory_store();
+    store
+        .session_end(&owner(), &orchestrator, "restarted")
+        .unwrap();
+    let start = |id: &str| NewOrchestrator {
+        id: Some(id.into()),
+        project_id: "alpha".into(),
+        ..NewOrchestrator::default()
+    };
+    let error = store
+        .session_start(&owner(), start("not-a-ulid"))
+        .unwrap_err();
+    assert_eq!(error.code(), "usage");
+    let id = crate::ids::new_ulid();
+    let session = store
+        .session_start(&owner(), start(&id))
+        .unwrap()
+        .value
+        .session;
+    assert_eq!(session.id, id);
+}
+
 /// A new attempt is supervised by the project's live orchestrator, and is
 /// refused when there is none.
 #[test]

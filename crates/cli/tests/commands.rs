@@ -891,13 +891,25 @@ fn exit_codes_follow_the_table() {
     );
     assert_eq!(world.store().last_seq().unwrap(), seq);
 
+    // A second orchestrator start returns the live one and writes nothing.
+    let out = world.run(&["orchestrator", "start", "alpha"]);
+    assert_eq!(out.code, 0, "{}", out.json);
+    assert_eq!(out.json["data"]["session"]["id"], orchestrator.as_str());
+    assert_eq!(world.store().last_seq().unwrap(), seq);
+
+    // Focus is the owner's, needs a known agent and a pane to point at.
+    let out = world.run_as(&orchestrator, &["agent", "focus", &orchestrator]);
+    assert_eq!((out.code, out.error_code()), (6, "forbidden"));
+    let out = world.run(&["agent", "focus", "alpha-1-build"]);
+    assert_eq!((out.code, out.error_code()), (3, "not_found"));
+    let out = world.run(&["agent", "focus", &orchestrator]);
+    assert_eq!((out.code, out.error_code()), (5, "refused"), "{}", out.json);
+
     // 7: the daemon is needed and absent, and nothing was written.
     for args in [
-        vec!["orchestrator", "start", "alpha"],
         vec!["agent", "relaunch", "alpha-1-build", "--note", "x"],
         vec!["agent", "resume", "alpha-1-build"],
         vec!["agent", "interrupt", "alpha-1-build"],
-        vec!["agent", "focus", "alpha-1-build"],
         vec!["mem", "approve", "01JC00000000000000000000P1"],
         vec!["doctor"],
         vec!["board", "--login"],
@@ -916,6 +928,24 @@ fn exit_codes_follow_the_table() {
     let out = empty.run(&["card", "list"]);
     assert_eq!((out.code, out.error_code()), (5, "refused"));
     assert!(!empty.db().exists(), "a read never creates state.db");
+}
+
+#[test]
+fn orchestrator_start_needs_the_project_checkout_configured() {
+    let world = World::initialized();
+    let seq = world.store().last_seq().unwrap();
+    let out = world.run(&["orchestrator", "start", "alpha"]);
+    assert_eq!((out.code, out.error_code()), (2, "usage"));
+    assert!(
+        out.json["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("checkouts.alpha")),
+        "{}",
+        out.json
+    );
+    assert_eq!(world.store().last_seq().unwrap(), seq, "nothing is written");
+    let out = world.run(&["orchestrator", "start", "nope"]);
+    assert_eq!((out.code, out.error_code()), (3, "not_found"));
 }
 
 #[test]

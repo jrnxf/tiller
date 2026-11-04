@@ -1,9 +1,10 @@
 //! Commands whose work happens outside `state.db`: they launch panes, call
 //! herdr or the forge, or read memory sources. Their arguments are parsed here
-//! so the command surface is complete and a wrong call is a usage error, but
-//! each answers `unavailable` (exit 7, nothing written) until the task that
-//! owns the outside half lands: orchestrator launch (T4.2), landing
-//! (T4.3), relaunch and resume (T4.5), herdr control and doctor (T2.5, T2.8).
+//! so the command surface is complete and a wrong call is a usage error.
+//! `orchestrator start` and `agent focus` run (`spawn.rs`); the rest answer
+//! `unavailable` (exit 7, nothing written) until the task that owns the
+//! outside half lands: relaunch and resume (T4.5), interrupt and doctor
+//! (T2.5, T2.8).
 
 use clap::Subcommand;
 
@@ -42,15 +43,12 @@ fn later(what: &str, needs: &str) -> Done {
     .hint("nothing was written; retry once it ships"))
 }
 
-pub fn orchestrator(_app: &App, cmd: OrchestratorCmd) -> Done {
+pub fn orchestrator(app: &App, cmd: OrchestratorCmd) -> Done {
     let OrchestratorCmd::Start { project } = cmd;
-    later(
-        &format!("tiller orchestrator start {project}"),
-        "herdr to open the workspace and launch Claude (T4.2)",
-    )
+    super::spawn::orchestrator_start(app, &project)
 }
 
-pub fn agent(_app: &App, cmd: AgentCmd) -> Done {
+pub fn agent(app: &App, cmd: AgentCmd) -> Done {
     match cmd {
         AgentCmd::Relaunch { run, .. } => later(
             &format!("tiller agent relaunch {run}"),
@@ -64,10 +62,7 @@ pub fn agent(_app: &App, cmd: AgentCmd) -> Done {
             &format!("tiller agent interrupt {run}"),
             "herdr to send the Escape (T2.5)",
         ),
-        AgentCmd::Focus { target } => later(
-            &format!("tiller agent focus {target}"),
-            "herdr to focus the pane (T2.5)",
-        ),
+        AgentCmd::Focus { target } => super::spawn::focus(app, &target),
     }
 }
 

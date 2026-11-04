@@ -21,13 +21,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tiller_agents::spawn::config::SpawnConfig;
 use tiller_core::domain::{
-    AnsweredVia, Approval, CardKind, CardOutcome, HoldReleaseReason, Host, HostKind, PeerScope,
-    Session,
+    AnsweredVia, Approval, CardKind, CardOutcome, HoldReleaseReason, Host, PeerScope, Session,
 };
 use tiller_core::domain::{InterventionKind, Stage};
 use tiller_core::state::approvals::Decision;
 use tiller_core::state::cards::{CardEdit, NewCard};
-use tiller_core::state::{find, get as get_row, resolve_id};
+use tiller_core::state::{get as get_row, resolve_id};
 use tiller_core::{Actor, Applied, Ctx, Error, Store, Timestamp, ids};
 use tiller_herdr::client::{Cli, Herdr};
 use tiller_herdr::poller::Registry;
@@ -1639,22 +1638,7 @@ async fn focus(
     let target = read(&state, move |store| {
         let id = resolve_id(store.conn(), "sessions", "session", &session)?;
         let session: Session = get_row(store.conn(), "session", &id)?;
-        let host: tiller_core::domain::Host = get_row(store.conn(), "host", &session.host_id)?;
-        let pane = find::<tiller_core::domain::Pane>(
-            store.conn(),
-            "session_id = ?1 AND gone_at IS NULL",
-            &[&session.id],
-        )?
-        .map(|pane| pane.pane_id)
-        .or(session.pane_id.clone())
-        .ok_or_else(|| Error::Refused {
-            entity: "session",
-            id: session.id.clone(),
-            fact: "the session has no pane to focus".into(),
-        })?;
-        let machine = (host.kind == HostKind::Remote)
-            .then_some(host.herdr_machine)
-            .flatten();
+        let (pane, machine) = tiller_core::state::runs::focus_target(store.conn(), &session)?;
         Ok((session.id, pane, machine))
     })
     .await?;

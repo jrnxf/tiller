@@ -4,7 +4,9 @@
 //!
 //! The role body and the brief go into one file passed with
 //! `--append-system-prompt-file`, so the brief survives compaction and a
-//! resume passes it again with the same flags. The settings fragment is the
+//! resume passes it again with the same flags. The orchestrator has no
+//! brief and no first prompt: it starts at its composer, waiting for the
+//! owner or its inbox. The settings fragment is the
 //! role's template rendered for this run (T4.1). The run's `config_hash` is
 //! the SHA-256 of a manifest over the role file, the fragment, the MCP
 //! config, the model, the effort, the tiller and Claude Code versions and the
@@ -29,17 +31,30 @@ use crate::roles::{self, MCP_CONFIG, Placeholders, Role};
 /// The first prompt a worker gets; the brief itself is in its instructions.
 pub const FIRST_PROMPT: &str = "Start on the brief at the end of your instructions.";
 
+/// The directories only the orchestrator's fragment names (`<home>`,
+/// `<pool>`, `<checkouts>`).
+#[derive(Clone, Copy, Debug)]
+pub struct Roots<'a> {
+    pub home: &'a Path,
+    pub pool: &'a Path,
+    pub checkouts: &'a Path,
+}
+
 /// What one launch needs.
 #[derive(Clone, Debug)]
 pub struct LaunchSpec<'a> {
     pub role: Role,
     pub session_id: &'a str,
+    /// The run, or empty for the orchestrator, which has none.
     pub run_id: &'a str,
     pub worktree: &'a Path,
     pub scratch: &'a Path,
     pub model: &'a str,
     pub effort: Effort,
-    pub brief: &'a str,
+    /// A worker's brief; `None` for the orchestrator.
+    pub brief: Option<&'a str>,
+    /// The orchestrator's roots; `None` for a worker.
+    pub roots: Option<Roots<'a>>,
     /// The packaged `tiller` binary, by its absolute path.
     pub tiller: &'a Path,
     pub default_branch: &'a str,
@@ -185,7 +200,7 @@ fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), SpawnError> {
 
 /// The command the script runs, word by word.
 fn argv(spec: &LaunchSpec<'_>, launch: &Launch, mode: &str) -> Vec<String> {
-    [
+    let mut words: Vec<String> = [
         spec.claude,
         "--append-system-prompt-file",
         &launch.prompt.to_string_lossy(),
@@ -200,10 +215,13 @@ fn argv(spec: &LaunchSpec<'_>, launch: &Launch, mode: &str) -> Vec<String> {
         spec.model,
         "--effort",
         spec.effort.as_str(),
-        FIRST_PROMPT,
     ]
     .map(str::to_owned)
-    .into()
+    .into();
+    if spec.brief.is_some() {
+        words.push(FIRST_PROMPT.to_owned());
+    }
+    words
 }
 
 /// The environment every fleet launch sets (`authority.md` section 7).
@@ -230,21 +248,30 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
 
     let front = spec.role.frontmatter()?;
     let body = spec.role.prompt_body()?;
-    let prompt = format!(
-        "{}\n\n# Your brief\n\n{}\n",
-        body.trim_end(),
-        spec.brief.trim()
-    );
+    let prompt = match spec.brief {
+        Some(brief) => format!("{}\n\n# Your brief\n\n{}\n", body.trim_end(), brief.trim()),
+        None => format!("{}\n", body.trim_end()),
+    };
+    let (home, pool, checkouts) = match spec.roots {
+        Some(roots) => (
+            absolute("the orchestrator home", roots.home)?,
+            absolute("the pool root", roots.pool)?,
+            absolute("the checkouts root", roots.checkouts)?,
+        ),
+        None => Default::default(),
+    };
     let fragment = roles::render_settings(
         spec.role,
         &Placeholders {
             tiller,
             worktree,
             scratch,
+            home,
+            pool,
+            checkouts,
             default_branch: spec.default_branch.into(),
             network_allow: spec.network_allow.to_vec(),
             no_mistakes_socket: spec.no_mistakes_socket.map(str::to_owned),
-            ..Placeholders::default()
         },
     )?;
     let fragment = serde_json::to_vec_pretty(&fragment)?;
@@ -280,9 +307,12 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
         .iter()
         .map(|w| sh_quote(w))
         .collect();
+    let what = match spec.run_id {
+        "" => format!("session {}", spec.session_id),
+        run => format!("run {run}"),
+    };
     let script = format!(
-        "#!/bin/sh\n# tiller spawn: run {run}, {role}. Regenerated on every launch; edits are lost.\ncd {cwd} || exit 1\nexec env {env} \\\n  {argv}\n",
-        run = spec.run_id,
+        "#!/bin/sh\n# tiller: {what}, {role}. Regenerated on every launch; edits are lost.\ncd {cwd} || exit 1\nexec env {env} \\\n  {argv}\n",
         role = spec.role.name(),
         cwd = sh_quote(&spec.worktree.to_string_lossy()),
         env = env.join(" "),

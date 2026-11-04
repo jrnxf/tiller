@@ -28,6 +28,7 @@
 pub mod config;
 pub mod dispatch;
 pub mod launch;
+pub mod orchestrator;
 pub mod pool;
 pub mod readings;
 
@@ -376,7 +377,8 @@ fn place(
         scratch: &scratch,
         model: &run.model,
         effort: run.effort,
-        brief: &brief,
+        brief: Some(&brief),
+        roots: None,
         tiller: world.tiller,
         default_branch: &project.default_branch,
         network_allow: &world.config.spawn.network_allow,

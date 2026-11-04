@@ -1318,3 +1318,249 @@ fn cleanup_never_closes_a_pane_another_session_holds() {
     );
     assert_eq!(cleaned.returned.as_deref(), Some(spawned.worktree.as_str()));
 }
+
+/// A rig whose config names the roots an orchestrator start needs, with the
+/// fleet's orchestrator ended so the project has none.
+fn orchestrator_rig() -> (Rig, PathBuf) {
+    let mut rig = Rig::new();
+    let root = rig.repo.root.path().to_owned();
+    rig.config = config(
+        &rig.repo.checkout,
+        &format!(
+            "\n[spawn]\npool_root = {:?}\ncheckouts_root = {:?}\n",
+            root.join("pool").to_string_lossy(),
+            root.to_string_lossy(),
+        ),
+    );
+    let id = rig.fleet.orchestrator_session.clone();
+    rig.fleet.store.session_end(&owner(), &id, "x").unwrap();
+    let homes = rig.fleet.dir.path().join("homes");
+    (rig, homes)
+}
+
+fn start_orchestrator(
+    rig: &mut Rig,
+    homes: &Path,
+    ctx: &Ctx,
+) -> Result<Applied<orchestrator::Orchestrator>> {
+    let world = world!(rig);
+    orchestrator::start(&mut rig.fleet.store, ctx, &world, homes, "alpha")
+}
+
+#[test]
+fn orchestrator_start_launches_in_a_new_workspace() {
+    let (mut rig, homes) = orchestrator_rig();
+    let started = start_orchestrator(&mut rig, &homes, &owner()).unwrap();
+    assert!(!started.replayed);
+    let value = &started.value;
+    let pane = value.pane_id.clone().unwrap();
+    assert_eq!(value.session.pane_id.as_deref(), Some(pane.as_str()));
+    assert_eq!(value.session.role, tiller_core::domain::Role::Orchestrator);
+    assert!(value.session.run_id.is_none());
+    assert!(
+        value
+            .session
+            .config_hash
+            .as_deref()
+            .is_some_and(|h| h.len() == 64)
+    );
+    assert!(value.warning.is_none(), "{:?}", value.warning);
+
+    // A new workspace in the checkout, named for the project, with the
+    // tokens that name the session.
+    let workspace = value.workspace_id.clone().unwrap();
+    assert!(rig.workspace_ids().contains(&workspace));
+    let tokens = rig.herdr.fake_pane(&pane).tokens;
+    assert_eq!(tokens.get("role").map(String::as_str), Some("orchestrator"));
+    assert_eq!(tokens.get("project").map(String::as_str), Some("alpha"));
+
+    // The home exists, private, and the launch files are the worker form
+    // with no run and no brief.
+    let home = homes.join("alpha");
+    assert_eq!(value.home.as_deref(), Some(home.to_string_lossy().as_ref()));
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&home).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
+    let dir = rig.scratch.join(&value.session.id);
+    let script = std::fs::read_to_string(dir.join("launch.sh")).unwrap();
+    assert!(script.contains("TILLER_RUN_ID=''"), "{script}");
+    assert!(script.contains(&format!("TILLER_SESSION_ID='{}'", value.session.id)));
+    assert!(script.contains("TILLER_ROLE='orchestrator'"));
+    assert!(script.contains("'--permission-mode' 'default'"), "{script}");
+    assert!(!script.contains(launch::FIRST_PROMPT), "{script}");
+    assert!(script.contains(&format!("cd '{}'", rig.repo.checkout.display())));
+    let prompt = std::fs::read_to_string(dir.join("prompt.md")).unwrap();
+    assert!(!prompt.contains("# Your brief"));
+    let settings = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+    for placeholder in ["<home>", "<pool>", "<checkouts>"] {
+        assert!(
+            !settings.contains(placeholder),
+            "{placeholder} in {settings}"
+        );
+    }
+    assert!(settings.contains(&home.to_string_lossy().into_owned()));
+
+    // The tokens go out before the launch line, which runs the script.
+    let calls = rig.herdr.calls();
+    let at = |prefix: &str| {
+        calls
+            .iter()
+            .position(|c| c.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no {prefix} in {calls:?}"))
+    };
+    let line = format!("send_text {pane} sh '{}'", dir.join("launch.sh").display());
+    assert!(at("report_tokens") < at(&line));
+    assert!(at(&line) < at("send_enter"));
+
+    // Spawn now finds a live orchestrator.
+    let live = tiller_core::state::outbox::live_orchestrator(rig.fleet.store.conn(), "alpha")
+        .unwrap()
+        .unwrap();
+    assert_eq!(live.id, value.session.id);
+}
+
+#[test]
+fn a_second_orchestrator_start_returns_the_first() {
+    let (mut rig, homes) = orchestrator_rig();
+    let first = start_orchestrator(&mut rig, &homes, &owner()).unwrap();
+    let workspaces = rig.workspace_ids().len();
+    let daemon = Ctx::new(Actor::Daemon);
+    let second = start_orchestrator(&mut rig, &homes, &daemon).unwrap();
+    assert!(second.replayed);
+    assert!(second.events.is_empty());
+    assert_eq!(second.value.session.id, first.value.session.id);
+    assert_eq!(second.value.workspace_id, first.value.workspace_id);
+    assert!(second.value.warning.is_none(), "{:?}", second.value.warning);
+    assert_eq!(rig.workspace_ids().len(), workspaces, "no second workspace");
+}
+
+#[test]
+fn orchestrator_start_never_types_into_an_old_orchestrator_pane() {
+    let (mut rig, homes) = orchestrator_rig();
+    // The ended orchestrator's pane shows no agent, its tokens intact: it
+    // may hold a shell or any other program, so it is left alone.
+    let pane = rig.fleet.orchestrator_pane.clone();
+    rig.herdr.set_screen(&pane, Screen::Shell);
+    rig.herdr.set_tokens(
+        &pane,
+        [("project", "alpha"), ("role", "orchestrator")]
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect(),
+    );
+    let started = start_orchestrator(&mut rig, &homes, &owner()).unwrap();
+    assert_ne!(started.value.pane_id.as_deref(), Some(pane.as_str()));
+    assert_ne!(started.value.workspace_id.as_deref(), Some("w1"));
+    let typed = format!("send_text {pane} ");
+    assert!(!rig.herdr.calls().iter().any(|c| c.starts_with(&typed)));
+}
+
+#[test]
+fn orchestrator_start_is_the_owner_s_or_the_daemon_s() {
+    let (mut rig, homes) = orchestrator_rig();
+    let worker = Ctx::new(Actor::Session(rig.fleet.orchestrator_session.clone()));
+    let error = start_orchestrator(&mut rig, &homes, &worker).unwrap_err();
+    assert!(
+        matches!(error, SpawnError::State(tiller_core::Error::Forbidden(_))),
+        "{error:?}"
+    );
+    assert!(rig.herdr.calls().is_empty(), "{:?}", rig.herdr.calls());
+}
+
+#[test]
+fn orchestrator_start_needs_its_roots_and_a_home_apart() {
+    let (mut rig, homes) = orchestrator_rig();
+    let checkout = rig.repo.checkout.clone();
+    rig.config = config(&checkout, "");
+    let error = start_orchestrator(&mut rig, &homes, &owner()).unwrap_err();
+    assert!(refusal(&error).contains("spawn.pool_root"), "{error}");
+
+    // A home inside the checkouts root would lose to its deny rule.
+    let root = rig.repo.root.path().to_owned();
+    rig.config = config(
+        &checkout,
+        &format!(
+            "\n[spawn]\npool_root = {:?}\ncheckouts_root = {:?}\n",
+            root.join("pool").to_string_lossy(),
+            root.to_string_lossy(),
+        ),
+    );
+    let inside = root.join("homes");
+    let error = start_orchestrator(&mut rig, &inside, &owner()).unwrap_err();
+    assert!(
+        refusal(&error).contains("overlaps spawn.checkouts_root"),
+        "{error}"
+    );
+    assert!(!inside.exists());
+
+    // `..` could hide a home inside a root from `starts_with`.
+    let sneaky = root.join("pool").join("..").join("homes");
+    let error = start_orchestrator(&mut rig, &sneaky, &owner()).unwrap_err();
+    assert!(refusal(&error).contains("without `..`"), "{error}");
+
+    // The orchestrator's scratch would lose to the same deny rules.
+    rig.scratch = root.join("pool").join("runs");
+    let error = start_orchestrator(&mut rig, &homes, &owner()).unwrap_err();
+    assert!(
+        refusal(&error).contains("spawn.scratch_root") && refusal(&error).contains("overlaps"),
+        "{error}"
+    );
+    assert!(
+        rig.herdr
+            .calls()
+            .iter()
+            .all(|c| !c.starts_with("create_workspace"))
+    );
+    assert!(
+        tiller_core::state::outbox::live_orchestrator(rig.fleet.store.conn(), "alpha")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn an_orchestrator_start_that_cannot_open_a_pane_leaves_no_new_home() {
+    let (mut rig, homes) = orchestrator_rig();
+    rig.herdr.refuse("create_workspace");
+    let error = start_orchestrator(&mut rig, &homes, &owner()).unwrap_err();
+    assert!(matches!(error, SpawnError::Herdr(_)), "{error:?}");
+    assert!(!homes.join("alpha").exists());
+
+    // A home an earlier orchestrator wrote to is kept.
+    std::fs::create_dir_all(homes.join("alpha")).unwrap();
+    std::fs::write(homes.join("alpha").join("notes.md"), "keep\n").unwrap();
+    start_orchestrator(&mut rig, &homes, &owner()).unwrap_err();
+    assert!(homes.join("alpha").join("notes.md").exists());
+}
+
+#[test]
+fn an_orchestrator_launch_that_fails_ends_its_session_and_closes_its_pane() {
+    let (mut rig, homes) = orchestrator_rig();
+    rig.herdr.refuse("send_text");
+    let before = rig.workspace_ids();
+    let error = start_orchestrator(&mut rig, &homes, &owner()).unwrap_err();
+    assert!(matches!(error, SpawnError::Herdr(_)), "{error:?}");
+    let calls = rig.herdr.calls();
+    assert!(
+        calls.iter().any(|c| c.starts_with("close_pane")),
+        "{calls:?}"
+    );
+    assert!(
+        tiller_core::state::outbox::live_orchestrator(rig.fleet.store.conn(), "alpha")
+            .unwrap()
+            .is_none()
+    );
+    let reason: String = rig
+        .fleet
+        .store
+        .conn()
+        .query_row(
+            "SELECT end_reason FROM sessions WHERE role = 'orchestrator' ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(reason, orchestrator::LAUNCH_FAILED);
+    assert_eq!(rig.workspace_ids(), before, "the new workspace is gone");
+    assert!(!rig.scratch.exists() || std::fs::read_dir(&rig.scratch).unwrap().next().is_none());
+}

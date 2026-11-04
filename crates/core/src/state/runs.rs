@@ -81,6 +81,9 @@ pub struct EndRun {
 /// An orchestrator session to start (`tiller orchestrator start`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct NewOrchestrator {
+    /// The session id, when the caller minted it first: the launch files
+    /// name the session before its row exists. A ULID; `None` mints one.
+    pub id: Option<String>,
     pub project_id: String,
     pub pane_id: Option<String>,
     pub claude_session_id: Option<String>,
@@ -162,6 +165,27 @@ fn herdr_idle_held(session: &Session, new: &NewObservation) -> bool {
 /// The live session of a run.
 pub fn live_session(conn: &Connection, run_id: &str) -> Result<Option<Session>> {
     find(conn, "run_id = ?1 AND ended_at IS NULL", &[&run_id])
+}
+
+/// Where `herdr agent focus` finds a session's agent (`tiller agent focus`,
+/// the board's "Open in herdr"): its pane, from the `panes` cache first and
+/// the session's own `pane_id` after, and the saved herdr machine of a
+/// remote host. An ended session is refused: its pane may hold another.
+pub fn focus_target(conn: &Connection, session: &Session) -> Result<(String, Option<String>)> {
+    if session.ended_at.is_some() {
+        return Err(Error::refused("session", &session.id, "the session ended"));
+    }
+    let host: Host = get(conn, "host", &session.host_id)?;
+    let pane = find::<Pane>(conn, "session_id = ?1 AND gone_at IS NULL", &[&session.id])?
+        .map(|pane| pane.pane_id)
+        .or(session.pane_id.clone())
+        .ok_or_else(|| {
+            Error::refused("session", &session.id, "the session has no pane to focus")
+        })?;
+    let machine = (host.kind == HostKind::Remote)
+        .then_some(host.herdr_machine)
+        .flatten();
+    Ok((pane, machine))
 }
 
 fn load_run(tx: &Tx<'_>, run: &str) -> Result<Run> {
@@ -790,7 +814,11 @@ impl Store {
                     format!("orchestrator session {} is live", live.id),
                 ));
             }
-            let id = ids::new_ulid();
+            let id = match &new.id {
+                Some(id) if ids::is_ulid(id) => id.clone(),
+                Some(id) => return Err(Error::Usage(format!("session id {id:?} is not a ULID"))),
+                None => ids::new_ulid(),
+            };
             if let Some(claude_id) = &new.claude_session_id {
                 take_claude_id(tx, claude_id, &id)?;
             }

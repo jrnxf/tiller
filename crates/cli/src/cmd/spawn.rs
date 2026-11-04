@@ -1,5 +1,6 @@
-//! `tiller spawn`, and the tools it, `tiller done` and `tiller run clean`
-//! reach outside `state.db` with (T4.2): treehouse, herdr and git.
+//! `tiller spawn` and `tiller orchestrator start`, and the tools they,
+//! `tiller done`, `tiller run clean` and `tiller agent focus` reach outside
+//! `state.db` with (T4.2): treehouse, herdr and git.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -13,8 +14,8 @@ use tiller_core::state::resolve_card;
 use tiller_herdr::client::{Cli, HerdrError};
 use tiller_reconcile::git::GitScanner;
 
-use super::KeyArg;
 use super::admin::load_config;
+use super::{KeyArg, resolve_session};
 use crate::app::{App, Done, Failure, Outcome};
 
 #[derive(Args, Debug)]
@@ -71,6 +72,14 @@ pub struct Tools {
     scratch: PathBuf,
 }
 
+/// `~/.local/state/tiller`, where the scratch and orchestrator roots
+/// default to; `key` is the setting that would make it unnecessary.
+fn state_dir(key: &str) -> Result<PathBuf, Failure> {
+    std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".local/state/tiller"))
+        .ok_or_else(|| Failure::usage(format!("HOME is not set; set {key} in config.toml")))
+}
+
 fn words(words: &[String]) -> Vec<OsString> {
     words.iter().map(OsString::from).collect()
 }
@@ -84,11 +93,7 @@ impl Tools {
         }
         let scratch = match &config.spawn.scratch_root {
             Some(root) => root.clone(),
-            None => std::env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(".local/state/tiller/runs"))
-                .ok_or_else(|| {
-                    Failure::usage("HOME is not set; set spawn.scratch_root in config.toml")
-                })?,
+            None => state_dir("spawn.scratch_root")?.join("runs"),
         };
         Ok(Self {
             pool: Treehouse::new(words(&config.spawn.treehouse)),
@@ -209,4 +214,47 @@ pub fn done(
         agents::done(store, &app.ctx(), &GitScanner::new(), run, outcome).map_err(failure)?;
     let warning = applied.value.kept.clone();
     Ok(Outcome::applied_as(applied, |ended| json!(ended.run)).with_warning(warning))
+}
+
+/// `tiller orchestrator start <project>`: the live orchestrator, or a new
+/// one launched in the project's herdr workspace.
+pub fn orchestrator_start(app: &App, project: &str) -> Done {
+    let tools = Tools::load(app)?;
+    let homes = match &tools.config.spawn.orchestrator_home {
+        Some(root) => root.clone(),
+        None => state_dir("spawn.orchestrator_home")?.join("orchestrators"),
+    };
+    let mut store = app.write()?;
+    let applied = agents::orchestrator::start(
+        &mut store,
+        &app.ctx(),
+        &tools.world(None, None),
+        &homes,
+        project,
+    )
+    .map_err(failure)?;
+    let warning = applied.value.warning.clone();
+    Ok(Outcome::applied(applied).with_warning(warning))
+}
+
+/// `tiller agent focus <run|session>`: focuses the agent's pane in the
+/// herdr client, on its saved machine for a remote host. Writes nothing.
+pub fn focus(app: &App, target: &str) -> Done {
+    app.require_owner("tiller agent focus")?;
+    let tools = Tools::load(app)?;
+    let store = app.read()?;
+    let session = resolve_session(&store, target)?;
+    let (pane, machine) = tiller_core::state::runs::focus_target(store.conn(), &session)?;
+    let herdr = match &machine {
+        Some(machine) => tools.herdr.clone().on_machine(machine),
+        None => tools.herdr.clone(),
+    };
+    herdr
+        .focus_agent(&pane)
+        .map_err(|error| failure(SpawnError::Herdr(error)))?;
+    Ok(Outcome::read(json!({
+        "session_id": session.id,
+        "pane_id": pane,
+        "machine": machine,
+    })))
 }

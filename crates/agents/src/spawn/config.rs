@@ -146,6 +146,16 @@ pub struct Paths {
     pub network_allow: Vec<String>,
     /// The `no-mistakes` daemon socket, when this host has one.
     pub no_mistakes_socket: Option<String>,
+    /// The treehouse pool root, which the orchestrator may not edit
+    /// (`<pool>`). `tiller orchestrator start` needs it.
+    pub pool_root: Option<PathBuf>,
+    /// The root the project checkouts sit under, which the orchestrator may
+    /// not edit (`<checkouts>`). `tiller orchestrator start` needs it.
+    pub checkouts_root: Option<PathBuf>,
+    /// The root of the orchestrator homes; a project's is
+    /// `<orchestrator_home>/<project>`. Outside the pool and the checkouts.
+    /// Empty means `~/.local/state/tiller/orchestrators`.
+    pub orchestrator_home: Option<PathBuf>,
 }
 
 impl Default for Paths {
@@ -158,6 +168,9 @@ impl Default for Paths {
             herdr_socket: None,
             network_allow: ["github.com", "api.github.com"].map(String::from).into(),
             no_mistakes_socket: None,
+            pool_root: None,
+            checkouts_root: None,
+            orchestrator_home: None,
         }
     }
 }
