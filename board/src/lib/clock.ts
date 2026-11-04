@@ -45,3 +45,12 @@ export function formatLisbon(iso: string | null): string | null {
   const parts = Object.fromEntries(lisbonParts.formatToParts(date).map((p) => [p.type, p.value]));
   return `${parts.weekday} ${parts.hour}:${parts.minute}`;
 }
+
+// The same, rounded to the nearest minute. A reset is stamped a hair before the
+// hour (13:59:59.6 for 14:00), and the label must not read 13:59.
+export function formatLisbonRounded(iso: string | null): string | null {
+  if (!iso) return null;
+  const at = Date.parse(iso);
+  if (Number.isNaN(at)) return null;
+  return formatLisbon(new Date(Math.round(at / 60_000) * 60_000).toISOString());
+}

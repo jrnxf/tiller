@@ -890,6 +890,83 @@ kbd {
   background: repeating-linear-gradient(90deg, var(--line-3) 0 4px, transparent 4px 8px);
 }
 
+/* The sidebar card: the fill is what is left, the blue tick is the share of the
+   window still to come (where an even spend would stand now). */
+
+.qfoot .qmeter {
+  width: 100%;
+  flex: 1;
+  min-width: 0;
+}
+
+.qfoot .qmeter.wide {
+  height: 6px;
+  border-radius: 3px;
+  flex: none;
+}
+
+.qfoot .qmeter u {
+  background: var(--blue);
+}
+
+.qf-run {
+  margin-left: auto;
+  font-size: 11.5px;
+  font-weight: normal;
+  color: var(--fg-3);
+  white-space: nowrap;
+}
+
+.qf-why {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 11.5px;
+  color: var(--fg-3);
+}
+
+.qf-why.warn > :first-child {
+  color: var(--yellow-text);
+}
+
+.qf-why.bad > :first-child {
+  color: var(--red-text);
+}
+
+.qrows {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: 7px;
+  border-top: 1px solid var(--line-1);
+}
+
+.qrow {
+  display: grid;
+  grid-template-columns: 38px 1fr 30px 38px;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--fg-3);
+}
+
+.qr-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qr-pct,
+.qr-reset {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.qr-pct {
+  color: var(--fg-1);
+}
+
 /* Top bar */
 
 .top {
@@ -1171,6 +1248,74 @@ kbd {
 .palette-empty {
   padding: 10px;
   color: var(--fg-3);
+}
+
+/* Settings: a Raycast-style list of settings, each opening a sub-page of options */
+
+.settings-backdrop {
+  /* Light enough that a previewed theme or density is judged on the real board. */
+  background: color-mix(in srgb, #000 8%, transparent);
+}
+
+.palette.settings {
+  width: min(400px, calc(100% - 32px));
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line-1);
+  color: var(--fg-3);
+  font-size: var(--fs-small);
+}
+
+.settings-head b {
+  color: var(--fg-1);
+  font-weight: var(--w-medium);
+}
+
+.settings-head span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-head .ib {
+  margin-left: -8px;
+}
+
+.settings-head .ib .icon {
+  transform: rotate(180deg);
+}
+
+.settings-list {
+  outline: none;
+}
+
+.settings-list li[role="option"]:hover:not([aria-selected="true"]) {
+  background: transparent;
+}
+
+.settings-list li[role="option"] > .icon {
+  color: var(--fg-3);
+}
+
+.settings-value {
+  margin-left: auto;
+  color: var(--fg-3);
+  font-size: var(--fs-small);
+}
+
+.settings-check {
+  display: inline-block;
+  width: 16px;
+  flex: none;
+  color: var(--accent-text);
+  text-align: center;
 }
 
 /* Phones: the sidebar becomes a drawer */

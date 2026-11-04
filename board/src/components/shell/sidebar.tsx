@@ -8,7 +8,15 @@ import { prefsStore } from "../../lib/prefs";
 import { attentionCount, scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
 import { Section } from "../states/section";
-import { AgentsIcon, BoardIcon, InboxIcon, MemoryIcon, PulseIcon, SearchIcon } from "./icons";
+import {
+  AgentsIcon,
+  BoardIcon,
+  InboxIcon,
+  MemoryIcon,
+  PulseIcon,
+  SearchIcon,
+  SettingsIcon,
+} from "./icons";
 import { MachinesSection } from "./machines-section";
 import { ProjectsSection } from "./projects-section";
 import { QuotaFooter, QuotaUnavailable } from "./quota-footer";
@@ -97,10 +105,12 @@ export function Sidebar({
   activeHost,
   onNavigate,
   onOpenPalette,
+  onOpenSettings,
 }: {
   activeHost: string | undefined;
   onNavigate: () => void;
   onOpenPalette: () => void;
+  onOpenSettings: () => void;
 }) {
   return (
     <aside className="side" aria-label="Sidebar">
@@ -149,6 +159,18 @@ export function Sidebar({
           <QuotaFooter />
         </Section>
       </div>
+      <button
+        type="button"
+        className="nav settings-btn"
+        aria-haspopup="dialog"
+        onClick={() => {
+          onNavigate();
+          onOpenSettings();
+        }}
+      >
+        <SettingsIcon />
+        <span className="lbl">Settings</span>
+      </button>
     </aside>
   );
 }

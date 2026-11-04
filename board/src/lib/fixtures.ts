@@ -141,6 +141,24 @@ function sessionWindow(now: number): QuotaWindow {
   };
 }
 
+function modelWindow(now: number): QuotaWindow {
+  return {
+    label: "claude:model:fable",
+    title: "Fable week",
+    kind: "model",
+    percent_remaining: 94,
+    resets_at: "2026-11-03T14:00:00.000Z",
+    pace: "behind",
+    reserve: 22,
+    burn_multiple: 0.4,
+    elapsed_percent: 71,
+    projected_exhaustion_at: null,
+    fetched_at: minutes(now, -2),
+    stale: false,
+    dot: "green",
+  };
+}
+
 function quotaFor(scenario: Scenario, now: number): QuotaResponse {
   switch (scenario) {
     case "quota-amber":
@@ -153,6 +171,7 @@ function quotaFor(scenario: Scenario, now: number): QuotaResponse {
             reserve: -9,
           }),
           sessionWindow(now),
+          modelWindow(now),
         ],
       };
     case "quota-red":
@@ -166,6 +185,7 @@ function quotaFor(scenario: Scenario, now: number): QuotaResponse {
             projected_exhaustion_at: "2026-11-02T20:00:00.000Z",
           }),
           sessionWindow(now),
+          modelWindow(now),
         ],
       };
     case "quota-grey":
@@ -173,10 +193,11 @@ function quotaFor(scenario: Scenario, now: number): QuotaResponse {
         windows: [
           weeklyWindow(now, { stale: true, fetched_at: minutes(now, -95) }),
           sessionWindow(now),
+          modelWindow(now),
         ],
       };
     default:
-      return { windows: [weeklyWindow(now), sessionWindow(now)] };
+      return { windows: [weeklyWindow(now), sessionWindow(now), modelWindow(now)] };
   }
 }
 

@@ -1,5 +1,5 @@
 import type { QuotaResponse, QuotaWindow, SignalsResponse, SignalsWeek } from "../../lib/api-types";
-import { formatLisbon } from "../../lib/clock";
+import { formatLisbonRounded } from "../../lib/clock";
 import { lisbonDay, lisbonWeekLabel } from "./lisbon";
 
 // Everything the Health page says is computed here from `GET /api/v1/signals`
@@ -330,7 +330,7 @@ export function quotaBlockOf(quota: QuotaResponse): QuotaBlock | null {
     percentLeft: left === null ? null : Math.round(left),
     percentUsed: left === null ? null : 100 - left,
     elapsedPercent: week.elapsed_percent === null ? null : clamp(week.elapsed_percent),
-    resetsShort: formatLisbon(week.resets_at),
+    resetsShort: formatLisbonRounded(week.resets_at),
     resetsFull: week.resets_at ? lisbonLong(week.resets_at) : null,
     verdict: verdict[week.dot],
     reserve:

@@ -223,7 +223,10 @@ test("the quota block says it in a sentence, with the weekday in Lisbon time", (
     reserve: "reserve 8 points",
     burn: "burn 0.8x the even pace",
   });
-  expect(block?.others).toEqual([{ label: "Session", percentLeft: 64 }]);
+  expect(block?.others).toEqual([
+    { label: "Session", percentLeft: 64 },
+    { label: "Fable week", percentLeft: 94 },
+  ]);
 });
 
 test("the quota block warns when spending runs ahead or the feed is old, and copes with no weekly window", () => {

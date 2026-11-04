@@ -8,7 +8,6 @@ import { projectColor } from "../../lib/project-color";
 import { boardQuery, machinesQuery, projectsQuery } from "../../lib/queries";
 import { prefsStore, updatePrefs } from "../../lib/prefs";
 import { scopedProjects } from "../../lib/scope";
-import type { Density, ThemePreference } from "../../lib/prefs";
 import { useStore } from "../../lib/store";
 import { ReconnectingBanner } from "../states/reconnecting-banner";
 import { Section } from "../states/section";
@@ -21,17 +20,6 @@ const TITLES: Record<string, string> = {
   "/memory": "Memory",
   "/health": "Health",
 };
-
-const THEMES: { value: ThemePreference; label: string }[] = [
-  { value: "system", label: "System" },
-  { value: "light", label: "Light" },
-  { value: "dark", label: "Dark" },
-];
-
-const DENSITIES: { value: Density; label: string }[] = [
-  { value: "comfortable", label: "Comfortable" },
-  { value: "compact", label: "Compact" },
-];
 
 interface HeaderProps {
   activeHost: string | undefined;
@@ -133,30 +121,6 @@ export function Header({ activeHost, menuOpen, onOpenMenu }: HeaderProps) {
             <BoardFilterSegment />
           </Section>
         ) : null}
-        <div className="seg hide-sm" role="group" aria-label="Theme">
-          {THEMES.map((theme) => (
-            <button
-              key={theme.value}
-              type="button"
-              aria-pressed={prefs.theme === theme.value}
-              onClick={() => updatePrefs({ theme: theme.value })}
-            >
-              {theme.label}
-            </button>
-          ))}
-        </div>
-        <div className="seg hide-sm" role="group" aria-label="Density">
-          {DENSITIES.map((density) => (
-            <button
-              key={density.value}
-              type="button"
-              aria-pressed={prefs.density === density.value}
-              onClick={() => updatePrefs({ density: density.value })}
-            >
-              {density.label}
-            </button>
-          ))}
-        </div>
       </header>
       <ReconnectingBanner />
       {pathname === "/" ? (

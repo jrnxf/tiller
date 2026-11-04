@@ -373,7 +373,7 @@ about 3 min of the developer's time
 
 ## CP4: Live board (developer, 15-20 min)
 
-- [ ] Developer uses the live board against the daemon
+- [x] Developer uses the live board against the daemon
 
 ### T4.5 Handoff and resume
 `sonnet` high - 1.5-2 h - after T2.2
