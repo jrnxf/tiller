@@ -283,11 +283,11 @@ about 3 min of the developer's time
 - [x] axum board API: HTTP plus one SSE stream; `index.html` with the boot snapshot; hashed assets with `Cache-Control: immutable`
 - [x] `contract/openapi.json` through utoipa, CI fails when stale; localhost health endpoint
 - [x] home-manager module: launchd on macOS, systemd user unit on Linux, through a dotfiles PR
-- [ ] Check: survives a kill and a reboot on both personal hosts
-  - Mac reboot passed (Wednesday 2026-11-04): the daemon restarted on its own, the board answered 200, and health was ok once herdr was up. The Linux host reboot check is still owed.
+- [x] Check: survives a kill and a reboot on both personal hosts
+  - Passed Wednesday 2026-11-04 on both hosts. Mac reboot: the daemon restarted on its own, the board answered 200, and health was ok once herdr was up. Linux host reboot: herdr started at boot through the `herdr-server` user unit, tiller was active, the board answered 200, and health was ok:true.
 - [x] Check: idle CPU and memory measured and reported
 - [x] Check: browsers resume SSE after a daemon restart, no reload, no missed event
-- [ ] Delivered
+- [x] Delivered
 
 ### T3.2 Board views
 `sonnet` high - 3-4 h - after T3.1
