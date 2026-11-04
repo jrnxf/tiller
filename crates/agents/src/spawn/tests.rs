@@ -203,6 +203,8 @@ pub(crate) struct Rig {
     pub(crate) config: SpawnConfig,
     pub(crate) tiller: PathBuf,
     pub(crate) scratch: PathBuf,
+    /// A Claude config dir of the rig's own, never the real one.
+    pub(crate) claude: ClaudeConfig,
     pub(crate) disk_free_mb: Option<i64>,
 }
 
@@ -215,6 +217,7 @@ macro_rules! world {
             scanner: &$rig.scanner,
             tiller: &$rig.tiller,
             scratch_root: &$rig.scratch,
+            claude_config: &$rig.claude,
             ram_free_mb: Some(64_000),
             disk_free_mb: $rig.disk_free_mb,
         }
@@ -241,6 +244,7 @@ impl Rig {
             config: config(&repo.checkout, extra),
             tiller: PathBuf::from("/home/user/.nix-profile/bin/tiller"),
             scratch: fleet.dir.path().join("runs"),
+            claude: ClaudeConfig::at(fleet.dir.path().join("claude")),
             fleet,
             repo,
             pool,
@@ -315,6 +319,16 @@ impl Rig {
         let run = self.run(run);
         let world = world!(self);
         cleanup(&mut self.fleet.store, &owner(), &world, &run).map(|a| a.value)
+    }
+
+    /// Whether the rig's Claude config records workspace trust for `dir`.
+    pub(crate) fn trusted(&self, dir: &Path) -> bool {
+        let Ok(text) = std::fs::read_to_string(self.claude.store().unwrap()) else {
+            return false;
+        };
+        let config: Value = serde_json::from_str(&text).unwrap();
+        let dir = std::fs::canonicalize(dir).unwrap();
+        config["projects"][dir.to_string_lossy().as_ref()][trust::FLAG] == true
     }
 
     pub(crate) fn workspace_ids(&self) -> Vec<String> {
@@ -457,6 +471,40 @@ fn spawn_creates_worktree_pane_and_run() {
     assert!(script.contains(&format!("TILLER_SESSION_ID='{}'", spawned.session.id)));
     assert!(script.contains("TILLER_ROLE='builder'"));
     assert!(script.contains(&format!("cd '{}'", spawned.worktree)));
+
+    // The session starts past the trust dialog: the worktree is trusted in
+    // the Claude config the script hands it.
+    assert!(rig.trusted(Path::new(&spawned.worktree)));
+    let config = rig.claude.forwarded().unwrap().display().to_string();
+    assert!(
+        script.contains(&format!("CLAUDE_CONFIG_DIR='{config}'")),
+        "{script}"
+    );
+    assert!(!script.contains("-u CLAUDE_CONFIG_DIR"), "{script}");
+}
+
+#[test]
+fn spawn_refuses_when_trust_cannot_be_recorded() {
+    let mut rig = Rig::new();
+    let store = rig.claude.store().unwrap();
+    std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+    std::fs::write(&store, "{\"projects\": [").unwrap();
+    let card = rig.card(CardKind::Ship, None);
+    let ctx = rig.orchestrator();
+    let error = rig
+        .try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("workspace-trust dialog"), "{error}");
+    // Nothing was typed and the owner's config was left as it was.
+    let calls = rig.herdr.calls();
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.starts_with("create_workspace") || c.starts_with("send_text")),
+        "{calls:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&store).unwrap(), "{\"projects\": [");
 }
 
 #[test]
@@ -607,6 +655,7 @@ fn race(rig: &Rig, cards: &[Card]) -> Vec<Result<Outcome>> {
                 let herdr_file = servers.path().join(format!("herdr-{i}.json"));
                 let config = rig.config.clone();
                 let scratch = rig.scratch.clone();
+                let claude = rig.claude.clone();
                 let tiller = rig.tiller.clone();
                 let ctx = rig.orchestrator();
                 let request = Rig::request(card, RunRole::Builder);
@@ -623,6 +672,7 @@ fn race(rig: &Rig, cards: &[Card]) -> Vec<Result<Outcome>> {
                         scanner: &scanner,
                         tiller: &tiller,
                         scratch_root: &scratch,
+                        claude_config: &claude,
                         ram_free_mb: Some(64_000),
                         disk_free_mb: Some(64_000),
                     };
@@ -1390,6 +1440,7 @@ fn orchestrator_start_launches_in_a_new_workspace() {
     assert!(script.contains("'--permission-mode' 'auto'"), "{script}");
     assert!(!script.contains(launch::FIRST_PROMPT), "{script}");
     assert!(script.contains(&format!("cd '{}'", rig.repo.checkout.display())));
+    assert!(rig.trusted(&rig.repo.checkout));
     let prompt = std::fs::read_to_string(dir.join("prompt.md")).unwrap();
     assert!(!prompt.contains("# Your brief"));
     let settings = std::fs::read_to_string(dir.join("settings.json")).unwrap();

@@ -339,6 +339,7 @@ pub fn resume(
             model: &run.model,
             effort: run.effort,
             claude: &world.config.spawn.claude,
+            claude_config: world.claude_config,
         },
         Start::Resume {
             claude_session_id: &claude_id,
@@ -742,6 +743,7 @@ fn start_again(
                 network_allow: &world.config.spawn.network_allow,
                 no_mistakes_socket: world.config.spawn.no_mistakes_socket.as_deref(),
                 claude: &world.config.spawn.claude,
+                claude_config: world.claude_config,
                 claude_version: claude_version.as_deref(),
                 memory: &[],
                 note: Some(note),
@@ -775,6 +777,7 @@ fn start_again(
                 model: &run.model,
                 effort: run.effort,
                 claude: &world.config.spawn.claude,
+                claude_config: world.claude_config,
             },
             Start::Fresh { note },
         )?,

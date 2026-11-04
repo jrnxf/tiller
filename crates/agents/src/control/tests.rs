@@ -341,9 +341,12 @@ fn resume_relaunches_claude_resume_in_its_pane() {
     // Claude died; the shell is left in the pane.
     rig.herdr.set_screen(&spawned.pane_id, Screen::Shell);
     let claude = boot(&rig, "resume");
+    // A resume records trust again, in case the entry went.
+    std::fs::remove_file(rig.claude.store().unwrap()).unwrap();
 
     let ctx = rig.orchestrator();
     let done = resume_it(&mut rig, &ctx, &patient(), &spawned.run.id).unwrap();
+    assert!(rig.trusted(std::path::Path::new(&spawned.worktree)));
     assert_eq!(
         claude.join().unwrap().as_deref(),
         Some(spawned.session.id.as_str())
@@ -442,6 +445,7 @@ fn relaunch_resumes_worker_in_own_worktree_with_note() {
     let head = git(&worktree, &["rev-parse", "HEAD"]);
     let claude = boot(&rig, "startup");
     let ctx = rig.orchestrator();
+    std::fs::remove_file(rig.claude.store().unwrap()).unwrap();
 
     let done = relaunched(
         relaunch_it(
@@ -495,6 +499,7 @@ fn relaunch_resumes_worker_in_own_worktree_with_note() {
     assert!(text.contains(&new), "{text}");
     assert!(!text.contains("'--resume'"), "{text}");
     assert!(text.contains("tests pass; the docs are left"), "{text}");
+    assert!(rig.trusted(&worktree));
     assert_eq!(rig.events("run.relaunched", &spawned.run.id), 1);
 }
 

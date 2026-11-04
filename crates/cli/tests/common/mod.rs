@@ -98,6 +98,9 @@ impl World {
         let mut command = Command::new(env!("CARGO_BIN_EXE_tiller"));
         command
             .env("TILLER_HOME", self.home())
+            // A launch records workspace trust in Claude's config; keep the
+            // owner's own config out of reach.
+            .env("CLAUDE_CONFIG_DIR", self.dir.path().join("claude"))
             .env_remove("TILLER_DB")
             .env_remove("TILLER_SESSION_ID")
             .env_remove("TILLER_RUN_ID")

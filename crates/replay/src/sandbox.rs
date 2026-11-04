@@ -18,6 +18,7 @@ use std::sync::Mutex;
 use tiller_agents::spawn::World;
 use tiller_agents::spawn::config::SpawnConfig;
 use tiller_agents::spawn::pool::Pool;
+use tiller_agents::spawn::trust::ClaudeConfig;
 use tiller_core::domain::{Boundary, Card, Project};
 use tiller_core::import::Bundle;
 use tiller_core::state::projects::Init;
@@ -47,6 +48,8 @@ pub struct Sandbox {
     /// The `tiller` path written into launch lines; nothing runs it.
     pub tiller: PathBuf,
     pub scratch: PathBuf,
+    /// The Claude config dir launches record trust in, inside the sandbox.
+    pub claude: ClaudeConfig,
     /// The live orchestrator session of each project used so far.
     pub sessions: BTreeMap<String, String>,
     /// The last event before the replay started, so the audit judges only
@@ -106,6 +109,7 @@ impl Sandbox {
         }
         let config = SpawnConfig::from_table(&table)?;
         let herdr = FakeHerdr::new(root.join("herdr.json"));
+        let claude = ClaudeConfig::at(root.join("claude"));
         Ok(Self {
             pool: StubPool::new(root.join("pool")),
             tiller: root.join("bin").join("tiller"),
@@ -116,6 +120,7 @@ impl Sandbox {
             herdr,
             scanner: GitScanner::new(),
             scratch,
+            claude,
             sessions: BTreeMap::new(),
             mark,
         })
@@ -201,6 +206,7 @@ impl Sandbox {
             scanner: &self.scanner,
             tiller: &self.tiller,
             scratch_root: &self.scratch,
+            claude_config: &self.claude,
             ram_free_mb: Some(FREE_MB),
             disk_free_mb: Some(FREE_MB),
         };

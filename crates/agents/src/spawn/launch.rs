@@ -12,7 +12,9 @@
 //! config, the model, the effort, the tiller and Claude Code versions and the
 //! memory revisions rendered (`docs/design/learning-loop.md`, section 5),
 //! so two runs can be compared part by part. The MCP config is the packaged
-//! one (G35).
+//! one (G35). Once the files are written, the launch directory's Claude
+//! Code workspace trust is recorded ([`super::trust`]), so the session
+//! reaches its composer instead of the trust dialog.
 
 use std::fs;
 use std::io::Write;
@@ -26,6 +28,7 @@ use sha2::{Digest, Sha256};
 use tiller_core::domain::Effort;
 
 use super::SpawnError;
+use super::trust::{self, ClaudeConfig};
 use crate::roles::{self, MCP_CONFIG, Placeholders, Role};
 
 /// The first prompt a worker gets; the brief itself is in its instructions.
@@ -71,6 +74,8 @@ pub struct LaunchSpec<'a> {
     pub no_mistakes_socket: Option<&'a str>,
     /// The Claude Code command.
     pub claude: &'a str,
+    /// Where Claude Code keeps the user config the trust is recorded in.
+    pub claude_config: &'a ClaudeConfig,
     /// The Claude Code version, for the manifest ([`claude_version`]).
     pub claude_version: Option<&'a str>,
     /// The memory revisions rendered into the prompt, as `(source id, blob
@@ -93,6 +98,7 @@ pub struct AgainSpec<'a> {
     pub model: &'a str,
     pub effort: Effort,
     pub claude: &'a str,
+    pub claude_config: &'a ClaudeConfig,
 }
 
 /// How that later session starts.
@@ -315,6 +321,7 @@ struct Command<'a> {
     run_id: &'a str,
     worktree: &'a Path,
     claude: &'a str,
+    claude_config: &'a ClaudeConfig,
     model: &'a str,
     effort: Effort,
     mode: &'a str,
@@ -346,22 +353,32 @@ fn argv(command: &Command<'_>, launch: &Launch) -> Vec<String> {
     words
 }
 
-/// The environment every fleet launch sets (`authority.md` section 7).
+/// The environment every fleet launch sets (`authority.md` section 7),
+/// and tiller's `CLAUDE_CONFIG_DIR` when it has one, so the session reads
+/// the config its trust was recorded in. Without one, the script unsets any
+/// the pane inherited, for the same reason.
 fn env(command: &Command<'_>) -> Vec<(&'static str, String)> {
-    vec![
+    let mut env = vec![
         ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1".into()),
         ("TILLER_SESSION_ID", command.session_id.into()),
         ("TILLER_RUN_ID", command.run_id.into()),
         ("TILLER_ROLE", command.role.name().into()),
-    ]
+    ];
+    if let Some(dir) = command.claude_config.forwarded() {
+        env.push(("CLAUDE_CONFIG_DIR", dir.to_string_lossy().into_owned()));
+    }
+    env
 }
 
 /// The launch script's text.
 fn script(command: &Command<'_>, launch: &Launch) -> String {
-    let env: Vec<String> = env(command)
+    let mut env: Vec<String> = env(command)
         .into_iter()
         .map(|(k, v)| format!("{k}={}", sh_quote(&v)))
         .collect();
+    if command.claude_config.forwarded().is_none() {
+        env.insert(0, "-u CLAUDE_CONFIG_DIR".into());
+    }
     let words: Vec<String> = argv(command, launch).iter().map(|w| sh_quote(w)).collect();
     let what = match command.run_id {
         "" => format!("session {}", command.session_id),
@@ -459,6 +476,7 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
             run_id: spec.run_id,
             worktree: spec.worktree,
             claude: spec.claude,
+            claude_config: spec.claude_config,
             model: spec.model,
             effort: spec.effort,
             mode: &mode,
@@ -467,6 +485,8 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
         &launch,
     );
     write_new(&launch.script, text.as_bytes(), 0o700)?;
+    // Last, so a launch refused for any other reason records nothing.
+    trust::record(spec.claude_config, spec.worktree)?;
     launch.line = format!("sh {}", sh_quote(&launch.script.to_string_lossy()));
     Ok(launch)
 }
@@ -522,6 +542,7 @@ pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<String, Spa
             run_id: spec.run_id,
             worktree: spec.worktree,
             claude: spec.claude,
+            claude_config: spec.claude_config,
             model: spec.model,
             effort: spec.effort,
             mode: &mode,
@@ -537,6 +558,7 @@ pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<String, Spa
     }
     write_new(&partial, text.as_bytes(), 0o700)?;
     fs::rename(&partial, &launch.script)?;
+    trust::record(spec.claude_config, spec.worktree)?;
     Ok(format!("sh {}", sh_quote(&launch.script.to_string_lossy())))
 }
 
@@ -573,5 +595,53 @@ mod tests {
         let (mode, note) = effective_mode("claude", "dontAsk");
         assert_eq!(mode, "dontAsk");
         assert!(note.is_none());
+    }
+
+    fn text(claude_config: &ClaudeConfig) -> String {
+        let launch = Launch {
+            prompt: "/home/user/run/prompt.md".into(),
+            settings: "/home/user/run/settings.json".into(),
+            mcp: "/home/user/run/mcp.json".into(),
+            script: "/home/user/run/launch.sh".into(),
+            config_hash: String::new(),
+            manifest: Value::Null,
+            line: String::new(),
+            mode_note: None,
+        };
+        script(
+            &Command {
+                role: Role::Builder,
+                session_id: "s1",
+                run_id: "r1",
+                worktree: Path::new("/home/user/work"),
+                claude: "claude",
+                claude_config,
+                model: "sonnet",
+                effort: Effort::Medium,
+                mode: "dontAsk",
+                start: Vec::new(),
+            },
+            &launch,
+        )
+    }
+
+    #[test]
+    fn the_session_reads_the_config_its_trust_was_recorded_in() {
+        let set = text(&ClaudeConfig::at("/home/user/claude"));
+        assert!(
+            set.contains("exec env CLAUDE_CODE_DISABLE_AUTO_MEMORY='1'"),
+            "{set}"
+        );
+        assert!(
+            set.contains("CLAUDE_CONFIG_DIR='/home/user/claude'"),
+            "{set}"
+        );
+        // Without tiller's own, one the pane inherited is unset.
+        let unset = text(&ClaudeConfig::default());
+        assert!(
+            unset.contains("exec env -u CLAUDE_CONFIG_DIR CLAUDE_CODE"),
+            "{unset}"
+        );
+        assert!(!unset.contains("CLAUDE_CONFIG_DIR="), "{unset}");
     }
 }

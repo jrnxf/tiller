@@ -9,6 +9,7 @@ use clap::Args;
 use serde_json::json;
 use tiller_agents::spawn::config::SpawnConfig;
 use tiller_agents::spawn::pool::Treehouse;
+use tiller_agents::spawn::trust::ClaudeConfig;
 use tiller_agents::spawn::{self as agents, Request, SpawnError, World, readings};
 use tiller_core::state::resolve_card;
 use tiller_herdr::client::{Cli, HerdrError};
@@ -70,6 +71,7 @@ pub struct Tools {
     scanner: GitScanner,
     tiller: PathBuf,
     scratch: PathBuf,
+    claude: ClaudeConfig,
 }
 
 /// `~/.local/state/tiller`, where the scratch and orchestrator roots
@@ -101,6 +103,7 @@ impl Tools {
             scanner: GitScanner::new(),
             tiller: std::env::current_exe()?,
             scratch,
+            claude: ClaudeConfig::from_env(),
             config,
         })
     }
@@ -123,6 +126,7 @@ impl Tools {
             scanner: &self.scanner,
             tiller: &self.tiller,
             scratch_root: &self.scratch,
+            claude_config: &self.claude,
             ram_free_mb,
             disk_free_mb,
         }

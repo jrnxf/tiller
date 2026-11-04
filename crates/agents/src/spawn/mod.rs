@@ -31,6 +31,7 @@ pub mod launch;
 pub mod orchestrator;
 pub mod pool;
 pub mod readings;
+pub mod trust;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -54,6 +55,7 @@ use tiller_reconcile::sources::{Scanner, WorktreeScan};
 use self::config::SpawnConfig;
 use self::launch::LaunchSpec;
 use self::pool::Pool;
+use self::trust::ClaudeConfig;
 use crate::roles::{self, RoleError};
 
 #[derive(Debug, thiserror::Error)]
@@ -141,6 +143,8 @@ pub struct World<'a> {
     pub tiller: &'a Path,
     /// The run scratch root; each run gets `<root>/<run id>`.
     pub scratch_root: &'a Path,
+    /// Where Claude Code keeps the user config launches record trust in.
+    pub claude_config: &'a ClaudeConfig,
     /// Free RAM and disk, read just before `run.start`.
     pub ram_free_mb: Option<i64>,
     pub disk_free_mb: Option<i64>,
@@ -384,6 +388,7 @@ fn place(
         network_allow: &world.config.spawn.network_allow,
         no_mistakes_socket: world.config.spawn.no_mistakes_socket.as_deref(),
         claude: &world.config.spawn.claude,
+        claude_config: world.claude_config,
         claude_version: claude_version.as_deref(),
         memory: &[],
         note: None,
