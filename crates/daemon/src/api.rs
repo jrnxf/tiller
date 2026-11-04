@@ -29,6 +29,7 @@ use tiller_core::state::cards::{CardEdit, NewCard};
 use tiller_core::state::{get as get_row, resolve_id};
 use tiller_core::{Actor, Applied, Ctx, Error, Store, Timestamp, ids};
 use tiller_herdr::client::{Cli, Herdr};
+use tiller_herdr::front::{OpenError, PROBE_TIMEOUT, Terminal, Wait, open_agent};
 use tiller_herdr::poller::Registry;
 use tokio::sync::watch;
 
@@ -66,6 +67,9 @@ pub struct Inner {
     pub peers: Arc<Peers>,
     /// The local herdr server, for focus and pane tails.
     pub herdr: Cli,
+    /// The terminal app "Open in herdr" brings to the front, from
+    /// `[herdr] terminal`; none means a focus only.
+    pub terminal: Option<Arc<dyn Terminal>>,
     pub started_at: Timestamp,
     /// Tool versions, filled in once after start.
     pub tools: Arc<Mutex<Value>>,
@@ -1722,27 +1726,46 @@ async fn focus(
         Some(machine) => state.0.herdr.clone().on_machine(machine),
         None => state.0.herdr.clone(),
     };
-    let focused = tokio::task::spawn_blocking(move || herdr.focus_agent(&pane)).await;
-    match focused {
-        Ok(Ok(())) => Ok(Json(MutationResponse {
-            ok: true,
-            replayed: false,
-            events: Vec::new(),
-            receipt: Receipt {
-                recorded_at: Timestamp::now().to_string(),
-                outbox_id: None,
-                approval_id: None,
-            },
-            data: json!({"session_id": session_id}),
-            host: None,
-        })),
-        Ok(Err(error)) => Err(ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "unavailable",
-            format!("herdr did not focus the agent: {error}"),
-        )),
-        Err(error) => Err(Error::Internal(error.to_string()).into()),
-    }
+    let screen = state.0.herdr.clone().timeout(PROBE_TIMEOUT);
+    let terminal = state.0.terminal.clone();
+    let app = terminal.as_ref().map(|terminal| terminal.name().to_owned());
+    let opened = tokio::task::spawn_blocking(move || {
+        open_agent(&screen, terminal.as_deref(), Wait::default(), || {
+            herdr.focus_agent(&pane)
+        })
+    })
+    .await;
+    let data = match opened {
+        Ok(Ok(opened)) => json!({"session_id": session_id, "opened": opened, "terminal": app}),
+        Ok(Err(OpenError::Herdr(error))) => {
+            return Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                format!("herdr did not focus the agent: {error}"),
+            ));
+        }
+        // The focus landed, so this is no failed request: the answer says
+        // what went wrong with the window.
+        Ok(Err(error)) => json!({
+            "session_id": session_id,
+            "opened": "failed",
+            "terminal": app,
+            "problem": error.to_string(),
+        }),
+        Err(error) => return Err(Error::Internal(error.to_string()).into()),
+    };
+    Ok(Json(MutationResponse {
+        ok: true,
+        replayed: false,
+        events: Vec::new(),
+        receipt: Receipt {
+            recorded_at: Timestamp::now().to_string(),
+            outbox_id: None,
+            approval_id: None,
+        },
+        data,
+        host: None,
+    }))
 }
 
 // -- login and the app shell --------------------------------------------------------
@@ -1876,12 +1899,19 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn app_with(home: &std::path::Path, assets: Assets, damage: Damage) -> Router {
-        app_full(home, assets, damage, Peers::idle())
+        app_full(home, assets, damage, Peers::idle(), Cli::local(), None)
     }
 
     /// The board API with these peer links.
     pub(crate) fn app_with_peers(home: &std::path::Path, peers: Arc<Peers>) -> Router {
-        app_full(home, Assets::of::<Fixture>(), Damage::default(), peers)
+        app_full(
+            home,
+            Assets::of::<Fixture>(),
+            Damage::default(),
+            peers,
+            Cli::local(),
+            None,
+        )
     }
 
     fn app_full(
@@ -1889,6 +1919,8 @@ pub(crate) mod tests {
         assets: Assets,
         damage: Damage,
         peers: Arc<Peers>,
+        herdr: Cli,
+        terminal: Option<Arc<dyn Terminal>>,
     ) -> Router {
         let (_newest_tx, newest) = watch::channel(0);
         let (_stop_tx, stop) = watch::channel(false);
@@ -1901,7 +1933,8 @@ pub(crate) mod tests {
             stop,
             pollers: Registry::new(),
             peers,
-            herdr: Cli::local(),
+            herdr,
+            terminal,
             started_at: Timestamp::now(),
             tools: Arc::new(Mutex::new(Value::Null)),
             damage,
@@ -2652,6 +2685,151 @@ pub(crate) mod tests {
             )
             .unwrap();
         assert_eq!(alpha, 1);
+    }
+
+    /// A herdr that logs each call and answers the attach probe from a
+    /// file the fake terminal app creates when it opens.
+    fn scripted_herdr(dir: &std::path::Path) -> Cli {
+        let script = format!(
+            r#"echo "$*" >> '{dir}/calls'
+case "$*" in *"terminal title clear"*)
+  if [ -e '{dir}/attached' ]; then r=cleared; else r=no_foreground_client; fi
+  printf '{{"result":{{"type":"client_window_title","reason":"%s"}}}}\n' "$r";;
+esac"#,
+            dir = dir.display()
+        );
+        Cli::local().program(vec![
+            "sh".into(),
+            "-c".into(),
+            script.into(),
+            "herdr".into(),
+        ])
+    }
+
+    /// A terminal app that records what it was asked and attaches a client
+    /// when it opens.
+    struct ScriptedApp(std::path::PathBuf);
+
+    impl Terminal for ScriptedApp {
+        fn name(&self) -> &str {
+            "Ghostty"
+        }
+
+        fn raise(&self) -> std::io::Result<()> {
+            std::fs::write(self.0.join("app"), "raise")
+        }
+
+        fn open(&self, command: &[std::ffi::OsString]) -> std::io::Result<()> {
+            let command: Vec<_> = command.iter().map(|w| w.to_string_lossy()).collect();
+            std::fs::write(self.0.join("app"), format!("open {}", command.join(" ")))?;
+            std::fs::write(self.0.join("attached"), "")
+        }
+    }
+
+    /// A terminal app that is not installed.
+    struct MissingApp;
+
+    impl Terminal for MissingApp {
+        fn name(&self) -> &str {
+            "Ghostty"
+        }
+
+        fn raise(&self) -> std::io::Result<()> {
+            Err(std::io::Error::other(
+                "Unable to find application named 'Ghostty'",
+            ))
+        }
+
+        fn open(&self, _: &[std::ffi::OsString]) -> std::io::Result<()> {
+            self.raise()
+        }
+    }
+
+    #[tokio::test]
+    async fn focus_says_what_it_did_on_this_machine() {
+        let mut fleet = Fleet::new();
+        let local = fleet.worker("w2:p1");
+        let remote = fleet.worker("w3:p1");
+        fleet
+            .open()
+            .conn()
+            .execute_batch(&format!(
+                "INSERT INTO hosts (id, label, kind, herdr_machine) VALUES ('h-r', 'remote-a', 'remote', 'm-1');
+                 UPDATE sessions SET host_id = 'h-r' WHERE id = '{remote}'"
+            ))
+            .unwrap();
+        let cookie = owner_cookie(fleet.dir.path());
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+        let app = |terminal: Option<Arc<dyn Terminal>>| {
+            app_full(
+                fleet.dir.path(),
+                Assets::of::<Fixture>(),
+                Damage::default(),
+                Peers::idle(),
+                scripted_herdr(dir),
+                terminal,
+            )
+        };
+        let focus = |app: Router, session: String, key: &'static str| {
+            let cookie = cookie.clone();
+            async move {
+                let answer = send(
+                    &app,
+                    mutation(
+                        "POST",
+                        &format!("/api/v1/agents/{session}/focus"),
+                        json!({"idempotency_key": key}),
+                        &[("cookie", cookie.as_str())],
+                    ),
+                )
+                .await;
+                assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+                let body: Value = serde_json::from_str(&answer.body).unwrap();
+                body["data"].clone()
+            }
+        };
+        let calls = || std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
+        let app_did = || std::fs::read_to_string(dir.join("app")).unwrap_or_default();
+        let ghostty = || Some(Arc::new(ScriptedApp(dir.to_owned())) as Arc<dyn Terminal>);
+
+        // No terminal configured and no client: focused, but nothing shows it.
+        let data = focus(app(None), local.clone(), "k-1").await;
+        assert_eq!(data["opened"], "unseen");
+        assert_eq!(data["terminal"], Value::Null);
+        assert!(calls().contains("agent focus w2:p1"), "{}", calls());
+
+        // No client: the app opens on herdr, then the focus lands again.
+        let data = focus(app(ghostty()), local.clone(), "k-2").await;
+        assert_eq!(data["opened"], "launched");
+        assert_eq!(data["terminal"], "Ghostty");
+        // The program words, the bare `sh` resolved to a full path.
+        assert!(app_did().starts_with("open /"), "{}", app_did());
+        assert!(app_did().ends_with("esac herdr"), "{}", app_did());
+
+        // A client is attached: the app comes to the front.
+        let data = focus(app(ghostty()), local.clone(), "k-3").await;
+        assert_eq!(data["opened"], "raised");
+        assert_eq!(app_did(), "raise");
+
+        // The app will not open: the focus still landed, so the answer is
+        // 200 and names the problem.
+        let data = focus(app(Some(Arc::new(MissingApp))), local.clone(), "k-5").await;
+        assert_eq!(data["opened"], "failed");
+        assert_eq!(
+            data["problem"],
+            "Ghostty did not open: Unable to find application named 'Ghostty'"
+        );
+
+        // A remote agent: the probe asks the local server, the focus goes
+        // to the saved machine.
+        std::fs::remove_file(dir.join("calls")).unwrap();
+        let data = focus(app(None), remote, "k-4").await;
+        assert_eq!(data["opened"], "focused");
+        assert_eq!(
+            calls().lines().collect::<Vec<_>>(),
+            ["terminal title clear", "--machine m-1 agent focus w3:p1"]
+        );
     }
 
     #[test]

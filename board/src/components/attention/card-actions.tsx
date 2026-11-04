@@ -1,10 +1,12 @@
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
-import type { BoardRow } from "../../lib/api-types";
+import type { BoardRow, MutationResponse } from "../../lib/api-types";
 import { focusReason, hostField, ownerKey, ownerOf, projectGroups } from "../../lib/peers";
-import { projectsQuery } from "../../lib/queries";
+import { agentsQuery, machinesQuery, projectsQuery } from "../../lib/queries";
+import { focusOutcome, focusPath, remoteLabel } from "../board/herdr";
+import type { FocusData } from "../board/herdr";
 import { PeerNote } from "../board/host-chip";
 import { useHostLabel, useMachineRows, useStanding } from "../board/peer-state";
 import { ActionFailure } from "./action-failure";
@@ -309,16 +311,26 @@ export function OpenInHerdr({
 }) {
   const send = useCallback(
     (idempotency_key: string) =>
-      sendMutation("POST", `/api/v1/agents/${sessionId}/focus`, { idempotency_key }),
+      sendMutation<FocusData>("POST", focusPath(sessionId), { idempotency_key }),
     [sessionId],
   );
+  // A remote agent's pane shows once its machine is selected in herdr. The
+  // Inbox does not wait on these reads: without them the agent is local.
+  const agents = useQuery(agentsQuery()).data?.orchestrators ?? [];
+  const machines = useQuery(machinesQuery()).data?.machines ?? [];
+  const hostId =
+    agents
+      .flatMap((orchestrator) => [orchestrator, ...orchestrator.workers])
+      .find((agent) => agent.session_id === sessionId)?.host_id ?? null;
+  const remote = remoteLabel(machines, hostId);
   // Focusing again later is a new click; only a double click is folded.
   const [round, setRound] = useState(0);
-  const [lastReceipt, setLastReceipt] = useState<string | null>(null);
-  const onRecorded = useCallback((_: unknown, key: string) => {
-    setLastReceipt(key);
+  const [last, setLast] = useState<{ receipt: string; data: FocusData } | null>(null);
+  const onRecorded = useCallback((response: MutationResponse<FocusData>, key: string) => {
+    setLast({ receipt: key, data: response.data });
     setRound((n) => n + 1);
   }, []);
+  const outcome = last ? focusOutcome(last.data, remote) : null;
   const action = useAction({ binding: `${sessionId}:${round}`, send, onRecorded });
   const { trigger } = action;
   const button = useRef<HTMLButtonElement>(null);
@@ -358,8 +370,17 @@ export function OpenInHerdr({
         {label ?? "Open in herdr"}
         <kbd>O</kbd>
       </button>
-      {lastReceipt && !action.pending ? (
-        <InlineReceipt receiptKey={lastReceipt} text="Focused in herdr" />
+      {last && outcome && !action.pending ? (
+        outcome.tone === "ok" ? (
+          <InlineReceipt
+            receiptKey={last.receipt}
+            text={remote ? `${outcome.title} - select ${remote} in herdr's sidebar` : outcome.title}
+          />
+        ) : (
+          <p className="refusal" role="alert">
+            {outcome.detail}
+          </p>
+        )
       ) : null}
       <ActionFailure error={action.error} host={undefined} />
     </span>

@@ -324,6 +324,7 @@ mod tests {
             pollers: Registry::new(),
             peers: crate::peer::link::Peers::idle(),
             herdr: Cli::local(),
+            terminal: None,
             started_at: Timestamp::now(),
             tools: Arc::new(Mutex::new(serde_json::Value::Null)),
             damage: crate::readonly::Damage::default(),

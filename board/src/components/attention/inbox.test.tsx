@@ -3,10 +3,12 @@ import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
+import type { AgentRow, AgentsResponse } from "../../lib/api-types";
 import { hydrateFromSnapshot } from "../../lib/boot";
 import { FIXTURE_HEAD_SHA, fixtureSnapshot, serverResponses } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
+import { agentsQuery } from "../../lib/queries";
 import { createQueryClient } from "../../lib/query-client";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
@@ -16,6 +18,8 @@ import { answeredStore, withdrawnStore } from "./answered";
 const RETRY = "01JATTN0000000000000000000";
 const MERGE = "01JATTN0000000000000000001";
 const QUIET = "01JATTN0000000000000000002";
+const SESSION_C = "01JSESS000000000000000000C";
+const HOST_B = "01JHOSTB00000000000000000B";
 
 interface Call {
   method: string;
@@ -414,6 +418,47 @@ test("a permission prompt is answered in its pane, not with a decision", async (
   fireEvent.click(screen.getByRole("button", { name: /Open the pane in herdr/ }));
   await flush();
   expect(calls[0]?.path).toBe("/api/v1/agents/01JSESS000000000000000000C/focus");
+});
+
+test("the pane button says what herdr did, and when no herdr window here shows it", async () => {
+  stubDaemon("default");
+  const launched = ok();
+  launched.body.data = { opened: "launched", terminal: "Ghostty" };
+  const unseen = ok();
+  unseen.body.data = { opened: "unseen", terminal: null };
+  replies.push(launched, unseen);
+  await renderInbox("default", "perm-01JSESS000000000000000000C");
+
+  fireEvent.click(screen.getByRole("button", { name: /Open the pane in herdr/ }));
+  await flush();
+  expect(screen.getByText(/Opened herdr in Ghostty/)).toBeTruthy();
+
+  fireEvent.click(screen.getByRole("button", { name: /Open the pane in herdr/ }));
+  await flush();
+  expect(screen.getByRole("alert").textContent).toMatch(
+    /no herdr window is open on the daemon's machine\. Start herdr there, or open the board on the machine you are at\./,
+  );
+  expect(screen.queryByText(/Opened herdr in Ghostty/)).toBeNull();
+});
+
+test("the pane button says where to find a remote agent's pane", async () => {
+  stubDaemon("default");
+  const { queryClient } = await renderInbox("default", "perm-01JSESS000000000000000000C");
+  // The prompt's agent runs on host-b, a saved remote machine.
+  act(() => {
+    queryClient.setQueryData<AgentsResponse>(agentsQuery().queryKey, (agents) => {
+      const [first, ...rest] = agents?.orchestrators ?? [];
+      if (!first) throw new Error("no orchestrator in the fixture");
+      const worker: AgentRow = { ...first, session_id: SESSION_C, host_id: HOST_B, workers: [] };
+      return { orchestrators: [{ ...first, workers: [...first.workers, worker] }, ...rest] };
+    });
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: /Open the pane in herdr/ }));
+  await flush();
+  expect(screen.getByRole("status").textContent).toMatch(
+    /^Focused on host-b - select host-b in herdr's sidebar,/,
+  );
 });
 
 test("pressing O twice while the first focus is in flight focuses once", async () => {

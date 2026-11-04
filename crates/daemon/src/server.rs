@@ -22,6 +22,7 @@ use tiller_core::domain::Boundary;
 use tiller_core::state::projects::Init;
 use tiller_core::{Actor, Ctx, Store, Timestamp};
 use tiller_herdr::client::Cli;
+use tiller_herdr::front::Terminal;
 use tiller_herdr::poller::Registry;
 use tokio::sync::watch;
 
@@ -67,6 +68,9 @@ pub struct Config {
     /// Extra `Host` values served reads (`Inner::allowed_hosts`).
     pub allowed_hosts: Vec<String>,
     pub herdr: Cli,
+    /// The terminal app "Open in herdr" brings to the front
+    /// (`[herdr] terminal`); none means a focus only.
+    pub terminal: Option<Arc<dyn Terminal>>,
     pub quota: Vec<OsString>,
     /// The SSH client peer links run (`protocol.md` 10.2): `ssh`, or
     /// `TILLER_SSH` split on whitespace.
@@ -287,6 +291,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         pollers: registry,
         peers,
         herdr: config.herdr,
+        terminal: config.terminal,
         started_at,
         tools: tool_versions,
         damage: damage.clone(),

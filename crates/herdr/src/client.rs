@@ -197,13 +197,44 @@ impl Cli {
         self.run(&["agent", "focus", pane_id]).map(|_| ())
     }
 
-    fn command(&self, args: &[&str]) -> Command {
-        let (program, leading) = self
-            .program
+    /// Whether a herdr client is attached in the foreground of this server.
+    /// herdr has no read-only probe, so this asks it to clear the window
+    /// title and reads why: `cleared` or `no_foreground_client`. The side
+    /// effect hands the window title back to herdr's own `ui.window_title`,
+    /// which Tiller never changes. herdr refuses the call with `--machine`, so
+    /// it answers for a local server only.
+    pub fn client_attached(&self) -> Result<bool> {
+        let result = self.result(&["terminal", "title", "clear"])?;
+        attached_from(&result)
+    }
+
+    /// The command line that opens a herdr client on this server: the
+    /// program, resolved to a full path when it is a bare name, so a terminal
+    /// app with its own `PATH` still finds it, then `--session` for a named
+    /// session.
+    pub fn attach_command(&self) -> Vec<OsString> {
+        let (program, leading) = self.program_words();
+        let program = on_path(&program).map_or(program, PathBuf::into_os_string);
+        let mut command = vec![program];
+        command.extend(leading.iter().cloned());
+        if let Some(session) = &self.session {
+            command.push("--session".into());
+            command.push(session.into());
+        }
+        command
+    }
+
+    /// The program and its leading arguments; `herdr` when none is set.
+    fn program_words(&self) -> (OsString, &[OsString]) {
+        self.program
             .split_first()
             .map_or((OsString::from("herdr"), &[][..]), |(p, rest)| {
                 (p.clone(), rest)
-            });
+            })
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let (program, leading) = self.program_words();
         let mut command = Command::new(program);
         command.args(leading);
         if let Some(machine) = &self.machine {
@@ -362,6 +393,37 @@ fn cli_error(call: &str, stderr: &str, stdout: &str) -> HerdrError {
         Some(error) => api_error(call, error),
         None => HerdrError::Unreachable(format!("{call}: {}", stderr.trim())),
     }
+}
+
+/// Reads a `terminal title clear` result.
+fn attached_from(result: &Value) -> Result<bool> {
+    match result.get("reason").and_then(Value::as_str) {
+        Some("cleared") => Ok(true),
+        Some("no_foreground_client") => Ok(false),
+        other => Err(HerdrError::Parse {
+            call: "terminal title".into(),
+            detail: format!("unknown reason {other:?}"),
+        }),
+    }
+}
+
+/// A bare program name's first match on `PATH`; a name with a slash is
+/// already a path.
+fn on_path(program: &OsString) -> Option<PathBuf> {
+    let name = Path::new(program);
+    if name.components().count() != 1 {
+        return None;
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(name))
+        .find(|path| is_executable(path))
+}
+
+/// A file someone may run, as the shell's `PATH` search takes it.
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 fn parse<T: serde::de::DeserializeOwned>(call: &str, value: Value) -> Result<T> {
@@ -605,6 +667,57 @@ mod tests {
         let error = cli.send_enter("w1:p1").unwrap_err();
         assert!(matches!(error, HerdrError::Unreachable(_)), "{error:?}");
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn title_clear_says_whether_a_client_is_in_front() {
+        // herdr 0.9.5's answers, as the lab session gave them.
+        let cleared = json!({"type": "client_window_title", "changed": true, "reason": "cleared"});
+        assert!(attached_from(&cleared).unwrap());
+        let none = json!({"type": "client_window_title", "changed": false, "reason": "no_foreground_client"});
+        assert!(!attached_from(&none).unwrap());
+        let odd = json!({"type": "client_window_title", "changed": false, "reason": "later"});
+        assert!(matches!(attached_from(&odd), Err(HerdrError::Parse { .. })));
+    }
+
+    #[test]
+    fn attach_command_resolves_a_bare_program_and_keeps_the_session() {
+        let command = Cli::local()
+            .program(vec!["sh".into()])
+            .session("lab")
+            .attach_command();
+        let first = Path::new(&command[0]);
+        assert!(first.is_absolute(), "{first:?}");
+        assert!(first.ends_with("sh"));
+        assert_eq!(&command[1..], ["--session", "lab"]);
+
+        let command = Cli::local()
+            .program(vec!["/home/user/bin/herdr".into(), "--flag".into()])
+            .attach_command();
+        assert_eq!(command, ["/home/user/bin/herdr", "--flag"]);
+
+        let command = Cli::local()
+            .program(vec!["no-such-herdr-program".into()])
+            .attach_command();
+        assert_eq!(command, ["no-such-herdr-program"]);
+
+        // No program set runs `herdr`, the same as every other call.
+        let command = Cli::local().attach_command();
+        assert_eq!(command.len(), 1);
+        assert!(Path::new(&command[0]).ends_with("herdr"), "{command:?}");
+    }
+
+    #[test]
+    fn only_a_file_with_an_exec_bit_counts_as_on_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("herdr");
+        std::fs::write(&file, "").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!is_executable(&file));
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(is_executable(&file));
+        assert!(!is_executable(dir.path()));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { useCallback, useEffect } from "react";
 
-import type { AgentRow } from "../../lib/api-types";
+import type { AgentRow, Machine } from "../../lib/api-types";
 import { machinesQuery } from "../../lib/queries";
 import { ActionError, sendMutation } from "../attention/api";
 import { ulid } from "../attention/ulid";
@@ -9,7 +9,7 @@ import { showToast } from "./toast";
 
 const FOCUS_TOOLTIP = "Focus this agent's terminal in herdr";
 const FOCUS_TOOLTIP_REMOTE =
-  "Opens herdr on the remote machine first, then focuses this agent's terminal";
+  "Focuses this agent's terminal on the remote machine; select that machine in herdr's sidebar to see it";
 
 export const focusPath = (sessionId: string) => `/api/v1/agents/${sessionId}/focus`;
 
@@ -26,7 +26,68 @@ export function focusCommand(
   return `herdr agent focus ${name}`;
 }
 
-export type FocusResult = { ok: true } | { ok: false; message: string };
+// What the daemon did (protocol.md 7.4): focused the pane only, brought the
+// terminal app with herdr in it to the front, opened herdr in the app,
+// focused a pane no herdr window on its machine shows, or focused the pane
+// but could not bring a window up.
+type Opened = "focused" | "raised" | "launched" | "unseen" | "failed";
+
+export type FocusData = {
+  session_id?: string;
+  opened?: Opened;
+  // The terminal app from `[herdr] terminal`, when one is configured.
+  terminal?: string | null;
+  // What went wrong with the window, when `opened` is "failed".
+  problem?: string;
+} | null;
+
+export type FocusResult = { ok: true; data: FocusData } | { ok: false; message: string };
+
+export type FocusOutcome = { tone: "ok" | "bad"; title: string; detail: string };
+
+// The words for what the jump did. A daemon that does not say is an older one,
+// which only focused. herdr's window shows one server at a time, so a remote
+// agent's pane appears once that machine is selected in its sidebar.
+export function focusOutcome(data: FocusData, remote: string | null = null): FocusOutcome {
+  const opened = data?.opened ?? "focused";
+  const app = data?.terminal ?? "the terminal";
+  if (opened === "unseen") {
+    return {
+      tone: "bad",
+      title: "No herdr window here",
+      detail:
+        "herdr focused the agent, but no herdr window is open on the daemon's machine. Start herdr there, or open the board on the machine you are at.",
+    };
+  }
+  if (opened === "failed") {
+    return {
+      tone: "bad",
+      title: "herdr window did not open",
+      detail: `herdr focused the agent, but ${data?.problem ?? `${app} did not open`}.`,
+    };
+  }
+  const where = remote ? `Select ${remote} in herdr's sidebar to see the agent's terminal.` : null;
+  switch (opened) {
+    case "raised":
+      return {
+        tone: "ok",
+        title: "Brought herdr to the front",
+        detail: where ?? `herdr is in front in ${app}, on the agent's terminal.`,
+      };
+    case "launched":
+      return {
+        tone: "ok",
+        title: `Opened herdr in ${app}`,
+        detail: where ?? "The new herdr window is on the agent's terminal.",
+      };
+    default:
+      return {
+        tone: "ok",
+        title: remote ? `Focused on ${remote}` : "Focused in herdr",
+        detail: where ?? "herdr shows the agent's terminal.",
+      };
+  }
+}
 
 // `POST /api/v1/agents/{session}/focus`. Focus is not a state change, so each
 // click is a fresh key: focusing the same agent again later is a new jump. A
@@ -34,8 +95,10 @@ export type FocusResult = { ok: true } | { ok: false; message: string };
 // more about what to do.
 export async function focusAgent(sessionId: string): Promise<FocusResult> {
   try {
-    await sendMutation("POST", focusPath(sessionId), { idempotency_key: ulid() });
-    return { ok: true };
+    const response = await sendMutation<FocusData>("POST", focusPath(sessionId), {
+      idempotency_key: ulid(),
+    });
+    return { ok: true, data: response.data };
   } catch (error) {
     if (!(error instanceof ActionError)) throw error;
     if (error.status === 0 || error.status === 503) {
@@ -51,22 +114,23 @@ export async function focusAgent(sessionId: string): Promise<FocusResult> {
   }
 }
 
+// The label of the machine a host id names when it is a remote one, and null
+// for this machine.
+export function remoteLabel(machines: Machine[], hostId: string | null): string | null {
+  const machine = machines.find((candidate) => candidate.id === hostId);
+  return machine?.kind === "remote" ? machine.label : null;
+}
+
 // Returns the click handler for "Open in herdr" (and the O key).
 export function useHerdrFocus() {
   const { data: machines } = useSuspenseQuery(machinesQuery());
   return useCallback(
     (agent: Pick<AgentRow, "session_id" | "host_id">) => {
-      const machine = machines.machines.find((candidate) => candidate.id === agent.host_id);
-      const remote = machine?.kind === "remote";
+      const remote = remoteLabel(machines.machines, agent.host_id);
       void focusAgent(agent.session_id).then((result) => {
         if (result.ok) {
-          showToast(
-            "ok",
-            remote
-              ? `Opened herdr on ${machine?.label ?? "the remote machine"}`
-              : "Focused in herdr",
-            "The agent's terminal is in front.",
-          );
+          const outcome = focusOutcome(result.data, remote);
+          showToast(outcome.tone, outcome.title, outcome.detail);
         } else {
           showToast("bad", "Could not open herdr", result.message);
         }

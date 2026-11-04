@@ -2,6 +2,7 @@
 
 pub mod client;
 pub mod composer;
+pub mod front;
 pub mod layout;
 pub mod poller;
 

@@ -507,9 +507,29 @@ Every mutation body carries `idempotency_key` (a ULID the board mints when the c
 | `POST /api/v1/projects/{id}/stage` | `project.stage`; to pre-launch the daemon reads the default-branch head from the project's checkout (`checkouts.<id>` in `config.toml`) | `rev`, `stage` |
 | `POST /api/v1/attention/{id}/withdraw` | `attention.withdraw` with the reason `withdrawn from the board by the owner` | `idempotency_key`; the board's Withdraw on an item that no longer applies; 422 `refused` while it still applies. Not forwarded: a peer's item is withdrawn on that host |
 | `POST /api/v1/projects/{id}/delete` | `project.delete` | `confirm` (the project id, typed by the owner; a mismatch is 400); 422 `refused` while something is live, for `fleet` and for a project another host owns |
-| `POST /api/v1/agents/{session}/focus` | none; `herdr agent focus`, with the saved machine for a remote agent | - |
+| `POST /api/v1/agents/{session}/focus` | none; `herdr agent focus`, with the saved machine for a remote agent, then herdr is put in front of the screen (below). `data` holds `session_id`, `opened`, `terminal` and, when `opened` is `failed`, `problem` | - |
 
 There is no endpoint for spawn, land, run end or cleanup. Those belong to agents and the daemon.
+
+**Open in herdr.** The focus endpoint is the board's "Open in herdr" button and O key. Besides the focus, it puts herdr in front of the person at the daemon's own screen, using the terminal app named in the `[herdr]` table of `~/.tiller/config.toml`:
+
+```toml
+[herdr]
+terminal = "Ghostty"        # a macOS app name; unset means focus only, and other systems ignore it
+# terminal_exec = ["-e"]    # what the app takes before a command to run; "-e" when unset
+```
+
+The daemon first asks the local herdr server whether a client is attached in front. herdr has no read-only probe, so it calls `herdr terminal title clear` and reads the reason (`cleared` or `no_foreground_client`); the side effect hands the window title back to herdr's `ui.window_title`, which Tiller never changes. The probe has 2 seconds; a herdr that cannot answer it in time, or at all, is taken as attached. Then it focuses, and `opened` says what happened:
+
+| Client attached | `terminal` set | What the daemon does | `opened` |
+|---|---|---|---|
+| yes | no | focus | `focused` |
+| no | no | focus; no herdr window here shows it, and the board says to open the board on the machine you are at | `unseen` |
+| yes | yes | focus, then `open -a <terminal>` | `raised` |
+| no | yes | focus, then `open -na <terminal> --args <terminal_exec> <herdr> [--session <s>]`, wait about 10 seconds for the client to attach, then focus again | `launched` |
+| either | yes | focus, but the app does not open or its client does not attach in time; `problem` says which | `failed` |
+
+The `<herdr>` command is the daemon's own herdr (`spawn.herdr`, or `TILLER_HERDR`), its program resolved to a full path so the app finds it. A focus herdr refuses is 503 `unavailable` and nothing else happens; `failed` is a 200, because the focus did happen. One open runs at a time, so a second click while a client is attaching waits for it and then raises the app. `[herdr] terminal` drives macOS `open`, so a daemon on another system ignores it with a warning in its log. The probe always asks the local server, because the window on this machine is the one that matters. For a remote agent the focus goes to the saved machine, but herdr's window does not follow it there, so the board tells the owner to select that machine in herdr's sidebar; and `--machine` refuses the title call, so whether a client is attached on the remote machine cannot be asked at all. A daemon with no screen of its own (a server) has no client attached and no terminal configured, so every focus answers `unseen`. Test: `front::tests` in `tiller-herdr`, and `api::tests::focus_says_what_it_did_on_this_machine`.
 
 **Forwarding** (ADR 0003). Every mutation body above may carry `host` (a peer label; absent means this host). With a peer `host`, the daemon checks the cookie and headers as for any mutation, refuses at once with 503 `peer_unreachable` when the link is not `live`, and otherwise sends the body as a signed `mutate` frame (section 10.3) and returns the peer's response with `host` added. Project slugs are unique only per host and `fleet` exists on every host, so `POST /api/v1/cards` takes `host` like the rest; the new-card picker sends the host of the project the owner chose. The forwarding allowlist is exactly: `POST /api/v1/cards`, `PATCH /api/v1/cards/{id}`, `POST .../comment`, `POST` and `DELETE .../hold`, `POST .../close`, `.../cancel` and `.../reopen`, `POST /api/v1/attention/{id}/answer` and `POST /api/v1/approvals/{id}/decide`. Not forwarded: `attention/{id}/withdraw`, because the item is cleared on the host that holds it; `memory/proposals/decide`, `memory/edits` and `memory/changes/{proposal}/undo`, because memory reads stay local (7.3), so the board host never shows what a decision would keep; `projects/{id}/stage` and `projects/{id}/delete`, because the forwarded owner has no project commands (`authority.md` section 3); and `agents/{session}/focus`, which already runs herdr against the peer's saved machine; and `interventions/{id}/label`, because the Health numbers are this host's own. A mutation off the list with a peer `host` is 502 `peer_refused`.
 

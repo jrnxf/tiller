@@ -756,6 +756,11 @@ a.irow:hover {
   flex-wrap: wrap;
 }
 
+/* The row's gap already spaces a wrapped alert from the button. */
+.ca-herdr .refusal {
+  margin: 0;
+}
+
 .ca-none {
   margin: 0 0 12px;
   color: var(--fg-3);

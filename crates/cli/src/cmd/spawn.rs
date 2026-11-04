@@ -114,7 +114,12 @@ pub fn herdr_program(paths: &Paths) -> Vec<OsString> {
 /// `config.toml`: the one `tiller spawn` drives, unless `TILLER_HERDR`
 /// replaces it, socket and all.
 pub fn configured_herdr(app: &App) -> Result<Cli, Failure> {
-    let paths = Paths::from_table(&load_config(app)?).map_err(failure)?;
+    herdr_from_config(&load_config(app)?)
+}
+
+/// [`configured_herdr`] from a `config.toml` already read.
+pub fn herdr_from_config(table: &toml::Table) -> Result<Cli, Failure> {
+    let paths = Paths::from_table(table).map_err(failure)?;
     Ok(match crate::daemon::env_command("TILLER_HERDR") {
         Some(program) => Cli::local().program(program),
         None => herdr_cli(&paths),

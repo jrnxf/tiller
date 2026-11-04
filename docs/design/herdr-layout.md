@@ -48,7 +48,7 @@ The indentation is drawn by the label, not by herdr. Workspaces are flat rows in
 | Order upkeep | The reconcile loop checks each block's order and glyphs after every spawn, cleanup and herdr reconnect, and repairs drift with `workspace.move` and relabels. This is idempotent |
 | Row tokens | `herdr pane report-metadata` sets `$project`, `$card`, `$role` and `$model`, shown through `[ui.sidebar.spaces] rows` with an `fg` colour per project. herdr loses these on a server restart [D], so the adapter reports them again after every reconnect |
 | Agents panel | `agent_panel_sort = "spaces"`, so the panel follows the same block order |
-| Jump | `herdr agent focus <card>-<role>` (the board's jump button calls this too) |
+| Jump | `herdr agent focus <card>-<role>` (the board's jump button calls this too, then raises or opens the terminal app from `[herdr] terminal`; `protocol.md` 7.4, Open in herdr) |
 | Cleanup | Close the worker's pane only after its run is recorded as ended and its worktree has no unlanded work. herdr closes the emptied workspace. Then relabel the block |
 | Orphans | A worker workspace whose run is ended in state.db and whose pane process is dead gets closed by reconcile. If the pane process is alive, it never gets closed; reconcile raises an attention item instead |
 | Zero workers | The orchestrator workspace stands alone |

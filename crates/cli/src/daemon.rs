@@ -3,15 +3,22 @@
 //! `config.toml`. The helper programs can be replaced for tests and labs:
 //! `TILLER_HERDR`, `TILLER_QUOTA_AXI` and `TILLER_SSH` each hold a command
 //! line (a program and its leading arguments, split on whitespace).
+//! `[herdr] terminal` names the terminal app the board's "Open in herdr"
+//! brings to the front (`protocol.md` 7.4); it is a macOS app, so other
+//! systems ignore it.
 
 use std::ffi::OsString;
 use std::io::IsTerminal;
 use std::process::ExitCode;
+use std::sync::Arc;
 
+use serde::Deserialize;
 use tiller_daemon::assets::Assets;
 use tiller_daemon::{Config, Ended};
+use tiller_herdr::front::{MacApp, Terminal};
 
-use crate::cmd::spawn::configured_herdr;
+use crate::cmd::admin::load_config;
+use crate::cmd::spawn::herdr_from_config;
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -35,6 +42,39 @@ pub fn command_line(variable: &str, default: &str) -> Vec<OsString> {
     env_command(variable).unwrap_or_else(|| vec![default.into()])
 }
 
+/// The `[herdr]` table of `config.toml`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct HerdrTable {
+    /// The macOS app herdr runs in, such as `Ghostty`. Unset, "Open in
+    /// herdr" only focuses the pane.
+    terminal: Option<String>,
+    /// What the app takes before a command to run; `["-e"]` when unset.
+    terminal_exec: Option<Vec<String>>,
+}
+
+/// The terminal app from the `[herdr]` table, or none.
+fn configured_terminal(table: &toml::Table) -> anyhow::Result<Option<MacApp>> {
+    let herdr: HerdrTable = match table.get("herdr") {
+        Some(value) => value
+            .clone()
+            .try_into()
+            .map_err(|e: toml::de::Error| anyhow::anyhow!("config.toml [herdr]: {e}"))?,
+        None => HerdrTable::default(),
+    };
+    let Some(app) = herdr.terminal else {
+        return Ok(None);
+    };
+    if app.trim().is_empty() {
+        anyhow::bail!("config.toml [herdr]: terminal names an app");
+    }
+    let terminal = MacApp::new(app);
+    Ok(Some(match herdr.terminal_exec {
+        Some(exec) => terminal.exec(exec.into_iter().map(OsString::from).collect()),
+        None => terminal,
+    }))
+}
+
 /// The exit code for a database newer than this binary (`recovery.md` R11).
 const NEWER_SCHEMA: u8 = 3;
 
@@ -52,15 +92,27 @@ pub fn run(args: &Args) -> anyhow::Result<ExitCode> {
     let app = crate::app::App::from_env(None);
     // A [spawn] table that does not parse stops the start: guessing the bare
     // default could drive another session's server.
-    let herdr = configured_herdr(&app).map_err(|failure| match &failure.hint {
+    let failed = |failure: crate::app::Failure| match &failure.hint {
         Some(hint) => anyhow::anyhow!("{}; {hint}", failure.message),
         None => anyhow::anyhow!("{}", failure.message),
-    })?;
+    };
+    let table = load_config(&app).map_err(failed)?;
+    let herdr = herdr_from_config(&table).map_err(failed)?;
+    let mut terminal = configured_terminal(&table)?;
+    if !cfg!(target_os = "macos")
+        && let Some(ignored) = terminal.take()
+    {
+        tracing::warn!(
+            terminal = ignored.name(),
+            "config.toml [herdr] terminal is a macOS app; Open in herdr only focuses here"
+        );
+    }
     let config = Config {
         home: app.home,
         port: args.port,
         allowed_hosts: args.allow_hosts.clone(),
         herdr,
+        terminal: terminal.map(|app| Arc::new(app) as _),
         quota: command_line("TILLER_QUOTA_AXI", "quota-axi"),
         ssh: command_line("TILLER_SSH", "ssh"),
         assets: Assets::board(),
@@ -84,5 +136,40 @@ pub fn run(args: &Args) -> anyhow::Result<ExitCode> {
             );
             Ok(ExitCode::from(NEWER_SCHEMA))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tiller_herdr::front::Terminal;
+
+    fn table(text: &str) -> toml::Table {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn no_herdr_table_means_focus_only() {
+        assert!(configured_terminal(&table("")).unwrap().is_none());
+        assert!(configured_terminal(&table("[herdr]")).unwrap().is_none());
+    }
+
+    #[test]
+    fn terminal_names_the_app_and_refuses_unknown_keys() {
+        let app = configured_terminal(&table("[herdr]\nterminal = \"Ghostty\""))
+            .unwrap()
+            .unwrap();
+        assert_eq!(app.name(), "Ghostty");
+        let app = configured_terminal(&table(
+            "[herdr]\nterminal = \"WezTerm\"\nterminal_exec = [\"start\", \"--\"]",
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(app.name(), "WezTerm");
+        let error = configured_terminal(&table("[herdr]\nterminl = \"Ghostty\""))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("[herdr]"), "{error}");
+        assert!(configured_terminal(&table("[herdr]\nterminal = \" \"")).is_err());
     }
 }

@@ -1453,6 +1453,7 @@ dependencies = [
  "tiller-observe",
  "tiller-reconcile",
  "toml",
+ "tracing",
  "tracing-subscriber",
 ]
 

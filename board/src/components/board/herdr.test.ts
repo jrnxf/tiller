@@ -1,6 +1,6 @@
 import { afterEach, expect, test, vi } from "vitest";
 
-import { focusAgent, focusCommand, focusPath } from "./herdr";
+import { focusAgent, focusCommand, focusOutcome, focusPath } from "./herdr";
 
 function answer(status: number, body: unknown) {
   const request = vi.fn(async () => new Response(JSON.stringify(body), { status }));
@@ -16,7 +16,7 @@ afterEach(() => vi.unstubAllGlobals());
 test("Open in herdr posts to the agent's focus endpoint as JSON with an idempotency key", async () => {
   const request = answer(200, ok);
   const result = await focusAgent("01JSESS");
-  expect(result).toEqual({ ok: true });
+  expect(result).toEqual({ ok: true, data: null });
   expect(request).toHaveBeenCalledTimes(1);
   const [path, init] = request.mock.calls[0] as unknown as [string, RequestInit];
   expect(path).toBe(focusPath("01JSESS"));
@@ -74,4 +74,61 @@ test("the command shown is the one herdr knows the agent by", () => {
   expect(focusCommand({ herdr_name: null, role: "build" }, "alpha", "alpha-42")).toBe(
     "herdr agent focus alpha-42-build",
   );
+});
+
+test("the words say what the daemon did with the terminal app", () => {
+  expect(focusOutcome({ opened: "focused", terminal: null })).toEqual({
+    tone: "ok",
+    title: "Focused in herdr",
+    detail: "herdr shows the agent's terminal.",
+  });
+  expect(focusOutcome({ opened: "raised", terminal: "Ghostty" })).toEqual({
+    tone: "ok",
+    title: "Brought herdr to the front",
+    detail: "herdr is in front in Ghostty, on the agent's terminal.",
+  });
+  expect(focusOutcome({ opened: "launched", terminal: "Ghostty" })).toEqual({
+    tone: "ok",
+    title: "Opened herdr in Ghostty",
+    detail: "The new herdr window is on the agent's terminal.",
+  });
+  // An older daemon says nothing about the app: it only focused.
+  expect(focusOutcome(null).title).toBe("Focused in herdr");
+});
+
+test("no herdr window where the daemon runs is not a success", () => {
+  const outcome = focusOutcome({ opened: "unseen", terminal: null });
+  expect(outcome.tone).toBe("bad");
+  expect(outcome.title).toBe("No herdr window here");
+  expect(outcome.detail).toBe(
+    "herdr focused the agent, but no herdr window is open on the daemon's machine. Start herdr there, or open the board on the machine you are at.",
+  );
+  expect(focusOutcome({ opened: "unseen", terminal: null }, "host-b").tone).toBe("bad");
+});
+
+test("a window that would not open says the focus still landed", () => {
+  expect(
+    focusOutcome({
+      opened: "failed",
+      terminal: "Ghostty",
+      problem: "no herdr client attached in Ghostty within 10s",
+    }),
+  ).toEqual({
+    tone: "bad",
+    title: "herdr window did not open",
+    detail: "herdr focused the agent, but no herdr client attached in Ghostty within 10s.",
+  });
+});
+
+test("a remote agent's terminal needs its machine selected in herdr's sidebar", () => {
+  expect(focusOutcome({ opened: "focused", terminal: null }, "host-b")).toEqual({
+    tone: "ok",
+    title: "Focused on host-b",
+    detail: "Select host-b in herdr's sidebar to see the agent's terminal.",
+  });
+  expect(focusOutcome({ opened: "launched", terminal: "Ghostty" }, "host-b")).toEqual({
+    tone: "ok",
+    title: "Opened herdr in Ghostty",
+    detail: "Select host-b in herdr's sidebar to see the agent's terminal.",
+  });
 });

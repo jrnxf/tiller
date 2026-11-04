@@ -33,7 +33,7 @@ interface Posted {
 }
 
 // Answers the board API from the fixtures and records every write.
-function stubApi(scenario: Scenario, focusStatus = 200) {
+function stubApi(scenario: Scenario, focusStatus = 200, focused: unknown = null) {
   const posted: Posted[] = [];
   vi.stubGlobal(
     "fetch",
@@ -48,7 +48,13 @@ function stubApi(scenario: Scenario, focusStatus = 200) {
         });
         return focusStatus === 200
           ? new Response(
-              JSON.stringify({ ok: true, replayed: false, events: [], receipt: null, data: null }),
+              JSON.stringify({
+                ok: true,
+                replayed: false,
+                events: [],
+                receipt: null,
+                data: focused,
+              }),
               { status: 200 },
             )
           : new Response(
@@ -366,12 +372,12 @@ test("the button says it opens herdr on the remote machine first only for a remo
   });
   expect(local.getAttribute("title")).toBe("Focus this agent's terminal in herdr");
   expect(remote.getAttribute("title")).toBe(
-    "Opens herdr on the remote machine first, then focuses this agent's terminal",
+    "Focuses this agent's terminal on the remote machine; select that machine in herdr's sidebar to see it",
   );
 });
 
-test("Open in herdr asks the daemon to focus that agent, and says the remote machine was opened", async () => {
-  const posted = stubApi("default");
+test("Open in herdr asks the daemon to focus that agent, and says where to find the remote one", async () => {
+  const posted = stubApi("default", 200, { opened: "raised", terminal: "Ghostty" });
   await renderApp("default", "/agents");
 
   const row = agentRow("├ alpha-43 build");
@@ -381,10 +387,37 @@ test("Open in herdr asks the daemon to focus that agent, and says the remote mac
   const sessionId = row.dataset.testid?.replace("agent-", "");
   expect(posted[0]).toMatchObject({ path: `/api/v1/agents/${sessionId}/focus`, method: "POST" });
   await waitFor(() =>
-    expect(screen.getByRole("status").textContent).toContain("Opened herdr on host-b"),
+    expect(screen.getByRole("status").textContent).toContain("Brought herdr to the front"),
+  );
+  expect(screen.getByRole("status").textContent).toContain(
+    "Select host-b in herdr's sidebar to see the agent's terminal.",
   );
   // Clicking the button did not also change which agent is selected.
   expect(row.getAttribute("aria-selected")).toBe("false");
+});
+
+test("Open in herdr says when herdr opened, and when no herdr window here can show it", async () => {
+  stubApi("default", 200, { opened: "launched", terminal: "Ghostty" });
+  await renderApp("default", "/agents");
+
+  fireEvent.click(
+    within(agentRow("├ alpha-42 build")).getByRole("button", { name: /Open in herdr/ }),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("status").textContent).toContain("Opened herdr in Ghostty"),
+  );
+
+  stubApi("default", 200, { opened: "unseen", terminal: null });
+  fireEvent.click(
+    within(agentRow("├ alpha-42 build")).getByRole("button", { name: /Open in herdr/ }),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("status").textContent).toContain("No herdr window here"),
+  );
+  expect(screen.getByRole("status").textContent).toContain(
+    "Start herdr there, or open the board on the machine you are at.",
+  );
+  expect(screen.getByRole("status").textContent).not.toContain("Focused in herdr");
 });
 
 test("the O key opens the selected agent, and a letter typed into a field does not", async () => {
