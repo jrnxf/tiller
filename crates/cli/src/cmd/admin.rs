@@ -262,7 +262,7 @@ fn project_delete(app: &App, store: &mut Store, args: ProjectDelete) -> Done {
         failure.current = Some(json!(preview.deletion));
         return Err(failure);
     }
-    let summary = removal_summary(&preview.deletion.removed);
+    let summary = removal_summary(&preview.deletion);
     if !args.yes {
         let terminal = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
         if !terminal || !typed_id(&args.id, &summary)? {
@@ -300,14 +300,20 @@ fn project_delete(app: &App, store: &mut Store, args: ProjectDelete) -> Done {
 }
 
 /// "events: 37, cards: 4, projects: 1": the tables with rows, largest first.
-fn removal_summary(removed: &std::collections::BTreeMap<String, i64>) -> String {
-    let mut tables: Vec<_> = removed.iter().collect();
+fn removal_summary(deletion: &tiller_core::state::deletion::Deletion) -> String {
+    let mut tables: Vec<_> = deletion.removed.iter().collect();
     tables.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-    tables
+    let mut parts: Vec<String> = tables
         .iter()
         .map(|(table, n)| format!("{table}: {n}"))
-        .collect::<Vec<_>>()
-        .join(", ")
+        .collect();
+    if deletion.withdrawn_attention > 0 {
+        parts.push(format!(
+            "open questions withdrawn: {}",
+            deletion.withdrawn_attention
+        ));
+    }
+    parts.join(", ")
 }
 
 /// Asks the owner to type the project id; true when they did.

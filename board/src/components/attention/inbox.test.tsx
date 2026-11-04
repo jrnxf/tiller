@@ -129,22 +129,60 @@ test("an item shows its question, evidence, recommendation, consequence and that
   ).toBeTruthy();
   expect(screen.getByText(/It covers every failure seen this month/)).toBeTruthy();
   expect(screen.getByText(/The builder implements the policy you pick/)).toBeTruthy();
-  expect(screen.getByTestId("current").textContent).toContain("Current.");
+  expect(screen.getByTestId("current").textContent).toContain("Still waiting");
 });
 
-test("an item that is no longer current says so and still takes an answer", async () => {
+test("an item that no longer applies offers Withdraw and turns its options off", async () => {
   stubDaemon("default");
   await renderInbox("default", QUIET);
-  expect(screen.getByTestId("not-current").textContent).toContain("No longer current.");
-  expect(screen.getByRole("button", { name: /Answer/ })).toBeTruthy();
+  expect(screen.getByTestId("not-current").textContent).toContain("No longer applies.");
+  expect(screen.getByRole("button", { name: "Withdraw" })).toBeTruthy();
+  for (const option of within(screen.getByRole("group", { name: "Answer" })).getAllByRole(
+    "button",
+  )) {
+    expect((option as HTMLButtonElement).disabled).toBe(true);
+  }
 });
 
-test("a second click on Answer repeats nothing", async () => {
+test("Withdraw sends the withdraw once", async () => {
+  stubDaemon("default", true);
+  replies = [ok({})];
+  await renderInbox("default", QUIET);
+  const withdraw = screen.getByRole("button", { name: "Withdraw" });
+  fireEvent.click(withdraw);
+  fireEvent.click(withdraw);
+  release?.();
+  await flush();
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toMatchObject({
+    method: "POST",
+    path: `/api/v1/attention/${QUIET}/withdraw`,
+  });
+});
+
+test("keys 1-3 answer, but not while typing in the note", async () => {
+  stubDaemon("default");
+  replies = [ok({ outbox_id: "01JOUTB0000000000000000001" })];
+  await renderInbox("default", RETRY);
+  fireEvent.keyDown(screen.getByRole("textbox", { name: "Note" }), { key: "2" });
+  await flush();
+  expect(calls).toHaveLength(0);
+  fireEvent.keyDown(window, { key: "2" });
+  await flush();
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.body.answer).toBe("Fixed delay, five attempts");
+});
+
+function pickRecommended() {
+  return screen.getByRole("button", { name: /Exponential backoff, three attempts/ });
+}
+
+test("a second click on an option repeats nothing", async () => {
   stubDaemon("default", true);
   replies = [ok({ outbox_id: "01JOUTB0000000000000000001" })];
   await renderInbox("default", RETRY);
 
-  const answer = screen.getByRole("button", { name: /Answer/ });
+  const answer = pickRecommended();
   fireEvent.click(answer);
   fireEvent.click(answer);
   fireEvent.click(answer);
@@ -160,8 +198,8 @@ test("a second click on Answer repeats nothing", async () => {
   expect(String(calls[0]?.body.idempotency_key)).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
 
   // Recorded: the control is gone, so there is nothing left to click.
-  expect(screen.queryByRole("button", { name: /Answer/ })).toBeNull();
-  expect(screen.getByRole("status").getAttribute("data-stage")).toBe("recorded");
+  expect(screen.queryByRole("group", { name: "Answer" })).toBeNull();
+  expect(screen.getByRole("status")).toBeTruthy();
   expect(calls).toHaveLength(1);
 });
 
@@ -169,7 +207,7 @@ test("the receipt moves to delivered and done as the outbox row does", async () 
   stubDaemon("default");
   replies = [ok({ outbox_id: "01JOUTB0000000000000000001" })];
   const { queryClient } = await renderInbox("default", RETRY);
-  fireEvent.click(screen.getByRole("button", { name: /Answer/ }));
+  fireEvent.click(pickRecommended());
   await flush();
 
   const outbox = (state: string, seq: number) =>
@@ -197,10 +235,10 @@ test("a retry after the daemon did not answer reuses the same key", async () => 
   replies = ["unreachable", ok({ outbox_id: "01JOUTB0000000000000000001" })];
   await renderInbox("default", RETRY);
 
-  fireEvent.click(screen.getByRole("button", { name: /Answer/ }));
+  fireEvent.click(pickRecommended());
   await flush();
   expect(screen.getByRole("alert").textContent).toContain("Trying again is safe");
-  fireEvent.click(screen.getByRole("button", { name: /Answer/ }));
+  fireEvent.click(pickRecommended());
   await flush();
 
   expect(calls).toHaveLength(2);
@@ -212,7 +250,7 @@ test("the answered item stays in the inbox with its receipt after it leaves the 
   stubDaemon("default");
   replies = [ok({ outbox_id: "01JOUTB0000000000000000001" })];
   const { queryClient } = await renderInbox("default", RETRY);
-  fireEvent.click(screen.getByRole("button", { name: /Answer/ }));
+  fireEvent.click(pickRecommended());
   await flush();
 
   act(() =>

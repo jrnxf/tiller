@@ -97,6 +97,18 @@ pub struct ApprovalBinding {
     pub state: String,
 }
 
+/// What made an open attention item stale (`state.md`, Attention).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct StaleItem {
+    /// `card_closed`, `run_ended`, `session_ended`, `project_deleted` or
+    /// `project_retired`.
+    pub reason: String,
+    /// The card display id, run, session or project the reason is about.
+    pub subject: Option<String>,
+    /// When it happened, when the state records it.
+    pub at: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct AttentionItem {
     pub id: String,
@@ -113,6 +125,16 @@ pub struct AttentionItem {
     pub opened_by_session_id: Option<String>,
     pub opened_at: String,
     pub still_current: bool,
+    /// Why an open item no longer applies; absent while it does and once it
+    /// is answered or withdrawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale: Option<StaleItem>,
+    /// The live session the question is about, when it names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_session_id: Option<String>,
+    /// The project the question is about, when it names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_project_id: Option<String>,
     pub answered_at: Option<String>,
     pub withdrawn_at: Option<String>,
     pub rev: i64,
@@ -948,6 +970,17 @@ pub struct AnswerBody {
     pub answer: String,
     #[serde(default)]
     pub rev: Option<i64>,
+}
+
+/// `POST /api/v1/attention/{id}/withdraw`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WithdrawBody {
+    pub idempotency_key: String,
+    /// A paired peer's label: the withdraw is not forwarded, so a peer's
+    /// item is refused (`protocol.md` 7.4).
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 /// `POST /api/v1/approvals/{id}/decide`.

@@ -306,6 +306,74 @@
         }
       }
     },
+    "/api/v1/attention/{id}/withdraw": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "withdraw_attention",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WithdrawBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "the question still applies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/board": {
       "get": {
         "tags": [
@@ -1173,6 +1241,16 @@
             }
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "the question still applies",
             "content": {
               "application/json": {
                 "schema": {
@@ -2195,8 +2273,33 @@
             "type": "integer",
             "format": "int64"
           },
+          "stale": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StaleItem",
+                "description": "Why an open item no longer applies; absent while it does and once it\nis answered or withdrawn."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "still_current": {
             "type": "boolean"
+          },
+          "subject_project_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The project the question is about, when it names one."
+          },
+          "subject_session_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The live session the question is about, when it names one."
           },
           "withdrawn_at": {
             "type": [
@@ -5054,6 +5157,33 @@
         },
         "additionalProperties": false
       },
+      "StaleItem": {
+        "type": "object",
+        "description": "What made an open attention item stale (`state.md`, Attention).",
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When it happened, when the state records it."
+          },
+          "reason": {
+            "type": "string",
+            "description": "`card_closed`, `run_ended`, `session_ended`, `project_deleted` or\n`project_retired`."
+          },
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The card display id, run, session or project the reason is about."
+          }
+        }
+      },
       "TimelineEntry": {
         "type": "object",
         "required": [
@@ -5138,6 +5268,26 @@
               "null"
             ],
             "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WithdrawBody": {
+        "type": "object",
+        "description": "`POST /api/v1/attention/{id}/withdraw`.",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label: the withdraw is not forwarded, so a peer's\nitem is refused (`protocol.md` 7.4)."
+          },
+          "idempotency_key": {
+            "type": "string"
           }
         },
         "additionalProperties": false

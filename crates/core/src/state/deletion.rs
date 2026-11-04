@@ -20,9 +20,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use super::attention::withdraw_attention;
 use super::get;
 use super::projects::{local_host_id, require_owner};
-use crate::domain::Project;
+use crate::domain::{Attention, Project};
 use crate::error::{Error, Result};
 use crate::ids::FLEET_PROJECT;
 use crate::store::{Actor, Applied, Ctx, NewEvent, Store};
@@ -88,6 +89,10 @@ pub(crate) const SOFT: &[(&str, &str, Soft)] = &[
         "contradicts_memory_id",
         Soft::Unlink("memories"),
     ),
+    // The subject of an item that stays names a project or session that may
+    // be gone: the page says what became of it.
+    ("attention", "subject_project_id", Soft::Keep),
+    ("attention", "subject_session_id", Soft::Keep),
     ("events", "entity_id", Soft::Remove),
     ("events", "card_id", Soft::Remove),
     ("idempotency_keys", "entity_id", Soft::Remove),
@@ -125,6 +130,11 @@ pub struct Deletion {
     pub project: String,
     pub removed: BTreeMap<String, i64>,
     pub unlinked: BTreeMap<String, i64>,
+    /// Open attention items of other projects (the fleet project included)
+    /// that are about this project or one of its sessions, withdrawn with it:
+    /// nobody is left to act on them.
+    #[serde(default)]
+    pub withdrawn_attention: i64,
 }
 
 /// [`Deletion`] before it happens, with the reason it would be refused.
@@ -159,7 +169,8 @@ impl Store {
         let fks = foreign_keys(&tx)?;
         mark(&tx, &fks, &project.id)?;
         let refused = blocker(&tx, &fks, &project.id)?;
-        let deletion = counts(&tx, &fks, &project.id)?;
+        let mut deletion = counts(&tx, &fks, &project.id)?;
+        deletion.withdrawn_attention = about_project(&tx, &project.id)?.len() as i64;
         // Dropping the transaction rolls the scratch table back.
         Ok(DeletionPreview { deletion, refused })
     }
@@ -185,7 +196,13 @@ impl Store {
             if let Some(fact) = blocker(tx.conn(), &fks, &project.id)? {
                 return Err(Error::refused("project", &project.id, fact));
             }
-            let deletion = counts(tx.conn(), &fks, &project.id)?;
+            let mut deletion = counts(tx.conn(), &fks, &project.id)?;
+            let reason = format!("project {} was deleted", project.id);
+            for id in about_project(tx.conn(), &project.id)? {
+                let item: Attention = get(tx.conn(), "attention", &id)?;
+                withdraw_attention(tx, &item, &reason)?;
+                deletion.withdrawn_attention += 1;
+            }
             apply(tx.conn(), &fks)?;
             tx.event(
                 NewEvent::new("project", &project.id, "project.deleted")
@@ -197,11 +214,27 @@ impl Store {
                         "next_card_seq": project.next_card_seq,
                         "removed": deletion.removed,
                         "unlinked": deletion.unlinked,
+                        "withdrawn_attention": deletion.withdrawn_attention,
                     })),
             )?;
             Ok(deletion)
         })
     }
+}
+
+/// The open attention items, on cards that stay, about the project or one of
+/// its sessions. Items on the project's own cards are removed with them.
+fn about_project(conn: &Connection, project_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.id FROM attention a JOIN cards c ON c.id = a.card_id
+         WHERE a.answered_at IS NULL AND a.withdrawn_at IS NULL
+           AND c.project_id <> ?1
+           AND (a.subject_project_id = ?1
+                OR a.subject_session_id IN (SELECT id FROM sessions WHERE project_id = ?1))
+         ORDER BY a.opened_at, a.id",
+    )?;
+    let ids = stmt.query_map([project_id], |row| row.get(0))?;
+    Ok(ids.collect::<rusqlite::Result<_>>()?)
 }
 
 /// The checks that need no row walk.
@@ -469,6 +502,7 @@ fn counts(conn: &Connection, fks: &[ForeignKey], project_id: &str) -> Result<Del
         project: project_id.to_owned(),
         removed,
         unlinked,
+        withdrawn_attention: 0,
     })
 }
 
@@ -964,6 +998,143 @@ mod tests {
             count(&store, "SELECT count(*) FROM pragma_foreign_key_check"),
             0
         );
+    }
+
+    /// An open question on `fleet-1` about the deleted project, or one of its
+    /// sessions, is withdrawn with it; one about something else stays.
+    #[test]
+    fn delete_withdraws_the_open_questions_about_the_project() {
+        use crate::ids::HOST_HEALTH_CARD;
+        use crate::state::attention::{StaleReason, stale, still_current};
+
+        let (mut store, orchestrator) = memory_store();
+        let open = |store: &mut Store, question: &str, subject: Option<String>| {
+            store
+                .attention_open(
+                    &owner(),
+                    None,
+                    NewAttention {
+                        card: HOST_HEALTH_CARD.into(),
+                        kind: crate::domain::AttentionKind::Recovery,
+                        question: question.into(),
+                        subject_session_id: subject,
+                        ..NewAttention::default()
+                    },
+                )
+                .unwrap()
+                .value
+        };
+        let about_session = open(&mut store, "silent?", Some(orchestrator.clone()));
+        let about_project = store
+            .attention_open(
+                &owner(),
+                None,
+                NewAttention {
+                    card: HOST_HEALTH_CARD.into(),
+                    kind: crate::domain::AttentionKind::Recovery,
+                    question: "gate".into(),
+                    subject_project_id: Some("alpha".into()),
+                    ..NewAttention::default()
+                },
+            )
+            .unwrap()
+            .value;
+        let unrelated = open(&mut store, "disk?", None);
+        assert_eq!(about_session.subject_project_id.as_deref(), Some("alpha"));
+        assert!(still_current(store.conn(), &about_session).unwrap());
+
+        store
+            .session_end(&owner(), &orchestrator, "stopped")
+            .unwrap();
+        let why = stale(store.conn(), &about_session).unwrap().unwrap();
+        assert_eq!(why.reason, StaleReason::SessionEnded);
+        assert!(stale(store.conn(), &unrelated).unwrap().is_none());
+
+        let preview = store.project_delete_preview("alpha").unwrap();
+        assert_eq!(preview.deletion.withdrawn_attention, 2);
+        let deleted = store.project_delete(&owner(), "alpha").unwrap().value;
+        assert_eq!(deleted.withdrawn_attention, 2);
+
+        for id in [&about_session.id, &about_project.id] {
+            let item: crate::domain::Attention = get(store.conn(), "attention", id).unwrap();
+            assert_eq!(
+                item.withdraw_reason.as_deref(),
+                Some("project alpha was deleted")
+            );
+        }
+        let kept: crate::domain::Attention = get(store.conn(), "attention", &unrelated.id).unwrap();
+        assert!(kept.withdrawn_at.is_none());
+        assert!(still_current(store.conn(), &kept).unwrap());
+    }
+
+    /// An item about a project that is gone or retired is not current, and
+    /// says which and when.
+    #[test]
+    fn an_item_about_a_gone_project_is_not_current() {
+        use crate::ids::HOST_HEALTH_CARD;
+        use crate::state::attention::{StaleReason, stale};
+
+        let (mut store, orchestrator) = memory_store();
+        store.project_add(&owner(), project("beta")).unwrap();
+        let open = |store: &mut Store, project: &str| {
+            store
+                .attention_open(
+                    &owner(),
+                    None,
+                    NewAttention {
+                        card: HOST_HEALTH_CARD.into(),
+                        kind: crate::domain::AttentionKind::Recovery,
+                        question: format!("about {project}?"),
+                        subject_project_id: Some(project.into()),
+                        ..NewAttention::default()
+                    },
+                )
+                .unwrap()
+                .value
+        };
+        let retired = open(&mut store, "beta");
+        let deleted = open(&mut store, "alpha");
+        assert!(stale(store.conn(), &retired).unwrap().is_none());
+        // The owner's withdraw is for a question that no longer applies.
+        let error = store
+            .attention_withdraw_stale(&owner(), &retired.id, "owner")
+            .unwrap_err();
+        assert!(error.to_string().contains("still applies"), "{error}");
+
+        store.project_retire(&owner(), "beta").unwrap();
+        let withdrawn = store
+            .attention_withdraw_stale(&owner(), &retired.id, "owner")
+            .unwrap()
+            .value;
+        assert!(withdrawn.withdrawn_at.is_some());
+        let why = stale(store.conn(), &retired).unwrap().unwrap();
+        assert_eq!(why.reason, StaleReason::ProjectRetired);
+        assert!(why.at.is_some());
+
+        // The item is opened but, as a legacy row would be, not withdrawn.
+        store
+            .session_end(&owner(), &orchestrator, "stopped")
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE attention SET subject_project_id = 'alpha' WHERE id = ?1",
+                [&deleted.id],
+            )
+            .unwrap();
+        store.project_delete(&owner(), "alpha").unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE attention SET withdrawn_at = NULL, withdraw_reason = NULL WHERE id = ?1",
+                [&deleted.id],
+            )
+            .unwrap();
+        let item: crate::domain::Attention = get(store.conn(), "attention", &deleted.id).unwrap();
+        let why = stale(store.conn(), &item).unwrap().unwrap();
+        assert_eq!(why.reason, StaleReason::ProjectDeleted);
+        assert_eq!(why.subject.as_deref(), Some("alpha"));
+        assert!(why.at.is_some());
     }
 
     #[test]

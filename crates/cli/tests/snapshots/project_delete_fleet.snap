@@ -8,7 +8,8 @@ exit: 5
     "current": {
       "project": "fleet",
       "removed": {},
-      "unlinked": {}
+      "unlinked": {},
+      "withdrawn_attention": 0
     },
     "entity": "project",
     "id": "fleet",

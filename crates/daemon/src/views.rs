@@ -14,7 +14,7 @@ use tiller_core::domain::{
 };
 use tiller_core::state::interventions::InterventionSource;
 use tiller_core::state::signals::lisbon_weeks;
-use tiller_core::state::{attention::still_current, find, get, list, review};
+use tiller_core::state::{attention::stale, find, get, list, review};
 use tiller_core::{Result, Store, Timestamp};
 use tiller_herdr::poller::Health as PollerRecord;
 
@@ -261,6 +261,11 @@ pub fn attention_item(store: &Store, item: &Attention) -> Result<AttentionItem> 
         None => None,
     };
     let open = item.answered_at.is_none() && item.withdrawn_at.is_none();
+    let stale = if open {
+        stale(store.conn(), item)?
+    } else {
+        None
+    };
     Ok(AttentionItem {
         id: item.id.clone(),
         card_id: item.card_id.clone(),
@@ -273,7 +278,14 @@ pub fn attention_item(store: &Store, item: &Attention) -> Result<AttentionItem> 
         approval,
         opened_by_session_id: item.opened_by_session_id.clone(),
         opened_at: at(item.opened_at),
-        still_current: open && still_current(store.conn(), item)?,
+        still_current: open && stale.is_none(),
+        stale: stale.map(|stale| StaleItem {
+            reason: stale.reason.as_str().to_owned(),
+            subject: stale.subject,
+            at: at_opt(stale.at),
+        }),
+        subject_session_id: item.subject_session_id.clone(),
+        subject_project_id: item.subject_project_id.clone(),
         answered_at: at_opt(item.answered_at),
         withdrawn_at: at_opt(item.withdrawn_at),
         rev: item.rev,

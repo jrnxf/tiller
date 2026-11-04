@@ -169,6 +169,8 @@ impl Reconciler {
                             session.project_id
                         ),
                         evidence: Self::json_text(json!({"session_id": session.id, "last_observation_at": observed.to_string(), "pane_tail": session.pane_id.as_deref().map(|p| self.pane_tail(p))})),
+                        subject_session_id: Some(session.id.clone()),
+                        subject_project_id: Some(session.project_id.clone()),
                         options: Some(json!(["Interrupt", "Relaunch", "Wait"])),
                         ..NewAttention::default()
                     },
@@ -246,6 +248,8 @@ impl Reconciler {
                         run.role.short_name()
                     ),
                     evidence: Self::json_text(json!({"session_id": session.id, "run_id": run.id, "last_observation_at": observed.to_string(), "note_at": ts(note_at)})),
+                    subject_session_id: Some(session.id.clone()),
+                    subject_project_id: Some(session.project_id.clone()),
                     options: Some(json!(["Interrupt", "Relaunch", "Wait"])),
                     ..NewAttention::default()
                 },
@@ -513,6 +517,7 @@ impl Reconciler {
                         flight.messages
                     ),
                     evidence: Self::json_text(json!({"session_id": session.id, "crashes_in_hour": crashes + 1, "resumes_in_hour": resumes})),
+                    subject_project_id: Some(session.project_id.clone()),
                     options: Some(json!(["Relaunch", "Hold the project"])),
                     ..NewAttention::default()
                 },
@@ -539,6 +544,7 @@ impl Reconciler {
                         session.project_id, flight.runs
                     ),
                     evidence: Self::json_text(json!({"session_id": session.id})),
+                    subject_project_id: Some(session.project_id.clone()),
                     ..NewAttention::default()
                 },
             )? {
@@ -691,6 +697,7 @@ impl Reconciler {
                 run_id,
                 question: format!("Session {} could not be resumed: {why}. Free the resource, or relaunch by hand?", session.id),
                 evidence: Self::json_text(json!({"session_id": session.id})),
+                subject_project_id: Some(session.project_id.clone()),
                 ..NewAttention::default()
             },
         )? {
@@ -795,6 +802,7 @@ impl Reconciler {
                             session.project_id
                         ),
                         evidence: Self::json_text(json!({"session_id": session.id, "attempts": automatic(&attempts)})),
+                        subject_project_id: Some(session.project_id.clone()),
                         options: Some(json!(["Relaunch", "Hold the project"])),
                         ..NewAttention::default()
                     },
@@ -818,6 +826,7 @@ impl Reconciler {
                             run.id
                         ),
                         evidence: Self::json_text(json!({"session_id": session.id, "attempts": automatic(&attempts)})),
+                        subject_project_id: Some(session.project_id.clone()),
                         options: Some(json!(["Relaunch", "Abandon", "Wait"])),
                         ..NewAttention::default()
                     },
@@ -1165,6 +1174,7 @@ impl Reconciler {
                 run_id,
                 question: format!("After the reboot, {label} was not resumed: {why}. Relaunch it by hand, abandon it, or wait?"),
                 evidence: Self::json_text(json!({"session_id": session.id})),
+                subject_project_id: Some(session.project_id.clone()),
                 options: Some(json!(["Relaunch", "Abandon", "Wait"])),
                 ..NewAttention::default()
             },
@@ -1209,6 +1219,7 @@ impl Reconciler {
                 run_id,
                 question: format!("After the reboot, {label} was resumed twice and bound no session; its pane is left for you. Relaunch, abandon, or wait?"),
                 evidence: Self::json_text(json!({"session_id": session.id})),
+                subject_project_id: Some(session.project_id.clone()),
                 options: Some(json!(["Relaunch", "Abandon", "Wait"])),
                 ..NewAttention::default()
             },

@@ -288,12 +288,11 @@ test("an ask of a read pairing cannot be answered and says why", async () => {
   expect(
     screen.getAllByTestId("peer-note").every((n) => n.textContent === "view only pairing."),
   ).toBe(true);
-  for (const radio of screen.getAllByRole("radio")) {
-    expect((radio as HTMLInputElement).disabled).toBe(true);
+  for (const option of within(screen.getByRole("group", { name: "Answer" })).getAllByRole(
+    "button",
+  )) {
+    expect((option as HTMLButtonElement).disabled).toBe(true);
   }
-  expect((screen.getByRole("button", { name: /^Answer/ }) as HTMLButtonElement).disabled).toBe(
-    true,
-  );
   expect(posted).toHaveLength(0);
 });
 

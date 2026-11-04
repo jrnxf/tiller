@@ -523,6 +523,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/cards/{id}/reopen", post(reopen))
         .route("/api/v1/attention", get(attention))
         .route("/api/v1/attention/{id}/answer", post(answer))
+        .route("/api/v1/attention/{id}/withdraw", post(withdraw_attention))
         .route("/api/v1/approvals/{id}/decide", post(decide))
         .route("/api/v1/agents", get(agents))
         .route("/api/v1/agents/{session}/focus", post(focus))
@@ -1561,6 +1562,7 @@ async fn delete_project(
 #[utoipa::path(post, path = "/api/v1/interventions/{id}/label", tag = "mutations", request_body = RelabelBody,
     params(("id" = String, Path)),
     responses((status = 200, body = MutationResponse), (status = 404, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "the question still applies"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
 async fn relabel_intervention(
     State(state): State<AppState>,
@@ -1647,6 +1649,34 @@ async fn answer(
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
     submit(&state, &headers, Op::Answer, Some(id), &bytes).await
+}
+
+#[utoipa::path(post, path = "/api/v1/attention/{id}/withdraw", tag = "mutations", request_body = WithdrawBody,
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse), (status = 404, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "the question still applies"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn withdraw_attention(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers)?;
+    let request: WithdrawBody = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "a withdraw").await?;
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| {
+            Done::of(store.attention_withdraw_stale(
+                ctx,
+                &id,
+                "withdrawn from the board by the owner",
+            )?)
+        },
+    )
+    .await
 }
 
 #[utoipa::path(post, path = "/api/v1/approvals/{id}/decide", tag = "mutations", request_body = DecideBody,
@@ -1800,7 +1830,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, decide, focus, stage_project, project_delete_preview, delete_project,
+        cancel, reopen, answer, withdraw_attention, decide, focus, stage_project, project_delete_preview, delete_project,
         relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo
     ),

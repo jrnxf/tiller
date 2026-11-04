@@ -1,7 +1,7 @@
 //! Attention items: `attention.open`, `attention.answer`, `attention.withdraw`
 //! (`state.md`, Attention).
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -12,6 +12,7 @@ use crate::domain::*;
 use crate::error::{Error, Result};
 use crate::ids;
 use crate::store::{Applied, Ctx, NewEvent, Store, Tx};
+use crate::time::Timestamp;
 
 /// An attention item to open.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -25,6 +26,13 @@ pub struct NewAttention {
     pub consequence: Option<String>,
     pub options: Option<Value>,
     pub run_id: Option<String>,
+    /// A live session the question asks the owner to act on: the item stops
+    /// being current when it ends. Leave empty when the question is about a
+    /// session that already ended.
+    pub subject_session_id: Option<String>,
+    /// The project the question is about, when the card is not its own
+    /// (`fleet-1` items). Taken from `subject_session_id` when empty.
+    pub subject_project_id: Option<String>,
 }
 
 impl Default for NewAttention {
@@ -38,6 +46,8 @@ impl Default for NewAttention {
             consequence: None,
             options: None,
             run_id: None,
+            subject_session_id: None,
+            subject_project_id: None,
         }
     }
 }
@@ -61,10 +71,23 @@ pub(crate) fn open_attention(tx: &mut Tx<'_>, new: &NewAttention) -> Result<Atte
     }
     let id = ids::new_ulid();
     let session = tx.actor().session_id().map(str::to_owned);
+    let subject_project = match (&new.subject_project_id, &new.subject_session_id) {
+        (Some(project), _) => Some(project.clone()),
+        (None, Some(session)) => tx
+            .conn()
+            .query_row(
+                "SELECT project_id FROM sessions WHERE id = ?1",
+                [session],
+                |row| row.get(0),
+            )
+            .optional()?,
+        (None, None) => None,
+    };
     tx.conn().execute(
         "INSERT INTO attention (id, card_id, kind, question, evidence, recommendation, consequence, options,
-                                opened_at, opened_by_session_id, opened_by_run_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                opened_at, opened_by_session_id, opened_by_run_id,
+                                subject_session_id, subject_project_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             id,
             card.id,
@@ -77,6 +100,8 @@ pub(crate) fn open_attention(tx: &mut Tx<'_>, new: &NewAttention) -> Result<Atte
             tx.now(),
             session,
             new.run_id,
+            new.subject_session_id,
+            subject_project,
         ],
     )?;
     tx.event(
@@ -212,17 +237,125 @@ fn status(item: &Attention) -> AttentionStatus {
     AttentionStatus::from_columns(item.answered_at.is_some(), item.withdrawn_at.is_some())
 }
 
-/// `still_current`, derived: open, card open, and the run that opened it is
-/// still active (or it was not opened by a run).
+/// Why an open item no longer applies.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stale {
+    pub reason: StaleReason,
+    /// The card, run, session or project the reason is about.
+    pub subject: Option<String>,
+    /// When it happened, when the state records it.
+    pub at: Option<Timestamp>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StaleReason {
+    CardClosed,
+    RunEnded,
+    SessionEnded,
+    ProjectDeleted,
+    ProjectRetired,
+}
+
+impl StaleReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CardClosed => "card_closed",
+            Self::RunEnded => "run_ended",
+            Self::SessionEnded => "session_ended",
+            Self::ProjectDeleted => "project_deleted",
+            Self::ProjectRetired => "project_retired",
+        }
+    }
+}
+
+/// `still_current`, derived: open, and not [`stale`].
 pub fn still_current(conn: &rusqlite::Connection, item: &Attention) -> Result<bool> {
-    Ok(conn.query_row(
-        "SELECT a.answered_at IS NULL AND a.withdrawn_at IS NULL AND c.state = 'open'
-                AND (a.opened_by_run_id IS NULL OR r.ended_at IS NULL)
-         FROM attention a JOIN cards c ON c.id = a.card_id LEFT JOIN runs r ON r.id = a.opened_by_run_id
-         WHERE a.id = ?1",
-        [&item.id],
-        |row| row.get(0),
-    )?)
+    if item.answered_at.is_some() || item.withdrawn_at.is_some() {
+        return Ok(false);
+    }
+    Ok(stale(conn, item)?.is_none())
+}
+
+/// Why an open item no longer applies, or `None` while it does: its card is
+/// closed, the run that opened it ended, the live session it is about ended,
+/// or the project it is about was deleted or retired.
+pub fn stale(conn: &rusqlite::Connection, item: &Attention) -> Result<Option<Stale>> {
+    let (card, state): (String, CardState) = conn.query_row(
+        "SELECT display_id, state FROM cards WHERE id = ?1",
+        [&item.card_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if state != CardState::Open {
+        return Ok(Some(Stale {
+            reason: StaleReason::CardClosed,
+            subject: Some(card),
+            at: None,
+        }));
+    }
+    if let Some(run) = &item.opened_by_run_id {
+        let ended: Option<Timestamp> =
+            conn.query_row("SELECT ended_at FROM runs WHERE id = ?1", [run], |row| {
+                row.get(0)
+            })?;
+        if ended.is_some() {
+            return Ok(Some(Stale {
+                reason: StaleReason::RunEnded,
+                subject: Some(run.clone()),
+                at: ended,
+            }));
+        }
+    }
+    if let Some(project) = &item.subject_project_id {
+        let row: Option<Option<Timestamp>> = conn
+            .query_row(
+                "SELECT retired_at FROM projects WHERE id = ?1",
+                [project],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match row {
+            None => {
+                let at = conn.query_row(
+                    "SELECT max(at) FROM events WHERE kind = 'project.deleted' AND entity_id = ?1",
+                    [project],
+                    |row| row.get(0),
+                )?;
+                return Ok(Some(Stale {
+                    reason: StaleReason::ProjectDeleted,
+                    subject: Some(project.clone()),
+                    at,
+                }));
+            }
+            Some(Some(at)) => {
+                return Ok(Some(Stale {
+                    reason: StaleReason::ProjectRetired,
+                    subject: Some(project.clone()),
+                    at: Some(at),
+                }));
+            }
+            Some(None) => {}
+        }
+    }
+    if let Some(session) = &item.subject_session_id {
+        let row: Option<Option<Timestamp>> = conn
+            .query_row(
+                "SELECT ended_at FROM sessions WHERE id = ?1",
+                [session],
+                |row| row.get(0),
+            )
+            .optional()?;
+        // A session that is gone went with its project, which the check
+        // above names when the item says which project that was.
+        if !matches!(row, Some(None)) {
+            return Ok(Some(Stale {
+                reason: StaleReason::SessionEnded,
+                subject: Some(session.clone()),
+                at: row.flatten(),
+            }));
+        }
+    }
+    Ok(None)
 }
 
 /// The session an answer goes to: the live session that opened the item,
@@ -286,11 +419,40 @@ impl Store {
         item: &str,
         reason: &str,
     ) -> Result<Applied<Attention>> {
+        self.withdraw(ctx, item, reason, false)
+    }
+
+    /// The owner's withdraw: refused while the question still applies, since
+    /// a withdrawn item is never answered and the orchestrator would wait on
+    /// nothing.
+    pub fn attention_withdraw_stale(
+        &mut self,
+        ctx: &Ctx,
+        item: &str,
+        reason: &str,
+    ) -> Result<Applied<Attention>> {
+        self.withdraw(ctx, item, reason, true)
+    }
+
+    fn withdraw(
+        &mut self,
+        ctx: &Ctx,
+        item: &str,
+        reason: &str,
+        only_stale: bool,
+    ) -> Result<Applied<Attention>> {
         self.write(ctx, "attention.withdraw", None, |tx| {
             let id = resolve_id(tx.conn(), "attention", "attention", item)?;
             let item: Attention = get(tx.conn(), "attention", &id)?;
             if item.withdrawn_at.is_some() {
                 return Ok(item);
+            }
+            if only_stale && still_current(tx.conn(), &item)? {
+                return Err(Error::refused(
+                    "attention",
+                    &id,
+                    "the question still applies; answer it instead",
+                ));
             }
             withdraw_attention(tx, &item, reason)
         })

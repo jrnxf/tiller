@@ -251,6 +251,11 @@ CREATE TABLE attention (
   answer_idempotency_key  TEXT UNIQUE,
   withdrawn_at            TEXT,
   withdraw_reason         TEXT,
+  -- what the question is about, when it is about a live session or a project
+  -- (state.md, Attention); soft ids, not foreign keys, so a project delete
+  -- keeps them and the page can still say what became of the subject
+  subject_session_id      TEXT,
+  subject_project_id      TEXT,
   rev                     INTEGER NOT NULL DEFAULT 1,
   CHECK ((answered_at IS NULL) = (answer IS NULL)),
   CHECK ((answered_at IS NULL) = (answered_via IS NULL)),

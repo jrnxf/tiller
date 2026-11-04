@@ -516,6 +516,7 @@ impl<H: Herdr> Deliverer<H> {
                     .to_string(),
                 ),
                 run_id: session.run_id.clone(),
+                subject_session_id: Some(session.id.clone()),
                 ..NewAttention::default()
             },
         )?;

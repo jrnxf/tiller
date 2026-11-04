@@ -69,6 +69,12 @@ interface ApprovalBinding {
   state: string;
 }
 
+export interface StaleInfo {
+  reason: "card_closed" | "run_ended" | "session_ended" | "project_deleted" | "project_retired";
+  subject: string | null;
+  at: string | null;
+}
+
 export interface AttentionItem extends Federated {
   id: string;
   card_id: string;
@@ -83,6 +89,11 @@ export interface AttentionItem extends Federated {
   opened_by_session_id: string | null;
   opened_at: string;
   still_current: boolean;
+  // Why the question no longer applies; absent while it does.
+  stale?: StaleInfo | null;
+  // What the question is about. Soft ids: they outlive a deleted project.
+  subject_session_id?: string | null;
+  subject_project_id?: string | null;
   answered_at: string | null;
   withdrawn_at: string | null;
   rev: number;

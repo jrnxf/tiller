@@ -105,3 +105,16 @@ export const RetiredIcon = () => (
     <path d="M4.5 7h5" stroke="var(--fg-4)" strokeWidth="1.5" strokeLinecap="round" />
   </svg>
 );
+
+export const ChevronIcon = () => (
+  <Glyph box={12}>
+    <path
+      d="M4.5 2.5 8 6l-3.5 3.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+    />
+  </Glyph>
+);

@@ -27,9 +27,12 @@ exit: 0
           "recommendation": "yes",
           "rev": 1,
           "short": "<id27.short>",
+          "subject_project_id": null,
+          "subject_session_id": null,
           "withdraw_reason": null,
           "withdrawn_at": null
         },
+        "stale": null,
         "still_current": true
       }
     ]

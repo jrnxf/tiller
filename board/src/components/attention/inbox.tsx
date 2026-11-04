@@ -12,13 +12,24 @@ import { scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
 import { HostChip } from "../board/host-chip";
 import { useAmbiguousIds, useStanding } from "../board/peer-state";
-import { CheckIcon } from "../shell/icons";
 import { answeredStore } from "./answered";
 import { AnswerForm } from "./answer";
 import { ApproveBlock } from "./approve";
 import { CardActions, OpenInHerdr } from "./card-actions";
-import { KIND_LABELS, evidenceLines, formatAge, formatWhen } from "./format";
-import { BackIcon, FileIcon, InfoIcon, LockIcon, NeedsIcon, OkIcon, RetiredIcon } from "./icons";
+import { tidy } from "./ansi";
+import { KIND_LABELS, PRIORITIES, formatAge, formatWhen, parseEvidence, staleText } from "./format";
+import {
+  BackIcon,
+  ChevronIcon,
+  FileIcon,
+  InfoIcon,
+  LockIcon,
+  NeedsIcon,
+  OkIcon,
+  RetiredIcon,
+} from "./icons";
+import { Terminal } from "./terminal";
+import { WithdrawButton } from "./withdraw";
 import "./inbox.css";
 
 // One row of the inbox: a decision (an attention item) or a permission prompt.
@@ -97,60 +108,94 @@ function BackLink() {
   );
 }
 
-function Evidence({ evidence }: { evidence: string | null }) {
-  const lines = evidenceLines(evidence);
-  if (lines.length === 0) return null;
+// The question as the heading, with project names and ids set in mono.
+function Question({ text, projects }: { text: string; projects: Project[] }) {
+  const names = projects
+    .map((project) => project.name)
+    .filter((name) => name.length >= 3)
+    .map((name) => `(?<![\\w-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`);
+  const pattern = new RegExp(`(${[...names, "\\b[0-9A-HJKMNP-TV-Z]{26}\\b"].join("|")})`, "g");
+  return (
+    <>
+      {text.split(pattern).map((part, index) =>
+        index % 2 === 1 ? (
+          <code className="proj" key={index}>
+            {part}
+          </code>
+        ) : (
+          part
+        ),
+      )}
+    </>
+  );
+}
+
+function Evidence({ item, ctx }: { item: AttentionItem; ctx: Context }) {
+  const evidence = parseEvidence(item.evidence);
+  const sessionId = item.subject_session_id ?? evidence.sessionId;
+  const card = ctx.cards.get(item.card_id);
+  // The pane is only there to open while the session is live.
+  const herdr =
+    sessionId && item.still_current ? (
+      <OpenInHerdr sessionId={sessionId} off={focusReason(ownerOf(card ?? item))} />
+    ) : null;
+  if (!evidence.paneTail && evidence.lines.length === 0) return null;
   return (
     <div className="blk">
       <div className="blk-h">
-        Evidence<span className="c">{lines.length}</span>
+        Evidence
+        {evidence.paneTail && evidence.lastOutputAt ? (
+          <span className="hint">
+            orchestrator screen, last seen {formatWhen(evidence.lastOutputAt)}
+          </span>
+        ) : null}
       </div>
-      <div className="evi">
-        {lines.map((line, index) => (
-          <div className="evi-row" key={index}>
-            <FileIcon />
-            {line.href ? (
-              <a className="mono" href={line.href} target="_blank" rel="noreferrer noopener">
-                {line.text}
-              </a>
-            ) : (
-              <span>{line.text}</span>
-            )}
-          </div>
-        ))}
-      </div>
+      {evidence.paneTail ? (
+        <Terminal tail={evidence.paneTail} sessionId={sessionId} herdr={herdr} />
+      ) : null}
+      {evidence.lines.length ? (
+        <div className="evi">
+          {evidence.lines.map((line, index) => (
+            <div className="evi-row" key={index}>
+              <FileIcon />
+              {line.href ? (
+                <a className="mono" href={line.href} target="_blank" rel="noreferrer noopener">
+                  {line.text}
+                </a>
+              ) : (
+                <span>{line.text}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function Current({ item, answered }: { item: AttentionItem; answered: string | null }) {
-  if (answered !== null) {
-    return (
-      <div className="cur">
-        <CheckIcon />
-        <span>
-          <b>Answered.</b> You answered from this page; the receipt below follows it.
-        </span>
-      </div>
-    );
-  }
+function Status({ item, answered }: { item: AttentionItem; answered: string | null }) {
+  const standing = useStanding(item);
+  if (answered !== null) return null;
   if (!item.still_current) {
+    const text = staleText(item.stale);
     return (
-      <div className="cur old" data-testid="not-current">
+      <div className="stale" data-testid="not-current">
         <InfoIcon />
-        <span>
-          <b>No longer current.</b> The run that asked this has ended or the card moved on. An
-          answer is still recorded, but it may change nothing.
-        </span>
+        <div className="txt">
+          <div>
+            <b>No longer applies.</b> {text.head}
+          </div>
+          <div className="sub">{text.sub}</div>
+        </div>
+        <WithdrawButton item={item} off={standing.canAct ? null : standing.reason} />
       </div>
     );
   }
+  const last = parseEvidence(item.evidence).lastOutputAt;
   return (
-    <div className="cur" data-testid="current">
-      <CheckIcon />
-      <span>
-        <b>Current.</b> Still open, and the run that asked is still waiting.
-      </span>
+    <div className="waiting" data-testid="current">
+      <span className="dot" />
+      <span>Still waiting{last ? `, last output ${formatWhen(last)}` : ""}</span>
     </div>
   );
 }
@@ -170,6 +215,7 @@ function DecisionDetail({
       {KIND_LABELS[item.kind] ?? item.kind}
     </span>
   );
+  const card = ctx.cards.get(item.card_id) ?? null;
   return (
     <>
       <BackLink />
@@ -178,12 +224,14 @@ function DecisionDetail({
         owner={item}
         ctx={ctx}
         chip={chip}
-        when={`asked ${formatWhen(item.opened_at)}, ${formatAge(item.opened_at)} ago`}
+        when={`asked ${formatWhen(item.opened_at)} - ${formatAge(item.opened_at)} ago`}
       />
-      <h2 className="d-q">{item.question}</h2>
+      <h2 className="d-q">
+        <Question text={item.question} projects={ctx.projects} />
+      </h2>
+      <Status item={item} answered={answered} />
       {item.consequence ? <p className="d-ctx">{item.consequence}</p> : null}
-      <Current item={item} answered={answered} />
-      <Evidence evidence={item.evidence} />
+      <Evidence item={item} ctx={ctx} />
       {item.recommendation ? (
         <div className="blk">
           <div className="blk-h">Recommendation</div>
@@ -196,11 +244,33 @@ function DecisionDetail({
           </div>
         </div>
       ) : null}
-      {item.approval ? <ApproveBlock item={item} /> : <AnswerForm item={item} />}
-      <CardActions
-        card={ctx.cards.get(item.card_id) ?? null}
-        sessionId={item.opened_by_session_id}
-      />
+      <div className="blk">
+        {item.approval ? (
+          item.still_current ? (
+            <ApproveBlock item={item} />
+          ) : null
+        ) : (
+          <AnswerForm item={item} />
+        )}
+      </div>
+      <details className="card-det">
+        <summary>
+          <ChevronIcon />
+          Card {card ? <span className="id">{card.display_id}</span> : null}
+          {card ? <span className="ct">{card.title}</span> : null}
+          {card ? (
+            <span className="pill">
+              P{card.priority} {PRIORITIES[card.priority]}
+            </span>
+          ) : null}
+        </summary>
+        <CardActions
+          card={card}
+          sessionId={
+            tidy(parseEvidence(item.evidence).paneTail ?? "") ? null : item.opened_by_session_id
+          }
+        />
+      </details>
     </>
   );
 }

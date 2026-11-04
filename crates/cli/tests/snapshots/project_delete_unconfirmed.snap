@@ -13,7 +13,8 @@ exit: 5
         "idempotency_keys": 1,
         "projects": 1
       },
-      "unlinked": {}
+      "unlinked": {},
+      "withdrawn_attention": 0
     },
     "entity": "project",
     "hint": "tiller project delete gamma --yes",

@@ -210,6 +210,8 @@ record!(Attention in "attention" {
     withdrawn_at: Option<Timestamp>,
     withdraw_reason: Option<String>,
     rev: i64,
+    subject_session_id: Option<String>,
+    subject_project_id: Option<String>,
 });
 
 record!(Run in "runs" {

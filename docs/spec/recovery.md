@@ -379,7 +379,7 @@ The host is mid-cutover, or the owner fell back to Firstmate (M6), so `~/.tiller
 | `approval.stale` | R07, R08 | nothing: the old approval stays as a record | binding compared with the forge in the same transaction window |
 | `approval.finish` from `uncertain` | R08 | nothing: it records what the forge did | merged at the bound head, or not; unreadable goes to the developer |
 | `approval.decide` by a standing grant, then `approval.execute` and `tiller land` | R08, and the ordinary landing path | a merge the owner did not click | the grant's conditions (`authority.md` section 6); the head re-read in the same call; only a fast-forward head the run pushed is rematched; a failing scrub blocks it |
-| `attention.withdraw` | R07, R08 | the question's visibility | only when the subject landed or the binding moved; the new question is opened in the same pass |
+| `attention.withdraw` | R07, R08 | the question's visibility | only when the subject landed or the binding moved; the new question is opened in the same pass. An item whose session or project is gone is not withdrawn by a pass: the board shows it as no longer current and the owner withdraws it, or `project.delete` does |
 | `outbox.deliver`, `outbox.retarget`, `outbox.fail` | R09 | a message | the payload is the row; a failed answer opens an item |
 | `cache.refresh` with `gone_at` or `stale_reason` | R05, R15, R18 | nothing: a cache | positive evidence from a successful read only; a vanished worktree with unlanded work is recorded as lost work, not hidden |
 | close a herdr pane | R15 | an agent's session | agent dead and run ended |

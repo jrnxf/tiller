@@ -45,7 +45,7 @@ pub enum Nightly {
         next: Timestamp,
         /// The `recovery` item on `fleet-1`, opened from the second failed
         /// night in a row.
-        alarm: Option<Attention>,
+        alarm: Option<Box<Attention>>,
     },
 }
 
@@ -99,7 +99,7 @@ pub fn nightly(store: &mut Store, paths: &Paths, now: Timestamp) -> Result<Night
             return Ok(Nightly::Failed {
                 error: error.to_string(),
                 next: now.plus_minutes(RETRY_AFTER_MINUTES),
-                alarm: Some(alarm),
+                alarm: Some(Box::new(alarm)),
             });
         }
     };
@@ -129,7 +129,7 @@ pub fn nightly(store: &mut Store, paths: &Paths, now: Timestamp) -> Result<Night
             manifest.save(paths)?;
             let failed_nights = manifest.failures.iter().filter(|f| f.retry).count();
             let alarm = if retry && failed_nights >= 2 {
-                Some(failed_nights_alarm(store, paths, &manifest, now)?)
+                Some(Box::new(failed_nights_alarm(store, paths, &manifest, now)?))
             } else {
                 None
             };

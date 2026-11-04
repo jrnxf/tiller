@@ -3,7 +3,7 @@
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 use tiller_core::domain::{AnsweredVia, Ask, AskSource, Attention, AttentionKind};
-use tiller_core::state::attention::{NewAttention, still_current};
+use tiller_core::state::attention::{NewAttention, stale};
 use tiller_core::state::{get, list, resolve_id};
 
 use super::KeyArg;
@@ -112,6 +112,7 @@ fn open(app: &App, args: Open) -> Done {
             consequence: args.consequence,
             options,
             run_id,
+            ..NewAttention::default()
         },
     )?;
     Ok(Outcome::applied(applied).with_key(&keyed))
@@ -181,12 +182,13 @@ fn list_items(app: &App, open: bool) -> Done {
     let items: Vec<Attention> = list(store.conn(), filter, &[])?;
     let mut rows = Vec::new();
     for item in items {
-        let current = if item.answered_at.is_none() && item.withdrawn_at.is_none() {
-            Some(still_current(store.conn(), &item)?)
+        let (current, why) = if item.answered_at.is_none() && item.withdrawn_at.is_none() {
+            let why = stale(store.conn(), &item)?;
+            (Some(why.is_none()), why)
         } else {
-            None
+            (None, None)
         };
-        rows.push(json!({"item": item, "still_current": current}));
+        rows.push(json!({"item": item, "still_current": current, "stale": why}));
     }
     Ok(Outcome::read(json!({"attention": rows})))
 }

@@ -25,6 +25,8 @@ exit: 0
       "recommendation": "yes",
       "rev": 2,
       "short": "<id27.short>",
+      "subject_project_id": null,
+      "subject_session_id": null,
       "withdraw_reason": null,
       "withdrawn_at": null
     },

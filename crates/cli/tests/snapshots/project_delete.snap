@@ -11,7 +11,8 @@ exit: 0
       "idempotency_keys": 1,
       "projects": 1
     },
-    "unlinked": {}
+    "unlinked": {},
+    "withdrawn_attention": 0
   },
   "events": [
     "<seq>"

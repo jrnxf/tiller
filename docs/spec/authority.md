@@ -93,6 +93,7 @@ What each principal may do. "Own" means only on its own run, card or worktree. E
 | Record a review | yes | `no-mistakes` results | no | no | no | the run it reviews | the run it verifies | no |
 | Open an attention item | yes | reconcile, approvals | own project | through its orchestrator | through its orchestrator | through its orchestrator | through its orchestrator | no |
 | Answer an attention item | yes | no | records the owner's chat words, citing the ask (section 6) | no | no | no | no | no |
+| Withdraw an attention item | yes, on the board or in a terminal, for an item that no longer applies | when its subject landed or the binding moved | own project | through its orchestrator | no | no | no | no |
 | Request a merge approval | yes | yes (PR green, no grant) | own project | no | no | no | no | no |
 | Decide an approval | yes | grant match only | records the owner's chat word, citing the ask | no | no | no | no | no |
 | Create or revoke a grant; start or end away mode | yes | expires grants | no | no | no | no | no | no |
