@@ -41,8 +41,8 @@ Started Sunday 2026-11-01, Lisbon time.
 - [x] Nix flake: crane builds `tiller` with the board embedded; board derivation from `bun.lock`; dev shell with Rust, bun, sccache, sqlite3; home-manager module stub
 - [x] GitHub Actions CI: clippy, format checks, nextest, board lint, typecheck and tests
 - [x] `no-mistakes` config, MIT `LICENSE`, `README.md`, `AGENTS.md` with the hard rules and the commands for both halves
-- [ ] herdr 0.9.3 to 0.9.5 and the herdr config rows, through a dotfiles PR
-  - Only Linux moved to 0.9.5. The Mac is still on 0.9.3, pending a dotfiles change.
+- [x] herdr 0.9.3 to 0.9.5 and the herdr config rows, through a dotfiles PR
+  - Pass, Wednesday 2026-11-04: both hosts on herdr 0.9.5. On the Mac, launchd restarts herdr through the `co.jrnxf.herdr.server` login agent.
 - [x] Check: CI green
 - [x] Check: `tiller --version` works, and `tiller daemon` serves the placeholder board from the embedded assets
 - [x] Check: `nix build` gives one binary on macOS and on the Linux remote host
