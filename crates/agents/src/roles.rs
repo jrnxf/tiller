@@ -448,7 +448,7 @@ mod tests {
     const ROLE_TABLE: &[RoleRow] = &[
         RoleRow {
             role: Role::Orchestrator,
-            mode: "default",
+            mode: "auto",
             extra_deny: &[
                 "Agent",
                 "SendMessage",
@@ -661,7 +661,7 @@ mod tests {
             let fm = role.frontmatter().unwrap();
             assert_eq!(fm.name, role.name(), "{role}: name");
             let (model, effort, mode) = if role == Role::Orchestrator {
-                ("opus", "medium", "default")
+                ("opus", "medium", "auto")
             } else {
                 ("opus", "high", "dontAsk")
             };
@@ -1157,9 +1157,10 @@ mod tests {
         render_settings(Role::Builder, &worker).unwrap();
     }
 
-    /// The orchestrator runs in `default` mode so the owner answers prompts;
-    /// auto-approving sandboxed Bash would silence them. Workers hold a bare
-    /// `Bash` allow rule, so the auto-approval changes nothing for them. Every
+    /// The orchestrator's Bash is not auto-approved by the sandbox: its allow
+    /// rules stay narrow, and the auto mode classifier, not the sandbox,
+    /// decides what they do not cover. Workers hold a bare `Bash` allow rule,
+    /// so the auto-approval changes nothing for them. Every
     /// role's working directory gets the same shell-level secret and settings
     /// protection.
     #[test]

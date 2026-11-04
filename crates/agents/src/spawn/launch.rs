@@ -118,6 +118,9 @@ pub struct Launch {
     pub manifest: Value,
     /// What spawn types into the pane, followed by Enter.
     pub line: String,
+    /// Set when the role's declared permission mode is not the one launched
+    /// (auto mode is unavailable); spawn shows it in its output.
+    pub mode_note: Option<String>,
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -202,6 +205,78 @@ fn read_version(command: &str, timeout: Duration) -> Option<String> {
     std::io::Read::read_to_string(&mut child.stdout.take()?, &mut text).ok()?;
     let line = text.lines().next()?.trim();
     (!line.is_empty()).then(|| line.chars().take(64).collect())
+}
+
+/// Whether this Claude Code offers auto mode: its `--help` lists `auto` among
+/// the `--permission-mode` choices. Read once per process and given two
+/// seconds. `TILLER_CLAUDE_AUTO_MODE` overrides it (`0` for unavailable, for
+/// tests and for a host that knows better). When the answer cannot be read
+/// the mode is assumed available: Claude Code itself then refuses a mode it
+/// lacks, visibly, rather than tiller guessing a downgrade.
+fn claude_offers_auto(command: &str) -> bool {
+    static OFFERED: OnceLock<bool> = OnceLock::new();
+    *OFFERED.get_or_init(|| {
+        if let Ok(pinned) = std::env::var("TILLER_CLAUDE_AUTO_MODE") {
+            return pinned.trim() != "0";
+        }
+        read_help(command, Duration::from_secs(2)).is_none_or(|help| help_lists_auto(&help))
+    })
+}
+
+fn help_lists_auto(help: &str) -> bool {
+    help.lines()
+        .skip_while(|line| !line.contains("--permission-mode"))
+        .enumerate()
+        .take_while(|(i, line)| *i == 0 || !line.trim_start().starts_with('-'))
+        .map(|(_, line)| line)
+        .any(|line| line.contains("\"auto\""))
+}
+
+fn read_help(command: &str, timeout: Duration) -> Option<String> {
+    let mut child = std::process::Command::new(command)
+        .arg("--help")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut stdout, &mut text).ok()?;
+        Some(text)
+    });
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    reader.join().ok()?
+}
+
+/// The permission mode a launch passes: the role's declared mode, except that
+/// the orchestrator's `auto` falls back to `default` when this Claude Code
+/// does not offer it (and says so). Never `bypassPermissions` or `dontAsk`.
+fn effective_mode(claude: &str, declared: &str) -> (String, Option<String>) {
+    if declared == "auto" && !claude_offers_auto(claude) {
+        return (
+            "default".into(),
+            Some(
+                "auto mode is not available in this Claude Code; the orchestrator launched in default mode, so routine actions will prompt"
+                    .into(),
+            ),
+        );
+    }
+    (declared.to_owned(), None)
 }
 
 /// Quotes one word for `sh`.
@@ -326,7 +401,7 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
         ),
         None => Default::default(),
     };
-    let fragment = roles::render_settings(
+    let mut fragment = roles::render_settings(
         spec.role,
         &Placeholders {
             tiller,
@@ -340,6 +415,10 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
             no_mistakes_socket: spec.no_mistakes_socket.map(str::to_owned),
         },
     )?;
+    let (mode, mode_note) = effective_mode(spec.claude, &front.permission_mode);
+    if mode != front.permission_mode {
+        fragment["permissions"]["defaultMode"] = Value::String(mode.clone());
+    }
     let fragment = serde_json::to_vec_pretty(&fragment)?;
     let manifest = manifest(
         spec.role,
@@ -360,6 +439,7 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
         config_hash,
         manifest,
         line: String::new(),
+        mode_note,
     };
     write_new(&launch.prompt, prompt.as_bytes(), 0o600)?;
     write_new(&launch.settings, &fragment, 0o600)?;
@@ -380,7 +460,7 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
             claude: spec.claude,
             model: spec.model,
             effort: spec.effort,
-            mode: &front.permission_mode,
+            mode: &mode,
             start,
         },
         &launch,
@@ -410,6 +490,7 @@ pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<String, Spa
         config_hash: String::new(),
         manifest: Value::Null,
         line: String::new(),
+        mode_note: None,
     };
     for file in [&launch.prompt, &launch.settings, &launch.mcp] {
         if !file.is_file() {
@@ -420,6 +501,7 @@ pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<String, Spa
         }
     }
     let front = spec.role.frontmatter()?;
+    let (mode, _) = effective_mode(spec.claude, &front.permission_mode);
     let start = match start {
         Start::Fresh { note } => vec![relaunch_prompt(note)],
         Start::Resume { claude_session_id } => {
@@ -435,7 +517,7 @@ pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<String, Spa
             claude: spec.claude,
             model: spec.model,
             effort: spec.effort,
-            mode: &front.permission_mode,
+            mode: &mode,
             start,
         },
         &launch,
@@ -449,4 +531,25 @@ pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<String, Spa
     write_new(&partial, text.as_bytes(), 0o700)?;
     fs::rename(&partial, &launch.script)?;
     Ok(format!("sh {}", sh_quote(&launch.script.to_string_lossy())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HELP_WITH_AUTO: &str = "  --permission-mode <mode>   Permission mode\n                             (choices: \"acceptEdits\", \"auto\",\n                             \"dontAsk\", \"plan\")\n";
+    const HELP_WITHOUT_AUTO: &str = "  --permission-mode <mode>   Permission mode\n                             (choices: \"acceptEdits\", \"default\",\n                             \"dontAsk\", \"plan\")\n  --other   an \"auto\" thing\n";
+
+    #[test]
+    fn help_parser_reads_the_permission_mode_choices() {
+        assert!(help_lists_auto(HELP_WITH_AUTO));
+        assert!(!help_lists_auto(HELP_WITHOUT_AUTO));
+    }
+
+    #[test]
+    fn workers_keep_their_declared_mode() {
+        let (mode, note) = effective_mode("claude", "dontAsk");
+        assert_eq!(mode, "dontAsk");
+        assert!(note.is_none());
+    }
 }

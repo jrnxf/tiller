@@ -228,6 +228,10 @@ pub fn start(
             });
         }
     };
+    let warning = match (warning, launched.mode_note) {
+        (Some(warning), Some(note)) => Some(format!("{note}; {warning}")),
+        (warning, note) => warning.or(note),
+    };
     let session = started.value.session;
     Ok(Applied {
         value: Orchestrator {

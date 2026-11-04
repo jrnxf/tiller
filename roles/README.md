@@ -24,7 +24,7 @@ claude --append-system-prompt-file <body> --settings <fragment> --permission-mod
        --strict-mcp-config --mcp-config roles/mcp.json --model <model> --effort <effort>
 ```
 
-with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `TILLER_SESSION_ID`, `TILLER_RUN_ID` and `TILLER_ROLE` in the environment, no `--plugin-dir`, no mods, and never `--agent`, which would replace the default system prompt. Workers run in `dontAsk`; the orchestrator runs in `default` because the owner is present to answer its prompts. A resume is the same command with `--resume <claude session id>`: the role body and the fragment are passed again, which is why the check verifies both halves.
+with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `TILLER_SESSION_ID`, `TILLER_RUN_ID` and `TILLER_ROLE` in the environment, no `--plugin-dir`, no mods, and never `--agent`, which would replace the default system prompt. Workers run in `dontAsk`; the orchestrator runs in `auto`, so routine actions do not wait on the owner while the deny rules, the backstop and the sandbox keep the hard limits (it falls back to `default`, saying so, when Claude Code does not offer `auto`). A resume is the same command with `--resume <claude session id>`: the role body and the fragment are passed again, which is why the check verifies both halves.
 
 ## Defaults
 

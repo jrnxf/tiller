@@ -39,6 +39,8 @@ const MODEL: &str = "haiku";
 struct Lab {
     root: tempfile::TempDir,
     bin: String,
+    /// The `--permission-mode` of a session: the role's own.
+    mode: String,
 }
 
 /// One tool call of the session and what came back.
@@ -59,7 +61,8 @@ impl Lab {
         let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/live");
         fs::create_dir_all(&base).unwrap();
         let root = tempfile::tempdir_in(base).unwrap();
-        let lab = Self { root, bin };
+        let mode = role.frontmatter().unwrap().permission_mode;
+        let lab = Self { root, bin, mode };
         for dir in ["work", "scratch", "home", "outside", "other"] {
             fs::create_dir_all(lab.path(dir)).unwrap();
         }
@@ -213,7 +216,7 @@ impl Lab {
             .args(["-k", "10", "240", "claude", "-p", prompt, "--model", MODEL])
             .arg("--settings")
             .arg(self.path("settings.json"))
-            .args(["--permission-mode", "dontAsk", "--strict-mcp-config"])
+            .args(["--permission-mode", &self.mode, "--strict-mcp-config"])
             .arg("--mcp-config")
             .arg(self.path("mcp.json"))
             .args([
@@ -819,4 +822,27 @@ fn excluded_memory_files_never_load() {
             loads.answer
         );
     }
+}
+
+#[test]
+#[ignore = "live: one model session on this host"]
+fn orchestrator_auto_runs_a_compound_read_only_command() {
+    // The CP5 stall: a compound command no `Bash(tiller *)` rule matches
+    // waited on a prompt. In auto mode the classifier lets it run.
+    let lab = Lab::new(Role::Orchestrator);
+    assert_eq!(lab.mode, "auto");
+    let call = lab.bash("which tiller; env | grep -i tiller; tiller --help");
+    assert!(!call.is_error, "the call did not run: {call:#?}");
+}
+
+#[test]
+#[ignore = "live: one model session on this host"]
+fn orchestrator_auto_still_refuses_a_denied_push() {
+    let lab = Lab::new(Role::Orchestrator);
+    let before = git(&lab.path("origin.git"), &["rev-parse", "refs/heads/main"]);
+    refused(&lab.bash("git push origin HEAD:main"));
+    assert_eq!(
+        git(&lab.path("origin.git"), &["rev-parse", "refs/heads/main"]),
+        before
+    );
 }

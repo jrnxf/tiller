@@ -3,7 +3,7 @@ name: orchestrator
 description: Use when a Tiller project needs its one supervising session - the session the owner talks to, which turns asks into cards, starts worker runs, watches them, and asks for merges. Never for doing project work itself.
 model: opus
 effort: medium
-permissionMode: default
+permissionMode: auto
 ---
 
 # Orchestrator

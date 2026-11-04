@@ -1387,7 +1387,7 @@ fn orchestrator_start_launches_in_a_new_workspace() {
     assert!(script.contains("TILLER_RUN_ID=''"), "{script}");
     assert!(script.contains(&format!("TILLER_SESSION_ID='{}'", value.session.id)));
     assert!(script.contains("TILLER_ROLE='orchestrator'"));
-    assert!(script.contains("'--permission-mode' 'default'"), "{script}");
+    assert!(script.contains("'--permission-mode' 'auto'"), "{script}");
     assert!(!script.contains(launch::FIRST_PROMPT), "{script}");
     assert!(script.contains(&format!("cd '{}'", rig.repo.checkout.display())));
     let prompt = std::fs::read_to_string(dir.join("prompt.md")).unwrap();
