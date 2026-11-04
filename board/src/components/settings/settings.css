@@ -3,7 +3,7 @@
 .settings-page {
   max-width: 720px;
   margin: 0 auto;
-  padding: 18px 8px 12px;
+  padding: 2px 0 0;
 }
 
 .set-panel {
@@ -28,7 +28,7 @@
   min-width: 0;
 }
 
-.set-text h3 {
+.set-text h2 {
   margin: 0;
   font-size: var(--fs-regular);
   font-weight: var(--w-semibold);
@@ -43,7 +43,7 @@
 
 @media (max-width: 820px) {
   .settings-page {
-    padding-top: 8px;
+    padding-top: 0;
   }
 
   .set-row {

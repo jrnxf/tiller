@@ -12,9 +12,8 @@ import { Sidebar } from "./sidebar";
 export function useAppearance() {
   const saved = useStore(prefsStore);
   useEffect(() => {
-    const prefs = saved;
     const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const apply = () => applyAppearance(prefs, media.matches, document.documentElement);
+    const apply = () => applyAppearance(saved, media.matches, document.documentElement);
     apply();
     media.addEventListener("change", apply);
     return () => media.removeEventListener("change", apply);

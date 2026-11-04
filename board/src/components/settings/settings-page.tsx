@@ -30,7 +30,7 @@ function Choice<Value extends string>({
   return (
     <div className="set-row">
       <div className="set-text">
-        <h3>{label}</h3>
+        <h2>{label}</h2>
         <p>{hint}</p>
       </div>
       <div className="seg" role="group" aria-label={label}>
