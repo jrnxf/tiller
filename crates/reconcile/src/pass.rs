@@ -266,6 +266,9 @@ impl Reconciler {
         if let Err(error) = self.approvals(now, &mut report) {
             report.error("approvals", &error);
         }
+        // Step 6a: ask-user findings and event obligations, read from the
+        // PR cache and review records this pass just refreshed.
+        self.gates(now, &mut report);
         // Step 7, delivery, is the delivery poller's pass (`tiller_delivery`),
         // which runs every two seconds beside this loop and owns R09.
         // Step 8: layout.
