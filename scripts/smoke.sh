@@ -5,9 +5,12 @@ set -euo pipefail
 
 bin=${1:?usage: smoke.sh <path-to-tiller-binary>}
 log=$(mktemp)
-"$bin" daemon --port 0 >"$log" &
+# A home of its own, so a daemon already running on this machine is never
+# met, and its state never touched.
+home=$(mktemp -d)
+TILLER_HOME=$home "$bin" daemon --port 0 >"$log" &
 pid=$!
-trap 'kill "$pid" 2>/dev/null || true; rm -f "$log"' EXIT
+trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -rf "$log" "$home"' EXIT
 
 url=
 for _ in $(seq 1 50); do
