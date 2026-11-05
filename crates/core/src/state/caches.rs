@@ -5,7 +5,7 @@
 //! Cache rows are rebuildable (`state.md` section 10): a refresh rewrites
 //! them every poll and writes an event only when a fact changed.
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -16,6 +16,24 @@ use crate::domain::*;
 use crate::error::{Error, Result};
 use crate::store::{Applied, Ctx, NewEvent, Store, Tx};
 use crate::time::Timestamp;
+
+/// The heads that landed from the runs that used worktree `path` on `host`:
+/// merged PRs, and succeeded merge and `land_direct` approvals. A squash or
+/// rebase merge lands commits under new SHAs, and only these say so. The
+/// approval counts at once: the PR row reads open until the next PR refresh.
+pub fn landed_heads(conn: &Connection, host: &str, path: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT p.head_sha FROM prs p JOIN runs r ON r.id = p.run_id
+         WHERE r.host_id = ?1 AND r.worktree_path = ?2 AND p.state = 'merged' AND p.head_sha IS NOT NULL
+         UNION
+         SELECT a.head_sha FROM approvals a LEFT JOIN prs p ON p.id = a.pr_id
+         JOIN runs r ON r.id = coalesce(a.run_id, p.run_id)
+         WHERE r.host_id = ?1 AND r.worktree_path = ?2 AND a.kind IN ('merge', 'land_direct')
+           AND a.state = 'succeeded' AND a.head_sha IS NOT NULL",
+    )?;
+    let heads = stmt.query_map(params![host, path], |row| row.get(0))?;
+    Ok(heads.collect::<rusqlite::Result<_>>()?)
+}
 
 /// One pane as herdr reports it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

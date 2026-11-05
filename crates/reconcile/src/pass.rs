@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tiller_core::domain::{Card, OutboxKind, Project, Session};
 use tiller_core::ids::HOST_HEALTH_CARD;
 use tiller_core::state::attention::NewAttention;
-use tiller_core::state::caches::WorktreeReading;
+use tiller_core::state::caches::{WorktreeReading, landed_heads};
 use tiller_core::state::outbox::{NewMessage, live_orchestrator};
 use tiller_core::state::{find, get, list};
 use tiller_core::{Actor, Ctx, Result, Store, Timestamp};
@@ -530,18 +530,11 @@ impl Reconciler {
                 .as_deref()
                 .and_then(|id| projects.iter().find(|p| p.id == id))
                 .cloned();
-            let merged_heads: Vec<String> = match &run_id {
-                Some(run) => {
-                    let mut stmt = self
-                        .conn()
-                        .prepare("SELECT head_sha FROM prs WHERE run_id = ?1 AND state = 'merged' AND head_sha IS NOT NULL")?;
-                    let heads = stmt.query_map([run], |row| row.get(0))?;
-                    heads.collect::<rusqlite::Result<_>>()?
-                }
-                None => Vec::new(),
-            };
             let scan = match &project {
-                Some(project) => self.sources.scanner.scan(&path, project, &merged_heads),
+                Some(project) => {
+                    let landed = landed_heads(self.conn(), &host, &path.to_string_lossy())?;
+                    self.sources.scanner.scan(&path, project, &landed)
+                }
                 None => WorktreeScan {
                     exists: path.exists(),
                     ..WorktreeScan::missing(&path)
@@ -570,25 +563,11 @@ impl Reconciler {
         if let Some(scan) = self.scans.get(path) {
             return scan.clone();
         }
-        let merged = self.merged_heads_at(path).unwrap_or_default();
-        let scan = self.sources.scanner.scan(path, project, &merged);
+        let landed = landed_heads(self.conn(), &self.config.host_id, &path.to_string_lossy())
+            .unwrap_or_default();
+        let scan = self.sources.scanner.scan(path, project, &landed);
         self.scans.insert(path.to_owned(), scan.clone());
         scan
-    }
-
-    /// The heads of merged PRs of every run that used `path`: a squash or
-    /// rebase merge lands the worktree's commits under new SHAs, and only
-    /// these tell the scan so.
-    pub(crate) fn merged_heads_at(&self, path: &Path) -> Result<Vec<String>> {
-        let mut stmt = self.conn().prepare(
-            "SELECT p.head_sha FROM prs p JOIN runs r ON r.id = p.run_id
-             WHERE r.host_id = ?1 AND r.worktree_path = ?2 AND p.state = 'merged' AND p.head_sha IS NOT NULL",
-        )?;
-        let rows = stmt.query_map(
-            rusqlite::params![self.config.host_id, path.to_string_lossy()],
-            |row| row.get(0),
-        )?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Evidence JSON for an item or a note.

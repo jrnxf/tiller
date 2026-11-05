@@ -43,7 +43,7 @@ use serde_json::Value;
 use tiller_core::domain::{
     Card, Delivery, Effort, Project, Reservation, Run, RunOutcome, RunRole, Session, Worktree,
 };
-use tiller_core::state::caches::WorktreeReading;
+use tiller_core::state::caches::{WorktreeReading, landed_heads};
 use tiller_core::state::projects::meta;
 use tiller_core::state::runs::{EndRun, NewRun, Placement, SpawnChecks, Started, live_session};
 use tiller_core::state::{find, get, list, resolve_card};
@@ -509,21 +509,6 @@ fn fail(
     }
 }
 
-/// The heads of the merged PRs of every run that used `path`: a squash or
-/// rebase merge lands commits under new SHAs, and only these say so.
-fn merged_heads(store: &Store, run: &Run, path: &str) -> Result<Vec<String>> {
-    let mut stmt = store.conn().prepare(
-        "SELECT p.head_sha FROM prs p JOIN runs r ON r.id = p.run_id
-         WHERE r.host_id = ?1 AND r.worktree_path = ?2 AND p.state = 'merged' AND p.head_sha IS NOT NULL",
-    ).map_err(tiller_core::Error::from)?;
-    let rows = stmt
-        .query_map(rusqlite::params![run.host_id, path], |row| row.get(0))
-        .map_err(tiller_core::Error::from)?;
-    Ok(rows
-        .collect::<rusqlite::Result<_>>()
-        .map_err(tiller_core::Error::from)?)
-}
-
 /// Scans a run's worktree now and records the reading; returns the scan
 /// and the events the record wrote.
 pub(crate) fn scan_and_record(
@@ -535,7 +520,7 @@ pub(crate) fn scan_and_record(
     path: &Path,
 ) -> Result<(WorktreeScan, Vec<i64>)> {
     let text = path.to_string_lossy().into_owned();
-    let heads = merged_heads(store, run, &text)?;
+    let heads = landed_heads(store.conn(), &run.host_id, &text)?;
     let scan = scanner.scan(path, project, &heads);
     let mut events = Vec::new();
     if scan.exists {
