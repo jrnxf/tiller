@@ -93,6 +93,49 @@ fn dated_pause_silences_silent_escalation() {
     assert!(w.open_items(&run.card_id).is_empty());
 }
 
+/// P19 (R12): a dated worker pause silences the silent-worker alarm until
+/// the pause date, and the alarm returns after it (the view grants a
+/// quarter hour of grace past the date). Once it fires it fires once.
+#[test]
+fn silent_alarm_returns_after_the_pause_date() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let run = w.run_of(&worker);
+    let t0 = now();
+    w.observe(&worker, Activity::Working, t0.plus_minutes(-45));
+    let until = t0.plus_minutes(120);
+    w.store_mut().run_pause(&owner(), &run.id, until).unwrap();
+
+    // Well before the date, and just past it but inside the grace: silent.
+    for at in [t0, t0.plus_minutes(60), until.plus_minutes(10)] {
+        let report = w.pass(at);
+        assert!(!report.did("R12"), "{at}: {report:?}");
+        assert!(w.notes().is_empty(), "{at}: {:?}", w.notes());
+        assert!(w.open_items(&run.card_id).is_empty(), "{at}");
+    }
+
+    // Past the date and its grace: the alarm returns, once.
+    let report = w.pass(until.plus_minutes(16));
+    assert!(report.did("R12"), "{report:?}");
+    let silent = |w: &World| {
+        w.notes()
+            .into_iter()
+            .filter(|n| n.body.contains("silent for"))
+            .count()
+    };
+    assert_eq!(silent(&w), 1, "{:?}", w.notes());
+    assert!(
+        w.launcher.launches().is_empty(),
+        "the alarm never relaunches"
+    );
+    assert!(w.session(&worker).ended_at.is_none());
+
+    let again = w.pass(until.plus_minutes(17));
+    assert!(!again.did("R12"), "{again:?}");
+    assert_eq!(silent(&w), 1, "{:?}", w.notes());
+}
+
 /// R12, C07: a session `errored` for thirty minutes with its agent alive is
 /// silent: the orchestrator is told, nothing is retried, resumed or ended.
 #[test]

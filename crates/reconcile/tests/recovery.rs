@@ -10,6 +10,7 @@ use tiller_core::domain::{
     Activity, AnsweredVia, ApprovalState, AttentionKind, CardOutcome, CardState, Delivery, Effort,
     OutboxKind, OutboxState, PrState, RunOutcome, RunRole,
 };
+use tiller_core::state::attention::NewAttention;
 use tiller_core::state::cards::NewCard;
 use tiller_core::state::get;
 use tiller_core::state::outbox::NewMessage;
@@ -309,6 +310,138 @@ fn restart_turns_executing_uncertain_and_fires_timers_once() {
         "fired once"
     );
     let _ = run;
+}
+
+/// P19 (R01 timers): a dated hold is not released by a pass before its
+/// date; the first pass after it releases it, re-asking the owner with a
+/// `decision` item, and later passes fire nothing more.
+#[test]
+fn dated_hold_holds_until_its_date_then_asks_once() {
+    let mut w = World::new();
+    w.place();
+    let parked = w
+        .store_mut()
+        .card_create(
+            &owner(),
+            None,
+            NewCard {
+                project_id: "alpha".into(),
+                kind: tiller_core::domain::CardKind::Ship,
+                title: "parked".into(),
+                ..NewCard::default()
+            },
+            None,
+        )
+        .unwrap()
+        .value;
+    let t0 = now();
+    let until = t0.plus_minutes(60);
+    w.store_mut()
+        .card_hold(&owner(), &parked.id, until, "wait for the release")
+        .unwrap();
+    let released = |w: &World| {
+        w.event_kinds()
+            .iter()
+            .filter(|k| *k == "hold.released")
+            .count()
+    };
+
+    for at in [t0, t0.plus_minutes(30), until.plus_minutes(-1)] {
+        let report = w.pass(at);
+        assert!(!report.did("timer: hold"), "{at}: {report:?}");
+        assert_eq!(released(&w), 0, "{at}");
+        assert_eq!(
+            w.count("SELECT count(*) FROM holds WHERE released_at IS NOT NULL"),
+            0,
+            "{at}"
+        );
+        assert!(w.open_items(&parked.id).is_empty(), "{at}");
+    }
+
+    let report = w.pass(until.plus_minutes(1));
+    assert!(report.did("timer: hold"), "{report:?}");
+    assert_eq!(released(&w), 1);
+    let items = w.open_items(&parked.id);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].kind, AttentionKind::Decision);
+    assert_eq!(items[0].question, "wait for the release");
+
+    w.pass(until.plus_minutes(2));
+    w.pass(until.plus_minutes(24 * 60));
+    assert_eq!(released(&w), 1, "fired once");
+    assert_eq!(w.open_items(&parked.id).len(), 1);
+}
+
+/// P31: an undated wait is an attention item, not a hold, and waits for the
+/// owner's word. Passes spaced days apart never nag: no notification, no
+/// note, no second item, and the item stays open and unchanged.
+#[test]
+fn undated_hold_never_nags_across_days() {
+    let mut w = World::new();
+    w.place();
+    let parked = w
+        .store_mut()
+        .card_create(
+            &owner(),
+            None,
+            NewCard {
+                project_id: "alpha".into(),
+                kind: tiller_core::domain::CardKind::Ship,
+                title: "release".into(),
+                ..NewCard::default()
+            },
+            None,
+        )
+        .unwrap()
+        .value;
+    let waiting = w
+        .store_mut()
+        .attention_open(
+            &owner(),
+            None,
+            NewAttention {
+                card: parked.id.clone(),
+                kind: AttentionKind::Decision,
+                question: "Hold the release until the owner says go".into(),
+                ..NewAttention::default()
+            },
+        )
+        .unwrap()
+        .value;
+    assert_eq!(
+        w.count("SELECT count(*) FROM holds"),
+        0,
+        "an undated wait is not a hold"
+    );
+
+    let t0 = now();
+    w.pass(t0);
+    let items_before = w.items().len();
+    let notes_before = w.notes().len();
+    let events_before = w.count("SELECT count(*) FROM events WHERE card_id IS NOT NULL")
+        - w.count(&format!(
+            "SELECT count(*) FROM events WHERE card_id = '{}' AND kind LIKE 'observation%'",
+            parked.id
+        ));
+    assert!(w.launcher.notifications().is_empty());
+
+    for days in [1, 2, 5, 9, 30] {
+        w.pass(t0.plus_minutes(days * 24 * 60));
+        assert!(
+            w.launcher.notifications().is_empty(),
+            "day {days}: {:?}",
+            w.launcher.notifications()
+        );
+        assert!(w.launcher.launches().is_empty(), "day {days}");
+        assert_eq!(w.items().len(), items_before, "day {days}: {:?}", w.items());
+        assert_eq!(w.notes().len(), notes_before, "day {days}");
+        let held = w.open_items(&parked.id);
+        assert_eq!(held.len(), 1, "day {days}: {held:?}");
+        assert_eq!(held[0].id, waiting.id);
+        assert_eq!(held[0].question, waiting.question);
+    }
+    assert_eq!(w.count("SELECT count(*) FROM holds"), 0);
+    let _ = events_before;
 }
 
 /// R04: after a reboot every live session is dead; the orchestrator is
