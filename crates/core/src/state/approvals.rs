@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 use super::attention::{NewAttention, answer_attention, open_attention, withdraw_attention};
 use super::cards::{MARK_LANDED, active_runs, close_card, open_attention_id};
+use super::outbox::{NewMessage, enqueue, live_orchestrator};
 use super::projects::{require_daemon, require_owner};
 use super::records::{NewObligation, meet_obligation, open_obligation};
 use super::runs::{EndRun, end_run};
@@ -27,6 +28,56 @@ pub struct NewPr {
     pub url: String,
     pub head_sha: Option<String>,
     pub base_ref: Option<String>,
+}
+
+/// One `wake` to the project's live orchestrator for a PR event that is the
+/// orchestrator's to act on: checks turning green or red, or a review decision
+/// landing, while the PR is open. A merge or close outside Tiller is reconcile's
+/// note (R07). It runs only on a change, so a transition wakes once; with no live
+/// orchestrator nothing is enqueued, and the next session reads the PR itself.
+fn wake_for_pr_event(tx: &mut Tx<'_>, old: &Pr, new: &Pr) -> Result<()> {
+    if new.state != PrState::Open {
+        return Ok(());
+    }
+    let mut events = Vec::new();
+    if old.checks != new.checks {
+        match new.checks {
+            Checks::Success => events.push("checks passed".to_string()),
+            Checks::Failure => events.push("checks failed".to_string()),
+            _ => {}
+        }
+    }
+    if old.review_decision != new.review_decision {
+        match new.review_decision {
+            ReviewDecision::Approved => events.push("review approved".to_string()),
+            ReviewDecision::ChangesRequested => events.push("review requested changes".to_string()),
+            ReviewDecision::None => {}
+        }
+    }
+    if events.is_empty() {
+        return Ok(());
+    }
+    let card: Card = get(tx.conn(), "card", &new.card_id)?;
+    let Some(orchestrator) = live_orchestrator(tx.conn(), &card.project_id)? else {
+        return Ok(());
+    };
+    enqueue(
+        tx,
+        &NewMessage {
+            target_session_id: orchestrator.id,
+            kind: OutboxKind::Wake,
+            body: format!(
+                "[{}] PR #{}: {}. {}",
+                card.display_id,
+                new.number,
+                events.join(", "),
+                new.url
+            ),
+            card_id: Some(card.id.clone()),
+            reply_to: None,
+        },
+    )?;
+    Ok(())
 }
 
 /// What the forge poller read for one PR.
@@ -458,6 +509,7 @@ impl Store {
                     .card(&new.card_id)
                     .payload(Value::Object(changed)),
             )?;
+            wake_for_pr_event(tx, &old, &new)?;
             // Compare each open approval with the fetched head, not with the
             // previous fetch: the head may have moved before the PR's first
             // recorded head, or between an approval and a missed fetch.
