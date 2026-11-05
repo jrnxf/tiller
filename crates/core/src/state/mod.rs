@@ -18,6 +18,7 @@ pub mod deletion;
 pub mod interventions;
 pub mod learning;
 pub mod memory;
+pub mod notifications;
 pub mod outbox;
 pub mod peers;
 pub mod projects;
