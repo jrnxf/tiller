@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use tiller_core::domain::{
     Attention, AttentionKind, Card, CardKind, Effort, OutboxKind, OutboxMessage, OutboxState,
-    RunOutcome, RunRole,
+    RunOutcome, RunRole, StatusState,
 };
 use tiller_core::state::cards::NewCard;
 use tiller_core::state::outbox::NewMessage;
@@ -1058,4 +1058,81 @@ fn a_remote_lane_is_left_to_its_own_tiller() {
     assert_eq!(events(&w), before, "nothing written for a remote lane");
     assert_eq!(w.herdr.calls().len(), calls, "herdr never asked");
     assert_eq!(w.message(&message.id).state, OutboxState::Pending);
+}
+
+/// P18, P20: a worker's `tiller status` change reaches the orchestrator as
+/// exactly one wake line in its pane, never typed into the worker's own, for
+/// each state that asks something of the orchestrator.
+#[test]
+fn status_change_types_one_wake_line_into_the_orchestrator_pane() {
+    for state in [
+        StatusState::Done,
+        StatusState::Blocked,
+        StatusState::NeedsDecision,
+    ] {
+        let mut w = World::new();
+        let run = w.run();
+        w.fleet
+            .store
+            .run_status(
+                &Ctx::at(Actor::Session(w.worker.clone()), at(1)),
+                &run.id,
+                state,
+                "ready for review",
+            )
+            .unwrap();
+        let wakes: Vec<OutboxMessage> = list(
+            w.fleet.store.conn(),
+            "target_session_id = ?1 AND kind = 'wake'",
+            &[&w.fleet.orchestrator_session],
+        )
+        .unwrap();
+        assert_eq!(wakes.len(), 1, "{state}: one wake row");
+        assert!(
+            wakes[0]
+                .body
+                .contains(&format!("{state}: ready for review"))
+        );
+
+        let report = w.pass(at(2));
+        assert_eq!(report.rung, std::slice::from_ref(&wakes[0].id), "{state}");
+        let typed = w.herdr.fake_pane("w1:p1").submitted;
+        assert_eq!(typed, [line(&wakes[0], &w.card())], "{state}");
+        assert!(
+            w.submitted().is_empty(),
+            "{state}: the worker's pane is left alone"
+        );
+        assert_eq!(w.message(&wakes[0].id).state, OutboxState::Delivered);
+    }
+}
+
+/// P26: a wake for an orchestrator mid-turn waits, then lands once, in the
+/// idle pane, when its turn ends.
+#[test]
+fn wake_waits_for_a_working_orchestrator_then_lands_once() {
+    let mut w = World::new();
+    let run = w.run();
+    w.herdr.set_screen("w1:p1", Screen::Working);
+    w.fleet
+        .store
+        .run_status(
+            &Ctx::at(Actor::Session(w.worker.clone()), at(1)),
+            &run.id,
+            StatusState::Done,
+            "ready for review",
+        )
+        .unwrap();
+    w.poll(at(2));
+    let report = w.pass(at(3));
+    assert!(report.rung.is_empty(), "nothing typed over a working turn");
+    assert!(w.herdr.fake_pane("w1:p1").submitted.is_empty());
+
+    w.herdr.set_screen("w1:p1", Screen::Idle);
+    w.poll(at(4));
+    let report = w.pass(at(300));
+    assert_eq!(report.rung.len(), 1);
+    assert_eq!(w.herdr.fake_pane("w1:p1").submitted.len(), 1);
+    let report = w.pass(at(301));
+    assert!(report.rung.is_empty(), "one line, not one per pass");
+    assert_eq!(w.herdr.fake_pane("w1:p1").submitted.len(), 1);
 }
