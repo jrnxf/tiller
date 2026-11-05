@@ -590,7 +590,7 @@ fn second_import_changes_nothing() {
 #[test]
 fn cards_keep_the_lifecycle_rules() {
     let refused = |extra: Vec<Value>| -> String {
-        let mut records = records();
+        let mut records = self::records();
         records.cards.extend(extra);
         let dir = tempfile::tempdir().unwrap();
         write_bundle(dir.path(), &records, "dry");
@@ -614,7 +614,7 @@ fn cards_keep_the_lifecycle_rules() {
     );
 
     // A dependency on a card that closed undelivered stays and asks the owner.
-    let mut records = records();
+    let mut records = self::records();
     let mut d1 = card("d1", "alpha", "ship", "queued");
     d1["depends_on"] = json!(["b1"]);
     records.cards.push(d1);
@@ -657,7 +657,7 @@ fn long_or_hyphenated_legacy_ids_keep_their_slug_or_their_earlier_one() {
             [&host],
         )
         .unwrap();
-    let mut records = records();
+    let mut records = self::records();
     records
         .cards
         .push(card("hy1", "new-site", "ship", "queued"));
@@ -728,7 +728,7 @@ fn a_later_bundle_reads_state_db_as_it_now_is() {
         )
         .unwrap();
 
-    let mut records = records();
+    let mut records = self::records();
     let mut d2 = card("d2", "alpha", "ship", "queued");
     d2["depends_on"] = json!(["a3"]);
     records.cards.push(d2);
@@ -848,7 +848,7 @@ fn a_placement_into_a_document_with_content_is_refused() {
             [],
         )
         .unwrap();
-    let mut records = records();
+    let mut records = self::records();
     records
         .memory
         .push(memory("mem-6", "global", "rule", "A new rule."));
@@ -900,9 +900,9 @@ fn a_deleted_projects_id_numbers_on_from_its_tombstone() {
 }
 
 /// P10: the import stores each project's delivery mode and registry fields
-/// on the project row. The bundle names no `checks` (`firstmate-export.md`,
-/// `projects.json`), so a project comes in with none; the owner sets them
-/// with `project.edit`.
+/// on the project row. The exporter writes no `checks`, so a project comes in
+/// with none unless a hand-edited bundle names them; the owner sets them with
+/// `project.edit`.
 #[test]
 fn p10_import_stores_each_projects_delivery_and_registry_fields() {
     let dir = tempfile::tempdir().unwrap();
@@ -926,4 +926,68 @@ fn p10_import_stores_each_projects_delivery_and_registry_fields() {
     assert_eq!(beta.repo.as_deref(), Some("example/beta"));
     assert_eq!(beta.remote, None);
     assert_eq!(beta.checks, json!([]));
+}
+
+/// P10: every delivery mode survives export, import and a read back through
+/// the project registry.
+#[test]
+fn delivery_mode_round_trips_from_import() {
+    const MODES: [&str; 5] = [
+        "no-mistakes",
+        "no-mistakes-prod-only",
+        "direct-pr",
+        "direct-push",
+        "local-only",
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let mut records = self::records();
+    records.projects = MODES
+        .iter()
+        .map(|mode| json!({"id": format!("p-{mode}"), "delivery": mode, "default_branch": "main"}))
+        .collect();
+    records.cards.clear();
+    records.memory.clear();
+    records.inflight.clear();
+    write_bundle(dir.path(), &records, "dry");
+    let mut store = store();
+    store
+        .import_apply(&import_ctx(), &Bundle::read(dir.path()).unwrap())
+        .unwrap();
+
+    for mode in MODES {
+        let project = store.project(&format!("p-{mode}")).unwrap();
+        assert_eq!(project.delivery.to_string(), mode);
+    }
+}
+
+/// P10: a bundle that names `checks` imports them in either shape, and a
+/// shape the registry would refuse stops the plan.
+#[test]
+fn import_carries_a_projects_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut records = self::records();
+    records.projects[0]["checks"] =
+        json!({"full": ["cargo test"], "no_logic": ["cargo fmt --check"]});
+    records.projects[1]["checks"] = json!(["make test"]);
+    write_bundle(dir.path(), &records, "dry");
+    let mut store = store();
+    store
+        .import_apply(&import_ctx(), &Bundle::read(dir.path()).unwrap())
+        .unwrap();
+    let alpha: Project = crate::state::get(store.conn(), "project", "alpha").unwrap();
+    assert_eq!(
+        alpha.checks,
+        json!({"full": ["cargo test"], "no_logic": ["cargo fmt --check"]})
+    );
+    let beta: Project = crate::state::get(store.conn(), "project", "betasite").unwrap();
+    assert_eq!(beta.checks, json!(["make test"]));
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut bad = self::records();
+    bad.projects[0]["checks"] = json!("cargo test");
+    write_bundle(dir.path(), &bad, "dry");
+    let error = self::store()
+        .import_plan(&Bundle::read(dir.path()).unwrap(), Timestamp::now())
+        .unwrap_err();
+    assert!(error.to_string().contains("checks"), "{error}");
 }

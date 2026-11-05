@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use proptest::prelude::*;
 use rusqlite::types::Value as SqlValue;
+use serde_json::json;
 
 use super::approvals::{Decision, Execution, NewApproval, NewPr, PrFetch};
 use super::asks::{NewAsk, Resolution};
@@ -1557,4 +1558,147 @@ fn a_failed_spawn_does_not_wake_the_orchestrator() {
         .run_spawn_failed(&owner(), &run.id, "no worktree")
         .unwrap();
     assert_eq!(orchestrator_notes(&store, &orchestrator).len(), before);
+}
+
+fn project_input(id: &str, remote: Option<&str>, delivery: Delivery) -> NewProject {
+    NewProject {
+        id: id.into(),
+        name: id.into(),
+        repo: None,
+        remote: remote.map(Into::into),
+        default_branch: None,
+        delivery,
+        checks: None,
+        capacity: None,
+        deploy_workflow: None,
+        deploy_environment: None,
+        deploy_timeout_minutes: None,
+    }
+}
+
+/// P10: a GitHub remote names the repo, so `project.add` fills `repo` from it
+/// and records which forge it found; an explicit `repo` is kept.
+#[test]
+fn project_add_reads_the_repo_from_a_github_remote() {
+    let (mut store, _) = memory_store();
+    let added = store
+        .project_add(
+            &owner(),
+            project_input(
+                "gamma",
+                Some(&format!("git{}github.com:example/gamma.git", '@')),
+                Delivery::DirectPush,
+            ),
+        )
+        .unwrap();
+    assert_eq!(added.value.repo.as_deref(), Some("example/gamma"));
+
+    let mut named = project_input(
+        "delta",
+        Some("https://github.com/example/delta.git"),
+        Delivery::DirectPr,
+    );
+    named.repo = Some("example/other".into());
+    let added = store.project_add(&owner(), named).unwrap();
+    assert_eq!(added.value.repo.as_deref(), Some("example/other"));
+
+    let events: Vec<String> = store
+        .conn()
+        .prepare("SELECT payload FROM events WHERE kind = 'project.added' AND entity_id = ?1")
+        .unwrap()
+        .query_map(["gamma"], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].contains("\"forge\":\"github\""), "{}", events[0]);
+}
+
+/// P10: a Gerrit remote is not a forge Tiller publishes to, so such a project
+/// can only be local-only; the add says why instead of storing a delivery
+/// mode that could never land.
+#[test]
+fn project_add_refuses_a_gerrit_remote_unless_local_only() {
+    let (mut store, _) = memory_store();
+    let remote = "ssh://gerrit.example.com:29418/epsilon";
+    for delivery in [
+        Delivery::NoMistakes,
+        Delivery::DirectPr,
+        Delivery::DirectPush,
+    ] {
+        let error = store
+            .project_add(&owner(), project_input("epsilon", Some(remote), delivery))
+            .unwrap_err();
+        assert!(matches!(error, Error::Usage(_)), "{error}");
+        assert!(error.to_string().contains("Gerrit"), "{error}");
+    }
+    assert!(store.project("epsilon").is_err(), "nothing was stored");
+
+    let added = store
+        .project_add(
+            &owner(),
+            project_input("epsilon", Some(remote), Delivery::LocalOnly),
+        )
+        .unwrap();
+    assert_eq!(added.value.delivery, Delivery::LocalOnly);
+    assert_eq!(added.value.repo, None);
+}
+
+/// P10: an add replayed with the same values still returns the existing row
+/// after forge detection filled the repo.
+#[test]
+fn project_add_with_a_detected_repo_is_idempotent() {
+    let (mut store, _) = memory_store();
+    let input = project_input(
+        "gamma",
+        Some("https://github.com/example/gamma"),
+        Delivery::DirectPush,
+    );
+    let first = store.project_add(&owner(), input.clone()).unwrap();
+    let again = store.project_add(&owner(), input).unwrap();
+    assert_eq!(first.value.id, again.value.id);
+    assert_eq!(first.value.rev, again.value.rev);
+}
+
+/// P10: `checks` is an array of commands, or `{full, no_logic}`; anything
+/// else is refused on add and on edit rather than stored.
+#[test]
+fn project_checks_take_two_shapes_and_refuse_the_rest() {
+    let (mut store, _) = memory_store();
+    for (id, checks) in [
+        ("zeta", json!(["cargo test"])),
+        (
+            "eta",
+            json!({"full": ["cargo test"], "no_logic": ["cargo fmt --check"]}),
+        ),
+    ] {
+        let mut input = project_input(id, None, Delivery::DirectPush);
+        input.checks = Some(checks.clone());
+        assert_eq!(
+            store.project_add(&owner(), input).unwrap().value.checks,
+            checks
+        );
+    }
+
+    let mut input = project_input("theta", None, Delivery::DirectPush);
+    input.checks = Some(json!("cargo test"));
+    assert!(matches!(
+        store.project_add(&owner(), input).unwrap_err(),
+        Error::Usage(_)
+    ));
+
+    let rev = store.project("zeta").unwrap().rev;
+    let error = store
+        .project_edit(
+            &owner(),
+            "zeta",
+            rev,
+            ProjectEdit {
+                checks: Some(json!({"light": ["x"]})),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::Usage(_)), "{error}");
+    assert_eq!(store.project("zeta").unwrap().checks, json!(["cargo test"]));
 }

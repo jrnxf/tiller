@@ -2297,6 +2297,79 @@ fn p11_direct_push_lands_only_after_the_project_checks_pass() {
     );
 }
 
+/// P11: the whole no-PR flow. The project's checks gate the push (pending
+/// waits, passed pushes the bound commit to the default branch), and a project
+/// that deploys opens the deploy watch for the pushed SHA instead of closing
+/// the card, which the daemon's deploy poller resolves.
+#[test]
+fn direct_push_runs_project_checks_then_pushes() {
+    let forge = FakeForge::new();
+    let (remote, work, head) = repos();
+    let mut world = World::new(Delivery::DirectPush);
+    let lock = world.lock();
+    set_checks(
+        &mut world,
+        json!({"full": ["cargo test"], "no_logic": ["cargo fmt --check"]}),
+    );
+    let project: Project = get(world.store.conn(), "project", "alpha").unwrap();
+    world
+        .store
+        .project_edit(
+            &owner(),
+            "alpha",
+            project.rev,
+            ProjectEdit {
+                deploy_workflow: Some(Some("deploy.yml".into())),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap();
+    let approval = direct_approval(&mut world, work.path(), &head);
+    let before = git(remote.path(), &["rev-parse", "refs/heads/main"]);
+
+    forge.set(|view| view.checks = Checks::Pending);
+    let landed = lander(&forge)
+        .land(&lock, &mut world.store, &approval.id)
+        .unwrap();
+    assert!(matches!(landed, Landed::Waiting { .. }), "{landed:?}");
+    assert_eq!(
+        git(remote.path(), &["rev-parse", "refs/heads/main"]),
+        before
+    );
+
+    forge.set(|view| view.checks = Checks::Success);
+    let landed = lander(&forge)
+        .land(&lock, &mut world.store, &approval.id)
+        .unwrap();
+    assert!(matches!(landed, Landed::Succeeded { .. }), "{landed:?}");
+    assert_eq!(git(remote.path(), &["rev-parse", "refs/heads/main"]), head);
+
+    let card = world
+        .store
+        .card(approval.card_id.as_deref().unwrap())
+        .unwrap();
+    assert_eq!(
+        card.state,
+        tiller_core::domain::CardState::Open,
+        "the deploy watch holds it open"
+    );
+    let watches: Vec<tiller_core::domain::Obligation> = list(
+        world.store.conn(),
+        "card_id = ?1 AND state = 'open' AND json_extract(trigger_event, '$.kind') = 'deploy.finished'",
+        &[&card.id],
+    )
+    .unwrap();
+    assert_eq!(watches.len(), 1);
+    assert_eq!(
+        watches[0]
+            .trigger_event
+            .as_ref()
+            .and_then(|event| event.get("sha"))
+            .and_then(|sha| sha.as_str()),
+        Some(head.as_str())
+    );
+}
+
 /// P13: a standing grant for one project never matches a PR of another
 /// project that has no grant of its own, even when that PR is green, in
 /// scope and reviewed. The project that holds the grant still merges.

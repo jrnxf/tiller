@@ -32,6 +32,10 @@ pub struct Spawn {
     /// The brief; without it the worker is briefed with the card
     #[arg(long)]
     pub brief_file: Option<PathBuf>,
+    /// Build on the card's reported scout: same worktree and branch, and the
+    /// card becomes a ship card (builder only)
+    #[arg(long)]
+    pub promote: bool,
     /// The harness to launch on; G35 refuses one without the guards
     #[arg(long, default_value = "claude")]
     pub harness: String,
@@ -202,6 +206,11 @@ pub(crate) fn read_brief(path: &Path) -> Result<String, Failure> {
 
 pub fn spawn(app: &App, args: Spawn) -> Done {
     let brief = args.brief_file.as_deref().map(read_brief).transpose()?;
+    if args.promote && args.role != tiller_core::domain::RunRole::Builder {
+        return Err(Failure::usage(
+            "--promote starts a builder; give the role builder",
+        ));
+    }
     let tools = Tools::load(app)?;
     let mut store = app.write()?;
     let card = resolve_card(store.conn(), &args.card)?;
@@ -218,23 +227,39 @@ pub fn spawn(app: &App, args: Spawn) -> Done {
         "model": args.model,
         "effort": args.effort,
         "brief": brief,
+        "promote": args.promote,
         "harness": args.harness,
     });
     let keyed = app.key(&store, "run.start", &normalized, &args.key.key)?;
     let asked = args.model.zip(args.effort);
-    let applied = agents::spawn(
-        &mut store,
-        &app.ctx(),
-        Some(&keyed.key),
-        &world,
-        Request {
-            card: card.id,
-            role: args.role,
-            asked,
-            brief,
-            harness: args.harness,
-        },
-    )
+    let applied = if args.promote {
+        agents::promote::promote(
+            &mut store,
+            &app.ctx(),
+            Some(&keyed.key),
+            &world,
+            agents::promote::Request {
+                card: card.id,
+                asked,
+                brief,
+                harness: args.harness,
+            },
+        )
+    } else {
+        agents::spawn(
+            &mut store,
+            &app.ctx(),
+            Some(&keyed.key),
+            &world,
+            Request {
+                card: card.id,
+                role: args.role,
+                asked,
+                brief,
+                harness: args.harness,
+            },
+        )
+    }
     .map_err(failure)?;
     let warning = match &applied.value {
         agents::Outcome::Spawned(spawned) => spawned.warning.clone(),
