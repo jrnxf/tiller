@@ -836,12 +836,14 @@ pub(crate) fn pane_tail_of(herdr: Cli, target: PaneTarget) -> Vec<String> {
     };
     herdr
         .read_visible(&target.pane)
-        .map(|screen| pane_tail(&screen))
+        .map(|screen| pane_tail(&screen, PANE_TAIL))
         .unwrap_or_default()
 }
 
-/// The last non-empty lines of a pane read, without terminal escapes.
-fn pane_tail(screen: &str) -> Vec<String> {
+/// The last `keep` lines of a pane read, without terminal escapes and
+/// without the blank lines below the last text (`tiller run show --tail`
+/// shares it).
+pub fn pane_tail(screen: &str, keep: usize) -> Vec<String> {
     let plain = strip_ansi(screen);
     let lines: Vec<String> = plain
         .lines()
@@ -851,7 +853,7 @@ fn pane_tail(screen: &str) -> Vec<String> {
         .iter()
         .rposition(|line| !line.is_empty())
         .map_or(0, |i| i + 1);
-    lines[end.saturating_sub(PANE_TAIL)..end].to_vec()
+    lines[end.saturating_sub(keep)..end].to_vec()
 }
 
 fn strip_ansi(text: &str) -> String {
@@ -2905,7 +2907,8 @@ esac"#,
     #[test]
     fn pane_tail_drops_escapes_and_trailing_blank_lines() {
         let screen = "\u{1b}[1mbold\u{1b}[0m line\n\u{1b}]0;title\u{7}second\n\n   \n";
-        assert_eq!(pane_tail(screen), vec!["bold line", "second"]);
+        assert_eq!(pane_tail(screen, PANE_TAIL), vec!["bold line", "second"]);
+        assert_eq!(pane_tail(screen, 1), vec!["second"]);
     }
 
     /// CI fails when `contract/openapi.json` is stale. Regenerate it with

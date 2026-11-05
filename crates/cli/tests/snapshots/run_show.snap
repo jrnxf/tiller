@@ -118,6 +118,7 @@ exit: 0
     "pane_tail": {
       "available": false,
       "lines": null,
+      "reason": "the session has no pane",
       "requested": 20
     },
     "run": {
