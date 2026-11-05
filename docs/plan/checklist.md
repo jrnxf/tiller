@@ -490,6 +490,10 @@ ADR 0003, accepted Tuesday 2026-11-03. The owner approved it; runs in one or two
 
 ## Cutover (one host at a time)
 
+The steps, the freeze marker, the host order (Linux guest, personal Mac, work Mac) and the rollback are in [`cutover-runbook.md`](cutover-runbook.md). The T6.x numbers below follow the build plan, not the order: the Linux guest (T6.3) goes first.
+
+- [x] Cutover runbook written: freeze marker and manual stop steps, host order, local exporter check, rollback
+
 Each flip needs every kept parity row for that host passing, or live-checked at CP7. Rollback triggers: lost work, an unauthorized action, a duplicate dispatch.
 
 One-time owner setup, per host and repo (CP2, S03):
