@@ -1628,6 +1628,47 @@ fn orchestrator_restart_replaces_the_live_one_with_fresh_launch_files() {
 }
 
 #[test]
+fn orchestrator_restart_of_a_retired_project_keeps_the_live_one() {
+    let (mut rig, homes) = orchestrator_rig();
+    let first = start_orchestrator(&mut rig, &homes, &owner())
+        .unwrap()
+        .value;
+    let pane = first.pane_id.clone().unwrap();
+    rig.herdr.set_screen(&pane, Screen::Idle);
+    rig.fleet.bind(&first.session.id, &pane);
+    rig.fleet.store.project_retire(&owner(), "alpha").unwrap();
+
+    let waits = crate::control::Waits {
+        interrupt: std::time::Duration::from_secs(2),
+        exit: std::time::Duration::from_secs(2),
+        bind: std::time::Duration::from_secs(2),
+        poll: std::time::Duration::from_millis(10),
+    };
+    let world = world!(rig);
+    let error = orchestrator::start(
+        &mut rig.fleet.store,
+        &owner(),
+        &world,
+        &homes,
+        "alpha",
+        Some(&waits),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("project is retired"), "{error}");
+    let live = tiller_core::state::outbox::live_orchestrator(rig.fleet.store.conn(), "alpha")
+        .unwrap()
+        .unwrap();
+    assert_eq!(live.id, first.session.id);
+    assert!(
+        !rig.herdr
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("close_pane") && c.contains(&pane)),
+        "the live pane was closed"
+    );
+}
+
+#[test]
 fn orchestrator_restart_is_the_owners() {
     let (mut rig, homes) = orchestrator_rig();
     let first = start_orchestrator(&mut rig, &homes, &owner())
