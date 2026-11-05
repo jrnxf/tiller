@@ -39,7 +39,7 @@ its own.
 - `evals/check.sh` is the infrastructure test. It checks that every case
   names a real role and has a prompt and known graders, and that every
   fixture builds offline. It checks that no prompt appears in both splits,
-  that every role has a case in each split, and that `judge.lock` is current.
+  that every role has a case in each split, that the skill-trigger eval covers every skill the parity matrix's P65 row lists, and that `judge.lock` is current.
   It makes no model calls, runs in about a second, and runs in CI on every
   push (the `evals` job in `ci.yml`).
 - `evals/run.sh` runs the evals. It calls real models and costs money, so it
