@@ -1622,6 +1622,82 @@
         }
       }
     },
+    "/api/v1/projects/{id}/asks": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "ask_note",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AskNote"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{id}/delete": {
       "get": {
         "tags": [
@@ -2146,6 +2222,31 @@
             "description": "Where the page is served; absent for an artifact that is only a local file."
           }
         }
+      },
+      "AskNote": {
+        "type": "object",
+        "description": "`POST /api/v1/projects/{id}/asks`: a note typed in the board's ask box,\nrecorded and sent to the project's orchestrator as `tiller ask note` does.",
+        "required": [
+          "idempotency_key",
+          "text"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label. Not forwarded: a note for a peer's project is\n502 `peer_refused` (`protocol.md` 7.4)."
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string",
+            "description": "The ask, in the owner's words; multi-line."
+          }
+        },
+        "additionalProperties": false
       },
       "AskedRow": {
         "type": "object",

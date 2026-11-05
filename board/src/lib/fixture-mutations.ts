@@ -3,6 +3,7 @@
 // refusal, and the later receipt stages as change events.
 import type { ChangeEvent, Project } from "./api-types.ts";
 import type {
+  AgentsResponse,
   AttentionResponse,
   BoardResponse,
   InterventionKind,
@@ -13,7 +14,7 @@ import { memoryMutation } from "./fixtures-memory.ts";
 import { FIXTURE_HEAD_SHA, fixtureResource, fixtureResponses } from "./fixtures.ts";
 import type { Scenario } from "./fixtures.ts";
 import { relabelFixture } from "./fixtures-signals.ts";
-import { attentionPath, projectsPath } from "./queries.ts";
+import { agentsPath, attentionPath, projectsPath } from "./queries.ts";
 
 interface Reply {
   status: number;
@@ -222,7 +223,7 @@ function forwarded(
 ): MutationResult | null {
   const host = body.host;
   if (typeof host !== "string") return null;
-  if (/\/(stage|focus|label|delete)$/.test(path) || /\/memory\//.test(path)) {
+  if (/\/(stage|asks|focus|label|delete)$/.test(path) || /\/memory\//.test(path)) {
     return refusal(502, "peer_refused", `${method} ${path} is not forwarded to ${host}`);
   }
   if (host === "host-e") {
@@ -279,6 +280,35 @@ function handle(method: string, path: string, body: Record<string, unknown>): Mu
   if (method === "POST" && /^\/api\/v1\/(cards\/[^/]+\/comment|cards)$/.test(path)) {
     const outbox = fakeId("01JOUTB");
     return { reply: recorded({}, outbox, null), followUps: outboxStages(outbox) };
+  }
+  const asks = /^\/api\/v1\/projects\/([^/]+)\/asks$/.exec(path);
+  if (method === "POST" && asks?.[1]) {
+    const project = asks[1];
+    const live = (fixtureResponses()[agentsPath()] as AgentsResponse).orchestrators.some(
+      (row) => row.project_id === project,
+    );
+    const id = fakeId("01JASK");
+    const outbox = live ? fakeId("01JOUTB") : null;
+    const at = new Date().toISOString();
+    return {
+      reply: recorded(
+        {
+          ask: {
+            id,
+            project_id: project,
+            session_id: null,
+            source: "board",
+            text: body.text,
+            received_at: at,
+          },
+          message: outbox ? { id: outbox, target_session_id: "01JSESSION" } : null,
+          warning: live ? null : "no_orchestrator",
+        },
+        outbox,
+        null,
+      ),
+      followUps: outbox ? outboxStages(outbox) : [],
+    };
   }
   const stage = /^\/api\/v1\/projects\/([^/]+)\/stage$/.exec(path);
   if (method === "POST" && stage?.[1]) {

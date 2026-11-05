@@ -40,7 +40,7 @@ export interface BoardRow extends Federated {
   observed_at?: string | null;
 }
 
-interface AskedRow {
+export interface AskedRow {
   id: string;
   project_id: string;
   session_id: string | null;
@@ -418,6 +418,21 @@ export interface Receipt {
   recorded_at: string;
   outbox_id: string | null;
   approval_id: string | null;
+}
+
+// `data` of `POST /api/v1/projects/{id}/asks` (protocol.md section 7.4). The
+// warning is `no_orchestrator` when nobody was told: the ask is still recorded.
+export interface AskRecorded {
+  ask: {
+    id: string;
+    project_id: string;
+    session_id: string | null;
+    source: string;
+    text: string;
+    received_at: string;
+  };
+  message: { id: string; target_session_id: string } | null;
+  warning: string | null;
 }
 
 export interface MutationResponse<T = unknown> {

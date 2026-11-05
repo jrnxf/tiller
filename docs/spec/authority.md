@@ -79,7 +79,7 @@ What each principal may do. "Own" means only on its own run, card or worktree. E
 
 | Action | Owner | Daemon | Orchestrator | Scout | Builder | Reviewer | Verifier | Hook, script |
 |---|---|---|---|---|---|---|---|---|
-| Record an ask | board add | no | no | no | no | no | no | hook (prompt), script (note) |
+| Record an ask | board add, board ask box | no | no | no | no | no | no | hook (prompt), script (note) |
 | Resolve an ask, create or edit a card | yes | no | own project | no | no | no | no | no |
 | Hold, depend, reprioritize | yes | release due holds | own project | no | no | no | no | no |
 | Start a run (the execute decision) | yes | no | own project, within capacity, quota and model rules | no | no | no | no | no |
