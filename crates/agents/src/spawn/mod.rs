@@ -41,10 +41,12 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::Value;
 use tiller_core::domain::{
-    Card, Delivery, Effort, Project, Reservation, Run, RunOutcome, RunRole, Session, Worktree,
+    Card, CardKind, Delivery, Effort, Pr, Project, Reservation, Run, RunOutcome, RunRole, Session,
+    Worktree,
 };
 use tiller_core::state::caches::{WorktreeReading, landed_heads};
 use tiller_core::state::projects::meta;
+use tiller_core::state::publishes::published_head;
 use tiller_core::state::runs::{EndRun, NewRun, Placement, SpawnChecks, Started, live_session};
 use tiller_core::state::{find, get, list, resolve_card};
 use tiller_core::{Applied, Ctx, Store};
@@ -578,7 +580,9 @@ pub struct Ended {
 /// `tiller done`: reads the run's worktree now and refuses while it holds
 /// commits that are not landed or changes that are not committed (P51).
 /// Only `failed` and `abandoned` end a run over such work, and then the
-/// worktree stays for the orchestrator; cleanup will not return it.
+/// worktree stays for the orchestrator; cleanup will not return it. A
+/// builder whose committed head is on an open PR of its card also ends
+/// `reported`: the PR holds the work, and the card tracks it to landing.
 ///
 /// It needs no config, since a worker session runs it and fleet roles
 /// cannot read `config.toml`. A run on another host is judged by the last
@@ -593,11 +597,13 @@ pub fn done(
     let run: &Run = &get(store.conn(), "run", &run.id)?;
     let mut scan = None;
     let mut kept = None;
+    let mut note = None;
     let mut events = Vec::new();
     if run.outcome.is_none()
         && let Some(path) = &run.worktree_path
     {
-        let reading = if run.host_id == local_host(store)? {
+        let local = run.host_id == local_host(store)?;
+        let reading = if local {
             let project = project_of(store, run)?;
             let (scan, written) =
                 scan_and_record(store, ctx, scanner, run, &project, Path::new(path))?;
@@ -614,6 +620,20 @@ pub fn done(
                     ""
                 };
                 kept = Some(format!("ended {outcome} while {path} {what}{keeps}"));
+            } else if let Some(pr) = on_open_pr(store, run, outcome, local, &reading)? {
+                // Committed and on an open PR: the card tracks the PR to
+                // landing, and the slot goes to the next run.
+                note = Some(format!(
+                    "ended {outcome} with its head on PR #{}; the card tracks it to landing",
+                    pr.number
+                ));
+            } else if outcome == RunOutcome::Reported
+                && run.role == RunRole::Builder
+                && reading.dirty == Some(false)
+            {
+                return Err(SpawnError::Refused(format!(
+                    "{path} {what}, and no open PR of the card holds its head; land it or get its head onto the PR first, or end with --outcome failed or abandoned and the orchestrator decides what to keep"
+                )));
             } else {
                 return Err(SpawnError::Refused(format!(
                     "{path} {what}; land it first, or end with --outcome failed or abandoned and the orchestrator decides what to keep"
@@ -627,7 +647,7 @@ pub fn done(
         &run.id,
         EndRun {
             outcome,
-            note: kept.clone(),
+            note: kept.clone().or(note),
         },
     )?;
     events.extend(applied.events);
@@ -640,6 +660,32 @@ pub fn done(
         events,
         replayed: applied.replayed,
     })
+}
+
+/// The open PR that holds a builder's work when it ends `reported` over
+/// commits that are not landed: nothing else in the worktree, and the head
+/// the reading just recorded is on an open PR of the card. Only a reading
+/// taken now counts: another host's last reading may predate a commit. The
+/// core checks the same record again in `run.end`.
+fn on_open_pr(
+    store: &Store,
+    run: &Run,
+    outcome: RunOutcome,
+    fresh: bool,
+    reading: &WorktreeScan,
+) -> Result<Option<Pr>> {
+    if outcome != RunOutcome::Reported
+        || !fresh
+        || run.role != RunRole::Builder
+        || get::<Card>(store.conn(), "card", &run.card_id)?.kind != CardKind::Ship
+        || !reading.exists
+        || !reading.is_worktree
+        || reading.dirty != Some(false)
+        || reading.unlanded_commits.is_none()
+    {
+        return Ok(None);
+    }
+    Ok(published_head(store.conn(), run)?)
 }
 
 /// The last reading this host holds of a worktree, as a scan.

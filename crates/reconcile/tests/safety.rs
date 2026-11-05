@@ -152,3 +152,42 @@ fn no_automatic_repair_removes_unlanded_work() {
         );
     }
 }
+
+/// A builder that ended `reported` with its head on an open PR left its
+/// commits to the PR, which the card tracks: no "still holds work" note.
+/// The same worktree under a run that ended `abandoned` still gets one.
+#[test]
+fn work_on_an_open_pr_is_not_noted_as_held() {
+    for (outcome, noted) in [(RunOutcome::Reported, 0), (RunOutcome::Abandoned, 1)] {
+        let mut w = World::new();
+        let worker = w.worker("w2:p1");
+        w.place();
+        let run = w.run_of(&worker);
+        let path = run.worktree_path.clone().unwrap();
+        w.scanner.set(WorktreeScan {
+            path: path.clone().into(),
+            exists: true,
+            is_worktree: true,
+            branch: Some("fm/work".into()),
+            head_sha: Some("aaaa1111".into()),
+            dirty: Some(false),
+            unlanded_commits: Some(1),
+        });
+        let t0 = now();
+        w.pass(t0);
+        w.link_pr(&worker, 4, "aaaa1111");
+        w.store_mut()
+            .run_end(
+                &owner(),
+                &run.id,
+                EndRun {
+                    outcome,
+                    note: None,
+                },
+            )
+            .unwrap();
+        w.pass(t0.plus_minutes(1));
+        let notes = w.count("SELECT count(*) FROM outbox WHERE body LIKE '%still holds work%'");
+        assert_eq!(notes, noted, "{outcome}");
+    }
+}

@@ -7,7 +7,7 @@ use std::process::Command;
 use std::sync::{Arc, Barrier, Mutex};
 
 use tempfile::TempDir;
-use tiller_core::domain::{CardKind, Size};
+use tiller_core::domain::{CardKind, Pr, PrState, Size};
 use tiller_core::state::caches::QuotaReading;
 use tiller_core::state::cards::NewCard;
 use tiller_core::{Actor, Ctx};
@@ -1001,6 +1001,177 @@ fn done_refuses_while_commits_are_unlanded() {
     git(&worktree, &["fetch", "--quiet", "origin"]);
     rig.cleanup(&spawned.run.id).unwrap();
     assert_eq!(rig.pool.returned().len(), 1);
+}
+
+/// Whether the run's reservation still holds its project slot.
+fn holds_slot(rig: &Rig, run: &str) -> bool {
+    rig.fleet
+        .store
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM reservations WHERE run_id = ?1 AND released_at IS NULL",
+            [run],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+        > 0
+}
+
+/// A builder commits on a ship card and its branch goes to origin; it is
+/// still unlanded, since only the default branch counts.
+fn committed_builder(rig: &mut Rig) -> (Card, Spawned, PathBuf, String) {
+    let card = rig.card(CardKind::Ship, None);
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    let worktree = PathBuf::from(&spawned.worktree);
+    std::fs::write(worktree.join("fix.md"), "fixed\n").unwrap();
+    git(&worktree, &["add", "fix.md"]);
+    git(&worktree, &["commit", "--quiet", "-m", "fix"]);
+    let head = git(&worktree, &["rev-parse", "HEAD"]).trim().to_owned();
+    (card, spawned, worktree, head)
+}
+
+fn link_pr(rig: &mut Rig, card: &Card, run: &str, number: i64, head: Option<&str>) -> Pr {
+    rig.fleet
+        .store
+        .pr_link(
+            &Ctx::new(Actor::Daemon),
+            tiller_core::state::approvals::NewPr {
+                card: card.id.clone(),
+                run_id: Some(run.to_owned()),
+                number,
+                url: format!("https://github.com/example/alpha/pull/{number}"),
+                head_sha: head.map(str::to_owned),
+                base_ref: Some("main".into()),
+            },
+        )
+        .unwrap()
+        .value
+}
+
+/// The direct-pr flow: the worker commits and describes its PR, the daemon
+/// pushes the branch and opens the PR, and `tiller done` then ends the run
+/// `reported`, which frees the project slot; the PR stays on the card.
+#[test]
+fn done_reports_a_builder_whose_head_the_daemon_published() {
+    let mut rig = Rig::new();
+    let (card, spawned, worktree, head) = committed_builder(&mut rig);
+    let run = spawned.run.id.clone();
+
+    // Nothing published yet: the commit is only in the worktree.
+    let error = rig.done(&run, RunOutcome::Reported).unwrap_err();
+    let text = refusal(&error);
+    assert!(text.contains("1 unlanded commit, and no open PR"), "{text}");
+    assert!(holds_slot(&rig, &run));
+
+    // A PR whose head the forge has not reported, and no publish record:
+    // still nothing says the head left the worktree.
+    let pr = link_pr(&mut rig, &card, &run, 1, None);
+    assert!(rig.done(&run, RunOutcome::Reported).is_err());
+
+    rig.fleet
+        .store
+        .pr_describe(&owner(), &run, "Fix it", "Fixes it.")
+        .unwrap();
+    git(
+        &worktree,
+        &["push", "--quiet", "origin", "HEAD:refs/heads/fix"],
+    );
+    rig.fleet
+        .store
+        .publish_done(&Ctx::new(Actor::Daemon), &run, &head, &pr.id)
+        .unwrap();
+
+    let ended = rig.done(&run, RunOutcome::Reported).unwrap();
+    assert_eq!(ended.run.outcome, Some(RunOutcome::Reported));
+    assert_eq!(ended.kept, None);
+    assert!(
+        ended
+            .run
+            .outcome_note
+            .as_deref()
+            .is_some_and(|n| n.contains("PR #1") && n.contains("tracks it to landing")),
+        "{:?}",
+        ended.run.outcome_note
+    );
+    assert!(!holds_slot(&rig, &run));
+    let pr: Pr = get(rig.fleet.store.conn(), "pr", &pr.id).unwrap();
+    assert_eq!(pr.state, PrState::Open);
+    assert_eq!(pr.card_id, card.id);
+    // The commits are not landed, so cleanup keeps the worktree.
+    assert!(rig.cleanup(&run).is_err());
+    assert!(worktree.exists());
+}
+
+/// The forge's PR head stands for the push too, and anything the PR does
+/// not hold refuses: a later commit, or uncommitted changes.
+#[test]
+fn done_reports_a_builder_only_while_its_open_pr_holds_the_head() {
+    let mut rig = Rig::new();
+    let (card, spawned, worktree, head) = committed_builder(&mut rig);
+    let run = spawned.run.id.clone();
+    link_pr(&mut rig, &card, &run, 2, Some(&head));
+
+    // Uncommitted changes are on no PR, and the refusal says so.
+    std::fs::write(worktree.join("scratch.md"), "uncommitted\n").unwrap();
+    let text = refusal(&rig.done(&run, RunOutcome::Reported).unwrap_err());
+    assert!(text.contains("uncommitted changes"), "{text}");
+    assert!(!text.contains("no open PR"), "{text}");
+    std::fs::remove_file(worktree.join("scratch.md")).unwrap();
+
+    // A commit after the PR's head is not on it yet.
+    std::fs::write(worktree.join("more.md"), "more\n").unwrap();
+    git(&worktree, &["add", "more.md"]);
+    git(&worktree, &["commit", "--quiet", "-m", "more"]);
+    let text = refusal(&rig.done(&run, RunOutcome::Reported).unwrap_err());
+    assert!(
+        text.contains("2 unlanded commits, and no open PR"),
+        "{text}"
+    );
+    assert!(holds_slot(&rig, &run));
+
+    // Back at the PR's head, the run ends reported.
+    git(&worktree, &["reset", "--quiet", "--hard", &head]);
+    let ended = rig.done(&run, RunOutcome::Reported).unwrap();
+    assert_eq!(ended.run.outcome, Some(RunOutcome::Reported));
+    assert!(!holds_slot(&rig, &run));
+
+    // A PR that is closed or merged holds nothing: a second builder whose
+    // head is only on a closed PR is refused.
+    let (card, spawned, _worktree, head) = committed_builder(&mut rig);
+    let pr = link_pr(&mut rig, &card, &spawned.run.id, 3, Some(&head));
+    rig.sql(&format!(
+        "UPDATE prs SET state = 'closed' WHERE id = '{}'",
+        pr.id
+    ));
+    assert!(rig.done(&spawned.run.id, RunOutcome::Reported).is_err());
+}
+
+/// A run on another host is judged by the last reading this host holds,
+/// which may predate a commit, so it never ends `reported` on a PR.
+#[test]
+fn done_reports_a_builder_on_a_pr_only_from_a_fresh_reading() {
+    let mut rig = Rig::new();
+    let (card, spawned, _worktree, head) = committed_builder(&mut rig);
+    let run = spawned.run.id.clone();
+    link_pr(&mut rig, &card, &run, 5, Some(&head));
+    // A refused `landed` records the reading: head on the PR, nothing dirty.
+    assert!(rig.done(&run, RunOutcome::Landed).is_err());
+    let local: String = rig
+        .fleet
+        .store
+        .conn()
+        .query_row("SELECT value FROM meta WHERE key = 'host_id'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    rig.sql("UPDATE meta SET value = 'another-host' WHERE key = 'host_id'");
+    assert!(rig.done(&run, RunOutcome::Reported).is_err());
+    assert!(rig.run(&run).ended_at.is_none());
+    rig.sql(&format!(
+        "UPDATE meta SET value = '{local}' WHERE key = 'host_id'"
+    ));
+    let ended = rig.done(&run, RunOutcome::Reported).unwrap();
+    assert_eq!(ended.run.outcome, Some(RunOutcome::Reported));
 }
 
 #[test]
