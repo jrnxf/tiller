@@ -603,6 +603,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/projects/{id}/retire",
             get(project_retire_preview).post(retire_project),
         )
+        .route("/api/v1/projects/{id}/setup", get(project_setup))
         .route(
             "/api/v1/interventions/{id}/label",
             post(relabel_intervention),
@@ -1876,6 +1877,51 @@ async fn project_retire_preview(
     }))
 }
 
+#[utoipa::path(get, path = "/api/v1/projects/{id}/setup", tag = "reads",
+    params(("id" = String, Path)),
+    responses((status = 200, body = ProjectSetup), (status = 404, body = ErrorBody)))]
+async fn project_setup(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<ProjectSetup> {
+    let home = state.0.home.clone();
+    read(&state, move |store| {
+        let project = store.project(&id)?;
+        let changed = store.merge_gate_changed_at(&project.id)?;
+        let (checkout, config_error) = match checkout_of(&home, &project.id) {
+            Ok(checkout) => (checkout, None),
+            Err(error) => (None, Some(error)),
+        };
+        Ok(ProjectSetup {
+            merge_gate: project.merge_gate.to_string(),
+            merge_gate_changed_at: changed.map(|at| at.to_string()),
+            project: project.id,
+            repo: project.repo,
+            checkout,
+            config_error,
+        })
+    })
+    .await
+    .map(Json)
+}
+
+/// `checkouts.<project>` from `<home>/config.toml`, as `tiller config get`
+/// reads it; a missing file or key is `None`.
+fn checkout_of(home: &std::path::Path, project: &str) -> Result<Option<String>, String> {
+    let table = match std::fs::read_to_string(home.join("config.toml")) {
+        Ok(text) => text
+            .parse::<toml::Table>()
+            .map_err(|error| format!("config.toml does not parse: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("read config.toml: {error}")),
+    };
+    Ok(table
+        .get("checkouts")
+        .and_then(|checkouts| checkouts.get(project))
+        .and_then(toml::Value::as_str)
+        .map(str::to_owned))
+}
+
 #[utoipa::path(post, path = "/api/v1/projects/{id}/retire", tag = "mutations", request_body = RetireProject,
     params(("id" = String, Path)),
     responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody),
@@ -2367,7 +2413,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, stage_project, ask_note, start_orchestrator, project_delete_preview, delete_project, project_retire_preview, retire_project,
+        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, stage_project, ask_note, start_orchestrator, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
         relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo
     ),
@@ -3285,6 +3331,46 @@ pub(crate) mod tests {
         assert_eq!(body["replayed"], true, "{body}");
         let stale = send(&app, stage("k-stage-3", rev, "pre-launch")).await;
         assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.body);
+    }
+
+    /// The project detail's setup read: the stored merge gate, and the
+    /// checkout `config.toml` names, read fresh on every request; a
+    /// `config.toml` that does not parse says so instead of looking unset.
+    #[tokio::test]
+    async fn project_setup_reads_the_gate_and_the_checkout() {
+        let fleet = Fleet::new();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let setup = |body: &str| serde_json::from_str::<Value>(body).unwrap();
+
+        let unset = get(&app, "/api/v1/projects/alpha/setup").await;
+        assert_eq!(unset.status, StatusCode::OK, "{}", unset.body);
+        let body = setup(&unset.body);
+        assert_eq!(body["merge_gate"], "detect");
+        assert_eq!(body["checkout"], Value::Null);
+        assert_eq!(body["config_error"], Value::Null);
+
+        let config = fleet.dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "[checkouts]\nalpha = \"/home/user/checkouts/alpha\"\n",
+        )
+        .unwrap();
+        let body = setup(&get(&app, "/api/v1/projects/alpha/setup").await.body);
+        assert_eq!(body["checkout"], "/home/user/checkouts/alpha");
+
+        std::fs::write(&config, "[checkouts\n").unwrap();
+        let body = setup(&get(&app, "/api/v1/projects/alpha/setup").await.body);
+        assert_eq!(body["checkout"], Value::Null);
+        assert!(
+            body["config_error"]
+                .as_str()
+                .unwrap()
+                .contains("does not parse"),
+            "{body}"
+        );
+
+        let missing = get(&app, "/api/v1/projects/nope/setup").await;
+        assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
     }
 
     /// A retired project leaves the board with its closed cards, which the

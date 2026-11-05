@@ -402,6 +402,18 @@ export interface ProjectDeletePreview {
 
 // `GET /api/v1/projects/{id}/retire`: whether an archive applies now, and the
 // running agents it can stop first.
+// GET /api/v1/projects/{id}/setup: what `tiller doctor`'s merge_gates line and
+// `tiller config get checkouts.<id>` show for one of this host's projects.
+export interface ProjectSetup {
+  project: string;
+  repo: string | null;
+  merge_gate: "enforced" | "detect";
+  merge_gate_changed_at: string | null;
+  checkout: string | null;
+  // Why config.toml could not be read; `checkout` is then null.
+  config_error: string | null;
+}
+
 export interface ProjectRetirePreview {
   project: string;
   refused: string | null;

@@ -92,6 +92,11 @@
   overflow-wrap: anywhere;
 }
 
+.stage-command {
+  color: var(--fg-3);
+  font-weight: var(--w-normal);
+}
+
 .stage-when {
   color: var(--fg-3);
   font-weight: var(--w-normal);

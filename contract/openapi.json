@@ -2196,6 +2196,44 @@
         }
       }
     },
+    "/api/v1/projects/{id}/setup": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "project_setup",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectSetup"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{id}/stage": {
       "post": {
         "tags": [
@@ -5356,6 +5394,51 @@
               "null"
             ],
             "description": "Why the retire is refused now (an open card, the fleet project);\nabsent when it would apply."
+          }
+        }
+      },
+      "ProjectSetup": {
+        "type": "object",
+        "description": "`GET /api/v1/projects/{id}/setup`: what `tiller doctor`'s `merge_gates`\nline and `tiller config get checkouts.<id>` show for one of this host's\nprojects.",
+        "required": [
+          "project",
+          "merge_gate"
+        ],
+        "properties": {
+          "checkout": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`checkouts.<id>` from `config.toml`; absent when unset."
+          },
+          "config_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why `config.toml` could not be read; `checkout` is then absent."
+          },
+          "merge_gate": {
+            "type": "string",
+            "description": "`enforced` (GitHub refuses a merge the App did not make) or `detect`."
+          },
+          "merge_gate_changed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The newest `project.merge_gate_changed` event. The hourly ruleset\ncheck only writes when the value moves."
+          },
+          "project": {
+            "type": "string"
+          },
+          "repo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The GitHub repo, `owner/name`; absent for a project with none."
           }
         }
       },

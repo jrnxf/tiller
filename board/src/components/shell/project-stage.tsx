@@ -1,11 +1,11 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import type { Project } from "../../lib/api-types";
 import { ownerOf } from "../../lib/peers";
-import { projectsPath, queryKeyFor } from "../../lib/queries";
+import { projectSetupQuery, projectsPath, queryKeyFor } from "../../lib/queries";
 import { sendMutation } from "../attention/api";
 import { InlineReceipt } from "../attention/receipt";
 import { useAction } from "../attention/use-action";
@@ -97,7 +97,66 @@ function Facts({ project }: { project: Project }) {
       <Fact label="Builders follow">
         <code className="stage-sha">{project.effective_delivery}</code>
       </Fact>
+      {ownerOf(project) ? null : <SetupFacts project={project} />}
     </dl>
+  );
+}
+
+// A path that may wrap after each "/", so a narrow sidebar breaks it between
+// directories rather than inside one.
+function WrappingPath({ path }: { path: string }) {
+  const parts = path.split("/");
+  return parts.map((part, index) => (
+    <span key={index}>
+      {part}
+      {index < parts.length - 1 ? (
+        <>
+          /<wbr />
+        </>
+      ) : null}
+    </span>
+  ));
+}
+
+// The repo, merge gate and checkout of one of this host's projects, as
+// `tiller doctor` and `tiller config get checkouts.<id>` show them.
+function SetupFacts({ project }: { project: Project }) {
+  const setup = useQuery(projectSetupQuery(project.id)).data;
+  if (!setup) return null;
+  const changed = formatStageTime(setup.merge_gate_changed_at);
+  return (
+    <>
+      {setup.repo ? (
+        <>
+          <Fact label="Repo">
+            <code className="stage-sha">{setup.repo}</code>
+          </Fact>
+          <Fact label="Merge gate">
+            <code className="stage-sha">{setup.merge_gate}</code>
+            {setup.merge_gate === "detect" ? (
+              <span className="stage-flag">merges detected, not prevented</span>
+            ) : null}
+            {changed ? <span className="stage-when">since {changed}</span> : null}
+          </Fact>
+        </>
+      ) : null}
+      <Fact label="Checkout">
+        {setup.checkout ? (
+          <code className="stage-sha">
+            <WrappingPath path={setup.checkout} />
+          </code>
+        ) : setup.config_error ? (
+          <span className="stage-when">{setup.config_error}</span>
+        ) : (
+          <>
+            not set
+            <code className="stage-sha stage-command">
+              tiller config set checkouts.{project.id} &lt;path&gt;
+            </code>
+          </>
+        )}
+      </Fact>
+    </>
   );
 }
 

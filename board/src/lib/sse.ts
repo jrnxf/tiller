@@ -23,6 +23,7 @@ import {
   attentionPath,
   fetchJson,
   machinesPath,
+  projectSetupPath,
   projectsPath,
   quotaPath,
   queryKeyFor,
@@ -166,6 +167,10 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
       if (event.kind === "project.deleted" || event.kind === "project.retired") {
         onProjectGone(queryClient, event.entity_id);
       } else if (state) writeProject(queryClient, state as Project);
+      queryClient.invalidateQueries({
+        queryKey: queryKeyFor(projectSetupPath(event.entity_id)),
+        refetchType: "active",
+      });
       break;
     case "review_pass":
     case "obligation":

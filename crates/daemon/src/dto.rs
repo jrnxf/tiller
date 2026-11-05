@@ -1013,6 +1013,25 @@ pub struct ProjectRetirePreview {
     pub agents: Vec<ProjectAgent>,
 }
 
+/// `GET /api/v1/projects/{id}/setup`: what `tiller doctor`'s `merge_gates`
+/// line and `tiller config get checkouts.<id>` show for one of this host's
+/// projects.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ProjectSetup {
+    pub project: String,
+    /// The GitHub repo, `owner/name`; absent for a project with none.
+    pub repo: Option<String>,
+    /// `enforced` (GitHub refuses a merge the App did not make) or `detect`.
+    pub merge_gate: String,
+    /// The newest `project.merge_gate_changed` event. The hourly ruleset
+    /// check only writes when the value moves.
+    pub merge_gate_changed_at: Option<String>,
+    /// `checkouts.<id>` from `config.toml`; absent when unset.
+    pub checkout: Option<String>,
+    /// Why `config.toml` could not be read; `checkout` is then absent.
+    pub config_error: Option<String>,
+}
+
 /// `POST /api/v1/projects/{id}/retire`: retire one project, off the board.
 /// Local to the owning host; it is not forwarded to a peer.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]

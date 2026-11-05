@@ -13,6 +13,7 @@ import type {
   MemoryRevision,
   ProjectDeletePreview,
   ProjectRetirePreview,
+  ProjectSetup,
   ProjectsResponse,
   QuotaResponse,
   RunDetail,
@@ -147,6 +148,13 @@ export const projectRetireQuery = (projectId: string) =>
     staleTime: 0,
     gcTime: 0,
   });
+
+// The project detail's merge gate and checkout. A project event refreshes it,
+// since the hourly ruleset check moves the gate (lib/sse.ts).
+export const projectSetupPath = (projectId: string): QueryPath =>
+  `/api/v1/projects/${projectId}/setup`;
+export const projectSetupQuery = (projectId: string) =>
+  queryOptions({ ...readQuery<ProjectSetup>(projectSetupPath(projectId)), staleTime: 0 });
 
 // A single-entity read takes `?host=<label>` for a peer's record; absent means
 // this host (protocol.md section 7.3).
