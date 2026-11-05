@@ -22,7 +22,7 @@ exit: 5
     "entity": "project",
     "hint": "tiller card cancel alpha-1 --reason \"deleting project alpha\"",
     "id": "alpha",
-    "message": "project alpha: builder run on alpha-1 is live; end it first: cancel its card, then delete again; nothing was deleted"
+    "message": "project alpha: builder run on alpha-1 is live; end it first. Nothing was deleted. Next: cancel its card, then delete again"
   },
   "ok": false
 }

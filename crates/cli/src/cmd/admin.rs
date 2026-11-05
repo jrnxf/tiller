@@ -258,7 +258,7 @@ fn project_delete(app: &App, store: &mut Store, args: ProjectDelete) -> Done {
     if let Some(fact) = &preview.refused {
         let mut failure = match &preview.unblock {
             Some(unblock) => Failure::refused(format!(
-                "project {}: {fact}: {}, then delete again; nothing was deleted",
+                "project {}: {fact}. Nothing was deleted. Next: {}, then delete again",
                 args.id, unblock.step
             )),
             None => Failure::refused(format!("project {}: {fact}", args.id)),

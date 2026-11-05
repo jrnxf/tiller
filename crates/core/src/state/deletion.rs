@@ -452,17 +452,10 @@ fn blocker(conn: &Connection, fks: &[ForeignKey], project_id: &str) -> Result<Op
             }),
         }));
     }
-    let approval: Option<String> = conn
-        .query_row(
-            &format!(
-                "SELECT id FROM approvals WHERE state = 'executing' AND id IN ({}) ORDER BY id LIMIT 1",
-                doomed("approvals", "id")
-            ),
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if let Some(approval) = approval {
+    if let Some((approval, _)) = live(&format!(
+        "SELECT id, state FROM approvals WHERE state = 'executing' AND id IN ({}) ORDER BY id LIMIT 1",
+        doomed("approvals", "id")
+    ))? {
         return Ok(Some(Blocker {
             fact: format!("approval {approval} is executing"),
             unblock: Some(Unblock {
