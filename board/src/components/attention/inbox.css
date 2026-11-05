@@ -412,7 +412,18 @@ a.irow:hover {
   margin-top: 12px;
 }
 
+.inbox .appr .a-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+.inbox .appr .a-row .bind {
+  margin: 0;
+}
 .inbox .appr .acts {
+  margin: 0 0 0 auto;
   justify-content: flex-end;
 }
 

@@ -107,19 +107,44 @@ export function ApproveBlock({ item }: { item: AttentionItem }) {
           {shown ? <InfoIcon /> : <GitIcon />}
           {shown ? "The head moved" : "Approval bound to this head"}
         </div>
-        <div className="bind">
-          <span>
-            {approval.pr_number === null ? "Branch head" : `PR #${approval.pr_number} head`}
-          </span>
-          {shown ? (
-            <>
-              <span className="sha old">{shortSha(shown.shown)}</span>
-              <span className="sha new">{shortSha(shown.current)}</span>
-            </>
-          ) : (
-            <span className="sha" title={headSha}>
-              {shortSha(headSha)}
+        <div className="a-row">
+          <div className="bind">
+            <span>
+              {approval.pr_number === null ? "Branch head" : `PR #${approval.pr_number} head`}
             </span>
+            {shown ? (
+              <>
+                <span className="sha old">{shortSha(shown.shown)}</span>
+                <span className="sha new">{shortSha(shown.current)}</span>
+              </>
+            ) : (
+              <span className="sha" title={headSha}>
+                {shortSha(headSha)}
+              </span>
+            )}
+          </div>
+          {recorded ? null : (
+            <div className="acts">
+              <button
+                type="button"
+                className="btn lg"
+                disabled={pending || off !== null}
+                title={off ?? undefined}
+                onClick={reject.trigger}
+              >
+                {reject.pending ? "Rejecting..." : "Reject"}
+              </button>
+              <button
+                type="button"
+                className="btn primary lg"
+                // Until the new head arrives there is nothing current to approve.
+                disabled={pending || headSha === shown?.shown || off !== null}
+                title={off ?? undefined}
+                onClick={accept.trigger}
+              >
+                {accept.pending ? "Approving..." : `Approve ${shortSha(headSha)}`}
+              </button>
+            </div>
           )}
         </div>
         <PeerNote standing={standing} />
@@ -128,29 +153,6 @@ export function ApproveBlock({ item }: { item: AttentionItem }) {
             {staleMessage(shown, approval.pr_number)}
           </p>
         ) : null}
-        {recorded ? null : (
-          <div className="acts">
-            <button
-              type="button"
-              className="btn lg"
-              disabled={pending || off !== null}
-              title={off ?? undefined}
-              onClick={reject.trigger}
-            >
-              {reject.pending ? "Rejecting..." : "Reject"}
-            </button>
-            <button
-              type="button"
-              className="btn primary lg"
-              // Until the new head arrives there is nothing current to approve.
-              disabled={pending || headSha === shown?.shown || off !== null}
-              title={off ?? undefined}
-              onClick={accept.trigger}
-            >
-              {accept.pending ? "Approving..." : `Approve ${shortSha(headSha)}`}
-            </button>
-          </div>
-        )}
         <ActionFailure error={otherError} host={ownerOf(item)} />
       </div>
       <ReceiptPanel
