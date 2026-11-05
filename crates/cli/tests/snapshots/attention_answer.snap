@@ -4,6 +4,7 @@ source: crates/cli/tests/common/mod.rs
 exit: 0
 {
   "data": {
+    "applied": null,
     "attention": {
       "answer": "yes, follow it",
       "answer_idempotency_key": "shell:<id29>",

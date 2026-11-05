@@ -343,7 +343,7 @@ Reads have no side effects and are all trivially idempotent; they are listed aft
 
 | Command | Mutation | Caller | Retry |
 |---|---|---|---|
-| `tiller attention open <card> --kind K --question <t> [--evidence <json>] [--recommendation <t>] [--consequence <t>] [--options <json>]` | `attention.open` | orchestrator, reconcile | keyed |
+| `tiller attention open <card> --kind K --question <t> [--evidence <json>] [--recommendation <t>] [--consequence <t>] [--options <json>]` | `attention.open`; an option may carry an owner action (`state.md`, Attention), checked against the record before the item opens | orchestrator, reconcile | keyed |
 | `tiller attention answer <item> (--text <t> \| - \| --ask <ask>) [--key <k>]` | `attention.answer`; `--ask` records an answer the owner gave in the orchestrator chat, citing the hook-recorded ask, whose exact words become the answer (`answered_via = chat`), with the same checks as a chat approval (`authority.md`, G06) | owner; the orchestrator with `--ask` | keyed: the same key or the same exact words replay; a different answer is refused (`state.md`, Attention) |
 | `tiller attention withdraw <item> --reason <t>` | `attention.withdraw` | orchestrator, reconcile, owner | natural |
 | `tiller approval request <card> --kind merge\|land_direct [--pr <n>] [--action squash]` | `approval.request` (binds the cached head SHA) | orchestrator, daemon | natural: the same binding returns the open approval |
@@ -499,7 +499,7 @@ Every mutation body carries `idempotency_key` (a ULID the board mints when the c
 | `POST /api/v1/cards/{id}/comment` | `outbox.enqueue` (`note`) | `text` |
 | `POST /api/v1/cards/{id}/hold` / `DELETE .../hold` | `card.hold` / `hold.release` | `until`, `reason` |
 | `POST /api/v1/cards/{id}/close` / `cancel` / `reopen` | `card.close` / `card.cancel` / `card.reopen` | `outcome?`, `reason` |
-| `POST /api/v1/attention/{id}/answer` | `attention.answer` | `answer` (exact words) |
+| `POST /api/v1/attention/{id}/answer` | `attention.answer` | `answer` (exact words). Picking an option that carries an owner action applies it in the same transaction (`state.md`, Attention); the board turns such an option off on a peer's item, because the forwarded owner has no project commands |
 | `POST /api/v1/approvals/{id}/decide` | `approval.decide` | `decision` (`accept` or `reject`), `head_sha` the board showed; a mismatch is 422 with the new SHA, shown as the stale-approval refusal (T3.3) |
 | `POST /api/v1/memory/proposals/decide` | `mem.decide` (Keep or Discard), one approval row per proposal (`memory.md`, section 6) | `decisions`: a list of `{proposal, decision, base_blob}`, where `base_blob` is the blob the board showed; a mismatch is 422, shown as stale. Keep runs the holdout gate first and is 422 with its reason and hint unless it passes. A proposal made against an older text is 422, "the text moved; re-base and run the holdout again", except a member kept in the same batch after earlier members of its change set made against the same text, which is applied onto the text they left, the order the holdout run applied them in. Discard is not gated |
 | `POST /api/v1/memory/edits` | the owner's own edit: a proposal and its approval written in one act, decided by `owner`, then applied (`memory.md`, section 7) | `project`, `op` (`add`, `rewrite` or `remove`), `section`, `index?` (the line in the section), `text?`, `base_blob`; a mismatch is 422, shown as stale |

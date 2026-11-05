@@ -12,9 +12,10 @@ use tiller_core::domain::{
     Obligation, Pane, PeerScope, Pr, QuotaWindow as QuotaRow, Review, Role, Run, RunOutcome,
     Session,
 };
+use tiller_core::state::attention::{OwnerAction as CoreOwnerAction, stale};
 use tiller_core::state::interventions::InterventionSource;
 use tiller_core::state::signals::lisbon_weeks;
-use tiller_core::state::{attention::stale, find, get, list, review};
+use tiller_core::state::{find, get, list, review};
 use tiller_core::{Result, Store, Timestamp};
 use tiller_herdr::poller::Health as PollerRecord;
 
@@ -296,13 +297,25 @@ pub fn attention_item(store: &Store, item: &Attention) -> Result<AttentionItem> 
     })
 }
 
-/// An option is either a bare label or `{label, consequence, recommended}`.
+impl From<CoreOwnerAction> for OwnerAction {
+    fn from(action: CoreOwnerAction) -> Self {
+        match action {
+            CoreOwnerAction::ProjectCapacity { project, from, to } => {
+                Self::ProjectCapacity { project, from, to }
+            }
+        }
+    }
+}
+
+/// An option is either a bare label or `{label, consequence, recommended,
+/// action}`; core reads the action as the answer does.
 fn attention_option(option: &Value) -> AttentionOption {
     match option {
         Value::String(label) => AttentionOption {
             label: label.clone(),
             consequence: None,
             recommended: false,
+            action: None,
         },
         other => AttentionOption {
             label: other
@@ -318,6 +331,7 @@ fn attention_option(option: &Value) -> AttentionOption {
                 .get("recommended")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            action: CoreOwnerAction::of_option(other).map(OwnerAction::from),
         },
     }
 }

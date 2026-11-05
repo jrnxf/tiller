@@ -7,11 +7,12 @@ use serde_json::{Value, json};
 
 use super::cards::close_card;
 use super::outbox::{NewMessage, enqueue, live_orchestrator};
+use super::projects::{ProjectEdit, edit_project, positive};
 use super::{get, refuse, required, resolve_card, resolve_id};
 use crate::domain::*;
 use crate::error::{Error, Result};
 use crate::ids;
-use crate::store::{Applied, Ctx, NewEvent, Store, Tx};
+use crate::store::{Actor, Applied, Ctx, NewEvent, Store, Tx};
 use crate::time::Timestamp;
 
 /// An attention item to open.
@@ -53,19 +54,176 @@ impl Default for NewAttention {
 }
 
 /// An answer: the item, whether it was still current when answered, the
-/// message that carries it to the owning session, and the card it closed.
+/// message that carries it to the owning session, the card it closed and the
+/// owner action it applied.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Answered {
     pub attention: Attention,
     pub still_current: bool,
     pub message: Option<OutboxMessage>,
     pub closed_card: Option<Card>,
+    pub applied: Option<OwnerAction>,
+}
+
+/// An owner-only change an option carries (`state.md`, Attention): picking
+/// that option on this host's board or in an owner terminal applies it in
+/// the answer's transaction. The orchestrator offers it; only the owner
+/// applies it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OwnerAction {
+    /// `project.edit` of one project's capacity, bound to the capacity the
+    /// question saw.
+    ProjectCapacity { project: String, from: i64, to: i64 },
+}
+
+impl OwnerAction {
+    /// What the action changes, in the words the answer message uses.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::ProjectCapacity { project, from, to } => {
+                format!("project {project} capacity {from} to {to}")
+            }
+        }
+    }
+
+    /// The action an option carries. Lenient, because `attention.open`
+    /// refused a malformed one and an item opened before actions existed may
+    /// hold any `action` value: that option applies nothing.
+    pub fn of_option(option: &Value) -> Option<Self> {
+        option
+            .get("action")
+            .and_then(|action| serde_json::from_value(action.clone()).ok())
+    }
+
+    /// Refuses an action that cannot apply to the record as it is now, or
+    /// that reaches past the card's own project. Returns the project.
+    fn check(&self, conn: &rusqlite::Connection, card: &Card) -> Result<Project> {
+        match self {
+            Self::ProjectCapacity { project, from, to } => {
+                if *project != card.project_id {
+                    return Err(Error::Usage(format!(
+                        "the action names project {project}; {} is in {}",
+                        card.display_id, card.project_id
+                    )));
+                }
+                let found: Project = get(conn, "project", project)?;
+                if found.retired_at.is_some() {
+                    return Err(Error::refused("project", project, "project is retired"));
+                }
+                if found.capacity != *from {
+                    return Err(Error::refused(
+                        "project",
+                        project,
+                        format!(
+                            "capacity is {} now, not {from} as the question says",
+                            found.capacity
+                        ),
+                    ));
+                }
+                positive("capacity", *to)?;
+                if to == from {
+                    return Err(Error::Usage(format!(
+                        "project {project} capacity is already {to}"
+                    )));
+                }
+                Ok(found)
+            }
+        }
+    }
+
+    fn apply(&self, tx: &mut Tx<'_>, card: &Card) -> Result<()> {
+        let project = self.check(tx.conn(), card)?;
+        match self {
+            Self::ProjectCapacity { to, .. } => {
+                let edit = ProjectEdit {
+                    capacity: Some(*to),
+                    ..ProjectEdit::default()
+                };
+                edit_project(tx, &project.id, project.rev, &edit)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// An option's label: a bare string or the `label` of `{label, consequence,
+/// recommended, action}`.
+fn option_label(option: &Value) -> &str {
+    option
+        .as_str()
+        .or_else(|| option.get("label").and_then(Value::as_str))
+        .unwrap_or_default()
+}
+
+/// Whether the answer picks the option labelled `label`: its first line is
+/// the label, ignoring case and surrounding space. The board sends the label,
+/// then the owner's note after a blank line.
+fn picks(answer: &str, label: &str) -> bool {
+    let label = label.trim();
+    let first = answer.lines().next().unwrap_or_default().trim();
+    !label.is_empty() && first.to_lowercase() == label.to_lowercase()
+}
+
+/// Checks the options' owner actions at open: each is well formed, names a
+/// label no other option shares, and applies to the record as it is.
+fn check_options(conn: &rusqlite::Connection, card: &Card, options: Option<&Value>) -> Result<()> {
+    let Some(Value::Array(options)) = options else {
+        return Ok(());
+    };
+    for (index, option) in options.iter().enumerate() {
+        let Some(action) = option.get("action").filter(|action| !action.is_null()) else {
+            continue;
+        };
+        let action: OwnerAction = serde_json::from_value(action.clone())
+            .map_err(|error| Error::Usage(format!("option {} action: {error}", index + 1)))?;
+        let label = option_label(option);
+        if label.trim().is_empty() {
+            return Err(Error::Usage(format!(
+                "option {} carries an action and needs a label",
+                index + 1
+            )));
+        }
+        let twins = options
+            .iter()
+            .filter(|other| picks(label, option_label(other)))
+            .count();
+        if twins > 1 {
+            return Err(Error::Usage(format!(
+                "option {label:?} carries an action and is offered twice"
+            )));
+        }
+        action.check(conn, card)?;
+    }
+    Ok(())
+}
+
+/// The owner action of the option the answer picked. `None` when the item
+/// carries no actions; `Some(None)` when it does and the answer picked none.
+fn picked_action(item: &Attention, answer: &str) -> Option<Option<OwnerAction>> {
+    let Some(Value::Array(options)) = item.options.as_ref() else {
+        return None;
+    };
+    let actions: Vec<_> = options
+        .iter()
+        .map(|option| (option_label(option), OwnerAction::of_option(option)))
+        .collect();
+    if actions.iter().all(|(_, action)| action.is_none()) {
+        return None;
+    }
+    Some(
+        actions
+            .into_iter()
+            .find(|(label, _)| picks(answer, label))
+            .and_then(|(_, action)| action),
+    )
 }
 
 /// `attention.open` inside a mutation.
 pub(crate) fn open_attention(tx: &mut Tx<'_>, new: &NewAttention) -> Result<Attention> {
     required("question", &new.question)?;
     let card = resolve_card(tx.conn(), &new.card)?;
+    check_options(tx.conn(), &card, new.options.as_ref())?;
     if card.state != CardState::Open {
         return Err(Error::refused("card", &card.display_id, "card is closed"));
     }
@@ -153,6 +311,7 @@ pub(crate) fn answer_attention(
                 still_current: false,
                 message: None,
                 closed_card: None,
+                applied: None,
             });
         }
         return Err(Error::refused(
@@ -168,20 +327,51 @@ pub(crate) fn answer_attention(
         .answer()
         .map_err(refuse("attention", &item.id))?;
     let current = still_current(tx.conn(), item)?;
+    let picked = picked_action(item, answer);
+    let applied = picked.clone().flatten();
+    if let Some(action) = &applied {
+        // The forwarded owner has no project commands (`authority.md`
+        // section 3), and the orchestrator only records the owner's words.
+        if !matches!(tx.actor(), Actor::Owner | Actor::Board) {
+            return Err(Error::Forbidden(format!(
+                "{answer:?} applies {}, an owner-only change: the owner picks it on this host's board or in an owner terminal; {} may not",
+                action.describe(),
+                tx.actor()
+            )));
+        }
+        if !current {
+            return Err(Error::refused(
+                "attention",
+                &item.id,
+                format!(
+                    "the question is no longer current, so {} does not apply: pick another option or withdraw it",
+                    action.describe()
+                ),
+            ));
+        }
+    }
     tx.conn().execute(
         "UPDATE attention SET answered_at = ?2, answer = ?3, answered_via = ?4, answer_idempotency_key = ?5,
                 rev = rev + 1
          WHERE id = ?1",
         params![item.id, tx.now(), answer, via, tx.key()],
     )?;
+    let mut payload = json!({"answer": answer, "via": via, "still_current": current});
+    if let Some(action) = &applied {
+        payload["applied"] = json!(action);
+    }
     tx.event(
         NewEvent::new("attention", &item.id, "attention.answered")
             .rev(item.rev + 1)
             .card(&item.card_id)
-            .payload(json!({"answer": answer, "via": via, "still_current": current})),
+            .payload(payload),
     )?;
 
     let card: Card = get(tx.conn(), "card", &item.card_id)?;
+    // After the answer's event, so the answer's key belongs to the item.
+    if let Some(action) = &applied {
+        action.apply(tx, &card)?;
+    }
     let target = owning_session(tx.conn(), item, &card.project_id)?;
     let message = match target {
         Some(session) => Some(enqueue(
@@ -189,7 +379,17 @@ pub(crate) fn answer_attention(
             &NewMessage {
                 target_session_id: session,
                 kind: OutboxKind::Answer,
-                body: format!("[{}] {}\nanswer: {answer}", card.display_id, item.question),
+                body: match &picked {
+                    None => format!("[{}] {}\nanswer: {answer}", card.display_id, item.question),
+                    Some(applied) => format!(
+                        "[{}] {}\nanswer: {answer}\napplied: {}",
+                        card.display_id,
+                        item.question,
+                        applied
+                            .as_ref()
+                            .map_or_else(|| "nothing".into(), OwnerAction::describe)
+                    ),
+                },
                 card_id: Some(card.id.clone()),
                 reply_to: Some(item.id.clone()),
             },
@@ -230,6 +430,7 @@ pub(crate) fn answer_attention(
         still_current: current,
         message,
         closed_card,
+        applied,
     })
 }
 
@@ -458,3 +659,6 @@ impl Store {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

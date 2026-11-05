@@ -357,6 +357,25 @@ export function peerAttention(now: number, rows: BoardRow[]): AttentionResponse 
       ),
       decision(
         rows,
+        "host-d",
+        "gamma-12",
+        "01JPATTN00000000000000002D",
+        "Raise gamma capacity to 3 for the release build, or keep 2?",
+        now,
+        {
+          options: [
+            {
+              label: "Raise to 3",
+              consequence: null,
+              recommended: true,
+              action: { kind: "project_capacity", project: "gamma", from: 2, to: 3 },
+            },
+            { label: "Keep 2", consequence: null, recommended: false },
+          ],
+        },
+      ),
+      decision(
+        rows,
         "host-e",
         "ledger-6",
         "01JPATTN00000000000000000E",

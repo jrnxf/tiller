@@ -720,6 +720,35 @@ function attentionFor(
         withdrawn_at: null,
         rev: 2,
       },
+      {
+        id: "01JATTN0000000000000000003",
+        card_id: cardId("gamma-13"),
+        kind: "decision",
+        question: "Raise gamma capacity to 2 so the cache trim starts now, or let it wait?",
+        evidence: "gamma-12 holds gamma's only slot while it waits on a permission prompt.",
+        recommendation: "Raise it. host-a has two free slots.",
+        consequence: null,
+        options: [
+          {
+            label: "Raise to 2",
+            consequence: "The cache trim starts on the free slot.",
+            recommended: true,
+            action: { kind: "project_capacity", project: "gamma", from: 1, to: 2 },
+          },
+          {
+            label: "Let it wait",
+            consequence: "The cache trim starts when gamma-12 lands.",
+            recommended: false,
+          },
+        ],
+        approval: null,
+        opened_by_session_id: null,
+        opened_at: "2026-11-02T11:40:00.000Z",
+        still_current: true,
+        answered_at: null,
+        withdrawn_at: null,
+        rev: 1,
+      },
     ],
     permission_prompts: [
       {

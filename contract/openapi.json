@@ -2317,6 +2317,17 @@
           "recommended"
         ],
         "properties": {
+          "action": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OwnerAction",
+                "description": "The owner-only change picking this option applies on this host's\nboard; absent when it applies none."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "consequence": {
             "type": [
               "string",
@@ -4233,6 +4244,40 @@
             "type": "string"
           }
         }
+      },
+      "OwnerAction": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Sets one project's capacity, refused when it is no longer `from`.",
+            "required": [
+              "project",
+              "from",
+              "to",
+              "kind"
+            ],
+            "properties": {
+              "from": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "project_capacity"
+                ]
+              },
+              "project": {
+                "type": "string"
+              },
+              "to": {
+                "type": "integer",
+                "format": "int64"
+              }
+            }
+          }
+        ],
+        "description": "An owner-only change an option applies when the owner picks it\n(`state.md`, Attention)."
       },
       "PeerEvent": {
         "type": "object",

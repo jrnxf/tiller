@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import type { AttentionItem } from "../../lib/api-types";
+import type { AttentionItem, OwnerAction } from "../../lib/api-types";
 import { hostField, ownerOf } from "../../lib/peers";
 import { useStore } from "../../lib/store";
 import { PeerNote } from "../board/host-chip";
@@ -21,6 +21,11 @@ function answerText(option: string | null, note: string): string {
   return option ?? typed;
 }
 
+// The owner-only change an option applies, in the owner's words.
+function applies(action: OwnerAction): string {
+  return `${action.project} capacity from ${action.from} to ${action.to}`;
+}
+
 // Keys 1-3 answer, unless the owner is typing or holds a modifier.
 function typing(target: EventTarget | null): boolean {
   return (
@@ -39,6 +44,9 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
   const standing = useStanding(item);
   const stale = !item.still_current;
   const off = standing.canAct ? null : standing.reason;
+  // An owner action applies only where the owner answers on their own host:
+  // a forwarded answer never edits a peer's project (protocol.md 7.4).
+  const host = ownerOf(item);
 
   const send = useCallback(
     (idempotency_key: string) =>
@@ -88,11 +96,11 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
       if (event.repeat || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
       if (typing(event.target)) return;
       const option = options[Number(event.key) - 1];
-      if (option && /^[1-9]$/.test(event.key)) choose(option.label);
+      if (option && !(host && option.action) && /^[1-9]$/.test(event.key)) choose(option.label);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [locked, options, choose]);
+  }, [locked, options, choose, host]);
 
   const receipt = (
     <ReceiptPanel
@@ -108,13 +116,17 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
 
   if (action.recorded) {
     const said = sent ? (sent.option ?? sent.answer) : (pick ?? answer);
+    const picked = options.find((option) => option.label === (sent ? sent.option : pick));
     return (
       <>
         <div className="answered">
           <CheckIcon />
           <div className="t">
             <b>Answered {said}.</b>
-            <div className="sub">Your exact words are saved on the item.</div>
+            <div className="sub">
+              {picked?.action ? `Applied ${applies(picked.action)}. ` : null}
+              Your exact words are saved on the item.
+            </div>
           </div>
         </div>
         {receipt}
@@ -148,7 +160,7 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
                 key={option.label}
                 type="button"
                 className={`opt${option.recommended ? " rec" : ""}`}
-                disabled={locked}
+                disabled={locked || (host !== undefined && option.action !== undefined)}
                 aria-keyshortcuts={index < 9 ? String(index + 1) : undefined}
                 onClick={() => choose(option.label)}
               >
@@ -158,9 +170,17 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
                   {index < 9 ? <kbd>{index + 1}</kbd> : null}
                 </span>
                 {option.consequence ? <span className="what">{option.consequence}</span> : null}
+                {option.action ? (
+                  <span className="applies">Sets {applies(option.action)}</span>
+                ) : null}
               </button>
             ))}
           </div>
+          {host && options.some((option) => option.action) ? (
+            <p className="opts-note">
+              An option that changes a project is the owner's own: pick it on {host}'s board.
+            </p>
+          ) : null}
         </>
       ) : (
         <>

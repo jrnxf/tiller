@@ -84,6 +84,19 @@ pub struct AttentionOption {
     pub label: String,
     pub consequence: Option<String>,
     pub recommended: bool,
+    /// The owner-only change picking this option applies on this host's
+    /// board; absent when it applies none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<OwnerAction>,
+}
+
+/// An owner-only change an option applies when the owner picks it
+/// (`state.md`, Attention).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OwnerAction {
+    /// Sets one project's capacity, refused when it is no longer `from`.
+    ProjectCapacity { project: String, from: i64, to: i64 },
 }
 
 /// The approval a `merge` item asks for, bound to the head the board shows.

@@ -53,11 +53,22 @@ export interface BoardResponse {
   asked: AskedRow[];
 }
 
+// An owner-only change an option applies when the owner picks it, in the
+// same write as the answer (state.md, Attention). Capacity carries the value
+// the question saw, so a moved value refuses the pick.
+export interface OwnerAction {
+  kind: "project_capacity";
+  project: string;
+  from: number;
+  to: number;
+}
+
 // One answer the asker offers, with what it sets in motion.
 interface AttentionOption {
   label: string;
   consequence: string | null;
   recommended: boolean;
+  action?: OwnerAction;
 }
 
 // The approval a `merge` item asks for, bound to the head the board shows.

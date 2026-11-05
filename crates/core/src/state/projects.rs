@@ -119,7 +119,7 @@ pub fn meta(conn: &rusqlite::Connection, key: &str) -> Result<Option<String>> {
         .optional()?)
 }
 
-fn positive(name: &str, value: i64) -> Result<()> {
+pub(crate) fn positive(name: &str, value: i64) -> Result<()> {
     if value >= 1 {
         Ok(())
     } else {
@@ -136,6 +136,86 @@ fn non_negative(name: &str, value: Option<i64>) -> Result<()> {
         ))),
         _ => Ok(()),
     }
+}
+
+/// `project.edit` inside a mutation, after the caller checked the owner.
+pub(crate) fn edit_project(
+    tx: &mut Tx<'_>,
+    project_id: &str,
+    expected_rev: i64,
+    edit: &ProjectEdit,
+) -> Result<Project> {
+    let project: Project = get(tx.conn(), "project", project_id)?;
+    let mut next = project.clone();
+    let mut changed = serde_json::Map::new();
+    let mut named = None;
+    macro_rules! apply {
+        ($field:ident) => {
+            if let Some(value) = edit.$field.clone() {
+                named.get_or_insert(stringify!($field));
+                if next.$field != value {
+                    changed.insert(stringify!($field).into(), json!(value));
+                    next.$field = value;
+                }
+            }
+        };
+    }
+    apply!(name);
+    apply!(repo);
+    apply!(remote);
+    apply!(default_branch);
+    apply!(delivery);
+    apply!(checks);
+    apply!(capacity);
+    apply!(deploy_workflow);
+    apply!(deploy_environment);
+    apply!(deploy_timeout_minutes);
+    let Some(named) = named else {
+        return Ok(project);
+    };
+    let first = changed.keys().next().map_or(named, String::as_str);
+    let current = serde_json::to_value(&project)?;
+    check_rev(
+        "project",
+        &project.id,
+        project.rev,
+        expected_rev,
+        Some((first, current[first].clone())),
+    )?;
+    if changed.is_empty() {
+        return Ok(project);
+    }
+    if project.retired_at.is_some() {
+        return Err(Error::refused("project", &project.id, "project is retired"));
+    }
+    required("project name", &next.name)?;
+    positive("capacity", next.capacity)?;
+    positive("deploy timeout", next.deploy_timeout_minutes)?;
+    tx.conn().execute(
+        "UPDATE projects SET name = ?2, repo = ?3, remote = ?4, default_branch = ?5, delivery = ?6,
+                    checks = ?7, capacity = ?8, deploy_workflow = ?9, deploy_environment = ?10,
+                    deploy_timeout_minutes = ?11, rev = rev + 1
+             WHERE id = ?1",
+        params![
+            next.id,
+            next.name,
+            next.repo,
+            next.remote,
+            next.default_branch,
+            next.delivery,
+            next.checks,
+            next.capacity,
+            next.deploy_workflow,
+            next.deploy_environment,
+            next.deploy_timeout_minutes,
+        ],
+    )?;
+    tx.event(
+        NewEvent::new("project", &project.id, "project.edited")
+            .rev(project.rev + 1)
+            .payload(json!({"changed": changed, "expected_rev": expected_rev})),
+    )?;
+    get(tx.conn(), "project", &project.id)
 }
 
 impl Store {
@@ -343,71 +423,7 @@ impl Store {
     ) -> Result<Applied<Project>> {
         require_owner(&ctx.actor, "project.edit")?;
         self.write(ctx, "project.edit", None, |tx| {
-            let project: Project = get(tx.conn(), "project", project_id)?;
-            let mut next = project.clone();
-            let mut changed = serde_json::Map::new();
-            let mut named = None;
-            macro_rules! apply {
-                ($field:ident) => {
-                    if let Some(value) = edit.$field.clone() {
-                        named.get_or_insert(stringify!($field));
-                        if next.$field != value {
-                            changed.insert(stringify!($field).into(), json!(value));
-                            next.$field = value;
-                        }
-                    }
-                };
-            }
-            apply!(name);
-            apply!(repo);
-            apply!(remote);
-            apply!(default_branch);
-            apply!(delivery);
-            apply!(checks);
-            apply!(capacity);
-            apply!(deploy_workflow);
-            apply!(deploy_environment);
-            apply!(deploy_timeout_minutes);
-            let Some(named) = named else {
-                return Ok(project);
-            };
-            let first = changed.keys().next().map_or(named, String::as_str);
-            let current = serde_json::to_value(&project)?;
-            check_rev("project", &project.id, project.rev, expected_rev, Some((first, current[first].clone())))?;
-            if changed.is_empty() {
-                return Ok(project);
-            }
-            if project.retired_at.is_some() {
-                return Err(Error::refused("project", &project.id, "project is retired"));
-            }
-            required("project name", &next.name)?;
-            positive("capacity", next.capacity)?;
-            positive("deploy timeout", next.deploy_timeout_minutes)?;
-            tx.conn().execute(
-                "UPDATE projects SET name = ?2, repo = ?3, remote = ?4, default_branch = ?5, delivery = ?6,
-                        checks = ?7, capacity = ?8, deploy_workflow = ?9, deploy_environment = ?10,
-                        deploy_timeout_minutes = ?11, rev = rev + 1
-                 WHERE id = ?1",
-                params![
-                    next.id,
-                    next.name,
-                    next.repo,
-                    next.remote,
-                    next.default_branch,
-                    next.delivery,
-                    next.checks,
-                    next.capacity,
-                    next.deploy_workflow,
-                    next.deploy_environment,
-                    next.deploy_timeout_minutes,
-                ],
-            )?;
-            tx.event(
-                NewEvent::new("project", &project.id, "project.edited")
-                    .rev(project.rev + 1)
-                    .payload(json!({"changed": changed, "expected_rev": expected_rev})),
-            )?;
-            get(tx.conn(), "project", &project.id)
+            edit_project(tx, project_id, expected_rev, &edit)
         })
     }
 

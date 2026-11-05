@@ -1106,6 +1106,14 @@ button.chip:active {
   line-height: 1.4;
 }
 
+.opt .applies {
+  font-size: 12.5px;
+  font-weight: var(--w-medium);
+  color: var(--fg-2);
+  line-height: 1.4;
+  text-wrap: pretty;
+}
+
 .opt.rec {
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
   background: color-mix(in srgb, var(--accent) 7%, var(--bg-card));

@@ -18,6 +18,7 @@ import { answeredStore, withdrawnStore } from "./answered";
 const RETRY = "01JATTN0000000000000000000";
 const MERGE = "01JATTN0000000000000000001";
 const QUIET = "01JATTN0000000000000000002";
+const CAPACITY = "01JATTN0000000000000000003";
 const SESSION_C = "01JSESS000000000000000000C";
 const HOST_B = "01JHOSTB00000000000000000B";
 
@@ -276,6 +277,22 @@ test("the answered item stays in the inbox with its receipt after it leaves the 
   );
   expect(screen.getByTestId(`inbox-row-${RETRY}`).textContent).toContain("answered");
   expect(screen.getByRole("status")).toBeTruthy();
+});
+
+test("an option that changes capacity says so, and the answer says it was applied", async () => {
+  stubDaemon("default");
+  replies = [ok({ outbox_id: "01JOUTB0000000000000000001" })];
+  await renderInbox("default", CAPACITY);
+  const raise = screen.getByRole("button", { name: /Raise to 2/ });
+  expect(raise.textContent).toContain("Sets gamma capacity from 1 to 2");
+  expect(screen.getByRole("button", { name: /Let it wait/ }).textContent).not.toContain(
+    "Sets gamma",
+  );
+  fireEvent.click(raise);
+  await flush();
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.body.answer).toBe("Raise to 2");
+  expect(screen.getByText(/Applied gamma capacity from 1 to 2\./)).toBeTruthy();
 });
 
 test("approve sends the head SHA the board shows, once", async () => {

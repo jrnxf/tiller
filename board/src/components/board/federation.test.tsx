@@ -23,6 +23,7 @@ const LEDGER_5_E = "01JPCARDE00000000000000005";
 const ASK_D = "01JPATTN00000000000000000D";
 const ASK_E = "01JPATTN00000000000000000E";
 const ASK_F = "01JPATTN00000000000000000F";
+const CAPACITY_D = "01JPATTN00000000000000002D";
 
 interface Posted {
   method: string;
@@ -295,6 +296,22 @@ test("an ask of a read pairing cannot be answered and says why", async () => {
     expect((option as HTMLButtonElement).disabled).toBe(true);
   }
   expect(posted).toHaveLength(0);
+});
+
+test("an option that changes a peer's project is picked on that host's board", async () => {
+  const posted = stubApi("federated");
+  await renderApp("federated", `/inbox?item=${CAPACITY_D}`);
+  const group = await screen.findByRole("group", { name: "Answer" });
+  const raise = within(group).getByRole("button", { name: /Raise to 3/ }) as HTMLButtonElement;
+  expect(raise.disabled).toBe(true);
+  expect(screen.getByText(/pick it on host-d's board/)).toBeTruthy();
+  fireEvent.keyDown(window, { key: "1" });
+  await flush();
+  expect(posted).toHaveLength(0);
+  fireEvent.click(within(group).getByRole("button", { name: /Keep 2/ }));
+  await flush();
+  expect(posted).toHaveLength(1);
+  expect(posted[0]?.body).toMatchObject({ answer: "Keep 2", host: "host-d" });
 });
 
 test("the Agents screen shows the host of every agent, and a peer's pane cannot be opened from here", async () => {

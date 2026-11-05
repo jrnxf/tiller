@@ -42,7 +42,10 @@ pub struct Open {
     pub recommendation: Option<String>,
     #[arg(long)]
     pub consequence: Option<String>,
-    /// A JSON array of the choices the owner has
+    /// A JSON array of the choices the owner has: labels, or objects with
+    /// `label`, `consequence`, `recommended` and an optional owner `action`
+    /// (`{"kind": "project_capacity", "project": <id>, "from": <n>, "to": <n>}`)
+    /// that applies when the owner picks that option on the board
     #[arg(long)]
     pub options: Option<String>,
     #[command(flatten)]
@@ -145,6 +148,7 @@ fn answer(app: &App, args: Answer) -> Done {
             "still_current": answered.still_current,
             "message": answered.message,
             "closed_card": answered.closed_card,
+            "applied": answered.applied,
             "cited_ask": cited,
         })
     })
