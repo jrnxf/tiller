@@ -366,6 +366,9 @@ pub struct ArtifactRow {
     pub id: String,
     pub kind: String,
     pub title: String,
+    /// Where the page is served; absent for an artifact that is only a local file.
+    pub url: Option<String>,
+    pub created_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -520,6 +523,30 @@ pub struct Project {
     /// A peer row's link state; absent on this host's rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<LinkState>,
+}
+
+/// One published PR on the contributions view: the `prs` row with the card
+/// that produced it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct Contribution {
+    pub id: String,
+    pub project_id: String,
+    pub card_id: String,
+    pub card_display_id: String,
+    pub card_title: String,
+    pub repo: String,
+    pub number: i64,
+    pub url: String,
+    /// `open`, `merged` or `closed`.
+    pub state: String,
+    pub linked_at: String,
+    pub merged_at: Option<String>,
+}
+
+/// `GET /api/v1/contributions`: published PRs, newest first.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ContributionsResponse {
+    pub contributions: Vec<Contribution>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]

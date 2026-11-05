@@ -5,6 +5,7 @@ import type { CSSProperties } from "react";
 
 import type {
   CardApproval,
+  CardArtifact,
   CardPr,
   CardRun,
   TimelineEntry,
@@ -317,6 +318,40 @@ function PullRequest({ pr, approvals }: { pr: CardPr; approvals: CardApproval[] 
   );
 }
 
+// Pages, screenshots and reports made for the card, so each stays findable
+// after the conversation that made it is gone.
+function Pages({ artifacts }: { artifacts: CardArtifact[] }) {
+  return (
+    <div className="sect" data-testid="card-pages">
+      <div className="sect-h">
+        Pages<span className="c">{artifacts.length} published</span>
+      </div>
+      {artifacts.length > 0 ? (
+        artifacts.map((artifact) => (
+          <div key={artifact.id} className="run">
+            <div className="rh">
+              <span className="lab sm">{artifact.kind}</span>
+              {artifact.url ? (
+                <a href={artifact.url} target="_blank" rel="noreferrer">
+                  {artifact.title}
+                </a>
+              ) : (
+                artifact.title
+              )}
+              <span className="sp" />
+              <span className="meta">{formatLisbonMoment(artifact.created_at)}</span>
+            </div>
+          </div>
+        ))
+      ) : (
+        <div className="run">
+          <p style={{ margin: 0 }}>No pages have been made for this card.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function CardPage({ cardId, owner }: { cardId: string; owner?: string }) {
   const { data: detail } = useSuspenseQuery(cardQuery(cardId, owner));
   const { data: projects } = useSuspenseQuery(projectsQuery());
@@ -469,6 +504,8 @@ export function CardPage({ cardId, owner }: { cardId: string; owner?: string }) 
           </div>
         </div>
       )}
+
+      <Pages artifacts={detail.artifacts} />
 
       <div className="sect">
         <div className="sect-h">
