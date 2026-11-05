@@ -2103,6 +2103,75 @@ fn the_daemons_git_runs_nothing_the_worktree_names() {
     }
 }
 
+/// The land's own git calls (fetch, the descent check and the local
+/// fast-forward) run nothing the repository's config names: an upload-pack
+/// command on the remote, or a smudge filter that checks files out. Plain
+/// git in the same repository runs both, so the setup is live.
+#[test]
+fn the_lands_fetch_and_fast_forward_run_nothing_the_repository_names() {
+    let (_remote, work, head) = repos();
+    let marks = tempfile::tempdir().unwrap();
+    let script = |name: &str, body: &str| {
+        let path = marks.path().join(format!("{name}.sh"));
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\ntouch '{}'\n{body}\n",
+                marks.path().join(name).display()
+            ),
+        )
+        .unwrap();
+        let mut mode = std::fs::metadata(&path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
+        std::fs::set_permissions(&path, mode).unwrap();
+        path.display().to_string()
+    };
+    let uploadpack = script("uploadpack", "exec git-upload-pack \"$@\"");
+    git(
+        work.path(),
+        &["config", "remote.origin.uploadpack", &uploadpack],
+    );
+    let fetched = direct::fetch_default(work.path(), "origin", "main", &Identity::Owner).unwrap();
+    assert_eq!(fetched, git(work.path(), &["rev-parse", "main"]));
+    assert!(direct::descends(work.path(), &fetched, &head));
+    assert!(!marks.path().join("uploadpack").exists(), "uploadpack ran");
+
+    // The fast-forward checks `main` out in a worktree whose repository
+    // names a smudge filter for what changes.
+    git(work.path(), &["switch", "-q", "main"]);
+    std::fs::write(work.path().join(".gitattributes"), "feature filter=x\n").unwrap();
+    std::fs::write(
+        work.path().join(".git/info/attributes"),
+        "feature filter=x\n",
+    )
+    .unwrap();
+    let smudge = script("smudge", "cat");
+    git(work.path(), &["config", "filter.x.smudge", &smudge]);
+    let moved = direct::advance(work.path(), "main", &fetched, &head);
+    assert_eq!(moved, direct::Pushed::Done);
+    assert_eq!(git(work.path(), &["rev-parse", "main"]), head);
+    assert_eq!(
+        std::fs::read_to_string(work.path().join("feature")).unwrap(),
+        "feature"
+    );
+    assert!(!marks.path().join("smudge").exists(), "smudge ran");
+    assert!(
+        git(
+            work.path(),
+            &["status", "--porcelain", "--untracked-files=no"]
+        )
+        .is_empty()
+    );
+
+    // Plain git runs both.
+    git(work.path(), &["fetch", "-q", "origin", "main"]);
+    git(work.path(), &["checkout", "-q", "--detach", "main~1"]);
+    git(work.path(), &["checkout", "-q", "main"]);
+    for mark in ["uploadpack", "smudge"] {
+        assert!(marks.path().join(mark).exists(), "{mark} is not live");
+    }
+}
+
 /// Only described, done, direct-pr builder runs are published, and only the
 /// daemon records a publish.
 #[test]

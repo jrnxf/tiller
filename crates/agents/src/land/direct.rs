@@ -11,10 +11,13 @@
 //! repository the run's worktree shares.
 //!
 //! Every call here runs as the owner, outside the sandbox, in a repository a
-//! worker can write. So no call runs a hook or an fsmonitor, and [`push`] and
-//! [`uncommitted`] run in a [`CleanRoom`]: the repository's own config never
-//! applies to them, since a filter driver, `core.sshCommand` or a credential
-//! helper written there would run as a command too.
+//! worker can write. So no call runs a hook or an fsmonitor, and every call
+//! that fetches, pushes, reads a worktree or writes one ([`fetch_default`],
+//! [`descends`], [`push`], [`uncommitted`], [`advance`]) runs in a
+//! [`CleanRoom`]: the repository's own config never applies to them, since a
+//! filter driver, `core.sshCommand`, `remote.<name>.uploadpack` or a
+//! credential helper written there would run as a command too. The calls
+//! left in the repository only read refs.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -26,6 +29,9 @@ use super::forge::{AppToken, Identity};
 /// How long one push may run before the daemon stops it: a remote that
 /// never answers must not hold the publish or the land pass.
 pub const PUSH_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long one fetch may run, for the same reason.
+pub const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Config every call carries, above the repository's own: no hook and no
 /// fsmonitor runs.
@@ -151,6 +157,8 @@ struct CleanRoom {
     dir: tempfile::TempDir,
     /// The repository's own git dir, which holds the worktree's index.
     git_dir: PathBuf,
+    /// The repository's object store, where a fetch stores what it gets.
+    objects: PathBuf,
 }
 
 impl CleanRoom {
@@ -184,12 +192,21 @@ impl CleanRoom {
         Ok(Self {
             dir,
             git_dir: PathBuf::from(git_dir),
+            objects: Path::new(common).join("objects"),
         })
     }
 
     fn command(&self) -> Command {
         let mut command = command();
         command.arg("--git-dir").arg(self.dir.path());
+        command
+    }
+
+    /// Like [`Self::command`], but new objects go to the repository's
+    /// object store, so they outlive the room.
+    fn storing(&self) -> Command {
+        let mut command = self.command();
+        command.env("GIT_OBJECT_DIRECTORY", &self.objects);
         command
     }
 }
@@ -234,38 +251,41 @@ pub fn branch_head(repo: &Path, branch: &str) -> Result<String, String> {
     )
 }
 
-/// Fetches the remote default branch and returns its head.
+/// Fetches the remote default branch from a [`CleanRoom`], into the
+/// repository's object store, and returns its head. `remote` is a remote of
+/// `repo` or a URL.
 pub fn fetch_default(
     repo: &Path,
     remote: &str,
     default: &str,
     identity: &Identity,
 ) -> Result<String, String> {
-    git(
-        repo,
-        &[
-            "fetch",
-            "--quiet",
-            "--no-tags",
-            remote,
-            &format!("refs/heads/{default}"),
-        ],
-        identity,
-    )?;
-    git(
-        repo,
-        &["rev-parse", "--verify", "FETCH_HEAD^{commit}"],
-        &Identity::Owner,
-    )
+    let url = remote_url(repo, remote, false)?;
+    let room = CleanRoom::open(repo)?;
+    let mut fetch = room.storing();
+    fetch.args([
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--",
+        &url,
+        &format!("refs/heads/{default}"),
+    ]);
+    run(fetch, identity, Some(FETCH_TIMEOUT))?;
+    let mut head = room.storing();
+    head.args(["rev-parse", "--verify", "FETCH_HEAD^{commit}"]);
+    run(head, &Identity::Owner, None)
 }
 
+/// Whether `head` descends from `ancestor` (or is it), judged in a
+/// [`CleanRoom`].
 pub fn descends(repo: &Path, ancestor: &str, head: &str) -> bool {
-    git(
-        repo,
-        &["merge-base", "--is-ancestor", ancestor, head],
-        &Identity::Owner,
-    )
-    .is_ok()
+    let Ok(room) = CleanRoom::open(repo) else {
+        return false;
+    };
+    let mut check = room.command();
+    check.args(["merge-base", "--is-ancestor", ancestor, head]);
+    run(check, &Identity::Owner, None).is_ok()
 }
 
 /// What the push did.
@@ -281,7 +301,7 @@ pub enum Pushed {
 /// `git push <remote> <sha>:refs/heads/<branch>`, never forced, from a
 /// [`CleanRoom`]. `remote` is a remote of `repo` or a URL.
 pub fn push(repo: &Path, remote: &str, sha: &str, branch: &str, identity: &Identity) -> Pushed {
-    let url = match push_url(repo, remote) {
+    let url = match remote_url(repo, remote, true) {
         Ok(url) => url,
         Err(error) => return Pushed::Refused(error),
     };
@@ -307,16 +327,17 @@ pub fn push(repo: &Path, remote: &str, sha: &str, branch: &str, identity: &Ident
     }
 }
 
-/// Where a push to `remote` goes: its push URL when `repo` names it, else
-/// `remote` itself. A URL that would read as an option or names a transport
-/// helper (`ext::`, `fd::`), which runs a command, is refused.
-fn push_url(repo: &Path, remote: &str) -> Result<String, String> {
-    let url = git(
-        repo,
-        &["remote", "get-url", "--push", remote],
-        &Identity::Owner,
-    )
-    .unwrap_or_else(|_| remote.to_owned());
+/// Where a push (or a fetch) to `remote` goes: its push (or fetch) URL when
+/// `repo` names it, else `remote` itself. A URL that would read as an option
+/// or names a transport helper (`ext::`, `fd::`), which runs a command, is
+/// refused.
+fn remote_url(repo: &Path, remote: &str, push: bool) -> Result<String, String> {
+    let mut args = vec!["remote", "get-url"];
+    if push {
+        args.push("--push");
+    }
+    args.push(remote);
+    let url = git(repo, &args, &Identity::Owner).unwrap_or_else(|_| remote.to_owned());
     let helper = url.split_once("::").is_some_and(|(transport, _)| {
         !transport.is_empty()
             && transport
@@ -324,7 +345,9 @@ fn push_url(repo: &Path, remote: &str) -> Result<String, String> {
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
     });
     if url.is_empty() || url.starts_with('-') || helper {
-        return Err(format!("nothing was sent: the push URL {url:?} is refused"));
+        return Err(format!(
+            "nothing was sent: the remote URL {url:?} is refused"
+        ));
     }
     Ok(url)
 }
@@ -383,16 +406,7 @@ pub fn advance(repo: &Path, default: &str, old: &str, sha: &str) -> Pushed {
         }
     }
     let moved = match &checked_out {
-        Some(worktree) => {
-            if branch_head(Path::new(worktree), default).as_deref() != Ok(old) {
-                return Pushed::Refused(format!("{default} moved from {old}"));
-            }
-            git(
-                Path::new(worktree),
-                &["merge", "--ff-only", "--quiet", sha],
-                &owner,
-            )
-        }
+        Some(worktree) => fast_forward(Path::new(worktree), repo, default, old, sha),
         None => git(
             repo,
             &["update-ref", &format!("refs/heads/{default}"), sha, old],
@@ -408,6 +422,51 @@ pub fn advance(repo: &Path, default: &str, old: &str, sha: &str) -> Pushed {
             Err(_) => Pushed::Unknown(error),
         },
     }
+}
+
+/// Moves `default` from `old` to `sha` in the worktree that has it checked
+/// out, and the files with it. The files change in a [`CleanRoom`] with the
+/// worktree's own index, so no smudge filter or `core.fsmonitor` the
+/// repository names runs; a worktree edit that the move would overwrite
+/// refuses it. The ref moves last, and only from `old`.
+fn fast_forward(
+    worktree: &Path,
+    repo: &Path,
+    default: &str,
+    old: &str,
+    sha: &str,
+) -> Result<String, String> {
+    if branch_head(worktree, default).as_deref() != Ok(old) {
+        return Err(format!("{default} moved from {old}"));
+    }
+    let room = CleanRoom::open(worktree)?;
+    let mut ancestor = room.command();
+    ancestor.args(["merge-base", "--is-ancestor", old, sha]);
+    run(ancestor, &Identity::Owner, None)
+        .map_err(|_| format!("{sha} is not a fast-forward of {default} at {old}"))?;
+    let index = room.git_dir.join("index");
+    let mut files = room.command();
+    files
+        .arg("--work-tree")
+        .arg(worktree)
+        .args(["read-tree", "-m", "-u", old, sha])
+        .env("GIT_INDEX_FILE", &index);
+    run(files, &Identity::Owner, None)?;
+    let moved = git(
+        repo,
+        &["update-ref", &format!("refs/heads/{default}"), sha, old],
+        &Identity::Owner,
+    );
+    if moved.is_err() {
+        // Put the files back where the ref still is.
+        let mut back = room.command();
+        back.arg("--work-tree")
+            .arg(worktree)
+            .args(["read-tree", "-m", "-u", sha, old])
+            .env("GIT_INDEX_FILE", &index);
+        let _ = run(back, &Identity::Owner, None);
+    }
+    moved
 }
 
 #[cfg(test)]
