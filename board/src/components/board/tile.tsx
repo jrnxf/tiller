@@ -1,4 +1,4 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useSearch } from "@tanstack/react-router";
 
 import type { BoardRow } from "../../lib/api-types";
 import { cardDot } from "./activity";
@@ -52,7 +52,7 @@ function laneDot(dot: DotKind | null, lane: LaneHealth["kind"]): DotKind | null 
   return lane === "stale" ? "stale" : "off";
 }
 
-const LANE_PREFIX = { ok: "observed", stale: "stale, observed", disconnected: "last known" };
+const LANE_PREFIX = { ok: "", stale: "stale, observed", disconnected: "last known" };
 
 // The card page reads a peer's card from that peer (`?host=` on the read).
 export function ownerSearch(row: BoardRow) {
@@ -61,65 +61,52 @@ export function ownerSearch(row: BoardRow) {
 }
 
 function CardTile({ row, lane }: { row: BoardRow; lane: LaneHealth["kind"] }) {
-  const slim = row.column === "done";
   const dot = laneDot(cardDot(row), lane);
   const tone = badgeTone(row);
   const attention = row.column === "needs_you";
   const standing = useStanding(row);
   const id = shownId(row, useAmbiguousIds());
+  const owner = ownerOf(row);
+  const { card: openId, owner: openOwner } = useSearch({ strict: false });
+  const selected = openId === row.id && (openOwner ?? undefined) === owner;
   return (
     <Link
-      to="/cards/$cardId"
-      params={{ cardId: row.id }}
-      search={ownerSearch(row)}
-      className={`card${slim ? " done slim" : ""}${lane === "disconnected" || standing.dim ? " dim" : ""}`}
+      to="/"
+      search={(prev) => ({ ...prev, card: row.id, owner })}
+      className={`card${lane === "disconnected" || standing.dim ? " dim" : ""}`}
       data-attn={attention}
+      aria-current={selected ? "true" : undefined}
       data-peer-state={standing.peer ? (standing.dim ? "stale" : "live") : undefined}
       title={`${id}: ${row.title}`}
     >
       <div className="c-top">
         <Status mark={statusMark(row)} />
         <span className="id">{id}</span>
-        {slim ? <HostChip entity={row} /> : null}
-        {dot && row.observed_at && !slim ? (
-          // The freshness moves up beside the id when the board is tight.
-          <span className="c-obs">
-            <i className={`ld ${dot}`} />
-            <Ago at={row.observed_at} />
+        {standing.dim ? (
+          <span className="c-age">
+            <AsOf asOf={standing.asOf} />
+          </span>
+        ) : dot && row.observed_at ? (
+          <span className="c-age">
+            <Ago
+              at={row.observed_at}
+              prefix={dot === "unknown" ? "unknown, seen" : LANE_PREFIX[lane]}
+              oldAfter={300}
+            />
           </span>
         ) : null}
-        {slim && row.pr_number ? <PrChip number={row.pr_number} /> : <KindLabel kind={row.kind} />}
       </div>
       <div className="c-title">
         <span>{row.title}</span>
       </div>
-      {slim ? null : (
-        <>
-          <div className="c-chips">
-            <HostChip entity={row} />
-            <ModelChip model={row.model} />
-            {row.pr_number ? <PrChip number={row.pr_number} /> : null}
-            <span className={`lab sm ${tone}`}>
-              {dot === "unknown" ? <HelpIcon /> : null}
-              {badgeText(row)}
-            </span>
-          </div>
-          {standing.dim ? (
-            <div className="c-live c-asof">
-              <AsOf asOf={standing.asOf} />
-            </div>
-          ) : dot && row.observed_at ? (
-            <div className="c-live">
-              <i className={`ld ${dot}${dot === "live" ? " pulse" : ""}`} />
-              <Ago
-                at={row.observed_at}
-                prefix={dot === "unknown" ? "unknown, seen" : LANE_PREFIX[lane]}
-                oldAfter={300}
-              />
-            </div>
-          ) : null}
-        </>
-      )}
+      <div className="c-chips">
+        <HostChip entity={row} />
+        {row.pr_number ? <PrChip number={row.pr_number} /> : null}
+        <span className={`lab sm ${tone}`}>
+          {dot === "unknown" ? <HelpIcon /> : null}
+          {badgeText(row)}
+        </span>
+      </div>
     </Link>
   );
 }
@@ -135,8 +122,10 @@ function AskTile({ ask }: { ask: NonNullable<Tile["ask"]> }) {
       <div className="c-title">
         <span>Waiting for the orchestrator to tag this ask</span>
       </div>
-      <div className="c-live">
-        <Ago at={ask.received_at} prefix="asked" />
+      <div className="c-chips">
+        <span className="lab sm">
+          <Ago at={ask.received_at} prefix="asked" />
+        </span>
       </div>
     </div>
   );
@@ -152,9 +141,8 @@ export function TileView({ tile, lane = "ok" }: { tile: Tile; lane?: LaneHealth[
 export function MiniTile({ row }: { row: BoardRow }) {
   return (
     <Link
-      to="/cards/$cardId"
-      params={{ cardId: row.id }}
-      search={ownerSearch(row)}
+      to="/"
+      search={(prev) => ({ ...prev, card: row.id, owner: ownerOf(row) })}
       className="mini-card"
       title={`${row.host && row.link ? `${row.host} \u00b7 ` : ""}${row.display_id}: ${row.title}`}
     >

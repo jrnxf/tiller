@@ -176,13 +176,19 @@ export function ApproveBlock({ item }: { item: AttentionItem }) {
   );
 }
 
-// The Approve action alone, for a page that already shows the approval's box
-// (the card page). Same binding as the inbox: the head SHA shown, once.
-export function ApproveButton({ item }: { item: AttentionItem }) {
+// Reject then Approve, right-aligned, for a page that already shows the
+// approval's details (the card page). Same binding as the inbox: the head SHA
+// shown, once. Reject needs no reason.
+export function ApproveActions({ item }: { item: AttentionItem | undefined }) {
+  return item ? <ApproveActionsFor item={item} /> : null;
+}
+
+function ApproveActionsFor({ item }: { item: AttentionItem }) {
   const [refusal, setRefusal] = useState<StaleRefusal | null>(null);
   const standing = useStanding(item);
   const off = standing.canAct ? null : standing.reason;
   const accept = useDecide(item, "accept", setRefusal);
+  const reject = useDecide(item, "reject", setRefusal);
   const approval = item.approval;
   if (!approval) return null;
   const headSha = approval.head_sha;
@@ -196,27 +202,38 @@ export function ApproveButton({ item }: { item: AttentionItem }) {
   const stale = refusal
     ? { shown: refusal.shown, current: headSha === refusal.shown ? refusal.current : headSha }
     : null;
-  const otherError =
-    accept.error && !staleRefusal(accept.error, refusal?.shown ?? headSha) ? accept.error : null;
+  const error = accept.error ?? reject.error;
+  const otherError = error && !staleRefusal(error, refusal?.shown ?? headSha) ? error : null;
+  const pending = accept.pending || reject.pending;
   return (
-    <>
+    <div className="prc-act">
       {stale ? (
         <p className="refusal" role="alert" data-testid="stale-refusal">
           {staleMessage(stale, approval.pr_number)}
         </p>
       ) : null}
-      <div className="acts" style={{ display: "flex", gap: 8 }}>
+      <div className="acts right">
+        <button
+          type="button"
+          className="btn"
+          disabled={pending || off !== null}
+          title={off ?? undefined}
+          onClick={reject.trigger}
+        >
+          {reject.pending ? "Rejecting..." : "Reject"}
+        </button>
         <button
           type="button"
           className="btn primary"
-          disabled={accept.pending || headSha === stale?.shown || off !== null}
+          disabled={pending || headSha === stale?.shown || off !== null}
           title={off ?? undefined}
           onClick={accept.trigger}
         >
           {accept.pending ? "Approving..." : `Approve ${shortSha(headSha)}`}
         </button>
       </div>
+      <p className="meta">Bound to {shortSha(headSha)}. A new push asks again.</p>
       <ActionFailure error={otherError} host={ownerOf(item)} />
-    </>
+    </div>
   );
 }

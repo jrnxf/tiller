@@ -8,7 +8,7 @@
   --shadow-low: 0px 1px 4px -1px #00000017;
   --fs-t3: 20px;
   --row-h: 38px;
-  --card-pad: 8px;
+  --card-pad: 7px;
   --lane-h: 30px;
   --cell-gap: 4px;
 }
@@ -21,7 +21,7 @@
 }
 :root[data-density="compact"] {
   --row-h: 30px;
-  --card-pad: 6px;
+  --card-pad: 5px;
   --lane-h: 26px;
   --cell-gap: 3px;
 }
@@ -389,7 +389,7 @@
   background: var(--bg-card);
   border: 1px solid var(--line-1);
   border-radius: var(--r8);
-  padding: var(--card-pad) 10px;
+  padding: var(--card-pad) 9px;
   box-shadow: var(--shadow-low);
   cursor: pointer;
   transition:
@@ -402,12 +402,19 @@
   gap: 4px;
   position: relative;
   min-width: 0;
+  container-type: inline-size;
+}
+/* A narrow card (the board beside the drawer) keeps the whole id, so the age goes. */
+@container (max-width: 135px) {
+  .c-top .c-age {
+    display: none;
+  }
 }
 .card:hover {
   border-color: var(--line-3);
   background: var(--bg-card-hover);
 }
-.card[aria-selected="true"] {
+.card[aria-current="true"] {
   border-color: color-mix(in lch, var(--accent), transparent 40%);
   box-shadow: 0 0 0 1px color-mix(in lch, var(--accent), transparent 60%);
 }
@@ -440,11 +447,23 @@
   white-space: nowrap;
   font-weight: var(--w-medium);
 }
+/* Two lines of room whatever the title, so every card in a lane is one height. */
 .card .c-title {
   display: block;
   color: var(--fg-1);
   font-weight: var(--w-medium);
   line-height: 1.38;
+  min-height: 2.76em;
+}
+.card .c-top .c-age {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg-3);
+  font-size: 11.5px;
+  font-weight: var(--w-normal);
+  white-space: nowrap;
 }
 .card .c-title span {
   display: -webkit-box;
@@ -453,19 +472,6 @@
   overflow: hidden;
   min-width: 0;
   overflow-wrap: anywhere;
-}
-.card.slim {
-  gap: 1px;
-  padding: 4px 10px;
-}
-.card.slim .c-top {
-  min-height: 16px;
-}
-.card.slim .c-title span {
-  -webkit-line-clamp: 1;
-}
-.card.slim .c-title {
-  color: var(--fg-2);
 }
 .mini-card {
   width: 100%;
@@ -514,29 +520,12 @@ button.colh:hover {
   max-width: 100%;
   min-width: 0;
   overflow: hidden;
+  text-overflow: ellipsis;
 }
 .card .c-chips .lab:not(:has(*)) {
   display: block;
   line-height: 18px;
   text-overflow: ellipsis;
-}
-.card .c-live {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 11.5px;
-  color: var(--fg-3);
-  min-width: 0;
-  white-space: nowrap;
-}
-.card .c-live .obs,
-.card .c-live > span:not(.obs):last-child {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.card.done .c-title {
-  color: var(--fg-2);
 }
 .card.dim {
   opacity: 0.72;
@@ -808,39 +797,6 @@ button.colh:hover {
 .sha.new {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--line-2));
   color: var(--accent-text);
-}
-/* The approval is the foot of the pull request card: note left, action right,
-   wrapping below on narrow widths. inbox.css also styles .appr as a standalone
-   box and loads later, so the card-scoped rules below carry the specificity. */
-.prbox .appr {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px 16px;
-  margin: 12px 0 0;
-  padding: 10px 0 0;
-  border: 0;
-  border-top: 1px solid var(--line-1);
-  border-radius: 0;
-  background: none;
-}
-.prbox .appr.stale {
-  border-top-color: color-mix(in srgb, var(--yellow) 48%, var(--line-1));
-}
-.prbox .appr .a-main {
-  flex: 1 1 240px;
-  min-width: 0;
-}
-.prbox .appr .a-act {
-  flex: none;
-}
-.prbox .appr .a-act .bind {
-  margin: 0;
-}
-.prbox .appr ul {
-  flex: 1 0 100%;
-  margin: 0;
 }
 .appr .a-h {
   display: flex;
@@ -1289,13 +1245,103 @@ button.colh:hover {
 }
 
 /* Integration with the shell */
-.content:has(> .board-view, > .agents-view, > .empty) {
+.content:has(> .board-split, > .agents-view, > .empty) {
   padding: 0;
+}
+.board-split {
+  display: flex;
+  height: 100%;
+  min-width: 0;
 }
 .board-view {
   position: relative;
   height: 100%;
+  flex: 1;
+  min-width: 0;
   overflow: auto;
+}
+/* Docked: the board gives up this width, so every lane stays in view. */
+.board-split[data-docked="true"] .board {
+  min-width: 0;
+}
+.drawer {
+  flex: none;
+  width: 480px;
+  height: 100%;
+  overflow: auto;
+  border-left: 1px solid var(--line-1);
+  background: var(--bg-1);
+}
+.drawer .card-page {
+  max-width: none;
+  margin: 0;
+  padding: 14px 18px 40px;
+}
+.drawer .cp-nav {
+  margin-bottom: 12px;
+}
+.cp-tools {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+.cp-tools .ib {
+  display: grid;
+  place-items: center;
+  color: var(--fg-3);
+}
+.cp-tools .ib:hover {
+  color: var(--fg-1);
+}
+.acts.right {
+  justify-content: flex-end;
+}
+.run .acts .meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.prc .prc-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px 20px;
+  align-items: end;
+}
+.prc.stale {
+  border-color: color-mix(in srgb, var(--yellow) 48%, var(--line-1));
+  background: color-mix(in srgb, var(--yellow) 7%, var(--bg-2));
+}
+.prc-act {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: 220px;
+  text-align: right;
+}
+.prc-act .acts {
+  margin-top: 0;
+}
+.prc-act p {
+  margin: 0;
+  text-wrap: balance;
+}
+.prc-commits {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+.prc-commits li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 2px 0;
+}
+.prc-commits li span.mono {
+  color: var(--fg-2);
 }
 .board-view > .sec-note {
   position: sticky;
@@ -1317,9 +1363,6 @@ a.mini-card {
 }
 a.card:hover {
   color: inherit;
-}
-.card .c-live .ld {
-  flex: none;
 }
 .lab .icon,
 .mchip .icon {
@@ -1474,6 +1517,24 @@ a.card:hover {
 }
 
 @media (max-width: 820px) {
+  .board-split {
+    display: block;
+    position: relative;
+  }
+  .board-split[data-docked="true"] .board-view {
+    display: none;
+  }
+  .drawer {
+    width: auto;
+    border-left: 0;
+  }
+  .prc .prc-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .prc-act {
+    align-items: flex-end;
+    max-width: none;
+  }
   .toast {
     left: 16px;
   }
@@ -1588,108 +1649,6 @@ a.card:hover {
   }
 }
 
-/* Fit levels: the board drops card detail, step by step, until the lanes fit. */
-.card .c-obs {
-  display: none;
-  align-items: center;
-  gap: 5px;
-  color: var(--fg-3);
-  font-size: 11.5px;
-  font-weight: var(--w-normal);
-  white-space: nowrap;
-  flex: none;
-}
-.board[data-fit="1"] .card .c-obs,
-.board[data-fit="2"] .card .c-obs,
-.board[data-fit="3"] .card .c-obs {
-  display: inline-flex;
-}
-.board[data-fit="1"] .card .c-live,
-.board[data-fit="2"] .card .c-live,
-.board[data-fit="3"] .card .c-live {
-  display: none;
-}
-.board[data-fit="2"] .card .c-title span,
-.board[data-fit="3"] .card .c-title span {
-  -webkit-line-clamp: 1;
-}
-.board[data-fit="3"] .card .c-chips {
-  display: none;
-}
-/* The host chip stays when the other chips go (protocol.md section 10.5). */
-.board[data-fit="3"] .card .c-chips:has(.hchip) {
-  display: flex;
-}
-.board[data-fit="3"] .card .c-chips > :not(.hchip) {
-  display: none;
-}
-.board[data-fit="3"] .card[data-attn="true"] .c-title,
-.board[data-fit="3"] .card .c-title {
-  color: var(--fg-1);
-}
-.board[data-fit="2"] .card.slim,
-.board[data-fit="3"] .card.slim {
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-  padding: 3px 10px;
-}
-.board[data-fit="2"] .card.slim .c-top,
-.board[data-fit="3"] .card.slim .c-top {
-  flex: none;
-  min-height: 0;
-}
-.board[data-fit="2"] .card.slim .c-top .id,
-.board[data-fit="3"] .card.slim .c-top .id {
-  flex: none;
-}
-.board[data-fit="2"] .card.slim .c-top .lab,
-.board[data-fit="3"] .card.slim .c-top .lab {
-  display: none;
-}
-.board[data-fit="2"] .card.slim .c-title,
-.board[data-fit="3"] .card.slim .c-title {
-  flex: 1;
-  min-width: 0;
-}
-.board[data-fit="2"] .card:not(.slim),
-.board[data-fit="3"] .card:not(.slim) {
-  gap: 2px;
-  padding: 5px 10px;
-}
-.board[data-fit="2"] .card .c-chips {
-  flex-wrap: nowrap;
-  overflow: hidden;
-}
-.board[data-fit="2"] .card .c-chips .mchip {
-  display: none;
-}
-.board[data-fit="2"] .card .c-chips .lab:last-child svg {
-  display: none;
-}
-.board[data-fit="2"] .card .c-chips .lab:last-child {
-  flex: 0 1 auto;
-  min-width: 0;
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  line-height: 16px;
-}
-.board[data-fit="1"] .card:not(.slim) .c-top .lab,
-.board[data-fit="2"] .card:not(.slim) .c-top .lab,
-.board[data-fit="3"] .card:not(.slim) .c-top .lab {
-  display: none;
-}
-.board[data-fit="1"] .card .c-top .id,
-.board[data-fit="2"] .card .c-top .id,
-.board[data-fit="3"] .card .c-top .id {
-  flex: none;
-}
-.board[data-fit="1"] .card .c-obs,
-.board[data-fit="2"] .card .c-obs,
-.board[data-fit="3"] .card .c-obs {
-  margin-left: auto;
-}
 .acts {
   display: flex;
   gap: 8px;
@@ -1755,13 +1714,6 @@ a.card:hover {
 .asof {
   font-size: 11.5px;
   color: var(--yellow-text);
-}
-.card .c-asof {
-  display: flex;
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .peer-note {
   margin: 8px 0;

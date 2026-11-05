@@ -1,7 +1,8 @@
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
-import { useLayoutEffect, useRef, useState } from "react";
-import type { CSSProperties, RefObject } from "react";
+import { Link, useNavigate } from "@tanstack/react-router";
+import { Component, Suspense, useEffect } from "react";
+import type { ReactNode } from "react";
+import type { CSSProperties } from "react";
 
 import type { BoardFilter } from "../../lib/api-types";
 import { ownerKey, projectKey, standingOf } from "../../lib/peers";
@@ -18,6 +19,7 @@ import { Lane } from "./lane";
 import { COLUMNS, onHost, passesFilter, tilesOf } from "./model";
 import type { ColumnId, Tile } from "./model";
 import { LayersIcon, CloseIcon } from "../shell/icons";
+import { CardPage } from "./card-page";
 import "./board.css";
 
 const FILTER_NAME: Record<BoardFilter, string | null> = {
@@ -39,65 +41,6 @@ const COLUMN_MARK = {
 const MINI_WIDTH = 52;
 const FULL_WIDTH = 176;
 const GAP = 8;
-
-// How much of each card the board shows. 0 is the full card; each step drops
-// detail until the lanes fit the screen: 1 moves the freshness up beside the id,
-// 2 clips titles to one line, 3 keeps only the title and the badge.
-const MAX_FIT = 3;
-
-interface FitState {
-  key: string;
-  level: number;
-}
-
-// Raises the level, one step at a time, while the board overflows its frame, and
-// starts again from the full card whenever what is shown or its room changes.
-// The steps run in a layout effect, so the screen never paints an overflowing
-// intermediate.
-function useFitLevel(ref: RefObject<HTMLDivElement | null>, content: string): number {
-  const [size, setSize] = useState("");
-  const key = `${content}|${size}`;
-  const [state, setState] = useState<FitState>({ key, level: 0 });
-
-  let level = state.level;
-  if (state.key !== key) {
-    setState({ key, level: 0 });
-    level = 0;
-  }
-
-  useLayoutEffect(() => {
-    const element = ref.current;
-    if (!element) return;
-    const measured = `${element.clientWidth}x${element.clientHeight}`;
-    if (size === "") {
-      setSize(measured);
-      return;
-    }
-    // Phones stack the columns and scroll; only the grid has a frame to fit.
-    const stacked =
-      typeof window.matchMedia === "function" && window.matchMedia("(max-width: 820px)").matches;
-    if (
-      !stacked &&
-      element.scrollHeight > element.clientHeight + 1 &&
-      state.key === key &&
-      level < MAX_FIT
-    ) {
-      setState({ key, level: level + 1 });
-    }
-  }, [key, level, ref, size, state.key]);
-
-  useLayoutEffect(() => {
-    const element = ref.current;
-    if (!element || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() =>
-      setSize(`${element.clientWidth}x${element.clientHeight}`),
-    );
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [ref]);
-
-  return level;
-}
 
 export function EmptyScope({ host, what }: { host: string | undefined; what: "cards" | "agents" }) {
   const { data: machines } = useSuspenseQuery(machinesQuery());
@@ -130,8 +73,87 @@ export function EmptyScope({ host, what }: { host: string | undefined; what: "ca
   );
 }
 
-export function BoardView({ host, filter }: { host: string | undefined; filter: BoardFilter }) {
-  const frame = useRef<HTMLDivElement>(null);
+// A card that cannot be read must not take the board down with it.
+class DrawerBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return (
+      <div className="empty">
+        <div>
+          <b>This card could not be loaded</b>
+          It may have been removed, or the daemon is not answering.
+          <br />
+          <Link
+            to="/"
+            search={(prev) => ({ ...prev, card: undefined, owner: undefined })}
+            className="btn"
+          >
+            Close
+          </Link>
+        </div>
+      </div>
+    );
+  }
+}
+
+// The card a click opened, docked beside the board: the lanes shrink to make
+// room and stay in view. Expanding it opens the full card page.
+function CardDrawer({ cardId, owner }: { cardId: string; owner: string | undefined }) {
+  const navigate = useNavigate();
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable ||
+          target.closest("input, textarea, select, [role=dialog], [role=menu]"))
+      ) {
+        return;
+      }
+      void navigate({
+        to: "/",
+        search: (prev) => ({ ...prev, card: undefined, owner: undefined }),
+      });
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [navigate]);
+  return (
+    <aside className="drawer" aria-label="Card details" data-testid="card-drawer">
+      <DrawerBoundary key={`${owner ?? ""}/${cardId}`}>
+        <Suspense fallback={null}>
+          <CardPage cardId={cardId} owner={owner} variant="drawer" />
+        </Suspense>
+      </DrawerBoundary>
+    </aside>
+  );
+}
+
+export function BoardView({
+  host,
+  filter,
+  card,
+  owner,
+}: {
+  host: string | undefined;
+  filter: BoardFilter;
+  card?: string;
+  owner?: string;
+}) {
+  return (
+    <div className="board-split" data-docked={card ? "true" : "false"}>
+      <Board host={host} filter={filter} />
+      {card ? <CardDrawer cardId={card} owner={owner} /> : null}
+    </div>
+  );
+}
+
+function Board({ host, filter }: { host: string | undefined; filter: BoardFilter }) {
   const { data: board } = useSuspenseQuery(boardQuery());
   const { data: projects } = useSuspenseQuery(projectsQuery());
   // Agents only add each lane's orchestrator and its health: when they cannot
@@ -148,25 +170,9 @@ export function BoardView({ host, filter }: { host: string | undefined; filter: 
   const lanes = scopedProjects(prefs, projects.projects, board.rows, host);
   const focusMode = prefs.view === "focus";
   const tiles = tilesOf(board).filter((tile) => passesFilter(tile, filter) && onHost(tile, host));
-  const fit = useFitLevel(
-    frame,
-    [
-      prefs.density,
-      prefs.view,
-      filter,
-      host,
-      look.collapsed.join(","),
-      look.doneFolded,
-      lanes.map((project) => projectKey(project)).join(","),
-      tiles
-        .map((tile) => `${tile.key}:${tile.column}:${tile.row?.badge}:${tile.row?.title}`)
-        .join("|"),
-    ].join("#"),
-  );
-
   if (lanes.length === 0) {
     return (
-      <div className="board-view" ref={frame}>
+      <div className="board-view">
         <EmptyScope host={host} what="cards" />
       </div>
     );
@@ -190,7 +196,7 @@ export function BoardView({ host, filter }: { host: string | undefined; filter: 
     32 + (COLUMNS.length - 1) * GAP + full * FULL_WIDTH + (COLUMNS.length - full) * MINI_WIDTH;
 
   return (
-    <div className="board-view" ref={frame}>
+    <div className="board-view">
       {agentsRead.isError && !agentsRead.data ? (
         <SectionNote
           label="Agents"
@@ -201,7 +207,6 @@ export function BoardView({ host, filter }: { host: string | undefined; filter: 
       <div
         className="board"
         style={{ "--cols": widths, "--minw": `${minWidth}px` } as CSSProperties}
-        data-fit={fit}
         data-testid="board"
       >
         <div className="bhead">
