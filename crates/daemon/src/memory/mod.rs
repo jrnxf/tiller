@@ -99,17 +99,66 @@ pub struct MemoryUndo {
     pub base_blob: String,
 }
 
-/// Everything a memory write runs with.
-struct Writer {
+/// Everything a memory write runs with. The daemon's routes and `tiller mem
+/// approve` decide a proposal through the same `decide`, so an approval
+/// leaves the same rows and the same commit whichever way it is made.
+pub struct Writer {
     store: Store,
     repo: Repo,
     lock: Lock,
     list: ScrubList,
-    events: Vec<i64>,
-    replayed: bool,
+    pub events: Vec<i64>,
+    pub replayed: bool,
 }
 
 impl Writer {
+    /// Takes the memory repo's lock under `home`; it is held until the writer
+    /// drops.
+    pub fn open(store: Store, home: &std::path::Path) -> tiller_core::Result<Self> {
+        let repo = Repo::at(home);
+        let lock = repo.lock()?;
+        Ok(Self {
+            store,
+            repo,
+            lock,
+            list: scrub::terms(home),
+            events: Vec::new(),
+            replayed: true,
+        })
+    }
+
+    /// Keep or Discard on one proposal: the core records the decision and its
+    /// approval, and `mem.apply` commits a Keep at once. `shown` is the blob
+    /// the decider saw the proposal against; `None` decides it against the
+    /// document's current head. `after` names the proposals kept earlier on
+    /// the same document in this batch. Returns the landing and the document's
+    /// path.
+    pub fn decide(
+        &mut self,
+        ctx: &Ctx,
+        proposal: &str,
+        keep: bool,
+        shown: Option<&str>,
+        after: &[String],
+    ) -> tiller_core::Result<(MemoryLanded, String)> {
+        let change = self.store.memory_change(proposal)?;
+        let path = document_path(&change.project_id);
+        let file = self.repo.state(&path, &self.list)?;
+        let decided = self.store.mem_decide(
+            ctx,
+            proposal,
+            keep,
+            shown.unwrap_or(&file.head_blob),
+            &file,
+            after,
+        )?;
+        let pending = self.track(decided);
+        if let Some(approval) = &pending.approval_id {
+            self.apply(approval, &path)?;
+        }
+        Ok((self.landed(pending, &path)?, path))
+    }
+
     fn track<T>(&mut self, applied: Applied<T>) -> T {
         self.events.extend(applied.events);
         self.replayed &= applied.replayed;
@@ -196,16 +245,7 @@ async fn write(
             return Err(uninitialized());
         }
         let done = Store::open_current(&db).and_then(|store| {
-            let repo = Repo::at(&home);
-            let lock = repo.lock()?;
-            let mut writer = Writer {
-                store,
-                repo,
-                lock,
-                list: scrub::terms(&home),
-                events: Vec::new(),
-                replayed: true,
-            };
+            let mut writer = Writer::open(store, &home)?;
             let data = change(&mut writer, &key)?;
             Ok((data, writer.events, writer.replayed))
         });
@@ -392,9 +432,7 @@ pub(crate) async fn decide(
             let mut kept: Vec<(String, String)> = Vec::new();
             let mut out = Vec::new();
             for (at, (proposal, keep, shown)) in decisions.into_iter().enumerate() {
-                let change = w.store.memory_change(&proposal)?;
-                let path = document_path(&change.project_id);
-                let file = w.repo.state(&path, &w.list)?;
+                let path = document_path(&w.store.memory_change(&proposal)?.project_id);
                 let base = moved
                     .iter()
                     .find(|(doc, from, _)| *doc == path && *from == shown)
@@ -405,14 +443,7 @@ pub(crate) async fn decide(
                     .filter(|(doc, _)| *doc == path)
                     .map(|(_, id)| id.clone())
                     .collect();
-                let decided = w
-                    .store
-                    .mem_decide(&ctx, &proposal, keep, &base, &file, &after)?;
-                let pending = w.track(decided);
-                if let Some(approval) = &pending.approval_id {
-                    w.apply(approval, &path)?;
-                }
-                let landed = w.landed(pending, &path)?;
+                let (landed, _) = w.decide(&ctx, &proposal, keep, Some(&base), &after)?;
                 if keep {
                     kept.push((path.clone(), proposal));
                 }

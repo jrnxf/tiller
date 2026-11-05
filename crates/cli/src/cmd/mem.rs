@@ -6,7 +6,12 @@
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 use tiller_core::memory::document_path;
-use tiller_core::state::memory::{Note, Propose, ProposeOp};
+use tiller_core::state::learning::Gate;
+use tiller_core::state::memory::{
+    Note, PendingFilter, Proposal, Propose, ProposeOp, proposal_class, proposal_text,
+};
+use tiller_core::state::{get, resolve_id};
+use tiller_daemon::memory::Writer;
 use tiller_daemon::memory::apply::Repo;
 use tiller_daemon::memory::scrub;
 
@@ -19,7 +24,7 @@ pub enum MemCmd {
     Note(NoteArgs),
     /// Propose a change to one entry of a project or fleet memory document
     Propose(ProposeArgs),
-    /// Approve a memory proposal from the command line
+    /// Approve open memory proposals: by id, or every one a filter matches
     Approve(ApproveArgs),
 }
 
@@ -76,20 +81,36 @@ pub struct ProposeArgs {
     pub key: KeyArg,
 }
 
+/// Name proposals by id, or by filter for a bulk approval; never both, and
+/// never neither, so a bare `tiller mem approve` approves nothing.
 #[derive(Args, Debug)]
+#[command(group(clap::ArgGroup::new("pick").required(true).multiple(true)
+    .args(["proposals", "class", "boundary", "project"])))]
 pub struct ApproveArgs {
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    pub rest: Vec<String>,
+    /// Proposal ids (the full ULID or its last 7 characters)
+    #[arg(group = "pick", conflicts_with_all = ["class", "boundary", "project"])]
+    pub proposals: Vec<String>,
+    /// Every open proposal of this class (rule, requirement, preference, note, ...)
+    #[arg(long)]
+    pub class: Option<String>,
+    /// Every open proposal in this boundary
+    #[arg(long, value_parser = ["personal", "work"])]
+    pub boundary: Option<String>,
+    /// Every open proposal for this project id (`fleet` for the shared document)
+    #[arg(long)]
+    pub project: Option<String>,
+    /// List what would be approved and write nothing
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub key: KeyArg,
 }
 
 pub fn run(app: &App, cmd: MemCmd) -> Done {
     match cmd {
         MemCmd::Note(args) => note(app, args),
         MemCmd::Propose(args) => propose(app, args),
-        MemCmd::Approve(_) => Err(Failure::unavailable(
-            "tiller mem approve is not in this build; Keep a proposal in the board's memory view, which runs the holdout gate",
-        )
-        .hint("nothing was written")),
+        MemCmd::Approve(args) => approve(app, args),
     }
 }
 
@@ -166,4 +187,140 @@ fn propose(app: &App, args: ProposeArgs) -> Done {
         })
     })
     .with_key(&keyed))
+}
+
+/// Keep on each named or matched proposal, one by one, through the same
+/// `Writer::decide` the board's Keep runs: a held proposal is refused with
+/// the gate's reason and the rest still go. A proposal that is no longer
+/// `proposed` is skipped.
+fn approve(app: &App, args: ApproveArgs) -> Done {
+    app.require_owner("mem approve")?;
+    let filter = PendingFilter {
+        class: args.class,
+        boundary: args.boundary,
+        project: args.project,
+    };
+    let by_id = !args.proposals.is_empty();
+    let store = if args.dry_run {
+        app.read()?
+    } else {
+        app.write()?
+    };
+    let chosen: Vec<Proposal> = if by_id {
+        let mut rows = Vec::new();
+        for given in &args.proposals {
+            let id = resolve_id(store.conn(), "proposals", "proposal", given)?;
+            let row: Proposal = get(store.conn(), "proposal", &id)?;
+            if !rows.iter().any(|seen: &Proposal| seen.id == row.id) {
+                rows.push(row);
+            }
+        }
+        rows
+    } else {
+        store.mem_pending(&filter)?
+    };
+    let line = |p: &Proposal| {
+        json!({
+            "id": p.id,
+            "project_id": p.project_id,
+            "boundary": p.boundary,
+            "class": proposal_class(p),
+            "op": p.op,
+            "text": proposal_text(p),
+        })
+    };
+    let with = |p: &Proposal, result: &str, extra: Value| {
+        let mut item = line(p);
+        item["result"] = json!(result);
+        if let (Some(item), Some(extra)) = (item.as_object_mut(), extra.as_object()) {
+            item.extend(extra.clone());
+        }
+        item
+    };
+    if args.dry_run {
+        let results = chosen
+            .iter()
+            .map(|p| {
+                if p.state != "proposed" {
+                    return Ok(with(p, "skipped", json!({"reason": not_proposed(p)})));
+                }
+                let gate = store.learning_gate(&p.id)?;
+                Ok(if gate.ok {
+                    with(p, "would_approve", json!({}))
+                } else {
+                    with(p, "would_refuse", json!({"reason": gate_reason(&gate)}))
+                })
+            })
+            .collect::<Result<Vec<Value>, Failure>>()?;
+        let count = |what: &str| results.iter().filter(|r| r["result"] == what).count();
+        return Ok(Outcome::read(json!({
+            "dry_run": true,
+            "would_approve": count("would_approve"),
+            "would_refuse": count("would_refuse"),
+            "skipped": count("skipped"),
+            "results": results,
+        })));
+    }
+    let normalized = json!({"approve": chosen.iter().map(|p| &p.id).collect::<Vec<_>>()});
+    let keyed = app.key(&store, "mem.approve", &normalized, &args.key.key)?;
+    let mut writer = Writer::open(store, &app.home)?;
+    let mut results = Vec::new();
+    let mut kept: Vec<(String, String)> = Vec::new();
+    for (at, p) in chosen.iter().enumerate() {
+        if p.state != "proposed" {
+            results.push(with(p, "skipped", json!({"reason": not_proposed(p)})));
+            continue;
+        }
+        let ctx = app.ctx().with_key(format!("{}:{at}", keyed.key));
+        let after: Vec<String> = kept
+            .iter()
+            .filter(|(project, _)| *project == p.project_id)
+            .map(|(_, id)| id.clone())
+            .collect();
+        match writer.decide(&ctx, &p.id, true, None, &after) {
+            Ok((landed, _)) => {
+                kept.push((p.project_id.clone(), p.id.clone()));
+                results.push(with(
+                    p,
+                    "approved",
+                    json!({"proposal_id": landed.proposal_id, "approval_id": landed.approval_id}),
+                ));
+            }
+            Err(error @ tiller_core::Error::Refused { .. }) => {
+                results.push(with(p, "refused", json!({"reason": error.to_string()})));
+            }
+            Err(error) => results.push(with(p, "failed", json!({"reason": error.to_string()}))),
+        }
+    }
+    let count = |what: &str| results.iter().filter(|r| r["result"] == what).count();
+    let (approved, skipped) = (count("approved"), count("skipped"));
+    let (refused, failed) = (count("refused"), count("failed"));
+    let held = refused + failed;
+    let warning =
+        (held > 0).then(|| format!("{held} proposal(s) were not approved; see their reasons"));
+    let mut outcome = Outcome::read(json!({
+        "dry_run": false,
+        "approved": approved,
+        "skipped": skipped,
+        "refused": refused,
+        "failed": failed,
+        "results": results,
+    }))
+    .with_warning(warning)
+    .with_key(&keyed);
+    outcome.mutation = Some((std::mem::take(&mut writer.events), writer.replayed));
+    Ok(outcome)
+}
+
+fn not_proposed(proposal: &Proposal) -> String {
+    format!("it is {}, not proposed", proposal.state)
+}
+
+/// What the holdout gate says, with the command that clears it.
+fn gate_reason(gate: &Gate) -> String {
+    let reason = gate.reason.clone().unwrap_or_default();
+    match &gate.hint {
+        Some(hint) => format!("{reason}; {hint}"),
+        None => reason,
+    }
 }

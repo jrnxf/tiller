@@ -1058,13 +1058,9 @@ fn exit_codes_follow_the_table() {
     assert_eq!(world.store().last_seq().unwrap(), seq);
 
     // 7: the daemon is needed and absent, and nothing was written.
-    for args in [
-        vec!["mem", "approve", "01JC00000000000000000000P1"],
-        vec!["board", "--login"],
-    ] {
-        let out = world.run(&args);
-        assert_eq!((out.code, out.error_code()), (7, "unavailable"), "{args:?}");
-    }
+    let args = ["board", "--login"];
+    let out = world.run(&args);
+    assert_eq!((out.code, out.error_code()), (7, "unavailable"), "{args:?}");
     assert_eq!(
         world.store().last_seq().unwrap(),
         seq,
