@@ -385,7 +385,7 @@ impl Rig {
     }
 }
 
-fn refusal(error: &SpawnError) -> String {
+pub(crate) fn refusal(error: &SpawnError) -> String {
     error.to_string()
 }
 

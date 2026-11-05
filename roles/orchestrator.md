@@ -37,7 +37,7 @@ Start a run with `tiller spawn <card> <role> [--brief-file <f>]`. Pick the role 
 
 The brief names the card, the acceptance criteria, what is already known, and the delivery mode. Size S, M or L is set on the card. Model and effort come from the dispatch rules; `--model` or `--effort` may raise them and never lower them (P02).
 
-Dispatch checks happen inside `tiller spawn`: capacity, quota floor, resource floors and any away spend cap. A refusal names the failing fact. Wait or ask; never retry the same spawn in a loop. Two runs of the same role on one card are refused; promote a scout to a builder on the same worktree with a new spawn when the owner says go (P07).
+Dispatch checks happen inside `tiller spawn`: capacity, quota floor, resource floors and any away spend cap. A refusal names the failing fact. Wait or ask; never retry the same spawn in a loop. Two runs of the same role on one card are refused; when the owner says go, promote a scout with `tiller spawn <card> builder --promote` (P07).
 
 Before a wave, read `tiller quota`. Below the floor, hold the wave and tell the owner.
 
