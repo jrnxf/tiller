@@ -15,8 +15,13 @@
 //! attempt ends the old run `relaunched` beside the new one. A stop returns
 //! a worktree only through `run.clean`, which keeps one that holds anything.
 
+mod project;
 #[cfg(test)]
 mod tests;
+
+pub use project::{
+    AgentsStopped, ProjectDeleted, ProjectRetired, StoppedAgent, delete_project, retire_project,
+};
 
 use std::fs;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};

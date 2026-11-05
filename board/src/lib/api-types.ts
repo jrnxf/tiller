@@ -388,6 +388,45 @@ export interface ProjectDeletePreview {
   unlinked: Record<string, number>;
   refused: string | null;
   unblock: DeleteUnblock | null;
+  // The running agents the delete stops first, the orchestrator first.
+  agents: ProjectAgent[];
+  // Worktrees with work not landed; the delete leaves them on disk.
+  unlanded: ProjectUnlanded[];
+  // Pull requests still open; the delete leaves them on GitHub.
+  open_prs: ProjectOpenPr[];
+}
+
+// `GET /api/v1/projects/{id}/retire`: whether an archive applies now, and the
+// running agents it can stop first.
+export interface ProjectRetirePreview {
+  project: string;
+  refused: string | null;
+  agents: ProjectAgent[];
+}
+
+// A running agent of a project: a live session, or an active run with none.
+export interface ProjectAgent {
+  role: string;
+  session: string | null;
+  // The worker's card display id; null for an orchestrator.
+  card: string | null;
+  run: string | null;
+  // Only this host can stop it.
+  local: boolean;
+}
+
+export interface ProjectUnlanded {
+  path: string;
+  branch: string | null;
+  card: string | null;
+  unlanded_commits: number | null;
+  dirty: boolean | null;
+}
+
+interface ProjectOpenPr {
+  card: string;
+  number: number;
+  url: string;
 }
 
 // The step that clears a refused delete, and the command that starts it when

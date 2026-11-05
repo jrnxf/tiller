@@ -130,10 +130,11 @@ function writeProject(queryClient: QueryClient, project: Project) {
   );
 }
 
-// A deleted project leaves this host's list at once; a peer's row of the same
-// id is another project and stays. Its cards, runs, sessions and items went
-// with it, so every read that may still show one is fetched again.
-export function onProjectDeleted(queryClient: QueryClient, projectId: string) {
+// A deleted or archived (retired) project leaves this host's list at once; a
+// peer's row of the same id is another project and stays. Its cards, runs,
+// sessions and items went or were stopped with it, so every read that may
+// still show one is fetched again.
+export function onProjectGone(queryClient: QueryClient, projectId: string) {
   queryClient.setQueryData<ProjectsResponse | undefined>(queryKeyFor(projectsPath), (old) =>
     old
       ? {
@@ -162,8 +163,9 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
       if (state) writeQuota(queryClient, state as QuotaWindow);
       break;
     case "project":
-      if (event.kind === "project.deleted") onProjectDeleted(queryClient, event.entity_id);
-      else if (state) writeProject(queryClient, state as Project);
+      if (event.kind === "project.deleted" || event.kind === "project.retired") {
+        onProjectGone(queryClient, event.entity_id);
+      } else if (state) writeProject(queryClient, state as Project);
       break;
     case "review_pass":
     case "obligation":

@@ -10,7 +10,9 @@ import { sendMutation } from "../attention/api";
 import { InlineReceipt } from "../attention/receipt";
 import { useAction } from "../attention/use-action";
 import { lisbonDay, lisbonShortDay } from "../health/lisbon";
+import { ArchiveProject } from "./project-archive";
 import { DeleteProject } from "./project-delete";
+import { FLEET_PROJECT } from "./project-dialog";
 import "./project-stage.css";
 
 type Stage = Project["stage"];
@@ -218,8 +220,8 @@ function ConfirmStage({
   );
 }
 
-// What opens under a project row: its stage facts, the stage switch and the
-// delete.
+// What opens under a project row: its stage facts, the stage switch, and the
+// archive and delete on the right, the delete last.
 export function ProjectDetail({ project, id }: { project: Project; id: string }) {
   const [confirming, setConfirming] = useState(false);
   const [receipt, setReceipt] = useState<{ key: string; text: string } | null>(null);
@@ -257,7 +259,12 @@ export function ProjectDetail({ project, id }: { project: Project; id: string })
       {confirming ? (
         <ConfirmStage project={project} target={target} onClose={close} onRecorded={onRecorded} />
       ) : null}
-      <DeleteProject project={project} owner={owner} />
+      {project.id === FLEET_PROJECT ? null : (
+        <div className="pdetail-actions">
+          <ArchiveProject project={project} owner={owner} />
+          <DeleteProject project={project} owner={owner} />
+        </div>
+      )}
     </div>
   );
 }

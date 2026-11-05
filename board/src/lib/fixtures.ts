@@ -15,7 +15,9 @@ import type {
   Machine,
   MachinesResponse,
   Project,
+  ProjectAgent,
   ProjectDeletePreview,
+  ProjectRetirePreview,
   ProjectsResponse,
   QuotaDot,
   QuotaResponse,
@@ -1186,8 +1188,33 @@ function contributionsFor(
   };
 }
 
-// What deleting a fixture project would remove, counted from its board rows.
-// A project with a card in Working has a live run, so the delete is refused.
+// The running agents of a fixture project, as a delete or archive would stop
+// them: the orchestrator first, then each worker in board order.
+function liveAgentsFor(
+  scenario: Scenario,
+  board: BoardResponse,
+  projectId: string,
+  now: number,
+): ProjectAgent[] {
+  const orchestrator = agentsFor(
+    board,
+    projectsFor(scenario, now),
+    now,
+    scenario,
+  ).orchestrators.find((agent) => agent.project_id === projectId && !isPeerRow(agent));
+  if (!orchestrator) return [];
+  const display = new Map(board.rows.map((row) => [row.id, row.display_id]));
+  return [orchestrator, ...orchestrator.workers].map((agent) => ({
+    role: agent.role === "build" ? "builder" : agent.role,
+    session: agent.session_id,
+    card: agent.card_id ? (display.get(agent.card_id) ?? null) : null,
+    run: agent.card_id ? (agent.run_id ?? null) : null,
+    local: true,
+  }));
+}
+
+// What deleting a fixture project would remove, counted from its board rows,
+// and the agents it stops first: a working card's builder among them.
 function deletePreviewFor(
   scenario: Scenario,
   board: BoardResponse,
@@ -1200,7 +1227,7 @@ function deletePreviewFor(
   if (!known) return undefined;
   const rows = board.rows.filter((row) => row.project_id === projectId && !row.host);
   const started = rows.filter((row) => row.column !== "queued");
-  const live = rows.find((row) => row.column === "working");
+  const working = rows.filter((row) => row.column === "working");
   return {
     project: projectId,
     removed: {
@@ -1215,13 +1242,45 @@ function deletePreviewFor(
       events: rows.length * 9 + 6,
     },
     unlinked: projectId === "gamma" ? { "cards.fixes_card_id": 1 } : {},
-    refused: live ? `builder run on ${live.display_id} is live; end it first` : null,
-    unblock: live
-      ? {
-          step: "cancel its card",
-          command: `tiller card cancel ${live.display_id} --reason "deleting project ${projectId}"`,
-        }
-      : null,
+    refused: null,
+    unblock: null,
+    agents: liveAgentsFor(scenario, board, projectId, now),
+    unlanded: working.map((row, index) => ({
+      path: `/home/user/worktrees/${row.display_id}`,
+      branch: `tiller/${row.display_id}`,
+      card: row.display_id,
+      unlanded_commits: index + 2,
+      dirty: index === 0,
+    })),
+    open_prs: rows
+      .filter((row) => row.pr_number && row.column !== "done")
+      .map((row) => ({
+        card: row.display_id,
+        number: row.pr_number ?? 0,
+        url: `https://github.com/example/${projectId}/pull/${row.pr_number}`,
+      })),
+  };
+}
+
+// Whether archiving a fixture project applies now: refused while a card of it
+// is open, as `project.retire` is.
+function retirePreviewFor(
+  scenario: Scenario,
+  board: BoardResponse,
+  projectId: string,
+  now: number,
+): ProjectRetirePreview | undefined {
+  const known = projectsFor(scenario, now).projects.some(
+    (project) => project.id === projectId && !project.host,
+  );
+  if (!known) return undefined;
+  const open = board.rows.find(
+    (row) => row.project_id === projectId && !row.host && row.column !== "done",
+  );
+  return {
+    project: projectId,
+    refused: open ? `card ${open.display_id} is open` : null,
+    agents: liveAgentsFor(scenario, board, projectId, now),
   };
 }
 
@@ -1251,6 +1310,8 @@ export function fixtureResource(
   }
   const deletion = /^\/api\/v1\/projects\/([^/]+)\/delete$/.exec(url.pathname);
   if (deletion?.[1]) return deletePreviewFor(served, board, deletion[1], now);
+  const retire = /^\/api\/v1\/projects\/([^/]+)\/retire$/.exec(url.pathname);
+  if (retire?.[1]) return retirePreviewFor(served, board, retire[1], now);
   const run = /^\/api\/v1\/runs\/([^/]+)$/.exec(url.pathname);
   if (run?.[1]) return runDetailFor(run[1], now);
   if (url.pathname.startsWith("/api/v1/memory")) return memoryResource(url);

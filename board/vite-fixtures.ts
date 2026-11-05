@@ -102,7 +102,7 @@ function apiMiddleware(): Connect.NextHandleFunction {
     if (req.method === "POST" || req.method === "PATCH") {
       readBody(req)
         .then((body) => {
-          const { reply, followUps } = fixtureMutation(req.method ?? "POST", url, body);
+          const { reply, followUps } = fixtureMutation(req.method ?? "POST", url, body, scenario);
           res.statusCode = reply.status;
           sendJson(res, reply.body);
           for (const { delayMs, event } of followUps) setTimeout(() => broadcast(event), delayMs);

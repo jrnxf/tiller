@@ -926,55 +926,62 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
     );
 }
 
-/// A delete refused while something of the project is live removes nothing,
-/// says so, and names the owner's next step; taking each step in turn clears
-/// the way. The order is the owner's at the end of a trial: a builder still on
-/// its card, the orchestrator, then the builder's agent.
+/// A delete stops the project's running agents first. A stop that fails
+/// refuses with the agent named and removes nothing; once the agents have
+/// ended, the delete cancels the card a run still works on and deletes.
 #[test]
-fn project_delete_names_the_step_that_clears_it() {
+fn project_delete_stops_its_agents_or_names_the_one_that_did_not_stop() {
+    use std::os::unix::fs::PermissionsExt;
     let world = World::initialized();
+    // A herdr that fails every call: no stop can be proven.
+    let herdr = world.dir.path().join("herdr");
+    std::fs::write(&herdr, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&herdr, std::fs::Permissions::from_mode(0o755)).unwrap();
+    world.set_env("TILLER_HERDR", herdr.to_str().unwrap());
     let orchestrator = world.orchestrator();
     let card = world.must(&[
         "card", "create", "alpha", "--kind", "ship", "--title", "last one",
     ]);
     let card = id(&card, "/data/display_id");
     let (_, builder) = world.builder_run(&card);
+    // A session with no pane has no agent to stop; this one has a pane.
+    world
+        .store()
+        .conn()
+        .execute(
+            "UPDATE sessions SET pane_id = 'p-1' WHERE id = ?1",
+            [&orchestrator],
+        )
+        .unwrap();
     let delete = ["project", "delete", "alpha", "--yes"];
 
-    let refused = fails(&world, 5, "project_delete_live_run", &delete);
-    let hint = |out: &common::Out| out.json["error"]["hint"].as_str().unwrap().to_owned();
-    assert_eq!(
-        hint(&refused),
-        format!("tiller card cancel {card} --reason \"deleting project alpha\"")
+    let refused = world.run(&delete);
+    assert_eq!(refused.code, 5, "{}", refused.json);
+    let message = refused.json["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains(&format!(
+            "could not stop the orchestrator (session {orchestrator})"
+        )),
+        "{message}"
     );
-    world.must(&[
-        "card",
-        "cancel",
-        &card,
-        "--reason",
-        "deleting project alpha",
-    ]);
+    assert!(message.contains("Project alpha was kept"), "{message}");
+    assert_eq!(world.run(&["card", "show", &card]).code, 0);
 
-    let refused = fails(&world, 5, "project_delete_live_session", &delete);
-    assert_eq!(hint(&refused), format!("tiller agent stop {orchestrator}"));
-    // `tiller agent stop` types `/exit` into the pane: Claude Code fires
-    // `SessionEnd`.
+    // Claude Code fires `SessionEnd` when each agent exits on its own.
     world.hook(
         None,
         "SessionEnd",
         r#"{"session_id":"claude-orchestrator","reason":"prompt_input_exit"}"#,
     );
-
-    let refused = world.run(&delete);
-    assert_eq!(refused.code, 5, "{}", refused.json);
-    assert_eq!(hint(&refused), format!("tiller agent stop {builder}"));
     world.hook(
         Some(&builder),
         "SessionEnd",
         r#"{"reason":"prompt_input_exit"}"#,
     );
 
-    step(&world, "project_delete_after_exit", &delete);
+    let deleted = step(&world, "project_delete_after_exit", &delete);
+    assert_eq!(deleted.data()["cancelled_cards"], serde_json::json!([card]));
+    assert_eq!(world.run(&["card", "show", &card]).code, 3);
 }
 
 /// Each exit code of `protocol.md` section 6.2 is reached by a real command.

@@ -3,7 +3,7 @@
 //! call these, so a snapshot entry is exactly what the matching GET returns
 //! (`protocol.md` section 7.6).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
@@ -174,9 +174,16 @@ pub fn board(
     host: Option<&str>,
 ) -> Result<BoardResponse> {
     let host_id = host.map(|host| host_id(store, host)).transpose()?;
+    // A retired project has left the board, its closed cards with it.
+    let retired: HashSet<String> = store
+        .projects()?
+        .into_iter()
+        .filter(|project| project.retired_at.is_some())
+        .map(|project| project.id)
+        .collect();
     let mut rows = Vec::new();
     for column in store.card_columns(project)? {
-        if !filter.keeps(column.column.as_str()) {
+        if !filter.keeps(column.column.as_str()) || retired.contains(&column.project_id) {
             continue;
         }
         if let Some(host_id) = &host_id {

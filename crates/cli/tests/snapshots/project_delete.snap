@@ -4,6 +4,7 @@ source: crates/cli/tests/common/mod.rs
 exit: 0
 {
   "data": {
+    "cancelled_cards": [],
     "project": "gamma",
     "removed": {
       "cards": 1,
@@ -11,7 +12,9 @@ exit: 0
       "idempotency_keys": 1,
       "projects": 1
     },
+    "stopped": [],
     "unlinked": {},
+    "warnings": [],
     "withdrawn_attention": 0
   },
   "events": [

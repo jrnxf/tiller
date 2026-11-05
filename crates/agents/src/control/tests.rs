@@ -1311,3 +1311,94 @@ fn the_live_orchestrator_stops_an_ended_run_it_inherited() {
     let stopped = stop_it(&mut rig, &ctx, &quick(), &spawned.session.id).unwrap();
     assert!(session(&rig, &stopped.session.id).ended_at.is_some());
 }
+
+fn delete_it(rig: &mut Rig, waits: &Waits) -> Result<ProjectDeleted> {
+    delete_project(&mut rig.fleet.store, &owner(), &rig.herdr, waits, "alpha").map(|a| a.value)
+}
+
+#[test]
+fn delete_stops_the_projects_agents_then_deletes_it() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    let card: String = rig
+        .fleet
+        .store
+        .conn()
+        .query_row(
+            "SELECT c.display_id FROM cards c JOIN runs r ON r.card_id = c.id WHERE r.id = ?1",
+            [&spawned.run.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    let deleted = delete_it(&mut rig, &quick()).unwrap();
+    assert!(typed(&rig, &spawned.pane_id, "/exit"));
+    let builder = deleted
+        .agents
+        .stopped
+        .iter()
+        .find(|stopped| stopped.agent.session.as_deref() == Some(spawned.session.id.as_str()))
+        .unwrap();
+    assert!(builder.stop_proof.is_some(), "{deleted:?}");
+    assert!(
+        deleted
+            .agents
+            .stopped
+            .iter()
+            .any(|stopped| stopped.agent.session.as_deref()
+                == Some(rig.fleet.orchestrator_session.as_str())),
+        "{deleted:?}"
+    );
+    assert_eq!(deleted.agents.cancelled_cards, vec![card]);
+    assert!(deleted.deletion.removed.contains_key("sessions"));
+    assert!(matches!(
+        get::<Project>(rig.fleet.store.conn(), "project", "alpha"),
+        Err(tiller_core::Error::NotFound { .. })
+    ));
+}
+
+#[test]
+fn delete_refuses_naming_the_agent_that_did_not_stop() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    // `/exit` never leaves the composer, so the stop is never proven.
+    rig.herdr.enter_as_newline(&spawned.pane_id, 100);
+
+    let error = delete_it(&mut rig, &quick()).unwrap_err().to_string();
+    assert!(error.contains(&spawned.session.id), "{error}");
+    assert!(error.contains("builder"), "{error}");
+    assert!(error.contains("was kept"), "{error}");
+    get::<Project>(rig.fleet.store.conn(), "project", "alpha").unwrap();
+    assert!(session(&rig, &spawned.session.id).ended_at.is_none());
+    assert!(rig.run(&spawned.run.id).ended_at.is_none());
+}
+
+#[test]
+fn retire_stops_the_orchestrator_only_when_asked() {
+    let mut rig = Rig::new();
+    let orchestrator = rig.fleet.orchestrator_session.clone();
+    let kept = retire_project(
+        &mut rig.fleet.store,
+        &owner(),
+        &rig.herdr,
+        &quick(),
+        "alpha",
+        false,
+    )
+    .unwrap();
+    assert!(kept.value.agents.stopped.is_empty());
+    assert!(session(&rig, &orchestrator).ended_at.is_none());
+
+    let retired = retire_project(
+        &mut rig.fleet.store,
+        &owner(),
+        &rig.herdr,
+        &quick(),
+        "alpha",
+        true,
+    )
+    .unwrap();
+    assert_eq!(retired.value.agents.stopped.len(), 1, "{retired:?}");
+    assert!(session(&rig, &orchestrator).ended_at.is_some());
+    assert!(retired.value.project.retired_at.is_some());
+}

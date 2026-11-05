@@ -8,6 +8,7 @@ import type {
   BoardResponse,
   InterventionKind,
   ProjectDeletePreview,
+  ProjectRetirePreview,
   ProjectsResponse,
 } from "./api-types.ts";
 import { memoryMutation } from "./fixtures-memory.ts";
@@ -130,20 +131,31 @@ function currentProject(id: string): Project | undefined {
   return switched.get(id) ?? known.find((project) => project.id === id);
 }
 
-// The projects deleted since the server started: the stand-in server leaves
-// them out of every read it answers.
+// The projects deleted or archived since the server started: the stand-in
+// server leaves them out of every read it answers. `stopped` holds the
+// projects whose agents a delete or archive stopped.
 const deleted = new Set<string>();
+const retired = new Set<string>();
+const stopped = new Set<string>();
 
 // A read the stand-in server answers, without the deleted projects' rows; a
-// deleted project's own delete preview is gone (a 404).
+// deleted or archived project's own previews are gone (a 404).
 export function withoutDeleted(path: string, body: unknown, scenario: Scenario): unknown {
-  if (deleted.size === 0 || body === undefined) return body;
+  if (deleted.size + retired.size === 0 || body === undefined) return body;
   const pathname = new URL(path, "http://localhost").pathname;
-  const preview = /^\/api\/v1\/projects\/([^/]+)\/delete$/.exec(pathname);
-  if (preview?.[1] && deleted.has(preview[1])) return undefined;
+  const preview = /^\/api\/v1\/projects\/([^/]+)\/(delete|retire)$/.exec(pathname);
+  if (preview?.[1] && gone(preview[1])) return undefined;
   if (pathname === "/api/v1/projects") {
     const { projects } = body as ProjectsResponse;
-    return { projects: projects.filter((project) => project.host || !deleted.has(project.id)) };
+    return { projects: projects.filter((project) => project.host || !gone(project.id)) };
+  }
+  if (pathname === "/api/v1/agents") {
+    const { orchestrators } = body as AgentsResponse;
+    return {
+      orchestrators: orchestrators.filter(
+        (agent) => agent.host || !agent.project_id || !stopped.has(agent.project_id),
+      ),
+    };
   }
   if (pathname === "/api/v1/board") {
     const board = body as BoardResponse;
@@ -217,6 +229,26 @@ function restaged(project: Project, stage: Project["stage"]): Project {
 // keeps its key and is answered.
 const unsure = new Set<string>();
 
+function gone(id: string): boolean {
+  return deleted.has(id) || retired.has(id);
+}
+
+// The event that takes a deleted or archived project off every open board.
+function projectGone(kind: string, txn: string, id: string): FollowUp {
+  return {
+    delayMs: 100,
+    event: {
+      kind,
+      txn,
+      entity: "project",
+      entity_id: id,
+      rev_after: null,
+      card_id: null,
+      entity_state: null,
+    },
+  };
+}
+
 function refusal(status: number, code: string, message: string): MutationResult {
   return { reply: refused(status, code, message), followUps: [] };
 }
@@ -228,7 +260,10 @@ function forwarded(
 ): MutationResult | null {
   const host = body.host;
   if (typeof host !== "string") return null;
-  if (/\/(stage|asks|focus|label|delete|orchestrator)$/.test(path) || /\/memory\//.test(path)) {
+  if (
+    /\/(stage|asks|focus|label|delete|retire|orchestrator)$/.test(path) ||
+    /\/memory\//.test(path)
+  ) {
     return refusal(502, "peer_refused", `${method} ${path} is not forwarded to ${host}`);
   }
   if (host === "host-e") {
@@ -246,7 +281,12 @@ function forwarded(
   return null;
 }
 
-function handle(method: string, path: string, body: Record<string, unknown>): MutationResult {
+function handle(
+  method: string,
+  path: string,
+  body: Record<string, unknown>,
+  scenario: Scenario,
+): MutationResult {
   const peer = forwarded(method, path, body);
   if (peer) return peer;
   const answer = /^\/api\/v1\/attention\/([^/]+)\/answer$/.exec(path);
@@ -361,33 +401,53 @@ function handle(method: string, path: string, body: Record<string, unknown>): Mu
   const deletion = /^\/api\/v1\/projects\/([^/]+)\/delete$/.exec(path);
   if (method === "POST" && deletion?.[1]) {
     const id = deletion[1];
-    const preview = deleted.has(id)
+    const preview = gone(id)
       ? undefined
-      : (fixtureResource(path, "default") as ProjectDeletePreview | undefined);
+      : (fixtureResource(path, scenario) as ProjectDeletePreview | undefined);
     if (!preview) return refusal(404, "not_found", `no project ${id}`);
     if (body.confirm !== id) return refusal(400, "usage", `type ${id} to delete the project`);
     if (preview.refused) return refusal(422, "refused", `project ${id}: ${preview.refused}`);
     deleted.add(id);
+    if (preview.agents.length > 0) stopped.add(id);
     return {
       reply: recorded(
-        { project: id, removed: preview.removed, unlinked: preview.unlinked },
+        {
+          project: id,
+          removed: preview.removed,
+          unlinked: preview.unlinked,
+          stopped: preview.agents.map((agent) => ({ ...agent, stop_proof: "exited" })),
+          cancelled_cards: preview.agents.flatMap((agent) => (agent.card ? [agent.card] : [])),
+          warnings: [],
+        },
         null,
         null,
       ),
-      followUps: [
+      followUps: [projectGone("project.deleted", "project.delete", id)],
+    };
+  }
+  const retire = /^\/api\/v1\/projects\/([^/]+)\/retire$/.exec(path);
+  if (method === "POST" && retire?.[1]) {
+    const id = retire[1];
+    const preview = gone(id)
+      ? undefined
+      : (fixtureResource(path, scenario) as ProjectRetirePreview | undefined);
+    if (!preview) return refusal(404, "not_found", `no project ${id}`);
+    if (preview.refused) return refusal(422, "refused", `project ${id}: ${preview.refused}`);
+    retired.add(id);
+    const stop = body.stop_agents === true;
+    if (stop && preview.agents.length > 0) stopped.add(id);
+    return {
+      reply: recorded(
         {
-          delayMs: 100,
-          event: {
-            kind: "project.deleted",
-            txn: "project.delete",
-            entity: "project",
-            entity_id: id,
-            rev_after: null,
-            card_id: null,
-            entity_state: null,
-          },
+          project: currentProject(id) ?? { id },
+          stopped: stop ? preview.agents.map((agent) => ({ ...agent, stop_proof: "exited" })) : [],
+          cancelled_cards: [],
+          warnings: [],
         },
-      ],
+        null,
+        null,
+      ),
+      followUps: [projectGone("project.retired", "project.retire", id)],
     };
   }
   const relabel = /^\/api\/v1\/interventions\/([^/]+)\/label$/.exec(path);
@@ -475,10 +535,12 @@ function handle(method: string, path: string, body: Record<string, unknown>): Mu
 }
 
 // A known idempotency key returns the stored reply and does nothing again.
+// `scenario` is the page's, for the project previews a delete or archive reads.
 export function fixtureMutation(
   method: string,
   path: string,
   body: Record<string, unknown>,
+  scenario: Scenario = "default",
 ): MutationResult {
   const key = typeof body.idempotency_key === "string" ? body.idempotency_key : null;
   const known = key ? replies.get(key) : undefined;
@@ -489,7 +551,7 @@ export function fixtureMutation(
         : known.reply;
     return { reply: replayed, followUps: [] };
   }
-  const result = handle(method, path, body);
+  const result = handle(method, path, body, scenario);
   // A 504 was never confirmed, so the retry with the same key must run again.
   if (key && result.reply.status !== 504) replies.set(key, result);
   return result;

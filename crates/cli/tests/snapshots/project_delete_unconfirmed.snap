@@ -6,13 +6,16 @@ exit: 5
   "error": {
     "code": "refused",
     "current": {
+      "open_prs": [],
       "project": "gamma",
+      "unlanded": [],
       "would_remove": {
         "cards": 1,
         "events": 2,
         "idempotency_keys": 1,
         "projects": 1
       },
+      "would_stop": [],
       "would_unlink": {},
       "would_withdraw_attention": 0
     },

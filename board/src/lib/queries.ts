@@ -11,6 +11,7 @@ import type {
   MemoryResponse,
   MemoryRevision,
   ProjectDeletePreview,
+  ProjectRetirePreview,
   ProjectsResponse,
   QuotaResponse,
   RunDetail,
@@ -130,6 +131,14 @@ export const contributionsQuery = (project?: string) =>
 export const projectDeleteQuery = (projectId: string) =>
   queryOptions({
     ...readQuery<ProjectDeletePreview>(`/api/v1/projects/${projectId}/delete`),
+    staleTime: 0,
+    gcTime: 0,
+  });
+
+// What archiving a project would do: always read fresh, like the delete's.
+export const projectRetireQuery = (projectId: string) =>
+  queryOptions({
+    ...readQuery<ProjectRetirePreview>(`/api/v1/projects/${projectId}/retire`),
     staleTime: 0,
     gcTime: 0,
   });

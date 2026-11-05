@@ -139,6 +139,8 @@ pub struct Deletion {
 }
 
 /// [`Deletion`] before it happens, with the reason it would be refused.
+/// Running agents do not refuse it: the owner's delete stops them first, so
+/// they are listed, with the work they leave behind.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct DeletionPreview {
     #[serde(flatten)]
@@ -147,6 +149,70 @@ pub struct DeletionPreview {
     /// What clears `refused`, when the owner can clear it from here.
     #[serde(default)]
     pub unblock: Option<Unblock>,
+    /// The agents the delete stops before it removes anything.
+    #[serde(default)]
+    pub agents: Vec<LiveAgent>,
+    /// Worktrees holding commits not yet landed, uncommitted changes, or
+    /// state not yet read. They stay on disk; the delete forgets them.
+    #[serde(default)]
+    pub unlanded: Vec<UnlandedWork>,
+    /// Pull requests still open on GitHub. They stay open; the delete
+    /// forgets them.
+    #[serde(default)]
+    pub open_prs: Vec<OpenPr>,
+}
+
+/// A running agent of a project: a live session, or an active run whose
+/// session has already ended.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LiveAgent {
+    pub role: String,
+    /// The live session; `None` for an active run with no live session.
+    pub session: Option<String>,
+    /// The display id of the worker's card; `None` for an orchestrator.
+    pub card: Option<String>,
+    pub run: Option<String>,
+    /// Whether it runs on this host, the only one that can stop it.
+    pub local: bool,
+}
+
+impl LiveAgent {
+    /// How a refusal or a prompt names it: `builder on alpha-42 (session
+    /// ...)`, or `orchestrator (session ...)`.
+    pub fn describe(&self) -> String {
+        let mut name = self.role.clone();
+        if let Some(card) = &self.card {
+            name.push_str(&format!(" on {card}"));
+        }
+        match (&self.session, &self.run) {
+            (Some(session), _) => name.push_str(&format!(" (session {session})")),
+            (None, Some(run)) => name.push_str(&format!(" (run {run}, no live session)")),
+            (None, None) => {}
+        }
+        name
+    }
+}
+
+/// A worktree of the project that holds work not yet landed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UnlandedWork {
+    pub path: String,
+    pub branch: Option<String>,
+    /// The display id of the card whose run made it, when known.
+    pub card: Option<String>,
+    /// Commits not on the base branch; `None` when not yet read.
+    pub unlanded_commits: Option<i64>,
+    /// Uncommitted changes; `None` when not yet read.
+    pub dirty: Option<bool>,
+}
+
+/// A pull request of the project still open on GitHub.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OpenPr {
+    /// The display id of its card.
+    pub card: String,
+    pub number: i64,
+    pub url: String,
 }
 
 /// The owner's way past a refused delete: the step, and the command that
@@ -180,25 +246,51 @@ impl Store {
                         ..Deletion::default()
                     },
                     refused: Some(fact),
-                    unblock: None,
+                    ..DeletionPreview::default()
                 });
             }
             Err(error) => return Err(error),
         }
         let fks = foreign_keys(&tx)?;
         mark(&tx, &fks, &project.id)?;
-        let (refused, unblock) = match blocker(&tx, &fks, &project.id)? {
+        let agents = live_agents(&tx, &project.id)?;
+        let blocked = match agents.iter().find(|LiveAgent { local, .. }| !local) {
+            // Only the host an agent runs on can stop it.
+            Some(remote) => Some(Blocker {
+                fact: format!("{} runs on another host", remote.describe()),
+                unblock: Some(Unblock {
+                    step: "stop it on its host".into(),
+                    command: remote
+                        .session
+                        .as_ref()
+                        .map(|session| format!("tiller agent stop {session}")),
+                }),
+            }),
+            None => blocker(&tx, &fks, &project.id, Live::Stopped)?,
+        };
+        let (refused, unblock) = match blocked {
             Some(Blocker { fact, unblock }) => (Some(fact), unblock),
             None => (None, None),
         };
         let mut deletion = counts(&tx, &fks, &project.id)?;
         deletion.withdrawn_attention = about_project(&tx, &project.id)?.len() as i64;
+        let unlanded = unlanded_work(&tx, &project.id)?;
+        let open_prs = open_prs(&tx, &project.id)?;
         // Dropping the transaction rolls the scratch table back.
         Ok(DeletionPreview {
             deletion,
             refused,
             unblock,
+            agents,
+            unlanded,
+            open_prs,
         })
+    }
+
+    /// The project's running agents: its live sessions, the orchestrator
+    /// first, then its active runs with no live session.
+    pub fn project_live_agents(&self, project_id: &str) -> Result<Vec<LiveAgent>> {
+        live_agents(self.conn(), project_id)
     }
 
     /// `project.delete`: removes the project and every row that belongs to
@@ -219,7 +311,8 @@ impl Store {
             check_deletable(tx.conn(), &project)?;
             let fks = foreign_keys(tx.conn())?;
             mark(tx.conn(), &fks, &project.id)?;
-            if let Some(Blocker { fact, .. }) = blocker(tx.conn(), &fks, &project.id)? {
+            if let Some(Blocker { fact, .. }) = blocker(tx.conn(), &fks, &project.id, Live::Refuse)?
+            {
                 return Err(Error::refused("project", &project.id, fact));
             }
             let mut deletion = counts(tx.conn(), &fks, &project.id)?;
@@ -415,20 +508,37 @@ fn spread(conn: &Connection, fks: &[ForeignKey]) -> Result<()> {
     }
 }
 
+/// Whether [`blocker`] counts the project's running agents.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Live {
+    /// They refuse: the delete itself never stops an agent.
+    Refuse,
+    /// The owner's delete stops them before it starts, so they do not.
+    Stopped,
+}
+
 /// Why the marked rows may not go: something is live, or the walk reached
 /// a row of another project.
-fn blocker(conn: &Connection, fks: &[ForeignKey], project_id: &str) -> Result<Option<Blocker>> {
+fn blocker(
+    conn: &Connection,
+    fks: &[ForeignKey],
+    project_id: &str,
+    agents: Live,
+) -> Result<Option<Blocker>> {
     let live = |sql: &str| -> Result<Option<(String, String)>> {
         Ok(conn
             .query_row(sql, [], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()?)
     };
     // The owner cannot end a run directly; cancelling its card does.
-    if let Some((role, card)) = live(&format!(
-        "SELECT r.role, c.display_id FROM runs r JOIN cards c ON c.id = r.card_id
-         WHERE r.ended_at IS NULL AND r.id IN ({}) ORDER BY r.id LIMIT 1",
-        doomed("runs", "id")
-    ))? {
+    if let (Live::Refuse, Some((role, card))) = (
+        agents,
+        live(&format!(
+            "SELECT r.role, c.display_id FROM runs r JOIN cards c ON c.id = r.card_id
+             WHERE r.ended_at IS NULL AND r.id IN ({}) ORDER BY r.id LIMIT 1",
+            doomed("runs", "id")
+        ))?,
+    ) {
         return Ok(Some(Blocker {
             fact: format!("{role} run on {card} is live; end it first"),
             unblock: Some(Unblock {
@@ -441,10 +551,13 @@ fn blocker(conn: &Connection, fks: &[ForeignKey], project_id: &str) -> Result<Op
     }
     // A session ends when its agent exits: `tiller agent stop` types the
     // `/exit`, and the `SessionEnd` hook records it.
-    if let Some((role, session)) = live(&format!(
-        "SELECT role, id FROM sessions WHERE ended_at IS NULL AND id IN ({}) ORDER BY id LIMIT 1",
-        doomed("sessions", "id")
-    ))? {
+    if let (Live::Refuse, Some((role, session))) = (
+        agents,
+        live(&format!(
+            "SELECT role, id FROM sessions WHERE ended_at IS NULL AND id IN ({}) ORDER BY id LIMIT 1",
+            doomed("sessions", "id")
+        ))?,
+    ) {
         return Ok(Some(Blocker {
             fact: format!("{role} session {session} is live; end it first"),
             unblock: Some(Unblock {
@@ -507,6 +620,78 @@ fn blocker(conn: &Connection, fks: &[ForeignKey], project_id: &str) -> Result<Op
         }
     }
     Ok(None)
+}
+
+fn live_agents(conn: &Connection, project_id: &str) -> Result<Vec<LiveAgent>> {
+    let local = local_host_id(conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT role, session, card, run, host FROM (
+           SELECT s.role, s.id AS session, c.display_id AS card, s.run_id AS run,
+                  s.host_id AS host
+           FROM sessions s
+           LEFT JOIN runs r ON r.id = s.run_id
+           LEFT JOIN cards c ON c.id = r.card_id
+           WHERE s.ended_at IS NULL AND s.project_id = ?1
+           UNION ALL
+           SELECT r.role, NULL, c.display_id, r.id, r.host_id
+           FROM runs r JOIN cards c ON c.id = r.card_id
+           WHERE r.ended_at IS NULL AND c.project_id = ?1
+             AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.run_id = r.id AND s.ended_at IS NULL)
+         )
+         ORDER BY role <> 'orchestrator', card, session, run",
+    )?;
+    let rows = stmt.query_map([project_id], |row| {
+        let host: String = row.get(4)?;
+        Ok(LiveAgent {
+            role: row.get(0)?,
+            session: row.get(1)?,
+            card: row.get(2)?,
+            run: row.get(3)?,
+            local: host == local,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The project's worktrees still on disk that hold work not landed, or
+/// whose state was never read.
+fn unlanded_work(conn: &Connection, project_id: &str) -> Result<Vec<UnlandedWork>> {
+    let mut stmt = conn.prepare(
+        "SELECT w.path, w.branch, c.display_id, w.unlanded_commits, w.dirty
+         FROM worktrees w
+         LEFT JOIN runs r ON r.id = w.run_id
+         LEFT JOIN cards c ON c.id = r.card_id
+         WHERE w.project_id = ?1 AND w.gone_at IS NULL
+           AND (w.unlanded_commits IS NULL OR w.unlanded_commits > 0
+                OR w.dirty IS NULL OR w.dirty = 1)
+         ORDER BY c.display_id, w.path",
+    )?;
+    let rows = stmt.query_map([project_id], |row| {
+        Ok(UnlandedWork {
+            path: row.get(0)?,
+            branch: row.get(1)?,
+            card: row.get(2)?,
+            unlanded_commits: row.get(3)?,
+            dirty: row.get::<_, Option<i64>>(4)?.map(|dirty| dirty == 1),
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+fn open_prs(conn: &Connection, project_id: &str) -> Result<Vec<OpenPr>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.display_id, p.number, p.url FROM prs p JOIN cards c ON c.id = p.card_id
+         WHERE p.project_id = ?1 AND p.state = 'open'
+         ORDER BY p.number",
+    )?;
+    let rows = stmt.query_map([project_id], |row| {
+        Ok(OpenPr {
+            card: row.get(0)?,
+            number: row.get(1)?,
+            url: row.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// The rows to remove per table and the references to unlink.
@@ -833,12 +1018,13 @@ mod tests {
             )
             .unwrap();
 
-        // Live runs and sessions refuse the delete, in the preview too.
+        // The preview lists the live run for the stop that comes first;
+        // the delete alone still refuses it.
         let preview = store.project_delete_preview("alpha").unwrap();
-        assert_eq!(
-            preview.refused.as_deref(),
-            Some(format!("builder run on {} is live; end it first", alpha.display_id).as_str())
-        );
+        assert_eq!(preview.refused, None);
+        let roles: Vec<_> = preview.agents.iter().map(|a| a.role.as_str()).collect();
+        assert_eq!(roles, ["orchestrator", "builder"], "{:?}", preview.agents);
+        assert_eq!(preview.agents[1].run.as_deref(), Some(run.run.id.as_str()));
         let error = store.project_delete(&owner(), "alpha").unwrap_err();
         assert_eq!(error.code(), "refused", "{error}");
 

@@ -591,6 +591,10 @@ pub fn router(state: AppState) -> Router {
             get(project_delete_preview).post(delete_project),
         )
         .route(
+            "/api/v1/projects/{id}/retire",
+            get(project_retire_preview).post(retire_project),
+        )
+        .route(
             "/api/v1/interventions/{id}/label",
             post(relabel_intervention),
         )
@@ -1718,13 +1722,65 @@ async fn project_delete_preview(
             step: unblock.step,
             command: unblock.command,
         }),
+        agents: preview.agents.into_iter().map(project_agent).collect(),
+        unlanded: preview
+            .unlanded
+            .into_iter()
+            .map(|work| ProjectUnlanded {
+                path: work.path,
+                branch: work.branch,
+                card: work.card,
+                unlanded_commits: work.unlanded_commits,
+                dirty: work.dirty,
+            })
+            .collect(),
+        open_prs: preview
+            .open_prs
+            .into_iter()
+            .map(|pr| ProjectOpenPr {
+                card: pr.card,
+                number: pr.number,
+                url: pr.url,
+            })
+            .collect(),
     }))
+}
+
+fn project_agent(agent: tiller_core::state::deletion::LiveAgent) -> ProjectAgent {
+    let tiller_core::state::deletion::LiveAgent {
+        role,
+        session,
+        card,
+        run,
+        local,
+    } = agent;
+    ProjectAgent {
+        role,
+        session,
+        card,
+        run,
+        local,
+    }
+}
+
+/// A project delete or retire's agent stops, judged as the store's errors:
+/// a stop that did not happen is a refusal naming the agent.
+fn stopped_or(project: &str, error: tiller_agents::spawn::SpawnError) -> Error {
+    use tiller_agents::spawn::SpawnError;
+    match error {
+        SpawnError::State(error) => error,
+        other => Error::Refused {
+            entity: "project",
+            id: project.to_owned(),
+            fact: other.to_string(),
+        },
+    }
 }
 
 #[utoipa::path(post, path = "/api/v1/projects/{id}/delete", tag = "mutations", request_body = DeleteProject,
     params(("id" = String, Path)),
     responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody),
-              (status = 422, body = ErrorBody, description = "`refused`: a live run or session, the fleet project, or another host's project"),
+              (status = 422, body = ErrorBody, description = "`refused`: an agent that did not stop, an executing approval, the fleet project, or another host's project or agent"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
 async fn delete_project(
     State(state): State<AppState>,
@@ -1738,10 +1794,67 @@ async fn delete_project(
     if request.confirm.trim() != id {
         return Err(ApiError::usage(format!("type {id} to delete the project")));
     }
+    let herdr = state.0.herdr.clone();
     mutate(
         &state,
         key(&request.idempotency_key)?,
-        move |store, ctx, _| Done::of(store.project_delete(ctx, &id)?),
+        move |store, ctx, _| {
+            let waits = tiller_agents::control::Waits::default();
+            let deleted = tiller_agents::control::delete_project(store, ctx, &herdr, &waits, &id)
+                .map_err(|error| stopped_or(&id, error))?;
+            Done::of(deleted)
+        },
+    )
+    .await
+}
+
+#[utoipa::path(get, path = "/api/v1/projects/{id}/retire", tag = "reads",
+    params(("id" = String, Path)),
+    responses((status = 200, body = ProjectRetirePreview), (status = 404, body = ErrorBody)))]
+async fn project_retire_preview(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<ProjectRetirePreview> {
+    let preview = read(&state, move |store| store.project_retire_preview(&id)).await?;
+    Ok(Json(ProjectRetirePreview {
+        project: preview.project,
+        refused: preview.refused,
+        agents: preview.agents.into_iter().map(project_agent).collect(),
+    }))
+}
+
+#[utoipa::path(post, path = "/api/v1/projects/{id}/retire", tag = "mutations", request_body = RetireProject,
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "`refused`: an open card, the fleet project, or an agent that did not stop"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn retire_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers)?;
+    let request: RetireProject = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "a project retire").await?;
+    let herdr = state.0.herdr.clone();
+    let stop_agents = request.stop_agents;
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| {
+            let waits = tiller_agents::control::Waits::default();
+            let retired = tiller_agents::control::retire_project(
+                store,
+                ctx,
+                &herdr,
+                &waits,
+                &id,
+                stop_agents,
+            )
+            .map_err(|error| stopped_or(&id, error))?;
+            Done::of(retired)
+        },
     )
     .await
 }
@@ -2036,7 +2149,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, stage_project, ask_note, start_orchestrator, project_delete_preview, delete_project,
+        cancel, reopen, answer, withdraw_attention, decide, focus, stage_project, ask_note, start_orchestrator, project_delete_preview, delete_project, project_retire_preview, retire_project,
         relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo
     ),
@@ -2953,9 +3066,70 @@ pub(crate) mod tests {
         assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.body);
     }
 
-    /// The board's project delete: the preview counts what goes, the delete
-    /// needs the id typed again, a live session refuses it, and only the
-    /// owner may send it.
+    /// A retired project leaves the board with its closed cards, which the
+    /// board would otherwise keep showing for three days.
+    #[tokio::test]
+    async fn a_retired_projects_closed_cards_leave_the_board() {
+        let mut fleet = Fleet::new();
+        let owner = Ctx::new(Actor::Owner);
+        fleet
+            .store
+            .project_add(
+                &owner,
+                tiller_core::state::projects::NewProject {
+                    id: "gamma".into(),
+                    name: "Gamma".into(),
+                    repo: None,
+                    remote: None,
+                    default_branch: None,
+                    delivery: tiller_core::domain::Delivery::DirectPr,
+                    checks: None,
+                    capacity: None,
+                    deploy_workflow: None,
+                    deploy_environment: None,
+                    deploy_timeout_minutes: None,
+                },
+            )
+            .unwrap();
+        let card = fleet
+            .store
+            .card_create(
+                &owner,
+                None,
+                tiller_core::state::cards::NewCard {
+                    project_id: "gamma".into(),
+                    kind: tiller_core::domain::CardKind::Ship,
+                    title: "dropped".into(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap()
+            .value;
+        fleet
+            .store
+            .card_cancel(&owner, &card.id, "not needed")
+            .unwrap();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let on_board = |body: &str| {
+            let body: Value = serde_json::from_str(body).unwrap();
+            body["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["project_id"] == "gamma")
+        };
+
+        let before = get(&app, "/api/v1/board?filter=all").await;
+        assert!(on_board(&before.body), "{}", before.body);
+        fleet.store.project_retire(&owner, "gamma").unwrap();
+        let after = get(&app, "/api/v1/board?filter=all").await;
+        assert!(!on_board(&after.body), "{}", after.body);
+    }
+
+    /// The board's project delete: the preview counts what goes and names
+    /// the agents it stops, the delete needs the id typed again, an agent
+    /// that does not stop refuses it by name, and only the owner may send it.
     #[tokio::test]
     async fn board_project_delete_previews_confirms_and_frees_the_id() {
         let mut fleet = Fleet::new();
@@ -2993,7 +3167,16 @@ pub(crate) mod tests {
             )
             .unwrap();
         let home = fleet.dir.path();
-        let app = app(home, Assets::of::<Fixture>());
+        // A herdr that fails every call: no stop can be proven.
+        let herdr = Cli::local().program(vec!["sh".into(), "-c".into(), "exit 1".into()]);
+        let app = app_full(
+            home,
+            Assets::of::<Fixture>(),
+            Damage::default(),
+            Peers::idle(),
+            herdr,
+            None,
+        );
         let cookie = owner_cookie(home);
         let delete = |id: &str, key: &str, confirm: &str, cookie: &str| {
             let headers: Vec<(&str, &str)> = if cookie.is_empty() {
@@ -3018,26 +3201,22 @@ pub(crate) mod tests {
         assert_eq!(body["refused"], Value::Null, "{body}");
         assert_eq!(body["unblock"], Value::Null, "{body}");
 
-        // alpha's orchestrator is live: the preview names it, the delete
-        // refuses and removes nothing.
+        // alpha's orchestrator is live: the preview lists it to stop, and
+        // the delete, whose stop fails, refuses naming it and removes nothing.
         let live = get(&app, "/api/v1/projects/alpha/delete").await;
         let body: Value = serde_json::from_str(&live.body).unwrap();
-        assert!(
-            body["refused"].as_str().unwrap().contains("session"),
-            "{body}"
-        );
-        assert_eq!(body["unblock"]["step"], "stop its agent", "{body}");
-        assert!(
-            body["unblock"]["command"]
-                .as_str()
-                .unwrap()
-                .starts_with("tiller agent stop "),
-            "{body}"
-        );
+        assert_eq!(body["refused"], Value::Null, "{body}");
+        assert_eq!(body["agents"][0]["role"], "orchestrator", "{body}");
+        assert_eq!(body["agents"][0]["local"], true, "{body}");
         let refused = send(&app, delete("alpha", "k-del-1", "alpha", &cookie)).await;
         assert_eq!(
             refused.status,
             StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            refused.body
+        );
+        assert!(
+            refused.body.contains("could not stop the orchestrator"),
             "{}",
             refused.body
         );

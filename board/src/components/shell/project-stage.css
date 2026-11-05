@@ -196,33 +196,127 @@
   pointer-events: none;
 }
 
-/* The project delete: a quiet control under the stage switch, and its dialog */
+/* The archive and delete: a row of quiet controls on the right, the delete
+   last, and their dialogs */
+
+.pdetail-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.pdetail-actions .btn {
+  height: 28px;
+  padding: 0 10px;
+  font-size: var(--fs-mini);
+}
+
+.pdetail-actions .btn[disabled] {
+  opacity: 0.45;
+  pointer-events: none;
+}
 
 .btn.project-delete {
-  justify-content: center;
   color: var(--red-text);
 }
 
 .btn.project-delete:hover {
   color: var(--red-text);
+  border-color: color-mix(in srgb, var(--red) 45%, var(--line-2));
   background: color-mix(in srgb, var(--red) 9%, transparent);
 }
 
-.btn.project-delete[disabled] {
-  opacity: 0.45;
-  pointer-events: none;
+/* Three actions do not fit a phone's row: they stack, the primary on top */
+@media (max-width: 480px) {
+  .dialog-actions.three {
+    flex-direction: column-reverse;
+  }
+
+  .dialog-actions.three .btn {
+    justify-content: center;
+  }
+}
+
+/* One card for what the dialog acts on: its sections share the border */
+
+.pdialog-card {
+  margin: 12px 0 0;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r8);
+  background: var(--bg-card);
+}
+
+.pdialog-section {
+  padding: 8px 12px 10px;
+}
+
+.pdialog-section + .pdialog-section,
+.delete-counts + .pdialog-section {
+  border-top: 1px solid var(--line-2);
+}
+
+.pdialog-section h3 {
+  margin: 0 0 4px;
+  font-size: var(--fs-mini);
+  font-weight: var(--w-medium);
+  color: var(--fg-3);
+}
+
+.pdialog-section ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pdialog-section li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--fs-mini);
+  color: var(--fg-1);
+}
+
+.pdialog-section li code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+}
+
+/* A worktree: its path whole, what is not landed under it */
+.pdialog-section li.stacked {
+  display: grid;
+  gap: 1px;
+}
+
+.pdialog-section li.stacked code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.pdialog-section li small {
+  flex: none;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.pdialog-section li a {
+  color: var(--accent-text);
+  font-variant-numeric: tabular-nums;
 }
 
 .delete-counts {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px 16px;
-  margin: 12px 0 0;
+  margin: 0;
   padding: 10px 12px;
   list-style: none;
-  border: 1px solid var(--line-2);
-  border-radius: var(--r8);
-  background: var(--bg-card);
 }
 
 .delete-counts li {

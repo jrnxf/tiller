@@ -8,15 +8,19 @@ use std::path::Path;
 use clap::{Args, Subcommand};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use tiller_agents::control::{self, Waits};
 use tiller_core::Applied;
 use tiller_core::Store;
 use tiller_core::domain::{Boundary, Delivery, HostKind, Project, Stage};
+use tiller_core::state::deletion::{DeletionPreview, LiveAgent};
 use tiller_core::state::get;
 use tiller_core::state::projects::{HostEdit, Init, NewProject, ProjectEdit};
+use tiller_herdr::client::Cli;
 
 use super::clearable;
 use super::read::{STOP_HOOK_MAX_RATE, STOP_HOOK_MIN_STOPS, intake_stats};
 use super::review::checkout_head;
+use super::spawn::{configured_herdr, failure};
 use crate::app::{App, Done, Failure, Outcome};
 
 #[derive(Args, Debug)]
@@ -45,12 +49,22 @@ pub enum ProjectCmd {
     /// Move a project between pre-launch and launched against the rev you read
     Stage(ProjectStage),
     /// Retire a project
-    Retire { id: String },
+    Retire(ProjectRetire),
     /// Delete a project and every record of it on this host, its events
-    /// included; never its checkout, worktrees or repository
+    /// included, after stopping its running agents; never its checkout,
+    /// worktrees or repository
     Delete(ProjectDelete),
     /// List projects
     List,
+}
+
+#[derive(Args, Debug)]
+pub struct ProjectRetire {
+    pub id: String,
+    /// Stop the project's running agents first, as a delete does. Without
+    /// it they keep running, and tiller names them
+    #[arg(long)]
+    pub stop_agents: bool,
 }
 
 #[derive(Args, Debug)]
@@ -246,7 +260,7 @@ pub fn project(app: &App, cmd: ProjectCmd) -> Done {
             )?))
         }
         ProjectCmd::Stage(args) => project_stage(app, &mut store, args),
-        ProjectCmd::Retire { id } => Ok(Outcome::applied(store.project_retire(&app.ctx(), &id)?)),
+        ProjectCmd::Retire(args) => project_retire(app, &mut store, args),
         ProjectCmd::Delete(args) => project_delete(app, &mut store, args),
     }
 }
@@ -275,18 +289,27 @@ fn project_delete(app: &App, store: &mut Store, args: ProjectDelete) -> Done {
     let summary = removal_summary(&preview.deletion);
     if !args.yes {
         let terminal = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-        if !terminal || !typed_id(&args.id, &summary)? {
+        if !terminal || !typed_id(&args.id, &summary, &preview)? {
+            let stops = match agent_list(&preview.agents) {
+                Some(agents) => format!("stops {agents} and "),
+                None => String::new(),
+            };
             let mut failure = Failure::refused(format!(
-                "project {}: deleting it removes {summary}; nothing was deleted",
+                "project {}: deleting it {stops}removes {summary}; nothing was deleted",
                 args.id
             ))
             .hint(format!("tiller project delete {} --yes", args.id));
             failure.entity = Some("project".into());
             failure.id = Some(args.id.clone());
-            failure.current = Some(would_remove(&preview.deletion));
+            let mut current = would_remove(&preview.deletion);
+            current["would_stop"] = json!(preview.agents);
+            current["unlanded"] = json!(preview.unlanded);
+            current["open_prs"] = json!(preview.open_prs);
+            failure.current = Some(current);
             return Err(failure);
         }
     }
+    let herdr = stop_herdr(app, &preview.agents)?;
     // Read before the delete, so a config.toml that does not parse turns into
     // a warning on a delete that happened, not a failure after it.
     let warning = match load_config(app) {
@@ -305,8 +328,72 @@ fn project_delete(app: &App, store: &mut Store, args: ProjectDelete) -> Done {
             failure.message, args.id
         )),
     };
-    let applied = store.project_delete(&app.ctx(), &args.id)?;
+    let applied = control::delete_project(store, &app.ctx(), &herdr, &Waits::default(), &args.id)
+        .map_err(failure)?;
+    let warnings: Vec<String> = applied
+        .value
+        .agents
+        .warnings
+        .iter()
+        .cloned()
+        .chain(warning)
+        .collect();
+    let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
     Ok(Outcome::applied(applied).with_warning(warning))
+}
+
+/// `tiller project retire`: with `--stop-agents`, stops the project's
+/// running agents first; without it, retires and names the agents left
+/// running.
+fn project_retire(app: &App, store: &mut Store, args: ProjectRetire) -> Done {
+    if args.stop_agents {
+        let herdr = stop_herdr(app, &store.project_retire_preview(&args.id)?.agents)?;
+        let applied =
+            control::retire_project(store, &app.ctx(), &herdr, &Waits::default(), &args.id, true)
+                .map_err(failure)?;
+        let warnings = &applied.value.agents.warnings;
+        let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
+        return Ok(Outcome::applied(applied).with_warning(warning));
+    }
+    let running = store.project_retire_preview(&args.id)?.agents;
+    let applied = store.project_retire(&app.ctx(), &args.id)?;
+    let warning = agent_list(&running).map(|agents| {
+        format!(
+            "still running: {agents}; tiller agent stop <session> stops one, or retire with --stop-agents"
+        )
+    });
+    Ok(Outcome::applied(applied).with_warning(warning))
+}
+
+/// The herdr the stops drive: never driven when nothing runs, so a config
+/// that does not load fails only a command that has agents to stop.
+fn stop_herdr(app: &App, agents: &[LiveAgent]) -> Result<Cli, Failure> {
+    match configured_herdr(app) {
+        Ok(herdr) => Ok(herdr),
+        Err(_) if agents.is_empty() => Ok(Cli::local()),
+        Err(failure) => Err(failure),
+    }
+}
+
+/// "the orchestrator (session s-1), builder on alpha-4 (session s-2)".
+fn agent_list(agents: &[LiveAgent]) -> Option<String> {
+    let names: Vec<String> = agents.iter().map(LiveAgent::describe).collect();
+    match names.split_first() {
+        None => None,
+        Some((first, rest)) => {
+            let first = if first.starts_with("orchestrator") {
+                format!("the {first}")
+            } else {
+                first.clone()
+            };
+            Some(
+                std::iter::once(first)
+                    .chain(rest.iter().cloned())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )
+        }
+    }
 }
 
 /// A refused delete's preview, named for what it is: nothing was removed.
@@ -337,12 +424,21 @@ fn removal_summary(deletion: &tiller_core::state::deletion::Deletion) -> String 
 }
 
 /// Asks the owner to type the project id; true when they did.
-fn typed_id(id: &str, summary: &str) -> Result<bool, Failure> {
+fn typed_id(id: &str, summary: &str, preview: &DeletionPreview) -> Result<bool, Failure> {
+    if let Some(agents) = agent_list(&preview.agents) {
+        eprintln!("Deleting project {id} first stops {agents}.");
+    }
     eprint!(
         "Deleting project {id} removes these rows from this host's state.db, events included:\n  {summary}\n\
-         The checkout, worktrees and repository are not touched.\n\
-         Type {id} to delete it: "
+         The checkout, worktrees and repository are not touched.\n"
     );
+    for work in &preview.unlanded {
+        eprintln!("  Not landed, left on disk: {}", work.path);
+    }
+    for pr in &preview.open_prs {
+        eprintln!("  Open PR, left on GitHub: {}", pr.url);
+    }
+    eprint!("Type {id} to delete it: ");
     let _ = std::io::stderr().flush();
     let mut answer = String::new();
     std::io::stdin().lock().read_line(&mut answer)?;

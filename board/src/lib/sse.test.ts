@@ -393,6 +393,27 @@ test("a session or run event marks the agents and run details stale", () => {
   expect(queryClient.getQueryState(queryKeyFor("/api/v1/agents"))?.isInvalidated).toBe(true);
 });
 
+test("an archived project leaves the list instead of being written back", () => {
+  const queryClient = seededClient();
+  const alpha = queryClient
+    .getQueryData<ProjectsResponse>(queryKeyFor(projectsPath))
+    ?.projects.find((project) => project.id === "alpha");
+
+  applyChange(
+    queryClient,
+    event({
+      kind: "project.retired",
+      entity: "project",
+      entity_id: "alpha",
+      entity_state: { ...alpha, retired_at: "2026-11-05T19:00:00Z" },
+    }),
+  );
+
+  const projects = queryClient.getQueryData<ProjectsResponse>(queryKeyFor(projectsPath));
+  expect(projects?.projects.map((project) => project.id)).not.toContain("alpha");
+  expect(queryClient.getQueryState(queryKeyFor(boardPath()))?.isInvalidated).toBe(true);
+});
+
 test("a deleted project leaves the list and every read is marked stale", () => {
   const queryClient = seededClient();
   const peerGamma = {

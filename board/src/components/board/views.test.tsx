@@ -8,6 +8,7 @@ import type {
   BoardRow,
   ChangeEvent,
   Project,
+  ProjectRetirePreview,
   ProjectsResponse,
 } from "../../lib/api-types";
 import { hydrateFromSnapshot } from "../../lib/boot";
@@ -20,6 +21,7 @@ import { createQueryClient } from "../../lib/query-client";
 import { boardPath, projectsPath, queryKeyFor } from "../../lib/queries";
 import { createAppRouter } from "../../lib/router";
 import { applyChange } from "../../lib/sse";
+import { ArchiveProject } from "../shell/project-archive";
 import { DeleteProject } from "../shell/project-delete";
 import { resetBoardLook } from "./board-prefs";
 
@@ -722,7 +724,7 @@ test("deleting a project shows what goes and arms only once the id is typed", as
   await renderApp();
 
   fireEvent.click(within(projectsRegion()).getByRole("button", { name: "Stage of gamma" }));
-  fireEvent.click(screen.getByRole("button", { name: "Delete project" }));
+  fireEvent.click(screen.getByRole("button", { name: "Delete" }));
   const dialog = screen.getByRole("dialog", { name: "Delete gamma?" });
   expect(dialog.textContent).toContain(
     "The checkout, its worktrees and the GitHub repository are left as they are.",
@@ -733,7 +735,7 @@ test("deleting a project shows what goes and arms only once the id is typed", as
   expect(counts.textContent).toContain("memory revisions4");
   expect(dialog.textContent).toContain("1 link with another project's records is cleared.");
 
-  const confirm = within(dialog).getByRole("button", { name: "Delete project" });
+  const confirm = within(dialog).getByRole("button", { name: /^Stop \d+ agents? and delete$/ });
   const typed = within(dialog).getByLabelText("Type gamma to confirm");
   expect(confirm).toHaveProperty("disabled", true);
   fireEvent.change(typed, { target: { value: "gam" } });
@@ -752,36 +754,114 @@ test("deleting a project shows what goes and arms only once the id is typed", as
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
-test("the fleet project has no delete control", () => {
+test("the fleet project has no archive or delete control", () => {
   const projects = fixtureResource(projectsPath) as ProjectsResponse;
   const gamma = projects.projects.find((project) => project.id === "gamma");
   if (!gamma) throw new Error("the fixtures lost gamma");
-  render(<DeleteProject project={{ ...gamma, id: "fleet", name: "Fleet" }} owner={undefined} />);
-  expect(screen.queryByRole("button", { name: "Delete project" })).toBeNull();
+  const fleet = { ...gamma, id: "fleet", name: "Fleet" };
+  render(
+    <>
+      <ArchiveProject project={fleet} owner={undefined} />
+      <DeleteProject project={fleet} owner={undefined} />
+    </>,
+  );
+  expect(screen.queryByRole("button")).toBeNull();
 });
 
-test("a project with a live run says why it cannot be deleted and asks for nothing", async () => {
+test("deleting a project with a working card lists the agents it stops and the work it leaves", async () => {
   const posted = stubApi("default");
   await renderApp();
 
   fireEvent.click(within(projectsRegion()).getByRole("button", { name: "Stage of alpha" }));
-  fireEvent.click(screen.getByRole("button", { name: "Delete project" }));
+  fireEvent.click(screen.getByRole("button", { name: "Delete" }));
   const dialog = screen.getByRole("dialog", { name: "Delete alpha?" });
+  const stops = await within(dialog).findByRole("region", { name: "Stopped first" });
+  const agents = within(stops)
+    .getAllByRole("listitem")
+    .map((item) => item.textContent);
+  expect(agents[0]).toBe("orchestrator");
+  expect(agents.slice(1).every((agent) => /^builder on alpha-\d+$/.test(agent ?? ""))).toBe(true);
+  const unlanded = within(dialog).getByRole("region", { name: "Not landed" });
+  expect(unlanded.textContent).toMatch(/\/home\/user\/worktrees\/alpha-\d+/);
+  expect(within(dialog).getByRole("region", { name: "Open pull requests" })).toBeTruthy();
+  expect(within(dialog).queryByRole("alert")).toBeNull();
+
+  const confirm = within(dialog).getByRole("button", {
+    name: `Stop ${agents.length} agents and delete`,
+  });
+  expect(confirm).toHaveProperty("disabled", true);
+  fireEvent.change(within(dialog).getByLabelText("Type alpha to confirm"), {
+    target: { value: "alpha" },
+  });
+  fireEvent.click(confirm);
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]?.path).toBe("/api/v1/projects/alpha/delete");
+});
+
+// ---- Project archive ----
+
+test("archiving a project with an open card says why and sends nothing", async () => {
+  const posted = stubApi("default");
+  await renderApp();
+
+  fireEvent.click(within(projectsRegion()).getByRole("button", { name: "Stage of alpha" }));
+  fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+  const dialog = screen.getByRole("dialog", { name: "Archive alpha?" });
   const why = await within(dialog).findByRole("alert");
-  expect(why.textContent).toMatch(/^builder run on alpha-\d+ is live; end it first$/);
-  // It names the step that clears the refusal, and the command for it.
-  expect(within(dialog).getByText("Next: cancel its card, then delete again.")).toBeTruthy();
-  expect(
-    within(dialog).getByText(/^tiller card cancel alpha-\d+ --reason "deleting project alpha"$/),
-  ).toBeTruthy();
-  expect(within(dialog).queryByRole("textbox")).toBeNull();
-  expect(within(dialog).getByRole("button", { name: "Delete project" })).toHaveProperty(
-    "disabled",
-    true,
-  );
+  expect(why.textContent).toMatch(/^card alpha-\d+ is open$/);
+  const archive = within(dialog).getByRole("button", { name: "Archive project" });
+  expect(archive).toHaveProperty("disabled", true);
+  fireEvent.click(archive);
   fireEvent.keyDown(dialog, { key: "Escape" });
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(posted).toHaveLength(0);
+});
+
+// kiln's archive preview with its orchestrator running, here or on another
+// host. kiln has no open card, so only the agent stands in the way.
+function kilnRunning(local: boolean) {
+  const fixtures = globalThis.fetch;
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) !== "/api/v1/projects/kiln/retire" || init?.method) {
+      return fixtures(input, init);
+    }
+    const preview = (await (await fixtures(input, init)).json()) as ProjectRetirePreview;
+    const agents = [{ role: "orchestrator", session: "s-kiln", card: null, run: null, local }];
+    return new Response(JSON.stringify({ ...preview, agents }), { status: 200 });
+  });
+}
+
+test("archiving a project with a running agent asks whether to stop it", async () => {
+  const posted = stubApi("degraded");
+  kilnRunning(true);
+  await renderApp("degraded");
+
+  fireEvent.click(within(projectsRegion()).getByRole("button", { name: "Stage of kiln" }));
+  fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+  const dialog = screen.getByRole("dialog", { name: "Archive kiln?" });
+  const running = await within(dialog).findByRole("region", { name: "Still running" });
+  expect(running.textContent).toBe("Still runningorchestrator");
+  expect(within(dialog).getByRole("button", { name: "Archive, keep running" })).toBeTruthy();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Stop 1 agent and archive" }));
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]?.path).toBe("/api/v1/projects/kiln/retire");
+  expect(posted[0]?.body).toMatchObject({ stop_agents: true });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+test("archiving with an agent on another host offers no stop", async () => {
+  const posted = stubApi("degraded");
+  kilnRunning(false);
+  await renderApp("degraded");
+
+  fireEvent.click(within(projectsRegion()).getByRole("button", { name: "Stage of kiln" }));
+  fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+  const dialog = screen.getByRole("dialog", { name: "Archive kiln?" });
+  await within(dialog).findByRole("region", { name: "Still running" });
+  expect(within(dialog).queryByRole("button", { name: /^Stop / })).toBeNull();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Archive, keep running" }));
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]?.body).toMatchObject({ stop_agents: false });
 });
 
 test("the switch to pre-launch says validation is skipped and a Saturday review runs", async () => {

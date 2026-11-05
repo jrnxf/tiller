@@ -936,6 +936,77 @@ pub struct ProjectDeletePreview {
     /// What clears `refused`, when the owner can clear it: absent for the
     /// fleet project and another host's project.
     pub unblock: Option<DeleteUnblock>,
+    /// The running agents the delete stops first, the orchestrator first.
+    pub agents: Vec<ProjectAgent>,
+    /// Worktrees with commits not landed or uncommitted changes. The delete
+    /// leaves them on disk.
+    pub unlanded: Vec<ProjectUnlanded>,
+    /// Pull requests still open. The delete leaves them on GitHub.
+    pub open_prs: Vec<ProjectOpenPr>,
+}
+
+/// A running agent of a project: a live session, or an active run with no
+/// live session.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ProjectAgent {
+    /// `orchestrator`, `builder`, `reviewer` and so on.
+    pub role: String,
+    /// The live session; absent for an active run with no live session.
+    pub session: Option<String>,
+    /// The display id of the worker's card; absent for an orchestrator.
+    pub card: Option<String>,
+    pub run: Option<String>,
+    /// Whether it runs on this host, the only one that can stop it.
+    pub local: bool,
+}
+
+/// A worktree of a project with work not landed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ProjectUnlanded {
+    pub path: String,
+    pub branch: Option<String>,
+    /// The display id of the card whose run made it, when known.
+    pub card: Option<String>,
+    /// Commits not on the base branch; absent when not yet read.
+    pub unlanded_commits: Option<i64>,
+    /// Uncommitted changes; absent when not yet read.
+    pub dirty: Option<bool>,
+}
+
+/// An open pull request of a project's card.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ProjectOpenPr {
+    /// The display id of its card.
+    pub card: String,
+    pub number: i64,
+    pub url: String,
+}
+
+/// `GET /api/v1/projects/{id}/retire`: whether a retire would apply now
+/// and which running agents it could stop first.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ProjectRetirePreview {
+    pub project: String,
+    /// Why the retire is refused now (an open card, the fleet project);
+    /// absent when it would apply.
+    pub refused: Option<String>,
+    /// The project's running agents, the orchestrator first.
+    pub agents: Vec<ProjectAgent>,
+}
+
+/// `POST /api/v1/projects/{id}/retire`: retire one project, off the board.
+/// Local to the owning host; it is not forwarded to a peer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RetireProject {
+    pub idempotency_key: String,
+    /// A paired peer's label. Refused: a project retire is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Stop the project's running agents first, as a delete does. Unset
+    /// leaves them running.
+    #[serde(default)]
+    pub stop_agents: bool,
 }
 
 /// The owner's way past a refused delete.

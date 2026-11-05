@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 use super::attention::{NewAttention, open_attention};
 use super::cards::{NewCard, create_card};
+use super::deletion::LiveAgent;
 use super::{check_rev, find, get, required};
 use crate::domain::*;
 use crate::error::{Error, Result};
@@ -73,6 +74,31 @@ pub struct ProjectEdit {
     pub deploy_workflow: Option<Option<String>>,
     pub deploy_environment: Option<Option<String>>,
     pub deploy_timeout_minutes: Option<i64>,
+}
+
+/// [`Store::project_retire_preview`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RetirePreview {
+    pub project: String,
+    pub refused: Option<String>,
+    /// The agents still running for the project. Retiring stops no agent:
+    /// the owner stops them first, or keeps them knowingly.
+    pub agents: Vec<LiveAgent>,
+}
+
+/// Why a project that is not retired may not retire.
+fn retire_refusal(conn: &rusqlite::Connection, project: &Project) -> Result<Option<String>> {
+    if project.id == FLEET_PROJECT {
+        return Ok(Some("the fleet project never retires".into()));
+    }
+    let open: Option<String> = conn
+        .query_row(
+            "SELECT display_id FROM cards WHERE project_id = ?1 AND state = 'open' ORDER BY display_id LIMIT 1",
+            [&project.id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(open.map(|card| format!("card {card} is open")))
 }
 
 pub(crate) fn require_owner(ctx_actor: &Actor, what: &str) -> Result<()> {
@@ -441,6 +467,22 @@ impl Store {
         })
     }
 
+    /// What `project.retire` would do, without doing it: why it would be
+    /// refused, and the agents still running for the project, which the
+    /// owner stops or keeps before it retires. Read-only.
+    pub fn project_retire_preview(&self, project_id: &str) -> Result<RetirePreview> {
+        let project: Project = get(self.conn(), "project", project_id)?;
+        let refused = match project.retired_at {
+            Some(_) => None,
+            None => retire_refusal(self.conn(), &project)?,
+        };
+        Ok(RetirePreview {
+            agents: self.project_live_agents(&project.id)?,
+            project: project.id,
+            refused,
+        })
+    }
+
     /// `project.retire`: refused while the project has an open card.
     pub fn project_retire(&mut self, ctx: &Ctx, project_id: &str) -> Result<Applied<Project>> {
         require_owner(&ctx.actor, "project.retire")?;
@@ -449,25 +491,16 @@ impl Store {
             if project.retired_at.is_some() {
                 return Ok(project);
             }
-            if project.id == FLEET_PROJECT {
-                return Err(Error::refused("project", &project.id, "the fleet project never retires"));
-            }
-            let open: Option<String> = tx
-                .conn()
-                .query_row(
-                    "SELECT display_id FROM cards WHERE project_id = ?1 AND state = 'open' ORDER BY display_id LIMIT 1",
-                    [&project.id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if let Some(card) = open {
-                return Err(Error::refused("project", &project.id, format!("card {card} is open")));
+            if let Some(fact) = retire_refusal(tx.conn(), &project)? {
+                return Err(Error::refused("project", &project.id, fact));
             }
             tx.conn().execute(
                 "UPDATE projects SET retired_at = ?2, rev = rev + 1 WHERE id = ?1",
                 params![project.id, tx.now()],
             )?;
-            tx.event(NewEvent::new("project", &project.id, "project.retired").rev(project.rev + 1))?;
+            tx.event(
+                NewEvent::new("project", &project.id, "project.retired").rev(project.rev + 1),
+            )?;
             get(tx.conn(), "project", &project.id)
         })
     }

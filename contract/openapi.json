@@ -1789,7 +1789,7 @@
             }
           },
           "422": {
-            "description": "`refused`: a live run or session, the fleet project, or another host's project",
+            "description": "`refused`: an agent that did not stop, an executing approval, the fleet project, or another host's project or agent",
             "content": {
               "application/json": {
                 "schema": {
@@ -1885,6 +1885,119 @@
             }
           },
           "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/retire": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "project_retire_preview",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectRetirePreview"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "retire_project",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetireProject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`refused`: an open card, the fleet project, or an agent that did not stop",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
             "content": {
               "application/json": {
                 "schema": {
@@ -4859,15 +4972,70 @@
           }
         }
       },
+      "ProjectAgent": {
+        "type": "object",
+        "description": "A running agent of a project: a live session, or an active run with no\nlive session.",
+        "required": [
+          "role",
+          "local"
+        ],
+        "properties": {
+          "card": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The display id of the worker's card; absent for an orchestrator."
+          },
+          "local": {
+            "type": "boolean",
+            "description": "Whether it runs on this host, the only one that can stop it."
+          },
+          "role": {
+            "type": "string",
+            "description": "`orchestrator`, `builder`, `reviewer` and so on."
+          },
+          "run": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The live session; absent for an active run with no live session."
+          }
+        }
+      },
       "ProjectDeletePreview": {
         "type": "object",
         "description": "`GET /api/v1/projects/{id}/delete`: what a project delete would remove,\nwithout removing anything (`state.md`, Deleting a project).",
         "required": [
           "project",
           "removed",
-          "unlinked"
+          "unlinked",
+          "agents",
+          "unlanded",
+          "open_prs"
         ],
         "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectAgent"
+            },
+            "description": "The running agents the delete stops first, the orchestrator first."
+          },
+          "open_prs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectOpenPr"
+            },
+            "description": "Pull requests still open. The delete leaves them on GitHub."
+          },
           "project": {
             "type": "string"
           },
@@ -4900,6 +5068,13 @@
               }
             ]
           },
+          "unlanded": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectUnlanded"
+            },
+            "description": "Worktrees with commits not landed or uncommitted changes. The delete\nleaves them on disk."
+          },
           "unlinked": {
             "type": "object",
             "description": "`table.column` references on rows that stay, set to `NULL`.",
@@ -4910,6 +5085,95 @@
             "propertyNames": {
               "type": "string"
             }
+          }
+        }
+      },
+      "ProjectOpenPr": {
+        "type": "object",
+        "description": "An open pull request of a project's card.",
+        "required": [
+          "card",
+          "number",
+          "url"
+        ],
+        "properties": {
+          "card": {
+            "type": "string",
+            "description": "The display id of its card."
+          },
+          "number": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "ProjectRetirePreview": {
+        "type": "object",
+        "description": "`GET /api/v1/projects/{id}/retire`: whether a retire would apply now\nand which running agents it could stop first.",
+        "required": [
+          "project",
+          "agents"
+        ],
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectAgent"
+            },
+            "description": "The project's running agents, the orchestrator first."
+          },
+          "project": {
+            "type": "string"
+          },
+          "refused": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the retire is refused now (an open card, the fleet project);\nabsent when it would apply."
+          }
+        }
+      },
+      "ProjectUnlanded": {
+        "type": "object",
+        "description": "A worktree of a project with work not landed.",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "card": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The display id of the card whose run made it, when known."
+          },
+          "dirty": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Uncommitted changes; absent when not yet read."
+          },
+          "path": {
+            "type": "string"
+          },
+          "unlanded_commits": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Commits not on the base branch; absent when not yet read."
           }
         }
       },
@@ -5096,6 +5360,30 @@
             "type": "string"
           }
         }
+      },
+      "RetireProject": {
+        "type": "object",
+        "description": "`POST /api/v1/projects/{id}/retire`: retire one project, off the board.\nLocal to the owning host; it is not forwarded to a peer.",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label. Refused: a project retire is not forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "stop_agents": {
+            "type": "boolean",
+            "description": "Stop the project's running agents first, as a delete does. Unset\nleaves them running."
+          }
+        },
+        "additionalProperties": false
       },
       "ReviewRow": {
         "type": "object",
