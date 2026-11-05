@@ -11,7 +11,7 @@ Tiller is a Rust core (CLI, daemon, state) plus a TypeScript board (Vite, React,
 5. **Writing style.** Never use the em dash; use "-". Never credit an agent in commits or PRs: no `Co-Authored-By` line and no "Generated with" line. Show every date in Europe/Lisbon time with its weekday.
 6. **Quality.** Fix any lint error, test failure or flaky test you see, even when your change did not cause it. Treat UI as pixel-exact: check screenshots in both themes at 1440 px and 390 px wide.
 7. **The predecessor system is read-only** during the build, except for steps the owner approves at a checkpoint.
-8. **Quota.** Check quota before starting a wave of work. Never dispatch below the 3% weekly floor; hold the wave and tell the owner.
+8. **Quota.** Check quota before starting a wave of work. Running ahead of pace is not a reason to stop. Hold the wave and tell the owner only when the week would run out before the work could finish, or when under 10% of it is left; otherwise start and mention the pace in the note. Away mode's `--quota-floor` still binds.
 9. **Never trade output or quality for speed.** If a shortcut would drop a planned capability or weaken a quality gate (review, tests, `no-mistakes`, bound approvals), stop and ask.
 
 Stop and ask when a contract in a spec has to change, a task fails its acceptance criteria twice, a test flakes and the cause is not in this repo, or anything would write outside a normal PR (dotfiles, GitHub settings, another repo).

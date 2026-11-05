@@ -14,6 +14,7 @@ pub mod ids;
 pub mod import;
 pub mod memory;
 pub mod migrate;
+pub mod quota_rule;
 pub mod state;
 pub mod store;
 pub mod time;
