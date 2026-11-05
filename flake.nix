@@ -115,7 +115,7 @@
               ./crates/herdr/tests/fixtures
               # Embedded by crates/agents with include_str!.
               ./roles
-              # The replay prompts crates/replay embeds with include_str!.
+              # Embedded by crates/replay with include_str!.
               ./crates/replay/prompts
             ];
           };
