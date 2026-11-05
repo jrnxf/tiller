@@ -2228,3 +2228,29 @@ fn a_direct_pr_brief_tells_the_worker_to_commit_and_never_push() {
         assert!(!line.contains(commit_only), "{line}");
     }
 }
+
+#[test]
+fn a_direct_push_brief_lists_the_checks_and_the_lighter_set() {
+    let mut project = delivery_project("direct-push", "launched");
+    project.checks = serde_json::json!({
+        "full": ["cargo test", "cargo clippy"],
+        "no_logic": ["cargo fmt --check"],
+    });
+    let line = delivery_line(&project);
+    assert!(line.contains("Delivery: direct-push."), "{line}");
+    assert!(line.contains("Commit only, never push"), "{line}");
+    assert!(line.contains("`cargo test`, `cargo clippy`"), "{line}");
+    assert!(
+        line.contains(
+            "touches no logic (docs, comments, copy, formatting) runs only: `cargo fmt --check`"
+        ),
+        "{line}"
+    );
+
+    project.checks = serde_json::json!([]);
+    let line = delivery_line(&project);
+    assert!(line.contains("names no checks"), "{line}");
+
+    let line = delivery_line(&delivery_project("direct-pr", "launched"));
+    assert!(!line.contains("watches the deploy"), "{line}");
+}

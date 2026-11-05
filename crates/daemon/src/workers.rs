@@ -561,6 +561,11 @@ pub fn start(
         lock: lock.clone(),
         forge: GhForge::new(tools.gh.clone()),
     };
+    let deploys = crate::forge::Deploys {
+        store: open()?,
+        lock: lock.clone(),
+        forge: crate::forge::GhDeploys::new(tools.gh.clone()),
+    };
     let land = Land {
         home: home.to_owned(),
         store: open()?,
@@ -587,6 +592,7 @@ pub fn start(
     spawn(registry, reconcile, stop, &mut handles);
     spawn(registry, publish, stop, &mut handles);
     spawn(registry, land, stop, &mut handles);
+    spawn(registry, deploys, stop, &mut handles);
     spawn(registry, finished, stop, &mut handles);
     spawn(registry, transcripts, stop, &mut handles);
     spawn(registry, quota, stop, &mut handles);

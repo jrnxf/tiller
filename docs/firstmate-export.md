@@ -78,6 +78,7 @@ One object per row in `data/projects.md`. Projects come only from the registry: 
 - **`repo`** is the GitHub `owner/name` in the registry line when it has one. Otherwise it comes from `git -C <home>/projects/<id> config remote.origin.url`, and the importer links PRs by it. Credentials in a remote are stripped. A checkout with no GitHub origin leaves `repo` null and adds an open question.
 - `default_branch` comes from the checkout's `origin/HEAD`, else null.
 - `capacity` comes from `config/project-capacity`. A value under 1 becomes null with an open question, because the importer refuses it.
+- `checks` is optional and the exporter does not write it, since Firstmate keeps no per-project check list. A bundle edited by hand may add it in either shape of `projects.checks` (an array of commands, or `{"full": [...], "no_logic": [...]}`); the importer stores it and refuses any other shape. An absent or null `checks` imports as none.
 - A project id must be a plain name (letters, digits, dot, dash, underscore, starting with a letter or digit, no `..`). A row with another id is skipped. A second row with the same id is dropped and asked about, and an `added` date that is not a calendar date becomes null.
 
 ### cards.jsonl
