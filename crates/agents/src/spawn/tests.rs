@@ -1255,6 +1255,31 @@ fn failed_spawn_ends_the_run_and_returns_the_worktree() {
     );
 }
 
+/// P67: the developer's own skills and slash commands stay callable in a
+/// role's session. The launch does not run Claude in `--bare` mode or switch
+/// slash commands or skills off, for a worker or a settings fragment.
+#[test]
+fn launch_keeps_the_developers_skills_callable() {
+    let mut rig = Rig::new();
+    let card = rig.card(CardKind::Ship, None);
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    let dir = rig.scratch.join(&spawned.run.id);
+    let script = std::fs::read_to_string(dir.join("launch.sh")).unwrap();
+    for flag in [
+        "--bare",
+        "--disable-slash-commands",
+        "--setting-sources",
+        "--plugin-dir",
+    ] {
+        assert!(!script.contains(flag), "launch script passes {flag}");
+    }
+    let settings: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("settings.json")).unwrap()).unwrap();
+    for key in ["skillOverrides", "disableSkillShellExecution", "skills"] {
+        assert!(settings.get(key).is_none(), "settings fragment sets {key}");
+    }
+}
+
 #[test]
 fn worker_launch_has_remote_control_off() {
     let mut rig = Rig::new();
