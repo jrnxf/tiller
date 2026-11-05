@@ -30,6 +30,7 @@ use tiller_herdr::fake::{FakeHerdr, Screen};
 use tiller_reconcile::git::GitScanner;
 
 use crate::Error;
+use crate::baseline::task_id;
 
 /// The prefix of every orchestrator's Claude session id in a sandbox, so an
 /// audit of a real home can tell a replay's rows from the owner's.
@@ -133,7 +134,7 @@ impl Sandbox {
         if let Some(session) = self.sessions.get(project) {
             return Ok(session.clone());
         }
-        let found: Project = get(self.store.conn(), "project", project)?;
+        self.checkout(project)?;
         let n = self.sessions.len() + 1;
         let workspace = format!("o{n}");
         let pane = format!("{workspace}:p1");
@@ -148,11 +149,24 @@ impl Sandbox {
                 ..NewOrchestrator::default()
             },
         )?;
-        let checkout = self.seed(project, &found.default_branch)?;
-        self.config.checkouts.insert(project.to_owned(), checkout);
         let session = started.value.session.id;
         self.sessions.insert(project.to_owned(), session.clone());
         Ok(session)
+    }
+
+    /// The checkout of `project`, seeded on first use: an orchestrator's own
+    /// project, or the project of a card another project's orchestrator
+    /// spawns on, as the live config names a checkout for every project.
+    pub fn checkout(&mut self, project: &str) -> Result<PathBuf, Error> {
+        if let Some(found) = self.config.checkouts.get(project) {
+            return Ok(found.clone());
+        }
+        let found: Project = get(self.store.conn(), "project", project)?;
+        let checkout = self.seed(project, &found.default_branch)?;
+        self.config
+            .checkouts
+            .insert(project.to_owned(), checkout.clone());
+        Ok(checkout)
     }
 
     /// A bare origin holding one commit on `branch`, and a clone of it.
@@ -183,7 +197,7 @@ impl Sandbox {
     pub fn imported(&self, bundle: &Bundle) -> Result<HashMap<String, Card>, Error> {
         let mut cards = HashMap::new();
         for card in &bundle.cards {
-            let key = card.legacy_id.clone().unwrap_or_else(|| card.id.clone());
+            let key = task_id(card);
             if let Some(found) = find::<Card>(self.store.conn(), "legacy_id = ?1", &[&card.id])? {
                 cards.insert(key, found);
             }

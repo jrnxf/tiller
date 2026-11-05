@@ -14,11 +14,12 @@ use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 use tiller_core::Timestamp;
-use tiller_core::domain::{CardKind, Effort, RunRole};
+use tiller_core::domain::{CardKind, Effort, RunRole, Size};
 use tiller_core::import::Bundle;
 
 use crate::Error;
-use crate::baseline::ReplayAsk;
+use crate::baseline::{BaselineHold, ReplayAsk, task_id};
+use crate::board::{BoardCard, filed_by};
 
 /// One ask, as the orchestrator's turn begins.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -30,6 +31,12 @@ pub struct Turn {
     pub text: String,
     /// What the `UserPromptSubmit` hook added to the turn.
     pub context: Option<String>,
+    /// When the owner sent the ask: the orchestrator's "now".
+    pub now: String,
+    /// The project's open cards, as `tiller card list` would show them.
+    pub board: Vec<BoardCard>,
+    /// Every live project, for a card that belongs in another one.
+    pub projects: Vec<String>,
 }
 
 /// One command the orchestrator runs. A `card` is a label an earlier `new`
@@ -46,6 +53,10 @@ pub enum Decision {
         project: Option<String>,
         kind: CardKind,
         title: String,
+        #[serde(default)]
+        size: Option<Size>,
+        #[serde(default)]
+        acceptance: Option<String>,
     },
     /// `tiller ask resolve <ask> followup:<card>`, or `ask link` after the first.
     Followup { card: String },
@@ -72,6 +83,8 @@ pub enum Decision {
     },
     /// `tiller attention open <card> --kind decision`.
     Attention { card: String, question: String },
+    /// `tiller card dep add <card> <depends_on>`: the card waits on another.
+    Dep { card: String, depends_on: String },
     /// The turn's last message, which the `Stop` hook checks.
     Reply { text: String },
 }
@@ -85,7 +98,6 @@ pub trait Orchestrator {
 struct Known {
     project: String,
     title: String,
-    since: Option<String>,
 }
 
 /// Decides each ask as Firstmate handled it: the same dispositions, card
@@ -94,7 +106,8 @@ struct Known {
 pub struct Recorded {
     asks: Vec<ReplayAsk>,
     cards: HashMap<String, Known>,
-    now: Timestamp,
+    /// Each card's filing day, which tells the cards an ask filed.
+    since: HashMap<String, Option<String>>,
 }
 
 impl Recorded {
@@ -105,24 +118,38 @@ impl Recorded {
             .cards
             .iter()
             .map(|card| {
-                let key = card.legacy_id.clone().unwrap_or_else(|| card.id.clone());
+                let key = task_id(card);
                 let known = Known {
                     project: projects
                         .get(&key)
                         .cloned()
                         .unwrap_or_else(|| card.project.clone()),
                     title: card.title.clone(),
-                    since: card.since.clone(),
                 };
                 (key, known)
             })
             .collect();
+        let since = bundle
+            .cards
+            .iter()
+            .map(|card| (task_id(card), card.since.clone()))
+            .collect();
         Self {
             asks: asks.to_vec(),
             cards,
-            now: Timestamp::now(),
+            since,
         }
     }
+}
+
+/// When a Firstmate hold lifts, if it still held when the ask came: a hold
+/// already over then (or undated) waits on the owner instead.
+pub fn hold_until(ask: &ReplayAsk, hold: &BaselineHold) -> Option<Timestamp> {
+    let asked = ask.ts.parse::<Timestamp>().ok()?;
+    hold.until
+        .as_deref()
+        .and_then(|day| format!("{day}T09:00:00Z").parse::<Timestamp>().ok())
+        .filter(|until| *until > asked)
 }
 
 /// Firstmate's task kinds as Tiller card kinds: a `captain` task waits on
@@ -161,16 +188,12 @@ impl Orchestrator for Recorded {
                 Decision::Cancelled { reason: None }
             }]);
         }
-        let new_only = ask.handling.iter().all(|h| h == "new card");
-        let mixed = !new_only && ask.handling.iter().any(|h| h == "new card");
-        let day = ask.ts.get(..10);
+        let filed = filed_by(ask, &self.since);
         let mut decisions = Vec::new();
         let mut spawns = Vec::new();
         for (i, card) in ask.cards.iter().enumerate() {
             let known = self.cards.get(card);
-            // Of an ask that both followed up and filed, the cards the bundle
-            // dates to the ask's day are the ones it filed.
-            let new = new_only || (mixed && known.and_then(|k| k.since.as_deref()) == day);
+            let new = filed.contains(card);
             let kind = card_kind(ask.kind.get(i).cloned().flatten().as_deref());
             if new {
                 decisions.push(Decision::New {
@@ -178,6 +201,8 @@ impl Orchestrator for Recorded {
                     project: known.map(|k| k.project.clone()),
                     kind,
                     title: known.map_or_else(|| card.clone(), |k| k.title.clone()),
+                    size: None,
+                    acceptance: None,
                 });
             } else {
                 decisions.push(Decision::Reopen {
@@ -201,12 +226,7 @@ impl Orchestrator for Recorded {
                 .reason
                 .clone()
                 .unwrap_or_else(|| format!("waiting ({})", hold.kind));
-            let until = hold
-                .until
-                .as_deref()
-                .and_then(|day| format!("{day}T09:00:00Z").parse::<Timestamp>().ok())
-                .filter(|until| *until > self.now);
-            decisions.push(match until {
+            decisions.push(match hold_until(ask, hold) {
                 Some(until) => Decision::Hold {
                     card: hold.card.clone(),
                     until,
