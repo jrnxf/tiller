@@ -602,7 +602,8 @@ fn plan_card(
             .and_then(|hold| hold.reason.clone())
             .filter(|reason| !reason.trim().is_empty());
         match card.hold.as_ref().map(|hold| hold.kind.as_str()) {
-            // A blocked wait becomes its dependencies; with none it is the owner's call.
+            // A blocked wait becomes its dependencies; with none it is the owner's call,
+            // as it is when every dependency already closed (`resolve_dependencies`).
             Some("blocked") if !card.depends_on.is_empty() => {}
             Some(hold_kind) => {
                 let until = card
@@ -880,6 +881,7 @@ fn resolve_dependencies(conn: &Connection, bundle: &Bundle, cards: &mut [CardPla
         if card.state != CardState::Open {
             continue;
         }
+        let mut all_released = !source.depends_on.is_empty();
         for on in &source.depends_on {
             if *on == card.legacy_id {
                 return Err(Error::refused(
@@ -920,10 +922,25 @@ fn resolve_dependencies(conn: &Connection, bundle: &Bundle, cards: &mut [CardPla
                     ),
                 });
             }
+            all_released &= released.is_some();
             card.waits.push(Wait::Dependency {
                 on: on.clone(),
                 display_id,
                 released,
+            });
+        }
+        // Nothing is left to wait on, so a blocked hold would vanish with its
+        // reason: keep it as the owner's call.
+        if all_released
+            && let Some(hold) = source.hold.as_ref().filter(|hold| hold.kind == "blocked")
+        {
+            card.waits.push(Wait::Attention {
+                kind: AttentionKind::Decision,
+                question: hold
+                    .reason
+                    .clone()
+                    .filter(|reason| !reason.trim().is_empty())
+                    .unwrap_or_else(|| NO_REASON.to_owned()),
             });
         }
         card.column = column(card.state, &card.waits);

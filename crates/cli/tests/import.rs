@@ -211,3 +211,95 @@ fn health_baseline_reads_a_bundle_and_numbers_reads_the_database() {
     assert_eq!(data["avoidable_per_outcome"]["value"], Value::Null);
     assert_eq!(data["avoidable_per_outcome"]["sample"], 0);
 }
+
+/// A bundle whose one open card is blocked on cards that are already closed.
+fn write_blocked_bundle(dir: &Path, depends_on: &[&str]) {
+    let projects = json!([{"id": "beta", "repo": "example/beta", "remote": null,
+                           "default_branch": "main", "delivery": "no-mistakes", "capacity": 2, "added": "2026-09-01"}])
+    .to_string();
+    let mut rows = vec![
+        json!({"id": "beta-dep", "project": "beta", "title": "Land the first page", "column": "done",
+               "kind": "ship", "priority": 1, "since": "2026-10-01", "hold": null,
+               "pr": null, "runs": [], "depends_on": [],
+               "category": null, "size": null, "done": {"outcome": "merged", "at": "2026-10-02"}, "body": []}),
+        json!({"id": "beta-open", "project": "beta", "title": "Open dependency", "column": "queued",
+               "kind": "ship", "priority": 1, "since": "2026-10-01", "hold": null,
+               "pr": null, "runs": [], "depends_on": [],
+               "category": null, "size": null, "done": null, "body": []}),
+    ];
+    rows.push(json!({"id": "beta-held", "project": "beta", "title": "Held for quota", "column": "queued",
+               "kind": "ship", "priority": 1, "since": "2026-10-03",
+               "hold": {"kind": "blocked", "until": null, "reason": "Held for quota: start after the reset."},
+               "pr": null, "runs": [], "depends_on": depends_on,
+               "category": null, "size": null, "done": null, "body": []}));
+    let cards = rows
+        .iter()
+        .map(|row| format!("{row}\n"))
+        .collect::<String>();
+    std::fs::write(dir.join("projects.json"), &projects).unwrap();
+    std::fs::write(dir.join("cards.jsonl"), &cards).unwrap();
+    std::fs::write(dir.join("memory.jsonl"), "").unwrap();
+    let manifest = json!({
+        "schema": "tiller-import/v1", "mode": "dry", "host_label": "host-a",
+        "generated_at": "2026-11-01T21:05:00+00:00",
+        "counts": {"projects": 1, "cards": 3, "inflight": 0, "memory": 0},
+        "files": {"projects.json": sha256(&projects), "cards.jsonl": sha256(&cards), "memory.jsonl": sha256("")},
+    });
+    std::fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
+}
+
+fn waits_of(plan: &Value, legacy_id: &str) -> Value {
+    plan["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["legacy_id"] == legacy_id)
+        .unwrap_or_else(|| panic!("no card {legacy_id} in {plan}"))
+        .clone()
+}
+
+#[test]
+fn a_blocked_hold_whose_dependencies_already_closed_keeps_its_reason() {
+    let world = World::initialized();
+    let bundle = world.dir.path().join("bundle");
+    std::fs::create_dir_all(&bundle).unwrap();
+    write_blocked_bundle(&bundle, &["beta-dep"]);
+    let path = bundle.to_str().unwrap();
+
+    let dry = world.must(&["import", path, "--dry-run"]);
+    let held = waits_of(dry.data(), "beta-held");
+    assert_eq!(held["column"], "needs_you", "{held}");
+    assert!(
+        held.to_string()
+            .contains("Held for quota: start after the reset."),
+        "the reason vanished: {held}"
+    );
+
+    world.must(&["import", path]);
+    let shown = world.must(&["card", "show", "beta-3"]);
+    assert!(
+        shown
+            .json
+            .to_string()
+            .contains("Held for quota: start after the reset."),
+        "{}",
+        shown.json
+    );
+}
+
+#[test]
+fn a_blocked_hold_with_an_open_dependency_stays_a_dependency() {
+    let world = World::initialized();
+    let bundle = world.dir.path().join("bundle");
+    std::fs::create_dir_all(&bundle).unwrap();
+    write_blocked_bundle(&bundle, &["beta-dep", "beta-open"]);
+    let path = bundle.to_str().unwrap();
+
+    let dry = world.must(&["import", path, "--dry-run"]);
+    let held = waits_of(dry.data(), "beta-held");
+    assert_ne!(held["column"], "needs_you", "{held}");
+    assert!(
+        !held.to_string().contains("start after the reset"),
+        "an open dependency should carry no hold: {held}"
+    );
+}

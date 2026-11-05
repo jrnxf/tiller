@@ -352,7 +352,7 @@ Reads have no side effects and are all trivially idempotent; they are listed aft
 | `tiller land <approval>` | `approval.execute`, `approval.finish` | daemon; run by the owner it asks the daemon to land and waits for the result (exit 7 when the daemon is down, or still not landed after 30 minutes, with the open land notices in `current`; the approval stays `accepted`), it never merges in its own process (`authority.md`, section 6) | natural up to `executing`; once the merge call is sent, a lost result is exit 8 and is never retried blind |
 | `tiller grant create <project> ...` / `revoke <grant>` | `grant.create` / `grant.revoke` (conditions in `authority.md`) | owner | keyed / natural |
 | `tiller away start --until <date> ...` / `end` | `away.start` / `away.end` (scope in `authority.md`) | owner | keyed / natural |
-| `tiller mem note [--contradicts <memory>]` / `propose` / `approve` | `mem.note` / `mem.propose` / `mem.decide` (`memory.md`) | fleet roles; `approve` owner only | keyed |
+| `tiller mem note [--contradicts <memory>]` / `propose` / `approve <id>... \| --class/--boundary/--project [--dry-run]` | `mem.note` / `mem.propose` / `mem.decide` (`memory.md`) | fleet roles; `approve` owner only | keyed |
 
 **Runs and agents**
 
