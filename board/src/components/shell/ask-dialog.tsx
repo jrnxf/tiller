@@ -129,7 +129,6 @@ function Picker({
                   }
                 }}
               />
-              <kbd className="ask-combo-key">A</kbd>
             </div>
             <Combobox.Empty className="ask-combo-empty">No project matches</Combobox.Empty>
             <Combobox.List className="ask-combo-list">

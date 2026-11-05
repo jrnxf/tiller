@@ -76,17 +76,10 @@
   color: var(--fg-4);
 }
 
-.ask-combo-key,
 .ask-combo-num {
   font-family: inherit;
   font-size: var(--fs-mini);
   color: var(--fg-3);
-}
-
-.ask-combo-key {
-  padding: 1px 6px;
-  border: 1px solid var(--line-2);
-  border-radius: var(--r6, var(--r8));
 }
 
 .ask-combo-num {
