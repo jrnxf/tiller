@@ -52,6 +52,7 @@ pub mod pass;
 pub mod recovery;
 pub mod sources;
 pub mod thresholds;
+pub mod tools;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;

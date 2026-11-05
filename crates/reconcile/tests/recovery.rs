@@ -1049,6 +1049,47 @@ fn worktree_gone_with_active_run_opens_recovery() {
     );
 }
 
+/// R01, P43: a `no-mistakes` daemon on another version than its CLI writes
+/// `host.degraded`, and an hour later one `recovery` item on `fleet-1`; the
+/// fix is the owner's, so nothing else happens. When the skew clears, the
+/// check recovers.
+#[test]
+fn tool_version_skew_degrades_the_host_and_opens_recovery_after_an_hour() {
+    let mut w = World::new();
+    w.worker("w2:p1");
+    w.place();
+    let skew = "the no-mistakes daemon is v1.84.0, older than its CLI v1.106.1; \
+                restart it with: no-mistakes daemon restart";
+    w.readings.set(HostReadings {
+        version_skew: Some(skew.into()),
+        ..HostReadings::default()
+    });
+    let t0 = now();
+    w.pass(t0);
+    assert_eq!(
+        w.count("SELECT count(*) FROM events WHERE kind = 'host.degraded' AND json_extract(payload, '$.check') = 'tool_versions'"),
+        1
+    );
+    w.pass(t0.plus_minutes(30));
+    assert!(w.open_items(&w.health_card()).is_empty());
+    w.pass(t0.plus_minutes(61));
+    let items = w.open_items(&w.health_card());
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert!(
+        items[0].question.contains("no-mistakes daemon restart"),
+        "{}",
+        items[0].question
+    );
+    w.pass(t0.plus_minutes(66));
+    assert_eq!(w.open_items(&w.health_card()).len(), 1, "once");
+    w.readings.set(HostReadings::default());
+    w.pass(t0.plus_minutes(71));
+    assert_eq!(
+        w.count("SELECT count(*) FROM events WHERE kind = 'host.recovered' AND json_extract(payload, '$.check') = 'tool_versions'"),
+        1
+    );
+}
+
 /// R16: a floor breached for half an hour goes to the developer on
 /// `fleet-1`, once, with the consumers; nothing is killed or deleted.
 #[test]

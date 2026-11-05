@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use tiller_agents::control::{self, Waits};
 use tiller_agents::intake::{HostConfig, IntakeSource};
@@ -28,6 +28,7 @@ use tiller_reconcile::git::GitScanner;
 use tiller_reconcile::sources::{
     Forge, HerdrLauncher, HerdrStatusProbe, HostReadings, NoHarness, Readings,
 };
+use tiller_reconcile::tools;
 use tiller_reconcile::{Config as ReconcileConfig, Reconciler, Sources};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -86,6 +87,9 @@ pub struct Tools {
     pub quota: Vec<OsString>,
     /// The GitHub CLI program.
     pub gh: String,
+    /// The tool versions `GET /api/v1/health` serves: read once at start
+    /// and again by the host check every five minutes (P43).
+    pub versions: Arc<Mutex<serde_json::Value>>,
 }
 
 /// The host's boot id, when the OS reports one (R04).
@@ -129,18 +133,65 @@ impl Source for Reconcile {
     }
 }
 
-/// Free RAM and disk read live for the host check (R01, R16).
+/// How long a read of the tool versions stands: the host check runs with
+/// every reconcile pass, and each version read starts several processes
+/// (`recovery.md` R01).
+const VERSIONS_EVERY: Duration = Duration::from_secs(300);
+
+/// Free RAM and disk read live for the host check (R01, R16), and the tool
+/// versions every five minutes (P43). The versions also fill
+/// `tools.versions`, which `GET /api/v1/health` serves.
 struct LiveReadings {
     home: PathBuf,
+    tools: Tools,
+    last: Mutex<Option<(Instant, tools::Versions)>>,
+}
+
+impl LiveReadings {
+    fn versions(&self) -> tools::Versions {
+        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((at, versions)) = last.as_ref()
+            && at.elapsed() < VERSIONS_EVERY
+        {
+            return versions.clone();
+        }
+        let versions = read_tool_versions(&self.tools);
+        *self
+            .tools
+            .versions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = versions.tools.clone();
+        *last = Some((Instant::now(), versions.clone()));
+        versions
+    }
+}
+
+/// Every tool Health lists, read now.
+pub fn read_tool_versions(tools: &Tools) -> tools::Versions {
+    let mut versions = tools::read_all(
+        &tools::Programs::standard(tools.quota.clone()),
+        tools::ps_args,
+    );
+    let herdr = tools
+        .herdr
+        .snapshot()
+        .ok()
+        .and_then(|snapshot| snapshot.version);
+    if let Some(object) = versions.tools.as_object_mut() {
+        object.insert("herdr".to_owned(), herdr.into());
+        object.insert("skew".to_owned(), versions.skew.clone().into());
+    }
+    versions
 }
 
 impl Readings for LiveReadings {
     fn read(&self) -> HostReadings {
+        let versions = self.versions();
         HostReadings {
             ram_free_mb: readings::ram_free_mb(),
             disk_free_mb: readings::disk_free_mb(&self.home),
-            version_skew: None,
-            versions: serde_json::json!({"tiller": env!("CARGO_PKG_VERSION")}),
+            version_skew: versions.skew,
+            versions: versions.tools,
         }
     }
 }
@@ -549,6 +600,8 @@ pub fn start(
         })),
         readings: Box::new(LiveReadings {
             home: home.to_owned(),
+            tools: tools.clone(),
+            last: Mutex::new(None),
         }),
         harness: Box::new(NoHarness),
     };
