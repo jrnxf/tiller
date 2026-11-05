@@ -413,7 +413,12 @@ pub(crate) fn config_file(app: &App) -> std::path::PathBuf {
 }
 
 pub fn load_config(app: &App) -> Result<toml::Table, Failure> {
-    match std::fs::read_to_string(config_file(app)) {
+    load_config_at(&config_file(app))
+}
+
+/// [`load_config`] for a `config.toml` path; a missing file is an empty table.
+pub fn load_config_at(path: &Path) -> Result<toml::Table, Failure> {
+    match std::fs::read_to_string(path) {
         Ok(text) => text.parse::<toml::Table>().map_err(|error| {
             Failure::new(
                 "internal",

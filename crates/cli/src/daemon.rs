@@ -1,6 +1,6 @@
 //! `tiller daemon`: runs `tiller-daemon` with this host's tools. herdr is the
 //! one `tiller spawn` drives: `spawn.herdr` and `spawn.herdr_socket` from
-//! `config.toml`. The helper programs can be replaced for tests and labs:
+//! `config.toml`, read again whenever that file changes. The helper programs can be replaced for tests and labs:
 //! `TILLER_HERDR`, `TILLER_QUOTA_AXI` and `TILLER_SSH` each hold a command
 //! line (a program and its leading arguments, split on whitespace), and
 //! `TILLER_GH` names the GitHub CLI program the land loop and the direct-pr
@@ -17,9 +17,10 @@ use std::sync::Arc;
 use serde::Deserialize;
 use tiller_daemon::assets::Assets;
 use tiller_daemon::{Config, Ended};
+use tiller_herdr::client::Cli;
 use tiller_herdr::front::{MacApp, Terminal};
 
-use crate::cmd::admin::load_config;
+use crate::cmd::admin::{load_config, load_config_at};
 use crate::cmd::spawn::herdr_from_config;
 
 #[derive(clap::Args)]
@@ -77,6 +78,41 @@ fn configured_terminal(table: &toml::Table) -> anyhow::Result<Option<MacApp>> {
     }))
 }
 
+/// `initial` made to follow `config.toml`: every herdr call names the
+/// `[spawn]` herdr as the file reads now, so editing `spawn.herdr`,
+/// `spawn.herdr_session` or `spawn.herdr_socket` needs no daemon restart. A
+/// file that no longer parses keeps the last herdr that did (one warning per
+/// edit): the start refuses a bad table, a running daemon must not go blind
+/// on a half-written one. `TILLER_HERDR` still replaces the table.
+fn follow_config(initial: Cli, config: std::path::PathBuf) -> Cli {
+    type Stamp = Option<(std::time::SystemTime, u64)>;
+    let stamp = |path: &std::path::Path| -> Stamp {
+        let meta = std::fs::metadata(path).ok()?;
+        Some((meta.modified().ok()?, meta.len()))
+    };
+    let seen = std::sync::Mutex::new((stamp(&config), initial.clone()));
+    initial.follow(move || {
+        let mut seen = seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = stamp(&config);
+        if now != seen.0 {
+            seen.0 = now;
+            match load_config_at(&config).and_then(|table| herdr_from_config(&table)) {
+                Ok(herdr) => {
+                    tracing::info!("config.toml changed; driving the herdr it names now");
+                    seen.1 = herdr;
+                }
+                Err(failure) => tracing::warn!(
+                    "config.toml [spawn] cannot be read ({}); keeping the herdr in use",
+                    failure.message
+                ),
+            }
+        }
+        seen.1.clone()
+    })
+}
+
 /// The exit code for a database newer than this binary (`recovery.md` R11).
 const NEWER_SCHEMA: u8 = 3;
 
@@ -100,6 +136,7 @@ pub fn run(args: &Args) -> anyhow::Result<ExitCode> {
     };
     let table = load_config(&app).map_err(failed)?;
     let herdr = herdr_from_config(&table).map_err(failed)?;
+    let herdr = follow_config(herdr, crate::cmd::admin::config_file(&app));
     let mut terminal = configured_terminal(&table)?;
     if !cfg!(target_os = "macos")
         && let Some(ignored) = terminal.take()

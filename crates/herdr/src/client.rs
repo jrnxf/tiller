@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -131,6 +131,17 @@ pub struct Cli {
     machine: Option<String>,
     socket: Option<PathBuf>,
     timeout: Duration,
+    follow: Option<Follow>,
+}
+
+/// Where a long-lived [`Cli`] looks up the herdr it drives on every call.
+#[derive(Clone)]
+struct Follow(Arc<dyn Fn() -> Cli + Send + Sync>);
+
+impl std::fmt::Debug for Follow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Follow")
+    }
 }
 
 impl Default for Cli {
@@ -141,6 +152,7 @@ impl Default for Cli {
             machine: None,
             socket: None,
             timeout: Duration::from_secs(10),
+            follow: None,
         }
     }
 }
@@ -190,6 +202,26 @@ impl Cli {
         self
     }
 
+    /// Takes the program, session and socket from `source` on every call, so
+    /// a long-lived holder (the daemon) follows a changed setting without a
+    /// restart. The saved machine and the timeout stay this CLI's own.
+    pub fn follow(mut self, source: impl Fn() -> Cli + Send + Sync + 'static) -> Self {
+        self.follow = Some(Follow(Arc::new(source)));
+        self
+    }
+
+    /// The CLI this call drives: `self`, or what the followed source names now.
+    fn current(&self) -> std::borrow::Cow<'_, Cli> {
+        let Some(Follow(source)) = &self.follow else {
+            return std::borrow::Cow::Borrowed(self);
+        };
+        let mut live = source();
+        live.machine.clone_from(&self.machine);
+        live.timeout = self.timeout;
+        live.follow = None;
+        std::borrow::Cow::Owned(live)
+    }
+
     /// Focuses an agent's pane in the herdr client (`herdr agent focus`),
     /// on the saved machine first for a remote agent. The board's "Open in
     /// herdr" button calls this through the daemon.
@@ -213,11 +245,13 @@ impl Cli {
     /// app with its own `PATH` still finds it, then `--session` for a named
     /// session.
     pub fn attach_command(&self) -> Vec<OsString> {
-        let (program, leading) = self.program_words();
+        let this = self.current();
+        let this = this.as_ref();
+        let (program, leading) = this.program_words();
         let program = on_path(&program).map_or(program, PathBuf::into_os_string);
         let mut command = vec![program];
         command.extend(leading.iter().cloned());
-        if let Some(session) = &self.session {
+        if let Some(session) = &this.session {
             command.push("--session".into());
             command.push(session.into());
         }
@@ -234,14 +268,15 @@ impl Cli {
     }
 
     fn command(&self, args: &[&str]) -> Command {
-        let (program, leading) = self.program_words();
+        let this = self.current();
+        let (program, leading) = this.program_words();
         let mut command = Command::new(program);
         command.args(leading);
-        if let Some(machine) = &self.machine {
+        if let Some(machine) = &this.machine {
             command.arg("--machine").arg(machine);
         }
         command.args(args);
-        if let Some(session) = &self.session {
+        if let Some(session) = &this.session {
             command.arg("--session").arg(session);
         }
         command
@@ -332,14 +367,15 @@ impl Cli {
 
     /// Sends one request to the API socket.
     fn socket_call(&self, method: &'static str, params: Value) -> Result<Value> {
-        let path = self.socket.as_ref().ok_or(HerdrError::NoSocket(method))?;
+        let this = self.current();
+        let path = this.socket.as_ref().ok_or(HerdrError::NoSocket(method))?;
         let unreachable = |e: std::io::Error| HerdrError::Unreachable(format!("{method}: {e}"));
         let mut stream = UnixStream::connect(path).map_err(unreachable)?;
         stream
-            .set_read_timeout(Some(self.timeout))
+            .set_read_timeout(Some(this.timeout))
             .map_err(unreachable)?;
         stream
-            .set_write_timeout(Some(self.timeout))
+            .set_write_timeout(Some(this.timeout))
             .map_err(unreachable)?;
         let request = json!({"id": format!("tiller:{method}"), "method": method, "params": params});
         stream

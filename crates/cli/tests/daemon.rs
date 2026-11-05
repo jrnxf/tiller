@@ -335,6 +335,71 @@ fn the_daemon_drives_the_herdr_spawn_names() {
     assert!(first.starts_with("lab "), "{seen}");
 }
 
+/// A herdr stand-in that records its arguments, led by `name`.
+fn recording_herdr(world: &World, name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let calls = world.dir.path().join(format!("{name}-calls"));
+    let herdr = world.dir.path().join(name);
+    std::fs::write(
+        &herdr,
+        format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 1\n", calls.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&herdr, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (herdr, calls)
+}
+
+fn wait_for_file(path: &std::path::Path) -> bool {
+    let deadline = Instant::now() + WAIT;
+    while !path.exists() {
+        if Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+#[test]
+fn the_daemon_follows_a_changed_spawn_herdr_without_a_restart() {
+    let world = World::initialized();
+    let (first, first_calls) = recording_herdr(&world, "first");
+    let (second, second_calls) = recording_herdr(&world, "second");
+    let set = |herdr: &std::path::Path| {
+        world.must(&[
+            "config",
+            "set",
+            "spawn.herdr",
+            &format!("[\"{}\"]", herdr.display()),
+        ]);
+    };
+    set(&first);
+    let child = daemon_command(&world)
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut daemon = Daemon { child, port: 0 };
+    assert!(
+        wait_for_file(&first_calls),
+        "the daemon never ran spawn.herdr"
+    );
+
+    set(&second);
+    let followed = wait_for_file(&second_calls);
+    // A half-written table keeps the herdr in use rather than blinding the
+    // daemon.
+    std::fs::write(world.home().join("config.toml"), "[spawn\n").unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(
+        daemon.child.try_wait().unwrap().is_none(),
+        "the daemon died"
+    );
+    assert!(terminate(&mut daemon).success());
+    assert!(
+        followed,
+        "the daemon kept driving the herdr it started with"
+    );
+}
+
 #[test]
 fn the_daemon_reads_only_spawn_and_needs_its_herdr() {
     let world = World::initialized();

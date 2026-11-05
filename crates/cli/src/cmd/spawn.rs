@@ -105,6 +105,16 @@ fn herdr_cli(paths: &Paths) -> Cli {
     }
 }
 
+/// The herdr every command and the daemon drive: `TILLER_HERDR` when set
+/// (tests and labs; the program only, socket and all replaced), else
+/// `spawn.herdr` with `spawn.herdr_socket`.
+pub fn resolve_herdr(paths: &Paths) -> Cli {
+    match crate::daemon::env_command("TILLER_HERDR") {
+        Some(program) => Cli::local().program(program),
+        None => herdr_cli(paths),
+    }
+}
+
 /// The herdr command the daemon, `tiller peer serve` and `tiller doctor`
 /// reach: `TILLER_HERDR` when set (tests and labs), else `spawn.herdr`.
 pub fn herdr_program(paths: &Paths) -> Vec<OsString> {
@@ -121,16 +131,13 @@ pub fn configured_herdr(app: &App) -> Result<Cli, Failure> {
 /// [`configured_herdr`] from a `config.toml` already read.
 pub fn herdr_from_config(table: &toml::Table) -> Result<Cli, Failure> {
     let paths = Paths::from_table(table).map_err(failure)?;
-    Ok(match crate::daemon::env_command("TILLER_HERDR") {
-        Some(program) => Cli::local().program(program),
-        None => herdr_cli(&paths),
-    })
+    Ok(resolve_herdr(&paths))
 }
 
 impl Tools {
     pub fn load(app: &App) -> Result<Self, Failure> {
         let config = SpawnConfig::from_table(&load_config(app)?).map_err(failure)?;
-        let herdr = herdr_cli(&config.spawn);
+        let herdr = resolve_herdr(&config.spawn);
         let scratch = match &config.spawn.scratch_root {
             Some(root) => root.clone(),
             None => state_dir("spawn.scratch_root")?.join("runs"),
