@@ -102,7 +102,7 @@ fn dry_run_prints_the_plan_then_import_writes_it_once() {
         cards,
         [
             ("beta-one", "beta-1", "done"),
-            ("beta-two", "beta-2", "needs_you")
+            ("beta-two", "beta-2", "queued")
         ]
     );
     assert_eq!(
@@ -268,7 +268,15 @@ fn a_blocked_hold_whose_dependencies_already_closed_keeps_its_reason() {
 
     let dry = world.must(&["import", path, "--dry-run"]);
     let held = waits_of(dry.data(), "beta-held");
-    assert_eq!(held["column"], "needs_you", "{held}");
+    assert_eq!(held["column"], "queued", "{held}");
+    assert!(
+        held["waits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["as"] == "attention"),
+        "the hold should ask the owner: {held}"
+    );
     assert!(
         held.to_string()
             .contains("Held for quota: start after the reset."),
@@ -297,7 +305,14 @@ fn a_blocked_hold_with_an_open_dependency_stays_a_dependency() {
 
     let dry = world.must(&["import", path, "--dry-run"]);
     let held = waits_of(dry.data(), "beta-held");
-    assert_ne!(held["column"], "needs_you", "{held}");
+    assert!(
+        held["waits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|w| w["as"] != "attention"),
+        "an open dependency should not ask the owner: {held}"
+    );
     assert!(
         !held.to_string().contains("start after the reset"),
         "an open dependency should carry no hold: {held}"

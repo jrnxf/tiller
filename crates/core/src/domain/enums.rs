@@ -409,12 +409,12 @@ text_enum!(
 );
 
 text_enum!(
-    /// The board column a card is in (`state.md` section 6). Never stored.
+    /// The board column a card is in (`state.md` section 6): how far its
+    /// work has come. Never stored.
     Column {
         Asked = "asked",
         Queued = "queued",
         Working = "working",
-        NeedsYou = "needs_you",
         Landing = "landing",
         Done = "done",
     }

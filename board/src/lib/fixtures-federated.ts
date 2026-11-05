@@ -18,6 +18,14 @@ import type {
   SnapshotPeer,
 } from "./api-types.ts";
 
+// What the worker of a card at work is doing: a permission prompt holds it,
+// and a card that waits on the owner some other way, or sits idle, has an idle
+// worker.
+export function workerActivity(row: BoardRow): string {
+  if (row.badge === "permission_prompt") return "waiting_permission";
+  return row.needs_you || row.badge === "idle" ? "idle" : "working";
+}
+
 interface PeerSpec {
   host: string;
   host_id: string;
@@ -164,6 +172,8 @@ function peerCard(
     priority: 2,
     column,
     badge,
+    // Every peer card that waits on the owner here waits on a decision.
+    needs_you: badge === "decision",
     parked_until: null,
     parked_reason: null,
     blocked_by: null,
@@ -182,7 +192,7 @@ export function peerRows(now: number): BoardRow[] {
       "host-d",
       12,
       "gamma",
-      "needs_you",
+      "working",
       "decision",
       "Rotate the signing key",
       {
@@ -247,7 +257,7 @@ export function peerRows(now: number): BoardRow[] {
       "host-e",
       6,
       "ledger",
-      "needs_you",
+      "working",
       "decision",
       "Pick the rounding rule",
       {
@@ -274,7 +284,7 @@ export function peerRows(now: number): BoardRow[] {
       "host-f",
       3,
       "atlas",
-      "needs_you",
+      "working",
       "decision",
       "Choose the tile size",
       {
@@ -416,7 +426,7 @@ export function peerAgents(now: number, rows: BoardRow[], projects: Project[]): 
       (row) =>
         row.host === host &&
         row.project_id === project.id &&
-        (row.column === "working" || row.column === "landing" || row.column === "needs_you"),
+        (row.column === "working" || row.column === "landing"),
     );
     const base = {
       host_id: spec(host).host_id,
@@ -435,7 +445,7 @@ export function peerAgents(now: number, rows: BoardRow[], projects: Project[]): 
         session_id: peerSession(`PW${host}${row.display_id}`),
         role: row.kind === "scout" ? "scout" : "build",
         model: row.model ?? "sonnet",
-        activity: row.column === "needs_you" ? "waiting_permission" : "working",
+        activity: workerActivity(row),
         activity_observed_at: at(now, (spec(host).frameMinutes ?? 1) + workerIndex / 10),
         last_status_line: `Running tests for ${row.display_id}`,
         herdr_name: `${row.display_id}-build`,

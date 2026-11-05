@@ -5,8 +5,9 @@ import { cardDot } from "./activity";
 import type { DotKind } from "./activity";
 import { ownerOf, shownId } from "../../lib/peers";
 import { Ago } from "./ago";
-import { badgeText, badgeTone, statusMark } from "./badge";
+import { badgeText, badgeTone, isPending, statusMark } from "./badge";
 import { cardNumber } from "./format";
+import { Glide } from "./glide";
 import { AsOf, HostChip } from "./host-chip";
 import { HelpIcon, PrIcon, Status } from "./icons";
 import { useAmbiguousIds, useStanding } from "./peer-state";
@@ -63,7 +64,6 @@ export function ownerSearch(row: BoardRow) {
 function CardTile({ row, lane }: { row: BoardRow; lane: LaneHealth["kind"] }) {
   const dot = laneDot(cardDot(row), lane);
   const tone = badgeTone(row);
-  const attention = row.column === "needs_you";
   const standing = useStanding(row);
   const id = shownId(row, useAmbiguousIds());
   const owner = ownerOf(row);
@@ -74,7 +74,8 @@ function CardTile({ row, lane }: { row: BoardRow; lane: LaneHealth["kind"] }) {
       to="/"
       search={(prev) => ({ ...prev, card: row.id, owner })}
       className={`card${lane === "disconnected" || standing.dim ? " dim" : ""}`}
-      data-attn={attention}
+      data-attn={row.needs_you}
+      data-pending={isPending(row)}
       aria-current={selected ? "true" : undefined}
       data-peer-state={standing.peer ? (standing.dim ? "stale" : "live") : undefined}
       title={`${id}: ${row.title}`}
@@ -132,7 +133,13 @@ function AskTile({ ask }: { ask: NonNullable<Tile["ask"]> }) {
 }
 
 export function TileView({ tile, lane = "ok" }: { tile: Tile; lane?: LaneHealth["kind"] }) {
-  if (tile.row) return <CardTile row={tile.row} lane={lane} />;
+  if (tile.row) {
+    return (
+      <Glide row={tile.row}>
+        <CardTile row={tile.row} lane={lane} />
+      </Glide>
+    );
+  }
   if (tile.ask) return <AskTile ask={tile.ask} />;
   return null;
 }
@@ -140,13 +147,15 @@ export function TileView({ tile, lane = "ok" }: { tile: Tile; lane?: LaneHealth[
 // In the folded Done column a card shrinks to its number.
 export function MiniTile({ row }: { row: BoardRow }) {
   return (
-    <Link
-      to="/"
-      search={(prev) => ({ ...prev, card: row.id, owner: ownerOf(row) })}
-      className="mini-card"
-      title={`${row.host && row.link ? `${row.host} \u00b7 ` : ""}${row.display_id}: ${row.title}`}
-    >
-      {cardNumber(row.display_id)}
-    </Link>
+    <Glide row={row}>
+      <Link
+        to="/"
+        search={(prev) => ({ ...prev, card: row.id, owner: ownerOf(row) })}
+        className="mini-card"
+        title={`${row.host && row.link ? `${row.host} \u00b7 ` : ""}${row.display_id}: ${row.title}`}
+      >
+        {cardNumber(row.display_id)}
+      </Link>
+    </Glide>
   );
 }

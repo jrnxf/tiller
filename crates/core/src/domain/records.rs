@@ -500,6 +500,10 @@ pub struct CardColumn {
     pub kind: CardKind,
     pub column: Column,
     pub badge: String,
+    /// The card waits on the owner: an open attention item, or a session on
+    /// a permission prompt. It stays in its column; the Needs you filter
+    /// keeps it.
+    pub needs_you: bool,
     pub parked_until: Option<Timestamp>,
     pub parked_reason: Option<String>,
     pub blocked_by: Option<String>,
@@ -515,6 +519,7 @@ impl CardColumn {
             kind: row.get("kind")?,
             column: row.get("column")?,
             badge: row.get("badge")?,
+            needs_you: row.get("needs_you")?,
             parked_until: row.get("parked_until")?,
             parked_reason: row.get("parked_reason")?,
             blocked_by: row.get("blocked_by")?,

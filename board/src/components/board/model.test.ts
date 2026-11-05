@@ -4,7 +4,13 @@ import type { BoardResponse, BoardRow } from "../../lib/api-types";
 import { badgeText, badgeTone, statusMark } from "./badge";
 import { countsByFilter, onHost, openCount, parseFilter, passesFilter, tilesOf } from "./model";
 
-function row(id: string, column: BoardRow["column"], badge: string, host = "h1"): BoardRow {
+function row(
+  id: string,
+  column: BoardRow["column"],
+  badge: string,
+  host = "h1",
+  needsYou = false,
+): BoardRow {
   return {
     id,
     display_id: id,
@@ -14,6 +20,7 @@ function row(id: string, column: BoardRow["column"], badge: string, host = "h1")
     title: id,
     column,
     badge,
+    needs_you: needsYou,
     parked_until: null,
     parked_reason: null,
     blocked_by: null,
@@ -27,7 +34,7 @@ const board: BoardResponse = {
   rows: [
     row("a-1", "queued", "filed"),
     row("a-2", "working", "working"),
-    row("a-3", "needs_you", "decision", "h2"),
+    row("a-3", "working", "decision", "h2", true),
     row("a-4", "done", "landed"),
   ],
   asked: [{ id: "ask-1", project_id: "alpha", session_id: null, received_at: "x", age_seconds: 5 }],
@@ -74,7 +81,7 @@ test("badges say what the card_column view computed, and parked and blocked say 
   expect(badgeText({ ...row("x", "queued", "blocked"), blocked_by: "alpha-3" })).toBe(
     "Blocked by alpha-3",
   );
-  expect(badgeText(row("x", "needs_you", "permission_prompt"))).toBe("Permission prompt");
+  expect(badgeText(row("x", "working", "permission_prompt", "h1", true))).toBe("Permission prompt");
   expect(badgeText(row("x", "working", "brand_new_state"))).toBe("brand new state");
 });
 
@@ -84,7 +91,9 @@ test("the mark and tone follow the column, with failures marked as such", () => 
   expect(statusMark(row("x", "done", "landed"))).toBe("done");
   expect(statusMark(row("x", "queued", "parked"))).toBe("parked");
   expect(statusMark(row("x", "queued", "filed"))).toBe("queued");
-  expect(badgeTone(row("x", "needs_you", "decision"))).toBe("warn");
+  expect(badgeTone(row("x", "landing", "merge", "h1", true))).toBe("warn");
+  expect(badgeTone(row("x", "landing", "ready"))).toBe("pend");
+  expect(badgeTone(row("x", "working", "between_runs"))).toBe("pend");
   expect(badgeTone(row("x", "working", "errored"))).toBe("bad");
   expect(badgeTone(row("x", "working", "stale"))).toBe("yel");
 });

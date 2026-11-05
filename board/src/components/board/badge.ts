@@ -10,8 +10,9 @@ const LABELS: Record<string, string> = {
   report: "Report",
   permission_prompt: "Permission prompt",
   checks: "Checks running",
+  checks_next: "Checks next",
   checks_failed: "Checks failed",
-  ready: "Ready to merge",
+  ready: "Approval next",
   merging: "Merging",
   deploying: "Deploying",
   errored: "Errored",
@@ -41,10 +42,21 @@ export function badgeText(row: BoardRow): string {
 
 // How the chip is tinted: a person must act (warn), something looks wrong
 // (yel for quiet or unknown, bad for errors), or it is just a fact (ghost).
-export type BadgeTone = "warn" | "yel" | "bad" | "ghost" | "ok";
+// A card between the steps of its work (pend) keeps its place and says what
+// comes next.
+export type BadgeTone = "warn" | "yel" | "bad" | "ghost" | "ok" | "pend";
+
+// The badges of a card between steps: no run is active and the next step has
+// not started (state.md, section 6).
+const PENDING = new Set(["between_runs", "checks_next", "ready"]);
+
+export function isPending(row: BoardRow): boolean {
+  return !row.needs_you && PENDING.has(row.badge);
+}
 
 export function badgeTone(row: BoardRow): BadgeTone {
-  if (row.column === "needs_you") return "warn";
+  if (row.needs_you) return "warn";
+  if (isPending(row)) return "pend";
   switch (row.badge) {
     case "errored":
     case "failed":

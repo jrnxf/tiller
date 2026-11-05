@@ -723,9 +723,10 @@ fn plan_card(
 const NO_REASON: &str = "Firstmate had this card waiting on the owner with no recorded reason; answer it or close the card.";
 
 /// The `card_column` value the card derives once written: no run is
-/// imported, so an open card is Needs you when it has a question, Queued
-/// when it is parked or blocked, Landing when it is a ship card this import
-/// links an open PR to, and Queued otherwise.
+/// imported, so an open card is Queued when it is parked or blocked, Landing
+/// when it is a ship card this import links an open PR to, and Queued
+/// otherwise. A question does not change the column: the card waits on the
+/// owner where it is.
 fn column(state: CardState, kind: CardKind, waits: &[Wait], pr: Option<&PrPlan>) -> String {
     let waiting = waits.iter().any(|w| {
         matches!(
@@ -743,8 +744,6 @@ fn column(state: CardState, kind: CardKind, waits: &[Wait], pr: Option<&PrPlan>)
     });
     if state == CardState::Closed {
         "done"
-    } else if waits.iter().any(|w| matches!(w, Wait::Attention { .. })) {
-        "needs_you"
     } else if kind == CardKind::Ship && open_pr && !waiting {
         "landing"
     } else {

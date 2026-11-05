@@ -5,6 +5,7 @@
 import type {
   AgentRow,
   AgentsResponse,
+  AttentionItem,
   AttentionResponse,
   BoardResponse,
   BoardRow,
@@ -33,6 +34,7 @@ import {
   peerProjects,
   peerRows,
   peerSnapshot,
+  workerActivity,
 } from "./fixtures-federated.ts";
 import { memoryResource } from "./fixtures-memory.ts";
 import { signalsFor } from "./fixtures-signals.ts";
@@ -356,7 +358,7 @@ function degradedRows(now: number): BoardRow[] {
     card(
       61,
       "delta",
-      "needs_you",
+      "working",
       "decision",
       "Choose the retention window",
       {
@@ -392,6 +394,18 @@ interface CardExtras {
   blockedBy?: string | null;
 }
 
+// The badges of a card that waits on the owner: an attention kind, or a
+// permission prompt (state.md, section 6).
+const WAITS_ON_OWNER = new Set<string>([
+  "decision",
+  "credential",
+  "merge",
+  "review",
+  "recovery",
+  "report",
+  "permission_prompt",
+] satisfies (AttentionItem["kind"] | "permission_prompt")[]);
+
 function card(
   n: number,
   project: string,
@@ -412,6 +426,7 @@ function card(
     priority: extras.priority ?? 2,
     column,
     badge,
+    needs_you: WAITS_ON_OWNER.has(badge),
     parked_until: null,
     parked_reason: extras.parkedReason ?? null,
     blocked_by: extras.blockedBy ?? null,
@@ -428,7 +443,7 @@ function defaultRows(now: number): BoardRow[] {
     card(
       41,
       "alpha",
-      "needs_you",
+      "working",
       "decision",
       "Pick the retry policy for the export job",
       {
@@ -467,7 +482,7 @@ function defaultRows(now: number): BoardRow[] {
     card(
       44,
       "alpha",
-      "needs_you",
+      "landing",
       "merge",
       "Retry failed exports with backoff",
       {
@@ -494,7 +509,7 @@ function defaultRows(now: number): BoardRow[] {
     card(
       12,
       "gamma",
-      "needs_you",
+      "working",
       "permission_prompt",
       "Renew the deploy certificate",
       {
@@ -533,17 +548,18 @@ const BUSY_TITLES = [
 ];
 
 // 4 projects with 10 cards each, spread the way a busy week looks: two queued,
-// two working, one waiting on the owner, one landing and four recently done.
+// three working (one between runs, one waiting on the owner), two landing (one
+// with its approval next) and three recently done.
 function busyRows(now: number): BoardRow[] {
   const rows: BoardRow[] = [];
   const plan: [BoardRow["column"], string][] = [
     ["queued", "filed"],
     ["queued", "parked"],
     ["working", "working"],
-    ["working", "idle"],
-    ["needs_you", "decision"],
+    ["working", "between_runs"],
+    ["working", "decision"],
     ["landing", "checks"],
-    ["done", "landed"],
+    ["landing", "ready"],
     ["done", "landed"],
     ["done", "reported"],
     ["done", "completed"],
@@ -564,10 +580,7 @@ function busyRows(now: number): BoardRow[] {
             kind: index % 4 === 1 ? "scout" : "ship",
             model: index % 3 === 0 ? "opus" : index % 3 === 1 ? "sonnet" : "haiku",
             pr: column === "landing" || column === "done" ? 200 + n : null,
-            observedMinutes:
-              column === "working" || column === "landing" || column === "needs_you"
-                ? 0.1 + index / 10
-                : null,
+            observedMinutes: column === "working" || column === "landing" ? 0.1 + index / 10 : null,
             parkedReason: badge === "parked" ? "waiting for the release" : null,
           },
           now,
@@ -782,8 +795,7 @@ function workerFor(row: BoardRow, now: number, index: number): AgentRow {
     session_id: sessionId(`W${row.display_id}`),
     role,
     model: row.model ?? "sonnet",
-    activity:
-      row.column === "needs_you" ? "waiting_permission" : row.badge === "idle" ? "idle" : "working",
+    activity: workerActivity(row),
     activity_observed_at: minutes(now, stale ? -22 : -(0.1 + index / 10)),
     last_status_line: stale
       ? "Reading src/import/dry_run.rs"
@@ -828,7 +840,7 @@ function agentsFor(
         (row) =>
           !isPeerRow(row) &&
           row.project_id === project.id &&
-          (row.column === "working" || row.column === "landing" || row.column === "needs_you"),
+          (row.column === "working" || row.column === "landing"),
       );
       const host = live.find((row) => row.host_id)?.host_id ?? HOST_A;
       // `degraded`: beta's orchestrator last spoke 41 minutes ago.
@@ -918,7 +930,7 @@ function cardDetailFor(
   const row = board.rows.find((candidate) => candidate.id === cardId);
   if (!row) return null;
   const done = row.column === "done";
-  const active = row.column === "working" || row.column === "landing" || row.column === "needs_you";
+  const active = row.column === "working" || row.column === "landing";
   const role = row.kind === "scout" ? "scout" : "build";
   const sha = fakeSha(row.id);
   const prs: CardPr[] = row.pr_number
@@ -1008,7 +1020,7 @@ function cardDetailFor(
             note: null,
             session_id: sessionId(`W${row.display_id}`),
             host_id: row.host_id,
-            activity: row.column === "needs_you" ? "waiting_permission" : "working",
+            activity: workerActivity(row),
             activity_observed_at: row.observed_at ?? minutes(now, -1),
           },
         ]
@@ -1235,7 +1247,7 @@ function deletePreviewFor(
       cards: rows.length,
       runs: started.length,
       sessions: started.length + 1,
-      attention: rows.filter((row) => row.column === "needs_you").length,
+      attention: rows.filter((row) => row.needs_you).length,
       artifacts: started.length * 2,
       memories: 3,
       memory_revisions: 4,

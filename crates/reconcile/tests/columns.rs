@@ -4,16 +4,22 @@
 mod common;
 
 use common::*;
-use tiller_core::domain::{AnsweredVia, Checks, Column, PipelineState, RunOutcome, StatusState};
-use tiller_core::state::approvals::Decision;
-use tiller_core::state::runs::EndRun;
+use tiller_core::domain::{
+    AnsweredVia, ApprovalAction, ApprovalKind, AttentionKind, CardKind, Checks, Column, Delivery,
+    Effort, PipelineState, RunOutcome, RunRole, StatusState,
+};
+use tiller_core::state::approvals::{Decision, NewApproval};
+use tiller_core::state::attention::NewAttention;
+use tiller_core::state::cards::NewCard;
+use tiller_core::state::projects::NewProject;
+use tiller_core::state::runs::{EndRun, NewOrchestrator, NewRun, SpawnChecks};
 use tiller_reconcile::columns;
 use tiller_reconcile::thresholds::Thresholds;
 
 /// R13 (P08): a builder's word is never enough. "done" with no PR leaves
 /// the card in Working, `run.end landed` is refused, and the orchestrator
 /// is told; an open PR with pending checks is Landing; green checks with
-/// no approval is Needs you only once the merge item exists.
+/// no approval wait on the owner only once the merge item exists.
 #[test]
 fn ship_card_stays_working_without_pr() {
     let mut w = World::new();
@@ -231,8 +237,11 @@ fn board_groups_every_column_and_carries_thresholds() {
             .iter()
             .all(|c| c.project_id == "alpha")
     );
-    assert_eq!(columns::filter(Column::NeedsYou), "needs");
-    assert_eq!(columns::filter(Column::Working), "active");
+    let working = board.columns[&Column::Working]
+        .iter()
+        .find(|c| c.id == run.card_id)
+        .unwrap();
+    assert_eq!(columns::filter(working), "active");
 }
 
 /// A card moves forward only. A gated ship card whose builder ended
@@ -295,8 +304,15 @@ fn a_card_never_steps_back_to_queued_between_steps() {
         (Column::Working, "between_runs".into())
     );
 
+    // Asking for the merge keeps the card in Landing: it waits on the
+    // owner there, so it never moves left.
     let approval = w.approve(&worker, &pr, "a1a1a1a1", false);
-    assert_eq!(column(&w, &run.card_id).0, Column::NeedsYou);
+    let asked = columns::column(w.store(), &run.card_id).unwrap();
+    assert_eq!(
+        (asked.column, asked.badge.as_str(), asked.needs_you),
+        (Column::Landing, "merge", true)
+    );
+    assert_eq!(columns::filter(&asked), "needs");
     w.store_mut()
         .approval_decide(
             &owner(),
@@ -310,5 +326,145 @@ fn a_card_never_steps_back_to_queued_between_steps() {
             },
         )
         .unwrap();
-    assert_eq!(column(&w, &run.card_id).0, Column::Queued);
+    let back = columns::column(w.store(), &run.card_id).unwrap();
+    assert_eq!((back.column, back.needs_you), (Column::Queued, false));
+}
+
+/// A card that waits on the owner stays in the column its work has reached:
+/// a decision asked mid-run is Working, flagged for the Needs you filter,
+/// and answering it clears the flag without moving the card.
+#[test]
+fn a_card_that_needs_you_stays_in_its_column() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let run = w.run_of(&worker);
+    let item = w
+        .store_mut()
+        .attention_open(
+            &owner(),
+            None,
+            NewAttention {
+                card: run.card_id.clone(),
+                kind: AttentionKind::Decision,
+                question: "Retry on 502 or fail fast?".into(),
+                ..NewAttention::default()
+            },
+        )
+        .unwrap()
+        .value;
+    let waiting = columns::column(w.store(), &run.card_id).unwrap();
+    assert_eq!(
+        (waiting.column, waiting.badge.as_str(), waiting.needs_you),
+        (Column::Working, "decision", true)
+    );
+
+    w.store_mut()
+        .attention_answer(&owner(), None, &item.id, "retry", AnsweredVia::Board)
+        .unwrap();
+    let answered = columns::column(w.store(), &run.card_id).unwrap();
+    assert_eq!(
+        (answered.column, answered.needs_you),
+        (Column::Working, false)
+    );
+}
+
+/// A direct-push card has no PR, and its builder stays live until the push.
+/// While its `land_direct` approval waits, the card waits on the owner in
+/// Landing, like a ship card waiting on its merge, not in Working.
+#[test]
+fn a_direct_land_waits_in_landing() {
+    let mut w = World::new();
+    w.place();
+    w.store_mut()
+        .project_add(
+            &owner(),
+            NewProject {
+                id: "beta".into(),
+                name: "Beta".into(),
+                repo: Some("example/beta".into()),
+                remote: Some("https://example.com/beta.git".into()),
+                default_branch: None,
+                delivery: Delivery::DirectPush,
+                checks: None,
+                capacity: Some(2),
+                deploy_workflow: None,
+                deploy_environment: None,
+                deploy_timeout_minutes: None,
+            },
+        )
+        .unwrap();
+    let orchestrator = w
+        .store_mut()
+        .session_start(
+            &owner(),
+            NewOrchestrator {
+                project_id: "beta".into(),
+                pane_id: Some("w9:p1".into()),
+                claude_session_id: Some("claude-beta".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .value
+        .session
+        .id;
+    let card = w
+        .store_mut()
+        .card_create(
+            &owner(),
+            None,
+            NewCard {
+                project_id: "beta".into(),
+                kind: CardKind::Ship,
+                title: "direct".into(),
+                ..NewCard::default()
+            },
+            None,
+        )
+        .unwrap()
+        .value;
+    let run = w
+        .store_mut()
+        .run_start(
+            &session_ctx(&orchestrator),
+            None,
+            NewRun {
+                card: card.id.clone(),
+                role: RunRole::Builder,
+                model: "test-model".into(),
+                effort: Effort::Medium,
+                host_id: None,
+                worktree_path: Some("/home/user/worktrees/beta-1".into()),
+                branch: Some("fm/beta-1".into()),
+                base_branch: Some("main".into()),
+                base_sha: Some("base".into()),
+                config_hash: None,
+                checks: SpawnChecks::default(),
+            },
+        )
+        .unwrap()
+        .value
+        .run;
+    w.store_mut()
+        .approval_request(
+            &session_ctx(&orchestrator),
+            NewApproval {
+                kind: ApprovalKind::LandDirect,
+                card: card.id.clone(),
+                run_id: Some(run.id.clone()),
+                pr_id: None,
+                branch: Some("fm/beta-1".into()),
+                head_sha: "a1a1a1a1".into(),
+                action: ApprovalAction::Push,
+                memory_paths: None,
+                grant_id: None,
+            },
+        )
+        .unwrap();
+    let waiting = columns::column(w.store(), &card.id).unwrap();
+    assert_eq!(
+        (waiting.column, waiting.badge.as_str(), waiting.needs_you),
+        (Column::Landing, "merge", true)
+    );
 }

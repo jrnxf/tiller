@@ -24,9 +24,14 @@ pub struct BoardRow {
     pub title: String,
     /// 0 is the most urgent, 4 the least.
     pub priority: i64,
-    /// `needs_you`, `asked`, `working`, `landing`, `queued` or `done`.
+    /// `asked`, `queued`, `working`, `landing` or `done`: how far the card's
+    /// work has come.
     pub column: String,
     pub badge: String,
+    /// The card waits on the owner (an open attention item or a permission
+    /// prompt) in whatever column it is; the Needs you filter keeps it.
+    #[serde(default)]
+    pub needs_you: bool,
     pub parked_until: Option<String>,
     pub parked_reason: Option<String>,
     pub blocked_by: Option<String>,

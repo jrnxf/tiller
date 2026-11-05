@@ -509,7 +509,7 @@ export function Inbox({
         withdrawn: entry,
       })),
   ].filter((entry) => inScope(entry.item.card_id));
-  // Oldest first, as the Needs you column sorts (state.md, section 6).
+  // Oldest first: the item that has waited longest leads.
   decisions.sort((a, b) => a.item.opened_at.localeCompare(b.item.opened_at));
   const current = decisions.filter((entry) => entry.item.still_current || entry.answered !== null);
   const stale = decisions.filter((entry) => !entry.item.still_current && entry.answered === null);

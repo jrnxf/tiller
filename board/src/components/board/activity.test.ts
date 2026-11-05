@@ -48,14 +48,16 @@ test("without thresholds in the snapshot the defaults apply", () => {
   expect(agentActivity(agent("working", 16), NOW).dot).toBe("stale");
 });
 
-const row = (column: BoardRow["column"], badge: string) => ({ column, badge }) as BoardRow;
+const row = (column: BoardRow["column"], badge: string, needs_you = false) =>
+  ({ column, badge, needs_you }) as BoardRow;
 
 test("a card's dot follows its badge, and only live columns have one", () => {
   expect(cardDot(row("working", "working"))).toBe("live");
   expect(cardDot(row("working", "stale"))).toBe("stale");
   expect(cardDot(row("working", "errored"))).toBe("off");
   expect(cardDot(row("landing", "checks"))).toBe("live");
-  expect(cardDot(row("needs_you", "decision"))).toBe("waiting");
+  expect(cardDot(row("working", "decision", true))).toBe("waiting");
+  expect(cardDot(row("landing", "checks_next"))).toBe("idle");
   expect(cardDot(row("queued", "filed"))).toBeNull();
   expect(cardDot(row("done", "landed"))).toBeNull();
 });

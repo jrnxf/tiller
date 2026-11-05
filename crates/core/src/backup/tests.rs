@@ -189,15 +189,15 @@ fn restore_drill_recovers_acknowledged_card_with_pending_decision() {
     assert_eq!(pending.question, "Dark or light footer?");
     assert_eq!(pending.answered_at, None, "the decision is pending again");
     assert_eq!(pending.withdrawn_at, None);
-    let column: String = store
+    let column = store
         .conn()
         .query_row(
-            "SELECT \"column\" FROM card_column WHERE id = ?1",
+            "SELECT \"column\", needs_you FROM card_column WHERE id = ?1",
             [&card.id],
-            |row| row.get(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
         )
         .unwrap();
-    assert_eq!(column, "needs_you");
+    assert_eq!(column, ("queued".to_owned(), true));
 }
 
 #[test]

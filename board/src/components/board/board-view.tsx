@@ -15,6 +15,7 @@ import { boardLookStore, toggleDoneFolded } from "./board-prefs";
 import { ChevronLeftIcon, Status } from "./icons";
 import { laneHealth } from "../states/degraded";
 import { SECTION_RETRY_MS, SectionNote, failureReason } from "../states/section";
+import { useMovingBoard } from "./glide";
 import { Lane } from "./lane";
 import { COLUMNS, onHost, passesFilter, tilesOf } from "./model";
 import type { ColumnId, Tile } from "./model";
@@ -32,7 +33,6 @@ const COLUMN_MARK = {
   asked: "asked",
   queued: "queued",
   working: "working",
-  needs_you: "needs_you",
   landing: "landing",
   done: "done",
 } as const;
@@ -157,7 +157,8 @@ export function BoardView({
 }
 
 function Board({ host, filter }: { host: string | undefined; filter: BoardFilter }) {
-  const { data: board } = useSuspenseQuery(boardQuery());
+  const { data: live } = useSuspenseQuery(boardQuery());
+  const board = useMovingBoard(live);
   const { data: projects } = useSuspenseQuery(projectsQuery());
   // Agents only add each lane's orchestrator and its health: when they cannot
   // be read the cards still show, with a note, and the read retries.

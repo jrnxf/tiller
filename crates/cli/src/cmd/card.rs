@@ -144,9 +144,12 @@ pub struct List {
     /// open or closed
     #[arg(long)]
     pub state: Option<CardState>,
-    /// asked, queued, working, needs_you, landing or done
+    /// asked, queued, working, landing or done
     #[arg(long)]
     pub column: Option<Column>,
+    /// Only cards that wait on the owner, in whatever column
+    #[arg(long)]
+    pub needs_you: bool,
 }
 
 #[derive(Args, Debug)]
@@ -392,7 +395,9 @@ fn list_cards(app: &App, args: List) -> Done {
     let rows = store.card_columns(args.project.as_deref())?;
     let mut cards = Vec::new();
     for row in rows {
-        if args.column.is_some_and(|column| column != row.column) {
+        if args.column.is_some_and(|column| column != row.column)
+            || args.needs_you && !row.needs_you
+        {
             continue;
         }
         let card = resolve_card(store.conn(), &row.id)?;
@@ -410,6 +415,7 @@ fn list_cards(app: &App, args: List) -> Done {
             "outcome": card.outcome,
             "column": row.column,
             "badge": row.badge,
+            "needs_you": row.needs_you,
             "rev": card.rev,
         }));
     }

@@ -61,6 +61,7 @@ export function agentActivity(
 
 // The live dot on a card comes from the badge the `card_column` view computed.
 export function cardDot(row: BoardRow): DotKind | null {
+  if (row.needs_you) return "waiting";
   if (row.column === "working" || row.column === "landing") {
     switch (row.badge) {
       case "working":
@@ -71,6 +72,7 @@ export function cardDot(row: BoardRow): DotKind | null {
       case "idle":
       case "paused":
       case "ready":
+      case "checks_next":
       case "between_runs":
         return "idle";
       case "stale":
@@ -82,6 +84,5 @@ export function cardDot(row: BoardRow): DotKind | null {
         return "unknown";
     }
   }
-  if (row.column === "needs_you") return "waiting";
   return null;
 }

@@ -663,7 +663,8 @@ SELECT
 FROM sessions s
 LEFT JOIN runs r ON r.id = s.run_id;
 
--- One row per open or recently closed card: its column and badge.
+-- One row per open or recently closed card: its column, its badge and whether
+-- it waits on the owner.
 -- Precedence follows state.md, section 6.
 CREATE VIEW card_column AS
 WITH
@@ -727,6 +728,16 @@ WITH
     WHERE state = 'open'
     GROUP BY card_id
   ),
+  pending_lands AS (
+    -- a direct land the owner has not decided yet. The builder's run stays
+    -- live until the push (it cannot end reported with no PR), so this
+    -- outranks an active run: the card waits in Landing, like a ship card
+    -- waiting on its merge
+    SELECT card_id
+    FROM approvals
+    WHERE kind = 'land_direct' AND state = 'requested'
+    GROUP BY card_id
+  ),
   progress AS (
     -- per open card, since it was created or last reopened: when its newest
     -- run started, and when the owner last sent it back (rejected its merge
@@ -772,8 +783,7 @@ SELECT
   c.id, c.display_id, c.project_id, c.kind,
   CASE
     WHEN c.state = 'closed' THEN 'done'
-    WHEN oa.card_id IS NOT NULL OR ar.rank = 0 THEN 'needs_you'
-    WHEN c.kind = 'ship' AND (lp.landing = 1 OR la.landing = 1 OR dw.landing = 1) THEN 'landing'
+    WHEN c.kind = 'ship' AND (lp.landing = 1 OR la.landing = 1 OR dw.landing = 1 OR pl.card_id IS NOT NULL) THEN 'landing'
     WHEN ar.n > 0 THEN 'working'
     WHEN oh.card_id IS NOT NULL OR od.card_id IS NOT NULL THEN 'queued'
     WHEN pg.back THEN 'queued'
@@ -797,12 +807,13 @@ SELECT
     WHEN oh.card_id IS NOT NULL THEN 'parked'
     WHEN od.card_id IS NOT NULL THEN 'blocked'
     WHEN pg.back THEN 'filed'
-    WHEN c.kind = 'ship' AND op.unread = 1 THEN 'checks'
+    WHEN c.kind = 'ship' AND op.unread = 1 THEN 'checks_next'
     WHEN c.kind = 'ship' AND op.failing = 1 THEN 'checks_failed'
     WHEN c.kind = 'ship' AND op.card_id IS NOT NULL THEN 'ready'
     WHEN pg.run_at IS NOT NULL THEN 'between_runs'
     ELSE 'filed'
   END AS badge,
+  c.state = 'open' AND (oa.card_id IS NOT NULL OR coalesce(ar.rank, 6) = 0) AS needs_you,
   oh.until_at   AS parked_until,
   oh.reason     AS parked_reason,
   od.blocked_by AS blocked_by,
@@ -814,6 +825,7 @@ LEFT JOIN landing_prs        lp ON lp.card_id = c.id
 LEFT JOIN landing_approvals  la ON la.card_id = c.id
 LEFT JOIN deploy_watches     dw ON dw.card_id = c.id
 LEFT JOIN open_prs           op ON op.card_id = c.id
+LEFT JOIN pending_lands      pl ON pl.card_id = c.id
 LEFT JOIN progress           pg ON pg.card_id = c.id
 LEFT JOIN open_holds         oh ON oh.card_id = c.id
 LEFT JOIN open_deps          od ON od.card_id = c.id

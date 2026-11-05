@@ -1,6 +1,6 @@
 //! Board column derivation (`state.md` section 6). The one definition of a
 //! column is the `card_column` view in `state.db`; this module reads it into
-//! the shape the board, the CLI and the boot snapshot share: six columns, the
+//! the shape the board, the CLI and the boot snapshot share: five columns, the
 //! Asked column from unresolved asks, and the staleness thresholds the client
 //! needs to age activity itself between events.
 //!
@@ -22,7 +22,7 @@ use crate::thresholds::Thresholds;
 pub struct ClientThresholds {
     pub worker_stale_minutes: i64,
     pub orchestrator_stale_minutes: i64,
-    /// An unresolved ask older than this shows its age (section 6, row 9).
+    /// An unresolved ask older than this shows its age (section 6, row 8).
     pub ask_age_minutes: i64,
 }
 
@@ -79,11 +79,14 @@ pub fn column(store: &Store, card_id: &str) -> tiller_core::Result<CardColumn> {
         })
 }
 
-/// The column a `column` word maps to, for the board's filters: Needs you
-/// is "needs", everything with an active run or a landing is "active".
-pub fn filter(column: Column) -> &'static str {
-    match column {
-        Column::NeedsYou => "needs",
+/// The board filter a card's row first falls under: a card that waits on
+/// the owner is "needs" in whatever column it is, everything else with an
+/// active run or a landing is "active".
+pub fn filter(card: &CardColumn) -> &'static str {
+    if card.needs_you {
+        return "needs";
+    }
+    match card.column {
         Column::Working | Column::Landing => "active",
         Column::Asked | Column::Queued | Column::Done => "all",
     }

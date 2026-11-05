@@ -143,7 +143,11 @@ test("every project is a lane and every card sits in the column its state puts i
   expect(screen.getByTestId("lane-beta")).toBeTruthy();
   expect(screen.getByTestId("lane-gamma")).toBeTruthy();
   expect(cellOf("Add the machines summary to the sidebar")?.dataset.column).toBe("working");
-  expect(cellOf("Pick the retry policy for the export job")?.dataset.column).toBe("needs_you");
+  // A card that waits on the owner stays where its work is, marked by its bar.
+  const waiting = screen.getByText("Pick the retry policy for the export job");
+  expect(cellOf("Pick the retry policy for the export job")?.dataset.column).toBe("working");
+  expect(waiting.closest<HTMLElement>(".card")?.dataset.attn).toBe("true");
+  expect(cellOf("Retry failed exports with backoff")?.dataset.column).toBe("landing");
   expect(cellOf("Move the poller behind a trait")?.dataset.column).toBe("landing");
   expect(cellOf("Document the cutover steps")?.dataset.column).toBe("queued");
   expect(cellOf("Pin the toolchain version")?.dataset.column).toBe("done");

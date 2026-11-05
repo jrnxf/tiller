@@ -22,7 +22,6 @@ const COLUMN_MARK: Record<ColumnId, StatusMark> = {
   asked: "asked",
   queued: "queued",
   working: "working",
-  needs_you: "needs_you",
   landing: "landing",
   done: "done",
 };
@@ -105,6 +104,7 @@ export function Lane({
     column,
     count: tiles.filter((tile) => tile.column === column.id).length,
   })).filter(({ count }) => count > 0);
+  const waiting = tiles.filter((tile) => tile.row?.needs_you).length;
 
   let body;
   if (tiles.length === 0) {
@@ -209,15 +209,17 @@ export function Lane({
         ) : null}
         <span className="ccs">
           {counts.map(({ column, count }) => (
-            <span
-              key={column.id}
-              className={`cc${column.id === "needs_you" ? " attn" : ""}`}
-              title={column.name}
-            >
+            <span key={column.id} className="cc" title={column.name}>
               <Status mark={COLUMN_MARK[column.id]} />
               {count}
             </span>
           ))}
+          {waiting > 0 ? (
+            <span className="cc attn" title="Needs you">
+              <Status mark="needs_you" />
+              {waiting}
+            </span>
+          ) : null}
         </span>
         <span className="sp" />
         {orchestrator ? (

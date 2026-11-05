@@ -60,12 +60,13 @@ impl std::str::FromStr for Filter {
 }
 
 impl Filter {
-    /// Whether a row in `column` passes the filter.
-    fn keeps(self, column: &str) -> bool {
+    /// Whether a row in `column`, waiting on the owner or not, passes the
+    /// filter.
+    fn keeps(self, column: &str, needs_you: bool) -> bool {
         match self {
             Filter::All => true,
             Filter::Active => matches!(column, "working" | "landing"),
-            Filter::Needs => matches!(column, "needs_you" | "asked"),
+            Filter::Needs => needs_you || column == "asked",
         }
     }
 }
@@ -151,6 +152,7 @@ pub fn board_row(store: &Store, card_id: &str) -> Result<Option<BoardRow>> {
         priority: card.priority,
         column: column.column.to_string(),
         badge: column.badge,
+        needs_you: column.needs_you,
         parked_until: at_opt(column.parked_until),
         parked_reason: column.parked_reason,
         blocked_by: column.blocked_by,
@@ -183,7 +185,9 @@ pub fn board(
         .collect();
     let mut rows = Vec::new();
     for column in store.card_columns(project)? {
-        if !filter.keeps(column.column.as_str()) || retired.contains(&column.project_id) {
+        if !filter.keeps(column.column.as_str(), column.needs_you)
+            || retired.contains(&column.project_id)
+        {
             continue;
         }
         if let Some(host_id) = &host_id {
@@ -891,6 +895,7 @@ pub fn card_detail(store: &Store, reference: &str) -> Result<CardDetail> {
             priority: card.priority,
             column: "done".into(),
             badge: card.outcome.map(|o| o.to_string()).unwrap_or_default(),
+            needs_you: false,
             parked_until: None,
             parked_reason: None,
             blocked_by: None,
@@ -1442,6 +1447,8 @@ impl Owner {
     fn board_row(&self, row: &mut BoardRow) {
         (row.host, row.as_of, row.link) = self.tag();
         if self.peer.is_some() {
+            let (column, needs_you) = peer_column(row);
+            (row.column, row.needs_you) = (column.to_owned(), needs_you);
             row.host_id = Some(self.host_id.clone());
         }
     }
@@ -1516,6 +1523,24 @@ fn scope<'a>(peers: &'a Federation, host: Option<&str>) -> Scope<'a> {
     }
 }
 
+/// Where a peer's row sits on this host's board, and whether it waits on the
+/// owner. A peer from before migration 11 still sends a Needs you column:
+/// place the card where this host would. A merge approval waits in Landing,
+/// a card that has run is in Working, any other is Queued.
+fn peer_column(row: &BoardRow) -> (&str, bool) {
+    if row.column != "needs_you" {
+        return (&row.column, row.needs_you);
+    }
+    let column = if row.kind == "ship" && row.badge == "merge" {
+        "landing"
+    } else if row.host_id.is_some() {
+        "working"
+    } else {
+        "queued"
+    };
+    (column, true)
+}
+
 /// A peer's cached board rows, filtered and tagged.
 pub fn peer_board(view: &PeerView, project: Option<&str>, filter: Filter) -> BoardResponse {
     let in_project = |id: &str| project.is_none_or(|project| project == id);
@@ -1525,7 +1550,10 @@ pub fn peer_board(view: &PeerView, project: Option<&str>, filter: Filter) -> Boa
     };
     if let Some(queries) = &view.queries {
         response.rows = (queries.board.rows.iter())
-            .filter(|row| filter.keeps(&row.column) && in_project(&row.project_id))
+            .filter(|row| {
+                let (column, needs_you) = peer_column(row);
+                filter.keeps(column, needs_you) && in_project(&row.project_id)
+            })
             .cloned()
             .collect();
         response.asked = (queries.board.asked.iter())
@@ -1903,6 +1931,28 @@ mod tests {
             slug("alpha-42", "Undo: coalesce strokes!"),
             "alpha-42-undo-coalesce-strokes"
         );
+    }
+
+    /// A peer from before migration 11 sends a Needs you column and no flag;
+    /// its card lands where this host would put it, flagged.
+    #[test]
+    fn an_old_peer_needs_you_row_keeps_its_progress() {
+        let row = |kind: &str, badge: &str, host: Option<&str>| -> BoardRow {
+            serde_json::from_value(serde_json::json!({
+                "id": "c1", "display_id": "alpha-1", "project_id": "alpha",
+                "host_id": host, "kind": kind, "title": "t", "priority": 2,
+                "column": "needs_you", "badge": badge, "rev": 1,
+            }))
+            .unwrap()
+        };
+        let merge = row("ship", "merge", Some("h1"));
+        let mid_run = row("ship", "decision", Some("h1"));
+        let never_ran = row("question", "decision", None);
+        assert_eq!(peer_column(&merge), ("landing", true));
+        assert_eq!(peer_column(&mid_run), ("working", true));
+        assert_eq!(peer_column(&never_ran), ("queued", true));
+        assert!(!Filter::Active.keeps(peer_column(&never_ran).0, true));
+        assert!(Filter::Needs.keeps(peer_column(&never_ran).0, true));
     }
 
     #[test]

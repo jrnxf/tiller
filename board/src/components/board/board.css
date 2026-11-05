@@ -89,6 +89,11 @@
 .lab.mute {
   color: var(--fg-3);
 }
+.lab.pend {
+  color: var(--fg-3);
+  border-style: dashed;
+  border-color: var(--line-3);
+}
 .mchip {
   display: inline-flex;
   align-items: center;
@@ -430,6 +435,30 @@
   width: 3px;
   border-radius: 0 3px 3px 0;
   background: var(--orange);
+}
+/* A card between the steps of its work keeps its place: the ring goes dashed
+   and the chip says what comes next. */
+.card[data-pending="true"] .si .ring {
+  stroke-dasharray: 2 2.6;
+}
+.card[data-pending="true"] .si .core {
+  opacity: 0.35;
+}
+/* A card that moved glides to its new place (glide.tsx). */
+::view-transition-group(.card-glide),
+::view-transition-old(.card-glide),
+::view-transition-new(.card-glide) {
+  animation-duration: 320ms;
+  animation-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(.card-glide) {
+    animation: none;
+  }
+  ::view-transition-old(.card-glide),
+  ::view-transition-new(.card-glide) {
+    animation-duration: 120ms;
+  }
 }
 .card .c-top {
   display: flex;

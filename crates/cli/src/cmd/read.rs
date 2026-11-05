@@ -34,7 +34,7 @@ const FALSE_BLOCK_WINDOW_MINUTES: i64 = 2;
 pub struct BoardArgs {
     #[arg(long)]
     pub project: Option<String>,
-    /// all, active (working or landing) or needs (needs you or asked)
+    /// all, active (working or landing) or needs (waits on you, or asked)
     #[arg(long, default_value = "all")]
     pub filter: Filter,
     /// Only this host's label
@@ -101,7 +101,7 @@ fn board_data(store: &Store, args: &BoardArgs) -> Result<Value, Failure> {
         let keep = match args.filter {
             Filter::All => true,
             Filter::Active => matches!(row.column, Column::Working | Column::Landing),
-            Filter::Needs => matches!(row.column, Column::NeedsYou | Column::Asked),
+            Filter::Needs => row.needs_you || row.column == Column::Asked,
         };
         if !keep {
             continue;
@@ -123,6 +123,7 @@ fn board_data(store: &Store, args: &BoardArgs) -> Result<Value, Failure> {
             "outcome": card.outcome,
             "column": row.column,
             "badge": row.badge,
+            "needs_you": row.needs_you,
             "parked_until": row.parked_until,
             "parked_reason": row.parked_reason,
             "blocked_by": row.blocked_by,

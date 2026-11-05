@@ -142,8 +142,17 @@ const STATUS = {
   ),
   working: (
     <>
-      <circle cx="7" cy="7" r="6" fill="none" stroke="var(--yellow)" strokeWidth="1.5" />
       <circle
+        className="ring"
+        cx="7"
+        cy="7"
+        r="6"
+        fill="none"
+        stroke="var(--yellow)"
+        strokeWidth="1.5"
+      />
+      <circle
+        className="core"
         cx="7"
         cy="7"
         r="2"
@@ -164,8 +173,17 @@ const STATUS = {
   ),
   landing: (
     <>
-      <circle cx="7" cy="7" r="6" fill="none" stroke="var(--green)" strokeWidth="1.5" />
       <circle
+        className="ring"
+        cx="7"
+        cy="7"
+        r="6"
+        fill="none"
+        stroke="var(--green)"
+        strokeWidth="1.5"
+      />
+      <circle
+        className="core"
         cx="7"
         cy="7"
         r="2"

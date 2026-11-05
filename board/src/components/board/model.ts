@@ -1,15 +1,14 @@
 import type { BoardFilter, BoardResponse, BoardRow } from "../../lib/api-types";
 import { ownerKey } from "../../lib/peers";
 
-// The six columns of the board in the order the mocks draw them. `asked` is not
-// a card column: it holds the unresolved asks (state.md, section 6).
-export type ColumnId = "asked" | "queued" | "working" | "needs_you" | "landing" | "done";
+// The five columns of the board, left to right as the work progresses. `asked`
+// is not a card column: it holds the unresolved asks (state.md, section 6).
+export type ColumnId = "asked" | "queued" | "working" | "landing" | "done";
 
 export const COLUMNS: { id: ColumnId; name: string }[] = [
   { id: "asked", name: "Asked" },
   { id: "queued", name: "Queued" },
   { id: "working", name: "Working" },
-  { id: "needs_you", name: "Needs you" },
   { id: "landing", name: "Landing" },
   { id: "done", name: "Done" },
 ];
@@ -49,7 +48,7 @@ export function tilesOf(board: BoardResponse): Tile[] {
 export function passesFilter(tile: Tile, filter: BoardFilter): boolean {
   if (filter === "all") return true;
   if (filter === "active") return tile.column !== "done";
-  return tile.column === "needs_you";
+  return tile.row?.needs_you === true;
 }
 
 export function countsByFilter(tiles: Tile[]): Record<BoardFilter, number> {

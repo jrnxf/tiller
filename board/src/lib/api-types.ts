@@ -2,7 +2,8 @@
 // by hand until `contract/openapi.json` (T2.8) exists; then this file is
 // replaced by types generated from it and only the names below must survive.
 
-type CardColumn = "needs_you" | "working" | "landing" | "queued" | "done";
+// How far a card's work has come (state.md, section 6). A card only moves right.
+type CardColumn = "working" | "landing" | "queued" | "done";
 
 export type BoardFilter = "all" | "active" | "needs";
 
@@ -27,6 +28,9 @@ export interface BoardRow extends Federated {
   priority: number;
   column: CardColumn;
   badge: string;
+  // The card waits on the owner, in whatever column it is: the orange bar
+  // and the Needs you filter.
+  needs_you: boolean;
   parked_until: string | null;
   parked_reason: string | null;
   blocked_by: string | null;

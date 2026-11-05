@@ -207,6 +207,17 @@ fn column_of(store: &Store, legacy_id: &str) -> String {
         .unwrap()
 }
 
+fn needs_you_of(store: &Store, legacy_id: &str) -> bool {
+    store
+        .conn()
+        .query_row(
+            "SELECT v.needs_you FROM card_column v JOIN cards c ON c.id = v.id WHERE c.legacy_id = ?1",
+            [legacy_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 #[test]
 fn dry_run_plans_every_record_and_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -307,8 +318,11 @@ fn import_reproduces_every_card_count_in_the_manifest() {
     assert_eq!(outcome("b1").as_deref(), Some("cancelled"));
     // A scout cannot close answered: the delivered outcome becomes its own.
     assert_eq!(outcome("f1").as_deref(), Some("reported"));
-    assert_eq!(column_of(&store, "a5"), "needs_you");
-    assert_eq!(column_of(&store, "n1"), "needs_you");
+    // A question keeps a card in its column and flags it for the owner.
+    assert_eq!(column_of(&store, "a5"), "queued");
+    assert_eq!(column_of(&store, "n1"), "queued");
+    assert!(needs_you_of(&store, "a5") && needs_you_of(&store, "n1"));
+    assert!(!needs_you_of(&store, "a6"));
     assert_eq!(column_of(&store, "a6"), "queued");
     assert_eq!(column_of(&store, "a7"), "queued");
     assert_eq!(column_of(&store, "a3"), "queued");
@@ -634,7 +648,7 @@ fn cards_keep_the_lifecycle_rules() {
         .import_plan(&Bundle::read(dir.path()).unwrap(), Timestamp::now())
         .unwrap();
     let d1 = plan.cards.iter().find(|c| c.legacy_id == "d1").unwrap();
-    assert_eq!(d1.column, "needs_you");
+    assert_eq!(d1.column, "queued");
     assert!(
         matches!(
             d1.waits.as_slice(),

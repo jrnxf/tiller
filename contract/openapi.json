@@ -2766,7 +2766,7 @@
           },
           "column": {
             "type": "string",
-            "description": "`needs_you`, `asked`, `working`, `landing`, `queued` or `done`."
+            "description": "`asked`, `queued`, `working`, `landing` or `done`: how far the card's\nwork has come."
           },
           "display_id": {
             "type": "string"
@@ -2808,6 +2808,10 @@
               "null"
             ],
             "description": "The model of the card's newest run."
+          },
+          "needs_you": {
+            "type": "boolean",
+            "description": "The card waits on the owner (an open attention item or a permission\nprompt) in whatever column it is; the Needs you filter keeps it."
           },
           "observed_at": {
             "type": [
