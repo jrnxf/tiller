@@ -19,6 +19,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tiller_agents::land::app::{APP_DIR, AppKey, KEY_FILE, KeyError};
 use tiller_agents::spawn::config::SpawnConfig;
 use tiller_agents::spawn::orchestrator::Orchestrator;
 use tiller_core::domain::{
@@ -1016,13 +1017,23 @@ async fn signals(State(state): State<AppState>) -> ApiResult<SignalsResponse> {
     responses((status = 200, body = Health)))]
 async fn health(State(state): State<AppState>) -> Json<Health> {
     let db = state.db();
-    let seq = tokio::task::spawn_blocking(move || {
-        db.exists()
-            .then(|| Store::open_current(&db).and_then(|store| store.last_seq()))
+    let home = state.0.home.clone();
+    let (seq, merge_app) = tokio::task::spawn_blocking(move || {
+        let seq = db
+            .exists()
+            .then(|| Store::open_current(&db).and_then(|store| store.last_seq()));
+        (seq, merge_app_health(&home))
     })
     .await
-    .ok()
-    .flatten();
+    .unwrap_or_else(|error| {
+        let detail = format!("the merge App key was not read: {error}");
+        let merge_app = MergeAppHealth {
+            status: "warn".into(),
+            app_id: None,
+            detail,
+        };
+        (None, merge_app)
+    });
     let pollers = state.0.pollers.health();
     let failing = pollers.iter().any(|p| p.consecutive_failures > 0);
     let tools = state
@@ -1043,7 +1054,40 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
         pollers: views::poller_health(pollers),
         tools,
         links: state.0.peers.links(),
+        merge_app,
     })
+}
+
+/// The merge App key's state, read as `tiller doctor` reads it.
+fn merge_app_health(home: &std::path::Path) -> MergeAppHealth {
+    let dir = home.join(APP_DIR);
+    match AppKey::load(&dir) {
+        Ok(Some(key)) => MergeAppHealth {
+            status: "ok".into(),
+            app_id: Some(key.id()),
+            detail: format!("App {} with its key in {}", key.id(), dir.display()),
+        },
+        Ok(None) => MergeAppHealth {
+            status: "missing".into(),
+            app_id: None,
+            detail: format!(
+                "no merge App key at {}, so every project runs as detect",
+                dir.join(KEY_FILE).display()
+            ),
+        },
+        Err(error) => MergeAppHealth {
+            status: if matches!(error, KeyError::Exposed { .. }) {
+                "fail"
+            } else {
+                "warn"
+            }
+            .into(),
+            app_id: None,
+            detail: format!(
+                "the merge App key is not used, so every project runs as detect: {error}"
+            ),
+        },
+    }
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -2743,6 +2787,8 @@ pub(crate) mod tests {
         let health: Value = serde_json::from_str(&health.body).unwrap();
         assert_eq!(health["initialized"], false);
         assert_eq!(health["ok"], false);
+        // No key file: the board's This host box says every project detects.
+        assert_eq!(health["merge_app"]["status"], "missing");
         // Every read says how to make the database, so whoever meets the 503
         // (the board's setup screen, a curl) knows the next step.
         for path in ["/api/v1/board", "/api/v1/agents", "/api/v1/events"] {

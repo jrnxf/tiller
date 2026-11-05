@@ -1,6 +1,12 @@
+import type { ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
+
+import type { DaemonHealth, MergeAppHealth } from "../../lib/api-types";
 import { prefsStore, updatePrefs } from "../../lib/prefs";
 import type { Density, ThemePreference } from "../../lib/prefs";
+import { healthQuery } from "../../lib/queries";
 import { useStore } from "../../lib/store";
+import { formatAge, secondsSince } from "../board/format";
 import "./settings.css";
 
 const THEMES: { value: ThemePreference; label: string }[] = [
@@ -49,10 +55,76 @@ function Choice<Value extends string>({
   );
 }
 
+// Always with the weekday: "Thu 5 Nov, 23:40".
+const startedAt = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Lisbon",
+  weekday: "short",
+  day: "numeric",
+  month: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
+const MERGE_APP_LABEL: Record<MergeAppHealth["status"], string> = {
+  ok: "Ready",
+  missing: "Not set up",
+  warn: "Not used",
+  fail: "Key exposed",
+};
+
+function Fact({ label, hint, children }: { label: string; hint: string; children: ReactNode }) {
+  return (
+    <div className="set-row">
+      <div className="set-text">
+        <h2>{label}</h2>
+        <p>{hint}</p>
+      </div>
+      <div className="set-value">{children}</div>
+    </div>
+  );
+}
+
+// What `tiller --version`, the service's start time and `tiller doctor`'s merge
+// App line tell the owner, read from the daemon serving this board.
+function HostFacts({ health }: { health: DaemonHealth }) {
+  const up = secondsSince(health.started_at);
+  const started = new Date(health.started_at);
+  const { merge_app: app } = health;
+  return (
+    <section className="set-panel" aria-label="This host" data-testid="host-facts">
+      <Fact label="Version" hint={`Schema ${health.schema}`}>
+        <code>{health.version}</code>
+      </Fact>
+      <Fact
+        label="Started"
+        hint={`${up === null ? "Running" : `Up ${formatAge(up)}`}, process ${health.pid}`}
+      >
+        {Number.isNaN(started.getTime()) ? "unknown" : startedAt.format(started)}
+      </Fact>
+      <Fact label="Merge App" hint={app.detail}>
+        <span className={`set-status ${app.status}`}>
+          {app.status === "ok" && app.app_id !== null
+            ? `App ${app.app_id}`
+            : MERGE_APP_LABEL[app.status]}
+        </span>
+      </Fact>
+    </section>
+  );
+}
+
 export function SettingsPage() {
   const prefs = useStore(prefsStore);
+  const health = useQuery(healthQuery()).data;
   return (
     <div className="settings-page" data-testid="settings">
+      {health ? (
+        <>
+          <h1 className="set-title">This host</h1>
+          <HostFacts health={health} />
+        </>
+      ) : null}
+      <h1 className="set-title">Appearance</h1>
       <section className="set-panel" aria-label="Appearance">
         <Choice
           label="Theme"

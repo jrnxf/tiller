@@ -3887,7 +3887,8 @@
           "server_time",
           "last_event_seq",
           "pollers",
-          "tools"
+          "tools",
+          "merge_app"
         ],
         "properties": {
           "initialized": {
@@ -3904,6 +3905,10 @@
               "$ref": "#/components/schemas/LinkHealth"
             },
             "description": "Each peer link's last success and last error (`protocol.md` 10.4);\nabsent on a host with no peers."
+          },
+          "merge_app": {
+            "$ref": "#/components/schemas/MergeAppHealth",
+            "description": "The merge App key, as `tiller doctor`'s `merge app` line reads it."
           },
           "ok": {
             "type": "boolean"
@@ -4791,6 +4796,32 @@
           }
         },
         "additionalProperties": false
+      },
+      "MergeAppHealth": {
+        "type": "object",
+        "description": "The merge App key under `~/.tiller/forge-app/`: names files and the\nreason, never the key.",
+        "required": [
+          "status",
+          "detail"
+        ],
+        "properties": {
+          "app_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The App's numeric id, when the key loads.",
+            "minimum": 0
+          },
+          "detail": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "`ok`, `missing` (every project runs as `detect`), `warn` (the key is\nnot used) or `fail` (the key is readable by group or others)."
+          }
+        }
       },
       "MutationResponse": {
         "type": "object",
