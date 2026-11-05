@@ -639,6 +639,17 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
         ],
     );
     fails(&world, 7, "land_needs_daemon", &["land", &approval_id]);
+    // A card lands its latest pending merge approval; a card with none says so.
+    let by_card = world.run(&["land", "alpha-1"]);
+    assert_eq!(by_card.code, 7, "land by card: {}", by_card.json);
+    assert!(
+        by_card.json.to_string().contains(&approval_id),
+        "land by card did not pick the approval: {}",
+        by_card.json
+    );
+    let none = world.run(&["land", "fleet-1"]);
+    assert_eq!(none.code, 5, "land with nothing pending: {}", none.json);
+    assert!(none.json.to_string().contains("fleet-1"));
     let grant = step(
         &world,
         "grant_create",

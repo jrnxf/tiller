@@ -55,6 +55,8 @@ pub struct Approve {
 
 #[derive(Args, Debug)]
 pub struct Land {
+    /// An approval, or a card (display id or id): a card lands its latest
+    /// pending merge approval
     pub approval: String,
     /// Seconds to wait for the daemon before giving up (the approval stays
     /// accepted and the daemon keeps trying)
@@ -307,7 +309,7 @@ pub fn approve(app: &App, args: Approve) -> Done {
 pub fn land(app: &App, args: Land) -> Done {
     app.require_owner("tiller land")?;
     let store = app.read()?;
-    let id = resolve_id(store.conn(), "approvals", "approval", &args.approval)?;
+    let id = resolve_land_target(store.conn(), &args.approval)?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(args.wait);
     let mut shown = std::collections::HashSet::new();
     loop {
@@ -386,6 +388,44 @@ pub fn land(app: &App, args: Land) -> Done {
             }
         }
     }
+}
+
+/// What `tiller land` was asked to land: an approval id stays an approval id;
+/// anything else that names a card lands that card's latest pending merge
+/// approval (one a decision or the daemon has not finished).
+fn resolve_land_target(conn: &rusqlite::Connection, input: &str) -> Result<String, Failure> {
+    let is_display = tiller_core::ids::parse_display_id(input.trim()).is_some();
+    if !is_display {
+        match resolve_id(conn, "approvals", "approval", input) {
+            Ok(id) => return Ok(id),
+            Err(tiller_core::Error::NotFound { candidates, .. }) if candidates.is_empty() => {}
+            Err(other) => return Err(other.into()),
+        }
+    }
+    let card = resolve_card(conn, input)?;
+    let approvals: Vec<Approval> = list(
+        conn,
+        "card_id = ?1 AND kind = 'merge' ORDER BY requested_at DESC, id DESC",
+        &[&card.id],
+    )?;
+    approvals
+        .into_iter()
+        .find(|approval| {
+            matches!(
+                approval.state,
+                ApprovalState::Requested
+                    | ApprovalState::Accepted
+                    | ApprovalState::Executing
+                    | ApprovalState::Uncertain
+            )
+        })
+        .map(|approval| approval.id)
+        .ok_or_else(|| {
+            Failure::refused(format!(
+                "{} has no pending merge approval to land",
+                card.display_id
+            ))
+        })
 }
 
 /// How often `tiller land` re-reads the approval while the daemon works.
