@@ -32,6 +32,9 @@ pub struct Spawn {
     /// The brief; without it the worker is briefed with the card
     #[arg(long)]
     pub brief_file: Option<PathBuf>,
+    /// The harness to launch on; G35 refuses one without the guards
+    #[arg(long, default_value = "claude")]
+    pub harness: String,
     #[command(flatten)]
     pub key: KeyArg,
 }
@@ -215,6 +218,7 @@ pub fn spawn(app: &App, args: Spawn) -> Done {
         "model": args.model,
         "effort": args.effort,
         "brief": brief,
+        "harness": args.harness,
     });
     let keyed = app.key(&store, "run.start", &normalized, &args.key.key)?;
     let asked = args.model.zip(args.effort);
@@ -228,6 +232,7 @@ pub fn spawn(app: &App, args: Spawn) -> Done {
             role: args.role,
             asked,
             brief,
+            harness: args.harness,
         },
     )
     .map_err(failure)?;

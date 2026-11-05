@@ -771,6 +771,37 @@ pub fn projects(store: &Store, now: Timestamp) -> Result<ProjectsResponse> {
     })
 }
 
+/// `GET /api/v1/contributions`: the PRs published from this host's cards,
+/// newest first; `project` narrows to one project.
+pub fn contributions(store: &Store, project: Option<&str>) -> Result<ContributionsResponse> {
+    let prs: Vec<Pr> = match project {
+        Some(project) => list(
+            store.conn(),
+            "project_id = ?1 ORDER BY linked_at DESC, id DESC",
+            &[&project],
+        )?,
+        None => list(store.conn(), "1 = 1 ORDER BY linked_at DESC, id DESC", &[])?,
+    };
+    let mut contributions = Vec::new();
+    for pr in prs {
+        let card: Card = get(store.conn(), "card", &pr.card_id)?;
+        contributions.push(Contribution {
+            repo: repo_of(&pr.url),
+            id: pr.id,
+            project_id: pr.project_id,
+            card_id: card.id,
+            card_display_id: card.display_id,
+            card_title: card.title,
+            number: pr.number,
+            url: pr.url,
+            state: pr.state.to_string(),
+            linked_at: at(pr.linked_at),
+            merged_at: at_opt(pr.merged_at),
+        });
+    }
+    Ok(ContributionsResponse { contributions })
+}
+
 // -- card detail ----------------------------------------------------------------
 
 fn run_outcome(outcome: Option<RunOutcome>) -> Option<String> {
@@ -1015,6 +1046,8 @@ pub fn card_detail(store: &Store, reference: &str) -> Result<CardDetail> {
                 id: artifact.id,
                 kind: artifact.kind.to_string(),
                 title: artifact.title,
+                url: artifact.url,
+                created_at: at(artifact.created_at),
             })
             .collect(),
         reviews: reviews
