@@ -2,7 +2,8 @@
 //! reports the versions of the tools Tiller drives, whether herdr answers,
 //! whether the packaged hook registration is whole, the stored `merge_gate`
 //! of every project and whether `config.toml` is newer than its last
-//! `config.changed` event. It never fixes, installs or writes anything: a
+//! `config.changed` event, who owns the host (the owner marker and whether a
+//! Firstmate is running on it). It never fixes, installs or writes anything: a
 //! failed required check makes the command exit 5 with the full report in
 //! the error's `current`.
 //!
@@ -37,6 +38,12 @@ const CLAUDE_CHECKED: &str = "2.1.312";
 
 /// A tool that answers `--version` within this long is alive.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The Firstmate scripts whose presence in the process list means a
+/// Firstmate is supervising this host: the supervisor daemon and the
+/// watcher. The one-shot `fm-watch-arm.sh` is not listed, because it exits
+/// as soon as it has armed the watcher.
+const FIRSTMATE_SCRIPTS: [&str; 2] = ["fm-supervise-daemon.sh", "fm-watch.sh"];
 
 /// A config file this much newer than its newest event was edited by hand.
 const CONFIG_SLACK_MS: i64 = 5_000;
@@ -460,6 +467,135 @@ fn config_drift(app: &App, store: &tiller_core::Store) -> Option<Check> {
     })
 }
 
+/// Whether a Firstmate runs on this host: some process has an argument
+/// whose file name is one of [`FIRSTMATE_SCRIPTS`]. `lines` is the process
+/// list, one command line per entry.
+fn firstmate_scripts(lines: &str) -> Vec<&'static str> {
+    FIRSTMATE_SCRIPTS
+        .into_iter()
+        .filter(|script| {
+            lines.lines().any(|line| {
+                line.split_whitespace()
+                    .any(|word| word.rsplit('/').next() == Some(script))
+            })
+        })
+        .collect()
+}
+
+/// The process list as command lines: `ps -axo args=`, or the command in
+/// `TILLER_PS` (the way the tests inject a fixed list).
+fn process_list() -> Result<String, String> {
+    let program = env_command("TILLER_PS").unwrap_or_else(|| vec!["ps".into()]);
+    let (first, rest) = program.split_first().ok_or("no command is configured")?;
+    let output = Command::new(first)
+        .args(rest)
+        .args(["-axo", "args="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|error| format!("cannot run {}: {error}", first.to_string_lossy()))?;
+    if !output.status.success() {
+        return Err(format!("exited with {}", output.status));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Whether a daemon holds `<home>/daemon.lock` now. A home that never ran a
+/// daemon has no lock file, and the probe must not create one.
+fn daemon_running(home: &Path) -> bool {
+    home.join(tiller_agents::land::LOCK_FILE).exists()
+        && tiller_agents::land::DaemonLock::held(home)
+}
+
+/// Who owns the host (`<home>/owner`, R20). A missing marker names no one,
+/// and the daemon dispatches under it; a marker naming `firstmate` makes the
+/// daemon and every mutation read only, so a daemon that is still running
+/// beside it is a host that cannot be trusted to stay quiet.
+fn owner_marker(marker: Option<&str>, daemon: bool) -> Check {
+    const NAME: &str = "owner marker";
+    match marker {
+        None => Check::new(
+            NAME,
+            false,
+            Status::Warn,
+            format!(
+                "no owner marker, so tiller dispatches{}; name the owner with: tiller owner set <owner>",
+                if daemon {
+                    " (the daemon is running)"
+                } else {
+                    " when its daemon runs"
+                }
+            ),
+        ),
+        Some("firstmate") if daemon => Check::missing(
+            NAME,
+            true,
+            "the owner marker says firstmate owns this host, but the tiller daemon is running; \
+             tiller must not dispatch here. Stop the daemon, or hand the host over with: tiller owner set tiller",
+        ),
+        Some("firstmate") => Check::new(
+            NAME,
+            true,
+            Status::Ok,
+            "firstmate owns this host and the tiller daemon is not running",
+        ),
+        Some("tiller") => Check::new(NAME, true, Status::Ok, "tiller owns this host"),
+        Some(other) => Check::new(
+            NAME,
+            true,
+            Status::Ok,
+            format!("the owner marker names {other:?}; tiller is read only here"),
+        ),
+    }
+}
+
+/// A running Firstmate beside a Tiller that would also dispatch. `list` is
+/// the process list, or why it could not be read.
+fn firstmate(list: Result<String, String>, marker: Option<&str>, daemon: bool) -> Check {
+    const NAME: &str = "firstmate";
+    let list = match list {
+        Ok(list) => list,
+        Err(error) => {
+            return Check::new(
+                NAME,
+                false,
+                Status::Warn,
+                format!(
+                    "cannot list processes, so a running Firstmate was not looked for: {error}"
+                ),
+            );
+        }
+    };
+    let found = firstmate_scripts(&list);
+    if found.is_empty() {
+        return Check::new(NAME, false, Status::Ok, "no Firstmate process is running");
+    }
+    let running = format!("Firstmate is running ({})", found.join(", "));
+    if matches!(marker, None | Some("tiller")) {
+        Check::new(
+            NAME,
+            false,
+            Status::Warn,
+            format!(
+                "{running} and tiller would also dispatch{}, so both could start the same work; \
+                 freeze one of them, or name the owner with: tiller owner set <owner>",
+                if daemon {
+                    " (its daemon is running)"
+                } else {
+                    ""
+                }
+            ),
+        )
+    } else {
+        Check::new(
+            NAME,
+            false,
+            Status::Ok,
+            format!("{running}, and the owner marker keeps tiller from dispatching"),
+        )
+    }
+}
+
 pub fn run(app: &App) -> Done {
     let mut checks = Vec::new();
     let table = load_config(app);
@@ -500,6 +636,10 @@ pub fn run(app: &App) -> Done {
     checks.push(nm);
     checks.push(daemon);
     checks.push(hooks());
+    let marker = app.owner_marker();
+    let daemon = daemon_running(&app.home);
+    checks.push(owner_marker(marker.as_deref(), daemon));
+    checks.push(firstmate(process_list(), marker.as_deref(), daemon));
     let merge_gates = stored(app, &mut checks);
 
     let ok = !checks.iter().any(Check::failed);
@@ -530,7 +670,56 @@ pub fn run(app: &App) -> Done {
 
 #[cfg(test)]
 mod tests {
-    use super::parts;
+    use super::{Status, firstmate, firstmate_scripts, owner_marker, parts};
+
+    const FM: &str = "bash /opt/fm/bin/fm-watch.sh\n/bin/zsh -l\nbash /opt/fm/bin/fm-supervise-daemon.sh --loop\n";
+
+    #[test]
+    fn firstmate_scripts_match_by_file_name_not_substring() {
+        assert_eq!(
+            firstmate_scripts(FM),
+            ["fm-supervise-daemon.sh", "fm-watch.sh"]
+        );
+        assert!(
+            firstmate_scripts(
+                "vim fm-watch.sh.bak\ntail -f /x/fm-watch.sh.log\nbash fm-watch-arm.sh"
+            )
+            .is_empty()
+        );
+        assert_eq!(firstmate_scripts("fm-watch.sh"), ["fm-watch.sh"]);
+    }
+
+    #[test]
+    fn owner_marker_cases() {
+        assert_eq!(owner_marker(None, false).status, Status::Warn);
+        assert!(
+            owner_marker(None, false)
+                .detail
+                .contains("tiller owner set <owner>")
+        );
+        let clash = owner_marker(Some("firstmate"), true);
+        assert!(clash.failed());
+        assert_eq!(owner_marker(Some("firstmate"), false).status, Status::Ok);
+        assert_eq!(owner_marker(Some("tiller"), true).status, Status::Ok);
+    }
+
+    #[test]
+    fn firstmate_warns_only_when_tiller_would_also_dispatch() {
+        assert_eq!(firstmate(Ok(FM.into()), None, false).status, Status::Warn);
+        assert_eq!(
+            firstmate(Ok(FM.into()), Some("tiller"), true).status,
+            Status::Warn
+        );
+        assert_eq!(
+            firstmate(Ok(FM.into()), Some("firstmate"), true).status,
+            Status::Ok
+        );
+        assert_eq!(firstmate(Ok("zsh".into()), None, true).status, Status::Ok);
+        assert_eq!(
+            firstmate(Err("no ps".into()), None, true).status,
+            Status::Warn
+        );
+    }
 
     #[test]
     fn versions_compare_by_number_not_text() {
