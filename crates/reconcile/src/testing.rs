@@ -395,6 +395,7 @@ pub struct World {
     pub readings: FakeReadings,
     pub harness: FakeHarness,
     pub config: Config,
+    forge_override: Option<Box<dyn Forge>>,
     reconciler: Option<Reconciler>,
 }
 
@@ -430,6 +431,7 @@ impl World {
             harness: FakeHarness::default(),
             config,
             fleet,
+            forge_override: None,
             reconciler: None,
         }
     }
@@ -463,7 +465,10 @@ impl World {
                 herdr: Box::new(self.herdr.clone()),
                 probe: Box::new(self.probe.clone()),
                 scanner: Box::new(self.scanner.clone()),
-                forge: Box::new(self.forge.clone()),
+                forge: self
+                    .forge_override
+                    .take()
+                    .unwrap_or_else(|| Box::new(self.forge.clone())),
                 launcher: Box::new(self.launcher.clone()),
                 readings: Box::new(self.readings.clone()),
                 harness: Box::new(self.harness.clone()),
@@ -475,6 +480,13 @@ impl World {
             ));
         }
         self.reconciler.as_mut().unwrap()
+    }
+
+    /// Reads the forge through `forge` instead of the fake, from the next
+    /// engine on.
+    pub fn use_forge(&mut self, forge: Box<dyn Forge>) {
+        self.forge_override = Some(forge);
+        self.reconciler = None;
     }
 
     /// Drops the engine, as a daemon restart does: its memory is gone, the

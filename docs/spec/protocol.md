@@ -249,7 +249,7 @@ Hook verdicts win over herdr's when both are newer than the projection: Firstmat
 
 ### 4.6 Forge sources: PRs and deploys
 
-The daemon's forge poller (T2.5) reads GitHub through `gh-axi` only. It never writes to the forge; the only forge writes are `tiller land`'s (`authority.md`, section 6).
+The daemon's forge poller (T2.5) and the forge reconcile reads (R07, R08, R19) read GitHub through `gh api` as the owner's login, the same `gh` the land and publish paths use, never through a stand-in that answers nothing. They never write to the forge; the only forge writes are `tiller land`'s (`authority.md`, section 6).
 
 | Source | Reads | Every | Writes |
 |---|---|---|---|
