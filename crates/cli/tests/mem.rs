@@ -198,7 +198,333 @@ fn a_proposal_needs_evidence_and_a_line_that_passes_the_scrub() {
         ],
     );
     assert_eq!(elsewhere.code, 6, "{}", elsewhere.json);
+}
 
-    let approve = world.run(&["mem", "approve", "01JC00000000000000000000P1"]);
-    assert_eq!((approve.code, approve.error_code()), (7, "unavailable"));
+/// `initialized`, plus a second project to file proposals against.
+fn two_projects() -> World {
+    let world = World::initialized();
+    world.must(&[
+        "project",
+        "add",
+        "beta",
+        "--name",
+        "Beta",
+        "--repo",
+        "example/beta",
+        "--delivery",
+        "direct-pr",
+        "--capacity",
+        "3",
+    ]);
+    world
+}
+
+/// An open proposal as the owner files it: a note of evidence, then the line.
+fn propose_line(world: &World, project: &str, section: &str, text: &str) -> String {
+    let noted = world.must(&["mem", "note", project, "--text", text]);
+    let evidence = noted.data()["evidence_id"].as_str().unwrap().to_owned();
+    let proposed = world.must(&[
+        "mem",
+        "propose",
+        project,
+        "--add",
+        section,
+        "--text",
+        text,
+        "--evidence",
+        &evidence,
+        "--expected-effect",
+        "sessions follow the line",
+    ]);
+    proposed.data()["id"].as_str().unwrap().to_owned()
+}
+
+/// Puts `proposals` in one change set whose holdout run passed, so the keep
+/// gate lets them through.
+fn open_gate(world: &World, proposals: &[&String]) {
+    let mut args = vec!["learn", "bundle", "placement"];
+    args.extend(proposals.iter().map(|p| p.as_str()));
+    world.must(&args);
+    let result = world.dir.path().join("result.json");
+    std::fs::write(
+        &result,
+        r#"{"aggregates": {"casesTotal": 4, "casesPassed": 4, "overallScore": 0.97}, "costUsd": 1.0, "partial": false}"#,
+    )
+    .unwrap();
+    world.must(&[
+        "learn",
+        "eval",
+        "placement",
+        "--result",
+        result.to_str().unwrap(),
+    ]);
+}
+
+fn states(world: &World) -> Vec<(String, String)> {
+    world
+        .store()
+        .conn()
+        .prepare("SELECT id, state FROM proposals ORDER BY created_at, id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+fn results(out: &Out) -> Vec<(String, String)> {
+    out.data()["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["id"].as_str().unwrap().to_owned(),
+                r["result"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn approve_takes_ids_or_a_filter_and_never_everything() {
+    let world = two_projects();
+    let rule = propose_line(
+        &world,
+        "alpha",
+        "How we work here",
+        "Run the formatter before a commit.",
+    );
+    world.must(&[
+        "project",
+        "add",
+        "gamma",
+        "--name",
+        "Gamma",
+        "--repo",
+        "example/gamma",
+        "--delivery",
+        "direct-pr",
+        "--capacity",
+        "3",
+    ]);
+    let note = propose_line(
+        &world,
+        "gamma",
+        "Watch out for",
+        "The staging box resets at midnight.",
+    );
+    let other = propose_line(
+        &world,
+        "beta",
+        "How we work here",
+        "Never edit the vendored copy.",
+    );
+    open_gate(&world, &[&rule, &note, &other]);
+
+    // No ids and no filter: refused as usage, nothing approved.
+    let bare = world.run(&["mem", "approve"]);
+    assert_eq!(
+        (bare.code, bare.error_code()),
+        (2, "usage"),
+        "{}",
+        bare.json
+    );
+    let both = world.run(&["mem", "approve", &rule, "--class", "rule"]);
+    assert_eq!(
+        (both.code, both.error_code()),
+        (2, "usage"),
+        "{}",
+        both.json
+    );
+    assert!(states(&world).iter().all(|(_, state)| state == "proposed"));
+
+    // A dry run lists the match and writes nothing.
+    let seq = world.store().last_seq().unwrap();
+    let dry = world.must(&["mem", "approve", "--class", "rule", "--dry-run"]);
+    assert_eq!(dry.data()["dry_run"], true);
+    assert_eq!(dry.data()["would_approve"], 2);
+    assert_eq!(
+        results(&dry),
+        vec![
+            (rule.clone(), "would_approve".to_owned()),
+            (other.clone(), "would_approve".to_owned())
+        ]
+    );
+    assert_eq!(dry.data()["results"][0]["class"], "rule");
+    assert_eq!(dry.data()["results"][0]["project_id"], "alpha");
+    assert_eq!(world.store().last_seq().unwrap(), seq);
+    assert!(states(&world).iter().all(|(_, state)| state == "proposed"));
+
+    // The class filter takes the rules and leaves the note.
+    let done = world.must(&["mem", "approve", "--class", "rule"]);
+    assert_eq!(done.data()["approved"], 2);
+    assert_eq!(
+        results(&done),
+        vec![
+            (rule.clone(), "approved".to_owned()),
+            (other.clone(), "approved".to_owned())
+        ]
+    );
+    let after = states(&world);
+    let state_of = |id: &str| after.iter().find(|(i, _)| i == id).unwrap().1.clone();
+    assert_eq!(state_of(&rule), "applied");
+    assert_eq!(state_of(&other), "applied");
+    assert_eq!(state_of(&note), "proposed");
+    let approvals: i64 = world
+        .store()
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM approvals WHERE kind = 'memory' AND state = 'succeeded'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(approvals, 2);
+    let text = std::fs::read_to_string(world.home().join("memory/projects/alpha.md")).unwrap();
+    assert!(
+        text.contains("Run the formatter before a commit."),
+        "{text}"
+    );
+    assert!(!world.home().join("memory/projects/gamma.md").exists());
+
+    // The same filter again finds nothing left: approved items are not redone.
+    let again = world.must(&["mem", "approve", "--class", "rule"]);
+    assert_eq!(again.data()["approved"], 0);
+    assert!(results(&again).is_empty());
+
+    // Named by id, an approved one is skipped and the open one goes.
+    let named = world.must(&["mem", "approve", &rule, &note]);
+    assert_eq!(
+        results(&named),
+        vec![
+            (rule.clone(), "skipped".to_owned()),
+            (note.clone(), "approved".to_owned())
+        ]
+    );
+    assert_eq!(named.data()["skipped"], 1);
+    assert_eq!(named.data()["approved"], 1);
+}
+
+#[test]
+fn approve_filters_by_project_and_boundary() {
+    let world = two_projects();
+    let alpha = propose_line(
+        &world,
+        "alpha",
+        "How we work here",
+        "Run the formatter before a commit.",
+    );
+    let beta = propose_line(
+        &world,
+        "beta",
+        "How we work here",
+        "Never edit the vendored copy.",
+    );
+    open_gate(&world, &[&alpha, &beta]);
+
+    let dry = world.must(&["mem", "approve", "--project", "beta", "--dry-run"]);
+    assert_eq!(
+        results(&dry),
+        vec![(beta.clone(), "would_approve".to_owned())]
+    );
+
+    let work = world.must(&["mem", "approve", "--boundary", "work", "--dry-run"]);
+    assert!(results(&work).is_empty());
+
+    let personal = world.must(&[
+        "mem",
+        "approve",
+        "--boundary",
+        "personal",
+        "--project",
+        "alpha",
+    ]);
+    assert_eq!(
+        results(&personal),
+        vec![(alpha.clone(), "approved".to_owned())]
+    );
+    let after = states(&world);
+    assert_eq!(
+        after.iter().find(|(id, _)| *id == beta).unwrap().1,
+        "proposed"
+    );
+
+    let wrong = world.run(&["mem", "approve", "--boundary", "office"]);
+    assert_eq!(wrong.code, 2, "{}", wrong.json);
+}
+
+#[test]
+fn approve_refuses_what_the_holdout_gate_holds_and_goes_on() {
+    let world = two_projects();
+    let held = propose_line(
+        &world,
+        "alpha",
+        "How we work here",
+        "Run the formatter before a commit.",
+    );
+    let ready = propose_line(
+        &world,
+        "beta",
+        "How we work here",
+        "Never edit the vendored copy.",
+    );
+    open_gate(&world, &[&ready]);
+
+    let dry = world.must(&["mem", "approve", "--class", "rule", "--dry-run"]);
+    assert_eq!(dry.data()["would_approve"], 1);
+    assert_eq!(dry.data()["would_refuse"], 1);
+    let reason = dry.data()["results"][0]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("no change set") && reason.contains("tiller learn eval"),
+        "{reason}"
+    );
+
+    let done = world.must(&["mem", "approve", "--class", "rule"]);
+    assert_eq!(done.data()["approved"], 1);
+    assert_eq!(done.data()["refused"], 1);
+    assert_eq!(
+        results(&done),
+        vec![
+            (held.clone(), "refused".to_owned()),
+            (ready.clone(), "approved".to_owned())
+        ]
+    );
+    assert!(done.json["warning"].is_string(), "{}", done.json);
+    let after = states(&world);
+    assert_eq!(
+        after.iter().find(|(id, _)| *id == held).unwrap().1,
+        "proposed"
+    );
+    assert_eq!(
+        after.iter().find(|(id, _)| *id == ready).unwrap().1,
+        "applied"
+    );
+}
+
+#[test]
+fn approve_takes_several_proposals_for_one_document_in_one_pass() {
+    let world = two_projects();
+    let first = propose_line(
+        &world,
+        "alpha",
+        "How we work here",
+        "Run the formatter before a commit.",
+    );
+    let second = propose_line(
+        &world,
+        "alpha",
+        "How we work here",
+        "Keep commits small and focused.",
+    );
+    open_gate(&world, &[&first, &second]);
+
+    let done = world.must(&["mem", "approve", "--project", "alpha"]);
+    assert_eq!(done.data()["approved"], 2, "{}", done.json);
+    let text = std::fs::read_to_string(world.home().join("memory/projects/alpha.md")).unwrap();
+    assert!(
+        text.contains("Run the formatter before a commit."),
+        "{text}"
+    );
+    assert!(text.contains("Keep commits small and focused."), "{text}");
 }
