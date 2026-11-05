@@ -194,7 +194,7 @@ function RunCard({ run, owner }: { run: CardRun; owner: string | undefined }) {
   );
 }
 
-function ApprovalBox({
+function ApprovalRow({
   approval,
   pr,
   ask,
@@ -208,34 +208,43 @@ function ApprovalBox({
   const who = approval.decided_by === "owner" ? "you" : (approval.decided_by ?? "someone");
   return (
     <div className={`appr${stale ? " stale" : ""}`} data-standing={standing}>
-      <div className="a-h">
-        {stale ? <WarnIcon /> : standing === "current" ? <Status mark="ok" /> : <LockIcon />}
-        {standing === "stale"
-          ? "Approval bound to an older commit"
-          : standing === "current"
-            ? "Approval matches the head"
-            : standing === "pending"
-              ? "Waiting for your approval"
-              : `Approval ${approval.state}`}
-        {stale ? (
-          <span className="lab sm yel">stale: new commits since approval</span>
-        ) : standing === "current" ? (
-          <span className="lab sm ok">current</span>
+      <div className="a-main">
+        <div className="a-h">
+          {stale ? <WarnIcon /> : standing === "current" ? <Status mark="ok" /> : <LockIcon />}
+          {standing === "stale"
+            ? "Approval bound to an older commit"
+            : standing === "current"
+              ? "Approval matches the head"
+              : standing === "pending"
+                ? "Waiting for your approval"
+                : `Approval ${approval.state}`}
+          {stale ? (
+            <span className="lab sm yel">stale: new commits since approval</span>
+          ) : standing === "current" ? (
+            <span className="lab sm ok">current</span>
+          ) : null}
+        </div>
+        {approval.head_sha ? (
+          <div className="bind">
+            {approval.decided_at
+              ? `Approved by ${who} at ${formatLisbonMoment(approval.decided_at)}, bound to`
+              : "Will be bound to"}{" "}
+            <span className={`sha${stale ? " old" : ""}`}>{shortSha(approval.head_sha)}</span>
+            {stale ? (
+              <>
+                <ChevronRightIcon />
+                head is <span className="sha new">{shortSha(pr.head_sha)}</span>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+        {standing === "current" ? (
+          <div className="bind">A new push would mark this approval stale and ask again.</div>
         ) : null}
       </div>
-      {approval.head_sha ? (
-        <div className="bind">
-          <LockIcon />
-          {approval.decided_at
-            ? `Approved by ${who} at ${formatLisbonMoment(approval.decided_at)}, bound to`
-            : "Will be bound to"}{" "}
-          <span className={`sha${stale ? " old" : ""}`}>{shortSha(approval.head_sha)}</span>
-          {stale ? (
-            <>
-              <ChevronRightIcon />
-              head is <span className="sha new">{shortSha(pr.head_sha)}</span>
-            </>
-          ) : null}
+      {standing === "pending" && ask ? (
+        <div className="a-act">
+          <ApproveButton item={ask} />
         </div>
       ) : null}
       {stale && approval.newer_commits.length > 0 ? (
@@ -251,12 +260,6 @@ function ApprovalBox({
           ))}
         </ul>
       ) : null}
-      {standing === "current" ? (
-        <div className="bind" style={{ marginTop: 6 }}>
-          A new push would mark this approval stale and ask again.
-        </div>
-      ) : null}
-      {standing === "pending" && ask ? <ApproveButton item={ask} /> : null}
     </div>
   );
 }
@@ -321,22 +324,22 @@ function PullRequest({
             </>
           ) : null}
         </dl>
-      </div>
-      {approval ? (
-        <ApprovalBox
-          approval={approval}
-          pr={pr}
-          ask={attention.find((item) => item.still_current && item.approval?.id === approval.id)}
-        />
-      ) : pr.state === "open" ? (
-        <div className="appr">
-          <div className="bind" style={{ margin: 0 }}>
-            <LockIcon />
-            No approval yet. One is requested once checks pass, and it is bound to the head commit
-            at that moment.
+        {approval ? (
+          <ApprovalRow
+            approval={approval}
+            pr={pr}
+            ask={attention.find((item) => item.still_current && item.approval?.id === approval.id)}
+          />
+        ) : pr.state === "open" ? (
+          <div className="appr">
+            <div className="bind">
+              <LockIcon />
+              No approval yet. One is requested once checks pass, and it is bound to the head commit
+              at that moment.
+            </div>
           </div>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
     </div>
   );
 }

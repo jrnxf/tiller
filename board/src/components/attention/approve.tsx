@@ -203,7 +203,7 @@ export function ApproveButton({ item }: { item: AttentionItem }) {
           {staleMessage(stale, approval.pr_number)}
         </p>
       ) : null}
-      <div className="acts" style={{ display: "flex", gap: 8, marginTop: 12 }}>
+      <div className="acts" style={{ display: "flex", gap: 8 }}>
         <button
           type="button"
           className="btn primary"
