@@ -7,8 +7,15 @@ use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use tiller_core::import::bundle::BundleCard;
 
 use crate::Error;
+
+/// The Firstmate task id the baseline names a bundle card by: the earlier
+/// id the exporter recorded, or else the card's own.
+pub fn task_id(card: &BundleCard) -> String {
+    card.legacy_id.clone().unwrap_or_else(|| card.id.clone())
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 pub struct ReplayAsk {
@@ -26,6 +33,15 @@ pub struct ReplayAsk {
     pub effort: Vec<Option<String>>,
     #[serde(default)]
     pub holds: Vec<BaselineHold>,
+    /// How each card ended up, which a judge may read in hindsight.
+    #[serde(default)]
+    pub final_outcome: serde_json::Value,
+    /// Firstmate's reply to the ask, shortened by the exporter.
+    #[serde(default)]
+    pub reply_excerpt: Option<String>,
+    /// How the exporter tied the ask to its cards.
+    #[serde(default)]
+    pub linkage: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]

@@ -1,7 +1,7 @@
 //! The replay loop: one ask at a time through the real hooks, the
 //! orchestrator and the core and spawn functions the CLI calls.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -10,18 +10,19 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tiller_agents::intake::Hooks;
 use tiller_agents::spawn::{self, Outcome as SpawnOutcome, Request};
-use tiller_core::domain::{AttentionKind, Card, Run, RunOutcome};
+use tiller_core::domain::{AttentionKind, Card, CardState, Run, RunOutcome};
 use tiller_core::import::Bundle;
 use tiller_core::state::asks::Resolution;
 use tiller_core::state::attention::NewAttention;
 use tiller_core::state::cards::NewCard;
 use tiller_core::state::{get, list, resolve_card};
-use tiller_core::{Actor, Ctx};
+use tiller_core::{Actor, Ctx, Timestamp};
 use tiller_observe::hooks::{self, Env, Outcome as HookOutcome};
 
 use crate::Error;
 use crate::audit::{Audit, fingerprint};
 use crate::baseline::{self, ReplayAsk};
+use crate::board::{self, BoardCard, History};
 use crate::orchestrator::{Decision, Orchestrator, Recorded, Turn};
 use crate::sandbox::{SESSION_PREFIX, Sandbox};
 
@@ -44,6 +45,9 @@ pub struct Record {
     pub stop: Value,
     /// What Firstmate did, for T5.2 to compare against.
     pub baseline: Value,
+    /// Why the orchestrator gave no decision list, when it gave none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unanswered: Option<String>,
 }
 
 /// A card the ask ended up linked to.
@@ -61,6 +65,10 @@ pub struct Step {
     pub decision: Value,
     pub ok: bool,
     pub result: Value,
+    /// Imported cards the decision reopened to match the board, by display
+    /// id. A reopen stays when the decision itself is then refused.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reopened: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -79,24 +87,79 @@ pub struct Replay<'a> {
     pub sandbox: &'a mut Sandbox,
     /// Where an ask with no card goes.
     pub default_project: String,
-    /// Each label a `new` decision gave, to the card it created.
+    /// Each label a `new` decision of the current turn gave, to the card it
+    /// created. A label names a card within one turn only: a later turn
+    /// may give the same label to another card.
     labels: HashMap<String, String>,
+    /// Every card a replayed ask filed, in order, for the boards after it.
+    filed: Vec<String>,
+    /// The display ids [`Self::reference`] reopened for the current step.
+    reopened: Vec<String>,
     /// Each Firstmate task id, to the card the import made of it.
-    imported: HashMap<String, String>,
+    imported: HashMap<String, Card>,
+    /// The Firstmate task id of each imported card, by card id.
+    keys: HashMap<String, String>,
+    /// When each bundle card was open, for the board a turn shows.
+    history: History,
+    /// The imported cards the current turn's board shows open, by card id:
+    /// the sandbox reopens one the moment a decision names it.
+    shown: HashSet<String>,
+    /// The Firstmate task ids of filed cards a replay card took the place of.
+    replaced: HashSet<String>,
+    /// How far the earliest ask lies in the past, in milliseconds: a hold
+    /// the orchestrator dates from an ask's day is moved forward by it, the
+    /// same for every ask, so one date is one instant all through.
+    shift_ms: i64,
 }
 
 impl<'a> Replay<'a> {
     pub fn new(
         sandbox: &'a mut Sandbox,
         default_project: String,
-        imported: HashMap<String, String>,
+        imported: HashMap<String, Card>,
+        history: History,
     ) -> Self {
+        let keys = imported
+            .iter()
+            .map(|(key, card)| (card.id.clone(), key.clone()))
+            .collect();
+        let shift_ms = history
+            .earliest()
+            .map_or(0, |at| Timestamp::now().as_millis() - at.as_millis());
         Self {
             sandbox,
             default_project,
             labels: HashMap::new(),
+            filed: Vec::new(),
+            reopened: Vec::new(),
             imported,
+            keys,
+            history,
+            shown: HashSet::new(),
+            replaced: HashSet::new(),
+            shift_ms,
         }
+    }
+
+    /// The project's cards as they stood when the ask at `index` arrived:
+    /// the imported ones [`History`] says were open, then the open ones
+    /// earlier replayed asks filed.
+    fn board(&mut self, index: usize, project: &str, day: &str) -> Result<Vec<BoardCard>, Error> {
+        let mut shown = Vec::new();
+        self.shown.clear();
+        for key in self.history.open(index, day, &self.replaced) {
+            if let Some(card) = self.imported.get(key).filter(|c| c.project_id == project) {
+                self.shown.insert(card.id.clone());
+                shown.push(board::shown(card, self.history.since(key), false));
+            }
+        }
+        for id in &self.filed {
+            let card: Card = get(self.sandbox.store.conn(), "card", id)?;
+            if card.project_id == project && card.state == CardState::Open {
+                shown.push(board::shown(&card, None, true));
+            }
+        }
+        Ok(shown)
     }
 
     /// Replays one ask. An error here is the harness failing, not a
@@ -107,6 +170,7 @@ impl<'a> Replay<'a> {
         ask: &ReplayAsk,
         orchestrator: &mut dyn Orchestrator,
     ) -> Result<Record, Error> {
+        self.labels.clear();
         let project = self.route(ask)?;
         let session = self.sandbox.orchestrator(&project)?;
         let env = Env {
@@ -153,15 +217,27 @@ impl<'a> Replay<'a> {
             .and_then(Value::as_str)
             .map(str::to_owned);
 
+        let day = ask.ts.get(..10).unwrap_or_default();
+        let board = self.board(index, &project, day)?;
         let turn = Turn {
             index,
             ask_id: ask_id.clone(),
             project: project.clone(),
             text: ask.ask.clone(),
             context,
+            now: ask.ts.clone(),
+            board,
+            projects: self.sandbox.projects()?,
         };
-        let decisions = orchestrator.decide(&turn)?;
+        // A turn the orchestrator could not answer is one unanswered ask,
+        // not the end of the replay: the ask stays unresolved.
+        let (decisions, unanswered) = match orchestrator.decide(&turn) {
+            Ok(decisions) => (decisions, None),
+            Err(Error::Orchestrator(e)) => (Vec::new(), Some(e)),
+            Err(e) => return Err(e),
+        };
         let ctx = Ctx::new(Actor::Session(session.clone()));
+        let before = self.filed.len();
         let mut steps = Vec::new();
         let mut runs = Vec::new();
         let mut reply = None;
@@ -184,8 +260,13 @@ impl<'a> Replay<'a> {
                     Ok(_) => applied.0,
                     Err(e) => json!(e.to_string()),
                 },
+                reopened: std::mem::take(&mut self.reopened),
             });
         }
+        // The replay's new cards take the place of Firstmate's, in order.
+        let filed = self.filed.len() - before;
+        self.replaced
+            .extend(self.history.filed(index).iter().take(filed).cloned());
         let runs = runs
             .iter()
             .map(|(run, dispatch)| self.end(run, dispatch.clone()))
@@ -225,6 +306,7 @@ impl<'a> Replay<'a> {
             runs,
             stop: json!({"outcome": outcome_name(&outcome), "found": found, "output": output}),
             baseline: ask.summary(),
+            unanswered,
         })
     }
 
@@ -264,17 +346,38 @@ impl<'a> Replay<'a> {
         if let Some(id) = self
             .labels
             .get(reference)
-            .or_else(|| self.imported.get(reference))
+            .or_else(|| self.imported.get(reference).map(|card| &card.id))
         {
             return Ok(Some(get(conn, "card", id)?));
         }
         Ok(resolve_card(conn, reference).ok())
     }
 
-    fn reference(&self, reference: &str) -> Result<String, Error> {
-        Ok(self
-            .card(reference)?
-            .map_or_else(|| reference.to_owned(), |card| card.id))
+    /// A card reference as a card id. A card the turn's board showed open
+    /// but the import closed (it closed later) is reopened first, so the
+    /// sandbox matches the board the orchestrator was shown.
+    fn reference(&mut self, reference: &str) -> Result<String, Error> {
+        let Some(card) = self.card(reference)? else {
+            return Ok(reference.to_owned());
+        };
+        if card.state == CardState::Closed && self.shown.contains(&card.id) {
+            let owner = Ctx::new(Actor::Owner);
+            self.sandbox.store.card_reopen(
+                &owner,
+                &card.id,
+                "replay: open when the ask arrived",
+            )?;
+            self.reopened.push(card.display_id);
+        }
+        Ok(card.id)
+    }
+
+    /// A card as a record names it: its display id and, for an imported
+    /// card, the Firstmate task id the baseline names it by, which T5.2
+    /// compares by.
+    fn named(&self, id: &str) -> Result<Value, Error> {
+        let card: Card = get(self.sandbox.store.conn(), "card", id)?;
+        Ok(json!({"display_id": card.display_id, "legacy_id": self.keys.get(&card.id)}))
     }
 
     /// Applies one decision. Returns what it did, and the run it started.
@@ -307,11 +410,15 @@ impl<'a> Replay<'a> {
                 project: target,
                 kind,
                 title,
+                size,
+                acceptance,
             } => {
                 let new = NewCard {
                     project_id: target.clone().unwrap_or_else(|| project.to_owned()),
                     kind: *kind,
                     title: title.clone(),
+                    size: *size,
+                    acceptance: acceptance.clone(),
                     ..NewCard::default()
                 };
                 let cross = (new.project_id != project).then(|| new.project_id.clone());
@@ -334,6 +441,7 @@ impl<'a> Replay<'a> {
                         .ok_or_else(|| Error::Sandbox("ask resolve made no card".into()))?
                 };
                 *out = json!({"card": card.display_id, "kind": card.kind, "cross_project": cross});
+                self.filed.push(card.id.clone());
                 if let Some(label) = label {
                     self.labels.insert(label.clone(), card.id);
                 }
@@ -355,7 +463,7 @@ impl<'a> Replay<'a> {
             Decision::Reopen { card, reason } => {
                 let card = self.reference(card)?;
                 let card = self.sandbox.store.card_reopen(ctx, &card, reason)?.value;
-                *out = json!({"card": card.display_id, "state": card.state});
+                *out = json!({"card": card.display_id, "legacy": self.keys.get(&card.id), "state": card.state});
                 Ok(None)
             }
             Decision::Chat { reason } => {
@@ -377,7 +485,19 @@ impl<'a> Replay<'a> {
                 effort,
             } => {
                 let card = self.reference(card)?;
-                let asked = model.clone().zip(*effort);
+                let project = get::<Card>(self.sandbox.store.conn(), "card", &card)?.project_id;
+                self.sandbox.checkout(&project)?;
+                // As `tiller spawn`, which takes `--model` only with `--effort`.
+                let asked = match (model, effort) {
+                    (Some(model), Some(effort)) => Some((model.clone(), *effort)),
+                    (None, None) => None,
+                    _ => {
+                        return Err(Error::Input(
+                            "spawn takes a model only with an effort, and an effort only with a model"
+                                .into(),
+                        ));
+                    }
+                };
                 let (store, world) = self.sandbox.world();
                 let request = Request {
                     card,
@@ -402,12 +522,16 @@ impl<'a> Replay<'a> {
                 reason,
             } => {
                 let card = self.reference(card)?;
+                // The orchestrator dates a hold from the ask's day; the
+                // sandbox's clock is today's.
+                let until =
+                    Timestamp::from_millis(until.as_millis() + self.shift_ms).unwrap_or(*until);
                 let hold = self
                     .sandbox
                     .store
-                    .card_hold(ctx, &card, *until, reason)?
+                    .card_hold(ctx, &card, until, reason)?
                     .value;
-                *out = json!({"hold": hold.id, "until": hold.until_at});
+                *out = json!({"hold": hold.id, "until": hold.until_at, "card": self.named(&card)?});
                 Ok(None)
             }
             Decision::Attention { card, question } => {
@@ -416,13 +540,20 @@ impl<'a> Replay<'a> {
                     ctx,
                     None,
                     NewAttention {
-                        card,
+                        card: card.clone(),
                         kind: AttentionKind::Decision,
                         question: question.clone(),
                         ..NewAttention::default()
                     },
                 )?;
-                *out = json!({"attention": opened.value.id});
+                *out = json!({"attention": opened.value.id, "card": self.named(&card)?});
+                Ok(None)
+            }
+            Decision::Dep { card, depends_on } => {
+                let card = self.reference(card)?;
+                let depends_on = self.reference(depends_on)?;
+                self.sandbox.store.dep_add(ctx, &card, &depends_on)?;
+                *out = json!({"card": self.named(&card)?, "depends_on": self.named(&depends_on)?});
                 Ok(None)
             }
             Decision::Reply { .. } => Ok(None),
@@ -472,7 +603,7 @@ impl<'a> Replay<'a> {
                 let card: Card = get(conn, "card", &link.card_id)?;
                 Ok(Linked {
                     display_id: card.display_id,
-                    legacy_id: card.legacy_id,
+                    legacy_id: self.keys.get(&card.id).cloned(),
                     kind: card.kind.to_string(),
                     relation: link.relation.to_string(),
                 })
@@ -540,6 +671,8 @@ pub struct Summary {
     pub cards_linked: usize,
     pub runs: usize,
     pub stop_unresolved: usize,
+    /// Asks the orchestrator gave no decision list for.
+    pub unanswered: usize,
     pub audit: Audit,
 }
 
@@ -578,8 +711,8 @@ pub fn run(
         asks: asks.len(),
         ..Summary::default()
     };
-    let imported = imported.into_iter().map(|(k, c)| (k, c.id)).collect();
-    let mut replay = Replay::new(&mut sandbox, default, imported);
+    let history = History::new(&bundle.cards, &asks);
+    let mut replay = Replay::new(&mut sandbox, default, imported, history);
     for (index, ask) in asks.iter().enumerate() {
         let record = replay.ask(index, ask, orchestrator)?;
         serde_json::to_writer(&mut log, &record)?;
@@ -592,6 +725,7 @@ pub fn run(
         summary.refused += record.decisions.iter().filter(|s| !s.ok).count();
         summary.cards_linked += record.cards.len();
         summary.runs += record.runs.len();
+        summary.unanswered += usize::from(record.unanswered.is_some());
         let unresolved = record
             .stop
             .pointer("/found/unresolved_ask_ids")

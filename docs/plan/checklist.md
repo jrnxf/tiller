@@ -415,10 +415,11 @@ about 3 min of the developer's time
 ### T5.2 Replay run and difference report
 `opus` high, pinned judge - 1.5-2 h - after T5.1
 
-- [ ] Each disposition, kind, model, effort and hold compared with Firstmate
-- [ ] Each difference classified better, worse or neutral with quoted evidence
-- [ ] Check: summary states its uncertainty
-- [ ] Check: every "worse" has a fix or the developer's acceptance
+- [x] Each disposition, kind, model, effort and hold compared with Firstmate
+- [x] Each difference classified better, worse or neutral with quoted evidence
+- [x] Check: summary states its uncertainty
+- [x] Check: every "worse" has a fix or the developer's acceptance
+- [x] Delivered
 
 ## CP6: Replay go or no-go (developer, 20-30 min)
 
