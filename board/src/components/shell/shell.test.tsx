@@ -293,3 +293,20 @@ test("the palette goes to Settings", async () => {
   fireEvent.keyDown(input, { key: "Enter" });
   await vi.waitFor(() => expect(screen.getByTestId("settings")).toBeTruthy());
 });
+
+test("the top-bar Ask button and the A key open the ask dialog with the picker open", async () => {
+  await renderApp();
+  expect(screen.queryByRole("dialog", { name: "Ask an orchestrator" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: /^Ask/ }));
+  expect(screen.getByRole("dialog", { name: "Ask an orchestrator" })).toBeTruthy();
+  await vi.waitFor(() =>
+    expect(document.activeElement?.classList.contains("ask-combo-in")).toBe(true),
+  );
+  // Escape closes the open list first, then the dialog.
+  fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+  expect(screen.queryByRole("dialog", { name: "Ask an orchestrator" })).toBeNull();
+
+  fireEvent.keyDown(document.body, { key: "a" });
+  expect(screen.getByRole("dialog", { name: "Ask an orchestrator" })).toBeTruthy();
+});

@@ -180,14 +180,18 @@ fn note_orchestrator(
 impl Store {
     /// `ask.record`. Keyed. A prompt typed in a worker pane is resolved as a
     /// follow-up on the run's card and noted to its supervisor; a script note
-    /// goes to the live orchestrator, or carries `warning: no_orchestrator`.
+    /// or a note typed in the board's ask box goes to the live orchestrator,
+    /// or carries `warning: no_orchestrator`.
     pub fn ask_record(
         &mut self,
         ctx: &Ctx,
         key: Option<&str>,
         new: NewAsk,
     ) -> Result<Applied<AskRecorded>> {
-        if new.source == AskSource::Board || new.source == AskSource::Import {
+        // The board's own ask box has no session and notes the orchestrator
+        // like a script note; its add card has its own path (`board_add`).
+        let board_note = new.source == AskSource::Board && new.session_id.is_none();
+        if (new.source == AskSource::Board && !board_note) || new.source == AskSource::Import {
             return Err(Error::Usage(format!(
                 "{} asks are recorded by their own path",
                 new.source

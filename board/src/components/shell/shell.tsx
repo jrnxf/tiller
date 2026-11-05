@@ -3,6 +3,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { applyAppearance, prefsStore } from "../../lib/prefs";
 import { useStore } from "../../lib/store";
+import { ToastHost } from "../board/toast";
+import { AskDialog } from "./ask-dialog";
 import { CommandPalette } from "./command-palette";
 import { Header } from "./header";
 import { Sidebar } from "./sidebar";
@@ -20,6 +22,15 @@ export function useAppearance() {
   }, [saved]);
 }
 
+function isPlainKey(event: KeyboardEvent): boolean {
+  return !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && !event.repeat;
+}
+
+function isTyping(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.isContentEditable || /^(input|textarea|select)$/i.test(target.tagName);
+}
+
 export function Shell({
   activeHost,
   children,
@@ -28,12 +39,14 @@ export function Shell({
   children: ReactNode;
 }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [askOpen, setAskOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const shellRef = useRef<HTMLDivElement>(null);
   const menuWasOpen = useRef(false);
   useAppearance();
 
   const closePalette = useCallback(() => setPaletteOpen(false), []);
+  const closeAsk = useCallback(() => setAskOpen(false), []);
   const closeMenu = useCallback(() => setMenuOpen(false), []);
 
   useEffect(() => {
@@ -43,6 +56,10 @@ export function Shell({
         setPaletteOpen((open) => !open);
       } else if (event.key === "Escape") {
         setMenuOpen(false);
+      } else if (event.key.toLowerCase() === "a" && isPlainKey(event) && !isTyping(event.target)) {
+        // The Ask button's shortcut, as long as nothing else is being typed into.
+        event.preventDefault();
+        setAskOpen(true);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -85,9 +102,16 @@ export function Shell({
       />
       <div className="nav-scrim" onClick={closeMenu} aria-hidden="true" />
       <div className="main" inert={menuOpen}>
-        <Header activeHost={activeHost} menuOpen={menuOpen} onOpenMenu={() => setMenuOpen(true)} />
+        <Header
+          activeHost={activeHost}
+          menuOpen={menuOpen}
+          onOpenMenu={() => setMenuOpen(true)}
+          onOpenAsk={() => setAskOpen(true)}
+        />
         <main className="content">{children}</main>
       </div>
+      <AskDialog open={askOpen} onClose={closeAsk} />
+      <ToastHost />
       <CommandPalette open={paletteOpen} onClose={closePalette} activeHost={activeHost} />
     </div>
   );

@@ -1,0 +1,252 @@
+/* The ask dialog: the picker and the text are one card, actions on the right. */
+
+.ask-dialog {
+  width: min(520px, 100%);
+}
+
+.ask-field {
+  margin-top: 14px;
+}
+
+.ask-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: var(--fs-mini);
+  font-weight: var(--w-medium);
+  color: var(--fg-3);
+}
+
+/* The orchestrator combobox: the Base UI parts with the board's tokens. */
+.ask-combo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r8);
+  background: var(--bg-card);
+  font: inherit;
+  font-size: var(--fs-small);
+  font-weight: var(--w-medium);
+  color: var(--fg-1);
+}
+
+.ask-combo-btn[data-empty="true"] {
+  color: var(--fg-3);
+}
+
+.ask-combo-btn .icon {
+  transform: rotate(90deg);
+}
+
+.ask-combo-btn:hover {
+  background: var(--bg-3);
+}
+
+.ask-combo-btn:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in lch, var(--accent), transparent 80%);
+}
+
+.ask-combo-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 0 4px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--line-2);
+}
+
+.ask-combo-in {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 8px;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: var(--fs-small);
+  color: var(--fg-1);
+  outline: none;
+}
+
+.ask-combo-in::placeholder {
+  color: var(--fg-4);
+}
+
+.ask-combo-num {
+  font-family: inherit;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.ask-combo-num {
+  min-width: 14px;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.ask-combo-pos {
+  z-index: 80;
+  width: min(320px, var(--available-width));
+}
+
+.ask-combo-pop {
+  max-height: min(240px, var(--available-height));
+  overflow: auto;
+  padding: 4px;
+  background: var(--bg-pop);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r8);
+  box-shadow: var(--shadow-high);
+}
+
+.ask-combo-list {
+  margin: 0;
+  padding: 0;
+}
+
+.ask-combo-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 0 8px;
+  border-radius: var(--r6, var(--r8));
+  font-size: var(--fs-small);
+  color: var(--fg-1);
+  cursor: default;
+  user-select: none;
+}
+
+.ask-combo-item[data-highlighted] {
+  background: var(--bg-3);
+}
+
+.ask-combo-item[data-disabled] {
+  color: var(--fg-4);
+  cursor: not-allowed;
+}
+
+.ask-combo-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--round);
+  background: var(--pc);
+}
+
+.ask-combo-name {
+  flex: 1;
+}
+
+.ask-combo-off {
+  flex: 2;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-mini);
+  color: var(--fg-4);
+}
+
+.ask-combo-check {
+  margin-right: 8px;
+  display: grid;
+  color: var(--accent-text);
+}
+
+.ask-combo-empty {
+  padding: 8px;
+  font-size: var(--fs-small);
+  color: var(--fg-3);
+}
+
+.ask-combo-empty:empty {
+  display: none;
+}
+
+.ask-in {
+  display: block;
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r8);
+  background: var(--bg-card);
+  padding: 8px 12px;
+  font: inherit;
+  font-size: var(--fs-small);
+  line-height: 20px;
+  color: var(--fg-1);
+  outline: none;
+}
+
+.ask-in:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in lch, var(--accent), transparent 80%);
+}
+
+.ask-in::placeholder {
+  color: var(--fg-4);
+}
+
+/* Always one line tall, so picking and sending never move the buttons. */
+.ask-note {
+  min-height: 18px;
+  margin-top: 6px;
+  font-size: var(--fs-mini);
+  line-height: 18px;
+  color: var(--fg-3);
+}
+
+.ask-note[data-warn="true"] {
+  color: var(--yellow-text);
+}
+
+.ask-fail .refusal,
+.ask-fail .sent-unsure {
+  margin-top: 8px;
+}
+
+.ask-hint {
+  margin-right: auto;
+  align-self: center;
+  font-size: var(--fs-mini);
+  color: var(--fg-4);
+}
+
+@media (max-width: 820px) {
+  .ask-hint {
+    display: none;
+  }
+}
+
+/* The top-bar Ask button: the one primary action in the bar. */
+.top .btn.ask-open {
+  background: var(--accent-solid);
+  border-color: transparent;
+  color: var(--accent-fg);
+}
+
+.top .btn.ask-open:hover {
+  background: var(--accent-solid-hover);
+}
+
+.ask-open kbd {
+  background: transparent;
+  color: inherit;
+  border-color: color-mix(in srgb, currentColor 40%, transparent);
+  opacity: 0.8;
+}
+
+@media (max-width: 820px) {
+  .ask-open .kb {
+    display: none;
+  }
+}

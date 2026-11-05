@@ -46,7 +46,6 @@ import {
   WarnIcon,
 } from "./icons";
 import { KindLabel, ModelChip } from "./tile";
-import { ToastHost } from "./toast";
 import { CheckIcon } from "../shell/icons";
 import "./board.css";
 
@@ -585,7 +584,6 @@ export function CardPage({ cardId, owner }: { cardId: string; owner?: string }) 
           })}
         </div>
       </div>
-      <ToastHost />
     </div>
   );
 }

@@ -873,6 +873,20 @@ pub struct CreateCard {
     pub priority: Option<i64>,
 }
 
+/// `POST /api/v1/projects/{id}/asks`: a note typed in the board's ask box,
+/// recorded and sent to the project's orchestrator as `tiller ask note` does.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AskNote {
+    pub idempotency_key: String,
+    /// A paired peer's label. Not forwarded: a note for a peer's project is
+    /// 502 `peer_refused` (`protocol.md` 7.4).
+    #[serde(default)]
+    pub host: Option<String>,
+    /// The ask, in the owner's words; multi-line.
+    pub text: String,
+}
+
 /// `PATCH /api/v1/cards/{id}`: `rev` plus the changed fields.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]

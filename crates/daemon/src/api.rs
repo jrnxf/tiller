@@ -21,10 +21,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tiller_agents::spawn::config::SpawnConfig;
 use tiller_core::domain::{
-    AnsweredVia, Approval, CardKind, CardOutcome, HoldReleaseReason, Host, PeerScope, Session,
+    AnsweredVia, Approval, AskSource, CardKind, CardOutcome, HoldReleaseReason, Host, PeerScope,
+    Session,
 };
 use tiller_core::domain::{InterventionKind, Stage};
 use tiller_core::state::approvals::Decision;
+use tiller_core::state::asks::NewAsk;
 use tiller_core::state::cards::{CardEdit, NewCard};
 use tiller_core::state::{get as get_row, resolve_id};
 use tiller_core::{Actor, Applied, Ctx, Error, Store, Timestamp, ids};
@@ -538,6 +540,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/projects", get(projects))
         .route("/api/v1/contributions", get(contributions))
         .route("/api/v1/projects/{id}/stage", post(stage_project))
+        .route("/api/v1/projects/{id}/asks", post(ask_note))
         .route(
             "/api/v1/projects/{id}/delete",
             get(project_delete_preview).post(delete_project),
@@ -1544,6 +1547,54 @@ async fn stage_project(
     .await
 }
 
+#[utoipa::path(post, path = "/api/v1/projects/{id}/asks", tag = "mutations", request_body = AskNote,
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody),
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn ask_note(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers)?;
+    let request: AskNote = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "an ask").await?;
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, key| {
+            let text = request.text.trim().to_owned();
+            if text.chars().count() > ASK_NOTE_MAX_CHARS {
+                return Err(Error::Usage(format!(
+                    "an ask is at most {ASK_NOTE_MAX_CHARS} characters"
+                )));
+            }
+            // The same core call as `tiller ask note`, from the board's ask box.
+            let applied = store.ask_record(
+                ctx,
+                Some(key),
+                NewAsk {
+                    project_id: id,
+                    session_id: None,
+                    source: AskSource::Board,
+                    text,
+                },
+            )?;
+            let outbox_id = applied.value.message.as_ref().map(|m| m.id.clone());
+            let mut done = Done::of(applied)?;
+            done.outbox_id = outbox_id;
+            Ok(done)
+        },
+    )
+    .await
+}
+
+/// The longest ask the board's box records: it is noted whole to the
+/// orchestrator, and again at every orchestrator start until it is resolved.
+const ASK_NOTE_MAX_CHARS: usize = 8000;
+
 #[utoipa::path(get, path = "/api/v1/projects/{id}/delete", tag = "reads",
     params(("id" = String, Path)),
     responses((status = 200, body = ProjectDeletePreview), (status = 404, body = ErrorBody)))]
@@ -1879,7 +1930,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, stage_project, project_delete_preview, delete_project,
+        cancel, reopen, answer, withdraw_attention, decide, focus, stage_project, ask_note, project_delete_preview, delete_project,
         relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo
     ),
@@ -2056,6 +2107,106 @@ pub(crate) mod tests {
             .conn()
             .query_row("SELECT count(*) FROM cards", [], |row| row.get(0))
             .unwrap()
+    }
+
+    fn ask_request(key: &str, text: &str, headers: &[(&str, &str)]) -> Request<Body> {
+        mutation(
+            "POST",
+            "/api/v1/projects/alpha/asks",
+            json!({"idempotency_key": key, "text": text}),
+            headers,
+        )
+    }
+
+    fn ask_texts(fleet: &Fleet) -> Vec<(String, String)> {
+        let store = fleet.open();
+        let mut statement = store
+            .conn()
+            .prepare("SELECT source, text FROM asks ORDER BY received_at, id")
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// The board's ask box: owner only, and the same `ask.record` and
+    /// orchestrator note as `tiller ask note`.
+    #[tokio::test]
+    async fn board_ask_records_the_ask_and_wakes_the_orchestrator() {
+        let fleet = Fleet::new();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let cookie = owner_cookie(fleet.dir.path());
+        let owner = [("cookie", cookie.as_str())];
+
+        let refused = send(&app, ask_request("a-1", "ship it", &[])).await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        assert!(ask_texts(&fleet).is_empty());
+
+        // The orchestrator is live: the ask is recorded and noted to it.
+        let woken = send(&app, ask_request("a-1", "  first\nsecond line  ", &owner)).await;
+        assert_eq!(woken.status, StatusCode::OK, "{}", woken.body);
+        let woken: Value = serde_json::from_str(&woken.body).unwrap();
+        assert_eq!(woken["data"]["warning"], Value::Null);
+        assert_eq!(woken["data"]["ask"]["source"], "board");
+        assert_eq!(woken["data"]["ask"]["project_id"], "alpha");
+        assert_eq!(
+            woken["data"]["message"]["target_session_id"],
+            fleet.orchestrator_session
+        );
+        assert_eq!(woken["data"]["message"]["kind"], "note");
+        assert_eq!(
+            woken["receipt"]["outbox_id"],
+            woken["data"]["message"]["id"]
+        );
+        assert_eq!(
+            ask_texts(&fleet),
+            [("board".to_owned(), "first\nsecond line".to_owned())]
+        );
+
+        // The same key replays the first answer and records nothing more.
+        let replay = send(&app, ask_request("a-1", "  first\nsecond line  ", &owner)).await;
+        assert_eq!(replay.status, StatusCode::OK, "{}", replay.body);
+        assert_eq!(ask_texts(&fleet).len(), 1);
+
+        // With no orchestrator the ask is still recorded, and the response says
+        // nobody was told, as `tiller ask note` does.
+        fleet
+            .open()
+            .session_end(&Ctx::new(Actor::Owner), &fleet.orchestrator_session, "exit")
+            .unwrap();
+        let alone = send(&app, ask_request("a-2", "anyone there?", &owner)).await;
+        assert_eq!(alone.status, StatusCode::OK, "{}", alone.body);
+        let alone: Value = serde_json::from_str(&alone.body).unwrap();
+        assert_eq!(alone["data"]["warning"], "no_orchestrator");
+        assert_eq!(alone["data"]["message"], Value::Null);
+        assert_eq!(alone["receipt"]["outbox_id"], Value::Null);
+        assert_eq!(ask_texts(&fleet).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn board_ask_refuses_empty_text_and_an_unknown_project() {
+        let fleet = Fleet::new();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let cookie = owner_cookie(fleet.dir.path());
+        let owner = [("cookie", cookie.as_str())];
+        let empty = send(&app, ask_request("a-1", "   ", &owner)).await;
+        assert_eq!(empty.status, StatusCode::BAD_REQUEST, "{}", empty.body);
+        let long = send(&app, ask_request("a-3", &"x".repeat(8001), &owner)).await;
+        assert_eq!(long.status, StatusCode::BAD_REQUEST, "{}", long.body);
+        let unknown = send(
+            &app,
+            mutation(
+                "POST",
+                "/api/v1/projects/nope/asks",
+                json!({"idempotency_key": "a-2", "text": "hi"}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND, "{}", unknown.body);
+        assert!(ask_texts(&fleet).is_empty());
     }
 
     #[tokio::test]
