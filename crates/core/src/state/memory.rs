@@ -2106,6 +2106,34 @@ pub struct RevisionDetail {
     pub sessions: Vec<LoadedBy>,
 }
 
+/// Which open proposals `tiller mem approve` takes in bulk. A field left
+/// `None` matches everything; the command refuses a filter with none set.
+#[derive(Clone, Debug, Default)]
+pub struct PendingFilter {
+    pub class: Option<String>,
+    pub boundary: Option<String>,
+    pub project: Option<String>,
+}
+
+impl PendingFilter {
+    pub fn is_empty(&self) -> bool {
+        self.class.is_none() && self.boundary.is_none() && self.project.is_none()
+    }
+}
+
+/// The line a proposal adds or rewrites to, when it names one.
+pub fn proposal_text(proposal: &Proposal) -> Option<String> {
+    intended_text(proposal)
+}
+
+/// The class a proposal's entry has: the one it carries, else the one its
+/// section implies, as `apply_rows` decides it.
+pub fn proposal_class(proposal: &Proposal) -> String {
+    field(&proposal.memory_fields, "class")
+        .unwrap_or_else(|| doc::section_class(&intended_section(proposal)))
+        .to_owned()
+}
+
 /// What the daemon needs to undo a change: its commit.
 #[derive(Clone, Debug, Serialize)]
 pub struct ChangeRef {
@@ -2448,6 +2476,26 @@ impl Store {
             card,
             sessions,
         })
+    }
+
+    /// The proposals still `proposed` that match `filter`, oldest first (the
+    /// order a bulk approval decides them in).
+    pub fn mem_pending(&self, filter: &PendingFilter) -> Result<Vec<Proposal>> {
+        let found: Vec<Proposal> = list(
+            self.conn(),
+            "state = 'proposed' AND (?1 IS NULL OR boundary = ?1) AND (?2 IS NULL OR project_id = ?2)
+             ORDER BY created_at, id",
+            &[&filter.boundary, &filter.project],
+        )?;
+        Ok(found
+            .into_iter()
+            .filter(|p| {
+                filter
+                    .class
+                    .as_deref()
+                    .is_none_or(|c| proposal_class(p) == c)
+            })
+            .collect())
     }
 
     /// The proposal behind a "Recent changes" entry, with the commit an

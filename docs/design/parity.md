@@ -16,20 +16,22 @@ Written Sunday 2026-11-01, Lisbon time. Every date below is a Lisbon date.
   - `[cards]`: counts over the bundle's 713 cards.
 - **Owner** is the plan task that builds it. "Spec" names the M1 spec that must describe it first (T1.6 checks this).
 - **Test** is a proposed name, written as `crate::module::test_name` for Rust, `board/<file>: <name>` for the board, `evals/<name>` for role evals, and `live check at CP7` where only a person can confirm it. The owner task may rename a test, but every row keeps at least one test, and each test proves its own row.
-- **Proof on main** is the checkable gate for the personal Mac, filled in Thursday 2026-11-05 (Lisbon time). It starts with a status word:
+- **Proof on main** is the checkable gate for the first cutover host, filled in Thursday 2026-11-05 (Lisbon time). It starts with a status word:
   - `tested`: the named Rust, board or CLI snapshot tests run in CI and prove the row;
   - `eval`: the named role eval proves it. Evals call real models, so they run only on demand (`evals/run.sh`); `evals/check.sh` validates their shape offline;
   - `live-check`: only a person can confirm it on the host at CP7. The cell gives the exact check;
   - `failing`: the row has no passing proof. The cell says what is tested and what is not built or not proven. Each one is a gap to close before cutover, not a pass;
-  - `remote`: a remote-host row. Not tested for the personal Mac. The cell lists the tests on main, if any.
+  - `remote`: a remote-host row. Not tested for the first cutover host. The cell lists the tests on main, if any.
   Test names are `crate::module::test_name` without the leading `crates/` path. A name in the Test column is the original plan; the Proof column is what exists.
 - **Decision**: `keep`, `keep (gap)` when no plan task names the work yet and the owner here is a proposal, or `drop?` for a proposed drop that waits for CP1. `keep (CP1)` and `drop (CP1)` record the CP1 outcome on a row that was proposed as a drop.
 
 Project names are replaced with what each project is, so this file stays public-safe.
 
-## Gate status for the personal Mac
+## Gate status for the first cutover host
 
-Parity rows for this host, counted Thursday 2026-11-05 (Lisbon time). 71 kept rows (P01 to P68, plus D01, D04 and D11 kept at CP1); 12 dropped (D02, D03, D05 to D10, D12 to D15).
+The captain chose the Linux guest as the first cutover host, ahead of the personal Mac (Thursday 2026-11-05, Lisbon time); the Mac is the second host. The proofs below are scratch-database tests that run on Linux in CI, so they hold for either host. Only P52 is host-specific: its live check runs on the Linux guest first, then on the Mac. P62, D01 and D11 stay remote-host rows.
+
+Parity rows, counted Thursday 2026-11-05 (Lisbon time). 71 kept rows (P01 to P68, plus D01, D04 and D11 kept at CP1); 12 dropped (D02, D03, D05 to D10, D12 to D15).
 
 | Status | Rows | Count |
 |---|---|---|
@@ -170,7 +172,7 @@ Each row waited for the developer's approval at CP1. A drop sends the capability
 
 | # | Capability | Evidence | Reason to drop | Decision |
 |---|---|---|---|---|
-| D01 | Secondmates and remote homes | 0 uses since Tue 2026-10-06 `[cap]`; 1 incidental read, Wed 2026-10-28 `[scan]` | Never used on host B. Tiller's per-project orchestrators and the per-host daemon cover the same need. Recheck against host A's bundle | keep (CP1): spec `protocol.md` section 10 and `authority.md` G25; owner T3.1 (Machines). ADR 0003 (accepted Tuesday 2026-11-03) makes it a federated board: `protocol.md` 10.1 to 10.6, `authority.md` G41 to G44; owner F2 to F6, and the peer link (F3) replaces T2.5's peer summary poll. Proof on main: **remote**, not tested for the personal Mac |
+| D01 | Secondmates and remote homes | 0 uses since Tue 2026-10-06 `[cap]`; 1 incidental read, Wed 2026-10-28 `[scan]` | Never used on host B. Tiller's per-project orchestrators and the per-host daemon cover the same need. Recheck against host A's bundle | keep (CP1): spec `protocol.md` section 10 and `authority.md` G25; owner T3.1 (Machines). ADR 0003 (accepted Tuesday 2026-11-03) makes it a federated board: `protocol.md` 10.1 to 10.6, `authority.md` G41 to G44; owner F2 to F6, and the peer link (F3) replaces T2.5's peer summary poll. Proof on main: **remote**, not tested for the first cutover host |
 | D02 | Backlog handoff between homes | 0 uses `[cap]` | Never used. One owner host per project (plan default) | drop (CP1) |
 | D03 | Orca and Codex app backends | 0 uses `[cap]` | Never used. Tiller runs on herdr only | drop (CP1) |
 | D04 | Other harness adapters (six non-Claude harnesses) | 0 uses `[cap]`; harness detection 14 uses, all reporting Claude `[scan]` | Tiller is Claude Code only in v1 | keep (CP1): spec `protocol.md` section 10 and `authority.md` G35; owner T2.6 (an adapter table per harness). Proof on main: **failing**, spec only; there is no adapter table and no test |
@@ -180,7 +182,7 @@ Each row waited for the developer's approval at CP1. A drop sends the capability
 | D08 | Public follow-up collection | 0 uses `[cap]` | Never used | drop (CP1) |
 | D09 | herdr project groups and lab sessions | 0 uses `[cap]` | The plan picks nested workspaces, not herdr groups (herdr layout rules) | drop (CP1) |
 | D10 | Approval failover | 0 uses `[cap]` | Never used. Approvals are bound records in state.db | drop (CP1) |
-| D11 | Config push to secondmate homes | 0 uses `[cap]` | Follows D01 | keep (CP1): spec `protocol.md` section 10 (`tiller config diff <peer>`); owner T2.2. Proof on main: **remote**, not tested for the personal Mac |
+| D11 | Config push to secondmate homes | 0 uses `[cap]` | Follows D01 | keep (CP1): spec `protocol.md` section 10 (`tiller config diff <peer>`); owner T2.2. Proof on main: **remote**, not tested for the first cutover host |
 | D12 | Pipeline spend accounting | 0 uses; flag present but empty `[cap]` | Never used. T3.5 reads the quota feed instead | drop (CP1) |
 | D13 | Watcher arm guard | PreToolUse hook `[cap]` | It guards a Firstmate mechanism (the orchestrator arming its own watcher) that Tiller does not have: the daemon owns watching. P58 and P59 keep the other two guards | drop (CP1) |
 | D14 | Self-update of Firstmate | 3 uses, last Sat 2026-10-31 `[cap]` | Firstmate-only, like work on the Firstmate repo itself (`firstmate-self-repo`). Tiller updates through the Nix flake and the dotfiles | drop (CP1) |

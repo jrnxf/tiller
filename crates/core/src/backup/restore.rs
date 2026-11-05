@@ -2,6 +2,7 @@
 //! owner's command, and refused while the daemon runs.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
@@ -105,6 +106,9 @@ pub fn restore(
     let staged = paths.beside_db(".restore.tmp");
     remove_if_exists(&staged)?;
     fs::copy(&source, &staged).map_err(io_error("copy", &source))?;
+    // The live database is owner-only; a copy keeps its source's mode.
+    fs::set_permissions(&staged, fs::Permissions::from_mode(0o600))
+        .map_err(io_error("chmod", &staged))?;
     fs::File::open(&staged)
         .and_then(|file| file.sync_all())
         .map_err(io_error("sync", &staged))?;

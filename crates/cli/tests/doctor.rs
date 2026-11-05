@@ -265,3 +265,81 @@ fn doctor_writes_nothing() {
     assert_eq!(world.store().last_seq().unwrap(), before);
     assert_eq!(fs::read(world.home().join("config.toml")).ok(), config);
 }
+
+/// Makes `TILLER_PS` print the given process list.
+fn fake_ps(world: &World, bin: &Path, list: &str) {
+    script(bin, "fake-ps", &format!("printf '%s\\n' '{list}'"));
+    world.set_env("TILLER_PS", bin.join("fake-ps").to_str().unwrap());
+}
+
+const FIRSTMATE_PROCESSES: &str =
+    "bash /opt/fm/bin/fm-watch.sh\nbash /opt/fm/bin/fm-supervise-daemon.sh";
+
+fn set_marker(world: &World, owner: &str) {
+    fs::write(world.home().join("owner"), format!("{owner}\n")).unwrap();
+}
+
+#[test]
+fn missing_owner_marker_warns_and_names_the_fix() {
+    let world = World::initialized();
+    let bin = world_with_tools(&world);
+    fake_ps(&world, &bin, "zsh");
+    let out = world.run(&["doctor"]);
+    assert_eq!(out.code, 0, "{}", out.json);
+    let marker = check(out.data(), "owner marker");
+    assert_eq!(marker["status"], "warn");
+    assert!(
+        marker["detail"]
+            .as_str()
+            .unwrap()
+            .contains("tiller owner set <owner>"),
+        "{marker}"
+    );
+    set_marker(&world, "tiller");
+    assert_eq!(
+        check(world.run(&["doctor"]).data(), "owner marker")["status"],
+        "ok"
+    );
+}
+
+#[test]
+fn firstmate_marker_beside_a_running_daemon_is_an_error() {
+    let world = World::initialized();
+    let bin = world_with_tools(&world);
+    fake_ps(&world, &bin, "zsh");
+    set_marker(&world, "firstmate");
+    assert_eq!(world.run(&["doctor"]).code, 0, "no daemon, no clash");
+    let _daemon = tiller_agents::land::DaemonLock::acquire(&world.home()).unwrap();
+    let out = world.run(&["doctor"]);
+    assert_eq!((out.code, out.error_code()), (5, "refused"), "{}", out.json);
+    assert_eq!(
+        check(&out.json["error"]["current"], "owner marker")["status"],
+        "fail"
+    );
+}
+
+#[test]
+fn running_firstmate_warns_when_tiller_would_also_dispatch() {
+    let world = World::initialized();
+    let bin = world_with_tools(&world);
+    fake_ps(&world, &bin, FIRSTMATE_PROCESSES);
+    let out = world.run(&["doctor"]);
+    assert_eq!(out.code, 0, "{}", out.json);
+    let found = check(out.data(), "firstmate");
+    assert_eq!(found["status"], "warn", "{found}");
+    assert!(found["detail"].as_str().unwrap().contains("fm-watch.sh"));
+    set_marker(&world, "firstmate");
+    assert_eq!(
+        check(world.run(&["doctor"]).data(), "firstmate")["status"],
+        "ok"
+    );
+}
+
+#[test]
+fn no_firstmate_process_is_quiet() {
+    let world = World::initialized();
+    let bin = world_with_tools(&world);
+    fake_ps(&world, &bin, "zsh\nvim fm-watch.sh.bak");
+    let out = world.run(&["doctor"]);
+    assert_eq!(check(out.data(), "firstmate")["status"], "ok");
+}
