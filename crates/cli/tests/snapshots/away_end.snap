@@ -32,13 +32,42 @@ exit: 0
       "rev": 2,
       "run_id": null,
       "scope": {
+        "merge": "none",
+        "orders": "keep going on alpha-42; hold schema changes",
         "projects": [
           "alpha"
         ],
+        "spend": {
+          "max_new_runs": 6,
+          "quota_floor_percent": 20.0
+        },
         "until_at": "<time>"
       },
       "short": "<id65.short>",
       "state": "succeeded"
+    },
+    "brief": {
+      "approval_id": "<id65>",
+      "away": false,
+      "ended_at": "<time>",
+      "ended_reason": "back",
+      "landed": [],
+      "merged_by_grant": [],
+      "orders": "keep going on alpha-42; hold schema changes",
+      "projects": [
+        "alpha"
+      ],
+      "runs": [],
+      "spend": {
+        "cap_reached": false,
+        "max_new_runs": 6,
+        "new_runs": 0,
+        "quota_floor_percent": 20.0
+      },
+      "started_at": "<time>",
+      "until_at": "<time>",
+      "waiting_approvals": [],
+      "waiting_decisions": []
     }
   },
   "events": [

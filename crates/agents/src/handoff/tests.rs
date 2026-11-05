@@ -8,6 +8,7 @@ use tiller_core::domain::{
     OutboxMessage, RunOutcome, RunRole, StatusState,
 };
 use tiller_core::state::attention::NewAttention;
+use tiller_core::state::caches::QuotaReading;
 use tiller_core::state::cards::NewCard;
 use tiller_core::state::list;
 use tiller_core::state::projects::{Init, NewProject};
@@ -110,6 +111,14 @@ impl World {
 
     /// Starts a builder run on `card`; returns the run id and its session.
     fn builder(&mut self, card: &Card) -> (String, String) {
+        self.try_builder(card, SpawnChecks::default()).unwrap()
+    }
+
+    fn try_builder(
+        &mut self,
+        card: &Card,
+        checks: SpawnChecks,
+    ) -> tiller_core::Result<(String, String)> {
         let started = self
             .store
             .run_start(
@@ -126,12 +135,61 @@ impl World {
                     base_branch: None,
                     base_sha: None,
                     config_hash: None,
-                    checks: SpawnChecks::default(),
+                    checks,
+                },
+            )?
+            .value;
+        Ok((started.run.id, started.session.id))
+    }
+
+    fn end_run(&mut self, run: &str, outcome: RunOutcome) {
+        self.store
+            .run_end(
+                &Ctx::new(Actor::Owner),
+                run,
+                EndRun {
+                    outcome,
+                    note: None,
                 },
             )
-            .unwrap()
-            .value;
-        (started.run.id, started.session.id)
+            .unwrap();
+    }
+
+    fn away_start(&mut self, scope: Value) -> tiller_core::Result<()> {
+        self.store
+            .away_start(&Ctx::new(Actor::Owner), scope)
+            .map(|_| ())
+    }
+
+    fn away_scope(&self, spend: Value) -> Value {
+        json!({
+            "until_at": Timestamp::now().plus_minutes(24 * 60),
+            "projects": ["alpha"],
+            "orders": "keep going on the export; hold anything that changes the schema",
+            "spend": spend,
+            "merge": "none",
+        })
+    }
+
+    fn quota(&mut self, percent: f64) {
+        self.store
+            .cache_quota(
+                &Ctx::new(Actor::Daemon),
+                vec![QuotaReading {
+                    label: "claude-weekly".into(),
+                    percent_remaining: Some(percent),
+                    resets_at: None,
+                    pace: None,
+                    reserve: None,
+                    burn_multiple: None,
+                    elapsed_percent: None,
+                    projected_exhaustion_at: None,
+                    title: None,
+                    kind: Some("weekly".into()),
+                    fetch_error: None,
+                }],
+            )
+            .unwrap();
     }
 
     fn status(&mut self, run: &str, line: &str) {
@@ -513,4 +571,148 @@ fn compaction_note_is_for_a_live_orchestrator_that_still_needs_it() {
         .unwrap();
     assert!(signal_compactions(&mut w.store, later).unwrap().is_empty());
     assert_eq!(w.notes().len(), 1, "only the earlier-handoff note exists");
+}
+
+// -- P34: away mode ------------------------------------------------------------
+
+#[test]
+fn away_contract_caps_spend_and_writes_return_brief() {
+    let mut w = World::new();
+    let before = w.card("alpha", "started before the owner left");
+    let export = w.card("alpha", "the billing export");
+    let login = w.card("alpha", "the login page");
+    let report = w.card("alpha", "the usage report");
+
+    // A run from before the owner left does not count against the cap.
+    let (early, _) = w.builder(&before);
+    w.end_run(&early, RunOutcome::Abandoned);
+
+    let scope = w.away_scope(json!({"max_new_runs": 2}));
+    w.away_start(scope).unwrap();
+
+    // The orchestrator reads the orders and what is left to spend.
+    let line = {
+        w.handoff("export and login are next", "start both builders");
+        w.brief("alpha").unwrap().away.unwrap()
+    };
+    assert_eq!(
+        line.orders.as_deref(),
+        Some("keep going on the export; hold anything that changes the schema")
+    );
+    assert_eq!((line.max_new_runs, line.new_runs), (Some(2), 0));
+    assert!(line.covers_project && line.no_merges);
+
+    let (export_run, _) = w.builder(&export);
+    w.status(&export_run, "PR open, waiting on checks");
+    w.end_run(&export_run, RunOutcome::Abandoned);
+    let (login_run, _) = w.builder(&login);
+    w.decision(&login, "ship the login behind a flag?");
+
+    // The third new run is over the cap, and says why.
+    let refused = w.try_builder(&report, SpawnChecks::default()).unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("away mode allows 2 new runs and 2 have started"),
+        "{refused}"
+    );
+    assert_eq!(w.brief("alpha").unwrap().away.unwrap().new_runs, 2);
+
+    // The owner returns. The brief says what the contract allowed, what it
+    // spent, what ran and what waits.
+    w.store
+        .away_end(&Ctx::new(Actor::Owner), "ended by the owner")
+        .unwrap();
+    let brief = ReturnBrief::load(w.store.conn(), None, Timestamp::now())
+        .unwrap()
+        .unwrap();
+    assert!(!brief.away);
+    assert_eq!(brief.ended_reason.as_deref(), Some("ended by the owner"));
+    assert_eq!(brief.projects, ["alpha"]);
+    assert_eq!(
+        brief.orders.as_deref(),
+        Some("keep going on the export; hold anything that changes the schema")
+    );
+    assert_eq!(
+        (
+            brief.spend.max_new_runs,
+            brief.spend.new_runs,
+            brief.spend.cap_reached
+        ),
+        (Some(2), 2, true)
+    );
+    let ran: Vec<_> = brief
+        .runs
+        .iter()
+        .map(|run| (run.card.as_str(), run.outcome))
+        .collect();
+    assert_eq!(
+        ran,
+        [
+            (export.display_id.as_str(), Some(RunOutcome::Abandoned)),
+            (login.display_id.as_str(), None),
+        ]
+    );
+    assert_eq!(
+        brief.runs[0].status.as_deref(),
+        Some("working: PR open, waiting on checks")
+    );
+    assert_eq!(brief.waiting_decisions.len(), 1);
+    assert_eq!(
+        brief.waiting_decisions[0].question,
+        "ship the login behind a flag?"
+    );
+    assert!(brief.landed.is_empty() && brief.merged_by_grant.is_empty());
+
+    // The cap ended with the contract, and the orchestrator no longer reads
+    // orders.
+    assert!(w.brief("alpha").unwrap().away.is_none());
+    w.end_run(&login_run, RunOutcome::Abandoned);
+    w.try_builder(&report, SpawnChecks::default()).unwrap();
+}
+
+#[test]
+fn away_quota_floor_binds_when_the_standing_floor_is_looser() {
+    let mut w = World::new();
+    let export = w.card("alpha", "the billing export");
+    let scope = w.away_scope(json!({"quota_floor_percent": 20}));
+    w.away_start(scope).unwrap();
+    let checks = || SpawnChecks {
+        quota_floor_percent: Some(3.0),
+        quota_max_age_minutes: 15,
+        ..SpawnChecks::default()
+    };
+
+    // 12 percent left clears the standing 3 percent floor, not the away 20.
+    w.quota(12.0);
+    let refused = w.try_builder(&export, checks()).unwrap_err();
+    assert!(
+        refused.to_string().contains("under the 20 percent floor")
+            || refused.to_string().contains("at or under the 20"),
+        "{refused}"
+    );
+
+    w.quota(45.0);
+    w.try_builder(&export, checks()).unwrap();
+}
+
+#[test]
+fn away_scope_that_cannot_be_enforced_is_refused() {
+    let mut w = World::new();
+    for spend in [
+        json!({"max_new_runs": -1}),
+        json!({"max_new_runs": "six"}),
+        json!({"quota_floor_percent": 140}),
+    ] {
+        let scope = w.away_scope(spend);
+        assert!(w.away_start(scope).is_err());
+    }
+    let mut scope = w.away_scope(json!({}));
+    scope["merge"] = json!("sometimes");
+    assert!(w.away_start(scope).is_err());
+    assert!(
+        ReturnBrief::load(w.store.conn(), None, Timestamp::now())
+            .unwrap()
+            .is_none()
+    );
 }

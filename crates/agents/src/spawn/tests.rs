@@ -321,6 +321,7 @@ impl Rig {
             role,
             asked: None,
             brief: Some(format!("Do the work on {}.", card.display_id)),
+            harness: "claude".into(),
         }
     }
 
@@ -1412,6 +1413,41 @@ fn auto_memory_off() {
         script.contains("CLAUDE_CODE_DISABLE_AUTO_MEMORY='1'"),
         "{script}"
     );
+}
+
+/// G35: a role launches only on a harness whose tool calls reach
+/// `tiller guard` and that has a sandbox equivalent. The refusal comes before
+/// any run, pane or worktree exists.
+#[test]
+fn refuses_harness_without_pretool_transport() {
+    let mut rig = Rig::new();
+    let card = rig.card(CardKind::Ship, None);
+    let ctx = rig.orchestrator();
+    for (harness, reason) in [
+        ("cursor", "no pre-tool hook transport"),
+        ("opencode", "no pre-tool hook transport"),
+        ("codex", "no pre-tool hook transport"),
+        ("gemini", "has no adapter"),
+    ] {
+        let mut request = Rig::request(&card, RunRole::Builder);
+        request.harness = harness.into();
+        let error = rig.try_spawn(&ctx, request).unwrap_err();
+        assert!(
+            matches!(error, SpawnError::Refused(_)),
+            "{harness}: {error:?}"
+        );
+        assert!(error.to_string().contains(reason), "{harness}: {error}");
+    }
+    let runs: i64 = rig
+        .fleet
+        .store
+        .conn()
+        .query_row("SELECT count(*) FROM runs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(runs, 0, "a refused harness starts no run");
+    // Claude Code, which has both, still spawns.
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    assert_eq!(rig.run(&spawned.run.id).role, RunRole::Builder);
 }
 
 #[test]

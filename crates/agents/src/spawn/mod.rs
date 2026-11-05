@@ -109,6 +109,9 @@ pub struct Request {
     pub asked: Option<(String, Effort)>,
     /// The brief; `None` briefs the worker with the card itself.
     pub brief: Option<String>,
+    /// The harness to launch the role on (`claude` unless asked); G35 refuses
+    /// one that cannot carry the guards.
+    pub harness: String,
 }
 
 /// The brief a spawn without `--brief-file` gives: the card.
@@ -244,6 +247,10 @@ pub fn spawn(
     world: &World<'_>,
     request: Request,
 ) -> Result<Applied<Outcome>> {
+    // G35, before anything is reserved or started.
+    if let Some(reason) = tiller_observe::harness::refusal(&request.harness) {
+        return Err(SpawnError::Refused(reason));
+    }
     let card = resolve_card(store.conn(), &request.card)?;
     let project: Project = get(store.conn(), "project", &card.project_id)?;
     let checkout = world.config.checkouts.get(&project.id).ok_or_else(|| {

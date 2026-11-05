@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 use super::attention::{NewAttention, answer_attention, open_attention, withdraw_attention};
 use super::cards::{MARK_LANDED, active_runs, close_card, open_attention_id};
+use super::outbox::{NewMessage, enqueue, live_orchestrator};
 use super::projects::{require_daemon, require_owner};
 use super::records::{NewObligation, meet_obligation, open_obligation};
 use super::runs::{EndRun, end_run};
@@ -27,6 +28,56 @@ pub struct NewPr {
     pub url: String,
     pub head_sha: Option<String>,
     pub base_ref: Option<String>,
+}
+
+/// One `wake` to the project's live orchestrator for a PR event that is the
+/// orchestrator's to act on: checks turning green or red, or a review decision
+/// landing, while the PR is open. A merge or close outside Tiller is reconcile's
+/// note (R07). It runs only on a change, so a transition wakes once; with no live
+/// orchestrator nothing is enqueued, and the next session reads the PR itself.
+fn wake_for_pr_event(tx: &mut Tx<'_>, old: &Pr, new: &Pr) -> Result<()> {
+    if new.state != PrState::Open {
+        return Ok(());
+    }
+    let mut events = Vec::new();
+    if old.checks != new.checks {
+        match new.checks {
+            Checks::Success => events.push("checks passed".to_string()),
+            Checks::Failure => events.push("checks failed".to_string()),
+            _ => {}
+        }
+    }
+    if old.review_decision != new.review_decision {
+        match new.review_decision {
+            ReviewDecision::Approved => events.push("review approved".to_string()),
+            ReviewDecision::ChangesRequested => events.push("review requested changes".to_string()),
+            ReviewDecision::None => {}
+        }
+    }
+    if events.is_empty() {
+        return Ok(());
+    }
+    let card: Card = get(tx.conn(), "card", &new.card_id)?;
+    let Some(orchestrator) = live_orchestrator(tx.conn(), &card.project_id)? else {
+        return Ok(());
+    };
+    enqueue(
+        tx,
+        &NewMessage {
+            target_session_id: orchestrator.id,
+            kind: OutboxKind::Wake,
+            body: format!(
+                "[{}] PR #{}: {}. {}",
+                card.display_id,
+                new.number,
+                events.join(", "),
+                new.url
+            ),
+            card_id: Some(card.id.clone()),
+            reply_to: None,
+        },
+    )?;
+    Ok(())
 }
 
 /// What the forge poller read for one PR.
@@ -458,6 +509,7 @@ impl Store {
                     .card(&new.card_id)
                     .payload(Value::Object(changed)),
             )?;
+            wake_for_pr_event(tx, &old, &new)?;
             // Compare each open approval with the fetched head, not with the
             // previous fetch: the head may have moved before the PR's first
             // recorded head, or between an approval and a missed fetch.
@@ -909,6 +961,7 @@ impl Store {
     /// temporary grants the scope asks for.
     pub fn away_start(&mut self, ctx: &Ctx, scope: Value) -> Result<Applied<Approval>> {
         require_owner(&ctx.actor, "away.start")?;
+        validate_away_scope(&scope)?;
         self.write(ctx, "away.start", None, |tx| {
             if let Some(active) = find::<Approval>(tx.conn(), "kind = 'away' AND state = 'accepted'", &[])? {
                 return Err(Error::refused("approval", &active.id, "away mode is already on"));
@@ -1060,6 +1113,112 @@ impl Store {
             }
             Ok(recorded)
         })
+    }
+}
+
+/// The running away contract: the `away` approval and what its scope limits
+/// (`authority.md`, section 6, "Away mode"). Only an `accepted` approval whose
+/// `until_at` has not passed counts, so a contract nobody ended yet stops
+/// binding at the time the owner gave.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AwayContract {
+    pub approval_id: String,
+    pub started_at: Timestamp,
+    pub until_at: Timestamp,
+    pub projects: Vec<String>,
+    /// Standing orders for the orchestrators to read.
+    pub orders: Option<String>,
+    /// No run starts once this many have started since the contract began.
+    pub max_new_runs: Option<i64>,
+    /// A weekly quota floor that applies when stricter than the standing one.
+    pub quota_floor_percent: Option<f64>,
+    /// `merge` is `"none"`: no merges while away, whatever grants exist.
+    pub no_merges: bool,
+}
+
+impl AwayContract {
+    pub fn from_approval(approval: &Approval) -> Result<Self> {
+        let scope = approval.scope.clone().unwrap_or(Value::Null);
+        let until_at = scope
+            .get("until_at")
+            .and_then(Value::as_str)
+            .and_then(|at| at.parse::<Timestamp>().ok())
+            .ok_or_else(|| Error::Usage("away scope needs until_at".into()))?;
+        let spend = scope.get("spend");
+        Ok(Self {
+            approval_id: approval.id.clone(),
+            started_at: approval.requested_at,
+            until_at,
+            projects: serde_json::from_value(scope.get("projects").cloned().unwrap_or(json!([])))?,
+            orders: scope
+                .get("orders")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            max_new_runs: spend
+                .and_then(|s| s.get("max_new_runs"))
+                .and_then(Value::as_i64),
+            quota_floor_percent: spend
+                .and_then(|s| s.get("quota_floor_percent"))
+                .and_then(Value::as_f64),
+            no_merges: scope.get("merge").and_then(Value::as_str) == Some("none"),
+        })
+    }
+
+    /// Runs that started since the contract began, whoever started them.
+    pub fn new_runs(&self, conn: &Connection) -> Result<i64> {
+        Ok(conn.query_row(
+            "SELECT count(*) FROM runs WHERE started_at >= ?1",
+            params![self.started_at],
+            |row| row.get(0),
+        )?)
+    }
+}
+
+/// The away contract binding at `now`, if the owner is away.
+pub fn active_away(conn: &Connection, now: Timestamp) -> Result<Option<AwayContract>> {
+    let Some(approval) = find::<Approval>(conn, "kind = 'away' AND state = 'accepted'", &[])?
+    else {
+        return Ok(None);
+    };
+    let contract = AwayContract::from_approval(&approval)?;
+    Ok((contract.until_at > now).then_some(contract))
+}
+
+/// Refuses an away scope whose parts cannot be enforced as written.
+fn validate_away_scope(scope: &Value) -> Result<()> {
+    if let Some(orders) = scope.get("orders")
+        && !orders.as_str().is_some_and(|text| !text.trim().is_empty())
+    {
+        return Err(Error::Usage("away orders must be non-empty text".into()));
+    }
+    if let Some(spend) = scope.get("spend") {
+        if !spend.is_object() {
+            return Err(Error::Usage("away spend must be an object".into()));
+        }
+        if let Some(cap) = spend.get("max_new_runs")
+            && !cap.as_i64().is_some_and(|cap| cap >= 0)
+        {
+            return Err(Error::Usage(
+                "away spend max_new_runs must be a whole number, 0 or more".into(),
+            ));
+        }
+        if let Some(floor) = spend.get("quota_floor_percent")
+            && !floor
+                .as_f64()
+                .is_some_and(|floor| (0.0..=100.0).contains(&floor))
+        {
+            return Err(Error::Usage(
+                "away spend quota_floor_percent must be 0 to 100".into(),
+            ));
+        }
+    }
+    match scope.get("merge") {
+        None => Ok(()),
+        Some(merge) if merge.is_object() => Ok(()),
+        Some(Value::String(mode)) if mode == "none" || mode == "grants" => Ok(()),
+        Some(_) => Err(Error::Usage(
+            "away merge must be \"none\", \"grants\" or a grant conditions object".into(),
+        )),
     }
 }
 
