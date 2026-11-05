@@ -961,6 +961,7 @@ impl Store {
     /// temporary grants the scope asks for.
     pub fn away_start(&mut self, ctx: &Ctx, scope: Value) -> Result<Applied<Approval>> {
         require_owner(&ctx.actor, "away.start")?;
+        validate_away_scope(&scope)?;
         self.write(ctx, "away.start", None, |tx| {
             if let Some(active) = find::<Approval>(tx.conn(), "kind = 'away' AND state = 'accepted'", &[])? {
                 return Err(Error::refused("approval", &active.id, "away mode is already on"));
@@ -1112,6 +1113,112 @@ impl Store {
             }
             Ok(recorded)
         })
+    }
+}
+
+/// The running away contract: the `away` approval and what its scope limits
+/// (`authority.md`, section 6, "Away mode"). Only an `accepted` approval whose
+/// `until_at` has not passed counts, so a contract nobody ended yet stops
+/// binding at the time the owner gave.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AwayContract {
+    pub approval_id: String,
+    pub started_at: Timestamp,
+    pub until_at: Timestamp,
+    pub projects: Vec<String>,
+    /// Standing orders for the orchestrators to read.
+    pub orders: Option<String>,
+    /// No run starts once this many have started since the contract began.
+    pub max_new_runs: Option<i64>,
+    /// A weekly quota floor that applies when stricter than the standing one.
+    pub quota_floor_percent: Option<f64>,
+    /// `merge` is `"none"`: no merges while away, whatever grants exist.
+    pub no_merges: bool,
+}
+
+impl AwayContract {
+    pub fn from_approval(approval: &Approval) -> Result<Self> {
+        let scope = approval.scope.clone().unwrap_or(Value::Null);
+        let until_at = scope
+            .get("until_at")
+            .and_then(Value::as_str)
+            .and_then(|at| at.parse::<Timestamp>().ok())
+            .ok_or_else(|| Error::Usage("away scope needs until_at".into()))?;
+        let spend = scope.get("spend");
+        Ok(Self {
+            approval_id: approval.id.clone(),
+            started_at: approval.requested_at,
+            until_at,
+            projects: serde_json::from_value(scope.get("projects").cloned().unwrap_or(json!([])))?,
+            orders: scope
+                .get("orders")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            max_new_runs: spend
+                .and_then(|s| s.get("max_new_runs"))
+                .and_then(Value::as_i64),
+            quota_floor_percent: spend
+                .and_then(|s| s.get("quota_floor_percent"))
+                .and_then(Value::as_f64),
+            no_merges: scope.get("merge").and_then(Value::as_str) == Some("none"),
+        })
+    }
+
+    /// Runs that started since the contract began, whoever started them.
+    pub fn new_runs(&self, conn: &Connection) -> Result<i64> {
+        Ok(conn.query_row(
+            "SELECT count(*) FROM runs WHERE started_at >= ?1",
+            params![self.started_at],
+            |row| row.get(0),
+        )?)
+    }
+}
+
+/// The away contract binding at `now`, if the owner is away.
+pub fn active_away(conn: &Connection, now: Timestamp) -> Result<Option<AwayContract>> {
+    let Some(approval) = find::<Approval>(conn, "kind = 'away' AND state = 'accepted'", &[])?
+    else {
+        return Ok(None);
+    };
+    let contract = AwayContract::from_approval(&approval)?;
+    Ok((contract.until_at > now).then_some(contract))
+}
+
+/// Refuses an away scope whose parts cannot be enforced as written.
+fn validate_away_scope(scope: &Value) -> Result<()> {
+    if let Some(orders) = scope.get("orders")
+        && !orders.as_str().is_some_and(|text| !text.trim().is_empty())
+    {
+        return Err(Error::Usage("away orders must be non-empty text".into()));
+    }
+    if let Some(spend) = scope.get("spend") {
+        if !spend.is_object() {
+            return Err(Error::Usage("away spend must be an object".into()));
+        }
+        if let Some(cap) = spend.get("max_new_runs")
+            && !cap.as_i64().is_some_and(|cap| cap >= 0)
+        {
+            return Err(Error::Usage(
+                "away spend max_new_runs must be a whole number, 0 or more".into(),
+            ));
+        }
+        if let Some(floor) = spend.get("quota_floor_percent")
+            && !floor
+                .as_f64()
+                .is_some_and(|floor| (0.0..=100.0).contains(&floor))
+        {
+            return Err(Error::Usage(
+                "away spend quota_floor_percent must be 0 to 100".into(),
+            ));
+        }
+    }
+    match scope.get("merge") {
+        None => Ok(()),
+        Some(merge) if merge.is_object() => Ok(()),
+        Some(Value::String(mode)) if mode == "none" || mode == "grants" => Ok(()),
+        Some(_) => Err(Error::Usage(
+            "away merge must be \"none\", \"grants\" or a grant conditions object".into(),
+        )),
     }
 }
 

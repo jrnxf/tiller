@@ -29,9 +29,15 @@ exit: 0
     "rev": 1,
     "run_id": null,
     "scope": {
+      "merge": "none",
+      "orders": "keep going on alpha-42; hold schema changes",
       "projects": [
         "alpha"
       ],
+      "spend": {
+        "max_new_runs": 6,
+        "quota_floor_percent": 20.0
+      },
       "until_at": "<time>"
     },
     "short": "<id65.short>",
