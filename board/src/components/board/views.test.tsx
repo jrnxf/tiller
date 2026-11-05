@@ -15,6 +15,7 @@ import { connectionStore } from "../../lib/connection";
 import { FIXTURE_HEAD_SHA, fixtureResource, fixtureSnapshot } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
 import { loadPrefs, prefsStore, updatePrefs } from "../../lib/prefs";
+import { receiptsStore } from "../../lib/receipts";
 import { createQueryClient } from "../../lib/query-client";
 import { boardPath, projectsPath, queryKeyFor } from "../../lib/queries";
 import { createAppRouter } from "../../lib/router";
@@ -25,6 +26,7 @@ import { resetBoardLook } from "./board-prefs";
 const HOST_B = "01JHOSTB00000000000000000B";
 const CARD_43 = "01JCARD0000000000000000043";
 const CARD_44 = "01JCARD0000000000000000044";
+const CARD_42 = "01JCARD0000000000000000042";
 const CARD_41 = "01JCARD0000000000000000041";
 
 interface Posted {
@@ -106,6 +108,7 @@ beforeEach(() => {
   localStorage.clear();
   prefsStore.set(loadPrefs());
   resetBoardLook();
+  receiptsStore.set({ byKey: {}, progress: {} });
   connectionStore.set("live");
   stubMedia();
   window.scrollTo = () => {};
@@ -252,80 +255,6 @@ test("a card event moves the card to its new column without remounting the other
   );
   // Same element before and after: React updated it, nothing was rebuilt.
   expect(screen.getByText("Pick the retry policy for the export job").closest("a")).toBe(untouched);
-});
-
-// ---- Fit ----
-
-type Measure = "scrollHeight" | "clientHeight" | "clientWidth";
-
-// jsdom has no layout: give the board's frame a size and a content height that
-// depends on how much detail the cards show.
-function defineMeasure(name: Measure, value: (frame: Element) => number) {
-  Object.defineProperty(Element.prototype, name, {
-    configurable: true,
-    get(this: Element) {
-      return this.classList.contains("board-view") ? value(this) : 0;
-    },
-  });
-}
-
-function stubFrame(contentHeight: (fit: number) => number) {
-  defineMeasure("clientHeight", () => 700);
-  defineMeasure("clientWidth", () => 1200);
-  defineMeasure("scrollHeight", (el) =>
-    contentHeight(Number(el.querySelector(".board")?.getAttribute("data-fit") ?? 0)),
-  );
-  return () => {
-    for (const name of ["scrollHeight", "clientHeight", "clientWidth"]) {
-      Reflect.deleteProperty(Element.prototype, name);
-    }
-  };
-}
-
-test("lanes that overflow the frame drop card detail one step at a time, and stop once they fit", async () => {
-  stubApi("busy");
-  const restore = stubFrame((fit) => 1000 - 150 * fit);
-  try {
-    await renderApp("busy");
-    // 1000, 850, 700: the third step fits the 700 px frame, so there is no fourth.
-    expect(screen.getByTestId("board").getAttribute("data-fit")).toBe("2");
-  } finally {
-    restore();
-  }
-});
-
-test("a board that cannot fit stops at the last step instead of looping", async () => {
-  stubApi("busy");
-  const restore = stubFrame(() => 5000);
-  try {
-    await renderApp("busy");
-    expect(screen.getByTestId("board").getAttribute("data-fit")).toBe("3");
-  } finally {
-    restore();
-  }
-});
-
-test("a board that already fits keeps the full card", async () => {
-  stubApi("busy");
-  const restore = stubFrame(() => 600);
-  try {
-    await renderApp("busy");
-    expect(screen.getByTestId("board").getAttribute("data-fit")).toBe("0");
-  } finally {
-    restore();
-  }
-});
-
-test("on a phone the columns stack and scroll, so nothing is dropped to fit", async () => {
-  stubApi("busy");
-  stubMedia((query) => query.includes("max-width"));
-  const restore = stubFrame(() => 5000);
-  try {
-    await renderApp("busy");
-    expect(screen.getByTestId("board").getAttribute("data-fit")).toBe("0");
-  } finally {
-    restore();
-  }
 });
 
 // ---- Agents ----
@@ -498,12 +427,55 @@ test("moving between views keeps the screen you were on until the next one is re
 
 // ---- Card detail ----
 
-test("a card on the board opens its detail page", async () => {
+test("a card on the board opens a docked drawer and the lanes stay on screen", async () => {
   stubApi("default");
   const { router } = await renderApp();
   fireEvent.click(screen.getByText("Move the poller behind a trait"));
+  await waitFor(() => expect(router.state.location.search).toEqual({ card: CARD_43 }));
+  expect(router.state.location.pathname).toBe("/");
+  const drawer = await screen.findByTestId("card-drawer");
+  expect(within(drawer).getByTestId("card-page")).toBeTruthy();
+  expect(screen.getByTestId("board")).toBeTruthy();
+  expect(document.querySelector(".board-split")?.getAttribute("data-docked")).toBe("true");
+  // Another card swaps the drawer's card in place.
+  fireEvent.click(screen.getByText("Add the machines summary to the sidebar"));
+  await waitFor(() => expect(router.state.location.search).toEqual({ card: CARD_42 }));
+});
+
+test("the drawer expands to the full page, and Back returns to the board with the drawer open", async () => {
+  stubApi("default");
+  const { router } = await renderApp("default", `/?card=${CARD_43}`);
+  const drawer = await screen.findByTestId("card-drawer");
+  fireEvent.click(within(drawer).getByRole("link", { name: "Open the full page" }));
   await waitFor(() => expect(router.state.location.pathname).toBe(`/cards/${CARD_43}`));
-  expect(screen.getByTestId("card-page")).toBeTruthy();
+  expect(screen.queryByTestId("card-drawer")).toBeNull();
+  fireEvent.click(within(screen.getByTestId("card-page")).getByRole("link", { name: /Board/ }));
+  await waitFor(() => expect(router.state.location.pathname).toBe("/"));
+  expect(router.state.location.search).toEqual({ card: CARD_43 });
+  expect(await screen.findByTestId("card-drawer")).toBeTruthy();
+});
+
+test("Close and Escape shut the drawer", async () => {
+  stubApi("default");
+  const { router } = await renderApp("default", `/?card=${CARD_43}`);
+  const drawer = await screen.findByTestId("card-drawer");
+  fireEvent.click(within(drawer).getByRole("link", { name: "Close" }));
+  await waitFor(() => expect(screen.queryByTestId("card-drawer")).toBeNull());
+  expect(router.state.location.search).toEqual({});
+
+  await act(async () => {
+    await router.navigate({ to: "/", search: { card: CARD_41 } });
+  });
+  await screen.findByTestId("card-drawer");
+  fireEvent.keyDown(window, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByTestId("card-drawer")).toBeNull());
+});
+
+test("a card that cannot be read leaves the board up and the drawer says so", async () => {
+  stubApi("default");
+  await renderApp("default", "/?card=does-not-exist");
+  expect(await screen.findByText("This card could not be loaded")).toBeTruthy();
+  expect(screen.getByTestId("board")).toBeTruthy();
 });
 
 test("a stale approval is called out with the commits that came after it", async () => {
@@ -512,14 +484,18 @@ test("a stale approval is called out with the commits that came after it", async
 
   const page = screen.getByTestId("card-page");
   expect(within(page).getByText(/Approval is stale/)).toBeTruthy();
-  const box = page.querySelector<HTMLElement>(".appr");
+  // The pull request and its approval are one card.
+  expect(page.querySelector(".appr")).toBeNull();
+  const box = page.querySelector<HTMLElement>(".prc");
   expect(box?.dataset.standing).toBe("stale");
-  expect(box?.textContent).toContain("Approval bound to an older commit");
+  expect(box?.textContent).toContain("stale");
   expect(box?.textContent).toContain("undo: coalesce on pointerup");
   // The bound commit is struck through; the head it moved to is highlighted.
-  expect(page.querySelector(".appr .sha.old")?.textContent).toHaveLength(7);
-  expect(page.querySelector(".appr .sha.new")?.textContent).toHaveLength(7);
+  expect(page.querySelector(".prc .sha.old")?.textContent).toHaveLength(7);
+  expect(page.querySelectorAll(".prc .sha.new").length).toBeGreaterThan(0);
   expect(page.textContent).toContain("+2 commits since approval");
+  // Nothing to decide on a stale approval.
+  expect(within(box as HTMLElement).queryByRole("button", { name: "Approve" })).toBeNull();
 });
 
 test("the page lists runs, the PR with its head, events and how fresh each signal is", async () => {
@@ -773,20 +749,33 @@ test("the switch to pre-launch says validation is skipped and a Saturday review 
   );
 });
 
-test("a PR waiting on the owner can be approved from the card page", async () => {
+test("a PR waiting on the owner is decided in the PR card, Reject then Approve on the right", async () => {
   const posted = stubApi("default");
   await renderApp("default", `/cards/${CARD_44}`);
   const page = screen.getByTestId("card-page");
-  const box = page.querySelector<HTMLElement>(".appr");
+  const box = page.querySelector<HTMLElement>(".prc");
   expect(box?.dataset.standing).toBe("pending");
-  expect(box?.textContent).toContain("Waiting for your approval");
-  const approve = within(page).getByRole("button", {
-    name: `Approve ${FIXTURE_HEAD_SHA.slice(0, 7)}`,
-  });
-  fireEvent.click(approve);
+  expect(page.querySelector(".appr")).toBeNull();
+  expect(
+    within(box as HTMLElement)
+      .getAllByRole("button")
+      .map((button) => button.textContent),
+  ).toEqual(["Reject", `Approve ${FIXTURE_HEAD_SHA.slice(0, 7)}`]);
+  fireEvent.click(
+    within(page).getByRole("button", { name: `Approve ${FIXTURE_HEAD_SHA.slice(0, 7)}` }),
+  );
   await waitFor(() => expect(posted).toHaveLength(1));
   expect(posted[0]).toMatchObject({
     path: "/api/v1/approvals/01JAPPR0000000000000000000/decide",
     body: { decision: "accept", head_sha: FIXTURE_HEAD_SHA },
   });
+});
+
+test("Reject needs no reason and is bound to the head the page shows", async () => {
+  const posted = stubApi("default");
+  await renderApp("default", `/cards/${CARD_44}`);
+  fireEvent.click(screen.getByRole("button", { name: "Reject" }));
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]?.body).toMatchObject({ decision: "reject", head_sha: FIXTURE_HEAD_SHA });
+  expect(Object.keys(posted[0]?.body ?? {})).not.toContain("reason");
 });

@@ -70,6 +70,17 @@ export const ChevronLeftIcon = () => (
   </Glyph>
 );
 
+export const ExpandIcon = () => (
+  <Glyph size={12} grid={12}>
+    <path
+      d="M7 2h3v3M5 10H2V7M10 2 6.8 5.2M2 10l3.2-3.2"
+      {...stroke}
+      strokeWidth={1.3}
+      {...round}
+    />
+  </Glyph>
+);
+
 export const ChevronRightIcon = () => (
   <Glyph size={12} grid={12}>
     <path d="M4.5 3 7.5 6 4.5 9" {...stroke} strokeWidth={1.4} {...round} />
@@ -81,13 +92,6 @@ export const WarnIcon = () => (
     <path d="M8 2.5 14.2 13H1.8z" {...stroke} strokeLinejoin="round" />
     <path d="M8 6.5v3" {...stroke} strokeWidth={1.4} strokeLinecap="round" />
     <circle cx="8" cy="11.2" r=".8" fill="currentColor" />
-  </Glyph>
-);
-
-export const LockIcon = () => (
-  <Glyph>
-    <rect x="3.5" y="7" width="9" height="6.5" rx="1.5" {...stroke} />
-    <path d="M5.5 7V5.2a2.5 2.5 0 0 1 5 0V7" {...stroke} />
   </Glyph>
 );
 

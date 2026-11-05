@@ -26,7 +26,7 @@ import { agentActivity } from "./activity";
 import { Ago } from "./ago";
 import { badgeText, statusMark } from "./badge";
 import { HostChip, PeerNote } from "./host-chip";
-import { ApproveButton } from "../attention/approve";
+import { ApproveActions } from "../attention/approve";
 import { useAmbiguousIds, useStanding } from "./peer-state";
 import { approvalFor, approvalStanding, mergeTimeline } from "./card-model";
 import { durationSeconds, formatAge, formatLisbonMoment, secondsSince, shortSha } from "./format";
@@ -35,7 +35,7 @@ import {
   BoltIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
-  LockIcon,
+  ExpandIcon,
   PaneIcon,
   PRIORITY_NAMES,
   PrIcon,
@@ -46,7 +46,7 @@ import {
   WarnIcon,
 } from "./icons";
 import { KindLabel, ModelChip } from "./tile";
-import { CheckIcon } from "../shell/icons";
+import { CheckIcon, CloseIcon } from "../shell/icons";
 import "./board.css";
 
 const ACTOR_LABEL = { you: "You", orchestrator: "Orchestrator", hook: "Hook", system: "Tiller" };
@@ -171,7 +171,7 @@ function RunCard({ run, owner }: { run: CardRun; owner: string | undefined }) {
         {seconds === null ? "" : `, ${formatAge(seconds)}`}.{run.note ? ` ${run.note}` : ""}
       </p>
       {active && sessionId && hostId ? (
-        <div className="acts">
+        <div className="acts right">
           {activity ? (
             <span className="meta">
               <i className={`ld ${activity.dot}`} /> {activity.label}
@@ -193,76 +193,8 @@ function RunCard({ run, owner }: { run: CardRun; owner: string | undefined }) {
   );
 }
 
-function ApprovalRow({
-  approval,
-  pr,
-  ask,
-}: {
-  approval: CardApproval;
-  pr: CardPr;
-  ask: AttentionItem | undefined;
-}) {
-  const standing = approvalStanding(approval, pr);
-  const stale = standing === "stale";
-  const who = approval.decided_by === "owner" ? "you" : (approval.decided_by ?? "someone");
-  return (
-    <div className={`appr${stale ? " stale" : ""}`} data-standing={standing}>
-      <div className="a-main">
-        <div className="a-h">
-          {stale ? <WarnIcon /> : standing === "current" ? <Status mark="ok" /> : <LockIcon />}
-          {standing === "stale"
-            ? "Approval bound to an older commit"
-            : standing === "current"
-              ? "Approval matches the head"
-              : standing === "pending"
-                ? "Waiting for your approval"
-                : `Approval ${approval.state}`}
-          {stale ? (
-            <span className="lab sm yel">stale: new commits since approval</span>
-          ) : standing === "current" ? (
-            <span className="lab sm ok">current</span>
-          ) : null}
-        </div>
-        {approval.head_sha ? (
-          <div className="bind">
-            {approval.decided_at
-              ? `Approved by ${who} at ${formatLisbonMoment(approval.decided_at)}, bound to`
-              : "Will be bound to"}{" "}
-            <span className={`sha${stale ? " old" : ""}`}>{shortSha(approval.head_sha)}</span>
-            {stale ? (
-              <>
-                <ChevronRightIcon />
-                head is <span className="sha new">{shortSha(pr.head_sha)}</span>
-              </>
-            ) : null}
-          </div>
-        ) : null}
-        {standing === "current" ? (
-          <div className="bind">A new push would mark this approval stale and ask again.</div>
-        ) : null}
-      </div>
-      {standing === "pending" && ask ? (
-        <div className="a-act">
-          <ApproveButton item={ask} />
-        </div>
-      ) : null}
-      {stale && approval.newer_commits.length > 0 ? (
-        <ul>
-          {approval.newer_commits.map((commit) => (
-            <li key={commit.sha}>
-              <span className="mono">{shortSha(commit.sha)}</span>
-              <span>{commit.subject}</span>
-              <span className="meta" style={{ marginLeft: "auto" }}>
-                {formatLisbonMoment(commit.at)}
-              </span>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </div>
-  );
-}
-
+// The pull request and its approval are one card: what is being approved on the
+// left, what you can do about it on the right.
 function PullRequest({
   pr,
   approvals,
@@ -274,7 +206,9 @@ function PullRequest({
 }) {
   const approval = approvalFor(approvals, pr);
   const standing = approval ? approvalStanding(approval, pr) : null;
+  const stale = standing === "stale";
   const checkTone = pr.checks === "passing" ? "ok" : pr.checks === "failing" ? "bad" : "yel";
+  const who = approval?.decided_by === "owner" ? "you" : (approval?.decided_by ?? "someone");
   return (
     <div className="sect">
       <div className="sect-h">
@@ -283,7 +217,7 @@ function PullRequest({
           {pr.repo}#{pr.number}
         </span>
       </div>
-      <div className="prbox">
+      <div className={`prbox prc${stale ? " stale" : ""}`} data-standing={standing ?? "none"}>
         <div className="ph1">
           <PrIcon />
           {pr.title}
@@ -294,49 +228,87 @@ function PullRequest({
             {pr.state}
           </span>
         </div>
-        <dl>
-          <dt>Head</dt>
-          <dd>
-            <span className={`sha${standing === "stale" ? " new" : ""}`}>
-              {shortSha(pr.head_sha)}
-            </span>
-            {standing === "stale" && approval ? (
-              <span className="meta">
-                +{approval.newer_commits.length} commit
-                {approval.newer_commits.length === 1 ? "" : "s"} since approval
+        <div className="prc-body">
+          <dl>
+            <dt>Head</dt>
+            <dd>
+              <span className={`sha${stale ? " new" : ""}`}>{shortSha(pr.head_sha)}</span>
+              {stale && approval ? (
+                <span className="meta">
+                  +{approval.newer_commits.length} commit
+                  {approval.newer_commits.length === 1 ? "" : "s"} since approval
+                </span>
+              ) : null}
+            </dd>
+            <dt>Base</dt>
+            <dd className="mono">{pr.base}</dd>
+            <dt>Checks</dt>
+            <dd>
+              <span className={`lab sm ${checkTone}`}>
+                {pr.checks === "passing" ? <CheckIcon /> : null}
+                {pr.checks_summary ?? pr.checks}
               </span>
+            </dd>
+            {pr.diff_summary ? (
+              <>
+                <dt>Diff</dt>
+                <dd>{pr.diff_summary}</dd>
+              </>
             ) : null}
-          </dd>
-          <dt>Base</dt>
-          <dd className="mono">{pr.base}</dd>
-          <dt>Checks</dt>
-          <dd>
-            <span className={`lab sm ${checkTone}`}>
-              {pr.checks === "passing" ? <CheckIcon /> : null}
-              {pr.checks_summary ?? pr.checks}
-            </span>
-          </dd>
-          {pr.diff_summary ? (
-            <>
-              <dt>Diff</dt>
-              <dd>{pr.diff_summary}</dd>
-            </>
+            <dt>Approval</dt>
+            <dd>
+              {!approval ? (
+                <span className="meta">
+                  {pr.state === "open" ? "None yet. One is requested once checks pass." : "None."}
+                </span>
+              ) : standing === "pending" ? (
+                <span className="lab sm yel">waiting for you</span>
+              ) : standing === "current" ? (
+                <>
+                  <span className="lab sm ok">
+                    <CheckIcon />
+                    approved
+                  </span>
+                  <span className="meta">
+                    by {who}
+                    {approval.decided_at ? `, ${formatLisbonMoment(approval.decided_at)}` : ""},
+                    bound to <span className="sha">{shortSha(approval.head_sha ?? "")}</span>
+                  </span>
+                </>
+              ) : stale ? (
+                <>
+                  <span className="lab sm yel">stale</span>
+                  <span className="meta">
+                    bound to <span className="sha old">{shortSha(approval.head_sha ?? "")}</span>
+                    <ChevronRightIcon />
+                    head is <span className="sha new">{shortSha(pr.head_sha)}</span>
+                  </span>
+                </>
+              ) : (
+                <span className="lab sm">{approval.state}</span>
+              )}
+            </dd>
+          </dl>
+          {approval && standing === "pending" ? (
+            <ApproveActions
+              item={attention.find(
+                (item) => item.still_current && item.approval?.id === approval.id,
+              )}
+            />
           ) : null}
-        </dl>
-        {approval ? (
-          <ApprovalRow
-            approval={approval}
-            pr={pr}
-            ask={attention.find((item) => item.still_current && item.approval?.id === approval.id)}
-          />
-        ) : pr.state === "open" ? (
-          <div className="appr">
-            <div className="bind">
-              <LockIcon />
-              No approval yet. One is requested once checks pass, and it is bound to the head commit
-              at that moment.
-            </div>
-          </div>
+        </div>
+        {stale && approval && approval.newer_commits.length > 0 ? (
+          <ul className="prc-commits">
+            {approval.newer_commits.map((commit) => (
+              <li key={commit.sha}>
+                <span className="mono">{shortSha(commit.sha)}</span>
+                <span>{commit.subject}</span>
+                <span className="meta" style={{ marginLeft: "auto" }}>
+                  {formatLisbonMoment(commit.at)}
+                </span>
+              </li>
+            ))}
+          </ul>
         ) : null}
       </div>
     </div>
@@ -377,7 +349,16 @@ function Pages({ artifacts }: { artifacts: CardArtifact[] }) {
   );
 }
 
-export function CardPage({ cardId, owner }: { cardId: string; owner?: string }) {
+export function CardPage({
+  cardId,
+  owner,
+  variant = "page",
+}: {
+  cardId: string;
+  owner?: string;
+  // The drawer is the same card, docked beside the board.
+  variant?: "page" | "drawer";
+}) {
   const { data: detail } = useSuspenseQuery(cardQuery(cardId, owner));
   const { data: projects } = useSuspenseQuery(projectsQuery());
   const { card, column } = detail;
@@ -416,17 +397,46 @@ export function CardPage({ cardId, owner }: { cardId: string; owner?: string }) 
   const openDeps = detail.deps.filter((dep) => dep.released_at === null);
 
   return (
-    <div className="card-page" data-testid="card-page">
+    <div className={`card-page${variant === "drawer" ? " in-drawer" : ""}`} data-testid="card-page">
       <div className="cp-nav">
-        <Link to="/" search={(prev) => ({ host: prev.host })} className="btn ghost sm">
-          <ChevronLeftIcon />
-          Board
-        </Link>
+        {variant === "page" ? (
+          <Link
+            to="/"
+            search={(prev) => ({ host: prev.host, card: cardId, owner })}
+            className="btn ghost sm"
+          >
+            <ChevronLeftIcon />
+            Board
+          </Link>
+        ) : null}
         <span className="pdot" style={{ "--pc": color } as CSSProperties} />
         <span className="muted">{project?.name ?? card.project_id}</span>
         <ChevronRightIcon />
         <b>{id}</b>
         <HostChip entity={column} />
+        {variant === "drawer" ? (
+          <span className="cp-tools">
+            <Link
+              to="/cards/$cardId"
+              params={{ cardId }}
+              search={{ owner }}
+              className="ib sm"
+              title="Open the full page"
+              aria-label="Open the full page"
+            >
+              <ExpandIcon />
+            </Link>
+            <Link
+              to="/"
+              search={(prev) => ({ ...prev, card: undefined, owner: undefined })}
+              className="ib sm"
+              title="Close"
+              aria-label="Close"
+            >
+              <CloseIcon />
+            </Link>
+          </span>
+        ) : null}
       </div>
       <PeerNote standing={standing} />
 
