@@ -504,6 +504,60 @@ fn relaunch_resumes_worker_in_own_worktree_with_note() {
 }
 
 #[test]
+fn relaunch_renders_the_launch_files_again_and_keeps_the_brief() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    let scratch = rig.scratch.join(&spawned.run.id);
+    let old_tiller = rig.tiller.to_string_lossy().into_owned();
+    let first_settings = std::fs::read_to_string(scratch.join("settings.json")).unwrap();
+    assert!(first_settings.contains(&old_tiller), "{first_settings}");
+    // The role prompt of the first launch was an older one.
+    let first_prompt = std::fs::read_to_string(scratch.join("prompt.md")).unwrap();
+    let brief = launch::brief_of(&first_prompt).unwrap().to_owned();
+    assert!(brief.starts_with("Do the work on"), "{brief}");
+    std::fs::write(
+        scratch.join("prompt.md"),
+        format!("an older role prompt\n\n# Your brief\n\n{brief}\n"),
+    )
+    .unwrap();
+    // tiller is upgraded: its binary now lives somewhere else.
+    rig.tiller = PathBuf::from("/home/user/upgraded/bin/tiller");
+    let claude = boot(&rig, "startup");
+    let ctx = rig.orchestrator();
+
+    let done =
+        relaunched(relaunch_it(&mut rig, &ctx, &patient(), &spawned.run.id, note("n")).unwrap());
+    claude.join().unwrap().unwrap();
+    assert_eq!(done.started, Proof::Confirmed, "{}", done.evidence);
+
+    let settings = std::fs::read_to_string(scratch.join("settings.json")).unwrap();
+    assert!(!settings.contains(&old_tiller), "{settings}");
+    assert!(
+        settings.contains("/home/user/upgraded/bin/tiller hook"),
+        "{settings}"
+    );
+    let prompt = std::fs::read_to_string(scratch.join("prompt.md")).unwrap();
+    assert!(!prompt.contains("an older role prompt"), "{prompt}");
+    assert_eq!(launch::brief_of(&prompt), Some(brief.as_str()));
+    assert_eq!(done.run.id, spawned.run.id);
+    assert_eq!(done.run.config_hash, spawned.run.config_hash);
+}
+
+#[test]
+fn relaunch_refuses_a_run_whose_prompt_holds_no_brief() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    std::fs::write(
+        rig.scratch.join(&spawned.run.id).join("prompt.md"),
+        "a prompt with nothing after the role\n",
+    )
+    .unwrap();
+    let error = relaunch_it(&mut rig, &owner(), &quick(), &spawned.run.id, note("n")).unwrap_err();
+    assert!(error.to_string().contains("holds no brief"), "{error}");
+    assert_eq!(rig.events("run.relaunched", &spawned.run.id), 0);
+}
+
+#[test]
 fn relaunch_interrupts_a_working_turn_before_the_exit() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);

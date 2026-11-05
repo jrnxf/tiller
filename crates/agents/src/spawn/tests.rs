@@ -1399,7 +1399,84 @@ fn start_orchestrator(
     ctx: &Ctx,
 ) -> Result<Applied<orchestrator::Orchestrator>> {
     let world = world!(rig);
-    orchestrator::start(&mut rig.fleet.store, ctx, &world, homes, "alpha")
+    orchestrator::start(&mut rig.fleet.store, ctx, &world, homes, "alpha", None)
+}
+
+#[test]
+fn orchestrator_restart_replaces_the_live_one_with_fresh_launch_files() {
+    let (mut rig, homes) = orchestrator_rig();
+    let first = start_orchestrator(&mut rig, &homes, &owner())
+        .unwrap()
+        .value;
+    let old_pane = first.pane_id.clone().unwrap();
+    rig.herdr.set_screen(&old_pane, Screen::Idle);
+    rig.fleet.bind(&first.session.id, &old_pane);
+
+    // Without a restart a live orchestrator is returned as it is.
+    let again = start_orchestrator(&mut rig, &homes, &owner()).unwrap();
+    assert!(again.replayed);
+    assert_eq!(again.value.session.id, first.session.id);
+
+    // tiller is upgraded: its binary now lives somewhere else.
+    rig.tiller = PathBuf::from("/home/user/upgraded/bin/tiller");
+    let waits = crate::control::Waits {
+        interrupt: std::time::Duration::from_secs(2),
+        exit: std::time::Duration::from_secs(2),
+        bind: std::time::Duration::from_secs(2),
+        poll: std::time::Duration::from_millis(10),
+    };
+    let world = world!(rig);
+    let restarted = orchestrator::start(
+        &mut rig.fleet.store,
+        &owner(),
+        &world,
+        &homes,
+        "alpha",
+        Some(&waits),
+    )
+    .unwrap();
+    assert!(!restarted.replayed);
+    let value = restarted.value;
+    assert_ne!(value.session.id, first.session.id);
+    let old: Session = get(rig.fleet.store.conn(), "session", &first.session.id).unwrap();
+    assert_eq!(old.end_reason.as_deref(), Some(orchestrator::RESTARTED));
+    assert!(
+        rig.herdr
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("close_pane") && c.contains(&old_pane)),
+        "the stopped pane was not closed"
+    );
+
+    let settings =
+        std::fs::read_to_string(rig.scratch.join(&value.session.id).join("settings.json")).unwrap();
+    assert!(
+        settings.contains("/home/user/upgraded/bin/tiller hook"),
+        "{settings}"
+    );
+}
+
+#[test]
+fn orchestrator_restart_is_the_owners() {
+    let (mut rig, homes) = orchestrator_rig();
+    let first = start_orchestrator(&mut rig, &homes, &owner())
+        .unwrap()
+        .value;
+    let world = world!(rig);
+    let error = orchestrator::start(
+        &mut rig.fleet.store,
+        &Ctx::new(Actor::Daemon),
+        &world,
+        &homes,
+        "alpha",
+        Some(&crate::control::Waits::default()),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("may not restart"), "{error}");
+    let live = tiller_core::state::outbox::live_orchestrator(rig.fleet.store.conn(), "alpha")
+        .unwrap()
+        .unwrap();
+    assert_eq!(live.id, first.session.id);
 }
 
 #[test]
