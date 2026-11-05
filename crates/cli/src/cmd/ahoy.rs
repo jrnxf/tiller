@@ -57,23 +57,29 @@ pub fn run(app: &App, args: Ahoy) -> Done {
             .unwrap_or_else(|| now.plus_minutes(-DEFAULT_WINDOW_MINUTES)),
     };
 
-    let events: Vec<Event> = list(
-        store.conn(),
-        &format!("at > ?1 AND kind IN ({RECAP_KINDS}) ORDER BY seq DESC LIMIT ?2"),
-        &[&since, &RECAP_LIMIT],
-    )?;
+    // The project filter runs before the limit, so a busy fleet's other
+    // projects cannot crowd this one out; card-less events are fleet-wide.
+    let events: Vec<Event> = match project.as_deref() {
+        Some(project) => list(
+            store.conn(),
+            &format!(
+                "at > ?1 AND kind IN ({RECAP_KINDS}) AND card_id IN \
+                 (SELECT id FROM cards WHERE project_id = ?3) ORDER BY seq DESC LIMIT ?2"
+            ),
+            &[&since, &RECAP_LIMIT, &project],
+        )?,
+        None => list(
+            store.conn(),
+            &format!("at > ?1 AND kind IN ({RECAP_KINDS}) ORDER BY seq DESC LIMIT ?2"),
+            &[&since, &RECAP_LIMIT],
+        )?,
+    };
     let mut recap = Vec::new();
     for event in events.into_iter().rev() {
         let card: Option<Card> = match &event.card_id {
             Some(id) => Some(get(store.conn(), "card", id)?),
             None => None,
         };
-        if project
-            .as_deref()
-            .is_some_and(|p| card.as_ref().is_some_and(|c| c.project_id != p))
-        {
-            continue;
-        }
         recap.push(json!({
             "at": event.at,
             "kind": event.kind,
