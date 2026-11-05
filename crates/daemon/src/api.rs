@@ -1535,6 +1535,10 @@ async fn project_delete_preview(
         removed: preview.deletion.removed,
         unlinked: preview.deletion.unlinked,
         refused: preview.refused,
+        unblock: preview.unblock.map(|unblock| DeleteUnblock {
+            step: unblock.step,
+            command: unblock.command,
+        }),
     }))
 }
 
@@ -2684,6 +2688,7 @@ pub(crate) mod tests {
         assert_eq!(body["removed"]["projects"], 1);
         assert_eq!(body["removed"]["cards"], 1);
         assert_eq!(body["refused"], Value::Null, "{body}");
+        assert_eq!(body["unblock"], Value::Null, "{body}");
 
         // alpha's orchestrator is live: the preview names it, the delete
         // refuses and removes nothing.
@@ -2691,6 +2696,14 @@ pub(crate) mod tests {
         let body: Value = serde_json::from_str(&live.body).unwrap();
         assert!(
             body["refused"].as_str().unwrap().contains("session"),
+            "{body}"
+        );
+        assert_eq!(body["unblock"]["step"], "type /exit in its pane", "{body}");
+        assert!(
+            body["unblock"]["command"]
+                .as_str()
+                .unwrap()
+                .starts_with("tiller agent focus "),
             "{body}"
         );
         let refused = send(&app, delete("alpha", "k-del-1", "alpha", &cookie)).await;

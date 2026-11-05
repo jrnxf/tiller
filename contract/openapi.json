@@ -3041,6 +3041,26 @@
         },
         "additionalProperties": false
       },
+      "DeleteUnblock": {
+        "type": "object",
+        "description": "The owner's way past a refused delete.",
+        "required": [
+          "step"
+        ],
+        "properties": {
+          "command": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The command that starts it, when there is one."
+          },
+          "step": {
+            "type": "string",
+            "description": "What to do, as a short imperative (\"cancel its card\")."
+          }
+        }
+      },
       "DepRow": {
         "type": "object",
         "required": [
@@ -4522,6 +4542,17 @@
             "propertyNames": {
               "type": "string"
             }
+          },
+          "unblock": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DeleteUnblock",
+                "description": "What clears `refused`, when the owner can clear it: absent for the\nfleet project and another host's project."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "unlinked": {
             "type": "object",

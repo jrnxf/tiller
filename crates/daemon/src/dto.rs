@@ -879,6 +879,18 @@ pub struct ProjectDeletePreview {
     /// Why the delete is refused now (a live run or session, the fleet
     /// project, a project another host owns); absent when it would apply.
     pub refused: Option<String>,
+    /// What clears `refused`, when the owner can clear it: absent for the
+    /// fleet project and another host's project.
+    pub unblock: Option<DeleteUnblock>,
+}
+
+/// The owner's way past a refused delete.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct DeleteUnblock {
+    /// What to do, as a short imperative ("cancel its card").
+    pub step: String,
+    /// The command that starts it, when there is one.
+    pub command: Option<String>,
 }
 
 /// `POST /api/v1/projects/{id}/delete`: the hard delete of one project.

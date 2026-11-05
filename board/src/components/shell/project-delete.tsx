@@ -64,6 +64,7 @@ function ConfirmDelete({ project, onClose }: { project: Project; onClose: () => 
   const action = useAction({ binding: `${project.id}:delete`, send, onRecorded: recorded });
 
   const refused = preview.data?.refused ?? null;
+  const unblock = preview.data?.unblock ?? null;
   const ready = preview.data !== undefined && refused === null;
   const armed = ready && typed.trim() === project.id && !action.pending;
 
@@ -145,6 +146,12 @@ function ConfirmDelete({ project, onClose }: { project: Project; onClose: () => 
           <p className="refusal" role="alert">
             {readFailure}
           </p>
+        ) : null}
+        {refused && unblock ? (
+          <div className="delete-next">
+            <p>Next: {unblock.step}, then delete again.</p>
+            {unblock.command ? <code>{unblock.command}</code> : null}
+          </div>
         ) : null}
         {ready ? (
           <div className="delete-confirm">

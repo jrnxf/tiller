@@ -746,6 +746,11 @@ test("a project with a live run says why it cannot be deleted and asks for nothi
   const dialog = screen.getByRole("dialog", { name: "Delete alpha?" });
   const why = await within(dialog).findByRole("alert");
   expect(why.textContent).toMatch(/^builder run on alpha-\d+ is live; end it first$/);
+  // It names the step that clears the refusal, and the command for it.
+  expect(within(dialog).getByText("Next: cancel its card, then delete again.")).toBeTruthy();
+  expect(
+    within(dialog).getByText(/^tiller card cancel alpha-\d+ --reason "deleting project alpha"$/),
+  ).toBeTruthy();
   expect(within(dialog).queryByRole("textbox")).toBeNull();
   expect(within(dialog).getByRole("button", { name: "Delete project" })).toHaveProperty(
     "disabled",

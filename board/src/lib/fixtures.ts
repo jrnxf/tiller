@@ -1126,6 +1126,12 @@ function deletePreviewFor(
     },
     unlinked: projectId === "gamma" ? { "cards.fixes_card_id": 1 } : {},
     refused: live ? `builder run on ${live.display_id} is live; end it first` : null,
+    unblock: live
+      ? {
+          step: "cancel its card",
+          command: `tiller card cancel ${live.display_id} --reason "deleting project ${projectId}"`,
+        }
+      : null,
   };
 }
 
