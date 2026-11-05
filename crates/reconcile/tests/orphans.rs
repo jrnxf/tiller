@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use tiller_core::domain::{AttentionKind, RunOutcome};
+use tiller_core::domain::{AttentionKind, Finish, RunOutcome};
 use tiller_core::state::runs::EndRun;
 use tiller_herdr::fake::Screen;
 
@@ -147,4 +147,43 @@ fn dead_pane_of_ended_run_is_closed_and_clean_worktree_returned() {
     let report = v.pass(t0.plus_minutes(1));
     assert!(!report.did("returned"), "{report:?}");
     assert!(!v.event_kinds().contains(&"run.cleaned".to_owned()));
+}
+
+/// R15: a run tiller landed through a squash merge holds no unlanded work,
+/// though the merge gave its commits new SHAs and the PR row still reads
+/// open: step 5 runs before step 6 refreshes the PR, so the succeeded
+/// approval's head is what says the worktree's head landed.
+#[test]
+fn run_landed_by_tiller_merge_is_not_unlanded_work() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let run = w.run_of(&worker);
+    let path = run.worktree_path.clone().unwrap();
+    let head = "aaaa1111";
+    // The squash commit on main is new, so the worktree's commit is not
+    // reachable from the default branch.
+    w.scanner.worktree(&path, "fm/work", head, false, Some(1));
+    let pr = w.link_pr(&worker, 1, head);
+    let approval = w.approve(&worker, &pr, head, true);
+    w.store_mut()
+        .approval_execute(&daemon(), &approval, head)
+        .unwrap();
+    w.store_mut()
+        .approval_finish(
+            &daemon(),
+            &approval,
+            Finish::Succeeded,
+            serde_json::json!({"sha": "e1e1e1e1"}),
+        )
+        .unwrap();
+    assert_eq!(w.run(&run.id).outcome, Some(RunOutcome::Landed));
+    w.forge.pr(REPO, 1, merged_pr(head, "e1e1e1e1", now()));
+    let report = w.pass(now());
+    assert!(!report.did("unlanded work"), "{report:?}");
+    let notes = w.notes();
+    assert!(
+        !notes.iter().any(|n| n.body.contains("still holds work")),
+        "{notes:?}"
+    );
 }

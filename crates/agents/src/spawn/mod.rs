@@ -41,10 +41,12 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::Value;
 use tiller_core::domain::{
-    Card, Delivery, Effort, Project, Reservation, Run, RunOutcome, RunRole, Session, Worktree,
+    Card, CardKind, Delivery, Effort, Pr, Project, Reservation, Run, RunOutcome, RunRole, Session,
+    Worktree,
 };
-use tiller_core::state::caches::WorktreeReading;
+use tiller_core::state::caches::{WorktreeReading, landed_heads};
 use tiller_core::state::projects::meta;
+use tiller_core::state::publishes::published_head;
 use tiller_core::state::runs::{EndRun, NewRun, Placement, SpawnChecks, Started, live_session};
 use tiller_core::state::{find, get, list, resolve_card};
 use tiller_core::{Applied, Ctx, Store};
@@ -461,13 +463,20 @@ fn place(
 }
 
 /// One layout pass: tokens, then renames, then moves. A herdr that refuses
-/// `workspace.move` leaves correct labels in the wrong order, which is still
-/// usable (`herdr-layout.md`, Known limits), so the caller only reports it.
+/// `workspace.move`, or a client without the API socket, leaves correct
+/// labels in the wrong order, which is still usable (`herdr-layout.md`,
+/// Known limits), so the caller only reports it.
 pub(crate) fn relayout(herdr: &dyn Herdr, bindings: &[layout::Binding]) -> Result<(), String> {
     let snapshot = herdr.snapshot().map_err(|e| e.to_string())?;
-    layout::repair(herdr, &snapshot, bindings)
-        .map(drop)
-        .map_err(|e| format!("layout repair: {e}"))
+    let repair =
+        layout::repair(herdr, &snapshot, bindings).map_err(|e| format!("layout repair: {e}"))?;
+    if repair.unordered > 0 {
+        return Err(format!(
+            "layout repair: {} workspace moves skipped: workspace.move needs the herdr API socket (spawn.herdr_socket)",
+            repair.unordered
+        ));
+    }
+    Ok(())
 }
 
 /// Ends a spawn that failed after `run.start`: the run `failed`, the
@@ -509,21 +518,6 @@ fn fail(
     }
 }
 
-/// The heads of the merged PRs of every run that used `path`: a squash or
-/// rebase merge lands commits under new SHAs, and only these say so.
-fn merged_heads(store: &Store, run: &Run, path: &str) -> Result<Vec<String>> {
-    let mut stmt = store.conn().prepare(
-        "SELECT p.head_sha FROM prs p JOIN runs r ON r.id = p.run_id
-         WHERE r.host_id = ?1 AND r.worktree_path = ?2 AND p.state = 'merged' AND p.head_sha IS NOT NULL",
-    ).map_err(tiller_core::Error::from)?;
-    let rows = stmt
-        .query_map(rusqlite::params![run.host_id, path], |row| row.get(0))
-        .map_err(tiller_core::Error::from)?;
-    Ok(rows
-        .collect::<rusqlite::Result<_>>()
-        .map_err(tiller_core::Error::from)?)
-}
-
 /// Scans a run's worktree now and records the reading; returns the scan
 /// and the events the record wrote.
 pub(crate) fn scan_and_record(
@@ -535,7 +529,7 @@ pub(crate) fn scan_and_record(
     path: &Path,
 ) -> Result<(WorktreeScan, Vec<i64>)> {
     let text = path.to_string_lossy().into_owned();
-    let heads = merged_heads(store, run, &text)?;
+    let heads = landed_heads(store.conn(), &run.host_id, &text)?;
     let scan = scanner.scan(path, project, &heads);
     let mut events = Vec::new();
     if scan.exists {
@@ -586,7 +580,9 @@ pub struct Ended {
 /// `tiller done`: reads the run's worktree now and refuses while it holds
 /// commits that are not landed or changes that are not committed (P51).
 /// Only `failed` and `abandoned` end a run over such work, and then the
-/// worktree stays for the orchestrator; cleanup will not return it.
+/// worktree stays for the orchestrator; cleanup will not return it. A
+/// builder whose committed head is on an open PR of its card also ends
+/// `reported`: the PR holds the work, and the card tracks it to landing.
 ///
 /// It needs no config, since a worker session runs it and fleet roles
 /// cannot read `config.toml`. A run on another host is judged by the last
@@ -601,11 +597,13 @@ pub fn done(
     let run: &Run = &get(store.conn(), "run", &run.id)?;
     let mut scan = None;
     let mut kept = None;
+    let mut note = None;
     let mut events = Vec::new();
     if run.outcome.is_none()
         && let Some(path) = &run.worktree_path
     {
-        let reading = if run.host_id == local_host(store)? {
+        let local = run.host_id == local_host(store)?;
+        let reading = if local {
             let project = project_of(store, run)?;
             let (scan, written) =
                 scan_and_record(store, ctx, scanner, run, &project, Path::new(path))?;
@@ -622,6 +620,20 @@ pub fn done(
                     ""
                 };
                 kept = Some(format!("ended {outcome} while {path} {what}{keeps}"));
+            } else if let Some(pr) = on_open_pr(store, run, outcome, local, &reading)? {
+                // Committed and on an open PR: the card tracks the PR to
+                // landing, and the slot goes to the next run.
+                note = Some(format!(
+                    "ended {outcome} with its head on PR #{}; the card tracks it to landing",
+                    pr.number
+                ));
+            } else if outcome == RunOutcome::Reported
+                && run.role == RunRole::Builder
+                && reading.dirty == Some(false)
+            {
+                return Err(SpawnError::Refused(format!(
+                    "{path} {what}, and no open PR of the card holds its head; land it or get its head onto the PR first, or end with --outcome failed or abandoned and the orchestrator decides what to keep"
+                )));
             } else {
                 return Err(SpawnError::Refused(format!(
                     "{path} {what}; land it first, or end with --outcome failed or abandoned and the orchestrator decides what to keep"
@@ -635,7 +647,7 @@ pub fn done(
         &run.id,
         EndRun {
             outcome,
-            note: kept.clone(),
+            note: kept.clone().or(note),
         },
     )?;
     events.extend(applied.events);
@@ -648,6 +660,32 @@ pub fn done(
         events,
         replayed: applied.replayed,
     })
+}
+
+/// The open PR that holds a builder's work when it ends `reported` over
+/// commits that are not landed: nothing else in the worktree, and the head
+/// the reading just recorded is on an open PR of the card. Only a reading
+/// taken now counts: another host's last reading may predate a commit. The
+/// core checks the same record again in `run.end`.
+fn on_open_pr(
+    store: &Store,
+    run: &Run,
+    outcome: RunOutcome,
+    fresh: bool,
+    reading: &WorktreeScan,
+) -> Result<Option<Pr>> {
+    if outcome != RunOutcome::Reported
+        || !fresh
+        || run.role != RunRole::Builder
+        || get::<Card>(store.conn(), "card", &run.card_id)?.kind != CardKind::Ship
+        || !reading.exists
+        || !reading.is_worktree
+        || reading.dirty != Some(false)
+        || reading.unlanded_commits.is_none()
+    {
+        return Ok(None);
+    }
+    Ok(published_head(store.conn(), run)?)
 }
 
 /// The last reading this host holds of a worktree, as a scan.

@@ -252,6 +252,24 @@
   color: var(--fg-3);
 }
 
+.delete-next {
+  margin-top: 10px;
+  font-size: var(--fs-mini);
+  color: var(--fg-2);
+}
+
+.delete-next code {
+  display: block;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: var(--r8);
+  border: 1px solid var(--line-2);
+  font-family: var(--mono);
+  color: var(--fg-1);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
 .delete-confirm {
   margin-top: 14px;
 }

@@ -85,6 +85,11 @@ function stubMedia(matching: (query: string) => boolean = () => false) {
 
 async function renderApp(scenario: Scenario = "default", path = "/") {
   const queryClient = createQueryClient();
+  // The board's one retry, without the real second of backoff before it,
+  // so a loaded test run cannot push these tests past their timeout.
+  queryClient.setDefaultOptions({
+    queries: { ...queryClient.getDefaultOptions().queries, retryDelay: 0 },
+  });
   hydrateFromSnapshot(queryClient, fixtureSnapshot(scenario));
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: [path] }));
   await router.load();
@@ -741,6 +746,11 @@ test("a project with a live run says why it cannot be deleted and asks for nothi
   const dialog = screen.getByRole("dialog", { name: "Delete alpha?" });
   const why = await within(dialog).findByRole("alert");
   expect(why.textContent).toMatch(/^builder run on alpha-\d+ is live; end it first$/);
+  // It names the step that clears the refusal, and the command for it.
+  expect(within(dialog).getByText("Next: cancel its card, then delete again.")).toBeTruthy();
+  expect(
+    within(dialog).getByText(/^tiller card cancel alpha-\d+ --reason "deleting project alpha"$/),
+  ).toBeTruthy();
   expect(within(dialog).queryByRole("textbox")).toBeNull();
   expect(within(dialog).getByRole("button", { name: "Delete project" })).toHaveProperty(
     "disabled",

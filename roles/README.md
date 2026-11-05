@@ -32,7 +32,7 @@ with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `TILLER_SESSION_ID`, `TILLER_RUN_ID` a
 |---|---|---|---|---|---|
 | orchestrator | `opus` | medium | `auto` | its home, its scratch directory | never; it supervises until the owner clears it |
 | scout | `opus` | high | `dontAsk` | its worktree, its scratch directory | a report artifact, `tiller done` (`reported`) |
-| builder | `opus` | high | `dontAsk` | its worktree, its scratch directory | the merge (`landed`), or `tiller done --outcome failed\|abandoned` |
+| builder | `opus` | high | `dontAsk` | its worktree, its scratch directory | `tiller done --outcome reported` once its head is on an open PR, the merge (`landed`), or `tiller done --outcome failed\|abandoned` |
 | reviewer | `opus` | high | `dontAsk` | its scratch directory only | a `code-review` review row, `tiller done` (`reported`) |
 | verifier | `opus` | high | `dontAsk` | its worktree (build output), its scratch directory | a `spec-review` review row, `tiller done` (`reported`) |
 

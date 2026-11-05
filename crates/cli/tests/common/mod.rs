@@ -131,6 +131,29 @@ impl World {
         self.exec(Some(session), args, None)
     }
 
+    /// Runs `tiller hook <event>` the way Claude Code does, with `input` on
+    /// stdin, and requires it to succeed.
+    pub fn hook(&self, session: Option<&str>, event: &str, input: &str) {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut child = self
+            .command(session)
+            .args(["hook", event])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "hook {event}: {output:?}");
+    }
+
     pub fn run_with_stdin(&self, args: &[&str], stdin: &str) -> Out {
         self.exec(None, args, Some(stdin))
     }

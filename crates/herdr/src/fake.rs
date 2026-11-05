@@ -62,6 +62,8 @@ struct World {
     /// typed text.
     #[serde(default)]
     newline_enters: BTreeMap<String, u32>,
+    #[serde(default)]
+    no_socket: bool,
 }
 
 /// A handle on the fake server's file. Clones share the server.
@@ -233,6 +235,12 @@ impl FakeHerdr {
 
     pub fn set_unreachable(&self, down: bool) {
         self.edit(|w| w.unreachable = down);
+    }
+
+    /// A client without the API socket: `workspace.move` fails before it
+    /// reaches the server, as `Cli` does when `socket` was never set.
+    pub fn set_no_socket(&self, missing: bool) {
+        self.edit(|w| w.no_socket = missing);
     }
 
     /// Makes the server answer every `call` (a call name such as `move`)
@@ -459,6 +467,9 @@ impl Herdr for FakeHerdr {
     }
 
     fn move_workspace(&self, workspace_id: &str, index: usize) -> Result<()> {
+        if self.load().no_socket {
+            return Err(HerdrError::NoSocket("workspace.move"));
+        }
         self.call("move", format!("move {workspace_id} {index}"))?;
         self.edit(|w| {
             if let Some(from) = w

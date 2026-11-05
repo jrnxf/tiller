@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use super::cards::landed_evidence;
 use super::outbox::{NewMessage, enqueue, live_orchestrator};
 use super::projects::{local_host_id, require_daemon};
+use super::publishes::published_head;
 use super::{find, get, list, refuse, required, resolve_card, resolve_id};
 use crate::domain::*;
 use crate::error::{Error, Result};
@@ -377,7 +378,40 @@ pub(crate) fn release_reservation(
             .card(&run.card_id)
             .payload(json!({"reason": reason, "run_id": run.id})),
     )?;
+    note_slot_open(
+        tx,
+        &reservation.project_id,
+        Some(&run.card_id),
+        format!(
+            "a run slot opened: run {} ended ({}); retry any queued spawn",
+            ids::short(&run.id),
+            reason
+        ),
+    )?;
     Ok(Some(reservation.id))
+}
+
+/// Wakes the project's live orchestrator, if any, so it retries spawns that
+/// were refused as full.
+pub(crate) fn note_slot_open(
+    tx: &mut Tx<'_>,
+    project_id: &str,
+    card_id: Option<&str>,
+    body: String,
+) -> Result<()> {
+    if let Some(orchestrator) = live_orchestrator(tx.conn(), project_id)? {
+        enqueue(
+            tx,
+            &NewMessage {
+                target_session_id: orchestrator.id,
+                kind: OutboxKind::Note,
+                body,
+                card_id: card_id.map(str::to_owned),
+                reply_to: None,
+            },
+        )?;
+    }
+    Ok(())
 }
 
 /// Counts the open reservations on a host and a project.
@@ -910,8 +944,10 @@ impl Store {
     }
 
     /// `run.end` (`tiller done`, reconcile). `landed` needs a succeeded
-    /// approval or a confirmed outside merge; a session ending its own run
-    /// needs a known `unlanded_commits` for its worktree (P51).
+    /// approval or a confirmed outside merge; `reported` for a builder on a
+    /// ship card needs its committed head on an open PR of the card; a
+    /// session ending its own run needs a known `unlanded_commits` for its
+    /// worktree (P51).
     pub fn run_end(&mut self, ctx: &Ctx, run: &str, end: EndRun) -> Result<Applied<Run>> {
         self.write(ctx, "run.end", None, |tx| {
             let run = load_run(tx, run)?;
@@ -928,11 +964,15 @@ impl Store {
                         "landed comes from a finished merge or an outside merge the owner confirmed",
                     ));
                 }
-                RunOutcome::Reported if card.kind == CardKind::Ship && run.role == RunRole::Builder => {
+                RunOutcome::Reported
+                    if card.kind == CardKind::Ship
+                        && run.role == RunRole::Builder
+                        && published_head(tx.conn(), &run)?.is_none() =>
+                {
                     return Err(Error::refused(
                         "run",
                         &run.id,
-                        "a builder on a ship card ends landed with the merge, or failed or abandoned",
+                        "a builder on a ship card ends reported only once its committed head is on an open PR; otherwise landed with the merge, or failed or abandoned",
                     ));
                 }
                 _ => {}

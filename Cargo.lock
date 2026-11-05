@@ -1531,6 +1531,7 @@ dependencies = [
  "tiller-core",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

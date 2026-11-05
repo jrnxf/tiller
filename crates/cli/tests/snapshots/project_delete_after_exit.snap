@@ -1,0 +1,27 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "project": "alpha",
+    "removed": {
+      "cards": 1,
+      "events": 14,
+      "idempotency_keys": 3,
+      "observations": 2,
+      "outbox": 1,
+      "projects": 1,
+      "reservations": 1,
+      "runs": 1,
+      "sessions": 2
+    },
+    "unlinked": {},
+    "withdrawn_attention": 0
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

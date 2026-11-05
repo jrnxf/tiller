@@ -215,6 +215,17 @@ pub(crate) fn edit_project(
             .rev(project.rev + 1)
             .payload(json!({"changed": changed, "expected_rev": expected_rev})),
     )?;
+    if next.capacity > project.capacity {
+        super::runs::note_slot_open(
+            tx,
+            &project.id,
+            None,
+            format!(
+                "project capacity raised from {} to {}; retry any queued spawn",
+                project.capacity, next.capacity
+            ),
+        )?;
+    }
     get(tx.conn(), "project", &project.id)
 }
 

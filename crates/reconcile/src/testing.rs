@@ -67,7 +67,9 @@ impl AgentProbe for FakeProbe {
     }
 }
 
-/// Scans the tests set per path; an unset path is missing.
+/// Scans the tests set per path; an unset path is missing. A head among the
+/// merged heads the caller passes has nothing unlanded, as `git rev-list
+/// HEAD --not <head>` finds nothing.
 #[derive(Clone, Default)]
 pub struct FakeScanner {
     scans: Arc<Mutex<HashMap<PathBuf, WorktreeScan>>>,
@@ -126,12 +128,20 @@ impl Scanner for FakeScanner {
         &self,
         path: &Path,
         _project: &tiller_core::domain::Project,
-        _merged: &[String],
+        merged: &[String],
     ) -> WorktreeScan {
-        lock(&self.scans)
+        let mut scan = lock(&self.scans)
             .get(path)
             .cloned()
-            .unwrap_or_else(|| WorktreeScan::missing(path))
+            .unwrap_or_else(|| WorktreeScan::missing(path));
+        if scan
+            .head_sha
+            .as_ref()
+            .is_some_and(|head| merged.contains(head))
+        {
+            scan.unlanded_commits = Some(0);
+        }
+        scan
     }
 
     /// The pool takes the worktree back: the path is gone from the next

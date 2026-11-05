@@ -14,7 +14,7 @@ use rusqlite::Connection;
 use tiller_core::domain::{Card, Role, Run, RunRole, Session};
 use tiller_core::state::{get, list};
 
-use crate::client::{Herdr, Result, Snapshot, WorkspaceInfo};
+use crate::client::{Herdr, HerdrError, Result, Snapshot, WorkspaceInfo};
 
 /// Where a session's workspace belongs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -293,11 +293,23 @@ pub struct Repair {
     pub renamed: usize,
     pub moved: usize,
     pub tokens_reported: usize,
+    /// Moves left undone because the client has no API socket: the labels
+    /// are right and the order is not (`spawn.herdr_socket` unset).
+    pub unordered: usize,
+}
+
+impl Repair {
+    /// Whether the pass wrote anything to herdr.
+    pub fn changed(&self) -> bool {
+        self.renamed + self.moved + self.tokens_reported > 0
+    }
 }
 
 /// Re-reports row tokens herdr lost or never had, then applies the layout
 /// plan: renames first, so a herdr that refuses `workspace.move` still ends
 /// with correct labels in the wrong order (`herdr-layout.md`, Known limits).
+/// A client without the API socket cannot move at all, which is a setup and
+/// not a failure: the moves it skips are counted in `unordered`.
 ///
 /// A pane whose `session` token names another session is left alone, row
 /// and tokens both: the binding is stale, and reconcile settles it. A pane
@@ -342,14 +354,24 @@ pub fn repair(herdr: &dyn Herdr, snapshot: &Snapshot, bindings: &[Binding]) -> R
             done.renamed += 1;
         }
     }
-    for action in &actions {
-        if let Action::Move {
-            workspace_id,
-            index,
-        } = action
-        {
-            herdr.move_workspace(workspace_id, *index)?;
-            done.moved += 1;
+    let moves: Vec<(&str, usize)> = actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::Move {
+                workspace_id,
+                index,
+            } => Some((workspace_id.as_str(), *index)),
+            Action::Rename { .. } => None,
+        })
+        .collect();
+    for (n, (workspace_id, index)) in moves.iter().enumerate() {
+        match herdr.move_workspace(workspace_id, *index) {
+            Ok(()) => done.moved += 1,
+            Err(HerdrError::NoSocket(_)) => {
+                done.unordered = moves.len() - n;
+                break;
+            }
+            Err(error) => return Err(error),
         }
     }
     Ok(done)

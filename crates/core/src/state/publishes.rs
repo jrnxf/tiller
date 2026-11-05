@@ -20,6 +20,47 @@ pub fn publish(conn: &Connection, run: &str) -> Result<Option<Publish>> {
     find(conn, "run_id = ?1", &[&run])
 }
 
+/// The open PR of the run's card that holds the run's work, read from the
+/// last recorded reading of its worktree: no uncommitted changes, and its
+/// head is the head the forge reports for the PR or the head the daemon
+/// recorded pushing as the run's publish. Then nothing in the worktree is
+/// only there: a builder may end `reported` and leave the PR to the card
+/// (`recovery.md` R13). `None` when the run has no worktree, the reading is
+/// unknown, or the head is on no open PR of the card. It trusts the latest
+/// reading, so `tiller done` takes one first on the run's own host.
+pub fn published_head(conn: &Connection, run: &Run) -> Result<Option<Pr>> {
+    let Some(path) = &run.worktree_path else {
+        return Ok(None);
+    };
+    let worktree: Option<Worktree> = find(
+        conn,
+        "host_id = ?1 AND path = ?2 AND gone_at IS NULL",
+        &[&run.host_id, path],
+    )?;
+    let Some(head) = worktree
+        .filter(|w| w.dirty == Some(false) && w.unlanded_commits.is_some())
+        .and_then(|w| w.head_sha)
+    else {
+        return Ok(None);
+    };
+    let forge: Option<Pr> = find(
+        conn,
+        "card_id = ?1 AND state = 'open' AND head_sha = ?2 ORDER BY number",
+        &[&run.card_id, &head],
+    )?;
+    if forge.is_some() {
+        return Ok(forge);
+    }
+    let Some(pr_id) = publish(conn, &run.id)?
+        .filter(|record| record.pushed_sha.as_deref() == Some(head.as_str()))
+        .and_then(|record| record.pr_id)
+    else {
+        return Ok(None);
+    };
+    let pr: Pr = get(conn, "pr", &pr_id)?;
+    Ok((pr.card_id == run.card_id && pr.state == PrState::Open).then_some(pr))
+}
+
 /// Whether `record` already covers `head` for `run`: pushed, its PR
 /// recorded, no failure since, no new description and no done report since
 /// the push. A description or a report in the same millisecond as the push

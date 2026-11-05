@@ -7,9 +7,9 @@ exit: 5
     "code": "refused",
     "current": {
       "project": "fleet",
-      "removed": {},
-      "unlinked": {},
-      "withdrawn_attention": 0
+      "would_remove": {},
+      "would_unlink": {},
+      "would_withdraw_attention": 0
     },
     "entity": "project",
     "id": "fleet",
