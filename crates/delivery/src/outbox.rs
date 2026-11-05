@@ -28,6 +28,7 @@ use tiller_core::{Actor, Ctx, Store, Timestamp};
 use tiller_herdr::client::Herdr;
 use tiller_herdr::composer::{Composer, classify};
 use tiller_herdr::poller::{PollError, Source};
+use tiller_herdr::submit::{Submission, Submit};
 
 /// How long a busy pane, or one whose composer holds text or cannot be read,
 /// waits before the next try.
@@ -46,12 +47,10 @@ pub const ANSWER_MINUTES: i64 = 60;
 
 /// How many times one pass presses Enter on a wake-up line that stays in
 /// the composer.
-pub const SUBMIT_PRESSES: u32 = 4;
+pub use tiller_herdr::submit::{PRESSES as SUBMIT_PRESSES, Pacing};
 /// How many passes press Enter on a wake-up line that stays in the
 /// composer; after them it is left like someone's text.
 pub const SUBMIT_PASSES: u32 = 3;
-/// How many times one pass reads the composer after an Enter.
-const SUBMIT_READS: u32 = 2 * SUBMIT_PRESSES;
 
 /// How long a remote lane's messages are left alone between looks.
 const QUIET_REMOTE_MINUTES: i64 = 5;
@@ -59,27 +58,6 @@ const QUIET_REMOTE_MINUTES: i64 = 5;
 const HELD: &str = "composer holds text";
 /// The deferral reason for a wake-up line Enter did not submit.
 const UNSUBMITTED: &str = "wake line typed but not submitted";
-
-/// The pauses that let a pane's agent take a typed line as one prompt.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Pacing {
-    /// Between typing the line and the first Enter. Claude Code can read an
-    /// Enter that arrives right after typed text as part of it, so the Enter
-    /// adds a newline instead of submitting; a Claude just relaunched in the
-    /// same pane does this every time.
-    pub settle: Duration,
-    /// Between an Enter and the read that checks the line left the composer.
-    pub recheck: Duration,
-}
-
-impl Default for Pacing {
-    fn default() -> Self {
-        Self {
-            settle: Duration::from_millis(500),
-            recheck: Duration::from_millis(500),
-        }
-    }
-}
 
 /// How often `message` has been rung at its current target, and when the
 /// first of those rings was: `attempts` and `delivered_at` count every
@@ -169,16 +147,6 @@ struct Defer {
     held: bool,
 }
 
-/// How a typed line's submit went.
-enum Submit {
-    /// The line left the composer, or the target acked the batch.
-    Left,
-    /// The line is still in the composer after every press.
-    Held,
-    /// herdr failed, so the composer could not be checked.
-    Failed(tiller_herdr::client::HerdrError),
-}
-
 impl Defer {
     fn new(secs: i64, reason: impl Into<String>) -> Self {
         Self {
@@ -194,6 +162,29 @@ impl Defer {
             ..Self::new(BUSY_DEFER_SECS, reason)
         }
     }
+}
+
+/// A pane whose composer holds a session's wake-up line, ready for Enter.
+struct Ready {
+    pane_id: String,
+    /// Every line a pass may have typed for the batch.
+    lines: Vec<String>,
+    /// This pass typed the line, rather than finding it there.
+    typed: bool,
+}
+
+/// A session whose wake-up line is typed and waits for Enter.
+struct Flight {
+    session: Session,
+    unacked: Vec<OutboxMessage>,
+    doorbells: HashMap<String, (i64, Option<Timestamp>)>,
+    /// The batch's oldest message, whose ack shows the line was submitted.
+    oldest: String,
+    pane_id: String,
+    /// Every line a pass may have typed for this batch.
+    lines: Vec<String>,
+    /// This pass typed the line, rather than finding it there.
+    typed: bool,
 }
 
 /// The daemon's delivery loop for the local host.
@@ -238,7 +229,11 @@ impl<H: Herdr> Deliverer<H> {
         &self.store
     }
 
-    /// One pass over every due message, one session at a time.
+    /// One pass over every due message. Each session is checked and its
+    /// line typed in turn, but the pauses around Enter are taken once for
+    /// all of them, and a session is recorded the moment its own line is
+    /// shown to have left, so a pane that is slow to take its line never
+    /// holds up the others.
     pub fn pass(&mut self, now: Timestamp) -> Result<Report> {
         let due: Vec<OutboxMessage> = list(
             self.store.conn(),
@@ -254,16 +249,148 @@ impl<H: Herdr> Deliverer<H> {
         self.quiet_until.retain(|_, until| *until > now);
         let ctx = Ctx::at(Actor::Daemon, now);
         let mut report = Report::default();
+        let mut flights = Vec::new();
         for session in sessions {
-            if let Err(error) = self.serve(&ctx, &session, &mut report) {
-                tracing::warn!(%session, %error, "delivery failed for a session");
-                report.errors.push((session, error.to_string()));
+            match self.serve(&ctx, &session, &mut report) {
+                Ok(Some(flight)) => flights.push(flight),
+                Ok(None) => {}
+                Err(error) => Self::failed(&mut report, session, &error),
             }
         }
+        self.submit_all(&ctx, flights, &mut report);
         Ok(report)
     }
 
-    fn serve(&mut self, ctx: &Ctx, session_id: &str, report: &mut Report) -> Result<()> {
+    fn failed(report: &mut Report, session: String, error: &DeliveryError) {
+        tracing::warn!(%session, %error, "delivery failed for a session");
+        report.errors.push((session, error.to_string()));
+    }
+
+    /// Presses Enter for every flight and reads each composer back, with one
+    /// pause for all of them at each step.
+    fn submit_all(&mut self, ctx: &Ctx, flights: Vec<Flight>, report: &mut Report) {
+        if flights.iter().any(|f| f.typed) {
+            std::thread::sleep(self.pacing.settle);
+        }
+        let mut active = Vec::with_capacity(flights.len());
+        for flight in flights {
+            match Submission::begin(&self.herdr, &flight.pane_id) {
+                Ok(submission) => active.push((flight, submission)),
+                Err(error) => self.settle(ctx, flight, Submit::Failed(error), report),
+            }
+        }
+        while !active.is_empty() {
+            std::thread::sleep(self.pacing.recheck);
+            let mut waiting = Vec::with_capacity(active.len());
+            for (flight, mut submission) in active {
+                let acked =
+                    match get::<OutboxMessage>(self.store.conn(), "outbox message", &flight.oldest)
+                    {
+                        Ok(message) => message.state == OutboxState::Acked,
+                        Err(error) => {
+                            Self::failed(report, flight.session.id.clone(), &error.into());
+                            continue;
+                        }
+                    };
+                match submission.check(&self.herdr, acked, |c| holds_line(c, &flight.lines)) {
+                    Some(done) => self.settle(ctx, flight, done, report),
+                    None => waiting.push((flight, submission)),
+                }
+            }
+            active = waiting;
+        }
+    }
+
+    /// Records how a flight's submit went.
+    fn settle(&mut self, ctx: &Ctx, flight: Flight, done: Submit, report: &mut Report) {
+        let session = flight.session.id.clone();
+        if let Err(error) = self.land(ctx, flight, done, report) {
+            Self::failed(report, session, &error);
+        }
+    }
+
+    fn land(&mut self, ctx: &Ctx, flight: Flight, done: Submit, report: &mut Report) -> Result<()> {
+        let Flight {
+            unacked,
+            doorbells,
+            pane_id,
+            ..
+        } = flight;
+        let due = self.due_of(ctx.now, &unacked);
+        let defer = match done {
+            Submit::Left => {
+                self.forget(&unacked);
+                return self.deliver(ctx, &unacked, &doorbells, &pane_id, report);
+            }
+            // Still pending, so the next pass finishes it with Enter; a line
+            // stuck there for long is reported like held text.
+            Submit::Held => {
+                for message in &unacked {
+                    *self.unsubmitted.entry(message.id.clone()).or_default() += 1;
+                    self.held_since.entry(message.id.clone()).or_insert(ctx.now);
+                }
+                Defer::held(UNSUBMITTED)
+            }
+            Submit::Failed(error) => {
+                self.forget(&unacked);
+                Defer::new(BUSY_DEFER_SECS, error.to_string())
+            }
+        };
+        let due: Vec<&OutboxMessage> = unacked.iter().filter(|m| due.contains(&m.id)).collect();
+        self.defer(ctx, &due, defer, report)
+    }
+
+    /// The composer is no longer known to hold text.
+    fn forget(&mut self, unacked: &[OutboxMessage]) {
+        for message in unacked {
+            self.held_since.remove(&message.id);
+            self.unsubmitted.remove(&message.id);
+        }
+    }
+
+    fn due_of(&self, now: Timestamp, unacked: &[OutboxMessage]) -> Vec<String> {
+        unacked
+            .iter()
+            .filter(|m| m.next_attempt_at.is_some_and(|at| at <= now))
+            .filter(|m| !self.quiet_until.contains_key(&m.id))
+            .map(|m| m.id.clone())
+            .collect()
+    }
+
+    /// Records every message of a batch as rung at `pane_id`.
+    fn deliver(
+        &mut self,
+        ctx: &Ctx,
+        unacked: &[OutboxMessage],
+        doorbells: &HashMap<String, (i64, Option<Timestamp>)>,
+        pane_id: &str,
+        report: &mut Report,
+    ) -> Result<()> {
+        let now = ctx.now;
+        for message in unacked {
+            let (rings, first) = doorbells.get(&message.id).copied().unwrap_or((0, None));
+            let next = next_ring(first.unwrap_or(now), rings + 1, now);
+            match self.store.outbox_deliver(ctx, &message.id, pane_id, next) {
+                Ok(_) => {}
+                // The target's hook acked the batch the moment the line was
+                // submitted, before this record.
+                Err(_)
+                    if get::<OutboxMessage>(self.store.conn(), "outbox message", &message.id)?
+                        .state
+                        == OutboxState::Acked => {}
+                Err(error) => return Err(error.into()),
+            }
+            report.rung.push(message.id.clone());
+        }
+        Ok(())
+    }
+
+    fn serve(
+        &mut self,
+        ctx: &Ctx,
+        session_id: &str,
+        report: &mut Report,
+    ) -> Result<Option<Flight>> {
         let now = ctx.now;
         let session: Session = get(self.store.conn(), "session", session_id)?;
         let unacked: Vec<OutboxMessage> = list(
@@ -277,16 +404,17 @@ impl<H: Herdr> Deliverer<H> {
             .filter(|m| !self.quiet_until.contains_key(&m.id))
             .collect();
         if due.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         if session.host_id != self.host_id {
             // Remote lanes are read only in v1: the peer's own Tiller
             // delivers, retargets and fails its messages.
             self.quiet(&due, now.plus_minutes(QUIET_REMOTE_MINUTES));
-            return Ok(());
+            return Ok(None);
         }
         if session.ended_at.is_some() {
-            return self.rehome(ctx, &session, &due, report);
+            self.rehome(ctx, &session, &due, report)?;
+            return Ok(None);
         }
         let mut doorbells = HashMap::with_capacity(unacked.len());
         for message in &unacked {
@@ -300,43 +428,40 @@ impl<H: Herdr> Deliverer<H> {
                 .then_some(session.activity_observed_at)
                 .flatten();
             if idle_since.is_none_or(|at| at > now.plus_minutes(-IDLE_MINUTES)) {
-                return self.defer(ctx, &due, Defer::new(BUSY_DEFER_SECS, "not idle"), report);
+                self.defer(ctx, &due, Defer::new(BUSY_DEFER_SECS, "not idle"), report)?;
+                return Ok(None);
             }
         }
 
-        let rung = self.ring(&session, &unacked, now)?;
-        if !matches!(&rung, Err(defer) if defer.held) {
-            // The composer is no longer known to hold text.
-            for message in &unacked {
-                self.held_since.remove(&message.id);
-                self.unsubmitted.remove(&message.id);
-            }
-        }
-        match rung {
-            Ok(pane_id) => {
-                for message in &unacked {
-                    let (rings, first) = doorbells.get(&message.id).copied().unwrap_or((0, None));
-                    let next = next_ring(first.unwrap_or(now), rings + 1, now);
-                    match self.store.outbox_deliver(ctx, &message.id, &pane_id, next) {
-                        Ok(_) => {}
-                        // The target's hook acked the batch the moment the
-                        // line was submitted, before this record.
-                        Err(_)
-                            if get::<OutboxMessage>(
-                                self.store.conn(),
-                                "outbox message",
-                                &message.id,
-                            )?
-                            .state
-                                == OutboxState::Acked => {}
-                        Err(error) => return Err(error.into()),
+        let ring = self.ring(&session, &unacked)?;
+        let oldest = unacked[0].id.clone();
+        let Ready {
+            pane_id,
+            lines,
+            typed,
+        } = match ring {
+            Ok(ready) => ready,
+            Err(defer) => {
+                if defer.held {
+                    for message in &unacked {
+                        self.held_since.entry(message.id.clone()).or_insert(now);
                     }
-                    report.rung.push(message.id.clone());
+                } else {
+                    self.forget(&unacked);
                 }
-                Ok(())
+                self.defer(ctx, &due, defer, report)?;
+                return Ok(None);
             }
-            Err(defer) => self.defer(ctx, &due, defer, report),
-        }
+        };
+        Ok(Some(Flight {
+            session,
+            unacked,
+            doorbells,
+            oldest,
+            pane_id,
+            lines,
+            typed,
+        }))
     }
 
     fn quiet(&mut self, messages: &[&OutboxMessage], until: Timestamp) {
@@ -345,18 +470,18 @@ impl<H: Herdr> Deliverer<H> {
         }
     }
 
-    /// Checks the pane and its composer, then types the line (or Enter
-    /// alone for a line already typed) and submits it. Returns the pane
-    /// rung, or why not.
+    /// Checks the pane and its composer, then types the line unless it is
+    /// already there. Returns the pane, the lines the batch may have typed
+    /// and whether this call typed one, or why not; Enter is pressed by
+    /// [`Deliverer::submit_all`].
     fn ring(
         &mut self,
         session: &Session,
         unacked: &[OutboxMessage],
-        now: Timestamp,
-    ) -> Result<std::result::Result<String, Defer>> {
-        let Some(oldest) = unacked.first() else {
+    ) -> Result<std::result::Result<Ready, Defer>> {
+        if unacked.is_empty() {
             return Ok(Err(Defer::new(BUSY_DEFER_SECS, "nothing to ring")));
-        };
+        }
         let Some(pane_id) = session.pane_id.clone() else {
             return Ok(Err(Defer::new(BUSY_DEFER_SECS, "session has no pane yet")));
         };
@@ -411,86 +536,24 @@ impl<H: Herdr> Deliverer<H> {
         });
         let typed = match classify(&screen) {
             Composer::Empty => {
-                let typed = self.herdr.send_text(&pane_id, &lines[0]);
-                if typed.is_ok() {
-                    std::thread::sleep(self.pacing.settle);
+                if let Err(error) = self.herdr.send_text(&pane_id, &lines[0]) {
+                    return Ok(Err(Defer::new(BUSY_DEFER_SECS, error.to_string())));
                 }
-                typed
+                true
             }
-            composer @ Composer::Holds(_) if !stuck && holds_line(&composer, &lines) => Ok(()),
-            Composer::Holds(_) => {
-                self.mark_held(unacked, now);
-                return Ok(Err(Defer::held(HELD)));
-            }
+            composer @ Composer::Holds(_) if !stuck && holds_line(&composer, &lines) => false,
+            Composer::Holds(_) => return Ok(Err(Defer::held(HELD))),
             Composer::Busy => return Ok(Err(Defer::new(BUSY_DEFER_SECS, "busy"))),
             Composer::Dialog => return Ok(Err(Defer::new(DIALOG_DEFER_SECS, "dialog showing"))),
             Composer::Unknown => {
                 return Ok(Err(Defer::new(BUSY_DEFER_SECS, "composer unreadable")));
             }
         };
-        if let Err(error) = typed {
-            return Ok(Err(Defer::new(BUSY_DEFER_SECS, error.to_string())));
-        }
-        Ok(match self.submit(&pane_id, oldest, &lines)? {
-            Submit::Left => Ok(pane_id),
-            // Still pending, so the next pass finishes it with Enter; a line
-            // stuck there for long is reported like held text.
-            Submit::Held => {
-                for message in unacked {
-                    *self.unsubmitted.entry(message.id.clone()).or_default() += 1;
-                }
-                self.mark_held(unacked, now);
-                Err(Defer::held(UNSUBMITTED))
-            }
-            Submit::Failed(error) => Err(Defer::new(BUSY_DEFER_SECS, error.to_string())),
-        })
-    }
-
-    fn mark_held(&mut self, unacked: &[OutboxMessage], now: Timestamp) {
-        for message in unacked {
-            self.held_since.entry(message.id.clone()).or_insert(now);
-        }
-    }
-
-    /// Presses Enter until the line has left the composer or the target's
-    /// hook acked the batch, at most [`SUBMIT_PRESSES`] times. Only a
-    /// composer read as empty, busy or behind a dialog shows the line left;
-    /// other text or an unreadable screen is read again, never pressed.
-    fn submit(&self, pane_id: &str, oldest: &OutboxMessage, lines: &[String]) -> Result<Submit> {
-        if let Err(error) = self.herdr.send_enter(pane_id) {
-            return Ok(Submit::Failed(error));
-        }
-        let mut presses = 1;
-        let mut failed = None;
-        for _ in 0..SUBMIT_READS {
-            std::thread::sleep(self.pacing.recheck);
-            let message: OutboxMessage = get(self.store.conn(), "outbox message", &oldest.id)?;
-            if message.state == OutboxState::Acked {
-                return Ok(Submit::Left);
-            }
-            let composer = match self.herdr.read_visible(pane_id) {
-                Ok(screen) => classify(&screen),
-                Err(error) => {
-                    failed = Some(error);
-                    continue;
-                }
-            };
-            failed = None;
-            match composer {
-                Composer::Empty | Composer::Busy | Composer::Dialog => return Ok(Submit::Left),
-                held if holds_line(&held, lines) => {
-                    if presses == SUBMIT_PRESSES {
-                        return Ok(Submit::Held);
-                    }
-                    if let Err(error) = self.herdr.send_enter(pane_id) {
-                        return Ok(Submit::Failed(error));
-                    }
-                    presses += 1;
-                }
-                Composer::Holds(_) | Composer::Unknown => {}
-            }
-        }
-        Ok(failed.map_or(Submit::Held, Submit::Failed))
+        Ok(Ok(Ready {
+            pane_id,
+            lines,
+            typed,
+        }))
     }
 
     fn defer(

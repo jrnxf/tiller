@@ -245,6 +245,85 @@ fn a_wrapped_wake_line_is_finished_but_a_draft_starting_with_one_is_not() {
     );
 }
 
+/// Two panes, the first one never taking its Enter: the pass types both
+/// lines, pauses once, and records the healthy pane without waiting out the
+/// stuck one's presses, so one slow pane cannot hold up another.
+#[test]
+fn a_pane_that_never_submits_does_not_delay_another() {
+    let mut fleet = Fleet::new();
+    let stuck_session = fleet.worker("w2:p1");
+    let healthy_session = fleet.worker("w4:p1");
+    let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
+    fleet.place(&herdr);
+    let registry = Registry::new();
+    let mut poller = registry
+        .register(HerdrSource::local(herdr.clone(), fleet.open(), &fleet.host))
+        .unwrap();
+    poller.poll_once(at(0));
+
+    let mut ids = Vec::new();
+    for (session, run) in [
+        (&stuck_session, &fleet.workers[0].1),
+        (&healthy_session, &fleet.workers[1].1),
+    ] {
+        let card_id = get::<tiller_core::domain::Run>(fleet.store.conn(), "run", run)
+            .unwrap()
+            .card_id;
+        let message = fleet
+            .store
+            .outbox_enqueue(
+                &Ctx::at(Actor::Daemon, at(1)),
+                None,
+                NewMessage {
+                    target_session_id: session.clone(),
+                    kind: OutboxKind::Steer,
+                    body: "rebase onto main before you push".into(),
+                    card_id: Some(card_id),
+                    reply_to: None,
+                },
+            )
+            .unwrap()
+            .value;
+        ids.push(message.id);
+    }
+    herdr.enter_as_newline("w2:p1", 100);
+
+    let mut deliverer = Deliverer::new(fleet.open(), herdr.clone(), &fleet.host).pacing(Pacing {
+        settle: Duration::ZERO,
+        recheck: Duration::ZERO,
+    });
+    let report = deliverer.pass(at(2)).unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.rung, [ids[1].clone()], "{report:?}");
+
+    let calls = herdr.calls();
+    let position = |prefix: &str, last: bool| {
+        let mut found = calls
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.starts_with(prefix));
+        if last {
+            found.next_back()
+        } else {
+            found.next()
+        }
+        .map(|(i, _)| i)
+    };
+    assert!(
+        position("send_text w4:p1", false) < position("send_enter w2:p1", false),
+        "every line is typed before the first pane is pressed: {calls:?}"
+    );
+    let healthy_done = position("send_enter w4:p1", true).unwrap();
+    let stuck_last = position("send_enter w2:p1", true).unwrap();
+    assert!(
+        healthy_done < stuck_last,
+        "the healthy pane is finished while the stuck one is still pressed: {calls:?}"
+    );
+    let state = |id: &str| get::<OutboxMessage>(fleet.store.conn(), "outbox message", id).unwrap();
+    assert_eq!(state(&ids[1]).state, OutboxState::Delivered);
+    assert_eq!(state(&ids[0]).state, OutboxState::Pending);
+}
+
 #[test]
 fn one_line_per_batch_names_the_oldest() {
     let mut w = World::new();

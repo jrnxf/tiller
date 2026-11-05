@@ -13,10 +13,11 @@ use tiller_agents::control::{self, Waits};
 use tiller_agents::intake::{HostConfig, IntakeSource};
 use tiller_agents::land::forge::{GhForge, NoApp};
 use tiller_agents::land::publish::Published;
+use tiller_agents::land::reconcile::{Local, ReconcileForge};
 use tiller_agents::land::scrub::ScrubList;
 use tiller_agents::land::{DaemonLock, Landed, Lander};
 use tiller_agents::spawn::readings;
-use tiller_core::domain::{Host, HostKind, Session};
+use tiller_core::domain::{Host, HostKind, PipelineState, Session};
 use tiller_core::state::list;
 use tiller_core::{Actor, Ctx, Store, Timestamp};
 use tiller_delivery::outbox::Deliverer;
@@ -25,7 +26,7 @@ use tiller_herdr::poller::{HerdrSource, PollError, Registry, Source};
 use tiller_observe::tailer::Tailer;
 use tiller_reconcile::git::GitScanner;
 use tiller_reconcile::sources::{
-    HerdrLauncher, HerdrStatusProbe, HostReadings, NoForge, NoHarness, Readings,
+    Forge, HerdrLauncher, HerdrStatusProbe, HostReadings, NoHarness, Readings,
 };
 use tiller_reconcile::{Config as ReconcileConfig, Reconciler, Sources};
 use tokio::sync::watch;
@@ -157,18 +158,70 @@ pub struct Land {
 }
 
 impl Land {
-    /// The host's private names as SHA-256 hashes, plus the optional
-    /// plain-text list `scripts/scrub-check.sh` also reads, kept outside any
-    /// repo (`memory.md` section 8).
     fn scrub(&self) -> ScrubList {
-        let mut terms =
-            std::fs::read_to_string(self.home.join("scrub-terms.sha256")).unwrap_or_default();
-        if let Some(extra) = std::env::var_os("TILLER_SCRUB_TERMS") {
-            terms.push('\n');
-            terms.push_str(&std::fs::read_to_string(extra).unwrap_or_default());
-        }
-        ScrubList::parse(&terms)
+        scrub_list(&self.home)
     }
+}
+
+/// The host's private names as SHA-256 hashes, plus the optional plain-text
+/// list `scripts/scrub-check.sh` also reads, kept outside any repo
+/// (`memory.md` section 8).
+fn scrub_list(home: &Path) -> ScrubList {
+    let mut terms = std::fs::read_to_string(home.join("scrub-terms.sha256")).unwrap_or_default();
+    if let Some(extra) = std::env::var_os("TILLER_SCRUB_TERMS") {
+        terms.push('\n');
+        terms.push_str(&std::fs::read_to_string(extra).unwrap_or_default());
+    }
+    ScrubList::parse(&terms)
+}
+
+/// What the reconcile forge reads from `state.db` and the host.
+struct StoreLocal {
+    home: PathBuf,
+    store: Store,
+}
+
+impl Local for StoreLocal {
+    fn pipeline_state(&self, repo: &str, number: i64) -> PipelineState {
+        self.store
+            .conn()
+            .query_row(
+                "SELECT pipeline_state FROM prs WHERE number = ?2
+                   AND project_id IN (SELECT id FROM projects WHERE repo = ?1)",
+                rusqlite::params![repo, number],
+                |row| row.get(0),
+            )
+            .unwrap_or(PipelineState::None)
+    }
+
+    fn asks(&self, repo: &str) -> Vec<String> {
+        let Ok(mut statement) = self.store.conn().prepare(
+            "SELECT text FROM asks WHERE length(text) > 40
+               AND project_id IN (SELECT id FROM projects WHERE repo = ?1)",
+        ) else {
+            return Vec::new();
+        };
+        statement
+            .query_map([repo], |row| row.get::<_, String>(0))
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
+    fn scrub_list(&self) -> ScrubList {
+        scrub_list(&self.home)
+    }
+}
+
+/// The forge reconcile reads through: GitHub as the owner's login, the same
+/// `gh` the publish and land paths use.
+fn reconcile_forge(home: &Path, store: Store, gh: &str) -> Box<dyn Forge> {
+    Box::new(ReconcileForge::new(
+        gh,
+        Box::new(StoreLocal {
+            home: home.to_owned(),
+            store,
+        }),
+    ))
 }
 
 impl Source for Land {
@@ -487,7 +540,7 @@ pub fn start(
         herdr: Box::new(tools.herdr.clone()),
         probe: Box::new(HerdrStatusProbe),
         scanner: Box::new(GitScanner::new()),
-        forge: Box::new(NoForge),
+        forge: reconcile_forge(home, open()?, &tools.gh),
         // Reconcile closes a dead pane through herdr (R15).
         launcher: Box::new(HerdrLauncher::new(tools.herdr.clone(), {
             let herdr = tools.herdr.clone();
@@ -538,6 +591,38 @@ pub fn start(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The forge reconcile reads through is the real one: with a `gh` that
+    /// reports a merged PR, the read says merged and carries no
+    /// "no forge is configured" error.
+    #[test]
+    fn reconcile_reads_the_forge_through_gh() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let gh = dir.path().join("gh");
+        std::fs::write(
+            &gh,
+            r#"#!/bin/sh
+case "$*" in
+  *pulls/7/files*) echo src/lib.rs ;;
+  *pulls/7/reviews*) echo '[[]]' ;;
+  *pulls/7) echo '{"number":7,"state":"closed","merged":true,"merged_at":"2026-11-05T10:00:00Z","merge_commit_sha":"e1e1e1e1","merged_by":{"login":"owner"},"body":"","head":{"sha":"a1a1a1a1","ref":"fm/work"},"base":{"ref":"main","repo":{"private":true}},"mergeable_state":"clean"}' ;;
+  *check-runs*) echo '[{"total_count":0,"check_runs":[]}]' ;;
+  */status*) echo '[{"statuses":[]}]' ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let forge = reconcile_forge(dir.path(), store, &gh.to_string_lossy());
+        let read = forge.pr("example/alpha", 7).unwrap();
+        assert_eq!(read.fetch.state, tiller_core::domain::PrState::Merged);
+        assert_eq!(read.fetch.merge_sha.as_deref(), Some("e1e1e1e1"));
+        assert_eq!(read.merged_by.as_deref(), Some("owner"));
+        assert_eq!(read.fetch.fetch_error, None);
+    }
 
     #[test]
     fn settings_default_to_claude() {

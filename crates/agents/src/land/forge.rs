@@ -185,7 +185,7 @@ impl GhForge {
         command.env("GH_PROMPT_DISABLED", "1").output()
     }
 
-    fn get(&self, args: &[&str]) -> Result<String, ForgeError> {
+    pub(crate) fn get(&self, args: &[&str]) -> Result<String, ForgeError> {
         let output = self
             .api(args, &Identity::Owner)
             .map_err(|error| ForgeError::Read(format!("run gh: {error}")))?;
@@ -224,14 +224,14 @@ impl GhForge {
         Ok(output)
     }
 
-    fn json(&self, path: &str) -> Result<Value, ForgeError> {
+    pub(crate) fn json(&self, path: &str) -> Result<Value, ForgeError> {
         serde_json::from_str(&self.get(&[path])?)
             .map_err(|error| ForgeError::Read(format!("{path}: {error}")))
     }
 
     /// Every page of a paginated endpoint, so a long list is never read as
     /// its first page only.
-    fn pages(&self, path: &str) -> Result<Vec<Value>, ForgeError> {
+    pub(crate) fn pages(&self, path: &str) -> Result<Vec<Value>, ForgeError> {
         let text = self.get(&["--paginate", "--slurp", path])?;
         serde_json::from_str(&text).map_err(|error| ForgeError::Read(format!("{path}: {error}")))
     }
@@ -337,8 +337,14 @@ fn status_result(status: &Value) -> Checks {
     }
 }
 
-impl Forge for GhForge {
-    fn pull(&self, repo: &str, number: i64) -> Result<PullView, ForgeError> {
+impl GhForge {
+    /// One PR as [`Forge::pull`] reads it, with the PR's raw JSON for the
+    /// fields a [`PullView`] does not carry (merge time, merger, visibility).
+    pub(crate) fn pull_with_raw(
+        &self,
+        repo: &str,
+        number: i64,
+    ) -> Result<(PullView, Value), ForgeError> {
         let pull = self.json(&format!("repos/{repo}/pulls/{number}"))?;
         let state = pull_state(&pull);
         let head_sha = text(&pull, "/head/sha");
@@ -352,7 +358,7 @@ impl Forge for GhForge {
             .lines()
             .map(str::to_owned)
             .collect();
-        Ok(PullView {
+        let view = PullView {
             state,
             checks: self.checks(repo, &head_sha)?,
             head_ref: text(&pull, "/head/ref"),
@@ -361,7 +367,14 @@ impl Forge for GhForge {
             body: text(&pull, "/body"),
             files,
             head_sha,
-        })
+        };
+        Ok((view, pull))
+    }
+}
+
+impl Forge for GhForge {
+    fn pull(&self, repo: &str, number: i64) -> Result<PullView, ForgeError> {
+        self.pull_with_raw(repo, number).map(|(view, _)| view)
     }
 
     fn checks(&self, repo: &str, sha: &str) -> Result<Checks, ForgeError> {

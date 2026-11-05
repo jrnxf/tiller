@@ -1595,6 +1595,7 @@ fn orchestrator_restart_replaces_the_live_one_with_fresh_launch_files() {
         exit: std::time::Duration::from_secs(2),
         bind: std::time::Duration::from_secs(2),
         poll: std::time::Duration::from_millis(10),
+        pacing: tiller_herdr::submit::Pacing::INSTANT,
     };
     let world = world!(rig);
     let restarted = orchestrator::start(
@@ -1643,6 +1644,7 @@ fn orchestrator_restart_of_a_retired_project_keeps_the_live_one() {
         exit: std::time::Duration::from_secs(2),
         bind: std::time::Duration::from_secs(2),
         poll: std::time::Duration::from_millis(10),
+        pacing: tiller_herdr::submit::Pacing::INSTANT,
     };
     let world = world!(rig);
     let error = orchestrator::start(
@@ -1705,6 +1707,7 @@ fn agent_stop_ends_a_live_orchestrator_and_closes_its_pane() {
         exit: std::time::Duration::from_secs(2),
         bind: std::time::Duration::from_secs(2),
         poll: std::time::Duration::from_millis(10),
+        pacing: tiller_herdr::submit::Pacing::INSTANT,
     };
 
     // Only the owner stops an orchestrator.
@@ -1772,6 +1775,7 @@ fn agent_stop_never_closes_a_pane_claude_still_holds() {
         exit: std::time::Duration::from_millis(300),
         bind: std::time::Duration::from_secs(2),
         poll: std::time::Duration::from_millis(10),
+        pacing: tiller_herdr::submit::Pacing::INSTANT,
     };
 
     let world = world!(rig);
@@ -1805,6 +1809,7 @@ fn agent_stop_leaves_a_pane_another_session_now_holds() {
         exit: std::time::Duration::from_millis(300),
         bind: std::time::Duration::from_secs(2),
         poll: std::time::Duration::from_millis(10),
+        pacing: tiller_herdr::submit::Pacing::INSTANT,
     };
     // herdr gave the orchestrator's pane id to another workspace: once to an
     // idle agent, after the orchestrator's hook ended it, and once to a bare
