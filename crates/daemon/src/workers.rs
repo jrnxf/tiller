@@ -20,6 +20,7 @@ use tiller_agents::spawn::readings;
 use tiller_core::domain::{Host, HostKind, PipelineState, Session};
 use tiller_core::state::list;
 use tiller_core::{Actor, Ctx, Store, Timestamp};
+use tiller_delivery::notify::Notifier;
 use tiller_delivery::outbox::Deliverer;
 use tiller_herdr::client::{Cli, Herdr};
 use tiller_herdr::poller::{HerdrSource, PollError, Registry, Source};
@@ -533,6 +534,7 @@ pub fn start(
         runtime: tokio::runtime::Handle::current(),
     };
     let delivery = Deliverer::new(open()?, tools.herdr.clone(), &local);
+    let notify = Notifier::new(open()?, tools.herdr.clone());
     let mut config = ReconcileConfig::new(&local, home);
     config.boot_id = boot_id();
     config.forge_login = settings.forge_login.clone();
@@ -586,6 +588,7 @@ pub fn start(
     spawn(registry, herdr, stop, &mut handles);
     spawn(registry, machines, stop, &mut handles);
     spawn(registry, delivery, stop, &mut handles);
+    spawn(registry, notify, stop, &mut handles);
     spawn(registry, reconcile, stop, &mut handles);
     spawn(registry, publish, stop, &mut handles);
     spawn(registry, land, stop, &mut handles);
