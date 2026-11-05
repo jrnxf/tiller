@@ -16,6 +16,7 @@ import { ChevronIcon, CloseIcon, LayersIcon, MenuIcon, ServerIcon } from "./icon
 const TITLES: Record<string, string> = {
   "/": "Board",
   "/agents": "Agents",
+  "/contributions": "Contributions",
   "/inbox": "Inbox",
   "/memory": "Memory",
   "/health": "Health",

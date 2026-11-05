@@ -536,6 +536,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/quota", get(quota))
         .route("/api/v1/health", get(health))
         .route("/api/v1/projects", get(projects))
+        .route("/api/v1/contributions", get(contributions))
         .route("/api/v1/projects/{id}/stage", post(stage_project))
         .route(
             "/api/v1/projects/{id}/delete",
@@ -917,6 +918,25 @@ async fn projects(
     let peers = state.0.peers.federation();
     read(&state, move |store| {
         views::federated_projects(store, &peers, query.host.as_deref(), Timestamp::now())
+    })
+    .await
+    .map(Json)
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct ContributionsQuery {
+    /// Only this project's PRs.
+    pub project: Option<String>,
+}
+
+#[utoipa::path(get, path = "/api/v1/contributions", tag = "reads", params(ContributionsQuery),
+    responses((status = 200, body = ContributionsResponse)))]
+async fn contributions(
+    State(state): State<AppState>,
+    Query(query): Query<ContributionsQuery>,
+) -> ApiResult<ContributionsResponse> {
+    read(&state, move |store| {
+        views::contributions(store, query.project.as_deref())
     })
     .await
     .map(Json)
@@ -1858,7 +1878,7 @@ async fn app_shell(
     info(title = "Tiller board API", version = "1", description = "The daemon's board API (docs/spec/protocol.md section 7). Every path answers only on 127.0.0.1 or localhost; mutations need the owner cookie."),
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
-        projects, signals, events, create_card, edit_card, comment, hold, release_hold, close,
+        projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
         cancel, reopen, answer, withdraw_attention, decide, focus, stage_project, project_delete_preview, delete_project,
         relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo
@@ -2515,6 +2535,54 @@ pub(crate) mod tests {
         assert_eq!((state.as_str(), head.as_str()), ("accepted", "abc1234"));
         let card = get(&app, "/api/v1/cards/alpha-9").await;
         assert_eq!(card.status, StatusCode::OK, "{}", card.body);
+    }
+
+    /// The contributions view lists the PRs published from cards, newest first,
+    /// narrowed by project, and the card page carries its pages with their URLs.
+    #[tokio::test]
+    async fn contributions_list_published_prs_and_cards_list_their_pages() {
+        let fleet = Fleet::new();
+        let store = fleet.open();
+        store
+            .conn()
+            .execute_batch(
+                "INSERT INTO cards (id, display_id, project_id, kind, title, created_at)
+                 VALUES ('c-1', 'alpha-1', 'alpha', 'ship', 'First', '2026-11-01T10:00:00Z'),
+                        ('c-2', 'alpha-2', 'alpha', 'ship', 'Second', '2026-11-02T10:00:00Z');
+                 INSERT INTO prs (id, project_id, card_id, number, url, linked_at, linked_by)
+                 VALUES ('p-1', 'alpha', 'c-1', 1, 'https://github.com/example/app/pull/1', '2026-11-01T11:00:00Z', 'owner'),
+                        ('p-2', 'alpha', 'c-2', 2, 'https://github.com/example/app/pull/2', '2026-11-02T11:00:00Z', 'owner');
+                 INSERT INTO artifacts (id, card_id, kind, title, url, path, created_at)
+                 VALUES ('a-1', 'c-1', 'page', 'Mockup', 'https://pages.example.com/mockup.html', NULL, '2026-11-01T12:00:00Z'),
+                        ('a-2', 'c-1', 'report', 'Local report', NULL, '/home/user/report.md', '2026-11-01T13:00:00Z')",
+            )
+            .unwrap();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+
+        let all = get(&app, "/api/v1/contributions").await;
+        assert_eq!(all.status, StatusCode::OK, "{}", all.body);
+        let all: Value = serde_json::from_str(&all.body).unwrap();
+        let ids: Vec<&str> = all["contributions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["p-2", "p-1"]);
+        assert_eq!(all["contributions"][0]["repo"], "example/app");
+        assert_eq!(all["contributions"][0]["card_display_id"], "alpha-2");
+
+        let none = get(&app, "/api/v1/contributions?project=elsewhere").await;
+        let none: Value = serde_json::from_str(&none.body).unwrap();
+        assert_eq!(none["contributions"], json!([]));
+
+        let card = get(&app, "/api/v1/cards/alpha-1").await;
+        let card: Value = serde_json::from_str(&card.body).unwrap();
+        assert_eq!(
+            card["artifacts"][0]["url"],
+            "https://pages.example.com/mockup.html"
+        );
+        assert_eq!(card["artifacts"][1]["url"], Value::Null);
     }
 
     /// The board's stage switch: to pre-launch it reads the default-branch
