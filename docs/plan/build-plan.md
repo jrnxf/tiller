@@ -57,7 +57,7 @@ When v2 and v1 conflict, v2 wins. When a task's acceptance criteria conflict wit
 5. **Writing style.** Never use the em dash; use "-". Never credit the agent in commits or PRs: no Co-Authored-By line and no "Generated with" line. Show every date in Europe/Lisbon time with its weekday.
 6. **Quality.** Fix any lint error, test failure or flaky test you see, even when your task did not cause it. Treat UI as pixel-exact: check screenshots in both themes at 1440 px and 390 px wide.
 7. **Firstmate is read-only** during the build, except for steps the developer approves at a checkpoint (the fleet ledger flag, the export runs, and the cutover itself).
-8. **Quota.** Before starting each wave, check the quota with `quota-axi`. Never dispatch below the 3% weekly floor; hold the wave and tell the developer.
+8. **Quota.** Before starting each wave, check the quota with `quota-axi`. Running ahead of pace is not a reason to stop. Hold the wave and tell the developer only when the week would run out before the work could finish, or when under 10% of it is left; otherwise start and mention the pace in the note. Away mode's `--quota-floor` still binds.
 9. **Never trade output or quality for speed of the build.** When a shortcut would drop a capability in the parity matrix, or weaken a quality gate (review, tests, `no-mistakes`, bound approvals), stop and ask.
 
 ## Who runs this
@@ -174,7 +174,7 @@ Put a hold on the work and ask the developer when any of these happens:
 - a task fails its acceptance criteria twice;
 - a host cannot reach the minimum common behavior;
 - anything would write to Firstmate, the developer's dotfiles, GitHub settings or another repo beyond a normal PR;
-- quota is below the floor;
+- the weekly quota would run out before the work could finish, or under 10% of it is left;
 - a test flakes and the cause is not in this repo.
 
 ## Parallel waves

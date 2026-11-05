@@ -13,6 +13,11 @@ exit: 0
     "windows": [
       {
         "burn_multiple": 0.8,
+        "dispatch": {
+          "decision": "go",
+          "note": null,
+          "size": "M"
+        },
         "dot": "green",
         "elapsed_percent": 40.0,
         "fetch_error": null,

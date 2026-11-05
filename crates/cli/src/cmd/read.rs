@@ -11,7 +11,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tiller_core::domain::{
     Ask, Card, Column, Host, HostKind, Observation, Pane, Project, QuotaWindow, Role, Run, Session,
+    Size,
 };
+use tiller_core::quota_rule::{self, Hold, Verdict};
 use tiller_core::state::{find, get, list};
 use tiller_core::{Store, Timestamp};
 
@@ -368,7 +370,56 @@ pub fn machines(app: &App, args: MachinesArgs) -> Done {
 
 // -- quota ------------------------------------------------------------------
 
-fn quota_data(store: &Store) -> Result<Value, Failure> {
+#[derive(Args, Debug)]
+pub struct QuotaArgs {
+    /// Size of the card to start (S, M or L); sets how long the window must
+    /// last. Unsized cards: M.
+    #[arg(long, default_value = "M")]
+    pub size: Size,
+}
+
+/// The dispatch answer for one weekly window (`quota_rule`): whether to start
+/// the work, and the one line the orchestrator carries in its note.
+fn dispatch_of(window: &QuotaWindow, size: Size, now: Jiff) -> Value {
+    let left = window
+        .percent_remaining
+        .map_or_else(|| "unknown".into(), |p| format!("{p:.0}%"));
+    let at = |ts: Option<tiller_core::Timestamp>| {
+        ts.map_or_else(|| "unknown".into(), |ts| lisbon::display(ts.as_jiff()))
+    };
+    let (decision, note) = match quota_rule::verdict(
+        window,
+        size,
+        tiller_core::Timestamp::from_jiff(now),
+    ) {
+        Verdict::Go => ("go", None),
+        Verdict::GoAheadOfPace => (
+            "go",
+            Some(format!(
+                "Started ahead of pace: {left} of the week left, projected empty {} before the reset {}.",
+                at(window.projected_exhaustion_at),
+                at(window.resets_at),
+            )),
+        ),
+        Verdict::Hold(Hold::LowRemaining) => (
+            "hold",
+            Some(format!(
+                "Holding: {left} of the week left, under {}%.",
+                quota_rule::HOLD_UNDER_PERCENT
+            )),
+        ),
+        Verdict::Hold(Hold::RunsOutFirst) => (
+            "hold",
+            Some(format!(
+                "Holding: the week is projected empty {} before a size {size} card could finish.",
+                at(window.projected_exhaustion_at),
+            )),
+        ),
+    };
+    json!({"size": size, "decision": decision, "note": note})
+}
+
+fn quota_data(store: &Store, size: Size) -> Result<Value, Failure> {
     let now = Jiff::now();
     let windows: Vec<QuotaWindow> = list(store.conn(), "1 = 1 ORDER BY label", &[])?;
     let provider = |window: &QuotaWindow| window.label.split(':').next().unwrap_or("").to_owned();
@@ -418,6 +469,8 @@ fn quota_data(store: &Store) -> Result<Value, Failure> {
                 "fetch_error": window.fetch_error,
                 "stale": stale(window),
                 "dot": dot_of(&provider(window)),
+                "dispatch": (window.kind.as_deref() == Some("weekly") && !stale(window))
+                    .then(|| dispatch_of(window, size, now)),
             })
         })
         .collect();
@@ -430,9 +483,9 @@ fn quota_data(store: &Store) -> Result<Value, Failure> {
     Ok(json!({"windows": rows, "providers": dots}))
 }
 
-pub fn quota(app: &App) -> Done {
+pub fn quota(app: &App, args: QuotaArgs) -> Done {
     let store = app.read()?;
-    Ok(Outcome::read(quota_data(&store)?))
+    Ok(Outcome::read(quota_data(&store, args.size)?))
 }
 
 // -- attention for the snapshot ----------------------------------------------
@@ -489,7 +542,7 @@ pub fn snapshot(app: &App) -> Done {
                 "/api/v1/attention?state=open": attention_data(&store)?,
                 "/api/v1/agents": agents_data(&store, None)?,
                 "/api/v1/machines": machines_data(&store, false)?,
-                "/api/v1/quota": quota_data(&store)?,
+                "/api/v1/quota": quota_data(&store, Size::M)?,
                 "/api/v1/projects": json!({"projects": projects}),
             },
         }))

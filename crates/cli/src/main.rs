@@ -129,8 +129,8 @@ enum Command {
     Agents(read::AgentsArgs),
     /// Hosts, their health and free slots
     Machines(read::MachinesArgs),
-    /// Quota windows and the dot
-    Quota,
+    /// Quota windows, the dot and whether to start work
+    Quota(read::QuotaArgs),
     /// The event log
     Events(read::EventsArgs),
     /// The version and schema
@@ -204,7 +204,7 @@ fn dispatch(app: &App, command: Command) -> Done {
         Command::Board(args) => read::board(app, args),
         Command::Agents(args) => read::agents(app, args),
         Command::Machines(args) => read::machines(app, args),
-        Command::Quota => read::quota(app),
+        Command::Quota(args) => read::quota(app, args),
         Command::Events(args) => read::events(app, args),
         Command::Version => Ok(read::version()),
         Command::Backup => backup::backup(app),

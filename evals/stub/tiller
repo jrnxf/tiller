@@ -14,6 +14,8 @@ mkdir -p "$state"
 printf '%s\n' "$*" >>"$state/calls.log"
 
 key="${1:-}-${2:-}"
+# `tiller quota --size S` answers like bare `tiller quota`.
+[ "${1:-}" = quota ] && key="quota-"
 if [ -f "$state/replies/$key" ]; then
 	cat "$state/replies/$key"
 	exit "$(cat "$state/replies/$key.exit" 2>/dev/null || echo 0)"
