@@ -85,6 +85,11 @@ function stubMedia(matching: (query: string) => boolean = () => false) {
 
 async function renderApp(scenario: Scenario = "default", path = "/") {
   const queryClient = createQueryClient();
+  // The board's one retry, without the real second of backoff before it,
+  // so a loaded test run cannot push these tests past their timeout.
+  queryClient.setDefaultOptions({
+    queries: { ...queryClient.getDefaultOptions().queries, retryDelay: 0 },
+  });
   hydrateFromSnapshot(queryClient, fixtureSnapshot(scenario));
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: [path] }));
   await router.load();
