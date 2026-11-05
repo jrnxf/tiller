@@ -11,6 +11,7 @@ use tiller_core::domain::{
     ApprovalAction, Card, Checks, Grant, GrantKind, PipelineState, Pr, PrState, Review, Run,
     Verdict,
 };
+use tiller_core::state::approvals::active_away;
 use tiller_core::state::review::prelaunch;
 use tiller_core::state::{find, list};
 
@@ -70,6 +71,9 @@ pub fn check(
         && expires.parse::<Timestamp>().is_ok_and(|at| at <= now)
     {
         return fail("grant expired");
+    }
+    if active_away(conn, now)?.is_some_and(|away| away.no_merges) {
+        return fail("away mode allows no merges");
     }
     if pr.state != PrState::Open {
         return fail("PR is not open");

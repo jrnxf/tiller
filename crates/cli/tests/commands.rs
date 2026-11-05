@@ -677,10 +677,19 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
             "2099-03-01",
             "--projects",
             "alpha",
+            "--orders",
+            "keep going on alpha-42; hold schema changes",
+            "--max-new-runs",
+            "6",
+            "--quota-floor",
+            "20",
+            "--merge",
+            "none",
             "--key",
             "away-1",
         ],
     );
+    step(&world, "away_brief", &["away", "brief"]);
     step(&world, "away_end", &["away", "end", "--reason", "back"]);
 
     // Ending the run, cleaning it.

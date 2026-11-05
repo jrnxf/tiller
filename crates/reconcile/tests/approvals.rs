@@ -335,6 +335,55 @@ fn fast_forward_pushed_by_run_rematches_grant() {
     assert_eq!(items[0].kind, AttentionKind::Merge);
 }
 
+/// P34: while the owner is away with `merge: "none"`, no standing grant
+/// merges, even for a head the run pushed; the owner is asked instead.
+#[test]
+fn away_with_no_merges_stops_a_standing_grant_matching() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let approval = w.approve(&worker, &pr, "a1a1a1a1", true);
+    let run = w.run_of(&worker);
+    w.store_mut()
+        .grant_create(
+            &owner(),
+            NewGrant {
+                project_id: "alpha".into(),
+                kind: GrantKind::Merge,
+                conditions: serde_json::json!({
+                    "v": 1, "actions": ["squash"], "base_ref": "main", "head_ref_pattern": "fm/*",
+                    "opened_by_fleet_run": true, "card_kinds": ["ship"], "checks": "success",
+                    "pipeline": "passed", "exclude_paths": [".github/workflows/**"]
+                }),
+            },
+        )
+        .unwrap();
+    w.store_mut()
+        .away_start(
+            &owner(),
+            serde_json::json!({
+                "until_at": now().plus_minutes(24 * 60),
+                "projects": ["alpha"],
+                "merge": "none",
+            }),
+        )
+        .unwrap();
+    w.forge.pr(REPO, 7, open_pr("a1a1a1a1"));
+    w.pass(now());
+    w.forge.pr(REPO, 7, open_pr("b2b2b2b2"));
+    w.forge.descends("a1a1a1a1", "b2b2b2b2");
+    let path = run.worktree_path.clone().unwrap();
+    w.scanner
+        .worktree(&path, "fm/work", "b2b2b2b2", false, Some(1));
+    let report = w.pass(now().plus_minutes(1));
+    assert!(!report.did("rematched"), "{report:?}");
+    assert_eq!(w.approval(&approval).state, ApprovalState::Stale);
+    let items = w.open_items(&run.card_id);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].kind, AttentionKind::Merge);
+}
+
 /// G04 (`authority.md` section 11): the owner's decision passes the pass; a
 /// decision some other principal wrote raises the unauthorized-action
 /// trigger once, with a recovery item on the card.

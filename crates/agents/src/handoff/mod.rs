@@ -9,11 +9,13 @@
 //! `herdr` is denied to the orchestrator, and the note it receives tells it
 //! to hand the owner the word, not to run it.
 
+mod away;
 mod breakpoint;
 mod resume;
 
+pub use away::{MergeLine, ReturnBrief, RunLine, Spend, WaitingApproval};
 pub use breakpoint::{BREAKPOINT_NOTE, CLEAR_HELP, signal_compactions};
-pub use resume::{Brief, CardLine, Changed, DecisionLine, Standing, WorkerLine};
+pub use resume::{AwayLine, Brief, CardLine, Changed, DecisionLine, Standing, WorkerLine};
 
 #[cfg(test)]
 mod tests;

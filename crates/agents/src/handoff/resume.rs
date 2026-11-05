@@ -6,6 +6,7 @@ use serde_json::Value;
 use tiller_core::domain::{
     Attention, AttentionKind, Card, CardOutcome, CardState, Handoff, Run, RunOutcome, RunRole,
 };
+use tiller_core::state::approvals::active_away;
 use tiller_core::state::{find, get, list};
 use tiller_core::{Result, Timestamp};
 
@@ -29,6 +30,25 @@ pub struct Brief {
     /// visible rather than dropped, so a damaged record is not read as an
     /// empty fleet.
     pub unresolved: Vec<String>,
+    /// The owner's away contract, while one binds: the orders to follow and
+    /// the spend left. Absent when the owner is here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub away: Option<AwayLine>,
+}
+
+/// What an orchestrator reads of the running away contract (P34). Following
+/// `orders` is convention; the spend cap and the merge limit are enforced.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AwayLine {
+    pub approval_id: String,
+    pub until_at: Timestamp,
+    /// Whether the contract covers this project.
+    pub covers_project: bool,
+    pub orders: Option<String>,
+    pub max_new_runs: Option<i64>,
+    pub new_runs: i64,
+    pub quota_floor_percent: Option<f64>,
+    pub no_merges: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -145,8 +165,25 @@ impl Brief {
             workers,
             changed_since,
             unresolved,
+            away: away_line(conn, project_id)?,
         }))
     }
+}
+
+fn away_line(conn: &Connection, project_id: &str) -> Result<Option<AwayLine>> {
+    let Some(away) = active_away(conn, Timestamp::now())? else {
+        return Ok(None);
+    };
+    Ok(Some(AwayLine {
+        approval_id: away.approval_id.clone(),
+        until_at: away.until_at,
+        covers_project: away.projects.iter().any(|project| project == project_id),
+        new_runs: away.new_runs(conn)?,
+        orders: away.orders,
+        max_new_runs: away.max_new_runs,
+        quota_floor_percent: away.quota_floor_percent,
+        no_merges: away.no_merges,
+    }))
 }
 
 /// The ids in a JSON list of strings, and the entries that are not strings.
@@ -162,7 +199,7 @@ fn strings(value: &Value) -> (Vec<String>, Vec<String>) {
     (ids, bad)
 }
 
-fn card_line(card: &Card) -> CardLine {
+pub(super) fn card_line(card: &Card) -> CardLine {
     CardLine {
         card: card.display_id.clone(),
         title: card.title.clone(),
@@ -175,7 +212,7 @@ fn display_id(conn: &Connection, card_id: &str) -> Result<String> {
     Ok(get::<Card>(conn, "card", card_id)?.display_id)
 }
 
-fn decision_line(conn: &Connection, item: &Attention) -> Result<DecisionLine> {
+pub(super) fn decision_line(conn: &Connection, item: &Attention) -> Result<DecisionLine> {
     let standing = if item.withdrawn_at.is_some() {
         Standing::Withdrawn
     } else if item.answered_at.is_some() {

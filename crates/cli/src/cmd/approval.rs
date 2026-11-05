@@ -3,6 +3,7 @@
 
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
+use tiller_agents::handoff::ReturnBrief;
 use tiller_agents::land::DaemonLock;
 use tiller_core::domain::{
     AnsweredVia, Approval, ApprovalAction, ApprovalKind, ApprovalState, GrantKind, Pr, Role, Run,
@@ -10,7 +11,7 @@ use tiller_core::domain::{
 };
 use tiller_core::state::approvals::{Decision, NewApproval, NewGrant};
 use tiller_core::state::{find, get, list, resolve_card, resolve_id};
-use tiller_core::{Actor, Ctx, Store};
+use tiller_core::{Actor, Ctx, Store, Timestamp};
 
 use super::KeyArg;
 use super::attention::chat_ask;
@@ -92,10 +93,15 @@ pub struct GrantCreate {
 pub enum Away {
     /// Turn away mode on until a date (owner only)
     Start(AwayStart),
-    /// Turn away mode off
+    /// Turn away mode off, and print the return brief
     End {
         #[arg(long, default_value = "ended by the owner")]
         reason: String,
+    },
+    /// The return brief: what the contract allowed, spent, shipped and left waiting
+    Brief {
+        /// The away contract; the newest when omitted
+        approval: Option<String>,
     },
 }
 
@@ -106,9 +112,20 @@ pub struct AwayStart {
     /// The projects the away scope covers
     #[arg(long, value_delimiter = ',', required = true)]
     pub projects: Vec<String>,
-    /// Conditions for the temporary merge grants away mode creates, as JSON
+    /// What the merge authority is while away: `none` (no merges, even under
+    /// existing grants), `grants` (existing grants only), or grant conditions
+    /// as JSON (also creates a temporary grant per project)
     #[arg(long)]
     pub merge: Option<String>,
+    /// Standing orders the orchestrators read while you are away
+    #[arg(long)]
+    pub orders: Option<String>,
+    /// Spend cap: no run starts once this many have started since you left
+    #[arg(long)]
+    pub max_new_runs: Option<i64>,
+    /// Spend cap: the weekly quota floor while away, when stricter than the standing one
+    #[arg(long)]
+    pub quota_floor: Option<f64>,
     #[command(flatten)]
     pub key: KeyArg,
 }
@@ -435,22 +452,60 @@ pub fn run_grant(app: &App, cmd: Grant) -> Done {
 }
 
 pub fn run_away(app: &App, cmd: Away) -> Done {
-    app.require_owner("tiller away")?;
-    let mut store = app.write()?;
+    // The brief is for whoever picks the work back up; the owner alone turns
+    // away mode on and off.
     match cmd {
+        Away::Brief { approval } => {
+            let store = app.read()?;
+            let Some(brief) =
+                ReturnBrief::load(store.conn(), approval.as_deref(), Timestamp::now())?
+            else {
+                return Ok(Outcome::read(json!({"brief": null})).with_help(
+                    "no away contract yet: `tiller away start --until <date> --projects <ids>`",
+                ));
+            };
+            Ok(Outcome::read(brief))
+        }
         Away::Start(args) => {
+            app.require_owner("tiller away")?;
+            let mut store = app.write()?;
             let until = lisbon::parse_when(&args.until)?;
             let mut scope = json!({"until_at": until, "projects": args.projects});
+            if let Some(orders) = &args.orders {
+                scope["orders"] = json!(orders);
+            }
+            let mut spend = serde_json::Map::new();
+            if let Some(cap) = args.max_new_runs {
+                spend.insert("max_new_runs".into(), json!(cap));
+            }
+            if let Some(floor) = args.quota_floor {
+                spend.insert("quota_floor_percent".into(), json!(floor));
+            }
+            if !spend.is_empty() {
+                scope["spend"] = Value::Object(spend);
+            }
             if let Some(merge) = &args.merge {
-                scope["merge"] = serde_json::from_str(merge)?;
+                scope["merge"] = match merge.as_str() {
+                    "none" | "grants" => json!(merge),
+                    conditions => serde_json::from_str(conditions)?,
+                };
             }
             let keyed = app.key(&store, "away.start", &scope, &args.key.key)?;
             let applied = store.away_start(&app.ctx().with_key(&keyed.key), scope)?;
             Ok(Outcome::applied(applied).with_key(&keyed))
         }
         Away::End { reason } => {
+            app.require_owner("tiller away")?;
+            let mut store = app.write()?;
             let applied = store.away_end(&app.ctx(), &reason)?;
-            Ok(Outcome::applied_as(applied, |away| json!({"away": away})))
+            let brief = match &applied.value {
+                Some(away) => ReturnBrief::load(store.conn(), Some(&away.id), Timestamp::now())?,
+                None => None,
+            };
+            Ok(Outcome::applied_as(
+                applied,
+                |away| json!({"away": away, "brief": brief}),
+            ))
         }
     }
 }

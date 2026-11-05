@@ -1,0 +1,30 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "approval_id": "<id65>",
+    "away": true,
+    "ended_at": null,
+    "ended_reason": null,
+    "landed": [],
+    "merged_by_grant": [],
+    "orders": "keep going on alpha-42; hold schema changes",
+    "projects": [
+      "alpha"
+    ],
+    "runs": [],
+    "spend": {
+      "cap_reached": false,
+      "max_new_runs": 6,
+      "new_runs": 0,
+      "quota_floor_percent": 20.0
+    },
+    "started_at": "<time>",
+    "until_at": "<time>",
+    "waiting_approvals": [],
+    "waiting_decisions": []
+  },
+  "ok": true
+}
