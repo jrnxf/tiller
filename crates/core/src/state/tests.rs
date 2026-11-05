@@ -1536,3 +1536,25 @@ fn a_freed_project_slot_wakes_the_orchestrator() {
     assert_eq!(notes.len(), before + 2);
     assert!(notes[before + 1].contains("a run slot opened"));
 }
+
+/// A spawn that fails frees its slot but does not wake the orchestrator: the
+/// wake would prompt a retry that fails the same way, forever.
+#[test]
+fn a_failed_spawn_does_not_wake_the_orchestrator() {
+    let (mut store, orchestrator) = memory_store();
+    let card = store
+        .card_create(&owner(), None, card(CardKind::Ship, "work"), None)
+        .unwrap()
+        .value;
+    let run = store
+        .run_start(&owner(), None, builder_run(&card.id))
+        .unwrap()
+        .value
+        .run;
+    let before = orchestrator_notes(&store, &orchestrator).len();
+
+    store
+        .run_spawn_failed(&owner(), &run.id, "no worktree")
+        .unwrap();
+    assert_eq!(orchestrator_notes(&store, &orchestrator).len(), before);
+}

@@ -378,16 +378,20 @@ pub(crate) fn release_reservation(
             .card(&run.card_id)
             .payload(json!({"reason": reason, "run_id": run.id})),
     )?;
-    note_slot_open(
-        tx,
-        &reservation.project_id,
-        Some(&run.card_id),
-        format!(
-            "a run slot opened: run {} ended ({}); retry any queued spawn",
-            ids::short(&run.id),
-            reason
-        ),
-    )?;
+    // A failed spawn is the orchestrator's own retry in flight: waking it
+    // would retry a spawn that keeps failing, forever.
+    if reason != ReservationRelease::SpawnFailed {
+        note_slot_open(
+            tx,
+            &reservation.project_id,
+            Some(&run.card_id),
+            format!(
+                "a run slot opened: run {} ended ({}); retry any queued spawn",
+                ids::short(&run.id),
+                reason
+            ),
+        )?;
+    }
     Ok(Some(reservation.id))
 }
 
