@@ -936,8 +936,9 @@ fn project_delete_names_the_step_that_clears_it() {
     ]);
 
     let refused = fails(&world, 5, "project_delete_live_session", &delete);
-    assert_eq!(hint(&refused), format!("tiller agent focus {orchestrator}"));
-    // `/exit` in the pane: Claude Code fires `SessionEnd`.
+    assert_eq!(hint(&refused), format!("tiller agent stop {orchestrator}"));
+    // `tiller agent stop` types `/exit` into the pane: Claude Code fires
+    // `SessionEnd`.
     world.hook(
         None,
         "SessionEnd",
@@ -946,7 +947,7 @@ fn project_delete_names_the_step_that_clears_it() {
 
     let refused = world.run(&delete);
     assert_eq!(refused.code, 5, "{}", refused.json);
-    assert_eq!(hint(&refused), format!("tiller agent focus {builder}"));
+    assert_eq!(hint(&refused), format!("tiller agent stop {builder}"));
     world.hook(
         Some(&builder),
         "SessionEnd",

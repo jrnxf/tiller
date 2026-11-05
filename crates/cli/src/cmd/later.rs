@@ -1,7 +1,7 @@
 //! `tiller orchestrator` and `tiller agent`: commands whose work happens
 //! outside `state.db`, in herdr panes. `orchestrator start` and
-//! `agent focus` run in `spawn.rs`; `agent relaunch`, `resume` and
-//! `interrupt` in `control.rs`.
+//! `agent focus` run in `spawn.rs`; `agent relaunch`, `resume`,
+//! `interrupt` and `stop` in `control.rs`.
 
 use clap::Subcommand;
 
@@ -29,6 +29,10 @@ pub enum AgentCmd {
     /// reaches whatever the agent does next, so it refuses unless the
     /// session is working
     Interrupt { run: String },
+    /// Stop the agent of an ended run, or an orchestrator, with a proven
+    /// `/exit`, then close its pane and return its worktree when it holds
+    /// nothing
+    Stop { target: String },
     /// Focus the agent's pane in herdr
     Focus { target: String },
 }
@@ -43,6 +47,7 @@ pub fn agent(app: &App, cmd: AgentCmd) -> Done {
         AgentCmd::Relaunch(args) => super::control::relaunch(app, args),
         AgentCmd::Resume { run } => super::control::resume(app, &run),
         AgentCmd::Interrupt { run } => super::control::interrupt(app, &run),
+        AgentCmd::Stop { target } => super::control::stop(app, &target),
         AgentCmd::Focus { target } => super::spawn::focus(app, &target),
     }
 }

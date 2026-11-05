@@ -120,17 +120,9 @@ pub fn start(
             ))
             .into());
         }
-        let (proof, pane) = control::stop(store, world.herdr, waits, &live)?;
-        events.extend(store.session_end(ctx, &live.id, RESTARTED)?.events);
-        // The stopped session's pane is closed, not reused: herdr cannot
-        // tell a bare shell from a program running in it.
-        if let Some(pane) = pane.or(live.pane_id.clone())
-            && let Err(e) = world.herdr.close_pane(&pane)
-        {
-            leftover = Some(format!(
-                "the stopped orchestrator ({proof}) left pane {pane} open: {e}"
-            ));
-        }
+        let stopped = control::stop_orchestrator(store, ctx, world.herdr, waits, &live, RESTARTED)?;
+        events.extend(stopped.events);
+        leftover = stopped.warning;
     }
     if project.retired_at.is_some() {
         return Err(tiller_core::Error::Refused {

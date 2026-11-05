@@ -21,9 +21,9 @@ exit: 5
       "would_withdraw_attention": 0
     },
     "entity": "project",
-    "hint": "tiller agent focus <id1>",
+    "hint": "tiller agent stop <id1>",
     "id": "alpha",
-    "message": "project alpha: orchestrator session <id1> is live; end it first. Nothing was deleted. Next: type /exit in its pane, then delete again"
+    "message": "project alpha: orchestrator session <id1> is live; end it first. Nothing was deleted. Next: stop its agent, then delete again"
   },
   "ok": false
 }

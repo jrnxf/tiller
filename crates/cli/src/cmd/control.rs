@@ -1,4 +1,4 @@
-//! `tiller agent interrupt`, `resume` and `relaunch` (T2.5, T4.5): the
+//! `tiller agent interrupt`, `resume`, `relaunch` and `stop` (T2.5, T4.5): the
 //! herdr half lives in `tiller_agents::control`; this parses the call and
 //! picks the tools.
 
@@ -11,7 +11,7 @@ use tiller_agents::spawn::readings;
 use tiller_core::domain::{Effort, Run};
 
 use super::spawn::{Tools, failure, read_brief};
-use super::{KeyArg, resolve_run};
+use super::{KeyArg, resolve_run, resolve_session};
 use crate::app::{App, Done, Outcome};
 
 #[derive(Args, Debug)]
@@ -119,4 +119,18 @@ pub fn relaunch(app: &App, args: Relaunch) -> Done {
     Ok(Outcome::applied(applied)
         .with_key(&keyed)
         .with_warning(warning))
+}
+
+/// `tiller agent stop <run|session>`: stops the agent of an ended run, or
+/// an orchestrator, proven, then cleans up after it. A cleanup that refuses
+/// is a warning: the agent is stopped either way.
+pub fn stop(app: &App, target: &str) -> Done {
+    let tools = Tools::load(app)?;
+    let mut store = app.write()?;
+    let session = resolve_session(&store, target)?;
+    let world = tools.world(None, None);
+    let applied = control::stop_agent(&mut store, &app.ctx(), &world, &Waits::default(), &session)
+        .map_err(failure)?;
+    let warning = applied.value.warning.clone();
+    Ok(Outcome::applied(applied).with_warning(warning))
 }

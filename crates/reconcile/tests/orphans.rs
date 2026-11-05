@@ -36,12 +36,8 @@ fn alive_pane_without_run_is_never_closed() {
     );
     assert!(w.herdr.fake_pane("w2:p1").screen == Screen::Idle);
     let notes = w.notes();
-    assert!(
-        notes
-            .iter()
-            .any(|n| n.body.contains("adopt it as a run, or close it")),
-        "{notes:?}"
-    );
+    let stop = format!("stop its agent with tiller agent stop {worker}");
+    assert!(notes.iter().any(|n| n.body.contains(&stop)), "{notes:?}");
     assert!(w.open_items(&run.card_id).is_empty());
     w.pass(t0.plus_minutes(32));
     let items = w.open_items(&run.card_id);
@@ -186,4 +182,35 @@ fn run_landed_by_tiller_merge_is_not_unlanded_work() {
         !notes.iter().any(|n| n.body.contains("still holds work")),
         "{notes:?}"
     );
+}
+
+/// R15: a live pane that names only its ended run is stopped by its
+/// session, whose row may have ended: `tiller agent stop <run>` would find
+/// no live session.
+#[test]
+fn alive_pane_naming_only_its_run_names_its_session() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let run = w.run_of(&worker);
+    let t0 = now();
+    w.pass(t0);
+    w.store_mut()
+        .run_end(
+            &owner(),
+            &run.id,
+            EndRun {
+                outcome: RunOutcome::Abandoned,
+                note: None,
+            },
+        )
+        .unwrap();
+    w.herdr.set_tokens(
+        "w2:p1",
+        std::collections::BTreeMap::from([("run".to_owned(), run.id.clone())]),
+    );
+    w.pass(t0.plus_minutes(1));
+    let stop = format!("stop its agent with tiller agent stop {worker}");
+    let notes = w.notes();
+    assert!(notes.iter().any(|n| n.body.contains(&stop)), "{notes:?}");
 }

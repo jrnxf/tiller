@@ -1,7 +1,7 @@
 //! The daemon's background work, each piece a poller in one registry so
 //! `/api/v1/health` shows its last success and last error: the herdr cache
 //! (local and each saved machine), delivery, reconcile, the land loop, the
-//! transcript tailer and the quota feed.
+//! stop loop of finished runs, the transcript tailer and the quota feed.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tiller_agents::control::{self, Waits};
 use tiller_agents::intake::{HostConfig, IntakeSource};
 use tiller_agents::land::forge::{GhForge, NoApp};
 use tiller_agents::land::publish::Published;
@@ -17,7 +18,7 @@ use tiller_agents::land::{DaemonLock, Landed, Lander};
 use tiller_agents::spawn::readings;
 use tiller_core::domain::{Host, HostKind, Session};
 use tiller_core::state::list;
-use tiller_core::{Store, Timestamp};
+use tiller_core::{Actor, Ctx, Store, Timestamp};
 use tiller_delivery::outbox::Deliverer;
 use tiller_herdr::client::{Cli, Herdr};
 use tiller_herdr::poller::{HerdrSource, PollError, Registry, Source};
@@ -264,6 +265,74 @@ impl Source for Publish {
     }
 }
 
+// -- finished runs ----------------------------------------------------------------
+
+/// Stops the agent of each local run that ended `landed` or `reported`, so
+/// reconcile can close its pane and return its worktree (R15). An agent
+/// mid-turn, with a draft or at a dialog waits for a later pass; one that
+/// took `/exit` without leaving is not sent another, and is left to R15.
+pub struct Finished {
+    store: Store,
+    herdr: Cli,
+}
+
+impl Source for Finished {
+    fn name(&self) -> String {
+        "stop".to_owned()
+    }
+
+    fn interval(&self) -> Duration {
+        Duration::from_secs(15)
+    }
+
+    fn poll(&mut self, now: Timestamp) -> Result<(), PollError> {
+        // Never an interrupt: the composer is looked at once, not waited on.
+        let waits = Waits {
+            interrupt: Duration::ZERO,
+            ..Waits::default()
+        };
+        let swept = control::stop_finished(
+            &mut self.store,
+            &Ctx::at(Actor::Daemon, now),
+            &self.herdr,
+            &waits,
+        )
+        .map_err(|error| PollError::State(tiller_core::Error::Internal(error.to_string())))?;
+        for swept in swept {
+            if swept.stopped {
+                tracing::info!(
+                    session = swept.session,
+                    run = swept.run,
+                    evidence = swept.evidence,
+                    "stopped the agent of a finished run"
+                );
+            } else if swept.failed {
+                tracing::warn!(
+                    session = swept.session,
+                    run = swept.run,
+                    evidence = swept.evidence,
+                    "could not stop a finished run's agent"
+                );
+            } else if swept.exit_sent {
+                tracing::warn!(
+                    session = swept.session,
+                    run = swept.run,
+                    evidence = swept.evidence,
+                    "a finished run's agent did not stop at /exit; left to reconcile"
+                );
+            } else {
+                tracing::debug!(
+                    session = swept.session,
+                    run = swept.run,
+                    evidence = swept.evidence,
+                    "a finished run's agent waits"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 // -- transcripts ------------------------------------------------------------------
 
 /// Tails the transcript of every live local session that has one
@@ -447,6 +516,10 @@ pub fn start(
         intake: HostConfig::load(home).intake_source == IntakeSource::Transcript,
         tailers: HashMap::new(),
     };
+    let finished = Finished {
+        store: open()?,
+        herdr: tools.herdr.clone(),
+    };
     let quota = crate::quota::Feed::new(open()?, tools.quota.clone(), settings.quota_providers);
 
     let mut handles = Vec::new();
@@ -456,6 +529,7 @@ pub fn start(
     spawn(registry, reconcile, stop, &mut handles);
     spawn(registry, publish, stop, &mut handles);
     spawn(registry, land, stop, &mut handles);
+    spawn(registry, finished, stop, &mut handles);
     spawn(registry, transcripts, stop, &mut handles);
     spawn(registry, quota, stop, &mut handles);
     Ok(handles)

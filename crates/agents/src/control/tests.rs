@@ -6,7 +6,7 @@
 use std::io::Write as _;
 use std::thread::JoinHandle;
 
-use tiller_core::domain::{CardKind, Size};
+use tiller_core::domain::{CardKind, RunOutcome, Size};
 use tiller_herdr::fake::{FakeHerdr, Screen};
 use tiller_herdr::testing::owner;
 
@@ -854,4 +854,350 @@ fn relaunch_after_session_end_with_claude_still_up_opens_a_pane() {
         done.ended_session.as_deref(),
         Some(spawned.session.id.as_str())
     );
+}
+
+fn stop_it(rig: &mut Rig, ctx: &Ctx, waits: &Waits, id: &str) -> Result<Stopped> {
+    let session = session(rig, id);
+    let world = world!(rig);
+    stop_agent(&mut rig.fleet.store, ctx, &world, waits, &session).map(|a| a.value)
+}
+
+fn sweep_it(rig: &mut Rig, waits: &Waits) -> Vec<Swept> {
+    stop_finished(
+        &mut rig.fleet.store,
+        &Ctx::new(Actor::Daemon),
+        &rig.herdr,
+        waits,
+    )
+    .unwrap()
+}
+
+/// A scout run whose Claude is up in its pane, which ends `reported`.
+fn scouting(rig: &mut Rig) -> Spawned {
+    let card = rig.card(CardKind::Scout, None);
+    let spawned = rig.spawn(&card, RunRole::Scout);
+    rig.herdr.set_screen(&spawned.pane_id, Screen::Idle);
+    rig.fleet.bind(&spawned.session.id, &spawned.pane_id);
+    spawned
+}
+
+/// A builder run whose PR the land loop merged.
+fn landed(rig: &mut Rig) -> Spawned {
+    let spawned = running(rig);
+    rig.sql(&format!(
+        "UPDATE runs SET ended_at = started_at, outcome = 'landed' WHERE id = '{}'",
+        spawned.run.id
+    ));
+    spawned
+}
+
+fn typed(rig: &Rig, pane: &str, line: &str) -> bool {
+    rig.herdr
+        .calls()
+        .contains(&format!("send_text {pane} {line}"))
+}
+
+#[test]
+fn stop_ends_an_ended_runs_agent_and_returns_its_worktree() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.done(&spawned.run.id, RunOutcome::Abandoned).unwrap();
+    // Cleanup alone never closes a pane that runs an agent.
+    let error = rig.cleanup(&spawned.run.id).unwrap_err();
+    assert!(error.to_string().contains("still runs"), "{error}");
+
+    let ctx = rig.orchestrator();
+    let stopped = stop_it(&mut rig, &ctx, &quick(), &spawned.session.id).unwrap();
+    assert!(stopped.stop_proof.contains("no agent"), "{stopped:?}");
+    assert!(typed(&rig, &spawned.pane_id, "/exit"));
+    assert_eq!(stopped.session.end_reason.as_deref(), Some(STOPPED));
+    assert!(stopped.session.ended_at.is_some());
+    let cleaned = stopped.cleaned.as_ref().unwrap();
+    assert_eq!(cleaned.returned.as_deref(), Some(spawned.worktree.as_str()));
+    assert_eq!(cleaned.closed_panes, vec![spawned.pane_id.clone()]);
+    assert_eq!(stopped.warning, None);
+    assert_eq!(rig.events("run.cleaned", &spawned.run.id), 1);
+    assert_eq!(
+        rig.pool.returned(),
+        vec![(
+            PathBuf::from(&spawned.worktree),
+            format!("tiller:{}", spawned.run.id)
+        )]
+    );
+}
+
+#[test]
+fn stop_keeps_a_worktree_that_holds_work() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    let worktree = PathBuf::from(&spawned.worktree);
+    std::fs::write(worktree.join("wip.txt"), "draft\n").unwrap();
+    rig.done(&spawned.run.id, RunOutcome::Failed).unwrap();
+
+    let stopped = stop_it(&mut rig, &owner(), &quick(), &spawned.session.id).unwrap();
+    assert!(stopped.session.ended_at.is_some());
+    assert_eq!(stopped.cleaned, None);
+    let warning = stopped.warning.unwrap();
+    assert!(warning.contains("uncommitted"), "{warning}");
+    assert!(worktree.join("wip.txt").exists());
+    assert!(rig.pool.returned().is_empty());
+}
+
+#[test]
+fn stop_refuses_an_active_run_and_an_outsider() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    let error = stop_it(&mut rig, &owner(), &quick(), &spawned.session.id).unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("is active"), "{text}");
+    assert!(text.contains("tiller done"), "{text}");
+    assert!(!typed(&rig, &spawned.pane_id, "/exit"));
+
+    rig.done(&spawned.run.id, RunOutcome::Abandoned).unwrap();
+    let worker = Ctx::new(Actor::Session(spawned.session.id.clone()));
+    let error = stop_it(&mut rig, &worker, &quick(), &spawned.session.id).unwrap_err();
+    assert!(error.to_string().contains("may not stop"), "{error}");
+    assert!(!typed(&rig, &spawned.pane_id, "/exit"));
+    assert!(session(&rig, &spawned.session.id).ended_at.is_none());
+}
+
+#[test]
+fn stop_refuses_over_a_draft() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.done(&spawned.run.id, RunOutcome::Abandoned).unwrap();
+    rig.herdr.type_draft(&spawned.pane_id, "half a thought");
+
+    let error = stop_it(&mut rig, &owner(), &quick(), &spawned.session.id).unwrap_err();
+    assert!(error.to_string().contains("holds a draft"), "{error}");
+    assert!(session(&rig, &spawned.session.id).ended_at.is_none());
+    assert_eq!(rig.events("run.cleaned", &spawned.run.id), 0);
+}
+
+#[test]
+fn the_daemon_stops_the_idle_agent_of_a_finished_run() {
+    let mut rig = Rig::new();
+    let reported = scouting(&mut rig);
+    rig.done(&reported.run.id, RunOutcome::Reported).unwrap();
+    let landed = landed(&mut rig);
+    let active = running(&mut rig);
+    let failed = running(&mut rig);
+    rig.done(&failed.run.id, RunOutcome::Failed).unwrap();
+
+    let swept = sweep_it(&mut rig, &quick());
+    assert_eq!(swept.len(), 2, "{swept:?}");
+    for finished in [&reported, &landed] {
+        let one = swept
+            .iter()
+            .find(|s| s.session == finished.session.id)
+            .unwrap();
+        assert!(one.stopped, "{swept:?}");
+        assert_eq!(one.run, finished.run.id);
+        assert!(typed(&rig, &finished.pane_id, "/exit"));
+        let ended = session(&rig, &finished.session.id);
+        assert_eq!(ended.end_reason.as_deref(), Some(RUN_ENDED));
+        // Its pane is a bare shell now, for reconcile to close (R15).
+        assert_eq!(rig.herdr.fake_pane(&finished.pane_id).screen, Screen::Shell);
+    }
+
+    // An active run, and a failed one the orchestrator decides about, are
+    // left alone.
+    for other in [&active, &failed] {
+        assert!(!typed(&rig, &other.pane_id, "/exit"));
+        assert!(session(&rig, &other.session.id).ended_at.is_none());
+    }
+    // A second pass finds nothing to do.
+    assert!(sweep_it(&mut rig, &quick()).is_empty());
+}
+
+#[test]
+fn the_daemon_waits_for_a_finished_agent_to_be_idle() {
+    let mut rig = Rig::new();
+    let working = scouting(&mut rig);
+    rig.done(&working.run.id, RunOutcome::Reported).unwrap();
+    rig.herdr.set_screen(&working.pane_id, Screen::Working);
+    let drafting = scouting(&mut rig);
+    rig.done(&drafting.run.id, RunOutcome::Reported).unwrap();
+    rig.herdr.type_draft(&drafting.pane_id, "half a thought");
+    let asking = scouting(&mut rig);
+    rig.done(&asking.run.id, RunOutcome::Reported).unwrap();
+    rig.herdr.set_screen(&asking.pane_id, Screen::Permission);
+
+    let swept = sweep_it(&mut rig, &quick());
+    assert_eq!(swept.len(), 3, "{swept:?}");
+    assert!(swept.iter().all(|s| !s.stopped), "{swept:?}");
+    for spawned in [&working, &drafting, &asking] {
+        assert!(!typed(&rig, &spawned.pane_id, "/exit"));
+        let calls = rig.herdr.calls();
+        assert!(
+            !calls.contains(&format!("send_escape {}", spawned.pane_id)),
+            "{calls:?}"
+        );
+        assert!(session(&rig, &spawned.session.id).ended_at.is_none());
+    }
+    assert_eq!(
+        rig.herdr.fake_pane(&drafting.pane_id).composer,
+        "half a thought"
+    );
+
+    // Once the turn ends, the next pass stops it.
+    rig.herdr.set_screen(&working.pane_id, Screen::Idle);
+    let swept = sweep_it(&mut rig, &quick());
+    let done = swept
+        .iter()
+        .find(|s| s.session == working.session.id)
+        .unwrap();
+    assert!(done.stopped, "{swept:?}");
+    assert!(session(&rig, &working.session.id).ended_at.is_some());
+}
+
+#[test]
+fn the_daemon_types_exit_once_into_an_agent_that_ignores_it() {
+    let mut rig = Rig::new();
+    let stubborn = scouting(&mut rig);
+    rig.done(&stubborn.run.id, RunOutcome::Reported).unwrap();
+    rig.herdr.ignore_exit(&stubborn.pane_id);
+
+    let swept = sweep_it(&mut rig, &quick());
+    let [first] = swept.as_slice() else {
+        panic!("{swept:?}")
+    };
+    assert!(!first.stopped && first.exit_sent, "{first:?}");
+    assert!(first.evidence.contains("not proven stopped"), "{first:?}");
+    assert!(session(&rig, &stubborn.session.id).ended_at.is_none());
+
+    // The `exit_sent` observation outlives the daemon, so no later pass,
+    // after a restart too, types `/exit` again.
+    assert!(sweep_it(&mut rig, &quick()).is_empty());
+    let exits = rig
+        .herdr
+        .calls()
+        .iter()
+        .filter(|c| **c == format!("send_text {} /exit", stubborn.pane_id))
+        .count();
+    assert_eq!(exits, 1);
+}
+
+#[test]
+fn the_daemon_leaves_an_agent_a_message_is_waiting_for() {
+    let mut rig = Rig::new();
+    let waiting = scouting(&mut rig);
+    rig.done(&waiting.run.id, RunOutcome::Reported).unwrap();
+    rig.fleet
+        .store
+        .outbox_enqueue(
+            &owner(),
+            None,
+            tiller_core::state::outbox::NewMessage {
+                target_session_id: waiting.session.id.clone(),
+                kind: tiller_core::domain::OutboxKind::Steer,
+                body: "one more thing".into(),
+                card_id: None,
+                reply_to: None,
+            },
+        )
+        .unwrap();
+
+    // Delivery types `tiller inbox <id>` into the same composer, so the
+    // agent is left alone until its message is delivered and acknowledged.
+    let left = |rig: &mut Rig| {
+        let swept = sweep_it(rig, &quick());
+        assert_eq!(swept.len(), 1);
+        assert!(!swept[0].stopped && !swept[0].exit_sent && !swept[0].failed);
+        assert!(
+            swept[0].evidence.contains("message waits"),
+            "{}",
+            swept[0].evidence
+        );
+        assert!(!typed(rig, &waiting.pane_id, "/exit"));
+    };
+    left(&mut rig);
+    // Typed but not yet acknowledged, the message is still the agent's turn.
+    rig.sql("UPDATE outbox SET state = 'delivered'");
+    left(&mut rig);
+}
+
+#[test]
+fn the_daemon_never_types_into_a_pane_another_session_now_holds() {
+    let mut rig = Rig::new();
+    let finished = scouting(&mut rig);
+    rig.done(&finished.run.id, RunOutcome::Reported).unwrap();
+    // The agent died without its hook, and herdr gave the closed pane's id
+    // to another workspace, whose agent now sits idle there.
+    rig.herdr
+        .report_tokens(
+            &finished.pane_id,
+            &std::collections::BTreeMap::from([("session".into(), "01OTHERSESSION".into())]),
+        )
+        .unwrap();
+
+    let swept = sweep_it(&mut rig, &quick());
+    assert_eq!(swept.len(), 1);
+    assert!(swept[0].stopped && !swept[0].exit_sent);
+    assert!(
+        swept[0].evidence.contains("01OTHERSESSION"),
+        "{}",
+        swept[0].evidence
+    );
+    assert!(!typed(&rig, &finished.pane_id, "/exit"));
+}
+
+#[test]
+fn stop_never_types_into_a_pane_the_next_attempt_holds() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    let claude = boot(&rig, "startup");
+    let request = RelaunchRequest {
+        note: "start over".into(),
+        new_attempt: true,
+        brief: Some("Do it again.".into()),
+        asked: None,
+    };
+    let ctx = rig.orchestrator();
+    let done =
+        relaunched(relaunch_it(&mut rig, &ctx, &patient(), &spawned.run.id, request).unwrap());
+    claude.join().unwrap();
+    assert_eq!(
+        done.session.pane_id.as_deref(),
+        Some(spawned.pane_id.as_str())
+    );
+    let exits = |rig: &Rig| {
+        rig.herdr
+            .calls()
+            .iter()
+            .filter(|c| **c == format!("send_text {} /exit", spawned.pane_id))
+            .count()
+    };
+    let before = exits(&rig);
+
+    // The old session's pane now holds the new attempt's agent.
+    let stopped = stop_it(&mut rig, &owner(), &quick(), &spawned.session.id).unwrap();
+    assert!(
+        stopped.stop_proof.contains(&done.session.id),
+        "{}",
+        stopped.stop_proof
+    );
+    assert_eq!(exits(&rig), before);
+    assert!(session(&rig, &done.session.id).ended_at.is_none());
+}
+
+#[test]
+fn the_live_orchestrator_stops_an_ended_run_it_inherited() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.done(&spawned.run.id, RunOutcome::Abandoned).unwrap();
+    // An ended run is never reowned: its supervisor stays a session that is
+    // not the live orchestrator.
+    rig.fleet
+        .store
+        .conn()
+        .execute(
+            "UPDATE runs SET supervisor_session_id = ?1 WHERE id = ?2",
+            [&spawned.session.id, &spawned.run.id],
+        )
+        .unwrap();
+
+    let ctx = rig.orchestrator();
+    let stopped = stop_it(&mut rig, &ctx, &quick(), &spawned.session.id).unwrap();
+    assert!(session(&rig, &stopped.session.id).ended_at.is_some());
 }

@@ -272,8 +272,25 @@ impl Reconciler {
                         .or_else(|| pane.tokens.get("project").cloned());
                     let Some(project) = project else { continue };
                     let key = format!("reconcile:R15:orphan:{}:{}", host, pane.pane_id);
+                    // A worker's agent is the orchestrator's to stop, named by
+                    // its session: a run's own session may have ended. An
+                    // orchestrator's is the owner's.
+                    let target = match (&run, &session) {
+                        (None, _) => None,
+                        (Some(_), Some(session)) => Some(session.id.clone()),
+                        (Some(run), None) => find::<Session>(
+                            self.conn(),
+                            "run_id = ?1 ORDER BY started_at DESC, id DESC",
+                            &[&run.id],
+                        )?
+                        .map(|s| s.id),
+                    };
+                    let stop = match target {
+                        Some(target) => format!("stop its agent with tiller agent stop {target}"),
+                        None => "close it".into(),
+                    };
                     let body = format!(
-                        "pane {} runs {} with no active run ({}); adopt it as a run, or close it?",
+                        "pane {} runs {} with no active run ({}); {stop}, or adopt it as a run?",
                         pane.pane_id,
                         pane.agent.as_deref().unwrap_or("an agent"),
                         run.as_ref()

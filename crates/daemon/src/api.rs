@@ -2698,12 +2698,12 @@ pub(crate) mod tests {
             body["refused"].as_str().unwrap().contains("session"),
             "{body}"
         );
-        assert_eq!(body["unblock"]["step"], "type /exit in its pane", "{body}");
+        assert_eq!(body["unblock"]["step"], "stop its agent", "{body}");
         assert!(
             body["unblock"]["command"]
                 .as_str()
                 .unwrap()
-                .starts_with("tiller agent focus "),
+                .starts_with("tiller agent stop "),
             "{body}"
         );
         let refused = send(&app, delete("alpha", "k-del-1", "alpha", &cookie)).await;

@@ -439,7 +439,8 @@ fn blocker(conn: &Connection, fks: &[ForeignKey], project_id: &str) -> Result<Op
             }),
         }));
     }
-    // A session ends when its agent exits: the `SessionEnd` hook records it.
+    // A session ends when its agent exits: `tiller agent stop` types the
+    // `/exit`, and the `SessionEnd` hook records it.
     if let Some((role, session)) = live(&format!(
         "SELECT role, id FROM sessions WHERE ended_at IS NULL AND id IN ({}) ORDER BY id LIMIT 1",
         doomed("sessions", "id")
@@ -447,8 +448,8 @@ fn blocker(conn: &Connection, fks: &[ForeignKey], project_id: &str) -> Result<Op
         return Ok(Some(Blocker {
             fact: format!("{role} session {session} is live; end it first"),
             unblock: Some(Unblock {
-                step: "type /exit in its pane".into(),
-                command: Some(format!("tiller agent focus {session}")),
+                step: "stop its agent".into(),
+                command: Some(format!("tiller agent stop {session}")),
             }),
         }));
     }

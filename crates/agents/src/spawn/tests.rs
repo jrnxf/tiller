@@ -306,7 +306,7 @@ impl Rig {
         get(self.fleet.store.conn(), "run", id).unwrap()
     }
 
-    fn done(&mut self, run: &str, outcome: RunOutcome) -> Result<Ended> {
+    pub(crate) fn done(&mut self, run: &str, outcome: RunOutcome) -> Result<Ended> {
         let run = self.run(run);
         done(
             &mut self.fleet.store,
@@ -318,7 +318,7 @@ impl Rig {
         .map(|a| a.value)
     }
 
-    fn cleanup(&mut self, run: &str) -> Result<Cleaned> {
+    pub(crate) fn cleanup(&mut self, run: &str) -> Result<Cleaned> {
         let run = self.run(run);
         let world = world!(self);
         cleanup(&mut self.fleet.store, &owner(), &world, &run).map(|a| a.value)
@@ -1648,6 +1648,173 @@ fn orchestrator_restart_is_the_owners() {
         .unwrap()
         .unwrap();
     assert_eq!(live.id, first.session.id);
+}
+
+#[test]
+fn agent_stop_ends_a_live_orchestrator_and_closes_its_pane() {
+    let (mut rig, homes) = orchestrator_rig();
+    let first = start_orchestrator(&mut rig, &homes, &owner())
+        .unwrap()
+        .value;
+    let pane = first.pane_id.clone().unwrap();
+    rig.herdr.set_screen(&pane, Screen::Idle);
+    rig.fleet.bind(&first.session.id, &pane);
+    let waits = crate::control::Waits {
+        interrupt: std::time::Duration::from_secs(2),
+        exit: std::time::Duration::from_secs(2),
+        bind: std::time::Duration::from_secs(2),
+        poll: std::time::Duration::from_millis(10),
+    };
+
+    // Only the owner stops an orchestrator.
+    let world = world!(rig);
+    let error = crate::control::stop_agent(
+        &mut rig.fleet.store,
+        &Ctx::new(Actor::Daemon),
+        &world,
+        &waits,
+        &first.session,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("may not stop"), "{error}");
+    assert!(
+        !rig.herdr
+            .calls()
+            .contains(&format!("send_text {pane} /exit"))
+    );
+
+    let world = world!(rig);
+    let stopped = crate::control::stop_agent(
+        &mut rig.fleet.store,
+        &owner(),
+        &world,
+        &waits,
+        &first.session,
+    )
+    .unwrap()
+    .value;
+    assert_eq!(
+        stopped.session.end_reason.as_deref(),
+        Some(crate::control::STOPPED)
+    );
+    assert_eq!(stopped.closed_pane.as_deref(), Some(pane.as_str()));
+    assert_eq!(stopped.cleaned, None);
+    assert_eq!(stopped.warning, None);
+    assert!(
+        tiller_core::state::outbox::live_orchestrator(rig.fleet.store.conn(), "alpha")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn agent_stop_never_closes_a_pane_claude_still_holds() {
+    let (mut rig, homes) = orchestrator_rig();
+    let first = start_orchestrator(&mut rig, &homes, &owner())
+        .unwrap()
+        .value;
+    let pane = first.pane_id.clone().unwrap();
+    rig.herdr.set_screen(&pane, Screen::Idle);
+    rig.fleet.bind(&first.session.id, &pane);
+    // Its `SessionEnd` hook fired, but Claude is still in the pane.
+    rig.fleet
+        .store
+        .session_end(
+            &Ctx::new(Actor::Hook),
+            &first.session.id,
+            "prompt_input_exit",
+        )
+        .unwrap();
+    rig.herdr.ignore_exit(&pane);
+    let waits = crate::control::Waits {
+        interrupt: std::time::Duration::from_secs(2),
+        exit: std::time::Duration::from_millis(300),
+        bind: std::time::Duration::from_secs(2),
+        poll: std::time::Duration::from_millis(10),
+    };
+
+    let world = world!(rig);
+    let stopped = crate::control::stop_agent(
+        &mut rig.fleet.store,
+        &owner(),
+        &world,
+        &waits,
+        &first.session,
+    )
+    .unwrap()
+    .value;
+    assert!(
+        stopped.stop_proof.contains("SessionEnd"),
+        "{}",
+        stopped.stop_proof
+    );
+    assert_eq!(stopped.closed_pane, None);
+    let warning = stopped.warning.unwrap_or_default();
+    assert!(
+        warning.contains(&format!("left pane {pane} open")),
+        "{warning}"
+    );
+    assert!(!rig.herdr.calls().contains(&format!("close_pane {pane}")));
+}
+
+#[test]
+fn agent_stop_leaves_a_pane_another_session_now_holds() {
+    let waits = crate::control::Waits {
+        interrupt: std::time::Duration::from_secs(2),
+        exit: std::time::Duration::from_millis(300),
+        bind: std::time::Duration::from_secs(2),
+        poll: std::time::Duration::from_millis(10),
+    };
+    // herdr gave the orchestrator's pane id to another workspace: once to an
+    // idle agent, after the orchestrator's hook ended it, and once to a bare
+    // shell while its row was still live.
+    for (ended, screen) in [(true, Screen::Idle), (false, Screen::Shell)] {
+        let (mut rig, homes) = orchestrator_rig();
+        let first = start_orchestrator(&mut rig, &homes, &owner())
+            .unwrap()
+            .value;
+        let pane = first.pane_id.clone().unwrap();
+        rig.herdr.set_screen(&pane, Screen::Idle);
+        rig.fleet.bind(&first.session.id, &pane);
+        if ended {
+            rig.fleet
+                .store
+                .session_end(
+                    &Ctx::new(Actor::Hook),
+                    &first.session.id,
+                    "prompt_input_exit",
+                )
+                .unwrap();
+        }
+        rig.herdr
+            .report_tokens(
+                &pane,
+                &std::collections::BTreeMap::from([("session".into(), "01OTHERSESSION".into())]),
+            )
+            .unwrap();
+        rig.herdr.set_screen(&pane, screen);
+
+        let world = world!(rig);
+        let stopped = crate::control::stop_agent(
+            &mut rig.fleet.store,
+            &owner(),
+            &world,
+            &waits,
+            &first.session,
+        )
+        .unwrap()
+        .value;
+        assert!(
+            stopped.stop_proof.contains("01OTHERSESSION"),
+            "{}",
+            stopped.stop_proof
+        );
+        assert_eq!(stopped.closed_pane, None);
+        assert_eq!(stopped.warning, None);
+        let calls = rig.herdr.calls();
+        assert!(!calls.contains(&format!("close_pane {pane}")));
+        assert!(!calls.contains(&format!("send_text {pane} /exit")));
+    }
 }
 
 #[test]

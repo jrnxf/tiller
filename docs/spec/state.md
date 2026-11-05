@@ -430,7 +430,7 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `run.place` | `tiller spawn` (T4.2), as soon as the worktree is leased, again once its base is read, and once the pane exists | run active; caller is the run's supervisor session, the owner, the board or the daemon; a value already recorded never changes; a pane needs the run's live session | `runs.worktree_path`, `branch`, `base_branch`, `base_sha`, `config_hash`; `sessions.pane_id`, `sessions.config_hash` | `run.placed` |
 | `session.start` | `tiller orchestrator start` | project not retired; no live orchestrator for the project | `sessions` (role `orchestrator`, no run); `outbox` (one note per unresolved ask of the project) | `session.started`, `outbox.enqueued` |
 | `run.bind_session` | `SessionStart` hook | run active, or the session is a live orchestrator session | `sessions.claude_session_id`, `pane_id`; on `clear`, `resume` or `fork` it rebinds to the new Claude id, and the old one goes in the event payload | `session.bound` |
-| `session.end` | `SessionEnd` hook (an ending reason), reconcile (pane gone) | session live | `sessions.ended_at`, `end_reason` | `session.ended` |
+| `session.end` | `SessionEnd` hook (an ending reason), reconcile (pane gone), `tiller agent stop` (`stopped`) and the daemon's stop loop (`run_ended`) when the hook has not ended it first | session live | `sessions.ended_at`, `end_reason` | `session.ended` |
 | `run.status` | `tiller status` (or the tailer on a hook-less host) | run active | `runs.last_status_line`, `observations`, `outbox` (one `wake` to the supervisor) | `run.status`, `outbox.enqueued` |
 | `run.pause` | worker status line | run active; date parses | `runs.pause_until` | `run.paused` |
 | `run.reown` | reconcile | orchestrator session for the project is live and differs | `runs.supervisor_session_id` | `run.reowned` |
@@ -538,7 +538,7 @@ The table from plan v2, expanded to every table in `schema.sql`.
 | Class | Records | Policy |
 |---|---|---|
 | Authoritative | `state.db` tables in section 9's first seven rows; the memory files under git | WAL mode, `synchronous = NORMAL` (WAL makes a committed transaction durable against a process crash; an OS crash can lose the last transactions but never corrupt), nightly backup through SQLite's online backup API inside the host's boundary (T2.3), versioned migrations with a down path, a restore drill in CI |
-| Rebuildable | `observations`, `events`-derived projections, every cache table, `sessions.activity*` | kept, pruned by retention, rebuilt from their source when missing |
+| Rebuildable | `observations`, `events`-derived projections, every cache table, `sessions.activity*` | kept, pruned by retention, rebuilt from their source when missing; an `exit_sent` observation is pruned only once its session has ended, since it is all that keeps the stop loop from typing a second `/exit` |
 | Disposable | logs, the daemon's in-memory SSE buffer, the in-memory peer cache | not backed up; the peer cache is refilled from the peer's snapshot on reconnect |
 | Credential | `~/.tiller/peers/<label>.key` | not backed up; a lost key is replaced by running `tiller peer add` again, which revokes the old one on the peer |
 

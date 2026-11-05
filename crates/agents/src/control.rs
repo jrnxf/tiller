@@ -1,6 +1,7 @@
-//! `tiller agent interrupt`, `resume` and `relaunch` (T2.5, T4.5;
-//! `protocol.md` 6.4): the herdr half of agent control, over the same herdr
-//! adapter and launch files spawn uses.
+//! `tiller agent interrupt`, `resume`, `relaunch` and `stop` (T2.5, T4.5;
+//! `protocol.md` 6.4), and the daemon's stop loop for finished runs: the
+//! herdr half of agent control, over the same herdr adapter and launch
+//! files spawn uses.
 //!
 //! Each command says what it saw, never what it hoped: an interrupt is
 //! `confirmed` only when the transcript shows the interrupt marker or a hook
@@ -8,10 +9,11 @@
 //! `SessionStart` hook arrives. Busy state is never rewritten as proof
 //! (Firstmate's `agent-control`).
 //!
-//! None of them deletes anything. A relaunch keeps the worktree, its
+//! None of them deletes work. A relaunch keeps the worktree, its
 //! commits and uncommitted work, the run row and its history: the old
 //! session's row is ended, a new one starts in the same worktree, and a new
-//! attempt ends the old run `relaunched` beside the new one.
+//! attempt ends the old run `relaunched` beside the new one. A stop returns
+//! a worktree only through `run.clean`, which keeps one that holds anything.
 
 #[cfg(test)]
 mod tests;
@@ -27,11 +29,12 @@ use serde_json::{Value, json};
 use tiller_core::domain::{
     Activity, Card, Delivery, Effort, Host, ObservationSource, Project, Run, RunRole, Session,
 };
-use tiller_core::state::get;
+use tiller_core::state::outbox::live_orchestrator;
 use tiller_core::state::runs::{
     AttemptModel, Bind, NewObservation, Placement, Relaunch, SpawnChecks, floor_refusal,
     live_session,
 };
+use tiller_core::state::{get, list};
 use tiller_core::{Actor, Applied, Ctx, Store, Timestamp};
 use tiller_herdr::client::{Herdr, PaneInfo};
 use tiller_herdr::composer::{self, Composer};
@@ -41,8 +44,8 @@ use tiller_reconcile::recovery::sessions::{LAUNCH_BIND_SOURCE, MANUAL_RESUME_REA
 
 use crate::spawn::launch::{self, AgainSpec, LaunchSpec, Start};
 use crate::spawn::{
-    Result, SpawnError, World, delivery_line, dispatch, project_of, quota_floor, relayout,
-    require_local, role_of, scan_and_record,
+    Cleaned, Result, SpawnError, World, cleanup, delivery_line, dispatch, local_host, project_of,
+    quota_floor, relayout, require_local, role_of, scan_and_record,
 };
 
 /// How long each command waits for its proof, and how often it looks.
@@ -606,20 +609,75 @@ pub(crate) fn stop(
     waits: &Waits,
     session: &Session,
 ) -> Result<(String, Option<String>)> {
+    match ready_to_stop(store, herdr, waits, session, true)? {
+        Ready::Gone(proof) => Ok(proof),
+        Ready::Exit(pane_id) => exit_and_prove(store, herdr, waits, session, &pane_id),
+    }
+}
+
+/// Where a stop stands before its `/exit`.
+enum Ready {
+    /// No agent runs for the session: the proof, and the pane when open.
+    Gone((String, Option<String>)),
+    /// The agent's pane, at an empty composer that takes `/exit`.
+    Exit(String),
+}
+
+/// The half of [`stop`] before `/exit`, which types nothing but Escape.
+/// With `interrupt` false not even that: a session still working is
+/// refused, so its turn is never cut short.
+fn ready_to_stop(
+    store: &Store,
+    herdr: &dyn Herdr,
+    waits: &Waits,
+    session: &Session,
+    interrupt: bool,
+) -> Result<Ready> {
     let Some(pane_id) = session.pane_id.clone() else {
-        return Ok((format!("session {} never had a pane", session.id), None));
+        return Ok(Ready::Gone((
+            format!("session {} never had a pane", session.id),
+            None,
+        )));
     };
     let Some(pane) = herdr.pane(&pane_id)? else {
-        return Ok((format!("herdr shows pane {pane_id} gone"), None));
+        return Ok(Ready::Gone((
+            format!("herdr shows pane {pane_id} gone"),
+            None,
+        )));
     };
-    if pane.agent.is_none() {
-        return Ok((
-            format!("herdr shows no agent in pane {pane_id}"),
-            Some(pane_id),
-        ));
+    // The pane may have gone to another session (a relaunch reuses it, and
+    // herdr gives a closed pane's id to another workspace): what runs there
+    // is not this session's to stop, and the pane not its to close.
+    if let Some(holder) = pane_holder(store, &pane, &session.id)? {
+        return Ok(Ready::Gone((
+            format!("pane {pane_id} now holds session {holder}"),
+            None,
+        )));
     }
-    if pane.agent_status.as_deref() == Some("working") {
-        herdr.send_escape(&pane_id)?;
+    if pane.agent.is_none() {
+        return Ok(Ready::Gone((
+            format!("herdr shows no agent in pane {pane_id}"),
+            tagged(&pane, &session.id).then_some(pane_id),
+        )));
+    }
+    if interrupt {
+        if pane.agent_status.as_deref() == Some("working") {
+            herdr.send_escape(&pane_id)?;
+        }
+    } else {
+        // herdr's word wins; the recorded activity counts only without one.
+        let working = match pane.agent_status.as_deref() {
+            Some(status) => status == "working",
+            None => session.activity == Activity::Working,
+        };
+        if working {
+            return Err(SpawnError::Refused(format!(
+                "session {} is still working (herdr: {}, recorded: {}); it is stopped once its turn ends",
+                session.id,
+                pane.agent_status.as_deref().unwrap_or("no status"),
+                session.activity
+            )));
+        }
     }
     // `/exit` goes in only at an empty composer: a turn still running would
     // take it as a message, a dialog as an answer, and a draft would be lost.
@@ -650,6 +708,42 @@ pub(crate) fn stop(
             )));
         }
     }
+    Ok(Ready::Exit(pane_id))
+}
+
+/// Another session that holds `pane`: a live row bound to it, or the
+/// session its tokens name.
+fn pane_holder(store: &Store, pane: &PaneInfo, session: &str) -> Result<Option<String>> {
+    let bound: Vec<Session> = list(
+        store.conn(),
+        "ended_at IS NULL AND pane_id = ?1 AND id <> ?2",
+        &[&pane.pane_id, &session],
+    )?;
+    Ok(bound.into_iter().map(|s| s.id).next().or_else(|| {
+        pane.tokens
+            .get("session")
+            .filter(|named| *named != session)
+            .cloned()
+    }))
+}
+
+/// Whether the pane's tokens name `session`: only such a pane is handed back
+/// to be closed, as `run.clean` closes only those.
+fn tagged(pane: &PaneInfo, session: &str) -> bool {
+    pane.tokens
+        .get("session")
+        .is_some_and(|named| named == session)
+}
+
+/// The half of [`stop`] from `/exit` on: types it and waits for the proof.
+fn exit_and_prove(
+    store: &Store,
+    herdr: &dyn Herdr,
+    waits: &Waits,
+    session: &Session,
+    pane_id: &str,
+) -> Result<(String, Option<String>)> {
+    let pane_id = pane_id.to_owned();
     herdr.send_text(&pane_id, "/exit")?;
     herdr.send_enter(&pane_id)?;
     // The pane is reused only once herdr shows Claude gone from it: a
@@ -660,7 +754,7 @@ pub(crate) fn stop(
             None => Some((format!("pane {pane_id} closed after /exit"), None)),
             Some(p) if p.agent.is_none() => Some((
                 format!("herdr shows no agent in pane {pane_id} after /exit"),
-                Some(pane_id.clone()),
+                tagged(&p, &session.id).then(|| pane_id.clone()),
             )),
             Some(_) => None,
         })
@@ -685,6 +779,301 @@ pub(crate) fn stop(
             waits.exit.as_secs()
         ))),
     }
+}
+
+/// The end reason of a session `tiller agent stop` stopped.
+pub const STOPPED: &str = "stopped";
+
+/// The end reason of a session the daemon stopped once its run finished.
+pub const RUN_ENDED: &str = "run_ended";
+
+/// An orchestrator stopped by [`stop_orchestrator`].
+pub(crate) struct OrchestratorStop {
+    pub proof: String,
+    pub closed_pane: Option<String>,
+    /// A pane left open, and why.
+    pub warning: Option<String>,
+    pub events: Vec<i64>,
+}
+
+/// Stops a live orchestrator with [`stop`], ends its row with `reason`, and
+/// closes its pane rather than reusing it: herdr cannot tell a bare shell
+/// from a program running in it. Only a pane herdr shows without an agent,
+/// and whose tokens still name the session, is closed; one Claude still
+/// holds after its `SessionEnd` hook is left open with a warning, since a
+/// live pane is never closed.
+pub(crate) fn stop_orchestrator(
+    store: &mut Store,
+    ctx: &Ctx,
+    herdr: &dyn Herdr,
+    waits: &Waits,
+    session: &Session,
+    reason: &str,
+) -> Result<OrchestratorStop> {
+    let (proof, pane) = stop(store, herdr, waits, session)?;
+    let events = store.session_end(ctx, &session.id, reason)?.events;
+    let (closed_pane, warning) = match (pane, &session.pane_id) {
+        (Some(pane), _) => match herdr.close_pane(&pane) {
+            Ok(()) => (Some(pane), None),
+            Err(e) => (
+                None,
+                Some(format!(
+                    "the stopped orchestrator ({proof}) left pane {pane} open: {e}"
+                )),
+            ),
+        },
+        (None, Some(pane)) => match herdr.pane(pane) {
+            Ok(Some(open))
+                if open.agent.is_some()
+                    && matches!(pane_holder(store, &open, &session.id), Ok(None)) =>
+            {
+                (
+                    None,
+                    Some(format!(
+                        "the stopped orchestrator ({proof}) left pane {pane} open; close it in herdr once {} exits",
+                        open.agent.as_deref().unwrap_or("its agent")
+                    )),
+                )
+            }
+            _ => (None, None),
+        },
+        (None, None) => (None, None),
+    };
+    Ok(OrchestratorStop {
+        proof,
+        closed_pane,
+        warning,
+        events,
+    })
+}
+
+/// What `tiller agent stop` did.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Stopped {
+    pub session: Session,
+    /// How the agent was proven stopped.
+    pub stop_proof: String,
+    /// The cleanup of a worker's ended run; `None` for an orchestrator, or
+    /// when cleanup refused.
+    pub cleaned: Option<Cleaned>,
+    /// An orchestrator's pane, closed once its agent stopped.
+    pub closed_pane: Option<String>,
+    /// What the stop left undone: a cleanup that refused, or a pane that
+    /// would not close.
+    pub warning: Option<String>,
+}
+
+/// `tiller agent stop <run|session>`: stops the session's agent with the
+/// proven stop a relaunch uses, ends its row, then cleans up after it. A
+/// worker's run must have ended first, since the stop is how its pane and
+/// worktree come back, never how a run ends; its supervisor or the owner
+/// stops it, and cleanup returns its worktree when that holds nothing. Only
+/// the owner stops an orchestrator, whose pane is closed as a restart's is.
+pub fn stop_agent(
+    store: &mut Store,
+    ctx: &Ctx,
+    world: &World<'_>,
+    waits: &Waits,
+    session: &Session,
+) -> Result<Applied<Stopped>> {
+    // Judged as the session is now, not as the caller last read it.
+    let session: Session = get(store.conn(), "session", &session.id)?;
+    let run = match &session.run_id {
+        Some(id) => {
+            let run: Run = get(store.conn(), "run", id)?;
+            if let Err(refused) = require_controller(ctx, &run, "stop the agent of", false) {
+                // An ended run is never reowned, so the project's live
+                // orchestrator stops its agent too.
+                let project = project_of(store, &run)?;
+                let live = live_orchestrator(store.conn(), &project.id)?;
+                let current = matches!(&ctx.actor, Actor::Session(id)
+                    if live.is_some_and(|live| live.id == *id));
+                if run.ended_at.is_none() || !current {
+                    return Err(refused);
+                }
+            }
+            require_local(store, &run)?;
+            if run.ended_at.is_none() {
+                return Err(SpawnError::Refused(format!(
+                    "run {} is active; end it first with tiller done {} --outcome <outcome>, then stop its agent; nothing was sent",
+                    run.id, run.id
+                )));
+            }
+            Some(run)
+        }
+        None => {
+            if !matches!(ctx.actor, Actor::Owner | Actor::Board) {
+                return Err(tiller_core::Error::Forbidden(format!(
+                    "{} may not stop orchestrator session {}; the owner does",
+                    ctx.actor, session.id
+                ))
+                .into());
+            }
+            if session.host_id != local_host(store)? {
+                return Err(SpawnError::Refused(format!(
+                    "session {} is on another host; stop it there",
+                    session.id
+                )));
+            }
+            None
+        }
+    };
+    let mut cleaned = None;
+    let mut closed_pane = None;
+    let mut warnings = Vec::new();
+    let (stop_proof, events) = match &run {
+        Some(run) => {
+            let (proof, _) = stop(store, world.herdr, waits, &session)?;
+            let mut events = store.session_end(ctx, &session.id, STOPPED)?.events;
+            match cleanup(store, ctx, world, run) {
+                Ok(applied) => {
+                    events.extend(applied.events);
+                    warnings.extend(applied.value.warnings.iter().cloned());
+                    cleaned = Some(applied.value);
+                }
+                Err(error) => warnings.push(format!(
+                    "the agent is stopped, but cleanup did not run: {error}"
+                )),
+            }
+            (proof, events)
+        }
+        None => {
+            let stopped = stop_orchestrator(store, ctx, world.herdr, waits, &session, STOPPED)?;
+            closed_pane = stopped.closed_pane;
+            warnings.extend(stopped.warning);
+            // The row is ended: what is left undone is a warning, not a
+            // failure that would hide the stop.
+            match layout::bindings(store.conn(), &session.host_id) {
+                Ok(bindings) => {
+                    if let Err(e) = relayout(world.herdr, &bindings) {
+                        warnings.push(e);
+                    }
+                }
+                Err(e) => warnings.push(format!("the panes were not relabelled: {e}")),
+            }
+            (stopped.proof, stopped.events)
+        }
+    };
+    Ok(Applied {
+        value: Stopped {
+            session: get(store.conn(), "session", &session.id)?,
+            stop_proof,
+            cleaned,
+            closed_pane,
+            warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
+        },
+        events,
+        replayed: false,
+    })
+}
+
+/// The observation the stop loop records before its one `/exit` into a
+/// session.
+pub const EXIT_SENT: &str = "exit_sent";
+
+/// What one pass of the daemon's stop loop did with one finished agent.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Swept {
+    pub session: String,
+    pub run: String,
+    pub stopped: bool,
+    /// `/exit` went in this pass: a session it did not stop is never sent
+    /// another, and is left to R15.
+    pub exit_sent: bool,
+    /// An error, not a refusal, left the agent as it was.
+    pub failed: bool,
+    /// The stop proof, or why the agent was left for a later pass.
+    pub evidence: String,
+}
+
+/// The daemon's stop loop: a run on this host that ended `landed` or
+/// `reported` (a builder whose PR landed or holds its head, a scout, a
+/// reviewer) leaves its agent nothing to do, so the agent is stopped with
+/// the same proven stop as `tiller agent stop` and its row ended. Its pane
+/// is then a bare shell, which reconcile closes before returning the
+/// worktree (R15). Only an agent idle at an empty composer is stopped: a
+/// turn still running, a draft, a dialog or a message not yet acknowledged
+/// leaves it for a later pass, and nothing is ever interrupted. `/exit` goes
+/// into a session at most once, recorded as an [`EXIT_SENT`] observation
+/// first, so an agent that ignores it is left to R15's note. A run that
+/// ended any other way keeps its agent for the orchestrator to decide about.
+pub fn stop_finished(
+    store: &mut Store,
+    ctx: &Ctx,
+    herdr: &dyn Herdr,
+    waits: &Waits,
+) -> Result<Vec<Swept>> {
+    let host = local_host(store)?;
+    let sessions: Vec<Session> = list(
+        store.conn(),
+        "ended_at IS NULL AND host_id = ?1 \
+         AND run_id IN (SELECT id FROM runs WHERE ended_at IS NOT NULL AND outcome IN ('landed', 'reported')) \
+         AND id NOT IN (SELECT session_id FROM observations WHERE event = ?2 AND session_id IS NOT NULL) \
+         ORDER BY started_at, id",
+        &[&host, &EXIT_SENT],
+    )?;
+    let mut swept = Vec::new();
+    // One session that errors is reported and the rest still go.
+    for session in sessions {
+        let mut exit_sent = false;
+        let stop =
+            ready_to_stop(store, herdr, waits, &session, false).and_then(|ready| match ready {
+                Ready::Gone(proof) => Ok(proof),
+                Ready::Exit(pane_id) => {
+                    // Read just before typing, since a pass waits on each
+                    // agent in turn: `/exit` never races a message for it.
+                    if waiting_message(store, &session.id)? {
+                        return Err(SpawnError::Refused(format!(
+                            "a message waits to be typed into session {}",
+                            session.id
+                        )));
+                    }
+                    store.observation_record(
+                        ctx,
+                        NewObservation {
+                            session_id: Some(session.id.clone()),
+                            run_id: session.run_id.clone(),
+                            source: ObservationSource::Herdr,
+                            event: EXIT_SENT.into(),
+                            verdict: None,
+                            observed_at: Timestamp::now(),
+                            payload: json!({"pane_id": pane_id}),
+                        },
+                    )?;
+                    exit_sent = true;
+                    exit_and_prove(store, herdr, waits, &session, &pane_id)
+                }
+            });
+        let (stopped, failed, evidence) = match stop
+            .and_then(|(proof, _)| Ok((store.session_end(ctx, &session.id, RUN_ENDED)?, proof)))
+        {
+            Ok((_, proof)) => (true, false, proof),
+            Err(SpawnError::Refused(why)) => (false, false, why),
+            Err(error) => (false, true, error.to_string()),
+        };
+        swept.push(Swept {
+            run: session.run_id.clone().unwrap_or_default(),
+            session: session.id,
+            stopped,
+            exit_sent,
+            failed,
+            evidence,
+        });
+    }
+    Ok(swept)
+}
+
+/// Whether the outbox holds a message for `session` not yet typed or not
+/// yet acknowledged.
+fn waiting_message(store: &Store, session: &str) -> Result<bool> {
+    Ok(store
+        .conn()
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM outbox WHERE target_session_id = ?1 AND state IN ('pending', 'delivered'))",
+            [session],
+            |row| row.get(0),
+        )
+        .map_err(tiller_core::Error::from)?)
 }
 
 /// The session a relaunch starts, and where.
