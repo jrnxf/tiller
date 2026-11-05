@@ -241,9 +241,11 @@ impl Cli {
     }
 
     /// Presses keys in a pane (`herdr pane send-keys`), in order: names such
-    /// as `enter` or `ctrl+c`, or single characters. herdr 0.9.5 reads every
-    /// word after the pane as a key, a leading dash included, and refuses a
-    /// name it does not know (`invalid_key`).
+    /// as `enter` or `ctrl+c`, or single characters. herdr 0.9.5 refuses a
+    /// name it does not know (`invalid_key`), and reads a word that starts
+    /// with `--` as its own flag wherever it stands (`--session` among the
+    /// keys picks the session), so the caller must never pass one; `-`
+    /// alone is the minus key.
     pub fn send_keys(&self, pane_id: &str, keys: &[&str]) -> Result<()> {
         let mut args = vec!["pane", "send-keys", pane_id];
         args.extend_from_slice(keys);
@@ -616,9 +618,22 @@ impl Herdr for Cli {
     }
 
     // herdr 0.9.5 prints nothing for `send-text` and `send-keys`: a write
-    // succeeds on exit 0, and a refusal is an error on stderr.
+    // succeeds on exit 0, and a refusal is an error on stderr. It reads a
+    // text that looks like one of its flags (`--session=x`) as that flag,
+    // so leading dashes are pressed as minus keys and the rest is sent as
+    // text.
     fn send_text(&self, pane_id: &str, text: &str) -> Result<()> {
-        self.run(&["pane", "send-text", pane_id, text]).map(drop)
+        let rest = text.trim_start_matches('-');
+        let dashes = text.len() - rest.len();
+        if dashes > 0 {
+            let mut args = vec!["pane", "send-keys", pane_id];
+            args.extend(std::iter::repeat_n("-", dashes));
+            self.run(&args)?;
+        }
+        if rest.is_empty() {
+            return Ok(());
+        }
+        self.run(&["pane", "send-text", pane_id, rest]).map(drop)
     }
 
     fn send_enter(&self, pane_id: &str) -> Result<()> {
@@ -848,6 +863,27 @@ mod tests {
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(is_executable(&file));
         assert!(!is_executable(dir.path()));
+    }
+
+    #[test]
+    fn a_text_that_starts_with_dashes_presses_them_and_sends_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("calls");
+        let record = format!("echo \"$*\" >> {}", log.display());
+        let cli = Cli::local().program(vec!["sh".into(), "-c".into(), record.into(), "--".into()]);
+        cli.send_text("w1:p1", "--session=lab x").unwrap();
+        cli.send_text("w1:p1", "-").unwrap();
+        cli.send_text("w1:p1", "a --b").unwrap();
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            calls.lines().collect::<Vec<_>>(),
+            [
+                "pane send-keys w1:p1 - -",
+                "pane send-text w1:p1 session=lab x",
+                "pane send-keys w1:p1 -",
+                "pane send-text w1:p1 a --b",
+            ]
+        );
     }
 
     #[test]

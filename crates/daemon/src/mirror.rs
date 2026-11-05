@@ -45,6 +45,9 @@ const SIZE_POLL: Duration = Duration::from_secs(2);
 const SIZE_TIMEOUT: Duration = Duration::from_secs(3);
 /// What a failed observe's stderr is kept to.
 const STDERR_KEEP: u64 = 2048;
+/// Observe children in a row that may start on a diff before the stream
+/// gives up, so a herdr that never sends a full frame cannot spin.
+const FIRST_FULL_TRIES: u32 = 3;
 
 /// The mirror's shared counters: open views and the input budget.
 #[derive(Debug)]
@@ -128,9 +131,14 @@ pub fn check_keys(keys: &[String]) -> Result<(), String> {
 }
 
 /// A key herdr might know: a name or one character, after any modifiers,
-/// with no space or control character. herdr refuses the rest itself.
+/// with no space or control character. herdr refuses the rest itself, but
+/// it reads a word that starts with a dash as one of its flags, so only
+/// `-` itself (the minus key) may start with one.
 fn plausible_key(key: &str) -> bool {
-    !key.is_empty() && key.len() <= 32 && !key.chars().any(|c| c.is_whitespace() || c.is_control())
+    !key.is_empty()
+        && key.len() <= 32
+        && (key == "-" || !key.starts_with('-'))
+        && !key.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 pub fn check_text(text: &str) -> Result<(), String> {
@@ -173,6 +181,8 @@ enum Woke {
 enum Ended {
     /// The pane changed size: observe again at this one.
     Resized((u16, u16)),
+    /// The child started on a diff: observe again for a full frame.
+    NoFullFrame,
     /// The stream is over, for the browser or for herdr.
     Done,
 }
@@ -184,6 +194,7 @@ async fn mirror(
     mut stop: watch::Receiver<bool>,
     tx: &mpsc::Sender<Bytes>,
 ) {
+    let mut no_full = 0;
     loop {
         let (cols, rows) = size;
         if !queue(tx, &TerminalLine::Size { cols, rows }) {
@@ -206,7 +217,17 @@ async fn mirror(
         let _ = child.start_kill();
         let _ = child.wait().await;
         match ended {
-            Ended::Resized(new) => size = new,
+            Ended::Resized(new) => {
+                size = new;
+                no_full = 0;
+            }
+            Ended::NoFullFrame => {
+                no_full += 1;
+                if no_full >= FIRST_FULL_TRIES {
+                    unavailable(tx, "herdr observe never sent a full frame");
+                    return;
+                }
+            }
             Ended::Done => return,
         }
     }
@@ -295,7 +316,7 @@ async fn observe(
                 // Diffs mean nothing without the full frame before them; a
                 // child that starts on one is asked again.
                 if first && !observed.full {
-                    return Ended::Resized(size);
+                    return Ended::NoFullFrame;
                 }
                 first = false;
                 let frame = TerminalLine::Frame {
@@ -421,6 +442,8 @@ mod tests {
         assert!(check_keys(&keys(&[])).is_err());
         assert!(check_keys(&keys(&["a b"])).is_err());
         assert!(check_keys(&keys(&["\u{1b}"])).is_err());
+        assert!(check_keys(&keys(&["a", "--session", "other"])).is_err());
+        assert!(check_keys(&keys(&["-h"])).is_err());
         assert!(check_keys(&vec!["a".to_owned(); MAX_KEYS + 1]).is_err());
         assert!(check_text("-rf").is_ok());
         assert!(check_text("").is_err());

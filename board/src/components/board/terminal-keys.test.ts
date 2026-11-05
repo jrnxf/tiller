@@ -27,6 +27,10 @@ test.each([
   ["\x1b[15;2~", ["shift+f5"]],
   ["\x1bb", ["alt+b"]],
   ["\x1bX", ["alt+X"]],
+  ["\x1b]", ["alt+]"]],
+  ["\x1bP", ["alt+P"]],
+  ["\x1b^", ["alt+^"]],
+  ["\x1b_", ["alt+_"]],
   ["\x1b\x7f", ["alt+backspace"]],
   ["\x1b\r", ["alt+enter"]],
   ["ls\r", ["l", "s", "enter"]],
@@ -47,6 +51,7 @@ test.each([
 
 test.each([
   ["a cursor position report", "\x1b[12;40R"],
+  ["a cursor position report on row 1", "\x1b[1;5R"],
   ["a focus report", "\x1b[I"],
   ["a mouse report", "\x1b[<0;10;5M"],
   ["a colour answer", "\x1b]11;rgb:0d0d/0e0e/1010\x1b\\"],

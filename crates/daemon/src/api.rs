@@ -3585,7 +3585,8 @@ esac"#,
 
     /// A herdr for the terminal mirror: it logs each call, gives the pane
     /// the size in `{dir}/size` (`cols rows`), and observes by recording
-    /// its pid, writing one full frame and sleeping as that same process.
+    /// its pid, writing one frame and sleeping as that same process. The
+    /// frame is full unless `{dir}/full` says `false`.
     fn mirror_herdr(dir: &std::path::Path) -> Cli {
         let script = format!(
             r#"echo "$*" >> '{dir}/calls'
@@ -3595,7 +3596,8 @@ case "$*" in
   printf '{{"result":{{"layout":{{"panes":[{{"pane_id":"w2:p1","rect":{{"width":%s,"height":%s}}}}]}}}}}}\n' "$cols" "$rows";;
 *"terminal session observe"*)
   echo $$ >> '{dir}/observers'
-  printf '{{"type":"terminal.frame","seq":1,"full":true,"width":80,"height":24,"bytes":"aGk="}}\n'
+  full=$(cat '{dir}/full' 2>/dev/null || echo true)
+  printf '{{"type":"terminal.frame","seq":1,"full":%s,"width":80,"height":24,"bytes":"aGk="}}\n' "$full"
   exec sleep 30;;
 esac"#,
             dir = dir.display()
@@ -3740,7 +3742,10 @@ esac"#,
             calls.lines().collect::<Vec<_>>(),
             [
                 "pane send-keys w2:p1 - ctrl+c enter",
-                "pane send-text w2:p1 -rf x"
+                // A paste that starts with a dash presses it, so herdr
+                // never reads the text as a flag.
+                "pane send-keys w2:p1 -",
+                "pane send-text w2:p1 rf x"
             ]
         );
     }
@@ -3844,6 +3849,43 @@ esac"#,
         // The viewer leaves: its observe is killed.
         drop(body);
         assert!(gone(&second[1]).await, "the observe outlived its viewer");
+    }
+
+    #[tokio::test]
+    async fn an_observe_that_never_sends_a_full_frame_gives_up() {
+        let mut fleet = Fleet::new();
+        let session = fleet.worker("w2:p1");
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+        std::fs::write(dir.join("full"), "false\n").unwrap();
+        let app = mirror_app(&fleet, dir);
+        let cookie = owner_cookie(fleet.dir.path());
+        let response = app
+            .oneshot(mutation(
+                "POST",
+                &format!("/api/v1/agents/{session}/terminal"),
+                json!({}),
+                &[("cookie", &cookie)],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let mut pending = String::new();
+        // Each try says the size, and none sends a frame on.
+        for _ in 0..3 {
+            assert_eq!(next_line(&mut body, &mut pending).await["type"], "size");
+        }
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "unavailable", "message": "herdr observe never sent a full frame"})
+        );
+        let observers = std::fs::read_to_string(dir.join("observers")).unwrap();
+        let observers: Vec<_> = observers.lines().collect();
+        assert_eq!(observers.len(), 3);
+        for pid in observers {
+            assert!(gone(pid).await, "an observe outlived its try");
+        }
     }
 
     #[test]

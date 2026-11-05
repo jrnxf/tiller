@@ -430,6 +430,9 @@ export function LiveTerminal({
       unmount?.();
       setReady(false);
       setTyping(false);
+      // Another agent's pane starts from nothing, not from this one's state.
+      setStatus({ kind: "connecting" });
+      setSize(null);
     };
   }, [sessionId, host]);
 

@@ -82,7 +82,9 @@ function escape(rest: string): { length: number; key?: string; unsent?: string }
       return { length: match.length, key: modifiers(parts[1]) + ARROWS[final] };
     }
     if (final === "Z") return { length: match.length, key: "shift+tab" };
-    if (SS3_F[final] && parts[0] === "1") {
+    // `ESC[1;5R` is Ctrl+F3 and also a cursor position report for row 1, so
+    // an `R` is always read as the report. F3 itself comes as `ESC O R`.
+    if (SS3_F[final] && final !== "R" && parts[0] === "1") {
       return { length: match.length, key: modifiers(parts[1]) + SS3_F[final] };
     }
     if (final === "~" && parts[0] && TILDE[parts[0]]) {
@@ -102,9 +104,10 @@ function escape(rest: string): { length: number; key?: string; unsent?: string }
     if (key) return { length: 3, key };
     return { length: 3, unsent: LETTER_UNSENT[final] };
   }
-  // OSC, DCS and the like end at BEL or ST; drop the whole report.
+  // OSC, DCS and the like end at BEL or ST; drop the whole report. Without
+  // the end it is Alt with `]`, `P`, `^` or `_`.
   // oxlint-disable-next-line no-control-regex
-  const string = /^\x1b[\]P^_][^\x07\x1b]*(\x07|\x1b\\)?/.exec(rest);
+  const string = /^\x1b[\]P^_][^\x07\x1b]*(\x07|\x1b\\)/.exec(rest);
   if (string) return { length: string[0].length };
   if (rest.length === 1) return { length: 1, key: "esc" };
   // Alt with a key: ESC, then that key's own byte.
