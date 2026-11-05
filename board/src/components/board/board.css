@@ -816,6 +816,11 @@ button.colh:hover {
   background: var(--bg-2);
   margin-top: 8px;
 }
+/* inbox.css also sets .appr margins and loads later; this wins by specificity so
+   the approval box sits 8px under the PR box on the card page. */
+.sect .appr {
+  margin: 8px 0 0;
+}
 .appr.stale {
   border-color: color-mix(in srgb, var(--yellow) 48%, var(--line-1));
   background: color-mix(in srgb, var(--yellow) 7%, var(--bg-2));

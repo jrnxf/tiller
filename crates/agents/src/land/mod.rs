@@ -635,7 +635,8 @@ impl Lander<'_> {
                 evidence: Some(
                     json!({"approval_id": approval.id, "head_sha": approval.head_sha}).to_string(),
                 ),
-                run_id: approval.run_id.clone(),
+                // Follows the approval, not the run that asked.
+                run_id: None,
                 ..NewAttention::default()
             },
         )?;

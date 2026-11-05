@@ -111,7 +111,7 @@ exit: 0
         "id": "<id85>",
         "kind": "merge",
         "opened_at": "<time>",
-        "opened_by_run_id": "<id35>",
+        "opened_by_run_id": null,
         "opened_by_session_id": null,
         "options": null,
         "question": "Merge alpha-1 at 0123456789ab (squash)?",

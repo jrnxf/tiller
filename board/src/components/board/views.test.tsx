@@ -12,7 +12,7 @@ import type {
 } from "../../lib/api-types";
 import { hydrateFromSnapshot } from "../../lib/boot";
 import { connectionStore } from "../../lib/connection";
-import { fixtureResource, fixtureSnapshot } from "../../lib/fixtures";
+import { FIXTURE_HEAD_SHA, fixtureResource, fixtureSnapshot } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
 import { loadPrefs, prefsStore, updatePrefs } from "../../lib/prefs";
 import { createQueryClient } from "../../lib/query-client";
@@ -24,6 +24,7 @@ import { resetBoardLook } from "./board-prefs";
 
 const HOST_B = "01JHOSTB00000000000000000B";
 const CARD_43 = "01JCARD0000000000000000043";
+const CARD_44 = "01JCARD0000000000000000044";
 const CARD_41 = "01JCARD0000000000000000041";
 
 interface Posted {
@@ -770,4 +771,22 @@ test("the switch to pre-launch says validation is skipped and a Saturday review 
   expect(screen.getByRole("dialog").textContent).toContain(
     "Per-change validation (no-mistakes) is skipped and a batched review runs every Saturday at 06:00 Lisbon time. Grants skip their pipeline condition for a PR with no pipeline run while pre-launch; every other condition still applies.",
   );
+});
+
+test("a PR waiting on the owner can be approved from the card page", async () => {
+  const posted = stubApi("default");
+  await renderApp("default", `/cards/${CARD_44}`);
+  const page = screen.getByTestId("card-page");
+  const box = page.querySelector<HTMLElement>(".appr");
+  expect(box?.dataset.standing).toBe("pending");
+  expect(box?.textContent).toContain("Waiting for your approval");
+  const approve = within(page).getByRole("button", {
+    name: `Approve ${FIXTURE_HEAD_SHA.slice(0, 7)}`,
+  });
+  fireEvent.click(approve);
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]).toMatchObject({
+    path: "/api/v1/approvals/01JAPPR0000000000000000000/decide",
+    body: { decision: "accept", head_sha: FIXTURE_HEAD_SHA },
+  });
 });

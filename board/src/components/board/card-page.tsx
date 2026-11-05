@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { CSSProperties } from "react";
 
 import type {
+  AttentionItem,
   CardApproval,
   CardArtifact,
   CardPr,
@@ -25,6 +26,7 @@ import { agentActivity } from "./activity";
 import { Ago } from "./ago";
 import { badgeText, statusMark } from "./badge";
 import { HostChip, PeerNote } from "./host-chip";
+import { ApproveButton } from "../attention/approve";
 import { useAmbiguousIds, useStanding } from "./peer-state";
 import { approvalFor, approvalStanding, mergeTimeline } from "./card-model";
 import { durationSeconds, formatAge, formatLisbonMoment, secondsSince, shortSha } from "./format";
@@ -192,7 +194,15 @@ function RunCard({ run, owner }: { run: CardRun; owner: string | undefined }) {
   );
 }
 
-function ApprovalBox({ approval, pr }: { approval: CardApproval; pr: CardPr }) {
+function ApprovalBox({
+  approval,
+  pr,
+  ask,
+}: {
+  approval: CardApproval;
+  pr: CardPr;
+  ask: AttentionItem | undefined;
+}) {
   const standing = approvalStanding(approval, pr);
   const stale = standing === "stale";
   const who = approval.decided_by === "owner" ? "you" : (approval.decided_by ?? "someone");
@@ -246,11 +256,20 @@ function ApprovalBox({ approval, pr }: { approval: CardApproval; pr: CardPr }) {
           A new push would mark this approval stale and ask again.
         </div>
       ) : null}
+      {standing === "pending" && ask ? <ApproveButton item={ask} /> : null}
     </div>
   );
 }
 
-function PullRequest({ pr, approvals }: { pr: CardPr; approvals: CardApproval[] }) {
+function PullRequest({
+  pr,
+  approvals,
+  attention,
+}: {
+  pr: CardPr;
+  approvals: CardApproval[];
+  attention: AttentionItem[];
+}) {
   const approval = approvalFor(approvals, pr);
   const standing = approval ? approvalStanding(approval, pr) : null;
   const checkTone = pr.checks === "passing" ? "ok" : pr.checks === "failing" ? "bad" : "yel";
@@ -304,7 +323,11 @@ function PullRequest({ pr, approvals }: { pr: CardPr; approvals: CardApproval[] 
         </dl>
       </div>
       {approval ? (
-        <ApprovalBox approval={approval} pr={pr} />
+        <ApprovalBox
+          approval={approval}
+          pr={pr}
+          ask={attention.find((item) => item.still_current && item.approval?.id === approval.id)}
+        />
       ) : pr.state === "open" ? (
         <div className="appr">
           <div className="bind" style={{ margin: 0 }}>
@@ -492,7 +515,14 @@ export function CardPage({ cardId, owner }: { cardId: string; owner?: string }) 
       </div>
 
       {detail.prs.length > 0 ? (
-        detail.prs.map((pr) => <PullRequest key={pr.id} pr={pr} approvals={detail.approvals} />)
+        detail.prs.map((pr) => (
+          <PullRequest
+            key={pr.id}
+            pr={pr}
+            approvals={detail.approvals}
+            attention={detail.attention}
+          />
+        ))
       ) : (
         <div className="sect">
           <div className="sect-h">Pull request</div>

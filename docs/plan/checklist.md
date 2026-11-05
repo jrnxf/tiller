@@ -398,7 +398,7 @@ about 3 min of the developer's time
 
 ## CP5: Supervised live trial (developer, 30-45 min)
 
-- [ ] On a throwaway sandbox repo: ask, card, worker, PR, bound approval, merge
+- [x] On a throwaway sandbox repo: ask, card, worker, PR, bound approval, merge (CP5 gated: passed Thu 2026-11-05, jrnxf/tiller-gate-sandbox#1 merged by tiller-merge[bot])
 
 ---
 
