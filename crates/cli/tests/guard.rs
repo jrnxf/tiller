@@ -49,12 +49,13 @@ fn guard_with(home: &Path, args: &[&str], command: &str) -> Output {
         "tool_name": "Bash",
         "tool_input": {"command": command},
     });
-    child
+    // A guard that decides before it reads the payload may exit first, which
+    // closes the pipe under this write.
+    let _ = child
         .stdin
         .take()
         .unwrap()
-        .write_all(payload.to_string().as_bytes())
-        .unwrap();
+        .write_all(payload.to_string().as_bytes());
     child.wait_with_output().unwrap()
 }
 
