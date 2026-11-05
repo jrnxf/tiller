@@ -63,10 +63,20 @@ fn home_with_orchestrator(home: &Path) -> String {
 
 #[cfg(test)]
 fn hook(home: &Path, event: &str, input: &str) -> (Duration, Duration, std::process::Output) {
+    hook_as(home, "claude", event, input)
+}
+
+#[cfg(test)]
+fn hook_as(
+    home: &Path,
+    harness: &str,
+    event: &str,
+    input: &str,
+) -> (Duration, Duration, std::process::Output) {
     let cpu_before = children_cpu();
     let started = Instant::now();
     let mut child = Command::new(env!("CARGO_BIN_EXE_tiller"))
-        .args(["hook", event])
+        .args(["hook", "--harness", harness, event])
         .env("TILLER_HOME", home)
         .env_remove("TILLER_SESSION_ID")
         .stdin(Stdio::piped())
@@ -215,4 +225,111 @@ fn hook_exits_zero_whatever_happens() {
         "a hook never creates state.db"
     );
     assert!(dir.path().join("log/hook.log").exists());
+}
+
+/// D04: `tiller hook --harness <h> <event>` takes another harness's event
+/// names and input shape and writes the same observations and verdicts.
+#[test]
+fn another_harness_writes_the_same_observations() {
+    let dir = tempfile::tempdir().unwrap();
+    let orchestrator = home_with_orchestrator(dir.path());
+    let store = Store::open(dir.path().join("state.db")).unwrap();
+    let newest = || -> (String, String, i64) {
+        store
+            .conn()
+            .query_row(
+                "SELECT event, payload, (SELECT count(*) FROM observations) FROM observations ORDER BY rowid DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    };
+    let activity = || -> Activity {
+        let session: Session =
+            tiller_core::state::get(store.conn(), "session", &orchestrator).unwrap();
+        session.activity
+    };
+
+    // Cursor names its session `conversation_id` and its events in camelCase.
+    let (_, _, out) = hook_as(
+        dir.path(),
+        "cursor",
+        "beforeSubmitPrompt",
+        r#"{"conversation_id":"claude-orch","prompt":"a whole prompt"}"#,
+    );
+    assert!(out.status.success() && out.stdout.is_empty(), "{out:?}");
+    let (event, payload, _) = newest();
+    assert_eq!(event, "UserPromptSubmit");
+    assert!(!payload.contains("a whole prompt"), "{payload}");
+    assert_eq!(activity(), Activity::Working);
+
+    let (_, _, out) = hook_as(
+        dir.path(),
+        "cursor",
+        "stop",
+        r#"{"session_id":"claude-orch"}"#,
+    );
+    assert!(out.status.success() && out.stdout.is_empty(), "{out:?}");
+    assert_eq!(newest().0, "Stop");
+    assert_eq!(activity(), Activity::Idle);
+
+    // Codex speaks Claude's names; OpenCode and Pi speak their own.
+    let (_, _, out) = hook_as(
+        dir.path(),
+        "codex",
+        "PostToolUse",
+        r#"{"session_id":"claude-orch","tool_name":"Bash","tool_input":{"command":"echo secret"}}"#,
+    );
+    assert!(out.status.success(), "{out:?}");
+    let (event, payload, _) = newest();
+    assert_eq!(event, "PostToolUse");
+    assert!(!payload.contains("secret"), "{payload}");
+    assert_eq!(activity(), Activity::Working);
+    hook_as(
+        dir.path(),
+        "opencode",
+        "session.idle",
+        // Identical input is one observation (4.1), so this turn differs.
+        r#"{"session_id":"claude-orch","turn":2}"#,
+    );
+    assert_eq!(activity(), Activity::Idle);
+    hook_as(
+        dir.path(),
+        "pi",
+        "session_shutdown",
+        r#"{"session_id":"claude-orch","reason":"quit"}"#,
+    );
+    assert_eq!(newest().0, "SessionEnd:quit");
+    assert_eq!(activity(), Activity::Ended);
+
+    // An ignored event writes nothing; an unmapped one keeps no reply text.
+    let (_, _, rows) = newest();
+    hook_as(
+        dir.path(),
+        "cursor",
+        "afterAgentResponse",
+        r#"{"session_id":"claude-orch","text":"a whole reply"}"#,
+    );
+    assert_eq!(newest().2, rows);
+    hook_as(
+        dir.path(),
+        "pi",
+        "message_update",
+        r#"{"session_id":"claude-orch","text":"a whole reply"}"#,
+    );
+    let (event, payload, count) = newest();
+    assert_eq!((event.as_str(), count), ("message_update", rows + 1));
+    assert!(!payload.contains("a whole reply"), "{payload}");
+
+    // A harness with no adapter is refused by the parser. A broken hook
+    // command line still exits 0 (main.rs), so it records nothing instead.
+    let (_, _, rows) = newest();
+    let (_, _, out) = hook_as(
+        dir.path(),
+        "gemini",
+        "Stop",
+        r#"{"session_id":"claude-orch","turn":3}"#,
+    );
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(newest().2, rows);
 }

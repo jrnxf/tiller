@@ -218,6 +218,16 @@ interface Freshness {
   observed_at: string | null;
 }
 
+// A page, screenshot or report made for the card. `url` is where a page is
+// served; an artifact that is only a local file has none.
+export interface CardArtifact {
+  id: string;
+  kind: string;
+  title: string;
+  url: string | null;
+  created_at: string;
+}
+
 export interface CardDetail {
   card: {
     id: string;
@@ -242,7 +252,7 @@ export interface CardDetail {
   runs: CardRun[];
   prs: CardPr[];
   approvals: CardApproval[];
-  artifacts: { id: string; kind: string; title: string }[];
+  artifacts: CardArtifact[];
   reviews: { id: string; verdict: string; at: string }[];
   obligations: { id: string; summary: string; state: string }[];
   events: EventLine[];
@@ -347,6 +357,26 @@ export interface Project extends Federated {
 
 export interface ProjectsResponse {
   projects: Project[];
+}
+
+// A PR published from a card (`GET /api/v1/contributions`).
+export interface Contribution {
+  id: string;
+  project_id: string;
+  card_id: string;
+  card_display_id: string;
+  card_title: string;
+  repo: string;
+  number: number;
+  url: string;
+  // open, merged or closed.
+  state: string;
+  linked_at: string;
+  merged_at: string | null;
+}
+
+export interface ContributionsResponse {
+  contributions: Contribution[];
 }
 
 // What deleting a project would remove (state.md, Deleting a project): rows

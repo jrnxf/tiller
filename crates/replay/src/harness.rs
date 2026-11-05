@@ -384,6 +384,7 @@ impl<'a> Replay<'a> {
                     role: *role,
                     asked,
                     brief: None,
+                    harness: "claude".into(),
                 };
                 let spawned = spawn::spawn(store, ctx, None, &world, request)?;
                 let run = match spawned.value {
