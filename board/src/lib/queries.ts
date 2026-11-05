@@ -7,6 +7,7 @@ import type {
   BoardResponse,
   CardDetail,
   ContributionsResponse,
+  DaemonHealth,
   MachinesResponse,
   MemoryResponse,
   MemoryRevision,
@@ -114,6 +115,10 @@ export const machinesQuery = () => readQuery<MachinesResponse>(machinesPath);
 
 export const quotaPath: QueryPath = "/api/v1/quota";
 export const quotaQuery = () => readQuery<QuotaResponse>(quotaPath);
+
+// The daemon's own facts (version, start time, merge App), for Settings.
+const healthPath: QueryPath = "/api/v1/health";
+export const healthQuery = () => readQuery<DaemonHealth>(healthPath);
 
 export const signalsPath: QueryPath = "/api/v1/signals";
 export const signalsQuery = () => readQuery<SignalsResponse>(signalsPath);

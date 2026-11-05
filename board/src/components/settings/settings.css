@@ -1,9 +1,20 @@
-/* The Settings page: one panel, a row per preference. */
+/* The Settings page: a titled panel per topic, a row per fact or preference. */
 
 .settings-page {
   max-width: 720px;
   margin: 0 auto;
   padding: 2px 0 0;
+}
+
+.set-title {
+  margin: 0 0 8px 2px;
+  font-size: var(--fs-small);
+  font-weight: var(--w-medium);
+  color: var(--fg-2);
+}
+
+.set-panel + .set-title {
+  margin-top: 24px;
 }
 
 .set-panel {
@@ -39,6 +50,49 @@
   margin: 2px 0 0;
   font-size: var(--fs-mini);
   color: var(--fg-3);
+}
+
+.set-text p {
+  overflow-wrap: anywhere;
+}
+
+.set-value {
+  flex: none;
+  color: var(--fg-1);
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
+}
+
+.set-value code {
+  font-family: var(--mono);
+  font-size: var(--fs-mini);
+}
+
+.set-status {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--round);
+  font-size: var(--fs-mini);
+  font-weight: var(--w-medium);
+  white-space: nowrap;
+}
+
+.set-status.ok {
+  color: var(--green-text);
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+}
+
+.set-status.missing,
+.set-status.warn {
+  color: var(--yellow-text);
+  background: color-mix(in srgb, var(--yellow) 14%, transparent);
+}
+
+.set-status.fail {
+  color: var(--red-text);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
 }
 
 @media (max-width: 820px) {

@@ -592,6 +592,19 @@ export interface DaemonHealth {
   version: string;
   // False until `tiller init` has made state.db.
   initialized: boolean;
+  // The schema this binary migrates to.
+  schema: number;
+  pid: number;
+  started_at: string;
+  // The merge App key, as `tiller doctor`'s `merge app` line reads it.
+  merge_app: MergeAppHealth;
+}
+
+export interface MergeAppHealth {
+  // `missing`: every project runs as detect. `fail`: the key has leaked.
+  status: "ok" | "missing" | "warn" | "fail";
+  app_id: number | null;
+  detail: string;
 }
 
 // `GET /api/v1/memory?scope=`: the document list and the chosen document

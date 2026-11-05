@@ -665,6 +665,20 @@ pub struct Health {
     /// absent on a host with no peers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<LinkHealth>,
+    /// The merge App key, as `tiller doctor`'s `merge app` line reads it.
+    pub merge_app: MergeAppHealth,
+}
+
+/// The merge App key under `~/.tiller/forge-app/`: names files and the
+/// reason, never the key.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct MergeAppHealth {
+    /// `ok`, `missing` (every project runs as `detect`), `warn` (the key is
+    /// not used) or `fail` (the key is readable by group or others).
+    pub status: String,
+    /// The App's numeric id, when the key loads.
+    pub app_id: Option<u64>,
+    pub detail: String,
 }
 
 /// The inlined `<script id="tiller-boot">` body and `GET /api/v1/snapshot`.
