@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Where the `no-mistakes` daemon keeps its pid file: this variable, else
-/// `~/.no-mistakes`.
+/// the `.no-mistakes` directory in the home directory.
 pub const NO_MISTAKES_HOME: &str = "TILLER_NO_MISTAKES_HOME";
 
 /// Runs `first rest... arg...`; `Ok(Some(line))` is the first non-empty
@@ -116,7 +116,7 @@ pub fn daemon_binary(
 }
 
 /// Where the `no-mistakes` daemon keeps its pid file: [`NO_MISTAKES_HOME`],
-/// else `~/.no-mistakes`.
+/// else the `.no-mistakes` directory in the home directory.
 pub fn no_mistakes_home() -> Option<PathBuf> {
     std::env::var_os(NO_MISTAKES_HOME)
         .map(PathBuf::from)
