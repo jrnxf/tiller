@@ -22,7 +22,7 @@ use crate::thresholds::Thresholds;
 pub struct ClientThresholds {
     pub worker_stale_minutes: i64,
     pub orchestrator_stale_minutes: i64,
-    /// An unresolved ask older than this shows its age (section 6, row 6).
+    /// An unresolved ask older than this shows its age (section 6, row 9).
     pub ask_age_minutes: i64,
 }
 

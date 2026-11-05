@@ -312,6 +312,16 @@ fn import_reproduces_every_card_count_in_the_manifest() {
     assert_eq!(column_of(&store, "a6"), "queued");
     assert_eq!(column_of(&store, "a7"), "queued");
     assert_eq!(column_of(&store, "a3"), "queued");
+    assert_eq!(column_of(&store, "a4"), "landing");
+    // The plan prints the column each card derives once written.
+    for card in plan.cards.iter().filter(|c| c.state == CardState::Open) {
+        assert_eq!(
+            card.column,
+            column_of(&store, &card.legacy_id),
+            "{}",
+            card.legacy_id
+        );
+    }
     let question: String = store
         .conn()
         .query_row(

@@ -70,10 +70,13 @@ export function cardDot(row: BoardRow): DotKind | null {
         return "live";
       case "idle":
       case "paused":
+      case "ready":
+      case "between_runs":
         return "idle";
       case "stale":
         return "stale";
       case "errored":
+      case "checks_failed":
         return "off";
       default:
         return "unknown";

@@ -411,6 +411,7 @@ CREATE TABLE approvals (
   CHECK ((state IN ('executing', 'succeeded', 'failed', 'uncertain')) = (executed_at IS NOT NULL))
 ) STRICT;
 CREATE INDEX approvals_open ON approvals(pr_id) WHERE state IN ('requested', 'accepted', 'executing');
+CREATE INDEX approvals_card ON approvals(card_id);
 -- one in-flight execution per PR
 CREATE UNIQUE INDEX approvals_executing ON approvals(pr_id) WHERE state = 'executing' AND pr_id IS NOT NULL;
 
@@ -713,8 +714,42 @@ WITH
   landing_approvals AS (
     SELECT card_id, 1 AS landing
     FROM approvals
-    WHERE kind IN ('merge', 'land_direct') AND state IN ('accepted', 'executing')
+    WHERE kind IN ('merge', 'land_direct') AND state IN ('accepted', 'executing', 'uncertain')
     GROUP BY card_id
+  ),
+  open_prs AS (
+    -- the card's open PRs: which badge a ship card shows in Landing once no
+    -- run is active on it
+    SELECT card_id,
+           max(fetched_at IS NULL) AS unread,
+           max(checks = 'failure' OR pipeline_state = 'failed') AS failing
+    FROM prs
+    WHERE state = 'open'
+    GROUP BY card_id
+  ),
+  progress AS (
+    -- per open card, since it was created or last reopened: when its newest
+    -- run started, and when the owner last sent it back (rejected its merge
+    -- or direct land, or the merge failed). A send-back holds until the
+    -- next run starts.
+    SELECT p.card_id, p.run_at,
+           p.back_at IS NOT NULL AND p.back_at > coalesce(p.run_at, '') AS back
+    FROM (
+      SELECT c.id AS card_id,
+             (SELECT max(r.started_at) FROM runs r
+              WHERE r.card_id = c.id AND r.started_at > coalesce(ro.at, '')) AS run_at,
+             (SELECT max(coalesce(a.finished_at, a.decided_at)) FROM approvals a
+              WHERE a.card_id = c.id AND a.kind IN ('merge', 'land_direct')
+                AND a.state IN ('rejected', 'failed')
+                AND coalesce(a.finished_at, a.decided_at) > coalesce(ro.at, '')) AS back_at
+      FROM cards c
+      LEFT JOIN (
+        SELECT entity_id AS card_id, max(at) AS at FROM events
+        WHERE kind = 'card.reopened'
+        GROUP BY entity_id
+      ) ro ON ro.card_id = c.id
+      WHERE c.state = 'open'
+    ) p
   ),
   deploy_watches AS (
     -- an open deploy-watch obligation (state.md, section 7)
@@ -740,6 +775,10 @@ SELECT
     WHEN oa.card_id IS NOT NULL OR ar.rank = 0 THEN 'needs_you'
     WHEN c.kind = 'ship' AND (lp.landing = 1 OR la.landing = 1 OR dw.landing = 1) THEN 'landing'
     WHEN ar.n > 0 THEN 'working'
+    WHEN oh.card_id IS NOT NULL OR od.card_id IS NOT NULL THEN 'queued'
+    WHEN pg.back THEN 'queued'
+    WHEN c.kind = 'ship' AND op.card_id IS NOT NULL THEN 'landing'
+    WHEN pg.run_at IS NOT NULL THEN 'working'
     ELSE 'queued'
   END AS "column",
   CASE
@@ -757,6 +796,11 @@ SELECT
     WHEN ar.n > 0 THEN 'unknown'
     WHEN oh.card_id IS NOT NULL THEN 'parked'
     WHEN od.card_id IS NOT NULL THEN 'blocked'
+    WHEN pg.back THEN 'filed'
+    WHEN c.kind = 'ship' AND op.unread = 1 THEN 'checks'
+    WHEN c.kind = 'ship' AND op.failing = 1 THEN 'checks_failed'
+    WHEN c.kind = 'ship' AND op.card_id IS NOT NULL THEN 'ready'
+    WHEN pg.run_at IS NOT NULL THEN 'between_runs'
     ELSE 'filed'
   END AS badge,
   oh.until_at   AS parked_until,
@@ -769,6 +813,8 @@ LEFT JOIN active_runs        ar ON ar.card_id = c.id
 LEFT JOIN landing_prs        lp ON lp.card_id = c.id
 LEFT JOIN landing_approvals  la ON la.card_id = c.id
 LEFT JOIN deploy_watches     dw ON dw.card_id = c.id
+LEFT JOIN open_prs           op ON op.card_id = c.id
+LEFT JOIN progress           pg ON pg.card_id = c.id
 LEFT JOIN open_holds         oh ON oh.card_id = c.id
 LEFT JOIN open_deps          od ON od.card_id = c.id
 WHERE c.state = 'open'

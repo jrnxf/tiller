@@ -10,10 +10,13 @@ const LABELS: Record<string, string> = {
   report: "Report",
   permission_prompt: "Permission prompt",
   checks: "Checks running",
+  checks_failed: "Checks failed",
+  ready: "Ready to merge",
   merging: "Merging",
   deploying: "Deploying",
   errored: "Errored",
   working: "Working",
+  between_runs: "Between runs",
   paused: "Paused",
   idle: "Idle",
   stale: "Stale",
@@ -45,6 +48,7 @@ export function badgeTone(row: BoardRow): BadgeTone {
   switch (row.badge) {
     case "errored":
     case "failed":
+    case "checks_failed":
       return "bad";
     case "stale":
     case "unknown":

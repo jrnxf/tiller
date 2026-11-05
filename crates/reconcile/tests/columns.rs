@@ -4,7 +4,8 @@
 mod common;
 
 use common::*;
-use tiller_core::domain::{Checks, Column, PipelineState, RunOutcome, StatusState};
+use tiller_core::domain::{AnsweredVia, Checks, Column, PipelineState, RunOutcome, StatusState};
+use tiller_core::state::approvals::Decision;
 use tiller_core::state::runs::EndRun;
 use tiller_reconcile::columns;
 use tiller_reconcile::thresholds::Thresholds;
@@ -232,4 +233,82 @@ fn board_groups_every_column_and_carries_thresholds() {
     );
     assert_eq!(columns::filter(Column::NeedsYou), "needs");
     assert_eq!(columns::filter(Column::Working), "active");
+}
+
+/// A card moves forward only. A gated ship card whose builder ended
+/// `reported` stays in Landing while its PR waits for checks to report and
+/// then for the merge approval to be asked for; a card whose run ended with
+/// no PR stays in Working until its next run. The owner rejecting the merge
+/// approval is what sends a card back to Queued.
+#[test]
+fn a_card_never_steps_back_to_queued_between_steps() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    let relaunched = w.worker("w3:p1");
+    w.place();
+    let run = w.run_of(&worker);
+    let column = |w: &World, card: &str| {
+        let row = columns::column(w.store(), card).unwrap();
+        (row.column, row.badge)
+    };
+    let end = |w: &mut World, run: &str, outcome: RunOutcome| {
+        w.store_mut()
+            .run_end(
+                &daemon(),
+                run,
+                EndRun {
+                    outcome,
+                    note: None,
+                },
+            )
+            .unwrap();
+    };
+
+    // The builder opens its PR and exits before any check reports.
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let path = run.worktree_path.clone().unwrap();
+    w.scanner
+        .worktree(&path, "fm/work", "a1a1a1a1", false, Some(1));
+    let mut unchecked = open_pr("a1a1a1a1");
+    unchecked.fetch.checks = Checks::None;
+    w.forge.pr(REPO, 7, unchecked);
+    w.pass(now());
+    end(&mut w, &run.id, RunOutcome::Reported);
+    assert_eq!(column(&w, &run.card_id).0, Column::Landing);
+
+    let mut pending = open_pr("a1a1a1a1");
+    pending.fetch.checks = Checks::Pending;
+    w.forge.pr(REPO, 7, pending);
+    w.pass(now().plus_minutes(1));
+    assert_eq!(column(&w, &run.card_id), (Column::Landing, "checks".into()));
+
+    // Checks green, no approval asked for yet.
+    w.forge.pr(REPO, 7, open_pr("a1a1a1a1"));
+    w.pass(now().plus_minutes(2));
+    assert_eq!(column(&w, &run.card_id), (Column::Landing, "ready".into()));
+
+    // A run that ends with no PR, before the next one starts.
+    let other = w.run_of(&relaunched);
+    end(&mut w, &other.id, RunOutcome::Relaunched);
+    assert_eq!(
+        column(&w, &other.card_id),
+        (Column::Working, "between_runs".into())
+    );
+
+    let approval = w.approve(&worker, &pr, "a1a1a1a1", false);
+    assert_eq!(column(&w, &run.card_id).0, Column::NeedsYou);
+    w.store_mut()
+        .approval_decide(
+            &owner(),
+            None,
+            &approval,
+            Decision {
+                accept: false,
+                via: AnsweredVia::Board,
+                memory: Vec::new(),
+                ask_id: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(column(&w, &run.card_id).0, Column::Queued);
 }
