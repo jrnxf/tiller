@@ -28,6 +28,7 @@
 pub mod config;
 pub mod dispatch;
 pub mod launch;
+pub mod listeners;
 pub mod orchestrator;
 pub mod pool;
 pub mod readings;
@@ -41,8 +42,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::Value;
 use tiller_core::domain::{
-    Card, CardKind, Delivery, Effort, Pr, Project, Reservation, Run, RunOutcome, RunRole, Session,
-    Worktree,
+    Artifact, Card, CardKind, Delivery, Effort, Pr, Project, Reservation, Run, RunOutcome, RunRole,
+    Session, Worktree,
 };
 use tiller_core::state::caches::{WorktreeReading, landed_heads};
 use tiller_core::state::projects::meta;
@@ -56,6 +57,7 @@ use tiller_reconcile::sources::{Scanner, WorktreeScan};
 
 use self::config::SpawnConfig;
 use self::launch::LaunchSpec;
+use self::listeners::Listeners;
 use self::pool::Pool;
 use self::trust::ClaudeConfig;
 use crate::roles::{self, RoleError};
@@ -149,6 +151,8 @@ pub struct World<'a> {
     pub pool: &'a dyn Pool,
     pub herdr: &'a dyn Herdr,
     pub scanner: &'a dyn Scanner,
+    /// The review page tool, which cleanup ends a run's pages with (P48).
+    pub listeners: &'a dyn Listeners,
     /// The packaged `tiller` binary the fragment's hooks call.
     pub tiller: &'a Path,
     /// The run scratch root; each run gets `<root>/<run id>`.
@@ -400,6 +404,7 @@ fn place(
         tiller: world.tiller,
         default_branch: &project.default_branch,
         network_allow: &world.config.spawn.network_allow,
+        review_hosts: &world.config.spawn.review_allowed_hosts,
         no_mistakes_socket: world.config.spawn.no_mistakes_socket.as_deref(),
         gh_login_readable: project.effective_delivery() == Delivery::NoMistakes,
         claude: &world.config.spawn.claude,
@@ -776,15 +781,20 @@ pub fn cleanup(
     // Cleaned already: the path may be another run's lease by now, so a
     // second cleanup reads nothing there and changes nothing.
     if cleaned_before(store, &run)? {
+        // Pages whose listener would not end the first time are tried again;
+        // there are none after a clean pass, so this changes nothing then.
+        let mut warnings = Vec::new();
+        let events = retire_listeners(store, ctx, world, &run, &mut warnings)?;
+        let replayed = events.is_empty() && warnings.is_empty();
         return Ok(Applied {
             value: Cleaned {
                 run,
                 closed_panes: Vec::new(),
                 returned: None,
-                warnings: Vec::new(),
+                warnings,
             },
-            events: Vec::new(),
-            replayed: true,
+            events,
+            replayed,
         });
     }
     let open = dead_panes(store, world.herdr, &run)?;
@@ -797,6 +807,7 @@ pub fn cleanup(
         if let Some(session) = live_session(store.conn(), &run.id)? {
             events.extend(store.session_end(ctx, &session.id, "cleaned")?.events);
         }
+        events.extend(retire_listeners(store, ctx, world, &run, &mut warnings)?);
         return Ok(Applied {
             value: Cleaned {
                 run,
@@ -827,6 +838,7 @@ pub fn cleanup(
     if let Some(session) = live_session(store.conn(), &run.id)? {
         events.extend(store.session_end(ctx, &session.id, "cleaned")?.events);
     }
+    events.extend(retire_listeners(store, ctx, world, &run, &mut warnings)?);
     let mut returned = None;
     match world.pool.give_back(Path::new(&path), &holder(&run)) {
         Ok(()) => returned = Some(path),
@@ -856,6 +868,36 @@ pub fn cleanup(
         events,
         replayed: false,
     })
+}
+
+/// Ends the review session of every page the run published and retires its
+/// artifact (P48), so a run's listeners go with the run. A page whose session
+/// will not end stays live with a warning, and the next cleanup of the run
+/// tries it again.
+fn retire_listeners(
+    store: &mut Store,
+    ctx: &Ctx,
+    world: &World<'_>,
+    run: &Run,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<i64>> {
+    let pages: Vec<Artifact> = list(
+        store.conn(),
+        "run_id = ?1 AND kind = 'page' AND retired_at IS NULL AND path IS NOT NULL ORDER BY created_at, id",
+        &[&run.id],
+    )?;
+    let mut events = Vec::new();
+    for page in pages {
+        let Some(path) = &page.path else { continue };
+        if let Err(e) = world.listeners.end(Path::new(path)) {
+            warnings.push(format!(
+                "the review page {path} is still served ({e}); end it with lavish-axi end"
+            ));
+            continue;
+        }
+        events.extend(store.artifact_retire(ctx, &page.id)?.events);
+    }
+    Ok(events)
 }
 
 /// Whether `run.clean` already recorded this run: the worktree row cannot

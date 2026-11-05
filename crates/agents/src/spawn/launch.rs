@@ -77,6 +77,9 @@ pub struct LaunchSpec<'a> {
     pub tiller: &'a Path,
     pub default_branch: &'a str,
     pub network_allow: &'a [String],
+    /// The hostnames the developer opens review links by, exported as
+    /// `LAVISH_AXI_ALLOWED_HOSTS` (P49).
+    pub review_hosts: &'a [String],
     pub no_mistakes_socket: Option<&'a str>,
     /// The worker may read the owner's GitHub login: a builder on a
     /// `no-mistakes` project ([`Placeholders::gh_login_readable`]).
@@ -110,6 +113,8 @@ pub struct AgainSpec<'a> {
     pub effort: Effort,
     pub claude: &'a str,
     pub claude_config: &'a ClaudeConfig,
+    /// The hostnames the developer opens review links by (P49).
+    pub review_hosts: &'a [String],
 }
 
 /// How that later session starts.
@@ -337,6 +342,7 @@ struct Command<'a> {
     model: &'a str,
     effort: Effort,
     mode: &'a str,
+    review_hosts: &'a [String],
     /// The words after the flags: the first prompt, or `--resume <id>`.
     start: Vec<String>,
 }
@@ -385,7 +391,49 @@ fn env(command: &Command<'_>) -> Vec<(&'static str, String)> {
     if let Some(dir) = command.claude_config.forwarded() {
         env.push(("CLAUDE_CONFIG_DIR", dir.to_string_lossy().into_owned()));
     }
+    // The review server a session starts is shared and keeps the environment
+    // of whoever started it first, so every launch carries the names the
+    // developer reaches it by (P49).
+    if !command.review_hosts.is_empty() {
+        env.push((REVIEW_HOSTS_VAR, command.review_hosts.join(" ")));
+    }
     env
+}
+
+/// The variable the review server reads its allowed hostnames from. It
+/// splits on whitespace.
+const REVIEW_HOSTS_VAR: &str = "LAVISH_AXI_ALLOWED_HOSTS";
+
+/// Checks a launch script before anything runs it (`recovery.md` R17): the
+/// environment a session needs is in the text, the MCP config is explicit and
+/// on disk, and the role file and worktree are there. A failed check refuses
+/// the launch and names itself.
+fn preflight(text: &str, command: &Command<'_>, launch: &Launch) -> Result<(), SpawnError> {
+    let fail = |check: String| Err(SpawnError::Refused(format!("launch preflight: {check}")));
+    let mut wanted = vec![("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1".to_owned())];
+    if !command.review_hosts.is_empty() {
+        wanted.push((REVIEW_HOSTS_VAR, command.review_hosts.join(" ")));
+    }
+    for (name, value) in wanted {
+        if !text.contains(&format!("{name}={}", sh_quote(&value))) {
+            return fail(format!("the launch environment does not set {name}"));
+        }
+    }
+    if !text.contains("--strict-mcp-config") || !text.contains("--mcp-config") {
+        return fail("the MCP config is not explicit".into());
+    }
+    for (what, file) in [("role file", &launch.prompt), ("MCP config", &launch.mcp)] {
+        if !file.is_file() {
+            return fail(format!("the {what} {} is missing", file.display()));
+        }
+    }
+    if !command.worktree.is_dir() {
+        return fail(format!(
+            "the worktree {} is missing",
+            command.worktree.display()
+        ));
+    }
+    Ok(())
 }
 
 /// The launch script's text.
@@ -517,22 +565,22 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
     write_new(&launch.settings, &rendered.fragment, 0o600)?;
     write_new(&launch.mcp, MCP_CONFIG.as_bytes(), 0o600)?;
 
-    let text = script(
-        &Command {
-            role: spec.role,
-            session_id: spec.session_id,
-            run_id: spec.run_id,
-            worktree: spec.worktree,
-            tiller_home: spec.tiller_home,
-            claude: spec.claude,
-            claude_config: spec.claude_config,
-            model: spec.model,
-            effort: spec.effort,
-            mode: &rendered.mode,
-            start: first_prompt(spec),
-        },
-        &launch,
-    );
+    let command = Command {
+        role: spec.role,
+        session_id: spec.session_id,
+        run_id: spec.run_id,
+        worktree: spec.worktree,
+        tiller_home: spec.tiller_home,
+        claude: spec.claude,
+        claude_config: spec.claude_config,
+        model: spec.model,
+        effort: spec.effort,
+        mode: &rendered.mode,
+        review_hosts: spec.review_hosts,
+        start: first_prompt(spec),
+    };
+    let text = script(&command, &launch);
+    preflight(&text, &command, &launch)?;
     write_new(&launch.script, text.as_bytes(), 0o700)?;
     // Last, so a launch refused for any other reason records nothing.
     trust::record(spec.claude_config, spec.worktree)?;
@@ -587,22 +635,22 @@ pub fn write_refreshed(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
     replace(&launch.prompt, rendered.prompt.as_bytes(), 0o600)?;
     replace(&launch.settings, &rendered.fragment, 0o600)?;
     replace(&launch.mcp, MCP_CONFIG.as_bytes(), 0o600)?;
-    let text = script(
-        &Command {
-            role: spec.role,
-            session_id: spec.session_id,
-            run_id: spec.run_id,
-            worktree: spec.worktree,
-            tiller_home: spec.tiller_home,
-            claude: spec.claude,
-            claude_config: spec.claude_config,
-            model: spec.model,
-            effort: spec.effort,
-            mode: &rendered.mode,
-            start: first_prompt(spec),
-        },
-        &launch,
-    );
+    let command = Command {
+        role: spec.role,
+        session_id: spec.session_id,
+        run_id: spec.run_id,
+        worktree: spec.worktree,
+        tiller_home: spec.tiller_home,
+        claude: spec.claude,
+        claude_config: spec.claude_config,
+        model: spec.model,
+        effort: spec.effort,
+        mode: &rendered.mode,
+        review_hosts: spec.review_hosts,
+        start: first_prompt(spec),
+    };
+    let text = script(&command, &launch);
+    preflight(&text, &command, &launch)?;
     replace(&launch.script, text.as_bytes(), 0o700)?;
     trust::record(spec.claude_config, spec.worktree)?;
     launch.line = format!("sh {}", sh_quote(&launch.script.to_string_lossy()));
@@ -653,22 +701,22 @@ pub fn write_again(spec: &AgainSpec<'_>, start: Start<'_>) -> Result<String, Spa
             vec!["--resume".to_owned(), claude_session_id.to_owned()]
         }
     };
-    let text = script(
-        &Command {
-            role: spec.role,
-            session_id: spec.session_id,
-            run_id: spec.run_id,
-            worktree: spec.worktree,
-            tiller_home: spec.tiller_home,
-            claude: spec.claude,
-            claude_config: spec.claude_config,
-            model: spec.model,
-            effort: spec.effort,
-            mode: &mode,
-            start,
-        },
-        &launch,
-    );
+    let command = Command {
+        role: spec.role,
+        session_id: spec.session_id,
+        run_id: spec.run_id,
+        worktree: spec.worktree,
+        tiller_home: spec.tiller_home,
+        claude: spec.claude,
+        claude_config: spec.claude_config,
+        model: spec.model,
+        effort: spec.effort,
+        mode: &mode,
+        review_hosts: spec.review_hosts,
+        start,
+    };
+    let text = script(&command, &launch);
+    preflight(&text, &command, &launch)?;
     // Written beside, then renamed over, so a script is never half there.
     let partial = launch.script.with_extension("sh.partial");
     match fs::remove_file(&partial) {
@@ -739,6 +787,7 @@ mod tests {
                 model: "sonnet",
                 effort: Effort::Medium,
                 mode: "dontAsk",
+                review_hosts: &[],
                 start: Vec::new(),
             },
             &launch,
@@ -769,5 +818,97 @@ mod tests {
             "{unset}"
         );
         assert!(!unset.contains("CLAUDE_CONFIG_DIR="), "{unset}");
+    }
+
+    /// A launch whose files and worktree are all there, in `dir`.
+    fn staged(dir: &Path) -> Launch {
+        fs::write(dir.join("prompt.md"), "role\n").unwrap();
+        fs::write(dir.join("mcp.json"), MCP_CONFIG).unwrap();
+        Launch {
+            prompt: dir.join("prompt.md"),
+            settings: dir.join("settings.json"),
+            mcp: dir.join("mcp.json"),
+            script: dir.join("launch.sh"),
+            config_hash: String::new(),
+            manifest: Value::Null,
+            line: String::new(),
+            mode_note: None,
+        }
+    }
+
+    fn command<'a>(
+        dir: &'a Path,
+        claude_config: &'a ClaudeConfig,
+        hosts: &'a [String],
+    ) -> Command<'a> {
+        Command {
+            role: Role::Builder,
+            session_id: "s1",
+            run_id: "r1",
+            worktree: dir,
+            tiller_home: Path::new("/home/user/.tiller"),
+            claude: "claude",
+            claude_config,
+            model: "sonnet",
+            effort: Effort::Medium,
+            mode: "dontAsk",
+            review_hosts: hosts,
+            start: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn preflight_refuses_launch_with_missing_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let launch = staged(dir.path());
+        let config = ClaudeConfig::default();
+        let hosts = vec!["board.example.com".to_owned()];
+        let command = command(dir.path(), &config, &hosts);
+        let good = script(&command, &launch);
+        preflight(&good, &command, &launch).unwrap();
+
+        // A script that lost the allowed hosts, or the auto-memory switch.
+        for name in [
+            "LAVISH_AXI_ALLOWED_HOSTS",
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+        ] {
+            let broken = good.replace(name, "OTHER");
+            let error = preflight(&broken, &command, &launch).unwrap_err();
+            assert!(error.to_string().contains(name), "{error}");
+        }
+        // Hosts that differ from the configured ones are not the same launch.
+        let wrong = good.replace("board.example.com", "other.example.com");
+        assert!(preflight(&wrong, &command, &launch).is_err());
+        // No hosts configured means none are required.
+        let none = Vec::new();
+        let plain = self::command(dir.path(), &config, &none);
+        preflight(&script(&plain, &launch), &plain, &launch).unwrap();
+    }
+
+    #[test]
+    fn preflight_refuses_a_launch_missing_its_files_or_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let launch = staged(dir.path());
+        let config = ClaudeConfig::default();
+        let command = command(dir.path(), &config, &[]);
+        let text = script(&command, &launch);
+        // The MCP config must be explicit on the command line.
+        let loose = text.replace("--strict-mcp-config", "");
+        assert!(
+            preflight(&loose, &command, &launch)
+                .unwrap_err()
+                .to_string()
+                .contains("MCP")
+        );
+        fs::remove_file(&launch.prompt).unwrap();
+        let error = preflight(&text, &command, &launch).unwrap_err();
+        assert!(error.to_string().contains("role file"), "{error}");
+        let gone = command_in(&config);
+        let error = preflight(&text, &gone, &staged(dir.path())).unwrap_err();
+        assert!(error.to_string().contains("worktree"), "{error}");
+    }
+
+    fn command_in(claude_config: &ClaudeConfig) -> Command<'_> {
+        command(Path::new("/home/user/missing-worktree"), claude_config, &[])
     }
 }

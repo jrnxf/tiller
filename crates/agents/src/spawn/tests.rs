@@ -7,14 +7,16 @@ use std::process::Command;
 use std::sync::{Arc, Barrier, Mutex};
 
 use tempfile::TempDir;
-use tiller_core::domain::{CardKind, Pr, PrState, Size};
+use tiller_core::domain::{Artifact, ArtifactKind, CardKind, Pr, PrState, Size};
 use tiller_core::state::caches::QuotaReading;
 use tiller_core::state::cards::NewCard;
+use tiller_core::state::records::NewArtifact;
 use tiller_core::{Actor, Ctx};
 use tiller_herdr::fake::{FakeHerdr, Screen};
 use tiller_herdr::testing::{Fleet, owner};
 use tiller_reconcile::git::GitScanner;
 
+use super::listeners::NoListeners;
 use super::*;
 
 pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
@@ -92,6 +94,34 @@ struct PoolLog {
     taken: Vec<(PathBuf, String, String, String)>,
     /// `(path, holder)` per return.
     returned: Vec<(PathBuf, String)>,
+}
+
+/// A review server that records the pages it was asked to end, and refuses
+/// them all while `refuse` is set.
+#[derive(Clone, Default)]
+pub(crate) struct FakeListeners {
+    ended: Arc<Mutex<Vec<PathBuf>>>,
+    refuse: Arc<Mutex<bool>>,
+}
+
+impl FakeListeners {
+    pub(crate) fn ended(&self) -> Vec<PathBuf> {
+        self.ended.lock().unwrap().clone()
+    }
+
+    pub(crate) fn refuse(&self, refuse: bool) {
+        *self.refuse.lock().unwrap() = refuse;
+    }
+}
+
+impl Listeners for FakeListeners {
+    fn end(&self, page: &Path) -> Result<(), String> {
+        if *self.refuse.lock().unwrap() {
+            return Err("the review server is not answering".into());
+        }
+        self.ended.lock().unwrap().push(page.to_owned());
+        Ok(())
+    }
 }
 
 /// A treehouse that cuts each worktree from the checkout's local base
@@ -200,6 +230,7 @@ pub(crate) struct Rig {
     pub(crate) pool: FakePool,
     pub(crate) herdr: FakeHerdr,
     pub(crate) scanner: GitScanner,
+    pub(crate) listeners: FakeListeners,
     pub(crate) config: SpawnConfig,
     pub(crate) tiller: PathBuf,
     pub(crate) scratch: PathBuf,
@@ -217,6 +248,7 @@ macro_rules! world {
             pool: &$rig.pool,
             herdr: &$rig.herdr,
             scanner: &$rig.scanner,
+            listeners: &$rig.listeners,
             tiller: &$rig.tiller,
             scratch_root: &$rig.scratch,
             tiller_home: &$rig.tiller_home,
@@ -254,6 +286,7 @@ impl Rig {
             pool,
             herdr,
             scanner: GitScanner::new(),
+            listeners: FakeListeners::default(),
             ram_free_mb: Some(64_000),
             disk_free_mb: Some(64_000),
         }
@@ -675,6 +708,7 @@ fn race(rig: &Rig, cards: &[Card]) -> Vec<Result<Outcome>> {
                         pool: &pool,
                         herdr: &herdr,
                         scanner: &scanner,
+                        listeners: &NoListeners,
                         tiller: &tiller,
                         scratch_root: &scratch,
                         tiller_home: Path::new("/data/tiller"),
@@ -944,6 +978,11 @@ fn cleanup_refuses_with_unlanded_commits() {
     rig.sql("UPDATE hosts SET lane_capacity = 32");
     // Every combination: the worktree goes back only when it holds nothing.
     for bits in 0..16_u8 {
+        // Sixteen spawns would trip the spawn rate limit: age the earlier
+        // runs out of its window.
+        rig.sql(
+            "UPDATE runs SET started_at = strftime('%Y-%m-%dT%H:%M:%fZ', started_at, '-1 hour')",
+        );
         let holding = Holding {
             unpushed: bits & 1 != 0,
             dirty: bits & 2 != 0,
@@ -2190,5 +2229,178 @@ fn a_direct_pr_brief_tells_the_worker_to_commit_and_never_push() {
     for (delivery, stage) in [("no-mistakes", "launched"), ("local-only", "pre-launch")] {
         let line = delivery_line(&delivery_project(delivery, stage));
         assert!(!line.contains(commit_only), "{line}");
+    }
+}
+
+#[test]
+fn respawn_storm_trips_rate_limit_not_host() {
+    let mut rig = Rig::new();
+    let ctx = rig.orchestrator();
+    let cards: Vec<Card> = (0..6).map(|_| rig.card(CardKind::Ship, None)).collect();
+    // Each run ends at once, so lanes are free and only the rate can refuse.
+    for card in &cards[..5] {
+        let spawned = rig.spawn(card, RunRole::Builder);
+        rig.done(&spawned.run.id, RunOutcome::Abandoned).unwrap();
+    }
+    let taken = rig.pool.taken().len();
+    let error = rig
+        .try_spawn(&ctx, Rig::request(&cards[5], RunRole::Builder))
+        .unwrap_err();
+    let why = refusal(&error);
+    assert!(why.contains("spawn rate limit"), "{error}");
+    assert!(why.contains("5 spawns in the last 10 minutes"), "{error}");
+    // Refused before anything was leased, and the host itself is fine.
+    assert_eq!(rig.pool.taken().len(), taken);
+    let degraded: i64 = rig
+        .fleet
+        .store
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind = 'host.degraded'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(degraded, 0);
+
+    // Runs that started before the window no longer count.
+    rig.sql("UPDATE runs SET started_at = '2026-01-01T00:00:00Z'");
+    rig.try_spawn(&ctx, Rig::request(&cards[5], RunRole::Builder))
+        .unwrap();
+}
+
+/// A review page the run published, recorded as the worker would.
+fn publish_page(rig: &mut Rig, card: &Card, run: &str, path: &str) -> Artifact {
+    rig.fleet
+        .store
+        .artifact_add(
+            &owner(),
+            NewArtifact {
+                card: card.display_id.clone(),
+                run_id: Some(run.to_owned()),
+                kind: ArtifactKind::Page,
+                title: "Review".into(),
+                url: None,
+                path: Some(path.to_owned()),
+            },
+        )
+        .unwrap()
+        .value
+}
+
+fn artifact(rig: &Rig, id: &str) -> Artifact {
+    get(rig.fleet.store.conn(), "artifact", id).unwrap()
+}
+
+#[test]
+fn cleanup_retires_task_review_listeners() {
+    let mut rig = Rig::new();
+    let card = rig.card(CardKind::Ship, None);
+    let other = rig.card(CardKind::Ship, None);
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    let neighbour = rig.spawn(&other, RunRole::Builder);
+    let run = spawned.run.id.clone();
+    let page = publish_page(&mut rig, &card, &run, "/home/user/.lavish/plan.html");
+    let second = publish_page(&mut rig, &card, &run, "/home/user/.lavish/diff.html");
+    let theirs = publish_page(
+        &mut rig,
+        &other,
+        &neighbour.run.id,
+        "/home/user/.lavish/theirs.html",
+    );
+    rig.done(&run, RunOutcome::Abandoned).unwrap();
+    rig.herdr.close_pane(&spawned.pane_id).unwrap();
+
+    // The review server is down: the pages stay live, and say so.
+    rig.listeners.refuse(true);
+    let cleaned = rig.cleanup(&run).unwrap();
+    assert_eq!(cleaned.warnings.len(), 2, "{:?}", cleaned.warnings);
+    assert!(
+        cleaned.warnings[0].contains("plan.html"),
+        "{:?}",
+        cleaned.warnings
+    );
+    assert!(artifact(&rig, &page.id).retired_at.is_none());
+
+    // Cleaning again once it answers retires them, and only the run's own.
+    rig.listeners.refuse(false);
+    let again = rig.cleanup(&run).unwrap();
+    assert!(again.warnings.is_empty(), "{:?}", again.warnings);
+    assert_eq!(
+        rig.listeners.ended(),
+        vec![
+            PathBuf::from("/home/user/.lavish/plan.html"),
+            PathBuf::from("/home/user/.lavish/diff.html"),
+        ]
+    );
+    for id in [&page.id, &second.id] {
+        assert!(artifact(&rig, id).retired_at.is_some());
+        assert_eq!(rig.events("artifact.retired", id), 1);
+    }
+    assert!(artifact(&rig, &theirs.id).retired_at.is_none());
+
+    // A third cleanup has nothing left to end.
+    rig.cleanup(&run).unwrap();
+    assert_eq!(rig.listeners.ended().len(), 2);
+}
+
+#[test]
+fn worker_env_sets_review_allowed_hosts() {
+    let mut rig = Rig::with_config(
+        "\n[spawn]\nreview_allowed_hosts = [\"board.example.com\", \"192.0.2.10\"]\n",
+    );
+    let card = rig.card(CardKind::Ship, None);
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    let dir = rig.scratch.join(&spawned.run.id);
+    let script = std::fs::read_to_string(dir.join("launch.sh")).unwrap();
+    assert!(
+        script.contains("LAVISH_AXI_ALLOWED_HOSTS='board.example.com 192.0.2.10'"),
+        "{script}"
+    );
+
+    // A relaunch and a resume start the review server the same way.
+    let run = rig.run(&spawned.run.id);
+    let again = launch::AgainSpec {
+        role: roles::Role::Builder,
+        session_id: "01J0000000000000000000RELA",
+        run_id: &run.id,
+        worktree: Path::new(&spawned.worktree),
+        scratch: &dir,
+        tiller_home: &rig.tiller_home,
+        model: &run.model,
+        effort: run.effort,
+        claude: &rig.config.spawn.claude,
+        claude_config: &rig.claude,
+        review_hosts: &rig.config.spawn.review_allowed_hosts,
+    };
+    launch::write_again(&again, launch::Start::Fresh { note: "again" }).unwrap();
+    let relaunch =
+        std::fs::read_to_string(dir.join("relaunch-01J0000000000000000000RELA.sh")).unwrap();
+    assert!(
+        relaunch.contains("LAVISH_AXI_ALLOWED_HOSTS='board.example.com 192.0.2.10'"),
+        "{relaunch}"
+    );
+
+    // With none configured, the launch sets nothing and the server keeps its
+    // loopback default.
+    let mut plain = Rig::new();
+    let card = plain.card(CardKind::Ship, None);
+    let spawned = plain.spawn(&card, RunRole::Builder);
+    let script =
+        std::fs::read_to_string(plain.scratch.join(&spawned.run.id).join("launch.sh")).unwrap();
+    assert!(!script.contains("LAVISH_AXI_ALLOWED_HOSTS"), "{script}");
+}
+
+#[test]
+fn review_allowed_hosts_names_hostnames() {
+    for bad in ["\"\"", "\"a.example.com b.example.com\""] {
+        let table: toml::Table = format!("[spawn]\nreview_allowed_hosts = [{bad}]\n")
+            .parse()
+            .unwrap();
+        let error = SpawnConfig::from_table(&table).unwrap_err();
+        assert!(
+            error.to_string().contains("review_allowed_hosts"),
+            "{error}"
+        );
     }
 }

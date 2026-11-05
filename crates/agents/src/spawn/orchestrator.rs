@@ -175,6 +175,7 @@ pub fn start(
         tiller: world.tiller,
         default_branch: &project.default_branch,
         network_allow: &world.config.spawn.network_allow,
+        review_hosts: &world.config.spawn.review_allowed_hosts,
         no_mistakes_socket: world.config.spawn.no_mistakes_socket.as_deref(),
         gh_login_readable: false,
         claude: &world.config.spawn.claude,

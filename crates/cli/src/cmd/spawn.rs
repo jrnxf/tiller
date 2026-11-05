@@ -9,6 +9,7 @@ use clap::Args;
 use serde_json::json;
 use tiller_agents::control::Waits;
 use tiller_agents::spawn::config::{Paths, SpawnConfig};
+use tiller_agents::spawn::listeners::Lavish;
 use tiller_agents::spawn::pool::Treehouse;
 use tiller_agents::spawn::trust::ClaudeConfig;
 use tiller_agents::spawn::{self as agents, Request, SpawnError, World, readings};
@@ -70,6 +71,7 @@ pub struct Tools {
     pool: Treehouse,
     herdr: Cli,
     scanner: GitScanner,
+    listeners: Lavish,
     tiller: PathBuf,
     tiller_home: PathBuf,
     scratch: PathBuf,
@@ -121,6 +123,19 @@ pub fn herdr_program(paths: &Paths) -> Vec<OsString> {
     crate::daemon::env_command("TILLER_HERDR").unwrap_or_else(|| words(&paths.herdr))
 }
 
+/// The review page tool `tiller spawn` ends pages with and the daemon reads
+/// their annotations from: `TILLER_LAVISH_AXI` when set (tests and labs),
+/// else `spawn.lavish`.
+pub fn lavish_program(paths: &Paths) -> Vec<OsString> {
+    crate::daemon::env_command("TILLER_LAVISH_AXI").unwrap_or_else(|| words(&paths.lavish))
+}
+
+/// [`lavish_program`] from a `config.toml` already read.
+pub fn lavish_from_config(table: &toml::Table) -> Result<Vec<OsString>, Failure> {
+    let paths = Paths::from_table(table).map_err(failure)?;
+    Ok(lavish_program(&paths))
+}
+
 /// The daemon's and `tiller peer serve`'s herdr, from the `[spawn]` table of
 /// `config.toml`: the one `tiller spawn` drives, unless `TILLER_HERDR`
 /// replaces it, socket and all.
@@ -146,6 +161,7 @@ impl Tools {
             pool: Treehouse::new(words(&config.spawn.treehouse)),
             herdr,
             scanner: GitScanner::new(),
+            listeners: Lavish::new(lavish_program(&config.spawn)),
             tiller: std::env::current_exe()?,
             tiller_home: absolute_home(&app.home)?,
             scratch,
@@ -175,6 +191,7 @@ impl Tools {
             pool: &self.pool,
             herdr: &self.herdr,
             scanner: &self.scanner,
+            listeners: &self.listeners,
             tiller: &self.tiller,
             scratch_root: &self.scratch,
             tiller_home: &self.tiller_home,

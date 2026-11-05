@@ -146,6 +146,14 @@ pub struct Paths {
     pub herdr_socket: Option<PathBuf>,
     /// Hosts the worker sandbox may reach (`<network_allow>`).
     pub network_allow: Vec<String>,
+    /// The hostnames the developer opens review links by. Every launch
+    /// exports them as `LAVISH_AXI_ALLOWED_HOSTS`, so the review server a
+    /// worker starts accepts requests for those names (P49); empty serves
+    /// loopback only.
+    pub review_allowed_hosts: Vec<String>,
+    /// The review page tool's command, which ends a run's review listeners at
+    /// its cleanup (P48).
+    pub lavish: Vec<String>,
     /// The `no-mistakes` daemon socket, when this host has one.
     pub no_mistakes_socket: Option<String>,
     /// The treehouse pool root, which the orchestrator may not edit
@@ -169,6 +177,8 @@ impl Default for Paths {
             herdr: vec!["herdr".into()],
             herdr_socket: None,
             network_allow: ["github.com", "api.github.com"].map(String::from).into(),
+            review_allowed_hosts: Vec::new(),
+            lavish: vec!["lavish-axi".into()],
             no_mistakes_socket: None,
             pool_root: None,
             checkouts_root: None,
@@ -230,10 +240,23 @@ impl SpawnConfig {
             }
         }
         let spawn = &self.spawn;
-        if spawn.treehouse.is_empty() || spawn.herdr.is_empty() || spawn.claude.is_empty() {
+        if spawn.treehouse.is_empty()
+            || spawn.herdr.is_empty()
+            || spawn.claude.is_empty()
+            || spawn.lavish.is_empty()
+        {
             return Err(SpawnError::Config(
-                "spawn: treehouse, herdr and claude each name a command".into(),
+                "spawn: treehouse, herdr, claude and lavish each name a command".into(),
             ));
+        }
+        if let Some(bad) = spawn
+            .review_allowed_hosts
+            .iter()
+            .find(|host| host.is_empty() || host.contains(char::is_whitespace))
+        {
+            return Err(SpawnError::Config(format!(
+                "spawn: review_allowed_hosts names hostnames, not {bad:?}"
+            )));
         }
         let quota = &self.quota;
         if !(0.0..100.0).contains(&quota.account_floor_percent)

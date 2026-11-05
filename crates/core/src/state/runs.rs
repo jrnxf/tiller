@@ -623,6 +623,59 @@ pub fn floor_refusal(name: &str, floor: Option<i64>, free: Option<i64>) -> Optio
     }
 }
 
+/// The spawn rate limit (`recovery.md` R16, P48): runs started in this many
+/// minutes are counted.
+pub const SPAWN_RATE_MINUTES: i64 = 10;
+/// More than this many spawns for one project in [`SPAWN_RATE_MINUTES`] trips
+/// the limit.
+pub const SPAWN_RATE_PROJECT: i64 = 5;
+/// More than this many spawns on one host in [`SPAWN_RATE_MINUTES`] trips the
+/// limit.
+pub const SPAWN_RATE_HOST: i64 = 10;
+
+/// Refuses a spawn or a relaunch past the spawn rate, so a respawn storm
+/// trips this limit and not the host's RAM, disk or process table. Returns
+/// the counts it saw. Every run row counts, ended or failed, since each one
+/// launched (or tried to launch) a worker.
+fn check_spawn_rate(
+    conn: &Connection,
+    host: &Host,
+    project: &Project,
+    now: Timestamp,
+) -> Result<(i64, i64)> {
+    let since = now.plus_minutes(-SPAWN_RATE_MINUTES);
+    let project_spawns: i64 = conn.query_row(
+        "SELECT count(*) FROM runs r JOIN cards c ON c.id = r.card_id
+         WHERE c.project_id = ?1 AND r.started_at >= ?2",
+        params![project.id, since],
+        |row| row.get(0),
+    )?;
+    if project_spawns >= SPAWN_RATE_PROJECT {
+        return Err(Error::refused(
+            "project",
+            &project.id,
+            format!(
+                "spawn rate limit: {project_spawns} spawns in the last {SPAWN_RATE_MINUTES} minutes, limit {SPAWN_RATE_PROJECT}; wait for the window to pass"
+            ),
+        ));
+    }
+    let host_spawns: i64 = conn.query_row(
+        "SELECT count(*) FROM runs WHERE host_id = ?1 AND started_at >= ?2",
+        params![host.id, since],
+        |row| row.get(0),
+    )?;
+    if host_spawns >= SPAWN_RATE_HOST {
+        return Err(Error::refused(
+            "host",
+            &host.label,
+            format!(
+                "spawn rate limit: {host_spawns} spawns in the last {SPAWN_RATE_MINUTES} minutes, limit {SPAWN_RATE_HOST}; wait for the window to pass"
+            ),
+        ));
+    }
+    Ok((project_spawns, host_spawns))
+}
+
 fn check_spawn(
     conn: &Connection,
     host: &Host,
@@ -631,6 +684,7 @@ fn check_spawn(
     now: Timestamp,
 ) -> Result<Value> {
     let (host_reserved, project_reserved) = check_capacity(conn, host, project)?;
+    let (project_spawns, host_spawns) = check_spawn_rate(conn, host, project, now)?;
     let floor = |name: &str, floor: Option<i64>, free: Option<i64>| -> Result<()> {
         match floor_refusal(name, floor, free) {
             Some(why) => Err(Error::refused("host", &host.label, why)),
@@ -680,6 +734,8 @@ fn check_spawn(
         "lane_capacity": host.lane_capacity,
         "project_reserved": project_reserved,
         "project_capacity": project.capacity,
+        "project_spawns": project_spawns,
+        "host_spawns": host_spawns,
         "ram_free_mb": checks.ram_free_mb,
         "ram_floor_mb": host.ram_floor_mb,
         "disk_free_mb": checks.disk_free_mb,

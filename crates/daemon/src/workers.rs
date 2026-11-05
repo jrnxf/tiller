@@ -21,6 +21,7 @@ use tiller_core::domain::{Host, HostKind, PipelineState, Session};
 use tiller_core::state::list;
 use tiller_core::{Actor, Ctx, Store, Timestamp};
 use tiller_delivery::outbox::Deliverer;
+use tiller_delivery::sources::{Lavish, PageAnswers};
 use tiller_herdr::client::{Cli, Herdr};
 use tiller_herdr::poller::{HerdrSource, PollError, Registry, Source};
 use tiller_observe::tailer::Tailer;
@@ -86,6 +87,9 @@ pub struct Tools {
     pub quota: Vec<OsString>,
     /// The GitHub CLI program.
     pub gh: String,
+    /// `lavish-axi`, with any leading arguments: the review page tool the
+    /// page answers are read from (`protocol.md` 3.5).
+    pub lavish: Vec<OsString>,
 }
 
 /// The host's boot id, when the OS reports one (R04).
@@ -575,6 +579,7 @@ pub fn start(
         store: open()?,
         herdr: tools.herdr.clone(),
     };
+    let pages = PageAnswers::new(open()?, Lavish::new(tools.lavish.clone()));
     let quota = crate::quota::Feed::new(open()?, tools.quota.clone(), settings.quota_providers);
 
     let mut handles = Vec::new();
@@ -587,6 +592,7 @@ pub fn start(
     spawn(registry, finished, stop, &mut handles);
     spawn(registry, transcripts, stop, &mut handles);
     spawn(registry, quota, stop, &mut handles);
+    spawn(registry, pages, stop, &mut handles);
     Ok(handles)
 }
 

@@ -72,6 +72,8 @@ pub struct Config {
     /// (`[herdr] terminal`); none means a focus only.
     pub terminal: Option<Arc<dyn Terminal>>,
     pub quota: Vec<OsString>,
+    /// `lavish-axi`: the review page tool whose annotations reach workers.
+    pub lavish: Vec<OsString>,
     /// The GitHub CLI the land loop and the direct-pr publish run as the
     /// owner's login: `gh`, or `TILLER_GH`.
     pub gh: String,
@@ -249,6 +251,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         herdr: config.herdr.clone(),
         quota: config.quota.clone(),
         gh: config.gh.clone(),
+        lavish: config.lavish.clone(),
     };
     let workers = tokio::spawn(start_workers(
         config.home.clone(),

@@ -1558,3 +1558,127 @@ fn a_failed_spawn_does_not_wake_the_orchestrator() {
         .unwrap();
     assert_eq!(orchestrator_notes(&store, &orchestrator).len(), before);
 }
+
+/// R16: more than five spawns in ten minutes on a project, or ten on the
+/// host, refuses the next one; the window passing lifts it. Every run row
+/// counts, ended or not.
+#[test]
+fn a_respawn_storm_trips_the_spawn_rate_limit() {
+    let (mut store, _) = memory_store();
+    let at = |minutes: i64| Timestamp::from_millis(1_900_000_000_000 + minutes * 60_000).unwrap();
+    for id in ["beta", "gamma"] {
+        store
+            .project_add(
+                &owner(),
+                NewProject {
+                    id: id.into(),
+                    name: id.into(),
+                    repo: Some(format!("example/{id}")),
+                    remote: None,
+                    default_branch: None,
+                    delivery: Delivery::DirectPr,
+                    checks: None,
+                    capacity: Some(3),
+                    deploy_workflow: None,
+                    deploy_environment: None,
+                    deploy_timeout_minutes: None,
+                },
+            )
+            .unwrap();
+        store
+            .session_start(
+                &owner(),
+                NewOrchestrator {
+                    project_id: id.into(),
+                    claude_session_id: Some(format!("claude-{id}")),
+                    ..NewOrchestrator::default()
+                },
+            )
+            .unwrap();
+    }
+    let spawn = |store: &mut Store, project: &str, minute: i64| {
+        let new = NewCard {
+            project_id: project.into(),
+            ..card(CardKind::Ship, "work")
+        };
+        let card = store.card_create(&owner(), None, new, None).unwrap().value;
+        let ctx = Ctx::at(Actor::Owner, at(minute));
+        let started = store.run_start(&ctx, None, builder_run(&card.id));
+        if let Ok(started) = &started {
+            let end = super::runs::EndRun {
+                outcome: RunOutcome::Abandoned,
+                note: None,
+            };
+            store.run_end(&ctx, &started.value.run.id, end).unwrap();
+        }
+        started.map(drop)
+    };
+
+    for _ in 0..5 {
+        spawn(&mut store, "alpha", 0).unwrap();
+    }
+    let error = spawn(&mut store, "alpha", 1).unwrap_err().to_string();
+    assert!(
+        error.contains("spawn rate limit: 5 spawns in the last 10 minutes, limit 5"),
+        "{error}"
+    );
+    // Another project is still served, until the host has had ten.
+    for _ in 0..5 {
+        spawn(&mut store, "beta", 2).unwrap();
+    }
+    let error = spawn(&mut store, "gamma", 3).unwrap_err().to_string();
+    assert!(
+        error.contains("spawn rate limit: 10 spawns in the last 10 minutes, limit 10"),
+        "{error}"
+    );
+    // The window passes.
+    spawn(&mut store, "alpha", 11).unwrap();
+    spawn(&mut store, "gamma", 11).unwrap();
+}
+
+/// P48: retiring an artifact is recorded once; retiring it again changes
+/// nothing. P47: feedback on a page is recorded on the card, once per key,
+/// and by the daemon only.
+#[test]
+fn artifact_retire_and_feedback_are_recorded_once() {
+    let (mut store, _) = memory_store();
+    let card = store
+        .card_create(&owner(), None, card(CardKind::Ship, "mock"), None)
+        .unwrap()
+        .value;
+    let page = store
+        .artifact_add(
+            &owner(),
+            super::records::NewArtifact {
+                card: card.id.clone(),
+                run_id: None,
+                kind: ArtifactKind::Page,
+                title: "Mock".into(),
+                url: None,
+                path: Some("/home/user/pages/mock.html".into()),
+            },
+        )
+        .unwrap()
+        .value;
+
+    let entry = serde_json::json!({"prompt": "bigger"});
+    let denied = store
+        .artifact_feedback(&owner(), "page:1", &page.id, entry.clone())
+        .unwrap_err();
+    assert_eq!(denied.code(), "forbidden");
+    let first = store
+        .artifact_feedback(&daemon(), "page:1", &page.id, entry.clone())
+        .unwrap();
+    assert!(!first.replayed);
+    let again = store
+        .artifact_feedback(&daemon(), "page:1", &page.id, entry)
+        .unwrap();
+    assert!(again.replayed);
+
+    let retired = store.artifact_retire(&owner(), &page.id).unwrap();
+    assert_eq!(retired.events.len(), 1);
+    assert!(retired.value.retired_at.is_some());
+    let twice = store.artifact_retire(&owner(), &page.id).unwrap();
+    assert!(twice.replayed);
+    assert!(twice.events.is_empty());
+}

@@ -17,6 +17,7 @@ use std::sync::Mutex;
 
 use tiller_agents::spawn::World;
 use tiller_agents::spawn::config::SpawnConfig;
+use tiller_agents::spawn::listeners::NoListeners;
 use tiller_agents::spawn::pool::Pool;
 use tiller_agents::spawn::trust::ClaudeConfig;
 use tiller_core::domain::{Boundary, Card, Project};
@@ -204,6 +205,7 @@ impl Sandbox {
             pool: &self.pool,
             herdr: &self.herdr,
             scanner: &self.scanner,
+            listeners: &NoListeners,
             tiller: &self.tiller,
             scratch_root: &self.scratch,
             tiller_home: &self.home,

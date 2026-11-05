@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::outbox::{NewMessage, enqueue};
+use super::projects::require_daemon;
 use super::{get, list, refuse, required, resolve_card, resolve_id};
 use crate::domain::*;
 use crate::error::{Error, Result};
@@ -238,6 +239,56 @@ impl Store {
                     .payload(json!({"kind": new.kind, "title": new.title, "url": new.url})),
             )?;
             get(tx.conn(), "artifact", &id)
+        })
+    }
+
+    /// `artifact.retire`: the artifact's page is no longer served (cleanup
+    /// ended its review listener), so nothing polls it any more. Retiring a
+    /// retired artifact changes nothing.
+    pub fn artifact_retire(&mut self, ctx: &Ctx, artifact: &str) -> Result<Applied<Artifact>> {
+        self.write(ctx, "artifact.retire", None, |tx| {
+            let id = resolve_id(tx.conn(), "artifacts", "artifact", artifact)?;
+            let found: Artifact = get(tx.conn(), "artifact", &id)?;
+            if found.retired_at.is_some() {
+                return Ok(found);
+            }
+            tx.conn().execute(
+                "UPDATE artifacts SET retired_at = ?2 WHERE id = ?1",
+                params![found.id, tx.now()],
+            )?;
+            tx.event(
+                NewEvent::new("artifact", &found.id, "artifact.retired")
+                    .card(&found.card_id)
+                    .payload(
+                        json!({"kind": found.kind, "title": found.title, "run_id": found.run_id}),
+                    ),
+            )?;
+            get(tx.conn(), "artifact", &found.id)
+        })
+    }
+
+    /// `artifact.feedback` (daemon): an annotation on a review page that no
+    /// session takes, because its card is closed or its run ended with no
+    /// orchestrator to tell. It is recorded on the card's timeline and wakes
+    /// nobody (`protocol.md` 3.5). Keyed by the entry, so a replay writes
+    /// nothing.
+    pub fn artifact_feedback(
+        &mut self,
+        ctx: &Ctx,
+        key: &str,
+        artifact: &str,
+        entry: Value,
+    ) -> Result<Applied<Artifact>> {
+        require_daemon(&ctx.actor, "artifact.feedback")?;
+        self.write(ctx, "artifact.feedback", Some(key), |tx| {
+            let id = resolve_id(tx.conn(), "artifacts", "artifact", artifact)?;
+            let found: Artifact = get(tx.conn(), "artifact", &id)?;
+            tx.event(
+                NewEvent::new("artifact", &found.id, "artifact.feedback")
+                    .card(&found.card_id)
+                    .payload(json!({"title": found.title, "run_id": found.run_id, "entry": entry})),
+            )?;
+            Ok(found)
         })
     }
 

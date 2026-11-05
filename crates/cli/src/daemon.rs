@@ -21,7 +21,7 @@ use tiller_herdr::client::Cli;
 use tiller_herdr::front::{MacApp, Terminal};
 
 use crate::cmd::admin::{load_config, load_config_at};
-use crate::cmd::spawn::herdr_from_config;
+use crate::cmd::spawn::{herdr_from_config, lavish_from_config};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -153,6 +153,7 @@ pub fn run(args: &Args) -> anyhow::Result<ExitCode> {
         herdr,
         terminal: terminal.map(|app| Arc::new(app) as _),
         quota: command_line("TILLER_QUOTA_AXI", "quota-axi"),
+        lavish: lavish_from_config(&table).map_err(failed)?,
         ssh: command_line("TILLER_SSH", "ssh"),
         gh: std::env::var("TILLER_GH").unwrap_or_else(|_| "gh".into()),
         assets: Assets::board(),

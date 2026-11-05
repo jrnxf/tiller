@@ -349,6 +349,7 @@ pub fn resume(
             effort: run.effort,
             claude: &world.config.spawn.claude,
             claude_config: world.claude_config,
+            review_hosts: &world.config.spawn.review_allowed_hosts,
         },
         Start::Resume {
             claude_session_id: &claude_id,
@@ -1180,6 +1181,7 @@ fn start_again(
         tiller: world.tiller,
         default_branch: &project.default_branch,
         network_allow: &world.config.spawn.network_allow,
+        review_hosts: &world.config.spawn.review_allowed_hosts,
         no_mistakes_socket: world.config.spawn.no_mistakes_socket.as_deref(),
         gh_login_readable: project.effective_delivery() == Delivery::NoMistakes,
         claude: &world.config.spawn.claude,

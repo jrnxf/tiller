@@ -466,6 +466,8 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `obligation.cancel` | orchestrator, owner | obligation `open` | `obligations.state` | `obligation.cancelled` |
 | `obligation.meet` | reconcile; daemon inside `deploy.record` | trigger event written in this transaction | `obligations.met*`, `outbox` | `obligation.met`, `outbox.enqueued` |
 | `artifact.add` | worker, orchestrator | card exists | `artifacts` | `artifact.added` |
+| `artifact.retire` | daemon, orchestrator, owner (inside run cleanup, P48) | artifact exists; retiring a retired one changes nothing | `artifacts.retired_at` | `artifact.retired` |
+| `artifact.feedback` | daemon (the review page poller, `protocol.md` 3.5) | artifact exists; keyed by the feedback entry | nothing | `artifact.feedback` on the artifact's card |
 | `review.record` | worker, daemon | run exists | `reviews` | `review.recorded` |
 | `handoff.write` | orchestrator | session live | `handoffs` | `handoff.written` |
 | `cache.refresh` | pollers | none | `panes`, `worktrees`, `quota_windows`, `hosts.last_seen_at` | `host.changed`, `pane.changed`, `worktree.changed`, `quota.changed` only on a change |
