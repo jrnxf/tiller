@@ -132,6 +132,15 @@ export function ApproveBlock({ item }: { item: AttentionItem }) {
           <div className="acts">
             <button
               type="button"
+              className="btn lg"
+              disabled={pending || off !== null}
+              title={off ?? undefined}
+              onClick={reject.trigger}
+            >
+              {reject.pending ? "Rejecting..." : "Reject"}
+            </button>
+            <button
+              type="button"
               className="btn primary lg"
               // Until the new head arrives there is nothing current to approve.
               disabled={pending || headSha === shown?.shown || off !== null}
@@ -139,15 +148,6 @@ export function ApproveBlock({ item }: { item: AttentionItem }) {
               onClick={accept.trigger}
             >
               {accept.pending ? "Approving..." : `Approve ${shortSha(headSha)}`}
-            </button>
-            <button
-              type="button"
-              className="btn lg"
-              disabled={pending || off !== null}
-              title={off ?? undefined}
-              onClick={reject.trigger}
-            >
-              {reject.pending ? "Rejecting..." : "Reject"}
             </button>
           </div>
         )}

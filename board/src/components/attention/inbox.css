@@ -412,6 +412,10 @@ a.irow:hover {
   margin-top: 12px;
 }
 
+.inbox .appr .acts {
+  justify-content: flex-end;
+}
+
 .note-in {
   width: 100%;
   height: 34px;
