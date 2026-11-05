@@ -164,6 +164,15 @@ impl Defer {
     }
 }
 
+/// A pane whose composer holds a session's wake-up line, ready for Enter.
+struct Ready {
+    pane_id: String,
+    /// Every line a pass may have typed for the batch.
+    lines: Vec<String>,
+    /// This pass typed the line, rather than finding it there.
+    typed: bool,
+}
+
 /// A session whose wake-up line is typed and waits for Enter.
 struct Flight {
     session: Session,
@@ -426,7 +435,11 @@ impl<H: Herdr> Deliverer<H> {
 
         let ring = self.ring(&session, &unacked)?;
         let oldest = unacked[0].id.clone();
-        let (pane_id, lines, typed) = match ring {
+        let Ready {
+            pane_id,
+            lines,
+            typed,
+        } = match ring {
             Ok(ready) => ready,
             Err(defer) => {
                 if defer.held {
@@ -465,7 +478,7 @@ impl<H: Herdr> Deliverer<H> {
         &mut self,
         session: &Session,
         unacked: &[OutboxMessage],
-    ) -> Result<std::result::Result<(String, Vec<String>, bool), Defer>> {
+    ) -> Result<std::result::Result<Ready, Defer>> {
         if unacked.is_empty() {
             return Ok(Err(Defer::new(BUSY_DEFER_SECS, "nothing to ring")));
         }
@@ -536,7 +549,11 @@ impl<H: Herdr> Deliverer<H> {
                 return Ok(Err(Defer::new(BUSY_DEFER_SECS, "composer unreadable")));
             }
         };
-        Ok(Ok((pane_id, lines, typed)))
+        Ok(Ok(Ready {
+            pane_id,
+            lines,
+            typed,
+        }))
     }
 
     fn defer(
