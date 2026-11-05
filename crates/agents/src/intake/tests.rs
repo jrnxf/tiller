@@ -358,12 +358,51 @@ fn context_line_tells_the_orchestrator_how_to_resolve() {
     assert_eq!(
         context(output.as_ref()),
         format!(
-            "tiller: ask {} (short {short}) recorded. Before this turn ends run: tiller ask resolve {short} new|followup:<card>|chat|cancelled. Start each line about a card with its tag, like [alpha-42].",
+            "tiller: ask {} (short {short}) recorded. Before this turn ends run: tiller ask resolve {short} new|followup:<card>|chat|cancelled. Start each line about a card with its tag, like [alpha-42]. Project alpha: 1 free run slot: spawn at most one run, leave other cards queued and say they are queued, not started.",
             ask.id
         )
     );
     assert_eq!(ask.disposition, Disposition::Unresolved);
     assert_eq!(ask.session_id.as_deref(), Some(world.orchestrator.as_str()));
+}
+
+/// The T5.2 replay (a23.6): a full project's orchestrator was never told so,
+/// spawned past the limit and reported the refused card as started.
+#[test]
+fn context_line_says_when_the_project_has_no_free_run_slot() {
+    let mut world = World::new();
+    let card = new_card(&mut world.store, "the sign-out link");
+    world
+        .store
+        .run_start(
+            &Ctx::new(Actor::Session(world.orchestrator.clone())),
+            None,
+            NewRun {
+                card: card.id,
+                role: RunRole::Builder,
+                model: "test-model".into(),
+                effort: Effort::Medium,
+                host_id: None,
+                worktree_path: None,
+                branch: None,
+                base_branch: None,
+                base_sha: None,
+                config_hash: None,
+                checks: SpawnChecks::default(),
+            },
+        )
+        .unwrap();
+    assert_eq!(world.store.project_free_runs("alpha").unwrap(), 0);
+    let (_, output) = world.hook(
+        &Hooks::default(),
+        "UserPromptSubmit",
+        json!({"prompt": "drop sign-out", "prompt_id": "p9"}),
+    );
+    let text = context(output.as_ref());
+    assert!(
+        text.contains("Project alpha: no free run slots: a spawn would be refused, so leave the card queued and say it is queued, not started."),
+        "{text}"
+    );
 }
 
 #[test]
