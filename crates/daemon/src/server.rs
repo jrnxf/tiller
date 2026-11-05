@@ -249,12 +249,14 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
     }
 
     let registry = Registry::new();
+    let tool_versions = Arc::new(Mutex::new(Value::Null));
     let tools = Tools {
         herdr: config.herdr.clone(),
         quota: config.quota.clone(),
         gh: config.gh.clone(),
         lavish: config.lavish.clone(),
         review_hosts: config.review_hosts.clone(),
+        versions: Arc::clone(&tool_versions),
     };
     let workers = tokio::spawn(start_workers(
         config.home.clone(),
@@ -266,12 +268,15 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         Arc::clone(&fatal),
     ));
 
-    let tool_versions = Arc::new(Mutex::new(Value::Null));
+    // Health answers before `tiller init`, when no worker reads the tools.
     {
-        let (slot, tools) = (Arc::clone(&tool_versions), tools.clone());
+        let tools = tools.clone();
         std::thread::spawn(move || {
-            let versions = read_versions(&tools);
-            *slot.lock().unwrap_or_else(PoisonError::into_inner) = versions;
+            let versions = workers::read_tool_versions(&tools).tools;
+            *tools
+                .versions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = versions;
         });
     }
 
@@ -439,36 +444,6 @@ async fn start_workers(
             _ = stop.changed() => {}
         }
     }
-}
-
-/// The versions of the tools the daemon drives (P43), each `null` when not
-/// found. Read once, off the request path.
-fn read_versions(tools: &Tools) -> Value {
-    let version = |program: &[OsString], arg: &str| -> Value {
-        let Some((first, rest)) = program.split_first() else {
-            return Value::Null;
-        };
-        let output = std::process::Command::new(first)
-            .args(rest)
-            .arg(arg)
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output();
-        match output {
-            Ok(output) if output.status.success() => {
-                let text = String::from_utf8_lossy(&output.stdout);
-                text.lines()
-                    .next()
-                    .map_or(Value::Null, |line| Value::String(line.trim().to_owned()))
-            }
-            _ => Value::Null,
-        }
-    };
-    json!({
-        "tiller": env!("CARGO_PKG_VERSION"),
-        "quota-axi": version(&tools.quota, "--version"),
-        "git": version(&[OsString::from("git")], "--version"),
-    })
 }
 
 /// Installs the SIGINT and SIGTERM handlers, the signals launchd and systemd

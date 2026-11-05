@@ -31,9 +31,12 @@ pub mod launch;
 pub mod listeners;
 pub mod orchestrator;
 pub mod pool;
+pub mod promote;
 pub mod readings;
 pub mod trust;
 
+#[cfg(test)]
+mod promote_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -42,8 +45,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::Value;
 use tiller_core::domain::{
-    Artifact, Card, CardKind, Delivery, Effort, Pr, Project, Reservation, Run, RunOutcome, RunRole,
-    Session, Worktree,
+    Artifact, Card, CardKind, CheckPlan, Delivery, Effort, Pr, Project, Reservation, Run,
+    RunOutcome, RunRole, Session, Worktree,
 };
 use tiller_core::state::caches::{WorktreeReading, landed_heads};
 use tiller_core::state::projects::meta;
@@ -144,7 +147,49 @@ pub fn delivery_line(project: &Project) -> String {
             " Commit only, never push: describe the PR with `tiller pr describe` and report done; the daemon pushes the branch and opens the PR.",
         );
     }
+    if effective == Delivery::DirectPush {
+        line.push_str(&direct_push_line(&project.checks));
+    }
     line.push('\n');
+    line
+}
+
+/// The `direct-push` worker's part of the delivery line (P11): run the
+/// project's own checks, commit, never push. The daemon lands the commit on
+/// the default branch once it is approved or a grant covers it, then watches
+/// the deploy.
+fn direct_push_line(checks: &serde_json::Value) -> String {
+    let mut line = String::from(
+        " Commit only, never push: the daemon lands your commit on the default branch after approval and then watches the deploy.",
+    );
+    let Ok(plan) = CheckPlan::parse(checks) else {
+        return line;
+    };
+    if plan.is_empty() {
+        line.push_str(" The project names no checks; run what the repository's own docs ask for.");
+        return line;
+    }
+    let list = |commands: &[String]| {
+        if commands.is_empty() {
+            "none".to_owned()
+        } else {
+            commands
+                .iter()
+                .map(|command| format!("`{command}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+    line.push_str(&format!(
+        " Before you report done run the project checks and fix what they find: {}.",
+        list(&plan.full)
+    ));
+    if let Some(lighter) = &plan.no_logic {
+        line.push_str(&format!(
+            " A change that touches no logic (docs, comments, copy, formatting) runs only: {}.",
+            list(lighter)
+        ));
+    }
     line
 }
 
@@ -219,6 +264,17 @@ fn holder(run: &Run) -> String {
     format!("tiller:{}", run.id)
 }
 
+/// The lease holder of the worktree a run works in: the run that took it
+/// from the pool. A promotion or a new attempt continues in its
+/// predecessor's worktree, so the chain's first run holds the lease.
+fn lease_holder(store: &Store, run: &Run) -> Result<String> {
+    let mut root = run.clone();
+    while let Some(id) = root.predecessor_run_id.clone() {
+        root = get(store.conn(), "run", &id)?;
+    }
+    Ok(holder(&root))
+}
+
 pub(crate) fn role_of(role: RunRole) -> Result<roles::Role> {
     roles::Role::parse(role.as_str())
         .ok_or_else(|| SpawnError::Usage(format!("no packaged role for {role}")))
@@ -287,30 +343,7 @@ pub fn spawn(
         },
     )?;
     if started.replayed {
-        let run: Run = get(store.conn(), "run", &started.value.run.id)?;
-        let session: Session = get(store.conn(), "session", &started.value.session.id)?;
-        // The key's first answer was an error, so its replay is one too.
-        if session.end_reason.as_deref() == Some("spawn_failed") {
-            return Err(SpawnError::Refused(format!(
-                "this key already spawned run {}, which failed: {}; spawn again with a new key",
-                run.id,
-                run.outcome_note.as_deref().unwrap_or("no reason recorded")
-            )));
-        }
-        if run.ended_at.is_none() && session.pane_id.is_none() {
-            return Err(SpawnError::Refused(format!(
-                "this key already started run {}, and its spawn stopped before a pane opened; end it with tiller done {} --outcome failed, then spawn again",
-                run.id, run.id
-            )));
-        }
-        return Ok(Applied {
-            value: Outcome::Replayed {
-                run: Box::new(run),
-                session: Box::new(session),
-            },
-            events: started.events,
-            replayed: true,
-        });
+        return replay(store, started);
     }
     let mut made = Made {
         events: started.events,
@@ -331,6 +364,34 @@ pub fn spawn(
         }
         Err(error) => Err(fail(store, ctx, world, &started.run, &made, error)),
     }
+}
+
+/// The answer to a spawn whose key already started a run.
+fn replay(store: &Store, started: Applied<Started>) -> Result<Applied<Outcome>> {
+    let run: Run = get(store.conn(), "run", &started.value.run.id)?;
+    let session: Session = get(store.conn(), "session", &started.value.session.id)?;
+    // The key's first answer was an error, so its replay is one too.
+    if session.end_reason.as_deref() == Some("spawn_failed") {
+        return Err(SpawnError::Refused(format!(
+            "this key already spawned run {}, which failed: {}; spawn again with a new key",
+            run.id,
+            run.outcome_note.as_deref().unwrap_or("no reason recorded")
+        )));
+    }
+    if run.ended_at.is_none() && session.pane_id.is_none() {
+        return Err(SpawnError::Refused(format!(
+            "this key already started run {}, and its spawn stopped before a pane opened; end it with tiller done {} --outcome failed, then spawn again",
+            run.id, run.id
+        )));
+    }
+    Ok(Applied {
+        value: Outcome::Replayed {
+            run: Box::new(run),
+            session: Box::new(session),
+        },
+        events: started.events,
+        replayed: true,
+    })
 }
 
 /// What a spawn made, so a step that fails can undo it, and the events its
@@ -355,7 +416,7 @@ fn place(
     started: &Started,
     made: &mut Made,
 ) -> Result<Spawned> {
-    let (run, session) = (&started.run, &started.session);
+    let run = &started.run;
     let branch = branch_name(&card.display_id, run.role, run.attempt);
     let worktree = world
         .pool
@@ -388,11 +449,36 @@ fn place(
         )));
     }
 
-    let scratch = world.scratch_root.join(&run.id);
-    let mut brief = match &request.brief {
+    let brief = match &request.brief {
         Some(brief) => brief.clone(),
         None => card_brief(card),
     };
+    launch_in(
+        store, ctx, world, card, project, role, started, &worktree, &branch, base_sha, brief, made,
+    )
+}
+
+/// The rest of a spawn once the run has a worktree at `base_sha`: the
+/// launch files, the herdr workspace and the launch line. A promotion
+/// reaches it with the scout's worktree.
+#[allow(clippy::too_many_arguments)]
+fn launch_in(
+    store: &mut Store,
+    ctx: &Ctx,
+    world: &World<'_>,
+    card: &Card,
+    project: &Project,
+    role: roles::Role,
+    started: &Started,
+    worktree: &Path,
+    branch: &str,
+    base_sha: String,
+    mut brief: String,
+    made: &mut Made,
+) -> Result<Spawned> {
+    let (run, session) = (&started.run, &started.session);
+    let worktree_text = worktree.to_string_lossy().into_owned();
+    let scratch = world.scratch_root.join(&run.id);
     if run.role == RunRole::Builder {
         brief.push_str(&delivery_line(project));
     }
@@ -401,7 +487,7 @@ fn place(
         role,
         session_id: &session.id,
         run_id: &run.id,
-        worktree: &worktree,
+        worktree,
         scratch: &scratch,
         tiller_home: world.tiller_home,
         model: &run.model,
@@ -435,7 +521,7 @@ fn place(
     made.events.extend(placed.events);
 
     let label = layout::worker_label(&card.display_id, run.role, true);
-    let created = world.herdr.create_workspace(&label, Some(&worktree))?;
+    let created = world.herdr.create_workspace(&label, Some(worktree))?;
     made.pane = Some(created.pane_id.clone());
     let placed = store.run_place(
         ctx,
@@ -464,7 +550,7 @@ fn place(
         session,
         reservation: started.reservation.clone(),
         worktree: worktree_text,
-        branch,
+        branch: branch.to_owned(),
         base_sha,
         pane_id: created.pane_id,
         workspace_id: created.workspace_id,
@@ -804,6 +890,40 @@ pub fn cleanup(
             replayed,
         });
     }
+    // A successor run (a promotion, a new attempt) works in the same
+    // worktree: it goes back with the last run that holds it.
+    if let Some(path) = &run.worktree_path
+        && let Some(active) = find::<Run>(
+            store.conn(),
+            "host_id = ?1 AND worktree_path = ?2 AND ended_at IS NULL AND id != ?3",
+            &[&run.host_id, path, &run.id],
+        )?
+    {
+        return Err(SpawnError::Refused(format!(
+            "{path} is in use by run {}; cleanup returns it with the last run that works there",
+            active.id
+        )));
+    }
+    // A scout whose report still awaits the developer keeps its worktree:
+    // "go" promotes it in place (P07).
+    if run.role == RunRole::Scout {
+        let waiting: i64 = store
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM attention a JOIN cards c ON c.id = a.card_id
+                 WHERE a.card_id = ?1 AND c.state = 'open' AND a.kind = 'report'
+                   AND a.answered_at IS NULL AND a.withdrawn_at IS NULL",
+                [&run.card_id],
+                |row| row.get(0),
+            )
+            .map_err(tiller_core::Error::from)?;
+        if waiting > 0 {
+            return Err(SpawnError::Refused(format!(
+                "run {} reported, and the card waits for the developer's answer; cleanup keeps its worktree until the card closes or the scout is promoted",
+                run.id
+            )));
+        }
+    }
     let open = dead_panes(store, world.herdr, &run)?;
     let mut warnings = Vec::new();
     let Some(path) = run.worktree_path.clone() else {
@@ -826,6 +946,7 @@ pub fn cleanup(
             replayed: false,
         });
     };
+    let lease = lease_holder(store, &run)?;
     let project = project_of(store, &run)?;
     let (scan, mut events) =
         scan_and_record(store, ctx, world.scanner, &run, &project, Path::new(&path))?;
@@ -847,7 +968,7 @@ pub fn cleanup(
     }
     events.extend(retire_listeners(store, ctx, world, &run, &mut warnings)?);
     let mut returned = None;
-    match world.pool.give_back(Path::new(&path), &holder(&run)) {
+    match world.pool.give_back(Path::new(&path), &lease) {
         Ok(()) => returned = Some(path),
         Err(e) => warnings.push(format!(
             "{path} is recorded clean and gone but treehouse did not take it back ({e}); return it with treehouse return"

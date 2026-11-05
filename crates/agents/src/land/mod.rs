@@ -27,8 +27,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tiller_core::domain::{
-    Approval, ApprovalKind, ApprovalState, AttentionKind, Checks, Delivery, Finish, Grant,
-    MergeGate, Pr, PrState, Project, Run,
+    Approval, ApprovalKind, ApprovalState, AttentionKind, CheckPlan, Checks, Delivery, Finish,
+    Grant, MergeGate, Pr, PrState, Project, Run,
 };
 use tiller_core::state::approvals::{Execution, NewApproval};
 use tiller_core::state::attention::NewAttention;
@@ -749,13 +749,12 @@ fn waiting(approval: Approval, why: String) -> Landed {
 }
 
 /// A `direct-push` project whose `checks` names any check needs the forge's
-/// result for the pushed SHA.
+/// result for the pushed SHA. A shape `CheckPlan` does not read counts as
+/// naming one, so a bad value never lets a push skip the gate.
 fn needs_checks(project: &Project) -> bool {
-    match &project.checks {
-        serde_json::Value::Null => false,
-        serde_json::Value::Array(list) => !list.is_empty(),
-        serde_json::Value::Object(map) => !map.is_empty(),
-        _ => true,
+    match CheckPlan::parse(&project.checks) {
+        Ok(plan) => !plan.is_empty(),
+        Err(_) => true,
     }
 }
 

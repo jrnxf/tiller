@@ -12,11 +12,8 @@
 //! `[spawn]` tables of `config.toml`, then the bare program name.
 
 use std::ffi::OsString;
-use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -25,6 +22,7 @@ use tiller_agents::spawn::config::SpawnConfig;
 use tiller_core::Timestamp;
 use tiller_herdr::client::{Cli, Herdr};
 use tiller_observe::hooks::{EVENTS, Handler};
+use tiller_reconcile::tools::{self, PROBE_TIMEOUT, read_version, version_parts};
 
 use super::admin::{config_file, load_config};
 use super::spawn::{herdr_program, words};
@@ -35,9 +33,6 @@ use crate::daemon::env_command;
 /// against (`host-capabilities.md`). A newer one is a warning: it may add
 /// events the table does not map.
 const CLAUDE_CHECKED: &str = "2.1.312";
-
-/// A tool that answers `--version` within this long is alive.
-const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The Firstmate scripts whose presence in the process list means a
 /// Firstmate is supervising this host: the supervisor daemon and the
@@ -114,62 +109,6 @@ struct Report {
     merge_gates: Vec<Gate>,
 }
 
-/// `program --version` within [`PROBE_TIMEOUT`]: the first line of stdout.
-fn read_version(program: &[OsString]) -> Result<String, String> {
-    let (first, rest) = program.split_first().ok_or("no command is configured")?;
-    run_first_line(first, rest, "--version").and_then(|line| line.ok_or("printed nothing".into()))
-}
-
-/// Runs the command with one more argument; `Ok(Some(line))` is the first
-/// non-empty stdout line, `Ok(None)` a clean exit that printed nothing.
-fn run_first_line(
-    first: &OsString,
-    rest: &[OsString],
-    arg: &str,
-) -> Result<Option<String>, String> {
-    let mut child = Command::new(first)
-        .args(rest)
-        .args(arg.split_whitespace())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("cannot run {}: {error}", first.to_string_lossy()))?;
-    let mut stdout = child.stdout.take();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut text = String::new();
-        if let Some(pipe) = stdout.as_mut() {
-            let _ = pipe.read_to_string(&mut text);
-        }
-        let _ = tx.send(text);
-    });
-    let deadline = Instant::now() + PROBE_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("did not answer within {PROBE_TIMEOUT:?}"));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(error) => return Err(error.to_string()),
-        }
-    };
-    if !status.success() {
-        return Err(format!("exited with {status}"));
-    }
-    let text = rx
-        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        .map_err(|_| "kept its output open".to_owned())?;
-    Ok(text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_owned))
-}
-
 /// One tool that must (or may) answer `--version`.
 fn tool(name: &str, required: bool, program: &[OsString]) -> Check {
     match read_version(program) {
@@ -202,22 +141,10 @@ fn herdr(program: Vec<OsString>) -> Check {
     }
 }
 
-/// The numeric parts of a version such as `2.1.312 (Claude Code)`.
-fn parts(version: &str) -> Vec<u64> {
-    version
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .trim_start_matches('v')
-        .split('.')
-        .map_while(|part| part.parse().ok())
-        .collect()
-}
-
 fn claude(program: &[OsString]) -> Check {
     let mut check = tool("claude", true, program);
     if let Some(version) = &check.version
-        && parts(version) > parts(CLAUDE_CHECKED)
+        && version_parts(version) > version_parts(CLAUDE_CHECKED)
     {
         check.status = Status::Warn;
         check.detail = format!(
@@ -228,29 +155,51 @@ fn claude(program: &[OsString]) -> Check {
     check
 }
 
-/// The no-mistakes daemon, when the CLI is installed. This CLI's `daemon
-/// status` does not report the daemon's version, so skew against the CLI is
-/// not readable and the check says so.
+/// The no-mistakes daemon, when the CLI is installed. The CLI's `daemon
+/// status` does not report the daemon's version, so it is read from the
+/// binary the daemon's pid runs (`tools::running_daemon_version`) and
+/// compared with the CLI's: a daemon on another version than its CLI is a
+/// warning, the shape of the Firstmate regression where an upgraded CLI kept
+/// talking to an old daemon.
 fn no_mistakes(cli: &Check) -> Check {
+    const NAME: &str = "no-mistakes daemon";
     if cli.status != Status::Ok {
+        return Check::new(NAME, false, Status::Warn, "the no-mistakes CLI is missing");
+    }
+    let running = match tools::run_first_line("no-mistakes".as_ref(), &[], "daemon status") {
+        Ok(line) => line.unwrap_or_else(|| "running".into()),
+        Err(error) => return Check::missing(NAME, false, error),
+    };
+    no_mistakes_skew(
+        &running,
+        cli.version.as_deref(),
+        tools::running_daemon_version(),
+    )
+}
+
+/// The verdict on a running daemon, given the CLI's version line and the
+/// daemon's, when it could be read.
+fn no_mistakes_skew(running: &str, cli: Option<&str>, daemon: Option<String>) -> Check {
+    const NAME: &str = "no-mistakes daemon";
+    let Some(daemon) = daemon else {
         return Check::new(
-            "no-mistakes daemon",
+            NAME,
             false,
             Status::Warn,
-            "the no-mistakes CLI is missing",
+            format!(
+                "{running}; its version could not be read, so skew against the CLI was not checked"
+            ),
         );
-    }
-    match run_first_line(&"no-mistakes".into(), &[], "daemon status") {
-        Ok(line) => Check::new(
-            "no-mistakes daemon",
+    };
+    match tools::skew(cli, Some(&daemon)) {
+        Some(skew) => Check::new(NAME, false, Status::Warn, skew).version(Some(daemon)),
+        None => Check::new(
+            NAME,
             false,
             Status::Ok,
-            format!(
-                "{}; the CLI does not report the daemon's version, so skew is not checked",
-                line.unwrap_or_else(|| "running".into())
-            ),
-        ),
-        Err(error) => Check::missing("no-mistakes daemon", false, error),
+            format!("{running}; same version as its CLI"),
+        )
+        .version(Some(daemon)),
     }
 }
 
@@ -670,7 +619,7 @@ pub fn run(app: &App) -> Done {
 
 #[cfg(test)]
 mod tests {
-    use super::{Status, firstmate, firstmate_scripts, owner_marker, parts};
+    use super::{Status, firstmate, firstmate_scripts, no_mistakes_skew, owner_marker};
 
     const FM: &str = "bash /opt/fm/bin/fm-watch.sh\n/bin/zsh -l\nbash /opt/fm/bin/fm-supervise-daemon.sh --loop\n";
 
@@ -722,10 +671,21 @@ mod tests {
     }
 
     #[test]
-    fn versions_compare_by_number_not_text() {
-        assert!(parts("2.1.312 (Claude Code)") == vec![2, 1, 312]);
-        assert!(parts("2.1.1000") > parts("2.1.312"));
-        assert!(parts("v3.1.2") == vec![3, 1, 2]);
-        assert!(parts("herdr 0.9.5").is_empty());
+    fn no_mistakes_daemon_older_than_its_cli_warns() {
+        let cli = Some("no-mistakes version v1.106.1 (a1b2c3d) 2026-11-01");
+        let old = || Some("no-mistakes version v1.84.0 (4822244) 2026-09-26".to_owned());
+        let skewed = no_mistakes_skew("daemon running (pid 7)", cli, old());
+        assert_eq!(skewed.status, Status::Warn);
+        assert!(
+            skewed.detail.contains("older than its CLI"),
+            "{}",
+            skewed.detail
+        );
+        assert!(!skewed.failed());
+        let same = no_mistakes_skew("daemon running (pid 7)", cli, cli.map(str::to_owned));
+        assert_eq!(same.status, Status::Ok);
+        let unread = no_mistakes_skew("daemon running (pid 7)", cli, None);
+        assert_eq!(unread.status, Status::Warn);
+        assert!(unread.detail.contains("could not be read"));
     }
 }

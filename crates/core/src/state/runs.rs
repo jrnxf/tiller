@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::approvals::active_away;
+use super::attention::withdraw_attention;
 use super::cards::landed_evidence;
 use super::outbox::{NewMessage, enqueue, live_orchestrator};
 use super::projects::{local_host_id, require_daemon};
@@ -47,6 +48,16 @@ pub struct NewRun {
     pub base_branch: Option<String>,
     pub base_sha: Option<String>,
     pub config_hash: Option<String>,
+    pub checks: SpawnChecks,
+}
+
+/// A scout's promotion to a builder run on the same card and worktree.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Promote {
+    /// The ended scout run, as a run reference.
+    pub scout_run: String,
+    pub model: String,
+    pub effort: Effort,
     pub checks: SpawnChecks,
 }
 
@@ -907,6 +918,176 @@ impl Store {
                     })),
             )?;
             let session = insert_run_session(tx, &run, &project.id, new.config_hash.as_deref())?;
+            Ok(Started {
+                run,
+                session,
+                reservation,
+            })
+        })
+    }
+
+    /// `run.start` for a promotion (P07): the developer said go on a scout's
+    /// report, so a builder run starts on the same card, in the scout's
+    /// worktree and on its branch, and the card becomes a ship card. It is
+    /// the execute decision again (`authority.md`, section 4 notes), so the
+    /// actor, capacity and floors are `run.start`'s. Keyed.
+    ///
+    /// The scout run has ended `reported`, its worktree is still held (never
+    /// cleaned), and no attention item is open on the card: the report's
+    /// choices are answered before the work they ask for starts.
+    pub fn run_promote(
+        &mut self,
+        ctx: &Ctx,
+        key: Option<&str>,
+        promote: Promote,
+    ) -> Result<Applied<Started>> {
+        required("model", &promote.model)?;
+        self.write(ctx, "run.start", key, |tx| {
+            let scout = load_run(tx, &promote.scout_run)?;
+            if scout.role != RunRole::Scout {
+                return Err(Error::refused(
+                    "run",
+                    &scout.id,
+                    format!("only a scout is promoted; this run is a {}", scout.role),
+                ));
+            }
+            if scout.outcome != Some(RunOutcome::Reported) {
+                return Err(Error::refused(
+                    "run",
+                    &scout.id,
+                    "a scout is promoted once it has ended reported; end it with tiller done first",
+                ));
+            }
+            let (Some(path), Some(branch)) = (&scout.worktree_path, &scout.branch) else {
+                return Err(Error::refused("run", &scout.id, "the scout has no worktree to promote in"));
+            };
+            let worktree: Option<Worktree> = find(
+                tx.conn(),
+                "host_id = ?1 AND path = ?2",
+                &[&scout.host_id, path],
+            )?;
+            let cleaned: bool = tx.conn().query_row(
+                "SELECT EXISTS (SELECT 1 FROM events WHERE entity = 'run' AND entity_id = ?1 AND kind = 'run.cleaned')",
+                [&scout.id],
+                |row| row.get(0),
+            )?;
+            if cleaned || worktree.as_ref().is_none_or(|w| w.gone_at.is_some()) {
+                return Err(Error::refused(
+                    "run",
+                    &scout.id,
+                    "the scout's worktree was already returned; spawn a builder on a fresh worktree instead",
+                ));
+            }
+            let card: Card = get(tx.conn(), "card", &scout.card_id)?;
+            if card.state != CardState::Open {
+                return Err(Error::refused("card", &card.display_id, "card is closed"));
+            }
+            // A promotion that failed after it committed left the card a
+            // ship card; it may be retried while the scout's worktree is held.
+            let retried: bool = tx.conn().query_row(
+                "SELECT EXISTS (SELECT 1 FROM events WHERE entity = 'card' AND entity_id = ?1 AND kind = 'card.promoted')",
+                [&card.id],
+                |row| row.get(0),
+            )?;
+            if card.kind != CardKind::Scout && !(card.kind == CardKind::Ship && retried) {
+                return Err(Error::refused(
+                    "card",
+                    &card.display_id,
+                    format!("only a scout card is promoted; this one is {}", card.kind),
+                ));
+            }
+            // The report's choices are what "go" answers; any other open
+            // question is not, and stays the owner's first.
+            let open: Vec<Attention> = list(
+                tx.conn(),
+                "card_id = ?1 AND answered_at IS NULL AND withdrawn_at IS NULL",
+                &[&card.id],
+            )?;
+            if let Some(other) = open.iter().find(|item| item.kind != AttentionKind::Report) {
+                return Err(Error::refused(
+                    "card",
+                    &card.display_id,
+                    format!("a {} item is open; answer it before promoting", other.kind),
+                ));
+            }
+            if let Some(active) = find::<Run>(
+                tx.conn(),
+                "card_id = ?1 AND ended_at IS NULL AND (worktree_path = ?2 OR role = 'builder')",
+                &[&card.id, path],
+            )? {
+                return Err(Error::refused(
+                    "card",
+                    &card.display_id,
+                    format!("{} run {} is already active on the card", active.role, active.id),
+                ));
+            }
+            let project: Project = get(tx.conn(), "project", &card.project_id)?;
+            if project.retired_at.is_some() {
+                return Err(Error::refused("project", &project.id, "project is retired"));
+            }
+            let supervisor = supervisor(tx.conn(), tx.actor(), &project.id)?;
+            let host: Host = get(tx.conn(), "host", &scout.host_id)?;
+            if host.id != local_host_id(tx.conn())? {
+                return Err(Error::refused("host", &host.label, "promote on the host that holds the worktree"));
+            }
+            let seen = check_spawn(tx.conn(), &host, &project, &promote.checks, tx.now())?;
+            for item in &open {
+                withdraw_attention(tx, item, "the scout was promoted to a ship run")?;
+            }
+
+            let id = ids::new_ulid();
+            let attempt = next_attempt(tx.conn(), &card.id, RunRole::Builder)?;
+            tx.conn().execute(
+                "INSERT INTO runs (id, card_id, role, attempt, predecessor_run_id, model, effort, host_id,
+                                   worktree_path, branch, base_branch, base_sha, supervisor_session_id,
+                                   started_at, idempotency_key)
+                 VALUES (?1, ?2, 'builder', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    id,
+                    card.id,
+                    attempt,
+                    scout.id,
+                    promote.model,
+                    promote.effort,
+                    host.id,
+                    path,
+                    branch,
+                    scout.base_branch,
+                    scout.base_sha,
+                    supervisor.id,
+                    tx.now(),
+                    tx.key(),
+                ],
+            )?;
+            let run: Run = get(tx.conn(), "run", &id)?;
+            let reservation = reserve(tx, &host, &project, &run)?;
+            tx.conn().execute(
+                "UPDATE cards SET kind = 'ship', rev = rev + 1 WHERE id = ?1",
+                [&card.id],
+            )?;
+            tx.event(
+                NewEvent::new("card", &card.id, "card.promoted")
+                    .rev(card.rev + 1)
+                    .card(&card.id)
+                    .payload(json!({"from": "scout", "to": "ship", "scout_run_id": scout.id, "run_id": id})),
+            )?;
+            tx.event(
+                NewEvent::new("run", &id, "run.started")
+                    .rev(1)
+                    .card(&card.id)
+                    .payload(json!({
+                        "role": RunRole::Builder,
+                        "attempt": attempt,
+                        "model": promote.model,
+                        "effort": promote.effort,
+                        "host_id": host.id,
+                        "supervisor_session_id": supervisor.id,
+                        "checks": seen,
+                        "dispatch": promote.checks.dispatch,
+                        "promoted_from_run_id": scout.id,
+                    })),
+            )?;
+            let session = insert_run_session(tx, &run, &project.id, None)?;
             Ok(Started {
                 run,
                 session,

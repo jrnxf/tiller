@@ -83,6 +83,8 @@ pub struct ProjectPlan {
     pub remote: Option<String>,
     pub default_branch: Option<String>,
     pub capacity: Option<i64>,
+    /// The bundle's `checks`, validated; `None` imports the default (none).
+    pub checks: Option<Value>,
     pub added_at: Option<Timestamp>,
     /// False for a project only cards or memory name; it is created retired
     /// when none of its cards is open.
@@ -430,7 +432,8 @@ fn plan_projects(
             ));
         }
         let own_cards: Vec<&CardPlan> = cards.iter().filter(|c| &c.project_id == id).collect();
-        let (delivery, repo, remote, default_branch, capacity, added_at) = match from_bundle {
+        let (delivery, repo, remote, default_branch, capacity, added_at, checks) = match from_bundle
+        {
             Some(p) => (
                 p.delivery
                     .parse::<Delivery>()
@@ -440,8 +443,9 @@ fn plan_projects(
                 p.default_branch.clone().filter(|b| !b.is_empty()),
                 p.capacity,
                 p.added.as_deref().map(bundle_time).transpose()?,
+                p.checks.clone().filter(|checks| !checks.is_null()),
             ),
-            None => (Delivery::LocalOnly, None, None, None, None, None),
+            None => (Delivery::LocalOnly, None, None, None, None, None, None),
         };
         if let Some(n) = capacity
             && n < 1
@@ -451,6 +455,10 @@ fn plan_projects(
                 legacy_id,
                 format!("capacity {n} is below 1"),
             ));
+        }
+        if let Some(checks) = &checks {
+            CheckPlan::parse(checks)
+                .map_err(|error| Error::refused("project", legacy_id, error))?;
         }
         out.push(ProjectPlan {
             legacy_id: legacy_id.clone(),
@@ -465,6 +473,7 @@ fn plan_projects(
             remote,
             default_branch,
             capacity,
+            checks,
             added_at,
             in_bundle_projects: from_bundle.is_some(),
             retire: !exists

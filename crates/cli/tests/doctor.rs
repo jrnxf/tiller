@@ -41,6 +41,20 @@ fn world_with_tools(world: &World) -> std::path::PathBuf {
         "herdr",
         "echo '{\"result\":{\"snapshot\":{\"version\":\"0.9.5\",\"workspaces\":[],\"panes\":[]}}}'",
     );
+    // The no-mistakes daemon runs the same binary as its CLI, found through
+    // its pid file and the process list.
+    let nm_home = world.dir.path().join("no-mistakes-home");
+    fs::create_dir_all(&nm_home).unwrap();
+    fs::write(nm_home.join("daemon.pid"), r#"{"pid":4242}"#).unwrap();
+    script(
+        &bin,
+        "ps",
+        &format!(
+            "case \"$1\" in -axo) ;; *) echo '{} daemon run --root /home/user/.no-mistakes';; esac",
+            bin.join("no-mistakes").display()
+        ),
+    );
+    world.set_env("TILLER_NO_MISTAKES_HOME", nm_home.to_str().unwrap());
     let claude_dir = world.dir.path().join("claude");
     fs::create_dir_all(&claude_dir).unwrap();
     world.set_env("PATH", bin.to_str().unwrap());
@@ -113,6 +127,33 @@ fn unreachable_herdr_fails_the_check() {
         check(&out.json["error"]["current"], "herdr")["status"],
         "fail"
     );
+}
+
+#[test]
+fn a_no_mistakes_daemon_older_than_its_cli_warns_with_the_fix() {
+    let world = World::initialized();
+    let bin = world_with_tools(&world);
+    // The CLI was upgraded; the daemon's process still runs the old binary.
+    script(&bin, "no-mistakes-old", "echo 'no-mistakes version v0.9.0'");
+    script(
+        &bin,
+        "ps",
+        &format!(
+            "case \"$1\" in -axo) ;; *) echo '{} daemon run --root /home/user/.no-mistakes';; esac",
+            bin.join("no-mistakes-old").display()
+        ),
+    );
+    let out = world.run(&["doctor"]);
+    assert_eq!(out.code, 0, "a skew warns, it does not fail: {}", out.json);
+    let daemon = check(out.data(), "no-mistakes daemon");
+    assert_eq!(daemon["status"], "warn");
+    assert_eq!(daemon["version"], "no-mistakes version v0.9.0");
+    let detail = daemon["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("v0.9.0, older than its CLI v1.0.0"),
+        "{detail}"
+    );
+    assert!(detail.contains("no-mistakes daemon restart"), "{detail}");
 }
 
 #[test]

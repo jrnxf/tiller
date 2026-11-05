@@ -189,6 +189,7 @@ pub(crate) fn edit_project(
         return Err(Error::refused("project", &project.id, "project is retired"));
     }
     required("project name", &next.name)?;
+    check_plan(&next.checks)?;
     positive("capacity", next.capacity)?;
     positive("deploy timeout", next.deploy_timeout_minutes)?;
     tx.conn().execute(
@@ -287,6 +288,7 @@ impl Store {
                     deploy_timeout_minutes: None,
                 },
                 &host_id,
+                "none",
             )?;
             let health_card = create_card(
                 tx,
@@ -410,6 +412,7 @@ impl Store {
             )));
         }
         required("project name", &new.name)?;
+        let (new, forge) = resolve_forge(new)?;
         self.write(ctx, "project.add", None, |tx| {
             let host_id = local_host_id(tx.conn())?;
             if let Some(existing) = find::<Project>(tx.conn(), "id = ?1", &[&new.id])? {
@@ -418,7 +421,7 @@ impl Store {
                 }
                 return Err(Error::refused("project", &new.id, "project id is taken"));
             }
-            insert_project(tx, &new, &host_id)?;
+            insert_project(tx, &new, &host_id, forge)?;
             get(tx.conn(), "project", &new.id)
         })
     }
@@ -523,6 +526,40 @@ impl Store {
     }
 }
 
+/// A `checks` value the project may hold (`CheckPlan`'s two shapes).
+fn check_plan(checks: &Value) -> Result<()> {
+    CheckPlan::parse(checks).map(drop).map_err(Error::Usage)
+}
+
+/// Forge detection at `project.add` (P10): reads the remote URL, fills in
+/// `repo` from a GitHub remote when none was given, and refuses a delivery
+/// mode Tiller cannot run against a Gerrit remote. Returns the project to
+/// add and the forge's name for the `project.added` event. Done before the
+/// write so a replay of the same add compares against what was stored.
+fn resolve_forge(mut new: NewProject) -> Result<(NewProject, &'static str)> {
+    let Some(remote) = new.remote.as_deref().filter(|remote| !remote.is_empty()) else {
+        return Ok((new, "none"));
+    };
+    match forge::detect(remote) {
+        Forge::Github { repo } => {
+            if new.repo.is_none() {
+                new.repo = Some(repo);
+            }
+            Ok((new, "github"))
+        }
+        Forge::Gerrit { evidence } => {
+            if new.delivery != Delivery::LocalOnly {
+                return Err(Error::Usage(format!(
+                    "{evidence}: Gerrit is not a forge Tiller publishes to, so project {} can only be local-only",
+                    new.id
+                )));
+            }
+            Ok((new, "gerrit"))
+        }
+        Forge::Other => Ok((new, "other")),
+    }
+}
+
 fn project_matches(existing: &Project, new: &NewProject) -> bool {
     existing.name == new.name
         && existing.repo == new.repo
@@ -553,12 +590,13 @@ pub(crate) fn first_card_seq(conn: &rusqlite::Connection, project_id: &str) -> R
     )?)
 }
 
-fn insert_project(tx: &mut Tx<'_>, new: &NewProject, host_id: &str) -> Result<()> {
+fn insert_project(tx: &mut Tx<'_>, new: &NewProject, host_id: &str, forge: &str) -> Result<()> {
     let capacity = new.capacity.unwrap_or(2);
     positive("capacity", capacity)?;
     let timeout = new.deploy_timeout_minutes.unwrap_or(60);
     positive("deploy timeout", timeout)?;
     let checks = new.checks.clone().unwrap_or_else(|| json!([]));
+    check_plan(&checks)?;
     let first_seq = first_card_seq(tx.conn(), &new.id)?;
     tx.conn().execute(
         "INSERT INTO projects (id, name, repo, remote, default_branch, delivery, checks, capacity,
@@ -585,7 +623,7 @@ fn insert_project(tx: &mut Tx<'_>, new: &NewProject, host_id: &str) -> Result<()
     tx.event(
         NewEvent::new("project", &new.id, "project.added")
             .rev(1)
-            .payload(json!({"name": new.name, "repo": new.repo, "delivery": new.delivery})),
+            .payload(json!({"name": new.name, "repo": new.repo, "delivery": new.delivery, "forge": forge})),
     )?;
     Ok(())
 }
