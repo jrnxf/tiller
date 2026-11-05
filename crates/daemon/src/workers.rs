@@ -272,6 +272,7 @@ impl Source for Land {
 /// source, so a slow remote never holds up landing. Only the holder of the
 /// single-instance lock publishes.
 pub struct Publish {
+    home: PathBuf,
     store: Store,
     lock: Arc<DaemonLock>,
     forge: GhForge,
@@ -290,7 +291,7 @@ impl Source for Publish {
         let lander = Lander {
             forge: &self.forge,
             app: &NoApp,
-            scrub: ScrubList::default(),
+            scrub: scrub_list(&self.home),
         };
         // One run that errors is logged and skipped.
         let pass = lander
@@ -553,6 +554,7 @@ pub fn start(
     };
     let reconcile = Reconcile(Reconciler::new(open()?, config, sources));
     let publish = Publish {
+        home: home.to_owned(),
         store: open()?,
         lock: lock.clone(),
         forge: GhForge::new(tools.gh.clone()),
