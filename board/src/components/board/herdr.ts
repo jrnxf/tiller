@@ -107,7 +107,8 @@ export async function focusAgent(sessionId: string): Promise<FocusResult> {
     if (error.status === 403) {
       return {
         ok: false,
-        message: "This browser is not signed in as the owner. Run `tiller board` for a login link.",
+        message:
+          "This browser is not signed in as the owner. Run `tiller board --login` for a login link.",
       };
     }
     return { ok: false, message: error.message };

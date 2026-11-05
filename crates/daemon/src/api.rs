@@ -31,13 +31,14 @@ use tiller_core::state::asks::NewAsk;
 use tiller_core::state::cards::{CardEdit, NewCard};
 use tiller_core::state::{get as get_row, resolve_id};
 use tiller_core::{Actor, Applied, Ctx, Error, Store, Timestamp, ids};
-use tiller_herdr::client::{Cli, Herdr};
+use tiller_herdr::client::{Cli, Herdr, HerdrError};
 use tiller_herdr::front::{OpenError, PROBE_TIMEOUT, Terminal, Wait, open_agent};
 use tiller_herdr::poller::Registry;
 use tokio::sync::watch;
 
 use crate::assets::{self, Assets};
 use crate::dto::*;
+use crate::mirror::{self, MAX_VIEWERS, Mirrors};
 use crate::peer::forward::{Op, Order};
 use crate::peer::link::{Forwarded, Peers};
 use crate::peer::{Federation, PeerView};
@@ -81,6 +82,8 @@ pub struct Inner {
     pub damage: Damage,
     /// The board's Start orchestrator; none answers it 503.
     pub orchestrators: Option<Arc<dyn OrchestratorStart>>,
+    /// The terminal mirror's open views and input budget.
+    pub mirrors: Mirrors,
 }
 
 /// Starts a project's orchestrator, or returns the live one, as `tiller
@@ -574,6 +577,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/approvals/{id}/decide", post(decide))
         .route("/api/v1/agents", get(agents))
         .route("/api/v1/agents/{session}/focus", post(focus))
+        .route("/api/v1/agents/{session}/terminal", post(terminal))
+        .route(
+            "/api/v1/agents/{session}/terminal/input",
+            post(terminal_input),
+        )
         .route("/api/v1/runs/{id}", get(run))
         .route("/api/v1/machines", get(machines))
         .route("/api/v1/quota", get(quota))
@@ -1993,6 +2001,171 @@ async fn decide(
     submit(&state, &headers, Op::Decide, Some(id), &bytes).await
 }
 
+/// An agent's pane on this machine, for the terminal mirror; an agent on a
+/// saved machine is refused, since herdr's observe stream stays local.
+async fn local_pane(state: &AppState, session: String) -> Result<(String, String), ApiError> {
+    let (session_id, pane, machine) = read(state, move |store| {
+        let id = resolve_id(store.conn(), "sessions", "session", &session)?;
+        let session: Session = get_row(store.conn(), "session", &id)?;
+        let (pane, machine) = tiller_core::state::runs::focus_target(store.conn(), &session)?;
+        Ok((session.id, pane, machine))
+    })
+    .await?;
+    if let Some(machine) = machine {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "refused",
+            format!("the agent runs on the saved machine {machine}; the terminal mirror shows panes on this machine only"),
+        )
+        .hint("open it in herdr instead"));
+    }
+    Ok((session_id, pane))
+}
+
+/// herdr's answer to a pane call, as the board API's error.
+fn pane_error(pane: &str, error: &HerdrError) -> ApiError {
+    match error {
+        HerdrError::Api { code, .. } if code == "pane_not_found" => pane_gone(pane),
+        HerdrError::NotFound { .. } => pane_gone(pane),
+        HerdrError::Api { code, message, .. } if code == "invalid_key" => {
+            ApiError::usage(format!("herdr refused a key: {message}"))
+        }
+        error => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            error.to_string(),
+        ),
+    }
+}
+
+fn pane_gone(pane: &str) -> ApiError {
+    let mut error = ApiError::new(
+        StatusCode::NOT_FOUND,
+        "not_found",
+        format!("herdr has no pane {pane}; the agent's pane closed"),
+    );
+    error.body.error.entity = Some("pane".to_owned());
+    error.body.error.id = Some(pane.to_owned());
+    error
+}
+
+/// The terminal mirror: the agent's live pane as NDJSON (`protocol.md`
+/// 7.4). A POST, so it passes every mutation check, owner cookie included,
+/// though it writes nothing.
+#[utoipa::path(post, path = "/api/v1/agents/{session}/terminal", tag = "mutations", request_body = TerminalOpen,
+    params(("session" = String, Path)),
+    responses((status = 200, content_type = "application/x-ndjson", body = TerminalLine,
+               description = "One `TerminalLine` per line: `size`, then `frame`s, until `closed` or `unavailable` or the end of the body"),
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
+              (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a saved machine"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
+              (status = 503, body = ErrorBody, description = "herdr is unreachable, or too many terminal views are open")))]
+async fn terminal(
+    State(state): State<AppState>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> Result<Response, ApiError> {
+    guard(&state, &headers)?;
+    let request: TerminalOpen = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "the terminal mirror").await?;
+    let (_, pane) = local_pane(&state, session).await?;
+    let viewer = state.0.mirrors.viewer().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            format!("{MAX_VIEWERS} terminal views are open; close one first"),
+        )
+    })?;
+    let herdr = state.0.herdr.clone();
+    let asked = pane.clone();
+    let size = tokio::task::spawn_blocking(move || herdr.pane_size(&asked))
+        .await
+        .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?;
+    let size = match size {
+        Ok(Some(size)) => size,
+        Ok(None) => return Err(pane_gone(&pane)),
+        Err(error) => return Err(pane_error(&pane, &error)),
+    };
+    let body = mirror::stream(
+        state.0.herdr.clone(),
+        pane,
+        size,
+        state.0.stop.clone(),
+        viewer,
+    );
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/x-ndjson"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+/// Keys or a paste for the agent's pane, through herdr (`protocol.md` 7.4).
+#[utoipa::path(post, path = "/api/v1/agents/{session}/terminal/input", tag = "mutations", request_body = TerminalInput,
+    params(("session" = String, Path)),
+    responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody),
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a saved machine"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
+              (status = 503, body = ErrorBody, description = "herdr is unreachable, or input came faster than 20 a second; nothing was sent")))]
+async fn terminal_input(
+    State(state): State<AppState>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers)?;
+    let request: TerminalInput = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "terminal input").await?;
+    let input = match (request.keys, request.text) {
+        (Some(keys), None) => mirror::check_keys(&keys).map(|()| Ok(keys)),
+        (None, Some(text)) => mirror::check_text(&text).map(|()| Err(text)),
+        _ => Err("send exactly one of keys and text".to_owned()),
+    }
+    .map_err(ApiError::usage)?;
+    let (session_id, pane) = local_pane(&state, session).await?;
+    if !state.0.mirrors.spend() {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "input came faster than 20 a second; nothing was sent",
+        )
+        .hint("send it again in a moment"));
+    }
+    let herdr = state.0.herdr.clone();
+    let target = pane.clone();
+    let sent = tokio::task::spawn_blocking(move || match input {
+        Ok(keys) => {
+            let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+            herdr
+                .send_keys(&target, &keys)
+                .map(|()| json!({"keys": keys.len()}))
+        }
+        Err(text) => herdr
+            .send_text(&target, &text)
+            .map(|()| json!({"text": text.len()})),
+    })
+    .await
+    .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
+    .map_err(|error| pane_error(&pane, &error))?;
+    Ok(Json(MutationResponse {
+        ok: true,
+        replayed: false,
+        events: Vec::new(),
+        receipt: Receipt {
+            recorded_at: Timestamp::now().to_string(),
+            outbox_id: None,
+            approval_id: None,
+        },
+        data: json!({"session_id": session_id, "sent": sent}),
+        host: None,
+    }))
+}
+
 /// The core's refusal when the approval binds another head than the one
 /// the board showed.
 const HEAD_MOVED: &str = "the head moved since it was shown";
@@ -2149,11 +2322,11 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, stage_project, ask_note, start_orchestrator, project_delete_preview, delete_project, project_retire_preview, retire_project,
+        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, stage_project, ask_note, start_orchestrator, project_delete_preview, delete_project, project_retire_preview, retire_project,
         relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo
     ),
-    components(schemas(ChangeEvent, ResetEvent, PeerEvent, LinkEvent, PeerResetEvent, ErrorBody, ErrorDetail)),
+    components(schemas(ChangeEvent, ResetEvent, PeerEvent, LinkEvent, PeerResetEvent, TerminalLine, ErrorBody, ErrorDetail)),
     tags(
         (name = "reads", description = "Reads, served to any request that passes the Host check"),
         (name = "mutations", description = "Mutations: owner cookie, JSON body, same origin"),
@@ -2235,6 +2408,7 @@ pub(crate) mod tests {
             tools: Arc::new(Mutex::new(Value::Null)),
             damage,
             orchestrators: None,
+            mirrors: Mirrors::default(),
         }))
     }
 
@@ -3407,6 +3581,269 @@ esac"#,
             calls().lines().collect::<Vec<_>>(),
             ["terminal title clear", "--machine m-1 agent focus w3:p1"]
         );
+    }
+
+    /// A herdr for the terminal mirror: it logs each call, gives the pane
+    /// the size in `{dir}/size` (`cols rows`), and observes by recording
+    /// its pid, writing one full frame and sleeping as that same process.
+    fn mirror_herdr(dir: &std::path::Path) -> Cli {
+        let script = format!(
+            r#"echo "$*" >> '{dir}/calls'
+case "$*" in
+*"pane layout"*)
+  read cols rows < '{dir}/size'
+  printf '{{"result":{{"layout":{{"panes":[{{"pane_id":"w2:p1","rect":{{"width":%s,"height":%s}}}}]}}}}}}\n' "$cols" "$rows";;
+*"terminal session observe"*)
+  echo $$ >> '{dir}/observers'
+  printf '{{"type":"terminal.frame","seq":1,"full":true,"width":80,"height":24,"bytes":"aGk="}}\n'
+  exec sleep 30;;
+esac"#,
+            dir = dir.display()
+        );
+        std::fs::write(dir.join("size"), "80 24\n").unwrap();
+        Cli::local().program(vec![
+            "sh".into(),
+            "-c".into(),
+            script.into(),
+            "herdr".into(),
+        ])
+    }
+
+    fn mirror_app(fleet: &Fleet, dir: &std::path::Path) -> Router {
+        app_full(
+            fleet.dir.path(),
+            Assets::of::<Fixture>(),
+            Damage::default(),
+            Peers::idle(),
+            mirror_herdr(dir),
+            None,
+        )
+    }
+
+    fn alive(pid: &str) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    /// Waits up to 5 seconds for `pid` to exit.
+    async fn gone(pid: &str) -> bool {
+        for _ in 0..100 {
+            if !alive(pid) {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// The next NDJSON line of a streaming body.
+    async fn next_line(
+        body: &mut (impl futures_util::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Unpin),
+        pending: &mut String,
+    ) -> Value {
+        use futures_util::StreamExt;
+        loop {
+            if let Some(end) = pending.find('\n') {
+                let line: String = pending.drain(..=end).collect();
+                return serde_json::from_str(&line).unwrap();
+            }
+            let chunk = tokio::time::timeout(std::time::Duration::from_secs(10), body.next())
+                .await
+                .expect("the stream stalled")
+                .expect("the stream ended")
+                .unwrap();
+            pending.push_str(&String::from_utf8_lossy(&chunk));
+        }
+    }
+
+    #[tokio::test]
+    async fn the_terminal_mirror_refuses_all_but_the_owner_on_loopback() {
+        let mut fleet = Fleet::new();
+        let session = fleet.worker("w2:p1");
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+        let app = mirror_app(&fleet, dir);
+        let cookie = owner_cookie(fleet.dir.path());
+        let stream = format!("/api/v1/agents/{session}/terminal");
+        let input = format!("/api/v1/agents/{session}/terminal/input");
+        let paths = [
+            (stream.as_str(), json!({})),
+            (input.as_str(), json!({"keys": ["ctrl+c"]})),
+        ];
+        let cookie_header = ("cookie", cookie.as_str());
+        let refusals: [(&str, Vec<(&str, &str)>); 4] = [
+            ("no owner cookie", vec![]),
+            ("a forged cookie", vec![("cookie", "tiller_owner=forged")]),
+            // An --allow-host name is served reads only, even with the cookie.
+            (
+                "an allow-host name",
+                vec![
+                    cookie_header,
+                    ("host", "board.example.com"),
+                    ("origin", "http://board.example.com"),
+                ],
+            ),
+            (
+                "another site",
+                vec![cookie_header, ("sec-fetch-site", "cross-site")],
+            ),
+        ];
+        for (path, body) in &paths {
+            for (case, headers) in &refusals {
+                let answer = send(&app, mutation("POST", path, body.clone(), headers)).await;
+                assert_eq!(
+                    answer.status,
+                    StatusCode::FORBIDDEN,
+                    "{case} {path}: {}",
+                    answer.body
+                );
+            }
+        }
+        // Nothing reached herdr.
+        assert!(!dir.join("calls").exists());
+
+        // The owner's keys and pastes reach the pane, in order and verbatim.
+        let sent = send(
+            &app,
+            mutation(
+                "POST",
+                &input,
+                json!({"keys": ["-", "ctrl+c", "enter"]}),
+                &[cookie_header],
+            ),
+        )
+        .await;
+        assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
+        let pasted = send(
+            &app,
+            mutation("POST", &input, json!({"text": "-rf x"}), &[cookie_header]),
+        )
+        .await;
+        assert_eq!(pasted.status, StatusCode::OK, "{}", pasted.body);
+        let both = send(
+            &app,
+            mutation(
+                "POST",
+                &input,
+                json!({"keys": ["a"], "text": "b"}),
+                &[cookie_header],
+            ),
+        )
+        .await;
+        assert_eq!(both.status, StatusCode::BAD_REQUEST, "{}", both.body);
+        let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
+        assert_eq!(
+            calls.lines().collect::<Vec<_>>(),
+            [
+                "pane send-keys w2:p1 - ctrl+c enter",
+                "pane send-text w2:p1 -rf x"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_remote_agent_gets_no_terminal_mirror() {
+        let mut fleet = Fleet::new();
+        let remote = fleet.worker("w3:p1");
+        fleet
+            .open()
+            .conn()
+            .execute_batch(&format!(
+                "INSERT INTO hosts (id, label, kind, herdr_machine) VALUES ('h-r', 'remote-a', 'remote', 'm-1');
+                 UPDATE sessions SET host_id = 'h-r' WHERE id = '{remote}'"
+            ))
+            .unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let app = mirror_app(&fleet, scratch.path());
+        let cookie = owner_cookie(fleet.dir.path());
+        for (path, body) in [
+            (format!("/api/v1/agents/{remote}/terminal"), json!({})),
+            (
+                format!("/api/v1/agents/{remote}/terminal/input"),
+                json!({"keys": ["a"]}),
+            ),
+        ] {
+            let answer = send(&app, mutation("POST", &path, body, &[("cookie", &cookie)])).await;
+            assert_eq!(
+                answer.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{}",
+                answer.body
+            );
+            assert!(answer.body.contains("\"refused\""), "{}", answer.body);
+        }
+        assert!(!scratch.path().join("calls").exists());
+    }
+
+    #[tokio::test]
+    async fn the_observe_process_ends_with_its_viewer_and_restarts_on_a_resize() {
+        let mut fleet = Fleet::new();
+        let session = fleet.worker("w2:p1");
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+        let app = mirror_app(&fleet, dir);
+        let cookie = owner_cookie(fleet.dir.path());
+        let observers = || {
+            std::fs::read_to_string(dir.join("observers"))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let response = app
+            .clone()
+            .oneshot(mutation(
+                "POST",
+                &format!("/api/v1/agents/{session}/terminal"),
+                json!({}),
+                &[("cookie", &cookie)],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/x-ndjson"
+        );
+        let mut body = response.into_body().into_data_stream();
+        let mut pending = String::new();
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "size", "cols": 80, "rows": 24})
+        );
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "frame", "seq": 1, "full": true, "bytes": "aGk="})
+        );
+        let first = observers();
+        assert_eq!(first.len(), 1);
+        assert!(alive(&first[0]));
+        let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
+        assert!(
+            calls.contains("terminal session observe w2:p1 --cols 80 --rows 24"),
+            "{calls}"
+        );
+
+        // The pane is resized: the old observe is killed, a new one runs at
+        // the new size and starts with a full frame.
+        std::fs::write(dir.join("size"), "120 36\n").unwrap();
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "size", "cols": 120, "rows": 36})
+        );
+        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+        assert!(gone(&first[0]).await, "the first observe outlived its size");
+        let second = observers();
+        assert_eq!(second.len(), 2);
+        assert!(alive(&second[1]));
+
+        // The viewer leaves: its observe is killed.
+        drop(body);
+        assert!(gone(&second[1]).await, "the observe outlived its viewer");
     }
 
     #[test]

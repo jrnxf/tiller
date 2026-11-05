@@ -31,6 +31,7 @@ import { useAmbiguousIds, useStanding } from "./peer-state";
 import { approvalFor, approvalStanding, mergeTimeline } from "./card-model";
 import { durationSeconds, formatAge, formatLisbonMoment, secondsSince, shortSha } from "./format";
 import { focusTooltip, useHerdrFocus, useOpenKey } from "./herdr";
+import { LiveTerminal, RemoteTerminalNote, TerminalToggle, useTerminalOpen } from "./live-terminal";
 import {
   BoltIcon,
   ChevronLeftIcon,
@@ -148,6 +149,22 @@ function RunCard({ run, owner }: { run: CardRun; owner: string | undefined }) {
   const machine = machines.machines.find((candidate) => candidate.id === run.host_id);
   const sessionId = run.session_id;
   const hostId = run.host_id;
+  const remote = machine?.kind === "remote";
+  const terminalOpen = useTerminalOpen();
+  // Only the owner sees an agent's terminal, and only for this machine's agents.
+  const mirror = active && sessionId && hostId && off === null;
+  const openPane = (
+    <button
+      type="button"
+      className="btn sm"
+      disabled={off !== null}
+      title={off ?? focusTooltip(machine)}
+      onClick={() => sessionId && hostId && focus({ session_id: sessionId, host_id: hostId })}
+    >
+      <PaneIcon />
+      Open in herdr
+    </button>
+  );
   return (
     <div className={`run${failed ? " fail" : ""}`}>
       <div className="rh">
@@ -177,17 +194,27 @@ function RunCard({ run, owner }: { run: CardRun; owner: string | undefined }) {
               <i className={`ld ${activity.dot}`} /> {activity.label}
             </span>
           ) : null}
-          <button
-            type="button"
-            className="btn sm"
-            disabled={off !== null}
-            title={off ?? focusTooltip(machine)}
-            onClick={() => focus({ session_id: sessionId, host_id: hostId })}
-          >
-            <PaneIcon />
-            Open in herdr
-          </button>
+          {mirror ? <TerminalToggle size="sm" /> : null}
+          {openPane}
         </div>
+      ) : null}
+      {mirror && terminalOpen ? (
+        remote ? (
+          <RemoteTerminalNote machine={machine?.label ?? "another machine"} />
+        ) : (
+          <LiveTerminal
+            sessionId={sessionId}
+            label={`${run.role} attempt ${run.number}`}
+            heading={
+              <span className="mir-title">
+                Attempt {run.number}
+                <span className="lab sm">{run.role}</span>
+                {machine ? <span className="meta">{machine.label}</span> : null}
+              </span>
+            }
+            actions={openPane}
+          />
+        )
       ) : null}
     </div>
   );

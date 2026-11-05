@@ -1154,6 +1154,50 @@ pub struct StartOrchestrator {
     pub host: Option<String>,
 }
 
+/// `POST /api/v1/agents/{session}/terminal`: opens the terminal mirror.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalOpen {
+    /// A paired peer's label; the mirror is not forwarded (`protocol.md`
+    /// 7.4).
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
+/// `POST /api/v1/agents/{session}/terminal/input`: exactly one of `keys`
+/// and `text`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalInput {
+    /// Keys pressed in order, as `herdr pane send-keys` names them:
+    /// `enter`, `esc`, `ctrl+c`, `left`, `space`, or one character. Up to 64.
+    #[serde(default)]
+    pub keys: Option<Vec<String>>,
+    /// Text pasted as one bracketed paste, up to 4096 bytes.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// A paired peer's label; input is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
+/// One line of the terminal mirror's NDJSON stream (`protocol.md` 7.4).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TerminalLine {
+    /// The pane's size in cells. It opens the stream and comes again when
+    /// the pane is resized; a full frame follows it.
+    Size { cols: u16, rows: u16 },
+    /// One herdr frame: the ANSI bytes, base64. A `full` frame redraws the
+    /// whole screen; the frames after it are diffs, `seq` counting up by
+    /// one.
+    Frame { seq: u64, full: bool, bytes: String },
+    /// The pane closed; the stream ends.
+    Closed { reason: Option<String> },
+    /// herdr stopped answering; the stream ends.
+    Unavailable { message: String },
+}
+
 /// `POST /api/v1/agents/{session}/focus`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]

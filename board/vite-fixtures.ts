@@ -8,6 +8,14 @@ import type { BoardRow } from "./src/lib/api-types.ts";
 import { fixtureMutation, withoutDeleted } from "./src/lib/fixture-mutations.ts";
 import { SCENARIOS, bootScript, fixtureResource, fixtureSnapshot } from "./src/lib/fixtures.ts";
 import type { Scenario } from "./src/lib/fixtures.ts";
+import {
+  FIXTURE_COLS,
+  FIXTURE_ROWS,
+  fullFrame,
+  promptFrame,
+  tickFrame,
+  typeInto,
+} from "./src/lib/fixtures-terminal.ts";
 
 // Stands in for the daemon until T2.8 lands: serves the board API from
 // fixtures and inlines the boot snapshot into index.html the way the daemon
@@ -63,6 +71,89 @@ function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   });
 }
 
+// The stand-in panes: what was typed at each one's prompt, and the streams
+// watching it, so a key shows on every open mirror.
+interface FixturePane {
+  typed: string;
+  started: number;
+  viewers: Set<(bytes: string) => void>;
+}
+const panes = new Map<string, FixturePane>();
+
+function paneOf(session: string): FixturePane {
+  let pane = panes.get(session);
+  if (!pane) {
+    pane = { typed: "", started: Date.now(), viewers: new Set() };
+    panes.set(session, pane);
+  }
+  return pane;
+}
+
+// `?term=<mode>` on the page URL picks how the mirror's pane behaves: live (the
+// default), ended, reconnect, unreachable or forbidden.
+function terminalMode(referer: string | undefined): string {
+  if (!referer) return "live";
+  return new URL(referer, "http://localhost").searchParams.get("term") ?? "live";
+}
+
+// Tries to open the stream after a `reconnect` pane's first, per session: they
+// hang, so the mirror stays on Reconnecting.
+const dropped = new Set<string>();
+
+function terminalStream(req: IncomingMessage, res: ServerResponse, session: string) {
+  const mode = terminalMode(req.headers.referer);
+  if (mode === "forbidden") {
+    res.statusCode = 403;
+    return sendJson(res, {
+      ok: false,
+      error: { code: "forbidden", message: "only the owner sees an agent's terminal" },
+    });
+  }
+  if (mode === "unreachable") {
+    res.statusCode = 503;
+    return sendJson(res, {
+      ok: false,
+      error: { code: "unavailable", message: "herdr is unreachable: no socket" },
+    });
+  }
+  if (mode !== "reconnect") dropped.delete(session);
+  else if (dropped.has(session)) return;
+  const pane = paneOf(session);
+  const seconds = () => Math.round((Date.now() - pane.started) / 1000);
+  res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-store" });
+  let frame = 1;
+  const send = (line: object) => res.write(`${JSON.stringify(line)}\n`);
+  const diff = (bytes: string) => {
+    frame += 1;
+    send({ type: "frame", seq: frame, full: false, bytes });
+  };
+  send({ type: "size", cols: FIXTURE_COLS, rows: FIXTURE_ROWS });
+  send({ type: "frame", seq: frame, full: true, bytes: fullFrame(pane.typed, seconds()) });
+  if (mode === "ended") {
+    send({ type: "closed", reason: "pane closed" });
+    return res.end();
+  }
+  if (mode === "reconnect") {
+    dropped.add(session);
+    return res.end();
+  }
+  pane.viewers.add(diff);
+  const ticker = setInterval(() => diff(tickFrame(pane.typed, seconds())), 1000);
+  // The response, not the request: the request is done once its body is read.
+  res.on("close", () => {
+    clearInterval(ticker);
+    pane.viewers.delete(diff);
+  });
+}
+
+function terminalInput(res: ServerResponse, session: string, body: Record<string, unknown>) {
+  const pane = paneOf(session);
+  pane.typed = typeInto(pane.typed, body);
+  for (const viewer of pane.viewers) viewer(promptFrame(pane.typed));
+  const sent = Array.isArray(body.keys) ? body.keys.length : 1;
+  sendJson(res, { ok: true, data: { session_id: session, sent } });
+}
+
 function startMover(res: ServerResponse) {
   const board = fixtureResource("/api/v1/board?filter=all", "live") as { rows: BoardRow[] };
   const row = board.rows.find((candidate) => candidate.display_id === "alpha-42");
@@ -98,6 +189,17 @@ function apiMiddleware(): Connect.NextHandleFunction {
     const url = req.url ?? "";
     if (!url.startsWith("/api/v1/")) return next();
     const scenario = scenarioOf(undefined, req.headers.referer);
+
+    const terminal = /^\/api\/v1\/agents\/([^/]+)\/terminal(\/input)?$/.exec(url);
+    if (terminal?.[1] && req.method === "POST") {
+      const session = terminal[1];
+      readBody(req)
+        .then((body) =>
+          terminal[2] ? terminalInput(res, session, body) : terminalStream(req, res, session),
+        )
+        .catch(() => res.destroy());
+      return;
+    }
 
     if (req.method === "POST" || req.method === "PATCH") {
       readBody(req)

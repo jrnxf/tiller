@@ -6,6 +6,7 @@ pub mod auth;
 pub mod dto;
 pub mod forge;
 pub mod memory;
+pub mod mirror;
 pub mod peer;
 pub mod quota;
 pub mod readonly;

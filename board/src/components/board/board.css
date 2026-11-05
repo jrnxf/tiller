@@ -1531,6 +1531,9 @@ a.card:hover {
   margin-left: auto;
   flex: none;
 }
+.card-page .run .acts .btn + .btn {
+  margin-left: 0;
+}
 
 @media (max-width: 1180px) {
   .lane-h .orch .tx {

@@ -313,6 +313,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         tools: tool_versions,
         damage: damage.clone(),
         orchestrators: config.orchestrators,
+        mirrors: crate::mirror::Mirrors::default(),
     });
 
     // Handlers first: a SIGTERM that follows the address line at once must

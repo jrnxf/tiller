@@ -114,6 +114,76 @@ export const SendIcon = () => (
   </Glyph>
 );
 
+// The live terminal mirror.
+export const TerminalIcon = () => (
+  <Glyph>
+    <rect x="1.8" y="2.8" width="12.4" height="8.4" rx="1.4" {...stroke} />
+    <path d="M5.5 13.5h5M8 11.2v2.3" {...stroke} strokeLinecap="round" />
+    <circle cx="5" cy="7" r="1.1" fill="currentColor" />
+  </Glyph>
+);
+
+export const KeyboardIcon = () => (
+  <Glyph>
+    <rect x="1.5" y="4" width="13" height="8" rx="1.5" {...stroke} />
+    <path d="M4 6.5h.01M6.5 6.5h.01M9 6.5h.01M11.5 6.5h.01M5 9.5h6" {...stroke} {...round} />
+  </Glyph>
+);
+
+export const PointerIcon = () => (
+  <Glyph>
+    <path d="M3.5 2.5 12 8.2l-3.8.9-1.9 3.6z" {...stroke} {...round} />
+  </Glyph>
+);
+
+export const GlobeIcon = () => (
+  <Glyph>
+    <circle cx="8" cy="8" r="6" {...stroke} />
+    <path
+      d="M2 8h12M8 2c1.8 1.7 2.6 3.7 2.6 6S9.8 12.3 8 14C6.2 12.3 5.4 10.3 5.4 8S6.2 3.7 8 2z"
+      {...stroke}
+    />
+  </Glyph>
+);
+
+export const LockIcon = () => (
+  <Glyph>
+    <rect x="3" y="7" width="10" height="7" rx="1.5" {...stroke} />
+    <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" {...stroke} />
+  </Glyph>
+);
+
+export const RetryIcon = () => (
+  <Glyph>
+    <path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5v3h-3" {...stroke} {...round} />
+  </Glyph>
+);
+
+// The phone key bar's arrows and Enter.
+const ARROW = {
+  left: "M10 3.5 5.5 8l4.5 4.5",
+  right: "M6 3.5 10.5 8 6 12.5",
+  up: "M3.5 10 8 5.5l4.5 4.5",
+  down: "M3.5 6 8 10.5 12.5 6",
+} as const;
+
+export const ArrowIcon = ({ to }: { to: keyof typeof ARROW }) => (
+  <Glyph>
+    <path d={ARROW[to]} {...stroke} strokeWidth={1.5} {...round} />
+  </Glyph>
+);
+
+export const EnterIcon = () => (
+  <Glyph>
+    <path
+      d="M13 3.5V8a1.5 1.5 0 0 1-1.5 1.5H3.5M6 7 3.5 9.5 6 12"
+      {...stroke}
+      strokeWidth={1.4}
+      {...round}
+    />
+  </Glyph>
+);
+
 // ---- status marks (14 px grid), one per column and badge ----
 
 const STATUS = {

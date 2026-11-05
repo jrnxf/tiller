@@ -18,6 +18,7 @@ import { EmptyScope } from "./board-view";
 import { formatLisbonMoment } from "./format";
 import { focusCommand, focusTooltip, useHerdrFocus, useOpenKey } from "./herdr";
 import { ChevronLeftIcon, PaneIcon } from "./icons";
+import { LiveTerminal, RemoteTerminalNote, TerminalToggle, useTerminalOpen } from "./live-terminal";
 import { AsOf, HostChip, PeerNote } from "./host-chip";
 import { useAmbiguousIds, useStanding } from "./peer-state";
 import { ModelChip, ownerSearch } from "./tile";
@@ -174,6 +175,9 @@ function AgentDetail({
     enabled: Boolean(agent.run_id),
   }).data;
   const remote = host?.kind === "remote";
+  const terminalOpen = useTerminalOpen();
+  // Only the owner sees an agent's terminal.
+  const mirror = off === null;
   return (
     <div className="agd">
       <div className="agd-h">
@@ -208,18 +212,7 @@ function AgentDetail({
             <code>{agent.last_status_line}</code>
           </div>
         ) : null}
-        <div className="acts">
-          <button
-            type="button"
-            className="btn primary"
-            disabled={off !== null}
-            title={off ?? focusTooltip(host)}
-            onClick={onOpen}
-          >
-            <PaneIcon />
-            Open in herdr
-            <kbd>O</kbd>
-          </button>
+        <div className="acts right">
           {card ? (
             <Link
               to="/cards/$cardId"
@@ -231,7 +224,46 @@ function AgentDetail({
               Open card {card.display_id}
             </Link>
           ) : null}
+          {mirror ? <TerminalToggle /> : null}
+          <button
+            type="button"
+            className="btn primary"
+            disabled={off !== null}
+            title={off ?? focusTooltip(host)}
+            onClick={onOpen}
+          >
+            <PaneIcon />
+            Open in herdr
+            <kbd>O</kbd>
+          </button>
         </div>
+        {mirror && terminalOpen ? (
+          remote ? (
+            <RemoteTerminalNote machine={host?.label ?? "another machine"} />
+          ) : (
+            <LiveTerminal
+              sessionId={agent.session_id}
+              label={line.label}
+              heading={
+                <span className="mir-title">
+                  {line.label}
+                  {host ? <span className="meta">{host.label}</span> : null}
+                </span>
+              }
+              actions={
+                <button
+                  type="button"
+                  className="btn sm"
+                  title={focusTooltip(host)}
+                  onClick={onOpen}
+                >
+                  <PaneIcon />
+                  Open in herdr
+                </button>
+              }
+            />
+          )
+        ) : null}
         <p className="agd-hint">
           {remote
             ? "Opens herdr on the remote machine first, then focuses this agent's terminal."

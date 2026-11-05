@@ -229,6 +229,37 @@ impl Cli {
         self.run(&["agent", "focus", pane_id]).map(|_| ())
     }
 
+    /// A pane's size in cells (`cols`, `rows`), from `herdr pane layout`,
+    /// or `None` when herdr no longer has the pane.
+    pub fn pane_size(&self, pane_id: &str) -> Result<Option<(u16, u16)>> {
+        let result = match self.result(&["pane", "layout", "--pane", pane_id]) {
+            Ok(result) => result,
+            Err(HerdrError::Api { code, .. }) if code == "pane_not_found" => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        size_from(&result, pane_id)
+    }
+
+    /// Presses keys in a pane (`herdr pane send-keys`), in order: names such
+    /// as `enter` or `ctrl+c`, or single characters. herdr 0.9.5 reads every
+    /// word after the pane as a key, a leading dash included, and refuses a
+    /// name it does not know (`invalid_key`).
+    pub fn send_keys(&self, pane_id: &str, keys: &[&str]) -> Result<()> {
+        let mut args = vec!["pane", "send-keys", pane_id];
+        args.extend_from_slice(keys);
+        self.run(&args).map(drop)
+    }
+
+    /// The `herdr terminal session observe` command that streams a pane's
+    /// screen as NDJSON frames rendered at `cols` by `rows`, for the caller
+    /// to spawn and read. It never resizes the pane.
+    pub fn observe_command(&self, pane_id: &str, cols: u16, rows: u16) -> Command {
+        let (cols, rows) = (cols.to_string(), rows.to_string());
+        self.command(&[
+            "terminal", "session", "observe", pane_id, "--cols", &cols, "--rows", &rows,
+        ])
+    }
+
     /// Whether a herdr client is attached in the foreground of this server.
     /// herdr has no read-only probe, so this asks it to clear the window
     /// title and reads why: `cleared` or `no_foreground_client`. The side
@@ -440,6 +471,34 @@ fn attached_from(result: &Value) -> Result<bool> {
             call: "terminal title".into(),
             detail: format!("unknown reason {other:?}"),
         }),
+    }
+}
+
+/// Reads one pane's size from a `pane layout` result.
+fn size_from(result: &Value, pane_id: &str) -> Result<Option<(u16, u16)>> {
+    let unreadable = |detail: &str| HerdrError::Parse {
+        call: "pane layout".into(),
+        detail: detail.into(),
+    };
+    let panes = result
+        .pointer("/layout/panes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| unreadable("no panes"))?;
+    let Some(pane) = panes
+        .iter()
+        .find(|p| p.get("pane_id").and_then(Value::as_str) == Some(pane_id))
+    else {
+        return Ok(None);
+    };
+    let cells = |name: &str| {
+        pane.pointer(&format!("/rect/{name}"))
+            .and_then(Value::as_u64)
+            .and_then(|n| u16::try_from(n).ok())
+            .filter(|n| *n > 0)
+    };
+    match (cells("width"), cells("height")) {
+        (Some(cols), Some(rows)) => Ok(Some((cols, rows))),
+        _ => Err(unreadable("no pane size")),
     }
 }
 
@@ -703,6 +762,41 @@ mod tests {
         let error = cli.send_enter("w1:p1").unwrap_err();
         assert!(matches!(error, HerdrError::Unreachable(_)), "{error:?}");
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn pane_layout_gives_the_pane_size() {
+        // herdr 0.9.5's answer, as the lab session gave it.
+        let result = json!({"layout": {"area": {"height": 43, "width": 128, "x": 0, "y": 0},
+            "panes": [{"focused": true, "pane_id": "w1:p2", "rect": {"height": 43, "width": 128, "x": 0, "y": 0}}],
+            "splits": [], "workspace_id": "w1"}, "type": "pane_layout"});
+        assert_eq!(size_from(&result, "w1:p2").unwrap(), Some((128, 43)));
+        assert_eq!(size_from(&result, "w1:p9").unwrap(), None);
+        assert!(size_from(&json!({"layout": {}}), "w1:p2").is_err());
+    }
+
+    #[test]
+    fn keys_follow_the_pane_and_observe_asks_for_the_pane_size() {
+        let cli = Cli::local().session("lab");
+        let observe = cli.observe_command("w1:p1", 120, 36);
+        let args: Vec<_> = observe.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                "terminal",
+                "session",
+                "observe",
+                "w1:p1",
+                "--cols",
+                "120",
+                "--rows",
+                "36",
+                "--session",
+                "lab"
+            ]
+        );
+        let quiet = Cli::local().program(vec!["true".into()]);
+        assert!(quiet.send_keys("w1:p1", &["-", "ctrl+c"]).is_ok());
     }
 
     #[test]

@@ -101,6 +101,193 @@
         }
       }
     },
+    "/api/v1/agents/{session}/terminal": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "summary": "The terminal mirror: the agent's live pane as NDJSON (`protocol.md`\n7.4). A POST, so it passes every mutation check, owner cookie included,\nthough it writes nothing.",
+        "operationId": "terminal",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TerminalOpen"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "One `TerminalLine` per line: `size`, then `frame`s, until `closed` or `unavailable` or the end of the body",
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/TerminalLine"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "no such agent, or its pane closed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`refused`: the agent runs on a saved machine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "herdr is unreachable, or too many terminal views are open",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{session}/terminal/input": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "summary": "Keys or a paste for the agent's pane, through herdr (`protocol.md` 7.4).",
+        "operationId": "terminal_input",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TerminalInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`refused`: the agent runs on a saved machine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "herdr is unreachable, or input came faster than 20 a second; nothing was sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/approvals/{id}/decide": {
       "post": {
         "tags": [
@@ -5869,6 +6056,152 @@
           },
           "idempotency_key": {
             "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TerminalInput": {
+        "type": "object",
+        "description": "`POST /api/v1/agents/{session}/terminal/input`: exactly one of `keys`\nand `text`.",
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label; input is not forwarded."
+          },
+          "keys": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Keys pressed in order, as `herdr pane send-keys` names them:\n`enter`, `esc`, `ctrl+c`, `left`, `space`, or one character. Up to 64."
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Text pasted as one bracketed paste, up to 4096 bytes."
+          }
+        },
+        "additionalProperties": false
+      },
+      "TerminalLine": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The pane's size in cells. It opens the stream and comes again when\nthe pane is resized; a full frame follows it.",
+            "required": [
+              "cols",
+              "rows",
+              "type"
+            ],
+            "properties": {
+              "cols": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "rows": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "size"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "One herdr frame: the ANSI bytes, base64. A `full` frame redraws the\nwhole screen; the frames after it are diffs, `seq` counting up by\none.",
+            "required": [
+              "seq",
+              "full",
+              "bytes",
+              "type"
+            ],
+            "properties": {
+              "bytes": {
+                "type": "string"
+              },
+              "full": {
+                "type": "boolean"
+              },
+              "seq": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "frame"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The pane closed; the stream ends.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "closed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "herdr stopped answering; the stream ends.",
+            "required": [
+              "message",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "unavailable"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "One line of the terminal mirror's NDJSON stream (`protocol.md` 7.4)."
+      },
+      "TerminalOpen": {
+        "type": "object",
+        "description": "`POST /api/v1/agents/{session}/terminal`: opens the terminal mirror.",
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label; the mirror is not forwarded (`protocol.md`\n7.4)."
           }
         },
         "additionalProperties": false
