@@ -6,7 +6,9 @@
 use std::io::Write as _;
 use std::thread::JoinHandle;
 
-use tiller_core::domain::{CardKind, RunOutcome, Size};
+use tiller_core::domain::{CardKind, ConfigManifest, Delivery, RunOutcome, Size, Stage};
+use tiller_core::state::find;
+use tiller_core::state::projects::ProjectEdit;
 use tiller_herdr::fake::{FakeHerdr, Screen};
 use tiller_herdr::testing::owner;
 
@@ -540,7 +542,68 @@ fn relaunch_renders_the_launch_files_again_and_keeps_the_brief() {
     assert!(!prompt.contains("an older role prompt"), "{prompt}");
     assert_eq!(launch::brief_of(&prompt), Some(brief.as_str()));
     assert_eq!(done.run.id, spawned.run.id);
-    assert_eq!(done.run.config_hash, spawned.run.config_hash);
+    // The hash follows the rendered files: the run and the new session
+    // carry the new one, its manifest resolves, the old session keeps its own.
+    let hash = done.run.config_hash.clone().unwrap();
+    assert_ne!(Some(&hash), spawned.run.config_hash.as_ref());
+    assert_eq!(done.session.config_hash, Some(hash.clone()));
+    let store = rig.fleet.open();
+    let manifest: Option<ConfigManifest> =
+        find(store.conn(), "config_hash = ?1", &[&hash]).unwrap();
+    assert!(manifest.is_some());
+    let old: Session = get(store.conn(), "session", &spawned.session.id).unwrap();
+    assert_eq!(old.config_hash, spawned.run.config_hash);
+    assert_eq!(rig.events("run.reconfigured", &spawned.run.id), 1);
+}
+
+#[test]
+fn relaunch_follows_the_projects_delivery_in_the_brief_and_the_gh_login_rule() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    let scratch = rig.scratch.join(&spawned.run.id);
+    let first = std::fs::read_to_string(scratch.join("settings.json")).unwrap();
+    assert!(first.contains(crate::roles::GH_LOGIN_RULE), "{first}");
+    let first_prompt = std::fs::read_to_string(scratch.join("prompt.md")).unwrap();
+    assert!(
+        first_prompt.contains("Delivery: direct-pr."),
+        "{first_prompt}"
+    );
+    // The project moves to no-mistakes, which reads the gh login.
+    {
+        let mut store = rig.fleet.open();
+        let project: Project = get(store.conn(), "project", "alpha").unwrap();
+        let project = store
+            .project_edit(
+                &owner(),
+                "alpha",
+                project.rev,
+                ProjectEdit {
+                    delivery: Some(Delivery::NoMistakes),
+                    ..ProjectEdit::default()
+                },
+            )
+            .unwrap()
+            .value;
+        store
+            .project_stage(&owner(), "alpha", project.rev, Stage::Launched, None)
+            .unwrap();
+    }
+    let claude = boot(&rig, "startup");
+    let ctx = rig.orchestrator();
+    let done =
+        relaunched(relaunch_it(&mut rig, &ctx, &patient(), &spawned.run.id, note("n")).unwrap());
+    claude.join().unwrap().unwrap();
+    assert_eq!(done.started, Proof::Confirmed, "{}", done.evidence);
+
+    let settings = std::fs::read_to_string(scratch.join("settings.json")).unwrap();
+    assert!(
+        !settings.contains(crate::roles::GH_LOGIN_RULE),
+        "{settings}"
+    );
+    let prompt = std::fs::read_to_string(scratch.join("prompt.md")).unwrap();
+    assert!(prompt.contains("Delivery: no-mistakes."), "{prompt}");
+    assert!(!prompt.contains("Delivery: direct-pr."), "{prompt}");
+    assert_eq!(prompt.matches("Delivery: ").count(), 1, "{prompt}");
 }
 
 #[test]

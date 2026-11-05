@@ -1123,19 +1123,26 @@ fn start_again(
             }
             brief
         }
-        // The same run keeps the brief it was launched with, which already
-        // carries its delivery line.
+        // The same run keeps the brief it was launched with, but its
+        // delivery line is the project's now, since the sandbox's gh login
+        // rules follow the delivery the launch files are rendered for.
         None => {
             let prompt = fs::read_to_string(old_scratch.join("prompt.md"))?;
-            launch::brief_of(&prompt)
-                .ok_or_else(|| {
-                    SpawnError::Refused(format!(
-                        "{} holds no brief, so run {} cannot be launched again; relaunch with --new-attempt --brief-file <f>",
-                        old_scratch.join("prompt.md").display(),
-                        run.id
-                    ))
-                })?
-                .to_owned()
+            let kept = launch::brief_of(&prompt).ok_or_else(|| {
+                SpawnError::Refused(format!(
+                    "{} holds no brief, so run {} cannot be launched again; relaunch with --new-attempt --brief-file <f>",
+                    old_scratch.join("prompt.md").display(),
+                    run.id
+                ))
+            })?;
+            let mut brief = match kept.rfind("\nDelivery: ") {
+                Some(at) if !kept[at + 1..].contains('\n') => kept[..at].to_owned(),
+                _ => kept.to_owned(),
+            };
+            if run.role == RunRole::Builder {
+                brief.push_str(&delivery_line(project));
+            }
+            brief
         }
     };
     let claude_version = launch::claude_version(&world.config.spawn.claude);
@@ -1187,10 +1194,23 @@ fn start_again(
         );
         launched.line
     } else {
-        // The same run keeps its brief, branch, worktree and hash, but its
-        // launch files are rendered again, so a tiller or role prompt
-        // upgraded since the first launch reaches the new session.
-        launch::write_refreshed(&spec)?.line
+        // The same run keeps its brief, branch and worktree, but its launch
+        // files are rendered again, so a tiller or role prompt upgraded
+        // since the first launch reaches the new session.
+        // The hash follows the files, so the run and the new session are
+        // attributed to the config they actually run.
+        let launched = launch::write_refreshed(&spec)?;
+        events.extend(
+            store
+                .config_manifest_record(ctx, &launched.config_hash, &launched.manifest)?
+                .events,
+        );
+        events.extend(
+            store
+                .run_reconfigure(ctx, &run.id, &launched.config_hash)?
+                .events,
+        );
+        launched.line
     };
     let pane_id = match old_pane {
         Some(pane) => pane,
