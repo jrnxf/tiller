@@ -1066,6 +1066,18 @@ pub struct DecideBody {
     pub rev: Option<i64>,
 }
 
+/// `POST /api/v1/projects/{id}/orchestrator`. The key is taken like every
+/// mutation's, but a retry is natural: a live orchestrator is returned, not a
+/// second one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StartOrchestrator {
+    pub idempotency_key: String,
+    /// A paired peer's label; a start is not forwarded (`protocol.md` 7.4).
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
 /// `POST /api/v1/agents/{session}/focus`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]

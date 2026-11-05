@@ -83,6 +83,8 @@ pub struct Config {
     /// `TILLER_SSH` split on whitespace.
     pub ssh: Vec<OsString>,
     pub assets: Assets,
+    /// The board's Start orchestrator (`tiller orchestrator start`).
+    pub orchestrators: Option<Arc<dyn crate::api::OrchestratorStart>>,
 }
 
 /// How a run ended.
@@ -310,6 +312,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         started_at,
         tools: tool_versions,
         damage: damage.clone(),
+        orchestrators: config.orchestrators,
     });
 
     // Handlers first: a SIGTERM that follows the address line at once must

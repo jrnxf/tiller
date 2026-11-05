@@ -110,7 +110,8 @@ pub fn start(
     project: &str,
     restart: Option<&Waits>,
 ) -> Result<Applied<Orchestrator>> {
-    if !matches!(ctx.actor, Actor::Owner | Actor::Daemon) {
+    // The board is the owner too: its Start orchestrator comes here.
+    if !matches!(ctx.actor, Actor::Owner | Actor::Board | Actor::Daemon) {
         return Err(tiller_core::Error::Forbidden(format!(
             "{} may not start an orchestrator; the owner or the daemon does",
             ctx.actor

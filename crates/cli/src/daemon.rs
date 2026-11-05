@@ -21,7 +21,7 @@ use tiller_herdr::client::Cli;
 use tiller_herdr::front::{MacApp, Terminal};
 
 use crate::cmd::admin::{load_config, load_config_at};
-use crate::cmd::spawn::{herdr_from_config, lavish_from_config};
+use crate::cmd::spawn::{BoardStart, herdr_from_config, lavish_from_config};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -148,7 +148,7 @@ pub fn run(args: &Args) -> anyhow::Result<ExitCode> {
     }
     let (lavish, review_hosts) = lavish_from_config(&table).map_err(failed)?;
     let config = Config {
-        home: app.home,
+        home: app.home.clone(),
         port: args.port,
         allowed_hosts: args.allow_hosts.clone(),
         herdr,
@@ -159,6 +159,7 @@ pub fn run(args: &Args) -> anyhow::Result<ExitCode> {
         ssh: command_line("TILLER_SSH", "ssh"),
         gh: std::env::var("TILLER_GH").unwrap_or_else(|_| "gh".into()),
         assets: Assets::board(),
+        orchestrators: Some(Arc::new(BoardStart { app })),
     };
     match tiller_daemon::run(config)? {
         Ended::Stopped => Ok(ExitCode::SUCCESS),

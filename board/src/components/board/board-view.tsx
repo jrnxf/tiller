@@ -271,6 +271,7 @@ function Board({ host, filter }: { host: string | undefined; filter: BoardFilter
               open={!look.collapsed.includes(key)}
               focusMode={focusMode}
               orchestrator={orchestrator}
+              orchestratorsKnown={agentsRead.data !== undefined}
               remoteHost={hostOfOrchestrator?.kind === "remote" ? hostOfOrchestrator : undefined}
               health={
                 standingOf(project, machines.machines).peer

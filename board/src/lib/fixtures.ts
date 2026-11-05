@@ -798,6 +798,19 @@ function workerFor(row: BoardRow, now: number, index: number): AgentRow {
   };
 }
 
+// kiln was registered and its orchestrator never started; the dev and preview
+// servers keep a Start orchestrator so the lane shows it running on the next
+// read.
+const UNSTARTED = new Set(["kiln"]);
+const startedOrchestrators = new Set<string>();
+
+// Starts the project's orchestrator, and says whether one was already live.
+export function startOrchestratorFixture(projectId: string): { live: boolean } {
+  const live = !UNSTARTED.has(projectId) || startedOrchestrators.has(projectId);
+  startedOrchestrators.add(projectId);
+  return { live };
+}
+
 function agentsFor(
   board: BoardResponse,
   projects: ProjectsResponse,
@@ -807,7 +820,7 @@ function agentsFor(
   if (board.rows.length === 0) return { orchestrators: [] };
   const peerProjectRows = projects.projects.filter(isPeerRow);
   const localOrchestrators = projects.projects
-    .filter((p) => !isPeerRow(p))
+    .filter((p) => !isPeerRow(p) && (!UNSTARTED.has(p.id) || startedOrchestrators.has(p.id)))
     .map((project, projectIndex) => {
       const live = board.rows.filter(
         (row) =>

@@ -14,6 +14,7 @@ use tiller_agents::spawn::pool::Treehouse;
 use tiller_agents::spawn::trust::ClaudeConfig;
 use tiller_agents::spawn::{self as agents, Request, SpawnError, World, readings};
 use tiller_core::state::resolve_card;
+use tiller_daemon::api::StartError;
 use tiller_herdr::client::{Cli, HerdrError};
 use tiller_reconcile::git::GitScanner;
 
@@ -328,22 +329,88 @@ pub fn done(
 /// one is stopped first and replaced.
 pub fn orchestrator_start(app: &App, project: &str, restart: bool) -> Done {
     let tools = Tools::load(app)?;
-    let homes = match &tools.config.spawn.orchestrator_home {
-        Some(root) => root.clone(),
-        None => state_dir("spawn.orchestrator_home")?.join("orchestrators"),
-    };
+    let homes = orchestrator_homes(&tools)?;
     let mut store = app.write()?;
-    let applied = agents::orchestrator::start(
-        &mut store,
-        &app.ctx(),
+    let applied = start_orchestrator(&tools, &homes, &mut store, &app.ctx(), project, restart)
+        .map_err(failure)?;
+    let warning = applied.value.warning.clone();
+    Ok(Outcome::applied(applied).with_warning(warning))
+}
+
+/// Where orchestrator homes live: `spawn.orchestrator_home`, or its default.
+fn orchestrator_homes(tools: &Tools) -> Result<PathBuf, Failure> {
+    match &tools.config.spawn.orchestrator_home {
+        Some(root) => Ok(root.clone()),
+        None => Ok(state_dir("spawn.orchestrator_home")?.join("orchestrators")),
+    }
+}
+
+/// The one orchestrator start: `tiller orchestrator start` and the board's
+/// Start orchestrator (through the daemon) both come here.
+fn start_orchestrator(
+    tools: &Tools,
+    homes: &Path,
+    store: &mut tiller_core::Store,
+    ctx: &tiller_core::Ctx,
+    project: &str,
+    restart: bool,
+) -> Result<tiller_core::Applied<agents::orchestrator::Orchestrator>, SpawnError> {
+    agents::orchestrator::start(
+        store,
+        ctx,
         &tools.world(None, None),
-        &homes,
+        homes,
         project,
         restart.then(Waits::default).as_ref(),
     )
-    .map_err(failure)?;
-    let warning = applied.value.warning.clone();
-    Ok(Outcome::applied(applied).with_warning(warning))
+}
+
+/// The board's Start orchestrator, which the daemon runs as the board:
+/// the tools are read from `config.toml` at each start, as the command
+/// reads them, and a live orchestrator is returned, never restarted.
+pub struct BoardStart {
+    pub app: App,
+}
+
+impl tiller_daemon::api::OrchestratorStart for BoardStart {
+    fn start(
+        &self,
+        store: &mut tiller_core::Store,
+        ctx: &tiller_core::Ctx,
+        project: &str,
+    ) -> Result<tiller_core::Applied<agents::orchestrator::Orchestrator>, StartError> {
+        let tools = Tools::load(&self.app).map_err(refused)?;
+        let homes = orchestrator_homes(&tools).map_err(refused)?;
+        start_orchestrator(&tools, &homes, store, ctx, project, false).map_err(
+            |error| match error {
+                SpawnError::State(error) => StartError::State {
+                    error: Box::new(error),
+                    notes: None,
+                },
+                SpawnError::Undone { error, notes } => match *error {
+                    SpawnError::State(error) => StartError::State {
+                        error: Box::new(error),
+                        notes: Some(notes),
+                    },
+                    error => refused(failure(SpawnError::Undone {
+                        error: Box::new(error),
+                        notes,
+                    })),
+                },
+                error => refused(failure(error)),
+            },
+        )
+    }
+}
+
+/// A refusal as the board gets it: the code and exit the command gives.
+fn refused(failure: Failure) -> StartError {
+    StartError::Refused {
+        exit: failure.exit,
+        code: failure.code,
+        message: failure.message.clone(),
+        hint: failure.hint.clone(),
+    }
 }
 
 /// `tiller agent focus <run|session>`: focuses the agent's pane in the

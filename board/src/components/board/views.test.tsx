@@ -86,14 +86,19 @@ function stubMedia(matching: (query: string) => boolean = () => false) {
   }));
 }
 
-async function renderApp(scenario: Scenario = "default", path = "/") {
+// `unread` leaves those paths out of the boot snapshot, so they are fetched.
+async function renderApp(scenario: Scenario = "default", path = "/", unread: string[] = []) {
   const queryClient = createQueryClient();
   // The board's one retry, without the real second of backoff before it,
   // so a loaded test run cannot push these tests past their timeout.
   queryClient.setDefaultOptions({
     queries: { ...queryClient.getDefaultOptions().queries, retryDelay: 0 },
   });
-  hydrateFromSnapshot(queryClient, fixtureSnapshot(scenario));
+  const snapshot = fixtureSnapshot(scenario);
+  snapshot.queries = Object.fromEntries(
+    Object.entries(snapshot.queries).filter(([key]) => !unread.includes(key)),
+  );
+  hydrateFromSnapshot(queryClient, snapshot);
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: [path] }));
   await router.load();
   render(
@@ -329,6 +334,47 @@ test("Open in herdr asks the daemon to focus that agent, and says where to find 
   );
   // Clicking the button did not also change which agent is selected.
   expect(row.getAttribute("aria-selected")).toBe("false");
+});
+
+test("Start orchestrator on a lane with none posts the start and leaves the lane open", async () => {
+  const posted = stubApi("degraded");
+  await renderApp("degraded");
+
+  const kiln = screen.getByTestId("lane-kiln");
+  const header = kiln.querySelector(".lane-h") as HTMLElement;
+  fireEvent.click(within(header).getByRole("button", { name: "Start orchestrator" }));
+
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]).toMatchObject({ path: "/api/v1/projects/kiln/orchestrator", method: "POST" });
+  expect(typeof posted[0]?.body.idempotency_key).toBe("string");
+  await waitFor(() =>
+    expect(screen.getByTestId("toast").textContent).toContain("Started the kiln orchestrator"),
+  );
+  expect(header.getAttribute("aria-expanded")).toBe("true");
+  // A lane with a live orchestrator offers no start.
+  const alpha = screen.getByTestId("lane-alpha").querySelector(".lane-h") as HTMLElement;
+  expect(within(alpha).queryByRole("button", { name: "Start orchestrator" })).toBeNull();
+});
+
+test("no lane offers Start orchestrator while the agents cannot be read", async () => {
+  stubApi("degraded");
+  const served = globalThis.fetch;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
+      String(input).startsWith("/api/v1/agents")
+        ? new Response(JSON.stringify({ ok: false, error: { code: "internal", message: "x" } }), {
+            status: 500,
+          })
+        : served(input, init),
+    ),
+  );
+  await renderApp("degraded", "/", ["/api/v1/agents"]);
+
+  await waitFor(() =>
+    expect(screen.getByText(/Lanes show no orchestrator until it answers/)).toBeTruthy(),
+  );
+  expect(screen.queryByRole("button", { name: "Start orchestrator" })).toBeNull();
 });
 
 test("Open in herdr says when herdr opened, and when no herdr window here can show it", async () => {

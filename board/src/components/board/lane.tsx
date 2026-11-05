@@ -10,9 +10,10 @@ import { COLUMNS, openCount } from "./model";
 import type { ColumnId, Tile } from "./model";
 import { PeerNote } from "./host-chip";
 import { MiniTile, TileView } from "./tile";
-import { focusReason, ownerOf, projectKey } from "../../lib/peers";
+import { focusReason, isPeerRow, ownerOf, projectKey } from "../../lib/peers";
 import type { Standing } from "../../lib/peers";
 import { useHerdrFocus } from "./herdr";
+import { StartOrchestratorButton } from "./orchestrator-start";
 import { ServerIcon } from "../shell/icons";
 import type { LaneHealth } from "../states/degraded";
 import { LaneNote } from "../states/lane-note";
@@ -70,6 +71,8 @@ interface LaneProps {
   open: boolean;
   focusMode: boolean;
   orchestrator: AgentRow | undefined;
+  // The agents read succeeded, so no orchestrator row means none is running.
+  orchestratorsKnown: boolean;
   remoteHost: Machine | undefined;
   health: LaneHealth;
   standing: Standing;
@@ -85,6 +88,7 @@ export function Lane({
   open,
   focusMode,
   orchestrator,
+  orchestratorsKnown,
   remoteHost,
   health,
   standing,
@@ -95,6 +99,8 @@ export function Lane({
   const focus = useHerdrFocus();
   const key = projectKey(project);
   const off = focusReason(ownerOf(project));
+  // Only this host's own projects start here: a peer's start is not forwarded.
+  const startable = !orchestrator && orchestratorsKnown && !isPeerRow(project);
   const counts = COLUMNS.map((column) => ({
     column,
     count: tiles.filter((tile) => tile.column === column.id).length,
@@ -109,7 +115,9 @@ export function Lane({
             <b>{filterName ? "Nothing in this tab" : "No cards yet"}</b>
             {filterName
               ? `No ${project.name} cards match "${filterName}".`
-              : `${project.name} has no cards. Ask its orchestrator for a first card, or open its pane.`}
+              : startable
+                ? `${project.name} has no cards and no orchestrator. Start its orchestrator, then ask it for a first card.`
+                : `${project.name} has no cards. Ask its orchestrator for a first card, or open its pane.`}
           </div>
           {filterName ? null : (
             <>
@@ -212,7 +220,11 @@ export function Lane({
           ))}
         </span>
         <span className="sp" />
-        {orchestrator ? <OrchestratorMini orchestrator={orchestrator} health={health} /> : null}
+        {orchestrator ? (
+          <OrchestratorMini orchestrator={orchestrator} health={health} />
+        ) : startable ? (
+          <StartOrchestratorButton projectId={project.id} projectName={project.name} />
+        ) : null}
       </div>
       {health.kind === "ok" ? null : (
         <LaneNote health={health} projectName={project.name} hostLabel={hostLabel} />

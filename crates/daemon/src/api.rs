@@ -20,6 +20,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tiller_agents::spawn::config::SpawnConfig;
+use tiller_agents::spawn::orchestrator::Orchestrator;
 use tiller_core::domain::{
     AnsweredVia, Approval, AskSource, CardKind, CardOutcome, HoldReleaseReason, Host, PeerScope,
     Session,
@@ -78,6 +79,38 @@ pub struct Inner {
     /// Set when `state.db` fails its integrity check (`recovery.md` R10):
     /// reads go on, every mutation is refused.
     pub damage: Damage,
+    /// The board's Start orchestrator; none answers it 503.
+    pub orchestrators: Option<Arc<dyn OrchestratorStart>>,
+}
+
+/// Starts a project's orchestrator, or returns the live one, as `tiller
+/// orchestrator start` does. The binary provides it: the spawn tools are
+/// read from `config.toml` there.
+pub trait OrchestratorStart: Send + Sync {
+    fn start(
+        &self,
+        store: &mut Store,
+        ctx: &Ctx,
+        project: &str,
+    ) -> Result<Applied<Orchestrator>, StartError>;
+}
+
+/// A start that failed, as `tiller orchestrator start` reports it.
+#[derive(Debug)]
+pub enum StartError {
+    /// The store failed, maybe after a start that was then undone (`notes`
+    /// say what was put back). The daemon checks the database for damage.
+    State {
+        error: Box<Error>,
+        notes: Option<String>,
+    },
+    /// Any other refusal, with the command's exit code (`protocol.md` 6.1).
+    Refused {
+        exit: u8,
+        code: &'static str,
+        message: String,
+        hint: Option<String>,
+    },
 }
 
 impl AppState {
@@ -242,18 +275,26 @@ impl From<(u16, Value)> for ApiError {
     }
 }
 
+/// The HTTP status for a CLI exit code (`protocol.md` 6.1).
+fn status_of_exit(exit: impl Into<i32>) -> StatusCode {
+    match exit.into() {
+        2 => StatusCode::BAD_REQUEST,
+        3 => StatusCode::NOT_FOUND,
+        4 => StatusCode::CONFLICT,
+        5 => StatusCode::UNPROCESSABLE_ENTITY,
+        6 => StatusCode::FORBIDDEN,
+        7 => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
 impl From<Error> for ApiError {
     fn from(error: Error) -> Self {
-        let status = match error.exit_code() {
-            2 => StatusCode::BAD_REQUEST,
-            3 => StatusCode::NOT_FOUND,
-            4 => StatusCode::CONFLICT,
-            5 => StatusCode::UNPROCESSABLE_ENTITY,
-            6 => StatusCode::FORBIDDEN,
-            7 => StatusCode::SERVICE_UNAVAILABLE,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        let mut api = ApiError::new(status, error.code(), error.to_string());
+        let mut api = ApiError::new(
+            status_of_exit(error.exit_code()),
+            error.code(),
+            error.to_string(),
+        );
         match &error {
             Error::NotFound {
                 entity,
@@ -541,6 +582,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/contributions", get(contributions))
         .route("/api/v1/projects/{id}/stage", post(stage_project))
         .route("/api/v1/projects/{id}/asks", post(ask_note))
+        .route(
+            "/api/v1/projects/{id}/orchestrator",
+            post(start_orchestrator),
+        )
         .route(
             "/api/v1/projects/{id}/delete",
             get(project_delete_preview).post(delete_project),
@@ -1591,6 +1636,67 @@ async fn ask_note(
     .await
 }
 
+#[utoipa::path(post, path = "/api/v1/projects/{id}/orchestrator", tag = "mutations", request_body = StartOrchestrator,
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody),
+              (status = 404, body = ErrorBody), (status = 422, body = ErrorBody), (status = 503, body = ErrorBody),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn start_orchestrator(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers)?;
+    let request: StartOrchestrator = body(&bytes)?;
+    key(&request.idempotency_key)?;
+    not_forwarded(&state, request.host.as_deref(), "an orchestrator start").await?;
+    if let Some(reason) = state.0.damage.reason() {
+        return Err(read_only(&reason));
+    }
+    let Some(starter) = state.0.orchestrators.clone() else {
+        return Err(Error::Unavailable("this daemon cannot start orchestrators".into()).into());
+    };
+    let db = state.db();
+    let damage = state.0.damage.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        if !db.exists() {
+            return Err(uninitialized());
+        }
+        let mut store = Store::open_current(&db).map_err(ApiError::from)?;
+        // The same start as `tiller orchestrator start`, as the board: a
+        // live orchestrator is returned (`replayed`), never a second one.
+        starter
+            .start(&mut store, &Ctx::new(Actor::Board), &id)
+            .map_err(|error| match error {
+                StartError::State { error, notes } => {
+                    damage.suspect(&db, &error);
+                    let mut api = ApiError::from(*error);
+                    if let Some(notes) = notes {
+                        api.body.error.message = format!("{}; {notes}", api.body.error.message);
+                    }
+                    api
+                }
+                StartError::Refused {
+                    exit,
+                    code,
+                    message,
+                    hint,
+                } => {
+                    let mut api = ApiError::new(status_of_exit(exit), code, message);
+                    api.body.error.hint = hint;
+                    api
+                }
+            })
+    })
+    .await;
+    let applied = match joined {
+        Ok(result) => result?,
+        Err(error) => return Err(Error::Internal(error.to_string()).into()),
+    };
+    Ok(Json(Done::of(applied)?.response()))
+}
+
 /// The longest ask the board's box records: it is noted whole to the
 /// orchestrator, and again at every orchestrator start until it is resolved.
 const ASK_NOTE_MAX_CHARS: usize = 8000;
@@ -1930,7 +2036,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, stage_project, ask_note, project_delete_preview, delete_project,
+        cancel, reopen, answer, withdraw_attention, decide, focus, stage_project, ask_note, start_orchestrator, project_delete_preview, delete_project,
         relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo
     ),
@@ -2015,6 +2121,7 @@ pub(crate) mod tests {
             started_at: Timestamp::now(),
             tools: Arc::new(Mutex::new(Value::Null)),
             damage,
+            orchestrators: None,
         }))
     }
 

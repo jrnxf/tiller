@@ -243,6 +243,64 @@ fn get(port: u16, path: &str) -> (String, String) {
     (head.lines().next().unwrap().to_owned(), body.to_owned())
 }
 
+/// `POST <path>` with a JSON body, as the signed-in board sends it.
+fn post_as_board(world: &World, port: u16, path: &str, body: &str) -> (String, Value) {
+    let now = tiller_core::Timestamp::now();
+    let token = tiller_daemon::auth::mint_login(&world.home(), now).unwrap();
+    let cookie = tiller_daemon::auth::redeem_login(&world.home(), &token, now)
+        .unwrap()
+        .unwrap();
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(
+        stream,
+        "POST {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\n\
+         Sec-Fetch-Site: same-origin\r\nCookie: {}={cookie}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        tiller_daemon::auth::COOKIE,
+        body.len()
+    )
+    .unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    let (head, body) = answer.split_once("\r\n\r\n").unwrap();
+    (
+        head.lines().next().unwrap().to_owned(),
+        serde_json::from_str(body).unwrap(),
+    )
+}
+
+/// The board's Start orchestrator is `tiller orchestrator start` run as the
+/// board: the same checks refuse it, and a refused start writes nothing.
+#[test]
+fn the_board_starts_an_orchestrator_through_the_command_start() {
+    let world = World::initialized();
+    let mut daemon = start(&world);
+    let sessions = || -> i64 {
+        world
+            .store()
+            .conn()
+            .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
+            .unwrap()
+    };
+    let before = sessions();
+
+    let path = "/api/v1/projects/alpha/orchestrator";
+    let (status, answer) = post_as_board(&world, daemon.port, path, r#"{"idempotency_key":"k1"}"#);
+    assert_eq!(status, "HTTP/1.0 400 Bad Request", "{answer}");
+    assert_eq!(answer["error"]["code"], "usage");
+    assert!(
+        answer["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("checkouts.alpha")),
+        "{answer}"
+    );
+    let path = "/api/v1/projects/nope/orchestrator";
+    let (status, answer) = post_as_board(&world, daemon.port, path, r#"{"idempotency_key":"k1"}"#);
+    assert_eq!(status, "HTTP/1.0 404 Not Found", "{answer}");
+    assert_eq!(sessions(), before, "a refused start writes nothing");
+    assert!(terminate(&mut daemon).success());
+}
+
 #[test]
 fn a_daemon_on_an_empty_home_makes_the_database_and_serves_agents() {
     let world = World::new();

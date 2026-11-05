@@ -11,7 +11,12 @@ import type {
   ProjectsResponse,
 } from "./api-types.ts";
 import { memoryMutation } from "./fixtures-memory.ts";
-import { FIXTURE_HEAD_SHA, fixtureResource, fixtureResponses } from "./fixtures.ts";
+import {
+  FIXTURE_HEAD_SHA,
+  fixtureResource,
+  fixtureResponses,
+  startOrchestratorFixture,
+} from "./fixtures.ts";
 import type { Scenario } from "./fixtures.ts";
 import { relabelFixture } from "./fixtures-signals.ts";
 import { agentsPath, attentionPath, projectsPath } from "./queries.ts";
@@ -223,7 +228,7 @@ function forwarded(
 ): MutationResult | null {
   const host = body.host;
   if (typeof host !== "string") return null;
-  if (/\/(stage|asks|focus|label|delete)$/.test(path) || /\/memory\//.test(path)) {
+  if (/\/(stage|asks|focus|label|delete|orchestrator)$/.test(path) || /\/memory\//.test(path)) {
     return refusal(502, "peer_refused", `${method} ${path} is not forwarded to ${host}`);
   }
   if (host === "host-e") {
@@ -423,6 +428,41 @@ function handle(method: string, path: string, body: Record<string, unknown>): Mu
             rev_after: null,
             card_id: null,
             entity_state: null,
+          },
+        },
+      ],
+    };
+  }
+  const orchestrator = /^\/api\/v1\/projects\/([^/]+)\/orchestrator$/.exec(path);
+  if (method === "POST" && orchestrator?.[1]) {
+    const project = orchestrator[1];
+    const { live } = startOrchestratorFixture(project);
+    const session = fakeId("01JSESS");
+    const data = {
+      session: { id: session, project_id: project, role: "orchestrator" },
+      label: project,
+      warning: null,
+    };
+    const reply = recorded(data, null, null);
+    if (live) {
+      return {
+        reply: { ...reply, body: { ...(reply.body as object), replayed: true } },
+        followUps: [],
+      };
+    }
+    return {
+      reply,
+      followUps: [
+        {
+          delayMs: 600,
+          event: {
+            kind: "session.started",
+            txn: "session.start",
+            entity: "session",
+            entity_id: session,
+            rev_after: null,
+            card_id: null,
+            entity_state: { id: session, role: "orchestrator", project_id: project },
           },
         },
       ],
