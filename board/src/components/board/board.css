@@ -809,16 +809,38 @@ button.colh:hover {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--line-2));
   color: var(--accent-text);
 }
-.appr {
-  border: 1px solid var(--line-1);
-  border-radius: var(--r8);
-  padding: 12px;
-  background: var(--bg-2);
-  margin-top: 8px;
+/* The approval is the foot of the pull request card: note left, action right,
+   wrapping below on narrow widths. inbox.css also styles .appr as a standalone
+   box and loads later, so the card-scoped rules below carry the specificity. */
+.prbox .appr {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin: 12px 0 0;
+  padding: 10px 0 0;
+  border: 0;
+  border-top: 1px solid var(--line-1);
+  border-radius: 0;
+  background: none;
 }
-.appr.stale {
-  border-color: color-mix(in srgb, var(--yellow) 48%, var(--line-1));
-  background: color-mix(in srgb, var(--yellow) 7%, var(--bg-2));
+.prbox .appr.stale {
+  border-top-color: color-mix(in srgb, var(--yellow) 48%, var(--line-1));
+}
+.prbox .appr .a-main {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+.prbox .appr .a-act {
+  flex: none;
+}
+.prbox .appr .a-act .bind {
+  margin: 0;
+}
+.prbox .appr ul {
+  flex: 1 0 100%;
+  margin: 0;
 }
 .appr .a-h {
   display: flex;
@@ -841,7 +863,7 @@ button.colh:hover {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  margin: 10px 0 0;
+  margin: 6px 0 0;
   font-size: var(--fs-mini);
   color: var(--fg-3);
 }
@@ -1425,6 +1447,21 @@ a.card:hover {
 }
 .card-page .run .acts {
   margin-top: 8px;
+  flex-wrap: nowrap;
+}
+.card-page .run .acts .meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  white-space: normal;
+}
+.card-page .run .acts .meta .ld {
+  margin: 0;
+}
+.card-page .run .acts .btn {
+  margin-left: auto;
+  flex: none;
 }
 
 @media (max-width: 1180px) {

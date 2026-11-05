@@ -6,13 +6,13 @@ mod common;
 use common::*;
 use tiller_core::domain::{
     ApprovalAction, ApprovalKind, ApprovalState, AttentionKind, CardOutcome, Delivery, Effort,
-    GrantKind, RunRole,
+    GrantKind, RunOutcome, RunRole,
 };
 use tiller_core::state::approvals::{NewApproval, NewGrant};
 use tiller_core::state::cards::NewCard;
 use tiller_core::state::list;
 use tiller_core::state::projects::NewProject;
-use tiller_core::state::runs::{NewOrchestrator, NewRun, SpawnChecks};
+use tiller_core::state::runs::{EndRun, NewOrchestrator, NewRun, SpawnChecks};
 
 /// R08 (also the T4.3 acceptance): a push after approval marks it stale,
 /// withdraws its merge item, and asks again at the new head.
@@ -435,4 +435,35 @@ fn decision_by_wrong_principal_opens_recovery() {
     let report = w.pass(now().plus_minutes(2));
     assert!(!report.did("G04"), "{report:?}");
     assert_eq!(w.breaches("G04").len(), 1);
+}
+
+/// The builder run ends before the merge approval is asked (the daemon
+/// publishes the PR after the run), yet the owner's question stays current:
+/// a merge item follows the card, its open PR and the bound head, not the
+/// run that asked. It stales only when the head moves.
+#[test]
+fn a_merge_ask_outlives_the_run_that_raised_it() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let run = w.run_of(&worker);
+    w.store_mut()
+        .run_end(
+            &owner(),
+            &run.id,
+            EndRun {
+                outcome: RunOutcome::Abandoned,
+                note: None,
+            },
+        )
+        .unwrap();
+    w.approve(&worker, &pr, "a1a1a1a1", false);
+    let items = w.open_items(&run.card_id);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].kind, AttentionKind::Merge);
+    assert!(
+        tiller_core::state::attention::still_current(w.store().conn(), &items[0]).unwrap(),
+        "a merge ask is not stale because its run ended"
+    );
 }

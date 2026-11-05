@@ -256,7 +256,10 @@ fn ask_merge(
             evidence: Some(
                 json!({"approval_id": approval.id, "head_sha": approval.head_sha}).to_string(),
             ),
-            run_id: approval.run_id.clone(),
+            // Not tied to the asking run: the daemon publishes the PR after
+            // the builder's run ends, and the ask follows the card, the PR
+            // and the bound head. The approval going stale withdraws it.
+            run_id: None,
             ..NewAttention::default()
         },
     )

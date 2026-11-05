@@ -914,7 +914,7 @@ function cardDetailFor(
           repo: `example/${row.project_id}`,
           title: row.title,
           state: done ? "merged" : "open",
-          head_sha: sha,
+          head_sha: row.id.endsWith("44") ? FIXTURE_HEAD_SHA : sha,
           base: "main",
           checks: row.badge === "checks" ? "pending" : "passing",
           checks_summary: row.badge === "checks" ? "2 of 4 checks running" : "4 of 4 checks green",
@@ -924,14 +924,16 @@ function cardDetailFor(
     : [];
   // The first landing card carries a stale approval so the screens show it.
   const stale = row.id.endsWith("43");
+  const waiting = row.id.endsWith("44");
   const approvals = prs.map((pr) => ({
-    id: `01JAPPR${pr.id.slice(-19)}`,
+    id: waiting ? "01JAPPR0000000000000000000" : `01JAPPR${pr.id.slice(-19)}`,
     kind: "merge",
-    state: stale ? "accepted" : done ? "succeeded" : "accepted",
+    // alpha-44 waits on the owner: the approval the Inbox shows for it.
+    state: waiting ? "requested" : stale ? "accepted" : done ? "succeeded" : "accepted",
     pr_id: pr.id,
     head_sha: stale ? fakeSha(`${row.id}-old`) : pr.head_sha,
-    decided_at: minutes(now, -80),
-    decided_by: "owner",
+    decided_at: waiting ? null : minutes(now, -80),
+    decided_by: waiting ? null : "owner",
     newer_commits: stale
       ? [
           {
@@ -1019,7 +1021,11 @@ function cardDetailFor(
         ? [{ id: "01JHOLD0000000000000000001", until_at: null, reason: row.parked_reason }]
         : [],
     deps: [],
-    attention: [],
+    attention: waiting
+      ? attentionFor("default", board, now).items.filter(
+          (item) => item.card_id === row.id && item.approval,
+        )
+      : [],
     runs,
     prs,
     approvals,

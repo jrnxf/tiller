@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { CSSProperties } from "react";
 
 import type {
+  AttentionItem,
   CardApproval,
   CardArtifact,
   CardPr,
@@ -25,6 +26,7 @@ import { agentActivity } from "./activity";
 import { Ago } from "./ago";
 import { badgeText, statusMark } from "./badge";
 import { HostChip, PeerNote } from "./host-chip";
+import { ApproveButton } from "../attention/approve";
 import { useAmbiguousIds, useStanding } from "./peer-state";
 import { approvalFor, approvalStanding, mergeTimeline } from "./card-model";
 import { durationSeconds, formatAge, formatLisbonMoment, secondsSince, shortSha } from "./format";
@@ -192,40 +194,57 @@ function RunCard({ run, owner }: { run: CardRun; owner: string | undefined }) {
   );
 }
 
-function ApprovalBox({ approval, pr }: { approval: CardApproval; pr: CardPr }) {
+function ApprovalRow({
+  approval,
+  pr,
+  ask,
+}: {
+  approval: CardApproval;
+  pr: CardPr;
+  ask: AttentionItem | undefined;
+}) {
   const standing = approvalStanding(approval, pr);
   const stale = standing === "stale";
   const who = approval.decided_by === "owner" ? "you" : (approval.decided_by ?? "someone");
   return (
     <div className={`appr${stale ? " stale" : ""}`} data-standing={standing}>
-      <div className="a-h">
-        {stale ? <WarnIcon /> : standing === "current" ? <Status mark="ok" /> : <LockIcon />}
-        {standing === "stale"
-          ? "Approval bound to an older commit"
-          : standing === "current"
-            ? "Approval matches the head"
-            : standing === "pending"
-              ? "Waiting for your approval"
-              : `Approval ${approval.state}`}
-        {stale ? (
-          <span className="lab sm yel">stale: new commits since approval</span>
-        ) : standing === "current" ? (
-          <span className="lab sm ok">current</span>
+      <div className="a-main">
+        <div className="a-h">
+          {stale ? <WarnIcon /> : standing === "current" ? <Status mark="ok" /> : <LockIcon />}
+          {standing === "stale"
+            ? "Approval bound to an older commit"
+            : standing === "current"
+              ? "Approval matches the head"
+              : standing === "pending"
+                ? "Waiting for your approval"
+                : `Approval ${approval.state}`}
+          {stale ? (
+            <span className="lab sm yel">stale: new commits since approval</span>
+          ) : standing === "current" ? (
+            <span className="lab sm ok">current</span>
+          ) : null}
+        </div>
+        {approval.head_sha ? (
+          <div className="bind">
+            {approval.decided_at
+              ? `Approved by ${who} at ${formatLisbonMoment(approval.decided_at)}, bound to`
+              : "Will be bound to"}{" "}
+            <span className={`sha${stale ? " old" : ""}`}>{shortSha(approval.head_sha)}</span>
+            {stale ? (
+              <>
+                <ChevronRightIcon />
+                head is <span className="sha new">{shortSha(pr.head_sha)}</span>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+        {standing === "current" ? (
+          <div className="bind">A new push would mark this approval stale and ask again.</div>
         ) : null}
       </div>
-      {approval.head_sha ? (
-        <div className="bind">
-          <LockIcon />
-          {approval.decided_at
-            ? `Approved by ${who} at ${formatLisbonMoment(approval.decided_at)}, bound to`
-            : "Will be bound to"}{" "}
-          <span className={`sha${stale ? " old" : ""}`}>{shortSha(approval.head_sha)}</span>
-          {stale ? (
-            <>
-              <ChevronRightIcon />
-              head is <span className="sha new">{shortSha(pr.head_sha)}</span>
-            </>
-          ) : null}
+      {standing === "pending" && ask ? (
+        <div className="a-act">
+          <ApproveButton item={ask} />
         </div>
       ) : null}
       {stale && approval.newer_commits.length > 0 ? (
@@ -241,16 +260,19 @@ function ApprovalBox({ approval, pr }: { approval: CardApproval; pr: CardPr }) {
           ))}
         </ul>
       ) : null}
-      {standing === "current" ? (
-        <div className="bind" style={{ marginTop: 6 }}>
-          A new push would mark this approval stale and ask again.
-        </div>
-      ) : null}
     </div>
   );
 }
 
-function PullRequest({ pr, approvals }: { pr: CardPr; approvals: CardApproval[] }) {
+function PullRequest({
+  pr,
+  approvals,
+  attention,
+}: {
+  pr: CardPr;
+  approvals: CardApproval[];
+  attention: AttentionItem[];
+}) {
   const approval = approvalFor(approvals, pr);
   const standing = approval ? approvalStanding(approval, pr) : null;
   const checkTone = pr.checks === "passing" ? "ok" : pr.checks === "failing" ? "bad" : "yel";
@@ -302,18 +324,22 @@ function PullRequest({ pr, approvals }: { pr: CardPr; approvals: CardApproval[] 
             </>
           ) : null}
         </dl>
-      </div>
-      {approval ? (
-        <ApprovalBox approval={approval} pr={pr} />
-      ) : pr.state === "open" ? (
-        <div className="appr">
-          <div className="bind" style={{ margin: 0 }}>
-            <LockIcon />
-            No approval yet. One is requested once checks pass, and it is bound to the head commit
-            at that moment.
+        {approval ? (
+          <ApprovalRow
+            approval={approval}
+            pr={pr}
+            ask={attention.find((item) => item.still_current && item.approval?.id === approval.id)}
+          />
+        ) : pr.state === "open" ? (
+          <div className="appr">
+            <div className="bind">
+              <LockIcon />
+              No approval yet. One is requested once checks pass, and it is bound to the head commit
+              at that moment.
+            </div>
           </div>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -492,7 +518,14 @@ export function CardPage({ cardId, owner }: { cardId: string; owner?: string }) 
       </div>
 
       {detail.prs.length > 0 ? (
-        detail.prs.map((pr) => <PullRequest key={pr.id} pr={pr} approvals={detail.approvals} />)
+        detail.prs.map((pr) => (
+          <PullRequest
+            key={pr.id}
+            pr={pr}
+            approvals={detail.approvals}
+            attention={detail.attention}
+          />
+        ))
       ) : (
         <div className="sect">
           <div className="sect-h">Pull request</div>
