@@ -808,3 +808,27 @@ fn backups_and_exports_are_owner_only() {
         assert_eq!(mode, 0o700, "{}", dir.display());
     }
 }
+
+#[test]
+fn a_restored_database_is_owner_only_whatever_the_backup_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let host = host();
+    let paths = &host.paths;
+    let mut store = Store::open(&paths.db).unwrap();
+    setup(&mut store, "test-host", Boundary::Personal);
+    let made = backup(store.conn(), paths, at("2026-11-01T15:00:00Z")).unwrap();
+    let Nightly::Done { entry, .. } = made else {
+        panic!("{made:?}");
+    };
+    drop(store);
+    fs::set_permissions(
+        paths.resolve(&entry.file),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+
+    restore(paths, None, false, at("2026-11-01T16:00:00Z")).unwrap();
+    let mode = fs::metadata(&paths.db).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}
