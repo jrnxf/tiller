@@ -1,0 +1,7 @@
+---
+type: tool_used
+tool: Bash
+input_match: '--kind\s+scout\b|tiller\s+spawn\s+\S+\s+scout\b'
+min: 0
+max: 0
+---
