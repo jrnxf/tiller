@@ -377,7 +377,40 @@ pub(crate) fn release_reservation(
             .card(&run.card_id)
             .payload(json!({"reason": reason, "run_id": run.id})),
     )?;
+    note_slot_open(
+        tx,
+        &reservation.project_id,
+        Some(&run.card_id),
+        format!(
+            "a run slot opened: run {} ended ({}); retry any queued spawn",
+            ids::short(&run.id),
+            reason
+        ),
+    )?;
     Ok(Some(reservation.id))
+}
+
+/// Wakes the project's live orchestrator, if any, so it retries spawns that
+/// were refused as full.
+pub(crate) fn note_slot_open(
+    tx: &mut Tx<'_>,
+    project_id: &str,
+    card_id: Option<&str>,
+    body: String,
+) -> Result<()> {
+    if let Some(orchestrator) = live_orchestrator(tx.conn(), project_id)? {
+        enqueue(
+            tx,
+            &NewMessage {
+                target_session_id: orchestrator.id,
+                kind: OutboxKind::Note,
+                body,
+                card_id: card_id.map(str::to_owned),
+                reply_to: None,
+            },
+        )?;
+    }
+    Ok(())
 }
 
 /// Counts the open reservations on a host and a project.

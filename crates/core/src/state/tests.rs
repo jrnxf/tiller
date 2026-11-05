@@ -1445,3 +1445,94 @@ fn run_clean_refuses_uncommitted_changes() {
         .unwrap();
     store.run_clean(&owner(), &run.id, true).unwrap();
 }
+
+fn orchestrator_notes(store: &Store, session: &str) -> Vec<String> {
+    let mut stmt = store
+        .conn()
+        .prepare(
+            "SELECT body FROM outbox WHERE target_session_id = ?1 AND kind = 'note' ORDER BY id",
+        )
+        .unwrap();
+    stmt.query_map([session], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// A raised capacity and a run ending each note the live orchestrator, so it
+/// retries a spawn that was refused as full.
+#[test]
+fn a_freed_project_slot_wakes_the_orchestrator() {
+    let (mut store, orchestrator) = memory_store();
+    let rev = store.project("alpha").unwrap().rev;
+    store
+        .project_edit(
+            &owner(),
+            "alpha",
+            rev,
+            ProjectEdit {
+                capacity: Some(1),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap();
+    let card = store
+        .card_create(&owner(), None, card(CardKind::Ship, "work"), None)
+        .unwrap()
+        .value;
+    let run = store
+        .run_start(&owner(), None, builder_run(&card.id))
+        .unwrap()
+        .value
+        .run;
+    let full = store
+        .run_start(&owner(), None, builder_run(&card.id))
+        .unwrap_err();
+    assert_eq!(full.code(), "refused");
+    let before = orchestrator_notes(&store, &orchestrator).len();
+
+    let rev = store.project("alpha").unwrap().rev;
+    store
+        .project_edit(
+            &owner(),
+            "alpha",
+            rev,
+            ProjectEdit {
+                capacity: Some(2),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap();
+    let notes = orchestrator_notes(&store, &orchestrator);
+    assert_eq!(notes.len(), before + 1);
+    assert!(notes[before].contains("capacity raised from 1 to 2"));
+
+    // Lowering it frees nothing.
+    let rev = store.project("alpha").unwrap().rev;
+    store
+        .project_edit(
+            &owner(),
+            "alpha",
+            rev,
+            ProjectEdit {
+                capacity: Some(1),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(orchestrator_notes(&store, &orchestrator).len(), before + 1);
+
+    store
+        .run_end(
+            &owner(),
+            &run.id,
+            super::runs::EndRun {
+                outcome: RunOutcome::Abandoned,
+                note: None,
+            },
+        )
+        .unwrap();
+    let notes = orchestrator_notes(&store, &orchestrator);
+    assert_eq!(notes.len(), before + 2);
+    assert!(notes[before + 1].contains("a run slot opened"));
+}
