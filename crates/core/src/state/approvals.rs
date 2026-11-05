@@ -1027,6 +1027,20 @@ impl Store {
             match result {
                 DeployResult::Success | DeployResult::Superseded => {
                     recorded.obligation = meet_obligation(tx, &watch, seq)?;
+                    // A run that shows up after `missing`, `timed_out` or a
+                    // failed run still resolves the watch (`state.md`
+                    // section 7), so the recovery items this watch opened
+                    // no longer apply and must not keep the card open.
+                    let own: Vec<Attention> = list(
+                        tx.conn(),
+                        "card_id = ?1 AND kind = 'recovery' AND answered_at IS NULL
+                         AND withdrawn_at IS NULL
+                         AND json_extract(evidence, '$.obligation_id') = ?2",
+                        &[&card.id, &watch.id],
+                    )?;
+                    for item in &own {
+                        withdraw_attention(tx, item, &format!("the deploy later ended {result}"))?;
+                    }
                     if open_attention_id(tx.conn(), &card.id)?.is_none()
                         && active_runs(tx.conn(), &card.id)?.is_empty()
                     {

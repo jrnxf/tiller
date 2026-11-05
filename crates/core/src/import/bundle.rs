@@ -53,6 +53,11 @@ pub struct BundleProject {
     pub delivery: String,
     #[serde(default)]
     pub capacity: Option<i64>,
+    /// The project's checks, in either shape of `projects.checks`. Optional:
+    /// the exporter does not write it (Firstmate keeps no per-project check
+    /// list), and a bundle edited by hand may.
+    #[serde(default)]
+    pub checks: Option<Value>,
     #[serde(default)]
     pub added: Option<String>,
 }

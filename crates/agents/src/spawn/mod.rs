@@ -41,8 +41,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::Value;
 use tiller_core::domain::{
-    Card, CardKind, Delivery, Effort, Pr, Project, Reservation, Run, RunOutcome, RunRole, Session,
-    Worktree,
+    Card, CardKind, CheckPlan, Delivery, Effort, Pr, Project, Reservation, Run, RunOutcome,
+    RunRole, Session, Worktree,
 };
 use tiller_core::state::caches::{WorktreeReading, landed_heads};
 use tiller_core::state::projects::meta;
@@ -139,7 +139,49 @@ pub fn delivery_line(project: &Project) -> String {
             " Commit only, never push: describe the PR with `tiller pr describe` and report done; the daemon pushes the branch and opens the PR.",
         );
     }
+    if effective == Delivery::DirectPush {
+        line.push_str(&direct_push_line(&project.checks));
+    }
     line.push('\n');
+    line
+}
+
+/// The `direct-push` worker's part of the delivery line (P11): run the
+/// project's own checks, commit, never push. The daemon lands the commit on
+/// the default branch once it is approved or a grant covers it, then watches
+/// the deploy.
+fn direct_push_line(checks: &serde_json::Value) -> String {
+    let mut line = String::from(
+        " Commit only, never push: the daemon lands your commit on the default branch after approval and then watches the deploy.",
+    );
+    let Ok(plan) = CheckPlan::parse(checks) else {
+        return line;
+    };
+    if plan.is_empty() {
+        line.push_str(" The project names no checks; run what the repository's own docs ask for.");
+        return line;
+    }
+    let list = |commands: &[String]| {
+        if commands.is_empty() {
+            "none".to_owned()
+        } else {
+            commands
+                .iter()
+                .map(|command| format!("`{command}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+    line.push_str(&format!(
+        " Before you report done run the project checks and fix what they find: {}.",
+        list(&plan.full)
+    ));
+    if let Some(lighter) = &plan.no_logic {
+        line.push_str(&format!(
+            " A change that touches no logic (docs, comments, copy, formatting) runs only: {}.",
+            list(lighter)
+        ));
+    }
     line
 }
 
