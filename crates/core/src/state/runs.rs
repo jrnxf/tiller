@@ -543,6 +543,7 @@ fn relaunch_in(tx: &mut Tx<'_>, run: &str, relaunch: &Relaunch) -> Result<Relaun
             Some(checks) => Some(check_spawn(tx.conn(), &host, &project, checks, tx.now())?),
             None => {
                 check_capacity(tx.conn(), &host, &project)?;
+                check_spawn_rate(tx.conn(), &host, &project, tx.now())?;
                 None
             }
         };
@@ -568,6 +569,10 @@ fn relaunch_in(tx: &mut Tx<'_>, run: &str, relaunch: &Relaunch) -> Result<Relaun
         (new_run, checks)
     } else {
         require_active(&run)?;
+        // A relaunch in place is the other half of a respawn storm.
+        let project: Project = get(tx.conn(), "project", &card.project_id)?;
+        let host: Host = get(tx.conn(), "host", &run.host_id)?;
+        check_spawn_rate(tx.conn(), &host, &project, tx.now())?;
         (run.clone(), None)
     };
     tx.event(
@@ -624,8 +629,8 @@ pub fn floor_refusal(name: &str, floor: Option<i64>, free: Option<i64>) -> Optio
     }
 }
 
-/// The spawn rate limit (`recovery.md` R16, P48): runs started in this many
-/// minutes are counted.
+/// The spawn rate limit (`recovery.md` R16, P48): worker sessions started in
+/// this many minutes are counted.
 pub const SPAWN_RATE_MINUTES: i64 = 10;
 /// More than this many spawns for one project in [`SPAWN_RATE_MINUTES`] trips
 /// the limit.
@@ -636,8 +641,9 @@ pub const SPAWN_RATE_HOST: i64 = 10;
 
 /// Refuses a spawn or a relaunch past the spawn rate, so a respawn storm
 /// trips this limit and not the host's RAM, disk or process table. Returns
-/// the counts it saw. Every run row counts, ended or failed, since each one
-/// launched (or tried to launch) a worker.
+/// the counts it saw. Every worker session row counts, ended or failed, and
+/// so a spawn, a new attempt and a relaunch in place each count once: each one
+/// launched (or tried to launch) a worker process.
 fn check_spawn_rate(
     conn: &Connection,
     host: &Host,
@@ -646,8 +652,8 @@ fn check_spawn_rate(
 ) -> Result<(i64, i64)> {
     let since = now.plus_minutes(-SPAWN_RATE_MINUTES);
     let project_spawns: i64 = conn.query_row(
-        "SELECT count(*) FROM runs r JOIN cards c ON c.id = r.card_id
-         WHERE c.project_id = ?1 AND r.started_at >= ?2",
+        "SELECT count(*) FROM sessions
+         WHERE project_id = ?1 AND run_id IS NOT NULL AND started_at >= ?2",
         params![project.id, since],
         |row| row.get(0),
     )?;
@@ -661,7 +667,8 @@ fn check_spawn_rate(
         ));
     }
     let host_spawns: i64 = conn.query_row(
-        "SELECT count(*) FROM runs WHERE host_id = ?1 AND started_at >= ?2",
+        "SELECT count(*) FROM sessions
+         WHERE host_id = ?1 AND run_id IS NOT NULL AND started_at >= ?2",
         params![host.id, since],
         |row| row.get(0),
     )?;

@@ -91,6 +91,9 @@ pub struct Tools {
     /// `lavish-axi`, with any leading arguments: the review page tool the
     /// page answers are read from (`protocol.md` 3.5).
     pub lavish: Vec<OsString>,
+    /// The hostnames the review server answers to; every call to it carries
+    /// them, since a call can be the one that starts it (P49).
+    pub review_hosts: Vec<String>,
 }
 
 /// The host's boot id, when the OS reports one (R04).
@@ -581,7 +584,10 @@ pub fn start(
         store: open()?,
         herdr: tools.herdr.clone(),
     };
-    let pages = PageAnswers::new(open()?, Lavish::new(tools.lavish.clone()));
+    let pages = PageAnswers::new(
+        open()?,
+        Lavish::new(tools.lavish.clone(), tools.review_hosts.clone()),
+    );
     let quota = crate::quota::Feed::new(open()?, tools.quota.clone(), settings.quota_providers);
 
     let mut handles = Vec::new();

@@ -17,13 +17,16 @@ pub trait Listeners {
 /// The `lavish-axi` CLI.
 pub struct Lavish {
     program: Vec<OsString>,
+    /// The hostnames the review server answers to: ending a page starts the
+    /// server when it is down, and the server reads these once, at start.
+    hosts: Vec<String>,
 }
 
 impl Lavish {
     /// `program` is the command and its leading arguments, `["lavish-axi"]`
     /// unless the config names another.
-    pub fn new(program: Vec<OsString>) -> Self {
-        Self { program }
+    pub fn new(program: Vec<OsString>, hosts: Vec<String>) -> Self {
+        Self { program, hosts }
     }
 }
 
@@ -33,11 +36,16 @@ impl Listeners for Lavish {
             .program
             .split_first()
             .ok_or_else(|| "the lavish command is empty".to_owned())?;
-        let out = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(leading)
             .arg("end")
             .arg(page)
-            .stdin(Stdio::null())
+            .stdin(Stdio::null());
+        if !self.hosts.is_empty() {
+            command.env("LAVISH_AXI_ALLOWED_HOSTS", self.hosts.join(" "));
+        }
+        let out = command
             .output()
             .map_err(|e| format!("lavish-axi end: {e}"))?;
         if out.status.success() {

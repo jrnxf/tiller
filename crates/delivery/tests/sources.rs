@@ -248,7 +248,7 @@ fn retired_and_ended_pages_are_not_read() {
     w.pass(1);
     w.queues
         .set(PAGE, Feedback::Entries(vec![entry("a1", "After the end")]));
-    // The owner ended the page: the source stops reading it.
+    // The owner ended the page: the source leaves it alone for a while.
     assert_eq!(w.pass(2).pages, 0);
 
     let mut w = World::new();
@@ -257,6 +257,18 @@ fn retired_and_ended_pages_are_not_read() {
         .set(PAGE, Feedback::Entries(vec![entry("a1", "Retired")]));
     assert_eq!(w.pass(1).pages, 0);
     assert!(w.outbox().is_empty());
+}
+
+#[test]
+fn an_ended_page_the_owner_reopens_is_read_again() {
+    let mut w = World::new();
+    w.queues.set(PAGE, Feedback::Ended);
+    w.pass(1);
+    w.queues
+        .set(PAGE, Feedback::Entries(vec![entry("a1", "Second round")]));
+    // Eleven minutes on, the page is asked again and answers.
+    let report = w.pass(11 * 60);
+    assert_eq!((report.pages, report.steered), (1, 1));
 }
 
 #[test]

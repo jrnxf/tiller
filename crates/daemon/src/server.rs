@@ -74,6 +74,8 @@ pub struct Config {
     pub quota: Vec<OsString>,
     /// `lavish-axi`: the review page tool whose annotations reach workers.
     pub lavish: Vec<OsString>,
+    /// The hostnames the review server answers to (`spawn.review_allowed_hosts`).
+    pub review_hosts: Vec<String>,
     /// The GitHub CLI the land loop and the direct-pr publish run as the
     /// owner's login: `gh`, or `TILLER_GH`.
     pub gh: String,
@@ -252,6 +254,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         quota: config.quota.clone(),
         gh: config.gh.clone(),
         lavish: config.lavish.clone(),
+        review_hosts: config.review_hosts.clone(),
     };
     let workers = tokio::spawn(start_workers(
         config.home.clone(),

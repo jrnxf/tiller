@@ -133,10 +133,11 @@ pub fn lavish_program(paths: &Paths) -> Vec<OsString> {
     crate::daemon::env_command("TILLER_LAVISH_AXI").unwrap_or_else(|| words(&paths.lavish))
 }
 
-/// [`lavish_program`] from a `config.toml` already read.
-pub fn lavish_from_config(table: &toml::Table) -> Result<Vec<OsString>, Failure> {
+/// [`lavish_program`] and the review server's hostnames
+/// (`spawn.review_allowed_hosts`) from a `config.toml` already read.
+pub fn lavish_from_config(table: &toml::Table) -> Result<(Vec<OsString>, Vec<String>), Failure> {
     let paths = Paths::from_table(table).map_err(failure)?;
-    Ok(lavish_program(&paths))
+    Ok((lavish_program(&paths), paths.review_allowed_hosts))
 }
 
 /// The daemon's and `tiller peer serve`'s herdr, from the `[spawn]` table of
@@ -164,7 +165,10 @@ impl Tools {
             pool: Treehouse::new(words(&config.spawn.treehouse)),
             herdr,
             scanner: GitScanner::new(),
-            listeners: Lavish::new(lavish_program(&config.spawn)),
+            listeners: Lavish::new(
+                lavish_program(&config.spawn),
+                config.spawn.review_allowed_hosts.clone(),
+            ),
             tiller: std::env::current_exe()?,
             tiller_home: absolute_home(&app.home)?,
             scratch,

@@ -15,7 +15,7 @@
 //! between the read and the store loses that batch; the owner sees the page
 //! unanswered and annotates again.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -32,6 +32,10 @@ use tiller_herdr::poller::{PollError, Source};
 
 /// How often the pages are read: every 30 s (`protocol.md` 3.5).
 pub const PAGES_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How long a page the owner ended is left alone before it is read again, in
+/// minutes: the owner can reopen an ended session for another round.
+const ENDED_RECHECK_MINUTES: i64 = 10;
 
 /// The longest an annotation's element text is kept in a message, so a page
 /// full of prose never makes a long body.
@@ -71,9 +75,9 @@ pub trait Pages: Send + 'static {
 pub struct PageAnswers<P: Pages> {
     store: Store,
     pages: P,
-    /// Pages the owner ended: they are not read again until the daemon
-    /// restarts.
-    ended: HashSet<PathBuf>,
+    /// Pages the owner ended, and when each is read again: an ended poll
+    /// returns at once, but a process per page every pass is not worth it.
+    ended: HashMap<PathBuf, Timestamp>,
 }
 
 impl<P: Pages> PageAnswers<P> {
@@ -81,7 +85,7 @@ impl<P: Pages> PageAnswers<P> {
         Self {
             store,
             pages,
-            ended: HashSet::new(),
+            ended: HashMap::new(),
         }
     }
 
@@ -98,13 +102,15 @@ impl<P: Pages> PageAnswers<P> {
             let Some(path) = artifact.path.clone().map(PathBuf::from) else {
                 continue;
             };
-            if self.ended.contains(&path) {
+            if self.ended.get(&path).is_some_and(|until| now < *until) {
                 continue;
             }
+            self.ended.remove(&path);
             let entries = match self.pages.feedback(&path) {
                 Ok(Feedback::Quiet) => continue,
                 Ok(Feedback::Ended) => {
-                    self.ended.insert(path);
+                    self.ended
+                        .insert(path, now.plus_minutes(ENDED_RECHECK_MINUTES));
                     continue;
                 }
                 Ok(Feedback::Entries(entries)) => entries,
@@ -115,10 +121,17 @@ impl<P: Pages> PageAnswers<P> {
             };
             report.pages += 1;
             for entry in entries {
-                match self.answer(now, &artifact, &entry)? {
-                    Fate::Steered => report.steered += 1,
-                    Fate::Noted => report.noted += 1,
-                    Fate::Recorded => report.recorded += 1,
+                // The read consumed the queue: one entry that cannot be
+                // stored must not cost the rest of the batch.
+                match self.answer(now, &artifact, &entry) {
+                    Ok(Fate::Steered) => report.steered += 1,
+                    Ok(Fate::Noted) => report.noted += 1,
+                    Ok(Fate::Recorded) => report.recorded += 1,
+                    Err(error) => report.errors.push(format!(
+                        "{}: entry {:?} was not stored: {error}",
+                        path.display(),
+                        entry.prompt
+                    )),
                 }
             }
         }
@@ -268,6 +281,10 @@ const OWNER: &str = "tiller";
 /// reads nothing until it stops.
 pub struct Lavish {
     program: Vec<OsString>,
+    /// The hostnames the review server answers to. A poll starts the server
+    /// when it is not running, and the server reads these once, at start, so
+    /// every call carries them (P49).
+    hosts: Vec<String>,
     /// Ids are `<start>-<n>`: a read consumes the queue, so every entry it
     /// returns is new.
     start: u64,
@@ -275,12 +292,13 @@ pub struct Lavish {
 }
 
 impl Lavish {
-    pub fn new(program: Vec<OsString>) -> Self {
+    pub fn new(program: Vec<OsString>, hosts: Vec<String>) -> Self {
         let start = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_millis().try_into().unwrap_or(u64::MAX));
         Self {
             program,
+            hosts,
             start,
             next: AtomicU64::new(0),
         }
@@ -301,21 +319,27 @@ impl Pages for Lavish {
             .program
             .split_first()
             .ok_or_else(|| "the lavish command is empty".to_owned())?;
-        let out = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(leading)
             .arg("poll")
             .arg(page)
             .args(["--owner", OWNER, "--timeout-ms", READ_MS])
-            .stdin(Stdio::null())
+            .stdin(Stdio::null());
+        if !self.hosts.is_empty() {
+            command.env("LAVISH_AXI_ALLOWED_HOSTS", self.hosts.join(" "));
+        }
+        let out = command
             .output()
             .map_err(|e| format!("lavish-axi poll: {e}"))?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        // Someone else is polling the page: they hear the owner, not us.
-        if stdout.contains("code: LISTENER_ACTIVE") || stderr.contains("code: LISTENER_ACTIVE") {
-            return Ok(Feedback::Quiet);
-        }
         if !out.status.success() {
+            // Someone else is polling the page: they hear the owner, not us.
+            if stdout.contains("code: LISTENER_ACTIVE") || stderr.contains("code: LISTENER_ACTIVE")
+            {
+                return Ok(Feedback::Quiet);
+            }
             return Err(format!(
                 "lavish-axi poll exited {}: {}",
                 out.status,
@@ -336,8 +360,11 @@ fn first_line<'a>(stderr: &'a str, stdout: &'a str) -> &'a str {
 }
 
 /// Reads `lavish-axi poll`'s output, a TOON document: a `session:` block
-/// whose `status:` is `feedback`, `waiting` or `ended`, and for `feedback` a
-/// `prompts[N]{uid,prompt,selector,tag,text}:` table.
+/// whose `status:` is `feedback`, `waiting`, `ended` or `browser_disconnected`,
+/// and for `feedback` a `prompts[N]` array. The array is a table
+/// (`{uid,prompt,selector,tag,text}:` and one row per prompt) unless a prompt
+/// carries more than those fields, an image attachment for one, and then it is
+/// a list (`- uid: ...` items with indented fields).
 fn parse_poll(output: &str, mut mint: impl FnMut() -> String) -> Result<Feedback, String> {
     let status = output
         .lines()
@@ -345,51 +372,117 @@ fn parse_poll(output: &str, mut mint: impl FnMut() -> String) -> Result<Feedback
         .map(str::trim)
         .ok_or("lavish-axi poll named no status")?;
     match status {
-        "waiting" => return Ok(Feedback::Quiet),
+        // The page is open nowhere right now; the owner comes back to it.
+        "waiting" | "browser_disconnected" => return Ok(Feedback::Quiet),
         "ended" => return Ok(Feedback::Ended),
         "feedback" => {}
         other => return Err(format!("lavish-axi poll status {other}")),
     }
     let mut lines = output.lines();
-    let Some((header, columns)) = lines.find_map(|line| {
-        let line = line.trim();
-        let columns = line
-            .strip_prefix("prompts[")?
-            .split_once("]{")?
-            .1
-            .strip_suffix("}:")?;
-        Some((line, columns))
-    }) else {
-        // Feedback that is not prompts (a browser that went away, an
-        // artifact failure) has no one to answer.
+    let Some(header) = lines.find(|line| line.trim().starts_with("prompts[")) else {
+        // Feedback that is not prompts (an artifact failure) has no one to
+        // answer.
         return Ok(Feedback::Quiet);
     };
-    let columns: Vec<String> = split_row(columns)?;
-    let field = |row: &[String], name: &str| -> String {
-        columns
-            .iter()
-            .position(|column| column == name)
-            .and_then(|at| row.get(at))
-            .cloned()
-            .unwrap_or_default()
-    };
-    let mut entries = Vec::new();
-    for line in lines {
-        // The table is the indented rows right under its header.
-        if !line.starts_with("  ") {
-            break;
+    let header = header.trim();
+    let (count, shape) = header
+        .strip_prefix("prompts[")
+        .and_then(|rest| rest.split_once(']'))
+        .ok_or_else(|| format!("lavish-axi poll header {header}"))?;
+    let count: usize = count
+        .parse()
+        .map_err(|_| format!("lavish-axi poll header {header}"))?;
+    let body: Vec<&str> = lines.take_while(|line| line.starts_with("  ")).collect();
+    let rows = match shape {
+        ":" => list_rows(&body)?,
+        _ => {
+            let columns = shape
+                .strip_prefix('{')
+                .and_then(|rest| rest.strip_suffix("}:"))
+                .ok_or_else(|| format!("lavish-axi poll header {header}"))?;
+            table_rows(&split_row(columns)?, &body, header)?
         }
-        let row = split_row(line.trim())
-            .map_err(|e| format!("lavish-axi poll row under {header}: {e}"))?;
-        entries.push(Entry {
-            id: mint(),
-            prompt: field(&row, "prompt"),
-            selector: field(&row, "selector"),
-            tag: field(&row, "tag"),
-            text: field(&row, "text"),
-        });
+    };
+    if rows.is_empty() && count > 0 {
+        // The read consumed the queue: say so rather than read it as quiet.
+        return Err(format!("lavish-axi poll named {count} prompts, none read"));
     }
-    Ok(Feedback::Entries(entries))
+    Ok(Feedback::Entries(
+        rows.into_iter()
+            .map(|row| Entry {
+                id: mint(),
+                prompt: row.get("prompt"),
+                selector: row.get("selector"),
+                tag: row.get("tag"),
+                text: row.get("text"),
+            })
+            .collect(),
+    ))
+}
+
+/// One prompt's fields by name.
+struct Row(Vec<(String, String)>);
+
+impl Row {
+    fn get(&self, name: &str) -> String {
+        self.0
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default()
+    }
+}
+
+/// The rows of a table array: the indented lines under its header.
+fn table_rows(columns: &[String], body: &[&str], header: &str) -> Result<Vec<Row>, String> {
+    body.iter()
+        .map(|line| {
+            let values = split_row(line.trim())
+                .map_err(|e| format!("lavish-axi poll row under {header}: {e}"))?;
+            Ok(Row(columns.iter().cloned().zip(values).collect()))
+        })
+        .collect()
+}
+
+/// The items of a list array: `  - key: value` opens an item and its other
+/// fields follow at the next indent. Nested arrays and objects, such as
+/// attachments, sit deeper and are left out.
+fn list_rows(body: &[&str]) -> Result<Vec<Row>, String> {
+    let mut rows: Vec<Row> = Vec::new();
+    for line in body {
+        let (field, item) = match line.strip_prefix("  - ") {
+            Some(first) => (first, true),
+            None => match line.strip_prefix("    ") {
+                // Deeper than a field of the item: a nested value.
+                Some(field) if !field.starts_with(' ') => (field, false),
+                _ => continue,
+            },
+        };
+        if item {
+            rows.push(Row(Vec::new()));
+        }
+        let Some(row) = rows.last_mut() else {
+            continue;
+        };
+        // A nested array's header (`attachments[1]{name,path}:`) has no value.
+        let Some((key, value)) = field.split_once(": ") else {
+            continue;
+        };
+        row.0.push((key.to_owned(), unquote(value)?));
+    }
+    Ok(rows)
+}
+
+/// A TOON value: raw text, or a string in double quotes with escapes.
+fn unquote(value: &str) -> Result<String, String> {
+    if !value.starts_with('"') {
+        return Ok(value.to_owned());
+    }
+    let mut fields = split_row(value)?;
+    match (fields.pop(), fields.is_empty()) {
+        (Some(field), true) => Ok(field),
+        _ => Err(format!("a value {value} is not one quoted string")),
+    }
 }
 
 /// Splits one TOON row: comma separated, a field in double quotes when it
@@ -460,10 +553,50 @@ mod tests {
         );
     }
 
+    /// What `lavish-axi poll` prints when a prompt carries an image: the
+    /// array is a list, and the attachment table nests inside its item.
+    #[test]
+    fn a_list_form_poll_yields_its_entries() {
+        let output = "session:\n  file: /home/user/page.html\n  status: feedback\n\
+            prompts[2]:\n  - uid: a\n    prompt: \"hi, \\\"x\\\"\"\n    selector: h1\n    tag: h1\n    text: T\n    attachments[1]{name,path}:\n      i.png,/p/i.png\n\
+            \x20 - uid: b\n    prompt: two\n    selector: \"\"\n    tag: \"\"\n    text: \"\"\n\
+            next_step: \"Apply the requested changes.\"\n";
+        let Feedback::Entries(entries) = parse_poll(output, ids()).unwrap() else {
+            panic!("expected entries");
+        };
+        assert_eq!(
+            entries,
+            [
+                Entry {
+                    id: "e1".into(),
+                    prompt: "hi, \"x\"".into(),
+                    selector: "h1".into(),
+                    tag: "h1".into(),
+                    text: "T".into(),
+                },
+                Entry {
+                    id: "e2".into(),
+                    prompt: "two".into(),
+                    ..Entry::default()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_batch_that_cannot_be_read_is_an_error_not_quiet() {
+        let unreadable = "session:\n  status: feedback\nprompts[1]:\n  nothing here\n";
+        assert!(parse_poll(unreadable, ids()).is_err());
+        let odd = "session:\n  status: feedback\nprompts[1]<odd>\n";
+        assert!(parse_poll(odd, ids()).is_err());
+    }
+
     #[test]
     fn waiting_and_ended_polls_carry_no_entries() {
         let waiting = "session:\n  file: /home/user/page.html\n  status: waiting\n";
         assert_eq!(parse_poll(waiting, ids()), Ok(Feedback::Quiet));
+        let away = "session:\n  file: /home/user/page.html\n  status: browser_disconnected\n";
+        assert_eq!(parse_poll(away, ids()), Ok(Feedback::Quiet));
         let ended = "session:\n  file: /home/user/page.html\n  status: ended\n  ended_by: user\n";
         assert_eq!(parse_poll(ended, ids()), Ok(Feedback::Ended));
         assert!(parse_poll("nothing", ids()).is_err());
@@ -476,7 +609,10 @@ mod tests {
         let path = dir.join("lavish-axi");
         std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Lavish::new(vec![path.into_os_string()])
+        Lavish::new(
+            vec![path.into_os_string()],
+            vec!["board.example.com".into(), "192.0.2.10".into()],
+        )
     }
 
     #[test]
@@ -486,7 +622,8 @@ mod tests {
         let mut lavish = stub(
             dir.path(),
             &format!(
-                "echo \"$@\" > {}\nprintf 'session:\\n  status: feedback\\nprompts[1]{{uid,prompt,selector,tag,text}}:\\n  ,Hello,,,\\n'",
+                "echo \"$@\" > {}\necho \"$LAVISH_AXI_ALLOWED_HOSTS\" > {}.hosts\nprintf 'session:\\n  status: feedback\\nprompts[1]{{uid,prompt,selector,tag,text}}:\\n  ,Hello,,,\\n'",
+                args.display(),
                 args.display()
             ),
         );
@@ -494,6 +631,13 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&args).unwrap().trim(),
             "poll /home/user/page.html --owner tiller --timeout-ms 1500"
+        );
+        // A poll starts the server when it is down: it must know its hosts.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("args.hosts"))
+                .unwrap()
+                .trim(),
+            "board.example.com 192.0.2.10"
         );
         let Feedback::Entries(entries) = found else {
             panic!("expected entries");
@@ -519,6 +663,16 @@ mod tests {
             busy.feedback(Path::new("/home/user/page.html")),
             Ok(Feedback::Quiet)
         );
+        // The words in an owner's prompt are not a listener conflict.
+        let mut said = stub(
+            dir.path(),
+            "printf 'session:\\n  status: feedback\\nprompts[1]{uid,prompt,selector,tag,text}:\\n  ,\"code: LISTENER_ACTIVE\",,,\\n'",
+        );
+        let Ok(Feedback::Entries(entries)) = said.feedback(Path::new("/home/user/page.html"))
+        else {
+            panic!("expected entries");
+        };
+        assert_eq!(entries[0].prompt, "code: LISTENER_ACTIVE");
         let mut broken = stub(dir.path(), "echo 'code: UNKNOWN' >&2; exit 1");
         let error = broken
             .feedback(Path::new("/home/user/page.html"))

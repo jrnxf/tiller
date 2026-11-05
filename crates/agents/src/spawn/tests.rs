@@ -980,9 +980,9 @@ fn cleanup_refuses_with_unlanded_commits() {
     // Every combination: the worktree goes back only when it holds nothing.
     for bits in 0..16_u8 {
         // Sixteen spawns would trip the spawn rate limit: age the earlier
-        // runs out of its window.
+        // sessions out of its window.
         rig.sql(
-            "UPDATE runs SET started_at = strftime('%Y-%m-%dT%H:%M:%fZ', started_at, '-1 hour')",
+            "UPDATE sessions SET started_at = strftime('%Y-%m-%dT%H:%M:%fZ', started_at, '-1 hour')",
         );
         let holding = Holding {
             unpushed: bits & 1 != 0,
@@ -2299,8 +2299,8 @@ fn respawn_storm_trips_rate_limit_not_host() {
         .unwrap();
     assert_eq!(degraded, 0);
 
-    // Runs that started before the window no longer count.
-    rig.sql("UPDATE runs SET started_at = '2026-01-01T00:00:00Z'");
+    // Launches before the window no longer count.
+    rig.sql("UPDATE sessions SET started_at = '2026-01-01T00:00:00Z'");
     rig.try_spawn(&ctx, Rig::request(&cards[5], RunRole::Builder))
         .unwrap();
 }

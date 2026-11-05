@@ -57,9 +57,12 @@ pub struct ArtifactAdd {
     pub kind: ArtifactKind,
     #[arg(long)]
     pub title: String,
-    #[arg(long, group = "where_")]
+    /// Where the artifact is served; a review page gives its URL and its file.
+    #[arg(long)]
     pub url: Option<String>,
-    #[arg(long, group = "where_")]
+    /// The file, made absolute against the current directory: the daemon
+    /// reads and polls review pages by it from its own.
+    #[arg(long)]
     pub path: Option<String>,
     #[command(flatten)]
     pub key: KeyArg,
@@ -192,13 +195,22 @@ pub fn artifact(app: &App, cmd: ArtifactCmd) -> Done {
     if args.url.is_none() && args.path.is_none() {
         return Err(Failure::usage("give --url <u> or --path <p>"));
     }
+    let path = match args.path {
+        Some(path) => Some(
+            std::path::absolute(&path)
+                .map_err(|e| Failure::usage(format!("--path {path}: {e}")))?
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        None => None,
+    };
     let mut store = app.write()?;
     let run_id = app.session(&store)?.and_then(|session| session.run_id);
     let keyed = app.key(
         &store,
         "artifact.add",
         &json!({"card": args.card, "kind": args.kind, "title": args.title,
-                "url": args.url, "path": args.path}),
+                "url": args.url, "path": path}),
         &args.key.key,
     )?;
     let applied = store.artifact_add(
@@ -209,7 +221,7 @@ pub fn artifact(app: &App, cmd: ArtifactCmd) -> Done {
             kind: args.kind,
             title: args.title,
             url: args.url,
-            path: args.path,
+            path,
         },
     )?;
     Ok(Outcome::applied(applied).with_key(&keyed))

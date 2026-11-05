@@ -1636,6 +1636,46 @@ fn a_respawn_storm_trips_the_spawn_rate_limit() {
     spawn(&mut store, "gamma", 11).unwrap();
 }
 
+/// P48: a relaunch in place starts a worker process too, so a loop of
+/// relaunches trips the spawn rate limit the way a loop of spawns does.
+#[test]
+fn a_relaunch_in_place_counts_toward_the_spawn_rate() {
+    let (mut store, _) = memory_store();
+    let card = store
+        .card_create(&owner(), None, card(CardKind::Ship, "work"), None)
+        .unwrap()
+        .value;
+    let started = store
+        .run_start(
+            &owner(),
+            None,
+            NewRun {
+                worktree_path: Some("/home/user/work/alpha-1".into()),
+                ..builder_run(&card.id)
+            },
+        )
+        .unwrap()
+        .value;
+    let relaunch = || Relaunch {
+        note: "again".into(),
+        new_attempt: false,
+        stop_proof: Some("pane exited".into()),
+        model: None,
+        checks: None,
+    };
+    // The spawn was the first of five.
+    for _ in 0..4 {
+        store
+            .run_relaunch(&owner(), &started.run.id, relaunch())
+            .unwrap();
+    }
+    let error = store
+        .run_relaunch(&owner(), &started.run.id, relaunch())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("spawn rate limit"), "{error}");
+}
+
 /// P48: retiring an artifact is recorded once; retiring it again changes
 /// nothing. P47: feedback on a page is recorded on the card, once per key,
 /// and by the daemon only.
