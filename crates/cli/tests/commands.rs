@@ -906,6 +906,56 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
     );
 }
 
+/// A delete refused while something of the project is live removes nothing,
+/// says so, and names the owner's next step; taking each step in turn clears
+/// the way. The order is the owner's at the end of a trial: a builder still on
+/// its card, the orchestrator, then the builder's agent.
+#[test]
+fn project_delete_names_the_step_that_clears_it() {
+    let world = World::initialized();
+    let orchestrator = world.orchestrator();
+    let card = world.must(&[
+        "card", "create", "alpha", "--kind", "ship", "--title", "last one",
+    ]);
+    let card = id(&card, "/data/display_id");
+    let (_, builder) = world.builder_run(&card);
+    let delete = ["project", "delete", "alpha", "--yes"];
+
+    let refused = fails(&world, 5, "project_delete_live_run", &delete);
+    let hint = |out: &common::Out| out.json["error"]["hint"].as_str().unwrap().to_owned();
+    assert_eq!(
+        hint(&refused),
+        format!("tiller card cancel {card} --reason \"deleting project alpha\"")
+    );
+    world.must(&[
+        "card",
+        "cancel",
+        &card,
+        "--reason",
+        "deleting project alpha",
+    ]);
+
+    let refused = fails(&world, 5, "project_delete_live_session", &delete);
+    assert_eq!(hint(&refused), format!("tiller agent focus {orchestrator}"));
+    // `/exit` in the pane: Claude Code fires `SessionEnd`.
+    world.hook(
+        None,
+        "SessionEnd",
+        r#"{"session_id":"claude-orchestrator","reason":"prompt_input_exit"}"#,
+    );
+
+    let refused = world.run(&delete);
+    assert_eq!(refused.code, 5, "{}", refused.json);
+    assert_eq!(hint(&refused), format!("tiller agent focus {builder}"));
+    world.hook(
+        Some(&builder),
+        "SessionEnd",
+        r#"{"reason":"prompt_input_exit"}"#,
+    );
+
+    step(&world, "project_delete_after_exit", &delete);
+}
+
 /// Each exit code of `protocol.md` section 6.2 is reached by a real command.
 #[test]
 fn exit_codes_follow_the_table() {

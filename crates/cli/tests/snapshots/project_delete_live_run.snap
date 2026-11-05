@@ -1,0 +1,28 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 5
+{
+  "error": {
+    "code": "refused",
+    "current": {
+      "project": "alpha",
+      "would_remove": {
+        "cards": 1,
+        "events": 6,
+        "idempotency_keys": 1,
+        "projects": 1,
+        "reservations": 1,
+        "runs": 1,
+        "sessions": 2
+      },
+      "would_unlink": {},
+      "would_withdraw_attention": 0
+    },
+    "entity": "project",
+    "hint": "tiller card cancel alpha-1 --reason \"deleting project alpha\"",
+    "id": "alpha",
+    "message": "project alpha: builder run on alpha-1 is live; end it first: cancel its card, then delete again; nothing was deleted"
+  },
+  "ok": false
+}

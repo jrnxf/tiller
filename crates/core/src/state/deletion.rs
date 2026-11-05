@@ -144,6 +144,23 @@ pub struct DeletionPreview {
     #[serde(flatten)]
     pub deletion: Deletion,
     pub refused: Option<String>,
+    /// What clears `refused`, when the owner can clear it from here.
+    #[serde(default)]
+    pub unblock: Option<Unblock>,
+}
+
+/// The owner's way past a refused delete: the step, and the command that
+/// starts it when there is one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Unblock {
+    pub step: String,
+    pub command: Option<String>,
+}
+
+/// Why the delete is refused while the project has rows in flight.
+struct Blocker {
+    fact: String,
+    unblock: Option<Unblock>,
 }
 
 impl Store {
@@ -163,17 +180,25 @@ impl Store {
                         ..Deletion::default()
                     },
                     refused: Some(fact),
+                    unblock: None,
                 });
             }
             Err(error) => return Err(error),
         }
         let fks = foreign_keys(&tx)?;
         mark(&tx, &fks, &project.id)?;
-        let refused = blocker(&tx, &fks, &project.id)?;
+        let (refused, unblock) = match blocker(&tx, &fks, &project.id)? {
+            Some(Blocker { fact, unblock }) => (Some(fact), unblock),
+            None => (None, None),
+        };
         let mut deletion = counts(&tx, &fks, &project.id)?;
         deletion.withdrawn_attention = about_project(&tx, &project.id)?.len() as i64;
         // Dropping the transaction rolls the scratch table back.
-        Ok(DeletionPreview { deletion, refused })
+        Ok(DeletionPreview {
+            deletion,
+            refused,
+            unblock,
+        })
     }
 
     /// `project.delete`: removes the project and every row that belongs to
@@ -194,7 +219,7 @@ impl Store {
             check_deletable(tx.conn(), &project)?;
             let fks = foreign_keys(tx.conn())?;
             mark(tx.conn(), &fks, &project.id)?;
-            if let Some(fact) = blocker(tx.conn(), &fks, &project.id)? {
+            if let Some(Blocker { fact, .. }) = blocker(tx.conn(), &fks, &project.id)? {
                 return Err(Error::refused("project", &project.id, fact));
             }
             let mut deletion = counts(tx.conn(), &fks, &project.id)?;
@@ -392,31 +417,59 @@ fn spread(conn: &Connection, fks: &[ForeignKey]) -> Result<()> {
 
 /// Why the marked rows may not go: something is live, or the walk reached
 /// a row of another project.
-fn blocker(conn: &Connection, fks: &[ForeignKey], project_id: &str) -> Result<Option<String>> {
-    let live = |sql: &str| -> Result<Option<String>> {
-        Ok(conn.query_row(sql, [], |row| row.get(0)).optional()?)
+fn blocker(conn: &Connection, fks: &[ForeignKey], project_id: &str) -> Result<Option<Blocker>> {
+    let live = |sql: &str| -> Result<Option<(String, String)>> {
+        Ok(conn
+            .query_row(sql, [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()?)
     };
-    if let Some(run) = live(&format!(
-        "SELECT r.role || ' run on ' || c.display_id || ' is live'
-         FROM runs r JOIN cards c ON c.id = r.card_id
+    // The owner cannot end a run directly; cancelling its card does.
+    if let Some((role, card)) = live(&format!(
+        "SELECT r.role, c.display_id FROM runs r JOIN cards c ON c.id = r.card_id
          WHERE r.ended_at IS NULL AND r.id IN ({}) ORDER BY r.id LIMIT 1",
         doomed("runs", "id")
     ))? {
-        return Ok(Some(format!("{run}; end it first")));
+        return Ok(Some(Blocker {
+            fact: format!("{role} run on {card} is live; end it first"),
+            unblock: Some(Unblock {
+                step: "cancel its card".into(),
+                command: Some(format!(
+                    "tiller card cancel {card} --reason \"deleting project {project_id}\""
+                )),
+            }),
+        }));
     }
-    if let Some(session) = live(&format!(
-        "SELECT role || ' session ' || id || ' is live'
-         FROM sessions WHERE ended_at IS NULL AND id IN ({}) ORDER BY id LIMIT 1",
+    // A session ends when its agent exits: the `SessionEnd` hook records it.
+    if let Some((role, session)) = live(&format!(
+        "SELECT role, id FROM sessions WHERE ended_at IS NULL AND id IN ({}) ORDER BY id LIMIT 1",
         doomed("sessions", "id")
     ))? {
-        return Ok(Some(format!("{session}; end it first")));
+        return Ok(Some(Blocker {
+            fact: format!("{role} session {session} is live; end it first"),
+            unblock: Some(Unblock {
+                step: "type /exit in its pane".into(),
+                command: Some(format!("tiller agent focus {session}")),
+            }),
+        }));
     }
-    if let Some(approval) = live(&format!(
-        "SELECT 'approval ' || id || ' is executing'
-         FROM approvals WHERE state = 'executing' AND id IN ({}) ORDER BY id LIMIT 1",
-        doomed("approvals", "id")
-    ))? {
-        return Ok(Some(approval));
+    let approval: Option<String> = conn
+        .query_row(
+            &format!(
+                "SELECT id FROM approvals WHERE state = 'executing' AND id IN ({}) ORDER BY id LIMIT 1",
+                doomed("approvals", "id")
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(approval) = approval {
+        return Ok(Some(Blocker {
+            fact: format!("approval {approval} is executing"),
+            unblock: Some(Unblock {
+                step: "wait for it to finish".into(),
+                command: None,
+            }),
+        }));
     }
     // A marked row whose required project or card stays belongs to someone
     // else: the walk reached it through a reference, not ownership. A link
@@ -450,10 +503,13 @@ fn blocker(conn: &Connection, fks: &[ForeignKey], project_id: &str) -> Result<Op
             } else {
                 other
             };
-            return Ok(Some(format!(
-                "{} rows of {owner} depend on {project_id}; untangle them first",
-                fk.table
-            )));
+            return Ok(Some(Blocker {
+                fact: format!(
+                    "{} rows of {owner} depend on {project_id}; untangle them first",
+                    fk.table
+                ),
+                unblock: None,
+            }));
         }
     }
     Ok(None)

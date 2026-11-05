@@ -7,14 +7,14 @@ exit: 5
     "code": "refused",
     "current": {
       "project": "gamma",
-      "removed": {
+      "would_remove": {
         "cards": 1,
         "events": 2,
         "idempotency_keys": 1,
         "projects": 1
       },
-      "unlinked": {},
-      "withdrawn_attention": 0
+      "would_unlink": {},
+      "would_withdraw_attention": 0
     },
     "entity": "project",
     "hint": "tiller project delete gamma --yes",

@@ -256,10 +256,20 @@ pub fn project(app: &App, cmd: ProjectCmd) -> Done {
 fn project_delete(app: &App, store: &mut Store, args: ProjectDelete) -> Done {
     let preview = store.project_delete_preview(&args.id)?;
     if let Some(fact) = &preview.refused {
-        let mut failure = Failure::refused(format!("project {}: {fact}", args.id));
+        let mut failure = match &preview.unblock {
+            Some(unblock) => Failure::refused(format!(
+                "project {}: {fact}: {}, then delete again; nothing was deleted",
+                args.id, unblock.step
+            )),
+            None => Failure::refused(format!("project {}: {fact}", args.id)),
+        };
+        failure.hint = preview
+            .unblock
+            .as_ref()
+            .and_then(|unblock| unblock.command.clone());
         failure.entity = Some("project".into());
         failure.id = Some(args.id.clone());
-        failure.current = Some(json!(preview.deletion));
+        failure.current = Some(would_remove(&preview.deletion));
         return Err(failure);
     }
     let summary = removal_summary(&preview.deletion);
@@ -273,7 +283,7 @@ fn project_delete(app: &App, store: &mut Store, args: ProjectDelete) -> Done {
             .hint(format!("tiller project delete {} --yes", args.id));
             failure.entity = Some("project".into());
             failure.id = Some(args.id.clone());
-            failure.current = Some(json!(preview.deletion));
+            failure.current = Some(would_remove(&preview.deletion));
             return Err(failure);
         }
     }
@@ -297,6 +307,16 @@ fn project_delete(app: &App, store: &mut Store, args: ProjectDelete) -> Done {
     };
     let applied = store.project_delete(&app.ctx(), &args.id)?;
     Ok(Outcome::applied(applied).with_warning(warning))
+}
+
+/// A refused delete's preview, named for what it is: nothing was removed.
+fn would_remove(deletion: &tiller_core::state::deletion::Deletion) -> Value {
+    json!({
+        "project": deletion.project,
+        "would_remove": deletion.removed,
+        "would_unlink": deletion.unlinked,
+        "would_withdraw_attention": deletion.withdrawn_attention,
+    })
 }
 
 /// "events: 37, cards: 4, projects: 1": the tables with rows, largest first.
