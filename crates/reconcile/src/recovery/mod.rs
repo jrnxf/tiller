@@ -10,6 +10,7 @@
 
 pub mod approvals;
 pub mod evidence;
+pub mod gates;
 pub mod sessions;
 
 use std::os::unix::fs::PermissionsExt;
