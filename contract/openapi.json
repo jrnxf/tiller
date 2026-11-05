@@ -1126,6 +1126,39 @@
         }
       }
     },
+    "/api/v1/contributions": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "contributions",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "description": "Only this project's PRs.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContributionsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/events": {
       "get": {
         "tags": [
@@ -2089,9 +2122,13 @@
         "required": [
           "id",
           "kind",
-          "title"
+          "title",
+          "created_at"
         ],
         "properties": {
+          "created_at": {
+            "type": "string"
+          },
           "id": {
             "type": "string"
           },
@@ -2100,6 +2137,13 @@
           },
           "title": {
             "type": "string"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the page is served; absent for an artifact that is only a local file."
           }
         }
       },
@@ -2944,6 +2988,77 @@
           }
         },
         "additionalProperties": false
+      },
+      "Contribution": {
+        "type": "object",
+        "description": "One published PR on the contributions view: the `prs` row with the card\nthat produced it.",
+        "required": [
+          "id",
+          "project_id",
+          "card_id",
+          "card_display_id",
+          "card_title",
+          "repo",
+          "number",
+          "url",
+          "state",
+          "linked_at"
+        ],
+        "properties": {
+          "card_display_id": {
+            "type": "string"
+          },
+          "card_id": {
+            "type": "string"
+          },
+          "card_title": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "linked_at": {
+            "type": "string"
+          },
+          "merged_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "number": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "description": "`open`, `merged` or `closed`."
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "ContributionsResponse": {
+        "type": "object",
+        "description": "`GET /api/v1/contributions`: published PRs, newest first.",
+        "required": [
+          "contributions"
+        ],
+        "properties": {
+          "contributions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Contribution"
+            }
+          }
+        }
       },
       "CreateCard": {
         "type": "object",

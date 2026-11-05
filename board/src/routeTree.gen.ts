@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AgentsRouteImport } from './routes/agents'
+import { Route as ContributionsRouteImport } from './routes/contributions'
 import { Route as HealthRouteImport } from './routes/health'
 import { Route as InboxRouteImport } from './routes/inbox'
 import { Route as MemoryRouteImport } from './routes/memory'
@@ -25,6 +26,11 @@ const IndexRoute = IndexRouteImport.update({
 const AgentsRoute = AgentsRouteImport.update({
   id: '/agents',
   path: '/agents',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ContributionsRoute = ContributionsRouteImport.update({
+  id: '/contributions',
+  path: '/contributions',
   getParentRoute: () => rootRouteImport,
 } as any)
 const HealthRoute = HealthRouteImport.update({
@@ -56,6 +62,7 @@ const CardsCardIdRoute = CardsCardIdRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/agents': typeof AgentsRoute
+  '/contributions': typeof ContributionsRoute
   '/health': typeof HealthRoute
   '/inbox': typeof InboxRoute
   '/memory': typeof MemoryRoute
@@ -65,6 +72,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/agents': typeof AgentsRoute
+  '/contributions': typeof ContributionsRoute
   '/health': typeof HealthRoute
   '/inbox': typeof InboxRoute
   '/memory': typeof MemoryRoute
@@ -75,6 +83,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/agents': typeof AgentsRoute
+  '/contributions': typeof ContributionsRoute
   '/health': typeof HealthRoute
   '/inbox': typeof InboxRoute
   '/memory': typeof MemoryRoute
@@ -86,6 +95,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/agents'
+    | '/contributions'
     | '/health'
     | '/inbox'
     | '/memory'
@@ -95,6 +105,7 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/agents'
+    | '/contributions'
     | '/health'
     | '/inbox'
     | '/memory'
@@ -104,6 +115,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/agents'
+    | '/contributions'
     | '/health'
     | '/inbox'
     | '/memory'
@@ -114,6 +126,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AgentsRoute: typeof AgentsRoute
+  ContributionsRoute: typeof ContributionsRoute
   HealthRoute: typeof HealthRoute
   InboxRoute: typeof InboxRoute
   MemoryRoute: typeof MemoryRoute
@@ -135,6 +148,13 @@ declare module '@tanstack/react-router' {
       path: '/agents'
       fullPath: '/agents'
       preLoaderRoute: typeof AgentsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/contributions': {
+      id: '/contributions'
+      path: '/contributions'
+      fullPath: '/contributions'
+      preLoaderRoute: typeof ContributionsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/health': {
@@ -178,6 +198,7 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AgentsRoute: AgentsRoute,
+  ContributionsRoute: ContributionsRoute,
   HealthRoute: HealthRoute,
   InboxRoute: InboxRoute,
   MemoryRoute: MemoryRoute,

@@ -7,6 +7,7 @@ import { ownerKey, projectKey } from "../../lib/peers";
 import { prefsStore } from "../../lib/prefs";
 import { attentionCount, scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
+import { PrIcon } from "../board/icons";
 import { Section } from "../states/section";
 import {
   AgentsIcon,
@@ -22,12 +23,13 @@ import { ProjectsSection } from "./projects-section";
 import { QuotaFooter, QuotaUnavailable } from "./quota-footer";
 
 const NAV: {
-  to: "/" | "/agents" | "/inbox" | "/memory" | "/health" | "/settings";
+  to: "/" | "/agents" | "/contributions" | "/inbox" | "/memory" | "/health" | "/settings";
   label: string;
   icon: ReactNode;
 }[] = [
   { to: "/", label: "Board", icon: <BoardIcon /> },
   { to: "/agents", label: "Agents", icon: <AgentsIcon /> },
+  { to: "/contributions", label: "Contributions", icon: <PrIcon /> },
   { to: "/inbox", label: "Inbox", icon: <InboxIcon /> },
   { to: "/memory", label: "Memory", icon: <MemoryIcon /> },
   { to: "/health", label: "Health", icon: <PulseIcon /> },
