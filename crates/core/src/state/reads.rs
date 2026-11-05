@@ -69,6 +69,19 @@ impl Store {
             .collect()
     }
 
+    /// How many of a project's run slots are free: its capacity less the
+    /// open reservations, never below zero. The same count `run.start`
+    /// refuses on.
+    pub fn project_free_runs(&self, id: &str) -> Result<i64> {
+        let project = self.project(id)?;
+        let reserved: i64 = self.conn().query_row(
+            "SELECT count(*) FROM reservations WHERE project_id = ?1 AND released_at IS NULL",
+            [id],
+            |row| row.get(0),
+        )?;
+        Ok((project.capacity - reserved).max(0))
+    }
+
     /// The `capacity` view: free run slots on each local host.
     pub fn capacity(&self) -> Result<Vec<HostCapacity>> {
         let mut stmt = self

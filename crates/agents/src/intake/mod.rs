@@ -114,7 +114,9 @@ impl Intake for Hooks {
                 "tiller: noted as a follow-up on [{}]; your orchestrator was told.",
                 card.display_id
             ),
-            None if session.role == Role::Orchestrator => ask_context(ask),
+            None if session.role == Role::Orchestrator => {
+                ask_context(ask, store.project_free_runs(&session.project_id)?)
+            }
             // A worker prompt whose card is closed: the orchestrator decides.
             None => format!(
                 "tiller: ask {} recorded for your orchestrator; the card is closed.",
@@ -190,12 +192,19 @@ pub fn prompt_key(prompt: &str, input: &HookInput) -> String {
     format!("prompt:{claude}:{}:{length}", hex(&Sha256::digest(prompt)))
 }
 
-/// The one line the orchestrator gets for an ask (`protocol.md` 2.3).
-pub fn ask_context(ask: &Ask) -> String {
+/// The one line the orchestrator gets for an ask (`protocol.md` 2.3), with
+/// the project's free run slots so a spawn it cannot make is reported as
+/// queued, not started.
+pub fn ask_context(ask: &Ask, free_runs: i64) -> String {
     let short = ids::short(&ask.id);
+    let slots = match free_runs {
+        0 => "no free run slots: a spawn would be refused, so leave the card queued and say it is queued, not started".to_owned(),
+        1 => "1 free run slot: spawn at most one run, leave other cards queued and say they are queued, not started".to_owned(),
+        n => format!("{n} free run slots: spawn at most {n} runs, leave other cards queued and say they are queued, not started"),
+    };
     format!(
-        "tiller: ask {} (short {short}) recorded. Before this turn ends run: tiller ask resolve {short} new|followup:<card>|chat|cancelled. Start each line about a card with its tag, like [{}-42].",
-        ask.id, ask.project_id
+        "tiller: ask {} (short {short}) recorded. Before this turn ends run: tiller ask resolve {short} new|followup:<card>|chat|cancelled. Start each line about a card with its tag, like [{}-42]. Project {}: {slots}.",
+        ask.id, ask.project_id, ask.project_id
     )
 }
 

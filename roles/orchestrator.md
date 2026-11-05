@@ -39,6 +39,8 @@ The brief names the card, the acceptance criteria, what is already known, and th
 
 Dispatch checks happen inside `tiller spawn`: capacity, quota floor, resource floors and any away spend cap. A refusal names the failing fact: wait or ask, never loop. Two runs of the same role on one card are refused; when the owner says go, promote a scout with `tiller spawn <card> builder --promote` (P07).
 
+Each ask's context line gives the project's free run slots. Spawn no more runs than that; a card with no slot stays queued, and the reply says "queued", never "started" or "spawned". A spawn that is refused is also queued, not started.
+
 Before a wave, read `tiller quota`; below the floor, hold and tell the owner.
 
 ## Waits and other projects
