@@ -654,6 +654,40 @@ fn state_dir_access_denied() {
     }
 }
 
+/// The merge App's key sits in the Tiller home (`authority.md`, Enforced
+/// merge gate): no fleet role reads it, by any route.
+#[test]
+fn merge_app_key_denied() {
+    for command in [
+        "cat ~/.tiller/forge-app/private-key.pem",
+        "base64 /home/user/.tiller/forge-app/private-key.pem",
+        "cp ~/.tiller/forge-app/private-key.pem /tmp/k",
+        "openssl rsa -in \"$TILLER_HOME/forge-app/private-key.pem\" -text",
+        "ls ~/.tiller/forge-app",
+    ] {
+        denied_for_all(command, Code::StateWrite);
+    }
+    for (name, input) in [
+        (
+            "Read",
+            json!({"file_path": "/home/user/.tiller/forge-app/private-key.pem"}),
+        ),
+        (
+            "Grep",
+            json!({"pattern": "PRIVATE", "path": "/home/user/.tiller/forge-app"}),
+        ),
+        ("Write", json!({"file_path": "~/.tiller/forge-app/app-id"})),
+    ] {
+        for role in Role::ALL {
+            assert_eq!(
+                tool(role, name, input.clone()).unwrap().code,
+                Code::StateWrite,
+                "{role}: {name}"
+            );
+        }
+    }
+}
+
 #[test]
 fn settings_edit_denied() {
     for command in [

@@ -20,6 +20,8 @@ use tiller_core::state::{get, list};
 use tiller_core::{Store, Timestamp};
 use tiller_herdr::poller::{PollError, Source};
 
+pub mod gate;
+
 /// Minutes after the push with no matching run before the watch records
 /// `missing`.
 pub const MISSING_AFTER_MINUTES: i64 = 10;

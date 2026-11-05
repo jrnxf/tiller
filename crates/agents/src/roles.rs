@@ -698,6 +698,38 @@ mod tests {
         ));
     }
 
+    /// G20 covers the merge App's key (`authority.md`, Enforced merge gate):
+    /// it lives in the Tiller home, which every role's deny rules and sandbox
+    /// hide, and no role is granted it back.
+    #[test]
+    fn the_merge_app_key_is_hidden() {
+        let key = "/home/user/.tiller/forge-app/private-key.pem";
+        for role in Role::ALL {
+            let fill = sample_fill(role);
+            let rendered = render_settings(role, &fill).unwrap();
+            let deny = strings(&rendered["permissions"]["deny"]);
+            for rule in [
+                "Read(//home/user/.tiller/**)",
+                "Edit(//home/user/.tiller/**)",
+            ] {
+                assert!(deny.contains(&rule), "{role}: {rule}");
+            }
+            let sandbox = &rendered["sandbox"]["filesystem"];
+            for key_name in ["denyRead", "denyWrite"] {
+                assert!(
+                    strings(&sandbox[key_name])
+                        .iter()
+                        .any(|path| key.starts_with(&format!("{path}/"))),
+                    "{role}: {key_name}"
+                );
+            }
+            assert!(
+                !rendered.to_string().contains("forge-app"),
+                "{role}: the App directory is named, so maybe granted"
+            );
+        }
+    }
+
     fn sample_fill(role: Role) -> Placeholders {
         let orchestrator = role == Role::Orchestrator;
         Placeholders {

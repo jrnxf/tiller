@@ -229,6 +229,14 @@ impl AppTokens for FakeApp {
     fn mint(&self, _repo: &str) -> std::result::Result<AppToken, ForgeError> {
         Ok(AppToken::new("ghs_test"))
     }
+
+    fn app_id(&self) -> std::result::Result<u64, ForgeError> {
+        Ok(1)
+    }
+
+    fn installed(&self, _repo: &str) -> std::result::Result<(), ForgeError> {
+        Ok(())
+    }
 }
 
 fn owner() -> Ctx {

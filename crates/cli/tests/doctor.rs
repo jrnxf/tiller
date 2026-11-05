@@ -238,6 +238,62 @@ fn merge_gate_is_reported_per_project() {
 }
 
 #[test]
+fn merge_app_key_is_checked_without_showing_it() {
+    use rsa::pkcs1::EncodeRsaPrivateKey;
+    let world = World::initialized();
+    world_with_tools(&world);
+    let merge_app = |world: &World| {
+        let out = world.run(&["doctor"]);
+        assert_eq!(out.code, 0, "an optional check: {}", out.json);
+        check(out.data(), "merge app").clone()
+    };
+    let c = merge_app(&world);
+    assert_eq!(c["status"], "warn");
+    assert!(
+        c["detail"].as_str().unwrap().contains("no merge App key"),
+        "{c}"
+    );
+
+    let dir = world.home().join("forge-app");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("app-id"), "4242\n").unwrap();
+    let key = dir.join("private-key.pem");
+    let pem = rsa::RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048)
+        .unwrap()
+        .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+        .unwrap();
+    fs::write(&key, pem.as_bytes()).unwrap();
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+    // A leaked key fails the check, yet doctor still exits 0: the check is
+    // optional.
+    let c = merge_app(&world);
+    assert_eq!(c["status"], "fail");
+    assert!(c["detail"].as_str().unwrap().contains("chmod 600"), "{c}");
+
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
+    let c = merge_app(&world);
+    assert_eq!(c["status"], "ok", "{c}");
+    assert!(c["detail"].as_str().unwrap().contains("App 4242"), "{c}");
+
+    fs::write(
+        &key,
+        "-----BEGIN RSA PRIVATE KEY-----\nc2VjcmV0\n-----END RSA PRIVATE KEY-----\n",
+    )
+    .unwrap();
+    let out = world.run(&["doctor"]);
+    let c = check(out.data(), "merge app");
+    assert_eq!(c["status"], "warn");
+    assert!(
+        c["detail"]
+            .as_str()
+            .unwrap()
+            .contains("not a usable RSA key"),
+        "{c}"
+    );
+    assert!(!out.json.to_string().contains("c2VjcmV0"), "the key leaked");
+}
+
+#[test]
 fn hand_edited_config_is_flagged() {
     let world = World::initialized();
     world_with_tools(&world);

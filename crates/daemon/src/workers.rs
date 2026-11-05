@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use tiller_agents::control::{self, Waits};
 use tiller_agents::intake::{HostConfig, IntakeSource};
-use tiller_agents::land::forge::{GhForge, NoApp};
+use tiller_agents::land::app::{APP_DIR, HostApp};
+use tiller_agents::land::forge::GhForge;
 use tiller_agents::land::publish::Published;
 use tiller_agents::land::reconcile::{Local, ReconcileForge};
 use tiller_agents::land::scrub::ScrubList;
@@ -214,6 +215,7 @@ pub struct Land {
     store: Store,
     lock: Arc<DaemonLock>,
     forge: GhForge,
+    app: HostApp,
 }
 
 impl Land {
@@ -295,7 +297,7 @@ impl Source for Land {
     fn poll(&mut self, _now: Timestamp) -> Result<(), PollError> {
         let lander = Lander {
             forge: &self.forge,
-            app: &NoApp,
+            app: &self.app,
             scrub: self.scrub(),
         };
         // One PR or approval that errors is logged and skipped; a grant pass
@@ -335,6 +337,7 @@ pub struct Publish {
     store: Store,
     lock: Arc<DaemonLock>,
     forge: GhForge,
+    app: HostApp,
 }
 
 impl Source for Publish {
@@ -349,7 +352,7 @@ impl Source for Publish {
     fn poll(&mut self, _now: Timestamp) -> Result<(), PollError> {
         let lander = Lander {
             forge: &self.forge,
-            app: &NoApp,
+            app: &self.app,
             scrub: scrub_list(&self.home),
         };
         // One run that errors is logged and skipped.
@@ -620,17 +623,28 @@ pub fn start(
         store: open()?,
         lock: lock.clone(),
         forge: GhForge::new(tools.gh.clone()),
+        app: HostApp::new(home),
     };
     let deploys = crate::forge::Deploys {
         store: open()?,
         lock: lock.clone(),
         forge: crate::forge::GhDeploys::new(tools.gh.clone()),
     };
+    let gate = crate::forge::gate::Gate {
+        store: open()?,
+        lock: lock.clone(),
+        forge: crate::forge::gate::GhRulesets::new(tools.gh.clone()),
+        app: Box::new(HostApp::new(home)),
+        app_dir: home.join(APP_DIR),
+        app_files: Default::default(),
+        last: HashMap::new(),
+    };
     let land = Land {
         home: home.to_owned(),
         store: open()?,
         lock,
         forge: GhForge::new(tools.gh.clone()),
+        app: HostApp::new(home),
     };
     let transcripts = Transcripts {
         store: open()?,
@@ -657,6 +671,7 @@ pub fn start(
     spawn(registry, publish, stop, &mut handles);
     spawn(registry, land, stop, &mut handles);
     spawn(registry, deploys, stop, &mut handles);
+    spawn(registry, gate, stop, &mut handles);
     spawn(registry, finished, stop, &mut handles);
     spawn(registry, transcripts, stop, &mut handles);
     spawn(registry, quota, stop, &mut handles);

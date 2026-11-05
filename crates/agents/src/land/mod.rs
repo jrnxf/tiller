@@ -12,6 +12,7 @@
 //! bound SHA as the forge's precondition (step 6) and records the result
 //! (step 7).
 
+pub mod app;
 pub mod direct;
 pub mod forge;
 pub mod grants;

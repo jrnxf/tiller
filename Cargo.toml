@@ -41,6 +41,7 @@ ed25519-dalek = "3"
 getrandom = "0.4"
 jiff = { version = "0.2.38", features = ["serde"] }
 notify = "8"
+ring = "0.17"
 rusqlite = { version = "0.40", features = ["bundled", "serde_json"] }
 rusqlite_migration = "2.6"
 rust-embed = { version = "8", features = ["mime-guess"] }
@@ -53,12 +54,14 @@ toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ulid = { version = "3", features = ["serde"] }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 utoipa = { version = "6", features = ["axum_extras"] }
 
 # Tests
 insta = { version = "1", features = ["json"] }
 nix = { version = "0.30", default-features = false, features = ["resource"] }
 proptest = "1"
+rsa = "0.9"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 
@@ -77,4 +80,9 @@ strip = true
 # The bundled SQLite at -O0 makes `tiller hook` miss its 10 ms budget in
 # debug builds, the ones tests run (T2.6).
 [profile.dev.package.libsqlite3-sys]
+opt-level = 3
+
+# Tests generate throwaway RSA keys for the merge App; unoptimized bignum
+# arithmetic makes each one take seconds.
+[profile.dev.package.num-bigint-dig]
 opt-level = 3

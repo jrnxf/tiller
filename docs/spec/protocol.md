@@ -256,7 +256,7 @@ The daemon's forge poller (T2.5) and the forge reconcile reads (R07, R08, R19) r
 |---|---|---|---|
 | PR poller | each open PR on a card: head SHA, state, checks, merge commit | 60 s while a run on the card is active or an approval on the PR is open, else 5 minutes | `pr.refresh` (`state.md`), which marks approvals `stale` on a moved head |
 | Deploy poller | the runs of the project's `deploy_workflow` on its default branch, with `head_sha`, `status`, `conclusion`, the environment each job deployed to, and the run URL | 60 s while a deploy-watch obligation is open, else not at all | `deploy.record` (`state.md`, section 8) |
-| Ruleset check | the default branch's rulesets and their bypass actors | at `tiller project add` and hourly; `tiller doctor` only reports the stored value and the last check | `project.merge_gate` (`state.md`, section 8; `authority.md`, Enforced merge gate) |
+| Ruleset check | the default branch's rulesets and their bypass actors | within a minute of `tiller project add`, hourly, and within a minute of the App's key or id changing; `tiller doctor` only reports the stored value and its last change | `project.merge_gate` (`state.md`, section 8; `authority.md`, Enforced merge gate) |
 
 The deploy watch (decided at CP2, C02 amended by S07). A run counts for the watch only when it matches both the commit and the environment:
 

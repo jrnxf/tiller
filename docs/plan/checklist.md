@@ -498,7 +498,8 @@ Each flip needs every kept parity row for that host passing, or live-checked at 
 
 One-time owner setup, per host and repo (CP2, S03):
 
-- [ ] Create one GitHub App owned by the owner's account (for example `tiller-merge`), with only the permissions `authority.md` lists for it; store its private key where only the daemon can read it (`authority.md`, Enforced merge gate)
+- [x] Daemon side: the App token minter reads `forge-app/`, the ruleset check records `enforced` or `detect` at add and hourly, and `tiller doctor` checks the key. The owner's steps are in [`merge-app-setup.md`](merge-app-setup.md)
+- [ ] Create one GitHub App owned by the owner's account (for example `tiller-merge`), with only the permissions `authority.md` lists for it; store its private key and id in `~/.tiller/forge-app/` ([`merge-app-setup.md`](merge-app-setup.md), steps 1 and 4)
 - [ ] For each gated repo (delivery `no-mistakes` or `no-mistakes-prod-only`, plus any project opted in) on the host being cut over: install the App, add a default-branch ruleset whose only bypass actor is the App, and confirm `tiller doctor` shows `merge_gate = enforced`. Until then that repo runs as `detect`, the labelled fallback
 - [ ] Choose the private remote the host's memory repo pushes to (`memory.remote`, C24)
 

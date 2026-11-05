@@ -136,9 +136,14 @@ pub trait Forge {
     -> Result<(), ForgeError>;
 }
 
-/// Mints the merge App's installation token for one repo.
+/// The daemon's merge App: mints its installation token for one repo, and
+/// tells the ruleset check who the App is and where it is installed.
 pub trait AppTokens {
     fn mint(&self, repo: &str) -> Result<AppToken, ForgeError>;
+    /// The App's id, the `actor_id` a ruleset names it by in its bypass list.
+    fn app_id(&self) -> Result<u64, ForgeError>;
+    /// Ok when the App is installed on `repo`.
+    fn installed(&self, repo: &str) -> Result<(), ForgeError>;
 }
 
 /// The host has no merge App yet: every mint fails, so an enforced project
@@ -147,12 +152,26 @@ pub trait AppTokens {
 /// that setup step.
 pub struct NoApp;
 
-impl AppTokens for NoApp {
-    fn mint(&self, repo: &str) -> Result<AppToken, ForgeError> {
-        Err(ForgeError::NoApp {
+impl NoApp {
+    fn missing(repo: &str) -> ForgeError {
+        ForgeError::NoApp {
             repo: repo.into(),
             why: "no merge App is installed on this host".into(),
-        })
+        }
+    }
+}
+
+impl AppTokens for NoApp {
+    fn mint(&self, repo: &str) -> Result<AppToken, ForgeError> {
+        Err(Self::missing(repo))
+    }
+
+    fn app_id(&self) -> Result<u64, ForgeError> {
+        Err(Self::missing("any repo"))
+    }
+
+    fn installed(&self, repo: &str) -> Result<(), ForgeError> {
+        Err(Self::missing(repo))
     }
 }
 

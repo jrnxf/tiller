@@ -17,6 +17,7 @@ use std::process::{Command, Stdio};
 
 use serde::Serialize;
 use serde_json::{Value, json};
+use tiller_agents::land::app::{APP_DIR, AppKey, KEY_FILE, KeyError};
 use tiller_agents::roles::Role;
 use tiller_agents::spawn::config::SpawnConfig;
 use tiller_core::Timestamp;
@@ -200,6 +201,45 @@ fn no_mistakes_skew(running: &str, cli: Option<&str>, daemon: Option<String>) ->
             format!("{running}; same version as its CLI"),
         )
         .version(Some(daemon)),
+    }
+}
+
+/// The daemon's merge App (`authority.md`, Enforced merge gate): its key
+/// and id under `<home>/forge-app/`. Optional: without it every project runs
+/// as `detect`, so a missing key warns; a key the group or others can read
+/// fails, because it has leaked off the owner's account. Names files and
+/// the reason, never the key.
+fn merge_app(home: &Path) -> Check {
+    const NAME: &str = "merge app";
+    let dir = home.join(APP_DIR);
+    match AppKey::load(&dir) {
+        Ok(Some(key)) => Check::new(
+            NAME,
+            false,
+            Status::Ok,
+            format!("App {} with its key in {}", key.id(), dir.display()),
+        ),
+        Ok(None) => Check::missing(
+            NAME,
+            false,
+            format!(
+                "no merge App key at {}, so every project runs as detect (docs/plan/merge-app-setup.md)",
+                dir.join(KEY_FILE).display()
+            ),
+        ),
+        Err(error) => {
+            let status = if matches!(error, KeyError::Exposed { .. }) {
+                Status::Fail
+            } else {
+                Status::Warn
+            };
+            Check::new(
+                NAME,
+                false,
+                status,
+                format!("the merge App key is not used, so every project runs as detect: {error}"),
+            )
+        }
     }
 }
 
@@ -589,6 +629,7 @@ pub fn run(app: &App) -> Done {
     let daemon = daemon_running(&app.home);
     checks.push(owner_marker(marker.as_deref(), daemon));
     checks.push(firstmate(process_list(), marker.as_deref(), daemon));
+    checks.push(merge_app(&app.home));
     let merge_gates = stored(app, &mut checks);
 
     let ok = !checks.iter().any(Check::failed);
