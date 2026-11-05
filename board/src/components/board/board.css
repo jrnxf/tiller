@@ -1447,6 +1447,21 @@ a.card:hover {
 }
 .card-page .run .acts {
   margin-top: 8px;
+  flex-wrap: nowrap;
+}
+.card-page .run .acts .meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  white-space: normal;
+}
+.card-page .run .acts .meta .ld {
+  margin: 0;
+}
+.card-page .run .acts .btn {
+  margin-left: auto;
+  flex: none;
 }
 
 @media (max-width: 1180px) {
