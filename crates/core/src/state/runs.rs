@@ -5,6 +5,7 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::approvals::active_away;
 use super::attention::withdraw_attention;
 use super::cards::landed_evidence;
 use super::outbox::{NewMessage, enqueue, live_orchestrator};
@@ -651,8 +652,38 @@ fn check_spawn(
     floor("RAM", host.ram_floor_mb, checks.ram_free_mb)?;
     floor("disk", host.disk_floor_mb, checks.disk_free_mb)?;
 
+    // While the owner is away, the contract's spend cap narrows the standing
+    // limits (`authority.md`, G28): no run beyond `max_new_runs`, and a
+    // quota floor when it is stricter.
+    let away = active_away(conn, now)?;
+    let mut away_spend = Value::Null;
+    let mut quota_floor = checks.quota_floor_percent;
+    if let Some(away) = &away {
+        let started = away.new_runs(conn)?;
+        if let Some(cap) = away.max_new_runs
+            && started >= cap
+        {
+            return Err(Error::refused(
+                "approval",
+                &away.approval_id,
+                format!(
+                    "away mode allows {cap} new runs and {started} have started; the owner raises the cap or returns"
+                ),
+            ));
+        }
+        if let Some(floor) = away.quota_floor_percent {
+            quota_floor = Some(quota_floor.map_or(floor, |standing| standing.max(floor)));
+        }
+        away_spend = json!({
+            "approval_id": away.approval_id,
+            "max_new_runs": away.max_new_runs,
+            "started": started,
+            "quota_floor_percent": away.quota_floor_percent,
+        });
+    }
+
     let mut quota = Vec::new();
-    if let Some(floor) = checks.quota_floor_percent {
+    if let Some(floor) = quota_floor {
         let windows: Vec<QuotaWindow> = list(conn, "kind = 'weekly' ORDER BY label", &[])?;
         if windows.is_empty() {
             return Err(Error::refused(
@@ -686,7 +717,7 @@ fn check_spawn(
             quota.push(json!({"label": window.label, "percent_remaining": window.percent_remaining, "fetched_at": window.fetched_at}));
         }
     }
-    Ok(json!({
+    let mut seen = json!({
         "host_reserved": host_reserved,
         "lane_capacity": host.lane_capacity,
         "project_reserved": project_reserved,
@@ -695,9 +726,13 @@ fn check_spawn(
         "ram_floor_mb": host.ram_floor_mb,
         "disk_free_mb": checks.disk_free_mb,
         "disk_floor_mb": host.disk_floor_mb,
-        "quota_floor_percent": checks.quota_floor_percent,
+        "quota_floor_percent": quota_floor,
         "quota": quota,
-    }))
+    });
+    if !away_spend.is_null() {
+        seen["away"] = away_spend;
+    }
+    Ok(seen)
 }
 
 /// `run.end` inside a mutation: ends the run and releases its reservation.

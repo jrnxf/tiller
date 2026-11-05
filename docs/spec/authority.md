@@ -245,7 +245,7 @@ The daemon matches grants when a PR becomes eligible (checks done, no open appro
 - `merge` is `none` (no merges while away, even under existing grants), `grants` (existing grants only), or a grant conditions object: then `away.start` also creates a temporary grant per listed project with `expires_at = until_at` and `away_approval_id` set.
 - Away can narrow authority or add temporary grants the owner wrote into the scope. It never answers attention items or decides pending approvals.
 
-`away.end` (the owner returns, or `until_at` passes and reconcile ends it) revokes the temporary grants and moves the approval to `succeeded`; the orchestrator writes the return brief (T4.5).
+`away.end` (the owner returns, or `until_at` passes and reconcile ends it) revokes the temporary grants and moves the approval to `succeeded`. The return brief (T4.5) is read from the records for the contract's window, so it is the same whenever it is asked: `tiller away brief`, and the output of `tiller away end`. It lists the orders, the spend against the cap, the runs that started, the cards that landed, the merges a grant made, and the attention items and approvals still waiting for the owner.
 
 ## 7. Guard layers
 

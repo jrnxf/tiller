@@ -5,7 +5,9 @@
 mod common;
 
 use common::*;
-use tiller_core::domain::{ApprovalState, AttentionKind, CardState, GrantKind, PrState};
+use tiller_core::domain::{
+    ApprovalState, AttentionKind, CardState, Checks, GrantKind, OutboxKind, PrState,
+};
 use tiller_core::state::approvals::NewGrant;
 use tiller_core::state::list;
 
@@ -134,4 +136,42 @@ fn force_push_after_approval_is_flagged_and_stale() {
     );
     w.pass(now().plus_minutes(2));
     assert_eq!(w.breaches("G11").len(), 1, "once per head");
+}
+
+/// P14: a CI-green transition wakes the orchestrator once; a poll that
+/// changes nothing about the checks wakes nobody again.
+#[test]
+fn ci_green_event_wakes_orchestrator_once() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let run = w.run_of(&worker);
+    let wakes = |w: &World| {
+        w.messages_to(&w.fleet.orchestrator_session.clone())
+            .into_iter()
+            .filter(|m| m.kind == OutboxKind::Wake && m.body.contains("checks passed"))
+            .count()
+    };
+
+    let mut pending = open_pr("a1a1a1a1");
+    pending.fetch.checks = Checks::Pending;
+    w.forge.pr(REPO, 7, pending);
+    w.pass(now());
+    assert_eq!(wakes(&w), 0, "pending checks wake nobody");
+
+    w.forge.pr(REPO, 7, open_pr("a1a1a1a1"));
+    w.pass(now().plus_minutes(1));
+    assert_eq!(wakes(&w), 1, "the green transition wakes once");
+    let message = w
+        .messages_to(&w.fleet.orchestrator_session.clone())
+        .into_iter()
+        .find(|m| m.body.contains("checks passed"))
+        .unwrap();
+    assert_eq!(message.card_id.as_deref(), Some(run.card_id.as_str()));
+    assert!(message.body.contains("PR #7"), "{}", message.body);
+
+    w.pass(now().plus_minutes(2));
+    assert_eq!(wakes(&w), 1, "an unchanged poll does not wake again");
+    assert_eq!(w.pr(&pr).checks, Checks::Success);
 }

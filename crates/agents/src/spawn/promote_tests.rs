@@ -21,6 +21,7 @@ impl Rig {
                 card: card.display_id.clone(),
                 asked: None,
                 brief: None,
+                harness: "claude".into(),
             },
         )
         .map(|applied| applied.value)

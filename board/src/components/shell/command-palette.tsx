@@ -4,6 +4,7 @@ import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { rankCommands } from "../../lib/commands";
 import { projectKey } from "../../lib/peers";
+import { PrIcon } from "../board/icons";
 import type { Command } from "../../lib/commands";
 import { machinesQuery, projectsQuery } from "../../lib/queries";
 import { toggleProjectHidden, updatePrefs, prefsStore } from "../../lib/prefs";
@@ -36,6 +37,8 @@ function iconFor(command: Command) {
       return <BoardIcon />;
     case "go-agents":
       return <AgentsIcon />;
+    case "go-contributions":
+      return <PrIcon />;
     case "go-inbox":
       return <InboxIcon />;
     case "go-memory":
@@ -66,11 +69,20 @@ function useCommands(activeHost: string | undefined, close: () => void): Command
   const prefs = useStore(prefsStore);
 
   return useMemo(() => {
-    const go = (to: "/" | "/agents" | "/inbox" | "/memory" | "/health" | "/settings") => () =>
-      void navigate({ to, search: (prev) => prev });
+    const go =
+      (to: "/" | "/agents" | "/contributions" | "/inbox" | "/memory" | "/health" | "/settings") =>
+      () =>
+        void navigate({ to, search: (prev) => prev });
     const commands: Command[] = [
       { id: "go-board", group: "Go to", label: "Board", run: go("/") },
       { id: "go-agents", group: "Go to", label: "Agents", run: go("/agents") },
+      {
+        id: "go-contributions",
+        group: "Go to",
+        label: "Contributions",
+        keywords: "pull requests prs published",
+        run: go("/contributions"),
+      },
       {
         id: "go-inbox",
         group: "Go to",

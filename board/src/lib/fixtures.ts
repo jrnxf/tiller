@@ -10,6 +10,7 @@ import type {
   BoardRow,
   CardDetail,
   CardPr,
+  ContributionsResponse,
   EventLine,
   Machine,
   MachinesResponse,
@@ -1022,7 +1023,18 @@ function cardDetailFor(
     runs,
     prs,
     approvals,
-    artifacts: [],
+    // A card with a PR has had a mockup made for it.
+    artifacts: prs.length
+      ? [
+          {
+            id: `01JART${row.id.slice(-20)}`,
+            kind: "page",
+            title: `Mockup for ${row.title}`,
+            url: `https://pages.example.com/${row.display_id}/mockup.html`,
+            created_at: minutes(now, -90),
+          },
+        ]
+      : [],
     reviews: [],
     obligations: [],
     events: eventsFor(row, now),
@@ -1125,6 +1137,36 @@ export function serverResponses(scenario: Scenario = "default", now: number = Da
   return fixtureResponses(serverScenario(scenario), now);
 }
 
+// The PRs the local board rows carry, newest first; `project` narrows them.
+function contributionsFor(
+  board: BoardResponse,
+  project: string | null,
+  now: number,
+): ContributionsResponse {
+  const rows = board.rows.filter(
+    (row) => row.pr_number && !row.host && (project === null || row.project_id === project),
+  );
+  return {
+    contributions: rows.map((row, index) => {
+      const number = row.pr_number ?? 0;
+      const merged = row.column === "done";
+      return {
+        id: `01JPR${String(number).padStart(21, "0")}`,
+        project_id: row.project_id,
+        card_id: row.id,
+        card_display_id: row.display_id,
+        card_title: row.title,
+        repo: `example/${row.project_id}`,
+        number,
+        url: `https://github.com/example/${row.project_id}/pull/${number}`,
+        state: merged ? "merged" : "open",
+        linked_at: minutes(now, -60 * (index + 1)),
+        merged_at: merged ? minutes(now, -30 * (index + 1)) : null,
+      };
+    }),
+  };
+}
+
 // What deleting a fixture project would remove, counted from its board rows.
 // A project with a card in Working has a live run, so the delete is refused.
 function deletePreviewFor(
@@ -1185,6 +1227,9 @@ export function fixtureResource(
   }
   const detail = /^\/api\/v1\/cards\/([^/]+)$/.exec(url.pathname);
   if (detail?.[1]) return cardDetailFor(board, detail[1], now) ?? undefined;
+  if (url.pathname === "/api/v1/contributions") {
+    return contributionsFor(board, url.searchParams.get("project"), now);
+  }
   const deletion = /^\/api\/v1\/projects\/([^/]+)\/delete$/.exec(url.pathname);
   if (deletion?.[1]) return deletePreviewFor(served, board, deletion[1], now);
   const run = /^\/api\/v1\/runs\/([^/]+)$/.exec(url.pathname);

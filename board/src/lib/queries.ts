@@ -6,6 +6,7 @@ import type {
   BoardFilter,
   BoardResponse,
   CardDetail,
+  ContributionsResponse,
   MachinesResponse,
   MemoryResponse,
   MemoryRevision,
@@ -118,6 +119,11 @@ export const signalsQuery = () => readQuery<SignalsResponse>(signalsPath);
 
 export const projectsPath: QueryPath = "/api/v1/projects";
 export const projectsQuery = () => readQuery<ProjectsResponse>(projectsPath);
+
+const contributionsPath = (project?: string): QueryPath =>
+  withParams("/api/v1/contributions", { project });
+export const contributionsQuery = (project?: string) =>
+  readQuery<ContributionsResponse>(contributionsPath(project));
 
 // Counted fresh each time the delete dialog opens: it is never in the boot
 // snapshot and never shared with another read.

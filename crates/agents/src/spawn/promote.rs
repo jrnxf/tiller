@@ -29,6 +29,8 @@ pub struct Request {
     pub asked: Option<(String, Effort)>,
     /// The builder's brief; `None` briefs it with the card and the scout.
     pub brief: Option<String>,
+    /// The harness to launch the builder on; G35 refuses one without the guards.
+    pub harness: String,
 }
 
 /// The brief a promotion without `--brief-file` gives: the card, and where
@@ -66,6 +68,10 @@ pub fn promote(
     world: &World<'_>,
     request: Request,
 ) -> Result<Applied<Outcome>> {
+    // G35, before anything is reserved or started.
+    if let Some(reason) = tiller_observe::harness::refusal(&request.harness) {
+        return Err(SpawnError::Refused(reason));
+    }
     let card = resolve_card(store.conn(), &request.card)?;
     let project: Project = get(store.conn(), "project", &card.project_id)?;
     let scout = scout_of(store, &card)?;
