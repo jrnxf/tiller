@@ -7,9 +7,10 @@ exit: 0
     "project": "alpha",
     "removed": {
       "cards": 1,
-      "events": 13,
+      "events": 14,
       "idempotency_keys": 3,
       "observations": 2,
+      "outbox": 1,
       "projects": 1,
       "reservations": 1,
       "runs": 1,
