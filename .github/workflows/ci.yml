@@ -77,3 +77,5 @@ jobs:
         run: nix build --print-build-logs
       - name: Smoke test
         run: scripts/smoke.sh result/bin/tiller
+      - name: Firstmate exporter produces a bundle the importer accepts
+        run: nix develop -c scripts/firstmate-export-check.sh result/bin/tiller

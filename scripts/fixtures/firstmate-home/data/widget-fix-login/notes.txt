@@ -1,0 +1,1 @@
+Checked the cookie flags; nothing odd.

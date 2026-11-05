@@ -1,0 +1,7 @@
+model=example-model
+effort=high
+herdr_workspace_id=ws-1
+herdr_tab_id=tab-1
+herdr_pane_id=pane-1
+worktree=/home/user/worktrees/widget-fix-login
+branch=fm/widget-fix-login

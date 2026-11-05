@@ -28,5 +28,5 @@ Project names in examples (`alpha`, `beta`, `gamma`, card ids like `alpha-42`) a
 | [`learning-loop.md`](learning-loop.md) | The learning loop (T7.3): retros per closed card, the curator, change sets, the holdout gate and the config manifest |
 | [`../plan/build-plan.md`](../plan/build-plan.md) | The executable build plan, task by task |
 | [`../plan/checklist.md`](../plan/checklist.md) | Build progress, ticked as work lands |
-| [`../firstmate-export.md`](../firstmate-export.md) | The Firstmate export prompt: the import contract |
+| [`../firstmate-export.md`](../firstmate-export.md) | The Firstmate export (script and the parts the first mate writes): the import contract |
 | [`../adr/`](../adr/) | Architecture decision records |

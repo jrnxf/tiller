@@ -1,312 +1,175 @@
-# Export this Firstmate home into a Tiller import bundle
+# Export a Firstmate home into a Tiller import bundle
 
-You are the first mate of this Firstmate home. The captain is moving to a new system, Tiller. Tiller starts on day one with no history of its own, so everything this home knows has to reach it through one import bundle that you write now.
+Tiller starts on day one with no history of its own, so everything a Firstmate home knows reaches it through one import bundle. `scripts/firstmate-export` writes that bundle. It is a script, not a prompt: it copies records verbatim, makes no model call, and lists what only a person can settle in `open-questions.md`.
 
-**Your job:** produce that bundle completely and faithfully, with provenance on every item, and change nothing in this home or its projects while you do it.
+It needs Node 20 or newer (the Nix dev shell has it) and `git`, and nothing else.
 
-**Who does what:**
-- Scripts and shell tools do the mechanics: copying, parsing, counting, checksums.
-- You do the judgment: classifying memory, writing summaries, writing the handoff letter.
-- When a record exists, copy it verbatim. Summarize only where a section below asks for a summary.
-
-## Settings
-
-Set these first, then echo them back in your opening line.
+## Run it
 
 ```sh
-MODE=dry            # dry: a rehearsal any time. final: only after the captain freezes dispatch at cutover.
-HOST_LABEL=<short label for this machine, as the captain names it>
-FM_HOME=<this home's root>
-STAMP=$(TZ=Europe/Lisbon date +%Y%m%d-%H%M)
-EXPORT_DIR="$HOME/.tiller/import/${HOST_LABEL}-${STAMP}-${MODE}"
+scripts/firstmate-export \
+  --home <the Firstmate home> \
+  --out "$HOME/.tiller/import/<label>-$(TZ=Europe/Lisbon date +%Y%m%d-%H%M)-dry" \
+  --host-label <short label for this machine> \
+  --mode dry
 ```
 
-- Make `EXPORT_DIR` fresh on every run. Never write into an earlier bundle.
-- Show every date in Europe/Lisbon. Write dates as `YYYY-MM-DD`, and datetimes as ISO 8601 with the offset.
-
-## Ground rules
-
-1. **Read-only everywhere outside `EXPORT_DIR`.**
-   - Your only writes go into `EXPORT_DIR`, plus the scout worktree for Part C if you spawn one.
-   - Leave the backlog, holds, captain records, learnings, config, state, panes, worktrees, branches and PRs exactly as they are.
-   - Before starting, capture `git -C "$FM_HOME" status --porcelain` and a checksum list of `data/` and `config/`. Prove both are unchanged at the end.
-2. **Dispatch continues as normal during a `dry` run.** Freezing dispatch and draining in-flight work are cutover steps the captain starts separately. Mention them only in `CUTOVER.md`.
-3. **Secrets stay where they are.**
-   - Open no secret-bearing file: `.env`, `.envrc`, key files, `*.pem`, `*.key`, vault output, token stores.
-   - When a record names where a secret lives, keep the reference, set `"secret_ref": true`, and copy no value.
-   - Part G includes a scan that must come back clean.
-4. **Work data stays on its machine.** If this home serves an employer's work, the bundle stays on this machine and is never copied to personal infrastructure. On every host the bundle is local-only: never commit it, push it or attach it anywhere, because it holds verbatim transcripts and quotes.
-5. **Provenance on everything.** Every exported item carries `source.file`, plus `source.line` or a record id, and the date the source gives.
-6. **Unsure means ask.** When you cannot map something with confidence, write it to `open-questions.md` with the source and your best two readings. Never guess silently.
-
-## Inputs
-
-Read these. Use this home's own tools wherever they exist.
-
-| Input | How to read it |
+| Option | Meaning |
 |---|---|
-| Projects | `data/projects.md` |
-| Backlog | `bin/fm-fleet-snapshot.sh --json` for parsed records (state, hold bucket, captain_actionable, repo, PR, priority, since), plus `data/backlog.md` for line numbers and raw hold payloads |
-| History | `data/done-archive.md` |
-| Captain records | `data/captain.md` |
-| Learnings | `data/learnings.md` (tier markers like `<!--a:YYYY-MM-DD-->` carry dates) |
-| Archives | `data/note-archive.md`, `data/memory-archive.md` (if present) |
-| Per-task records | every `data/<task-id>/` directory: brief, launch brief, final report, PR body, review findings, media |
-| Config | every file in `config/`, symlinks resolved, values copied |
-| State | `state/decision-bindings`, `state/afk-contracts`, `state/when`, `state/operational-inbox`, `state/terminal-outcomes`, per-task `state/<task-id>.*` entries, and `state/fleet-ledger.jsonl` if present |
-| Live | `herdr api snapshot` (local server, plus `--machine <id>` for any saved machine this home dispatches to), treehouse worktree list, `gh-axi` for every open PR this home tracks |
-| Incidents | `AGENTS.md`, `VISION.md`, `docs/` (only for the regressions list in Part E) |
-| Harness memory | the Claude Code auto-memory directory for this home, if one exists |
-| Transcripts | the Claude Code session transcripts for this home (`~/.claude/projects/<this home's path slug>/*.jsonl`), only for Part C |
+| `--home` | The Firstmate home to read. Also read from `FM_HOME`. |
+| `--out` | A new, empty directory outside the home. Every run uses a fresh one. |
+| `--mode` | `dry` is a rehearsal any time. `final` is only for cutover, after dispatch is frozen. Default `dry`. |
+| `--host-label` | The label the importer records for this host. Default: the short hostname. |
+| `--auto-memory` | The Claude Code auto-memory directory for this home, or `none`. Default: the directory Claude Code derives from the home's path. |
+| `--project-alias old=new` | Cards that name project `old` go to project `new`. Use it for a renamed project. |
+| `--repo-alias old/name=new/name` | PR links in repo `old/name` are rewritten to `new/name`. Use it for a renamed GitHub repo. |
+| `--allow-secret-hit path` | Allow secret-scan hits under this bundle path (see below). Repeatable. |
+
+Exit codes: 0 the bundle is written; 1 usage error or not a Firstmate home; 3 the secret scan found a hit nobody allowed.
+
+Then read `README.md`, `open-questions.md` and `secret-scan.md` in the bundle, and check it with the importer, which reads nothing it cannot use and changes nothing under `--dry-run`:
+
+```sh
+tiller import --dry-run <bundle>
+```
+
+The bundle is local only. It holds verbatim records and transcripts, so never commit it, push it or attach it anywhere. If the home serves an employer's work, the bundle stays on that machine.
+
+## What the script reads and writes
+
+The script is read-only on the home. It opens files for reading, and its only commands there are `git config --get remote.origin.url`, `git symbolic-ref` and `git rev-parse`, each run only in a directory that holds its own `.git`. A plain directory under the home or under another repository never reports that repository's remote. Every write goes into the bundle directory. The test `scripts/firstmate-export-check.sh` proves the home is byte-identical after a run.
+
+It reads `data/projects.md`, `data/backlog.md`, `data/done-archive.md`, `data/note-archive.md`, `data/captain.md`, `data/learnings.md`, `data/memory-archive.md`, the auto-memory directory, `data/<task-id>/`, `config/`, and the per-task `state/<task-id>.meta` and `.status` files. It never opens a secret-bearing file by design: names like `.env*`, `*.pem`, `*.key` and `credentials` are skipped before they are read.
 
 ## The bundle (schema `tiller-import/v1`)
 
 ```
-EXPORT_DIR/
-  manifest.json          # written last
-  README.md              # one-page human summary of the bundle
+<out>/
+  manifest.json          # written last; sha256 of every other file, and the counts
+  README.md              # the counts, what was skipped, what the script did not write
   projects.json
   cards.jsonl
-  inflight/<card-id>.json
-  inflight/<card-id>.brief.md
-  tasks/<card-id>/...    # copied per-task records
   memory.jsonl
-  memory/rules.md
-  memory/notes.md
-  memory/requirements.md # Firstmate mechanics the new system must reproduce
-  capabilities.md        # every Firstmate capability the captain actually uses, with evidence
+  memory/rules.md, notes.md, requirements.md   # rendered from memory.jsonl
+  memory-guesses.tsv     # every memory scope and class the script guessed
+  inflight/<card-id>.json, inflight/<card-id>.brief.md
+  tasks/<card-id>/...    # copied task files (see the rules below)
+  tasks-skipped.tsv      # what was not copied, and why
+  history/note-archive.md
   config.json
   commitments.jsonl
-  regressions.md
-  handoff-letter.md
-  baseline/              # Part C, optional
   open-questions.md
-  CUTOVER.md
+  secret-scan.md
 ```
 
----
+`tiller import` reads `manifest.json`, `projects.json`, `cards.jsonl`, `memory.jsonl` and `inflight/`, checks every file against the manifest, and checks the manifest counts against what it plans. Fields it does not read (such as `source`) are provenance for people.
 
-### Part A: records (mostly mechanical)
+### projects.json
 
-**`projects.json`**: an array with one object per project:
+One object per row in `data/projects.md`. Projects come only from the registry: a card naming an unregistered project does not create one.
 
 ```json
-{"id":"alpha","repo":"owner/name","remote":"<git remote URL>","fm_checkout":"<path, recorded only>",
- "default_branch":"main","delivery":"no-mistakes|no-mistakes-prod-only|direct-pr|local-only",
- "capacity":4,"owner_host":"<HOST_LABEL>","added":"2026-10-25","description":"<verbatim from projects.md>",
- "release_flow":"<from learnings, verbatim quote or null>","source":{"file":"data/projects.md","line":5}}
+{"id":"alpha","repo":"owner/name","remote":"https://github.com/owner/name.git","fm_checkout":"projects/alpha",
+ "default_branch":"main","delivery":"no-mistakes","capacity":4,"owner_host":"<host label>",
+ "added":"2026-10-25","description":"<verbatim>","release_flow":null,
+ "source":{"file":"data/projects.md","line":5}}
 ```
 
-**`cards.jsonl`**: one line per backlog record, from the current backlog and the done archive alike.
+- **`repo`** is the GitHub `owner/name` in the registry line when it has one. Otherwise it comes from `git -C <home>/projects/<id> config remote.origin.url`, and the importer links PRs by it. Credentials in a remote are stripped. A checkout with no GitHub origin leaves `repo` null and adds an open question.
+- `default_branch` comes from the checkout's `origin/HEAD`, else null.
+- `capacity` comes from `config/project-capacity`. A value under 1 becomes null with an open question, because the importer refuses it.
+- A project id must be a plain name (letters, digits, dot, dash, underscore, starting with a letter or digit, no `..`). A row with another id is skipped. A second row with the same id is dropped and asked about, and an `added` date that is not a calendar date becomes null.
+
+### cards.jsonl
+
+One line per record in `backlog.md` and `done-archive.md`. A repeated id is one card: `backlog.md` wins over `done-archive.md`, and the repeat is an open question.
 
 ```json
-{"id":"<task id>","project":"<project id, or \"fleet\" for home-level work>","title":"<verbatim title>",
- "column":"asked|queued|working|needs|landing|done","kind":"ship|scout|captain|other","priority":0,
- "since":"YYYY-MM-DD",
- "hold":{"kind":"captain|date|blocked|credential|other","until":"YYYY-MM-DD or null","reason":"<decoded hold text, verbatim>"},
- "pr":"<url or null>","report":"tasks/<id>/<file> or null",
- "runs":[{"started":"<datetime or null>","ended":"<datetime or null>","model":"...","outcome":"landed|reported|failed|abandoned|respawned|unknown","pr":"<url or null>"}],
- "depends_on":[],"category":null,"size":null,
- "done":{"outcome":"merged|reported|answered|dropped|cancelled|failed","at":"YYYY-MM-DD"},
+{"id":"alpha-fix","project":"alpha","title":"<verbatim title>","column":"queued","kind":"ship","priority":1,
+ "since":"2026-10-30","hold":null,"pr":"https://github.com/owner/name/pull/3","report":"tasks/alpha-fix/report.md",
+ "runs":[],"depends_on":[],"category":null,"size":null,"done":null,
+ "body":["<the indented lines under the record, verbatim>"],"legacy_id":"alpha-fix",
  "source":{"file":"data/backlog.md","line":15}}
 ```
 
-- Set `hold` and `done` to `null` when they do not apply.
-- List every attempt in `runs`, including failed, abandoned and respawned ones, from the task's records and the fleet ledger. A card with one clean run has one entry.
-- Leave `category` and `size` as `null` unless a record states them. Do not estimate them.
-- Decode `fm-hold-v1:<base64>` payloads and keep the decoded text verbatim.
-- Map columns like this:
+- **`body`** is the record's indented continuation lines, and **`legacy_id`** is the Firstmate id. The importer needs both.
+- A card id must be a plain name, as for projects: an id like `../x` names files under `data/`, `state/` and the bundle, so the record is skipped and asked about.
+- Every `(key: value)` group is read wherever it sits on the line; a group that starts like a field but does not parse stays in the title and is asked about. An empty title becomes the id.
+- A `since`, done or `hold-until` value that is not a calendar date (or an RFC 3339 time, for `hold-until`) becomes null with an open question; a free-text `hold-until` is kept in the hold reason. The importer refuses such dates.
+- **`kind`** is `ship`, `scout` or `captain`. Firstmate's `docs`, `ops`, `task` and any other kind become `other`.
+- **`done.outcome`** is what the importer accepts: `merged`, `reported`, `answered`, `completed`, `abandoned`, `dropped`, `cancelled`, `failed`. Firstmate's `done` word means what the kind says: a ship is `merged`, a scout `reported`, a captain card `answered`, anything else `completed`. `completed` and `abandoned` pass through. An open box in the done archive with no outcome becomes `abandoned` and an open question.
+- **`column`** is `done`, `working` (in the In flight section), `needs` (a captain hold) or `queued`.
+- **`hold`** decodes `fm-hold-v1:<base64>` payloads verbatim; a payload without that prefix is kept as written. `blocked-by:` tokens make a `blocked` hold.
+- **`depends_on`** keeps only ids that are cards in the bundle, because the importer refuses a dependency that is nowhere. A dropped one is an open question. When open cards block each other, the edge that closes the loop is dropped and asked about, because the importer refuses a cycle.
+- **`pr`** is the first GitHub pull request URL on the record line.
+- **`report`** points at a report file the bundle holds, else the task's `report.md` or `final-report.md`, else null.
+- `runs` is empty: the script does not reconstruct attempts. `category` and `size` stay null.
+- **`note-archive.md` is hold history, not memory and not cards.** It is copied to `history/note-archive.md`. An id that appears only there is not exported as open work, and is listed in `open-questions.md`.
 
-| Firstmate state | Column |
-|---|---|
-| In flight with a live worker | `working` |
-| In flight with an open PR whose pipeline or CI is running | `landing` |
-| Waiting on the captain (a decision, a credential, a merge with authority off) | `needs` |
-| Dated or blocked hold | `queued` (keep the hold) |
-| Done or archived | `done` |
+### tasks/
 
-**`tasks/<card-id>/`**: copy each `data/<task-id>/` directory, with three exceptions:
+For each card with a `data/<card-id>/` directory, the script copies **only top-level regular text files**:
 
-- Skip scratch fake homes (any `home/` subdirectory) and empty files.
-- Skip any file a ground rule excludes.
-- Copy media too. If the bundle would pass 500 MB, copy text only and list the media with its size and original path in `README.md`.
+- No symlinks, no directories (so no checkouts, worktrees or fake homes), no empty files.
+- No file over 200,000 bytes, and no file whose first 8 KB holds a NUL byte (binary and media).
+- No file with a secret-bearing name.
 
-**`config.json`**:
+The same rules apply to the in-flight brief (`data/<id>/brief.md`, only when `data/<id>` is a real directory) and to the `state/<id>.meta` and `.status` files it reads. Anything refused there is left out and asked about. Everything skipped is listed in `tasks-skipped.tsv` with its reason. The task copy stops at half the Part G limit, and the script fails if the finished bundle passes **500 MB**.
 
-```json
-{"dispatch":<crew-dispatch.json verbatim>,"lane_capacity":<parsed>,"project_capacity":<parsed>,
- "startup_memory_budget":<number>,"quota_floor":{"provider":"claude","percent":3,"source":{...}},
- "notify":{"script":"<resolved path>","managed_by":"dotfiles|local"},"herdr":{"<config key>":"<value>"}}
-```
+### memory.jsonl
 
-**`commitments.jsonl`**: everything this home has promised to do later. Sources: scheduled wakes in `state/when`, open AFK contracts, dated holds, "I'll report back when..." promises in recent threads, and `operational-inbox` items still open. Fields:
+One entry per list item (`-`, `*`, `+`, `1.` or `1)`) in `captain.md`, `learnings.md` and `memory-archive.md`, plus each auto-memory file, with the text verbatim. A continuation keeps its blank lines and indent, minus the item's own two spaces. A line that is neither a list item nor a heading is prose, not an entry: the script lists where it is in `open-questions.md`.
 
 ```json
-{"what":"...","due":"YYYY-MM-DD or null","card":"<id or null>","source":{...}}
+{"id":"mem-1","text":"<verbatim>","scope":"global","section":"<heading>","class":"rule","tier_marker":"a:2026-10-06",
+ "secret_ref":false,"provenance":"legacy-import","rationale":null,"generalized":null,"reason":null,
+ "source":{"file":"data/captain.md","line":4}}
 ```
 
-### Part B: live work
+The script only guesses; it never rewrites. Its guesses, each listed in `memory-guesses.tsv` and in `open-questions.md`:
 
-For each card whose column is `working`, `landing` or `needs` and that has a live worker or an open PR, write `inflight/<card-id>.json`:
+- `class`: `captain.md` entries are `rule`; learnings and the archive are `note`. An entry that names Firstmate's own scripts or paths (`bin/fm-*`, `state/<id>`, `FM_HOME`) is `requirement`.
+- `scope`: `project:<id>` when a registered project (longer than three characters) is named in the first 160 characters, else `global`.
+- `secret_ref` is true when the text names a key, token, vault or `.env`.
 
-```json
-{"id":"...","kind":"...","project":"...","model":"...","effort":"...",
- "herdr":{"machine":"local|<saved machine id>","workspace":"<label>","tab":"<label>","pane_id":"...","agent_status":"<from snapshot>"},
- "worktree":"<path>","branch":"...","base":"...","pr":"<url or null>","pipeline":"<no-mistakes run state or null>",
- "last_status":"<the worker's latest status line, verbatim>","started":"<datetime>",
- "recommendation":"drain|adopt|respawn","why":"<one sentence>"}
-```
+The count check is in the output and the README: entries written against the list items and files found in the sources. They must agree.
 
-Copy the task's brief verbatim to `inflight/<card-id>.brief.md`, and append a short "State at export" section: what is done, what remains, and the next step.
+### Other files
 
-- **Recommend `drain`** when the task can finish in Firstmate before cutover.
-- **Recommend `adopt`** when Tiller should take over the live pane and worktree as they are.
-- **Recommend `respawn`** when a fresh worker in the same worktree with the brief is cleaner.
+- `inflight/<card-id>.json` for each card in the `working` or `landing` column, from `state/<id>.meta` and `.status`. `recommendation` is always `drain`; the open question asks the first mate to change it to `adopt` or `respawn`. The brief is copied verbatim.
+- `config.json` from `config/`: `crew-dispatch.json`, `lane-capacity`, `project-capacity`, `startup-memory-budget`, and the `captain-notify.sh` target. `quota_floor` is null.
+- `commitments.jsonl`: dated holds, open AFK contracts, `state/when` entries, and a count of operational-inbox messages still on disk.
 
-### Part C: historical baseline (optional, one scout)
+## The secret gate
 
-This part gives Tiller a "before" to compare against, because it will not run side by side with Firstmate. Run it only when `MODE=dry`, or when no dry-run baseline exists yet. Hand it to one scout through this home's normal scout path, using the model and effort the dispatch rules pick for an investigation. The scout writes only into `EXPORT_DIR/baseline/`.
-
-The scout produces:
-
-1. **`baseline/output.json`.** Weekly landed cards per project and kind (merged ships, reported scouts), and median days from `since` to done. It comes from `cards.jsonl`. Plain arithmetic, done with a script.
-2. **`baseline/touches.jsonl`.** For each landed card in the last 21 days, the captain messages about it in the session transcripts. Each line carries a classification (`correction`, `unplanned_escalation_answer`, `routine`) and a verbatim quote.
-   - A correction is a captain message that changes direction or points out a mistake.
-   - Attribute a message to a card only when the transcript ties it to one: the card id, or an unambiguous title or PR reference nearby. Leave the rest unattributed.
-3. **`baseline/summary.md`.** It reports captain touches per landed card (corrections, unplanned escalation answers and routine touches counted separately), landed cards per week, and median time to done. Give each figure its method, sample size and caveats. State the caveats plainly: transcript attribution is approximate, and date-only fields make time to done coarse.
-4. **`baseline/replay.jsonl`.** This is the replay set the new system's orchestrator is tested against before cutover. Pick 30-50 captain asks from the transcripts, as varied as possible: ships, scouts, decisions, follow-ups on existing cards, plain chat, and asks that were cancelled or folded into another card. Each line holds:
-   - the ask text, verbatim;
-   - its timestamp;
-   - the cards it created or touched;
-   - what this home did with it (new card, follow-up, chat, or cancelled);
-   - the kind, model and effort dispatched;
-   - any hold placed;
-   - the final outcome.
-
-   Prefer asks whose handling the records show clearly. Skip any ask that quotes a secret value.
-
-### Part D: memory (your judgment)
-
-Read every non-empty bullet or paragraph in `data/captain.md`, `data/learnings.md`, both archives and the harness auto-memory. Write one line per entry to `memory.jsonl`:
-
-```json
-{"id":"mem-<n>","text":"<verbatim>","scope":"global|project:<id>","section":"<heading it sat under>",
- "class":"rule|note|requirement|stale","tier_marker":"<the tier marker or date, if any>",
- "secret_ref":false,"provenance":"legacy-import","rationale":"<only when the source states why, verbatim; else null>",
- "generalized":"<only for requirement: one sentence a different system can implement>",
- "reason":"<only for stale or requirement: why>","source":{"file":"data/learnings.md","line":12}}
-```
-
-How to classify:
-
-| Class | Meaning | Examples |
-|---|---|---|
-| `rule` | a captain preference that holds for any system | stay on Claude for workers; the PR shape; off-screen testing; the quota floor |
-| `note` | a fact about a project, tool or machine that stays true outside Firstmate | gamma has no PR CI; parallel Rust builds overload the Mac |
-| `requirement` | a fact about Firstmate's own scripts or flow that names a behavior the new system must reproduce | merge before teardown, so landed-work metadata survives; workers report done before the pipeline starts, so verify a run exists. Fill `generalized` |
-| `stale` | no longer true. Give the evidence in `reason`. When unsure, keep the entry as a `note` and add an open question | - |
-
-Never invent a rationale, an origin card or an author. When the source does not say, leave the field `null`.
-
-Then render three files from `memory.jsonl`: `memory/rules.md`, `memory/notes.md` (grouped by scope) and `memory/requirements.md`. Use the verbatim text with a source suffix, for example `(captain.md:7, 2026-10-26)`.
-
-**Completion check:** the count of entries in `memory.jsonl` equals the count of non-empty entries across every source. Print both numbers.
-
-### Part E: regressions
-
-`regressions.md` lists every incident the new system must survive. Sources:
-
-- dated lines in learnings (reboot recovery, stale panes, permission prompts the orchestrator cannot answer, load storms, merge-order mistakes, classifier refusals, screens covered by tests);
-- incidents recorded in this home's `docs/` and `AGENTS.md`.
-
-Each entry has five fields:
+After the bundle is written, the script scans every text file in it for the Part G patterns:
 
 ```
-### <short name>
-- When: YYYY-MM-DD (source)
-- What happened: <two sentences, factual>
-- Required behavior: <what the new system must do>
-- Check: <eval case, test or hook that would catch it>
-- Source: <file:line>
+sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|github_pat_|AKIA[0-9A-Z]{16}|xox[baprs]-|-----BEGIN [A-Z ]*PRIVATE KEY|(api[_-]?key|token|password|secret)\s*[:=]\s*\S{8,}
 ```
 
-**`capabilities.md`**: every Firstmate capability the captain actually uses. It is the input to Tiller's parity matrix. The captain's bar is that the new system must be "comparable" and that their "output will not be diminished", so a missing row here is how output quietly drops. List what you actually do for the captain, not what Firstmate could do. Typical areas:
+The last alternative is case-insensitive, so `API_KEY=`, `GITHUB_TOKEN=` and `Password:` count.
 
-- holds, dated holds and AFK mode;
-- scheduled wakes and check-ins;
-- secondmates and remote lanes;
-- dispatch, capacity and quota floors;
-- delivery through `no-mistakes`, plus PR and CI watching;
-- supervision and liveness;
-- the fleet snapshot and herdr presentation;
-- every skill or axi tool you call on the captain's behalf.
+- A hit nobody allowed stops the run with exit 3 and no `manifest.json`, so the bundle cannot be imported.
+- `secret-scan.md` reports every hit as a bundle path, a line number and a pattern name. It never prints the matched text, and it never drops a hit silently.
+- Only a path given with `--allow-secret-hit` is reported under "allowed" and does not fail the run; the script has no built-in list of paths to skip. A trailing `/` allows a whole directory.
+- A file with a NUL byte cannot be read as text, so it is listed as a hit ("binary file, not scanned") instead of being skipped.
+- Allow a hit only after reading it. Typical benign hits are prose that names token shapes, `?token=` in a local log URL, and `api_key=` in a code sample.
 
-Use one entry per capability:
+## Not written by the script
 
-```
-### <capability>
-- What it does for the captain: <one sentence>
-- Evidence of use: <count over the last 4 weeks, last used YYYY-MM-DD, sources>
-- How it works today: <script, doc or skill, with file:line>
-- Load-bearing: yes|no, with one sentence on why
-```
+These need judgment, and `tiller import` does not read them. The first mate writes them after the run, from the same home:
 
-Leave out anything with no evidence of use in the last 8 weeks, but list those names under a closing **Unused** heading, so nothing is hidden.
+- `capabilities.md`: every Firstmate capability the captain uses, with evidence of use and a `file:line` for how it works today. It is the input to the parity matrix.
+- `regressions.md`: every incident the new system must survive, each with when, what happened, the required behavior, a check, and a source. End it with a **Spec sources** section naming the home's contract documents.
+- `handoff-letter.md`: at most 1,500 words on how the captain works, each project's state, open threads and what to do first. Mark opinions as opinions.
+- `CUTOVER.md`: freeze dispatch, drain or hand off each in-flight card, holds that need the captain, re-run the script with `--mode final`, stop watchers, repoint dotfiles, and how to fall back within two weeks.
+- The "State at export" section of each `inflight/<id>.brief.md`, and the `adopt` or `respawn` calls.
+- `baseline/` (optional), built from the session transcripts by one scout.
+- The answers to `open-questions.md`.
 
-End `regressions.md` with a **Spec sources** section. It lists this home's contract documents that define behavior the new system must match. Typical ones cover the hold lifecycle, pre-tool guards, agent control, the subagent guard, the cd guard, the supervision host and the fleet ledger. For each document, give one line naming the contract it defines, with the path relative to the home. Do not copy the documents.
+Keep them beside the bundle, not inside it: the manifest hashes only what the script wrote, so a file added later would not match it. If you edit a file the importer reads, re-run the script instead.
 
-### Part F: the letters
+## Check the script
 
-**`handoff-letter.md`.** In your own voice, at most 1,500 words, write what a successor orchestrator needs that the files above do not already say:
-
-- how the captain likes to work with you, and which corrections you have absorbed;
-- each project's current state and quirks;
-- open threads and promises;
-- upcoming dates;
-- what you would do first on day one.
-
-Give each claim a source pointer when one exists. Mark opinions as opinions.
-
-**`CUTOVER.md`.** The concrete checklist for this host, in order:
-
-1. Freeze dispatch (the exact command).
-2. Drain or hand off each in-flight card, with its estimate.
-3. Holds that need the captain's answer first.
-4. Run this prompt with `MODE=final`.
-5. Stop this home's watchers and services (name each one and how it starts: launchd, login items, herdr config).
-6. Repoint everything that references this home: dotfiles symlinks such as `captain-notify.sh` and `crew-dispatch.json`, the settings files their hooks rewrite, herdr project groups and presentation settings. Give the file paths found by a read-only `grep` of the dotfiles.
-7. How to restart this home if the captain falls back within the first two weeks. Nothing here is deleted.
-
-### Part G: verify, then manifest
-
-Run every check below and show the output in your final message.
-
-- [ ] Every backlog and done-archive record appears exactly once in `cards.jsonl`. Print the counts, plus any ids missing or duplicated.
-- [ ] Every in-flight card has both `inflight/<id>.json` and `.brief.md`.
-- [ ] Every `report` path in `cards.jsonl` exists in the bundle.
-- [ ] The memory count check from Part D passes.
-- [ ] `capabilities.md` exists, and every entry has evidence of use and a `file:line` for how it works today.
-- [ ] `jq empty` passes on every `.json` file, and on every line of every `.jsonl` file.
-- [ ] The secret scan of `EXPORT_DIR` finds nothing:
-  ```sh
-  grep -rIEn 'sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|github_pat_|AKIA[0-9A-Z]{16}|xox[baprs]-|-----BEGIN [A-Z ]*PRIVATE KEY|(api[_-]?key|token|password|secret)[[:space:]]*[:=][[:space:]]*[^[:space:]]{8,}' "$EXPORT_DIR"
-  ```
-- [ ] `git status --porcelain` and the `data/` and `config/` checksums match the snapshot from the start.
-- [ ] `manifest.json` is written last:
-  ```json
-  {"schema":"tiller-import/v1","mode":"dry|final","host_label":"...","generated_at":"<Lisbon ISO datetime>",
-   "firstmate_head":"<git rev-parse HEAD>","counts":{"projects":0,"cards":0,"inflight":0,"memory":0,"regressions":0,"capabilities":0,"open_questions":0},
-   "files":{"<relative path>":"<sha256>"}}
-  ```
-
-## Done means
-
-All Part G checks pass. Then give the captain one short receipt containing:
-
-- the bundle path;
-- the counts;
-- the open questions that need them, as a numbered list with your recommendation for each;
-- the in-flight cards and your drain, adopt or respawn call for each;
-- and whether Part C ran.
-
-Stop there. The import into Tiller is a separate step that Tiller runs.
+`scripts/firstmate-export-check.sh [tiller-binary]` runs the script over the synthetic home in `scripts/fixtures/firstmate-home` and asserts each rule above: card `body` and `legacy_id`, the outcome and kind mappings, note-archive handling, the repo from a checkout's origin, task-dir copying (a symlink, a nested directory, an oversized file, a binary and a secret-named file are made at run time), the secret gate, an unchanged home, records the importer would refuse (a dependency cycle, impossible dates, a capacity of 0, an empty title, a duplicate project), ids and links that would reach outside the home, a plain directory below a home that is itself a repository, a clean `tiller import --dry-run` and a real `tiller import`, each into a scratch database. CI runs it in the `nix` job.

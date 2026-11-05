@@ -1,0 +1,1141 @@
+#!/usr/bin/env node
+// Build a tiller-import/v1 bundle from a Firstmate home (docs/firstmate-export.md).
+//
+// Read-only on the home: it opens files for reading and runs only
+// `git config --get` and `git rev-parse` in the project checkouts. Every write
+// goes into the fresh bundle directory. No model call: records are copied
+// verbatim, and whatever needs a human's judgment is listed in
+// open-questions.md.
+//
+//   scripts/firstmate-export --home <firstmate home> --out <new bundle dir>
+//       [--mode dry|final] [--host-label <label>] [--auto-memory <dir>|none]
+//       [--project-alias <old>=<new>]... [--repo-alias <old>=<new>]...
+//       [--allow-secret-hit <path>]...
+//
+// Exit codes: 0 bundle written; 1 usage or unreadable home; 3 the secret scan
+// found a hit nobody allowed (the bundle stays in place, without a manifest).
+'use strict'
+
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
+const crypto = require('node:crypto')
+const cp = require('node:child_process')
+
+const SCHEMA = 'tiller-import/v1'
+const DELIVERIES = ['no-mistakes', 'no-mistakes-prod-only', 'direct-pr', 'direct-push', 'local-only']
+const HOLD_KINDS = ['captain', 'date', 'blocked', 'credential', 'other']
+const KNOWN_KINDS = ['ship', 'scout', 'captain']
+// Firstmate kinds the bundle maps to `other` (the importer files them as ops).
+const OTHER_KINDS = ['docs', 'ops', 'task', 'other']
+const OUTCOME_WORDS = [
+  'done', 'merged', 'reported', 'answered', 'dropped', 'cancelled', 'failed', 'completed', 'abandoned',
+]
+const BUNDLE_LIMIT_BYTES = 500 * 1024 * 1024
+const TASK_FILE_LIMIT_BYTES = 200_000
+const HISTORY_FILE_LIMIT_BYTES = 5_000_000
+const SECRET_FILE_NAMES = /^(\.env.*|\.envrc|.*\.(pem|key|p12|pfx|jks|keystore)|id_(rsa|dsa|ecdsa|ed25519)|secrets?\.(ya?ml|json)|credentials(\.json)?|\.netrc|\.npmrc)$/i
+// The secret gate of docs/firstmate-export.md, one label per alternative.
+const SECRET_PATTERNS = [
+  ['openai-style key', /sk-[A-Za-z0-9]{20,}/],
+  ['github token', /ghp_[A-Za-z0-9]{20,}/],
+  ['github fine-grained token', /github_pat_/],
+  ['aws access key id', /AKIA[0-9A-Z]{16}/],
+  ['slack token', /xox[baprs]-/],
+  ['private key block', /-----BEGIN [A-Z ]*PRIVATE KEY/],
+  ['credential assignment', /(api[_-]?key|token|password|secret)\s*[:=]\s*\S{8,}/i],
+]
+// A Firstmate record id names files under data/ and state/ and in the bundle, so
+// it is a plain name: no separators, no `..`.
+const SAFE_ID = /^[A-Za-z0-9][\w.-]*$/
+function isSafeId(id) {
+  return SAFE_ID.test(id) && !id.includes('..')
+}
+// An RFC 3339 time, the other form the importer reads.
+function isTimestamp(text) {
+  return /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|[+-]\d\d:\d\d)$/.test(text) && !Number.isNaN(Date.parse(text))
+}
+// A calendar date the importer can read: YYYY-MM-DD that round-trips.
+function isDate(text) {
+  const match = /^(\d{4})-(\d\d)-(\d\d)$/.exec(text ?? '')
+  if (!match) return false
+  const [y, m, d] = match.slice(1).map(Number)
+  const date = new Date(Date.UTC(y, m - 1, d))
+  return date.getUTCFullYear() === y && date.getUTCMonth() === m - 1 && date.getUTCDate() === d
+}
+
+function fail(message, code = 1) {
+  process.stderr.write(`firstmate-export: ${message}\n`)
+  process.exit(code)
+}
+
+function parseArgs(argv) {
+  const opts = {
+    home: process.env.FM_HOME || '',
+    out: '',
+    mode: 'dry',
+    hostLabel: os.hostname().split('.')[0],
+    autoMemory: null,
+    aliases: new Map(),
+    repoAliases: new Map(),
+    allow: [],
+  }
+  const value = (i, name) => {
+    if (i + 1 >= argv.length) fail(`${name} needs a value`)
+    return argv[i + 1]
+  }
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]
+    if (arg === '--home') opts.home = value(i++, arg)
+    else if (arg === '--out') opts.out = value(i++, arg)
+    else if (arg === '--mode') opts.mode = value(i++, arg)
+    else if (arg === '--host-label') opts.hostLabel = value(i++, arg)
+    else if (arg === '--auto-memory') opts.autoMemory = value(i++, arg)
+    else if (arg === '--project-alias') {
+      const [from, to] = value(i++, arg).split('=')
+      if (!from || !to) fail('--project-alias takes <old>=<new>')
+      opts.aliases.set(from, to)
+    } else if (arg === '--repo-alias') {
+      const [from, to] = value(i++, arg).split('=')
+      if (!from || !to) fail('--repo-alias takes <old owner/name>=<new owner/name>')
+      opts.repoAliases.set(from.toLowerCase(), to)
+    } else if (arg === '--allow-secret-hit') opts.allow.push(value(i++, arg))
+    else if (arg === '--help' || arg === '-h') {
+      process.stdout.write(fs.readFileSync(__filename, 'utf8').split('\n').slice(1, 15).map((l) => l.replace(/^\/\/ ?/, '')).join('\n') + '\n')
+      process.exit(0)
+    } else fail(`unknown argument ${arg}`)
+  }
+  if (!opts.home) fail('--home (or FM_HOME) names the Firstmate home to read')
+  if (!opts.out) fail('--out names the new bundle directory')
+  if (!['dry', 'final'].includes(opts.mode)) fail('--mode is dry or final')
+  opts.home = path.resolve(opts.home)
+  opts.out = path.resolve(opts.out)
+  return opts
+}
+
+// ---------- small helpers ----------
+
+function lisbonParts(date) {
+  const get = (options) =>
+    Object.fromEntries(
+      new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Lisbon', ...options })
+        .formatToParts(date)
+        .map((part) => [part.type, part.value]),
+    )
+  const t = get({ year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
+  const zone = get({ timeZoneName: 'longOffset' }).timeZoneName
+  return { ...t, offset: zone === 'GMT' ? '+00:00' : zone.slice(3) }
+}
+
+function lisbonIso(date = new Date()) {
+  const t = lisbonParts(date)
+  return `${t.year}-${t.month}-${t.day}T${t.hour}:${t.minute}:${t.second}${t.offset}`
+}
+
+function sha256File(file) {
+  return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
+}
+
+function exists(file) {
+  try {
+    fs.lstatSync(file)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function readLines(file) {
+  return fs.readFileSync(file, 'utf8').split('\n').map((line) => line.replace(/\r$/, ''))
+}
+
+// Runs read-only git in `dir` only when `dir` is itself a repository. A plain
+// directory inside another repository (or under the home) must not report that
+// repository's remote, so git may not walk up out of `dir`.
+function git(dir, ...args) {
+  if (!exists(path.join(dir, '.git'))) return null
+  try {
+    return cp
+      .execFileSync('git', ['-c', 'safe.directory=*', '-C', dir, ...args], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        env: {
+          ...process.env,
+          GIT_OPTIONAL_LOCKS: '0',
+          GIT_TERMINAL_PROMPT: '0',
+          GIT_CEILING_DIRECTORIES: path.dirname(path.resolve(dir)),
+        },
+      })
+      .trim()
+  } catch {
+    return null
+  }
+}
+
+// An https remote (userinfo allowed), an scp-style remote or an ssh:// remote on github.com.
+function parseGithubRemote(url) {
+  const match = /^(?:https?:\/\/(?:[^@/]+@)?|ssh:\/\/git@|git@)github\.com[/:]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/.exec(url)
+  return match ? `${match[1]}/${match[2]}` : null
+}
+
+// A remote URL without any userinfo the checkout's config might carry.
+function cleanRemote(url) {
+  return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@/]+@/i, '$1')
+}
+
+function parseKeyValues(file) {
+  const out = {}
+  if (!exists(file)) return out
+  for (const line of readLines(file)) {
+    const at = line.indexOf('=')
+    if (at > 0) out[line.slice(0, at)] = line.slice(at + 1)
+  }
+  return out
+}
+
+// ---------- main ----------
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2))
+  const data = path.join(opts.home, 'data')
+  const config = path.join(opts.home, 'config')
+  const state = path.join(opts.home, 'state')
+  if (!exists(path.join(data, 'projects.md')) || !exists(path.join(data, 'backlog.md'))) {
+    fail(`${opts.home} is not a Firstmate home: data/projects.md and data/backlog.md are required`)
+  }
+  const realHome = fs.realpathSync(opts.home)
+  const realOut = resolveReal(opts.out)
+  if (realOut === realHome || realOut.startsWith(realHome + path.sep)) {
+    fail('--out must be outside the Firstmate home')
+  }
+  if (exists(opts.out) && fs.readdirSync(opts.out).length > 0) {
+    fail(`${opts.out} is not empty; every export goes into a fresh directory`)
+  }
+  fs.mkdirSync(opts.out, { recursive: true })
+
+  const questions = []
+  const ask = (group, text) => questions.push({ group, text })
+  const warnings = []
+
+  const write = (rel, text) => {
+    const file = path.join(opts.out, rel)
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, text)
+  }
+  const writeJsonl = (rel, rows) => write(rel, rows.map((row) => JSON.stringify(row) + '\n').join(''))
+
+  const projects = exportProjects({ opts, data, config, ask })
+  const projectIds = new Set(projects.map((p) => p.id))
+  const { cards, noteOnly } = exportCards({ opts, data, projects, projectIds, ask })
+
+  for (const message of dependencyQuestions(cards)) ask('Cards', message)
+  for (const message of breakCycles(cards)) ask('Cards', message)
+  const tasks = copyTasks({ opts, data, cards, ask })
+  resolveReports(cards, opts.out)
+
+  const memory = exportMemory({ opts, data, projects, ask })
+  write('memory-guesses.tsv', 'entry\tsource\tguess\tvalue\n' + memory.guesses.map((g) => g + '\n').join(''))
+  const inflight = exportInflight({ opts, data, state, cards, ask })
+  write('config.json', JSON.stringify(exportConfig({ config, ask }), null, 1) + '\n')
+  const commitments = exportCommitments({ state, cards })
+
+  const noteArchive = path.join(data, 'note-archive.md')
+  if (exists(noteArchive)) {
+    const reason = fileSkipReason(noteArchive, 'note-archive.md', { followLink: true, limit: HISTORY_FILE_LIMIT_BYTES })
+    if (reason) ask('Cards', `data/note-archive.md was not copied to history/ (${reason}).`)
+    else write('history/note-archive.md', fs.readFileSync(noteArchive, 'utf8'))
+  }
+
+  write('projects.json', JSON.stringify(projects, null, 1) + '\n')
+  writeJsonl('cards.jsonl', cards)
+  writeJsonl('memory.jsonl', memory.entries)
+  writeJsonl('commitments.jsonl', commitments)
+  for (const [cls, name] of [['rule', 'rules.md'], ['note', 'notes.md'], ['requirement', 'requirements.md']]) {
+    const lines = memory.entries.filter((m) => m.class === cls).map((m) => `- ${m.text.replace(/\n/g, '\n  ')} (${m.source.file}:${m.source.line})\n`)
+    write(`memory/${name}`, `# ${name.replace('.md', '')} (verbatim, from memory.jsonl)\n\n${lines.join('')}`)
+  }
+
+  const repos = new Set(projects.filter((p) => p.repo).map((p) => p.repo.toLowerCase()))
+  const unmatched = new Map()
+  for (const card of cards) {
+    const repo = card.pr && /github\.com\/([\w.-]+\/[\w.-]+)\/pull/.exec(card.pr)?.[1]
+    if (repo && !repos.has(repo.toLowerCase())) unmatched.set(repo, (unmatched.get(repo) ?? 0) + 1)
+  }
+  for (const [repo, count] of unmatched) {
+    ask('Cards', `${count} card(s) carry a PR in ${repo}, which no project's repo matches, so those PRs will not link (1: leave them, 2: if the repo was renamed, re-run with --repo-alias ${repo}=<owner/name>).`)
+  }
+  for (const item of noteOnly) {
+    ask('Cards', `note-archive.md:${item.line} holds a record for ${item.id} that is in neither backlog.md nor done-archive.md. It is hold history, so it is not exported as a card (1: leave it in history/note-archive.md, 2: add it by hand as open work).`)
+  }
+  if (inflight.length > 0) {
+    ask('In-flight work', `${inflight.length} in-flight card(s) (${inflight.join(', ')}) have recommendation "drain" by default. Change it to adopt or respawn where Tiller should take the live pane over.`)
+  }
+
+  const questionCount = writeQuestions(write, questions)
+  const scan = secretScan(opts)
+  write('secret-scan.md', scan.report)
+  write('README.md', readme({ opts, projects, cards, memory, tasks, inflight, scan, questionCount, warnings }))
+
+  // The 500 MB limit covers everything the bundle holds.
+  const total = walk(opts.out).reduce((sum, file) => sum + fs.statSync(file).size, 0)
+  if (total > BUNDLE_LIMIT_BYTES) fail(`the bundle is ${total} bytes, over the ${BUNDLE_LIMIT_BYTES} byte limit`)
+
+  if (scan.failures.length > 0) {
+    process.stderr.write(`firstmate-export: secret scan found ${scan.failures.length} hit(s) nobody allowed; see ${path.join(opts.out, 'secret-scan.md')}\n`)
+    process.stderr.write('Fix the source or re-run with --allow-secret-hit <bundle path> after reading the hit. No manifest.json was written.\n')
+    process.exit(3)
+  }
+
+  const files = {}
+  for (const file of walk(opts.out)) {
+    const rel = path.relative(opts.out, file).split(path.sep).join('/')
+    if (rel !== 'manifest.json') files[rel] = sha256File(file)
+  }
+  const manifest = {
+    schema: SCHEMA,
+    mode: opts.mode,
+    host_label: opts.hostLabel,
+    generated_at: lisbonIso(),
+    firstmate_head: git(opts.home, 'rev-parse', 'HEAD'),
+    counts: {
+      projects: projects.length,
+      cards: cards.length,
+      inflight: inflight.length,
+      memory: memory.entries.length,
+      regressions: 0,
+      capabilities: 0,
+      open_questions: questionCount,
+    },
+    files: Object.fromEntries(Object.entries(files).sort(([a], [b]) => (a < b ? -1 : 1))),
+  }
+  write('manifest.json', JSON.stringify(manifest, null, 1) + '\n')
+
+  process.stdout.write(
+    [
+      `bundle        ${opts.out}`,
+      `projects      ${projects.length}`,
+      `cards         ${cards.length}`,
+      `inflight      ${inflight.length}`,
+      `memory        ${memory.entries.length} (sources hold ${memory.expected})`,
+      `open questions ${questionCount}`,
+      `secret scan   ${scan.allowed.length} allowed hit(s), 0 failing`,
+      `bundle size   ${total} bytes`,
+      '',
+    ].join('\n'),
+  )
+}
+
+// The real path of `target`, which may not exist yet: its nearest existing
+// ancestor is resolved and the rest is appended.
+function resolveReal(target) {
+  let existing = target
+  const rest = []
+  while (!exists(existing)) {
+    rest.unshift(path.basename(existing))
+    existing = path.dirname(existing)
+  }
+  return path.join(fs.realpathSync(existing), ...rest)
+}
+
+function walk(dir) {
+  const out = []
+  const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort(byName)) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) out.push(...walk(full))
+    else if (entry.isFile()) out.push(full)
+  }
+  return out
+}
+
+// ---------- projects ----------
+
+function exportProjects({ opts, data, config, ask }) {
+  const capacity = {}
+  const capacityFile = path.join(config, 'project-capacity')
+  if (exists(capacityFile)) {
+    for (const line of readLines(capacityFile)) {
+      const match = /^\s*([^\s#]+?)[:=]?\s+(\d+)\b/.exec(line)
+      if (match) capacity[match[1]] = Number(match[2])
+    }
+  }
+
+  const projects = []
+  const seen = new Set()
+  readLines(path.join(data, 'projects.md')).forEach((line, index) => {
+    const match = /^- (\S+) \[([^\]]+)\] - (.*?)(?: \(added (\d{4}-\d\d-\d\d)\))?$/.exec(line)
+    if (!match) return
+    const [, id, flags, description] = match
+    if (!isSafeId(id)) {
+      ask('Projects', `data/projects.md:${index + 1}: "${id}" is not a plain project id (letters, digits, dot, dash, underscore); the row was skipped.`)
+      return
+    }
+    if (seen.has(id)) {
+      ask('Projects', `data/projects.md:${index + 1}: project ${id} is listed twice; the first row was kept (1: keep it, 2: merge the rows by hand).`)
+      return
+    }
+    seen.add(id)
+    let added = match[4]
+    if (added && !isDate(added)) {
+      ask('Projects', `data/projects.md:${index + 1}: project ${id} has the date ${added}, which is not a calendar date; added is null.`)
+      added = undefined
+    }
+    let projectCapacity = capacity[id] ?? null
+    if (projectCapacity !== null && projectCapacity < 1) {
+      ask('Projects', `config/project-capacity gives ${id} capacity ${projectCapacity}, but Tiller needs at least 1; capacity is null (1: leave the default, 2: set it by hand).`)
+      projectCapacity = null
+    }
+    const word = flags.trim().split(/\s+/)[0].toLowerCase()
+    let delivery = word
+    if (!DELIVERIES.includes(delivery)) {
+      ask('Projects', `data/projects.md:${index + 1}: project ${id} has delivery "${word}", which Tiller does not know (1: local-only, 2: set it by hand).`)
+      delivery = 'local-only'
+    }
+
+    const checkout = path.join(opts.home, 'projects', id)
+    const originUrl = exists(checkout) ? git(checkout, 'config', '--get', 'remote.origin.url') : null
+    const fromGit = originUrl ? parseGithubRemote(originUrl) : null
+    const fromRegistry = /github\.com\/([\w.-]+\/[\w.-]+)/.exec(description)
+    const registryRepo = fromRegistry ? fromRegistry[1].replace(/\.git$/, '').replace(/[.,;:)]+$/, '') : null
+    const repo = registryRepo || fromGit
+    if (registryRepo && fromGit && registryRepo.toLowerCase() !== fromGit.toLowerCase()) {
+      ask('Projects', `${id}: data/projects.md names ${registryRepo} but the checkout's origin is ${fromGit}. Used ${registryRepo} (1: keep it, 2: use the checkout's).`)
+    }
+    if (originUrl && !fromGit) {
+      ask('Projects', `${id}: the checkout's origin is not a GitHub remote, so repo is null and its PRs will not link (1: leave it, 2: set repo by hand).`)
+    }
+    if (!repo) {
+      ask('Projects', `${id}: no GitHub repo in data/projects.md and no origin remote in projects/${id}; repo is null and its PRs will not link.`)
+    }
+
+    const defaultBranch = exists(checkout) ? git(checkout, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD') : null
+    projects.push({
+      id,
+      repo,
+      remote: originUrl ? cleanRemote(originUrl) : repo ? `https://github.com/${repo}` : null,
+      fm_checkout: `projects/${id}`,
+      default_branch: defaultBranch ? defaultBranch.replace(/^origin\//, '') : null,
+      delivery,
+      capacity: projectCapacity,
+      owner_host: opts.hostLabel,
+      added: added ?? null,
+      description,
+      release_flow: null,
+      source: { file: 'data/projects.md', line: index + 1 },
+    })
+  })
+  return projects
+}
+
+// ---------- cards ----------
+
+const RECORD = /^- \[( |x|X)\] (\S+) - (.*)$/
+const OUTCOME_GROUP = new RegExp(`^\\((${OUTCOME_WORDS.join('|')}) (\\d{4}-\\d\\d-\\d\\d)\\)$`)
+
+function parseRecords(file, relName, defaultSection) {
+  const records = []
+  let section = defaultSection
+  let current = null
+  readLines(file).forEach((line, index) => {
+    if (line.startsWith('#')) {
+      if (line.startsWith('## ')) section = line.slice(3).trim()
+      current = null
+      return
+    }
+    const match = RECORD.exec(line)
+    if (match) {
+      current = { box: match[1], id: match[2], rest: match[3], line: index + 1, file: `data/${relName}`, section, body: [] }
+      records.push(current)
+    } else if (current && (line.startsWith('  ') || line === '')) {
+      current.body.push(line.startsWith('  ') ? line.slice(2) : '')
+    } else {
+      current = null
+    }
+  })
+  for (const record of records) {
+    while (record.body.length > 0 && record.body[record.body.length - 1].trim() === '') record.body.pop()
+  }
+  return records
+}
+
+// Reads every `(key: value)` group on a record line, wherever it sits; what is
+// left is the title, with any `blocked-by: id` tokens taken out. A group that
+// starts like a field but does not parse stays in the title and is reported.
+function parseRest(rest) {
+  const fields = { blockedBy: [], unparsed: [] }
+  const stripped = rest.replace(/\s*\(([^()]*)\)/g, (whole, inner) => {
+    let kv
+    if ((kv = /^(repo|kind|priority|hold-kind|hold-until|hold): (.*)$/.exec(inner))) fields[kv[1]] = kv[2].trim()
+    else if ((kv = /^since (\d{4}-\d\d-\d\d)(?:[ T]\d\d:\d\d\S*)?$/.exec(inner))) fields.since = kv[1]
+    else if ((kv = OUTCOME_GROUP.exec(`(${inner})`))) fields.done = { word: kv[1], at: kv[2] }
+    else if ((kv = /^blocked-by:\s*(.+)$/.exec(inner))) fields.blockedBy.push(...kv[1].split(/[\s,]+/).filter(Boolean))
+    else {
+      if (/^(repo|kind|priority|hold|hold-kind|hold-until|since|blocked-by|done|merged|reported|answered|dropped|cancelled|failed|completed|abandoned)\b/.test(inner)) fields.unparsed.push(`(${inner})`)
+      return whole
+    }
+    return ''
+  })
+  const title = stripped.trim()
+  for (const token of title.matchAll(/\bblocked-by:\s*(\S+)/g)) fields.blockedBy.push(token[1])
+  fields.title = title.replace(/\s*\bblocked-by:\s*\S+/g, '').trim()
+  return fields
+}
+
+// Only a payload with the `fm-hold-v1:` prefix is base64; anything else is the reason as written.
+function decodeHold(payload) {
+  if (!payload.startsWith('fm-hold-v1:')) return payload
+  return Buffer.from(payload.slice('fm-hold-v1:'.length), 'base64').toString('utf8')
+}
+
+function exportCards({ opts, data, projects, projectIds, ask }) {
+  const backlog = parseRecords(path.join(data, 'backlog.md'), 'backlog.md', 'In flight')
+  const archivePath = path.join(data, 'done-archive.md')
+  const archive = exists(archivePath) ? parseRecords(archivePath, 'done-archive.md', 'Archived') : []
+  const notePath = path.join(data, 'note-archive.md')
+  const noteRecords = exists(notePath) ? parseRecords(notePath, 'note-archive.md', 'Archived') : []
+
+  const byRepo = new Map(projects.filter((p) => p.repo).map((p) => [p.repo.toLowerCase(), p.id]))
+  const unknownProjects = new Map()
+  const unknownSections = new Set()
+  const cards = new Map()
+  const duplicates = new Set()
+
+  const projectOf = (repoField) => {
+    if (!repoField) return 'fleet'
+    let id = opts.aliases.get(repoField) ?? repoField
+    if (id.includes('/')) id = byRepo.get(id.toLowerCase()) ?? id.split('/').pop()
+    id = opts.aliases.get(id) ?? id
+    return id
+  }
+
+  const addRecord = (record) => {
+    if (!isSafeId(record.id)) {
+      ask('Cards', `${record.file}:${record.line}: "${record.id}" is not a plain card id (letters, digits, dot, dash, underscore); the record was skipped.`)
+      return
+    }
+    const f = parseRest(record.rest)
+    for (const group of f.unparsed) {
+      ask('Cards', `${record.file}:${record.line}: ${record.id} has the field ${group}, which the exporter could not read; it stays in the title.`)
+    }
+    const date = (value, what) => {
+      if (value === undefined || value === null || isDate(value)) return value ?? null
+      ask('Cards', `${record.file}:${record.line}: ${record.id} has ${what} ${value}, which is not a calendar date; left null.`)
+      return null
+    }
+    f.since = date(f.since, 'since') ?? undefined
+    if (f.done) f.done.at = date(f.done.at, 'a done date')
+    const project = projectOf(f.repo)
+    if (project !== 'fleet' && !projectIds.has(project)) {
+      unknownProjects.set(project, (unknownProjects.get(project) ?? 0) + 1)
+    }
+
+    const rawKind = f.kind ?? 'other'
+    let kind = rawKind
+    if (!KNOWN_KINDS.includes(kind)) {
+      kind = 'other'
+      if (!OTHER_KINDS.includes(rawKind)) ask('Cards', `${record.file}:${record.line}: ${record.id} has kind "${rawKind}"; exported as other (1: keep other, 2: set a kind by hand).`)
+    }
+
+    let priority = null
+    if (f.priority !== undefined) {
+      const n = Number(f.priority)
+      if (Number.isInteger(n) && n >= 0 && n <= 4) priority = n
+      else ask('Cards', `${record.file}:${record.line}: ${record.id} has priority "${f.priority}", outside 0 to 4; left null.`)
+    }
+
+    const prMatch = /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/.exec(record.rest)
+    let pr = prMatch ? prMatch[0] : null
+    if (pr) {
+      const named = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)$/.exec(pr)
+      const moved = named && opts.repoAliases.get(named[1].toLowerCase())
+      if (moved) pr = `https://github.com/${moved}/pull/${named[2]}`
+    }
+
+    let done = null
+    if (f.done) {
+      done = { outcome: outcomeOf(f.done.word, kind), at: f.done.at }
+    } else if (record.box !== ' ' || record.file === 'data/done-archive.md' || record.section.toLowerCase().startsWith('done')) {
+      const open = record.box === ' '
+      done = { outcome: open ? 'abandoned' : 'completed', at: f.since ?? null }
+      if (open) ask('Cards', `${record.file}:${record.line}: ${record.id} is an open box in the done archive with no outcome; exported closed as abandoned (1: keep it closed, 2: reopen it by hand).`)
+    }
+
+    let hold = null
+    if (!done) {
+      let reason = f.hold ? decodeHold(f.hold) : null
+      const declared = f['hold-kind']
+      let until = f['hold-until'] ?? null
+      if (until && !isDate(until) && !isTimestamp(until)) {
+        ask('Cards', `${record.file}:${record.line}: ${record.id} has hold-until "${until}", which is not a date; the date is left out and kept in the reason (1: set a date by hand, 2: leave it a captain hold).`)
+        reason = reason ?? `hold until ${until}`
+        until = null
+      }
+      if (f.blockedBy.length > 0) {
+        hold = { kind: 'blocked', until, reason: reason ?? `blocked-by ${f.blockedBy.join(' ')}` }
+      } else if (f.hold || declared || f['hold-until']) {
+        const kind2 = HOLD_KINDS.includes(declared) ? declared : until ? 'date' : 'captain'
+        hold = { kind: kind2, until, reason }
+      }
+    }
+
+    let column
+    if (done) column = 'done'
+    else if (record.section.toLowerCase().startsWith('in flight')) column = 'working'
+    else if (hold && hold.kind === 'captain') column = 'needs'
+    else {
+      column = 'queued'
+      const known = /^(queued|in flight|done|archived)/i.test(record.section)
+      if (!known && !unknownSections.has(record.section)) {
+        unknownSections.add(record.section)
+        ask('Cards', `data/backlog.md has a "${record.section}" section the exporter does not know; its open cards were put in queued.`)
+      }
+    }
+
+    const card = {
+      id: record.id,
+      project,
+      title: f.title || record.id,
+      column,
+      kind,
+      priority,
+      since: f.since ?? done?.at ?? null,
+      hold,
+      pr,
+      report: null,
+      runs: [],
+      depends_on: [...new Set(f.blockedBy)].filter((id) => id !== record.id),
+      category: null,
+      size: null,
+      done,
+      body: record.body,
+      legacy_id: record.id,
+      source: { file: record.file, line: record.line },
+    }
+    if (!f.title) ask('Cards', `${record.file}:${record.line}: ${record.id} has no title; its id is the title.`)
+    if (cards.has(record.id)) duplicates.add(record.id)
+    cards.set(record.id, card)
+  }
+
+  for (const record of archive) addRecord(record)
+  for (const record of backlog) addRecord(record)
+
+  for (const id of duplicates) {
+    ask('Cards', `${id} appears more than once across backlog.md and done-archive.md; the last record (backlog.md wins over done-archive.md) was kept (1: keep it, 2: keep the earlier one).`)
+  }
+  for (const [project, count] of unknownProjects) {
+    ask('Cards', `${count} card(s) name project "${project}", which data/projects.md does not list. The importer files them under a retired project of that name (1: accept, 2: re-run with --project-alias ${project}=<registered project>).`)
+  }
+
+  const known = new Set([...cards.keys()])
+  const seenNotes = new Set()
+  const noteOnly = []
+  for (const record of noteRecords) {
+    if (known.has(record.id) || seenNotes.has(record.id)) continue
+    seenNotes.add(record.id)
+    noteOnly.push({ id: record.id, line: record.line })
+  }
+  return { cards: [...cards.values()], noteOnly }
+}
+
+// Firstmate's own `done` word has no Tiller twin: the kind says what it means.
+function outcomeOf(word, kind) {
+  if (word === 'done') return { ship: 'merged', scout: 'reported', captain: 'answered' }[kind] ?? 'completed'
+  return word
+}
+
+function dependencyQuestions(cards) {
+  const ids = new Set(cards.map((card) => card.id))
+  const out = []
+  for (const card of cards) {
+    if (card.done) {
+      card.depends_on = []
+      continue
+    }
+    const missing = card.depends_on.filter((id) => !ids.has(id))
+    if (missing.length > 0) {
+      card.depends_on = card.depends_on.filter((id) => ids.has(id))
+      out.push(`${card.id} is blocked by ${missing.join(', ')}, which is not a card in the bundle; the dependency was dropped and the hold kept (1: keep, 2: remove the hold).`)
+    }
+  }
+  return out
+}
+
+// The importer refuses a bundle whose dependencies form a cycle. A depth-first
+// walk drops each edge that closes one, in record order, and asks.
+function breakCycles(cards) {
+  const byId = new Map(cards.map((card) => [card.id, card]))
+  const state = new Map()
+  const out = []
+  const visit = (card) => {
+    state.set(card.id, 'walking')
+    for (const dep of [...card.depends_on]) {
+      if (!byId.has(dep)) continue
+      if (state.get(dep) === 'walking') {
+        card.depends_on = card.depends_on.filter((id) => id !== dep)
+        out.push(`${card.id} and ${dep} block each other (or a longer loop); the dependency of ${card.id} on ${dep} was dropped and the hold kept (1: keep, 2: decide which card goes first).`)
+      } else if (!state.has(dep)) {
+        visit(byId.get(dep))
+      }
+    }
+    state.set(card.id, 'done')
+  }
+  for (const card of cards) if (!state.has(card.id)) visit(card)
+  return out
+}
+
+// ---------- tasks ----------
+
+function copyTasks({ opts, data, cards, ask }) {
+  const skipped = []
+  let copiedFiles = 0
+  let copiedBytes = 0
+  let dirs = 0
+  let bytesInBundle = 0
+  const cardIds = new Set(cards.map((c) => c.id))
+  let limitHit = false
+
+  for (const card of cards) {
+    const src = path.join(data, card.id)
+    let entries
+    try {
+      if (!fs.lstatSync(src).isDirectory()) continue
+      entries = fs.readdirSync(src, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    dirs++
+    for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const rel = `${card.id}/${entry.name}`
+      const file = path.join(src, entry.name)
+      const skip = (reason, bytes = 0) => skipped.push({ path: rel, reason, bytes })
+      const reason = fileSkipReason(file, entry.name)
+      if (reason) { skip(reason, entry.isFile() ? fs.lstatSync(file).size : 0); continue }
+      const size = fs.lstatSync(file).size
+      if (bytesInBundle + size > BUNDLE_LIMIT_BYTES / 2) { limitHit = true; skip('bundle size budget', size); continue }
+      const dest = path.join(opts.out, 'tasks', card.id, entry.name)
+      fs.mkdirSync(path.dirname(dest), { recursive: true })
+      fs.copyFileSync(file, dest)
+      bytesInBundle += size
+      copiedFiles++
+      copiedBytes += size
+    }
+  }
+  if (limitHit) ask('Tasks', 'The task copy hit its share of the 500 MB bundle limit; the files it skipped are listed in tasks-skipped.tsv.')
+
+  let withoutCard = 0
+  for (const entry of fs.readdirSync(data, { withFileTypes: true })) {
+    if (entry.isDirectory() && !cardIds.has(entry.name)) withoutCard++
+  }
+  const lines = skipped.map((s) => `${s.path}\t${s.reason}\t${s.bytes}`)
+  fs.writeFileSync(path.join(opts.out, 'tasks-skipped.tsv'), 'path\treason\tbytes\n' + lines.join('\n') + (lines.length ? '\n' : ''))
+  return { dirs, copiedFiles, copiedBytes, skipped, withoutCard }
+}
+
+// Why a file may not be copied into the bundle, or null when it may: only a
+// regular text file of a sane size with no secret-bearing name goes in. A named
+// home file (note-archive.md) may be a link to the real one; a task file may not.
+function fileSkipReason(file, name, { followLink = false, limit = TASK_FILE_LIMIT_BYTES } = {}) {
+  let stat
+  try {
+    stat = followLink ? fs.statSync(file) : fs.lstatSync(file)
+  } catch {
+    return 'unreadable'
+  }
+  if (stat.isSymbolicLink()) return 'symlink'
+  if (stat.isDirectory()) return 'directory'
+  if (!stat.isFile()) return 'not a regular file'
+  if (SECRET_FILE_NAMES.test(name)) return 'secret-bearing name'
+  if (stat.size === 0) return 'empty'
+  if (stat.size > limit) return `over ${limit} bytes`
+  if (!isText(file)) return 'not text'
+  return null
+}
+
+function isRealDirectory(dir) {
+  try {
+    return fs.lstatSync(dir).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+// A text file has no NUL byte in its first 8 KB.
+function isText(file) {
+  const fd = fs.openSync(file, 'r')
+  try {
+    const buffer = Buffer.alloc(8192)
+    const n = fs.readSync(fd, buffer, 0, buffer.length, 0)
+    return !buffer.subarray(0, n).includes(0)
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
+// A card's report is a file the bundle holds: a `data/<dir>/<report file>` its
+// record names, else the task's own report.md or final-report.md.
+function resolveReports(cards, out) {
+  const inBundle = (rel) => exists(path.join(out, rel))
+  for (const card of cards) {
+    const text = [card.title, ...card.body].join('\n')
+    for (const match of text.matchAll(/data\/([\w.-]+)\/([\w./-]*report[\w.-]*\.(?:md|html|json))/gi)) {
+      const rel = `tasks/${match[1]}/${match[2]}`
+      if (inBundle(rel)) { card.report = rel; break }
+    }
+    if (card.report) continue
+    for (const name of ['report.md', 'final-report.md']) {
+      if (inBundle(`tasks/${card.id}/${name}`)) { card.report = `tasks/${card.id}/${name}`; break }
+    }
+  }
+}
+
+// ---------- memory ----------
+
+// A list item: `- x`, `* x`, `+ x`, `1. x` or `1) x`.
+const BULLET = /^(?:[-*+]|\d+[.)]) (.*)$/
+const REQUIREMENT = /\bbin\/fm-|\bfm-[a-z-]+\.sh|\bfm-(send|control|spawn|brief)\b|state\/<id>|doorbell|\bFM_HOME\b/i
+const SECRET_REFERENCE = /\.env\b|-keys\b|keychain|vault|\bsecrets?\b|\btokens?\b|api[_ -]?key|\b[A-Z][A-Z0-9_]*_(KEY|TOKEN|SECRET|DSN)\b/
+
+function exportMemory({ opts, data, projects, ask }) {
+  const entries = []
+  const projectNames = projects.filter((p) => p.id.length > 3).map((p) => p.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  const mention = projectNames.length ? new RegExp(`(?<![\\w.-])(${projectNames.join('|')})(?![\\w-])`) : null
+  const scopeGuesses = []
+  const requirementGuesses = []
+  let expected = 0
+  const unexported = []
+
+  const add = ({ text, section, defaultClass, file, line, marker }) => {
+    let cls = defaultClass
+    if (REQUIREMENT.test(text)) {
+      cls = 'requirement'
+      requirementGuesses.push(`mem-${entries.length + 1}\t${file}:${line}\tclass\trequirement`)
+    }
+    const found = mention ? mention.exec(text.slice(0, 160)) : null
+    const scope = found ? `project:${found[1]}` : 'global'
+    if (found) scopeGuesses.push(`mem-${entries.length + 1}\t${file}:${line}\tscope\t${scope}`)
+    entries.push({
+      id: `mem-${entries.length + 1}`,
+      text,
+      scope,
+      section,
+      class: cls,
+      tier_marker: marker,
+      secret_ref: SECRET_REFERENCE.test(text),
+      provenance: 'legacy-import',
+      rationale: null,
+      generalized: null,
+      reason: null,
+      source: { file, line },
+    })
+  }
+
+  const defaults = [['captain.md', 'rule', 'Captain preferences'], ['learnings.md', 'note', 'Learnings'], ['memory-archive.md', 'note', 'memory-archive']]
+  for (const [name, defaultClass, heading] of defaults) {
+    const file = path.join(data, name)
+    if (!exists(file)) continue
+    let section = heading
+    let current = null
+    let blanks = 0
+    const lines = readLines(file)
+    const flush = () => {
+      if (current) add(current)
+      current = null
+      blanks = 0
+    }
+    lines.forEach((line, index) => {
+      const bullet = BULLET.exec(line)
+      if (line.startsWith('#')) {
+        flush()
+        section = line.replace(/^#+\s*/, '').trim() || heading
+      } else if (bullet) {
+        flush()
+        expected++
+        const text = bullet[1]
+        const marker = /<!--(a:\d{4}-\d\d-\d\d)-->/.exec(text)?.[1] ?? /^\(from [^)]*tier: (\w+)/.exec(text)?.[1] ?? null
+        current = { text, section, defaultClass, file: `data/${name}`, line: index + 1, marker }
+      } else if (line.trim() === '') {
+        if (current) blanks++
+      } else if (/^<!--.*-->\s*$/.test(line)) {
+        // A comment between entries is markup, not text to keep.
+        flush()
+      } else if (current && /^\s/.test(line)) {
+        // A continuation keeps its text; only the bullet's own two-space indent goes.
+        current.text += '\n'.repeat(blanks + 1) + (line.startsWith('  ') ? line.slice(2) : line.trimStart())
+        blanks = 0
+      } else {
+        flush()
+        unexported.push(`data/${name}:${index + 1}`)
+      }
+    })
+    flush()
+  }
+  if (unexported.length > 0) {
+    ask('Memory', `${unexported.length} line(s) in the memory files are prose, not list items, so they are not memory entries: ${unexported.slice(0, 8).join(', ')}${unexported.length > 8 ? ', ...' : ''} (1: leave them in the home, 2: add them as entries by hand).`)
+  }
+  const archived = entries.filter((e) => e.source.file === 'data/memory-archive.md').length
+  if (archived > 0) {
+    ask('Memory', `data/memory-archive.md holds ${archived} aged entries; all are classed note, like learnings. Mark any that no longer hold as stale (1: keep as notes, 2: mark stale by hand).`)
+  }
+
+  const autoDir = opts.autoMemory ?? path.join(os.homedir(), '.claude', 'projects', opts.home.replace(/[^A-Za-z0-9]/g, '-'), 'memory')
+  let harness = 0
+  if (opts.autoMemory !== 'none' && exists(autoDir)) {
+    for (const name of fs.readdirSync(autoDir).sort()) {
+      if (name === 'MEMORY.md' || !name.endsWith('.md')) continue
+      const raw = fs.readFileSync(path.join(autoDir, name), 'utf8')
+      const match = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(raw)
+      const type = match ? /^\s*type:\s*(\w+)/m.exec(match[1])?.[1] : null
+      const text = (match ? match[2] : raw).trim()
+      if (!text) continue
+      expected++
+      harness++
+      add({
+        text,
+        section: 'harness auto-memory',
+        defaultClass: type === 'project' || type === 'reference' ? 'note' : 'rule',
+        file: `harness-memory/${name}`,
+        line: 1,
+        marker: null,
+      })
+    }
+  }
+  if (harness > 0) ask('Memory', `${harness} harness auto-memory file(s) were classed by their type (feedback and user as rule, project and reference as note).`)
+
+  if (scopeGuesses.length > 0) {
+    ask('Memory scope', `${scopeGuesses.length} entries name a project in their first 160 characters and were scoped to it; the rest are global. Each is listed in memory-guesses.tsv (1: keep the scope, 2: make it global).`)
+  }
+  if (requirementGuesses.length > 0) {
+    ask('Memory class', `${requirementGuesses.length} entries match Firstmate's own scripts or paths and were classed requirement (a parity input, not memory). Each is listed in memory-guesses.tsv (1: keep requirement, 2: make it a rule or note).`)
+  }
+  return { entries, expected, guesses: [...requirementGuesses, ...scopeGuesses] }
+}
+
+// ---------- in-flight, config, commitments ----------
+
+function exportInflight({ opts, data, state, cards, ask }) {
+  const ids = []
+  for (const card of cards) {
+    if (!['working', 'landing'].includes(card.column)) continue
+    const stateFile = (suffix) => {
+      const file = path.join(state, `${card.id}${suffix}`)
+      if (!exists(file)) return null
+      const reason = fileSkipReason(file, `${card.id}${suffix}`)
+      if (reason) {
+        if (reason !== 'empty') ask('In-flight work', `state/${card.id}${suffix} was not read (${reason}).`)
+        return null
+      }
+      return file
+    }
+    const metaFile = stateFile('.meta')
+    const meta = metaFile ? parseKeyValues(metaFile) : {}
+    let lastStatus = null
+    const statusFile = stateFile('.status')
+    if (statusFile) {
+      const lines = readLines(statusFile).filter((l) => l.trim())
+      lastStatus = lines.length ? lines[lines.length - 1] : null
+    }
+    const record = {
+      id: card.id,
+      kind: card.kind,
+      project: card.project,
+      model: meta.model ?? null,
+      effort: meta.effort ?? null,
+      herdr: {
+        machine: 'local',
+        workspace: meta.herdr_workspace_id ?? null,
+        tab: meta.herdr_tab_id ?? null,
+        pane_id: meta.herdr_pane_id ?? null,
+        agent_status: null,
+      },
+      worktree: meta.worktree ?? null,
+      branch: meta.branch ?? null,
+      base: null,
+      pr: card.pr,
+      pipeline: null,
+      last_status: lastStatus,
+      started: card.since,
+      recommendation: 'drain',
+      why: 'The script cannot judge; drain is the safe default (finish it in Firstmate before the cutover).',
+    }
+    fs.mkdirSync(path.join(opts.out, 'inflight'), { recursive: true })
+    fs.writeFileSync(path.join(opts.out, 'inflight', `${card.id}.json`), JSON.stringify(record, null, 1) + '\n')
+    // The brief follows the task-copy rules: the task directory and the file
+    // are real, and the file is small text with a plain name.
+    const taskDir = path.join(data, card.id)
+    const brief = path.join(taskDir, 'brief.md')
+    let briefText = '(no brief on disk)\n'
+    if (exists(brief)) {
+      const reason = isRealDirectory(taskDir) ? fileSkipReason(brief, 'brief.md') : 'the task directory is not a plain directory'
+      if (reason) {
+        briefText = `(the brief was not copied: ${reason})\n`
+        ask('In-flight work', `data/${card.id}/brief.md was not copied (${reason}).`)
+      } else {
+        briefText = fs.readFileSync(brief, 'utf8')
+      }
+    }
+    fs.writeFileSync(path.join(opts.out, 'inflight', `${card.id}.brief.md`), briefText)
+    ids.push(card.id)
+  }
+  return ids
+}
+
+function exportConfig({ config, ask }) {
+  const read = (name) => {
+    const file = path.join(config, name)
+    try {
+      return fs.readFileSync(file, 'utf8')
+    } catch {
+      return null
+    }
+  }
+  const dispatchText = read('crew-dispatch.json')
+  let dispatch = null
+  try {
+    dispatch = dispatchText ? JSON.parse(dispatchText) : null
+  } catch {
+    dispatch = null
+  }
+  const lane = read('lane-capacity')
+  const laneMatch = lane ? /^\s*(\d+)/m.exec(lane) : null
+  let laneCapacity = laneMatch ? Number(laneMatch[1]) : null
+  if (laneCapacity !== null && laneCapacity < 1) {
+    ask('Config', `config/lane-capacity is ${laneCapacity}, but Tiller needs at least 1; lane_capacity is null (1: leave the default, 2: set it by hand).`)
+    laneCapacity = null
+  }
+  const projectCapacity = {}
+  for (const line of (read('project-capacity') ?? '').split('\n')) {
+    const match = /^\s*([^\s#]+?)[:=]?\s+(\d+)\b/.exec(line)
+    if (match) projectCapacity[match[1]] = Number(match[2])
+  }
+  const budget = read('startup-memory-budget')
+  let notifyTarget = null
+  try {
+    notifyTarget = fs.readlinkSync(path.join(config, 'captain-notify.sh'))
+  } catch {
+    notifyTarget = null
+  }
+  return {
+    dispatch,
+    lane_capacity: laneCapacity,
+    project_capacity: projectCapacity,
+    startup_memory_budget: budget && /^\s*\d+/.test(budget) ? Number(/^\s*(\d+)/.exec(budget)[1]) : null,
+    quota_floor: null,
+    notify: { script: notifyTarget ?? (exists(path.join(config, 'captain-notify.sh')) ? 'config/captain-notify.sh' : null), managed_by: notifyTarget ? 'dotfiles' : 'local' },
+    herdr: {},
+  }
+}
+
+function exportCommitments({ state, cards }) {
+  const out = []
+  for (const card of cards) {
+    if (card.hold?.until && card.column !== 'done') {
+      out.push({ what: `hold on ${card.id} comes due`, due: card.hold.until, card: card.id, source: card.source })
+    }
+  }
+  const afkDir = path.join(state, 'afk-contracts')
+  if (exists(afkDir)) {
+    for (const name of fs.readdirSync(afkDir).sort()) {
+      if (name.endsWith('.afk-contract') && !name.includes('superseded')) {
+        out.push({ what: `afk contract ${name}`, due: null, card: null, source: { file: `state/afk-contracts/${name}`, record: name } })
+      }
+    }
+  }
+  const when = path.join(state, 'when')
+  if (exists(when)) {
+    const entries = fs.lstatSync(when).isDirectory()
+      ? fs.readdirSync(when).sort()
+      : readLines(when).filter((l) => l.trim())
+    for (const entry of entries) out.push({ what: `scheduled wake: ${entry}`, due: null, card: null, source: { file: 'state/when', record: entry } })
+  }
+  const inbox = path.join(state, 'operational-inbox')
+  if (exists(inbox)) {
+    const count = fs.readdirSync(inbox).filter((n) => n.endsWith('.msg')).length
+    if (count > 0) out.push({ what: `${count} operational-inbox message(s) still on disk, not read by the exporter`, due: null, card: null, source: { file: 'state/operational-inbox', record: 'dir' } })
+  }
+  return out
+}
+
+// ---------- open questions, secret scan, readme ----------
+
+function writeQuestions(write, questions) {
+  const groups = new Map()
+  for (const q of questions) {
+    if (!groups.has(q.group)) groups.set(q.group, [])
+    groups.get(q.group).push(q.text)
+  }
+  let n = 0
+  let text = '# Open questions\n\nThe exporter copies records verbatim and writes here what only a person can settle. Each item has its source and two readings.\n'
+  for (const [group, items] of groups) {
+    text += `\n## ${group}\n\n`
+    for (const item of items) text += `${++n}. ${item}\n`
+  }
+  if (n === 0) text += '\nNone.\n'
+  write('open-questions.md', text)
+  return n
+}
+
+function secretScan(opts) {
+  const failures = []
+  const allowed = []
+  const allow = (rel) => opts.allow.some((a) => (a.endsWith('/') ? rel.startsWith(a) : rel === a))
+  for (const file of walk(opts.out)) {
+    const rel = path.relative(opts.out, file).split(path.sep).join('/')
+    if (rel === 'secret-scan.md' || rel === 'README.md') continue
+    const buffer = fs.readFileSync(file)
+    // A file with a NUL byte cannot be scanned as text: it is listed, not skipped.
+    if (buffer.subarray(0, 8192).includes(0)) {
+      (allow(rel) ? allowed : failures).push({ path: rel, line: 0, label: 'binary file, not scanned' })
+      continue
+    }
+    buffer.toString('utf8').split('\n').forEach((line, index) => {
+      for (const [label, pattern] of SECRET_PATTERNS) {
+        if (pattern.test(line)) (allow(rel) ? allowed : failures).push({ path: rel, line: index + 1, label })
+      }
+    })
+  }
+  const fmt = (hits) => hits.map((h) => `- ${h.line ? `${h.path}:${h.line}` : h.path} (${h.label})`).join('\n') || 'None.'
+  const report = [
+    '# Secret scan',
+    '',
+    'Patterns: the secret gate of docs/firstmate-export.md. Matched text is never printed here.',
+    '',
+    `## Hits nobody allowed (${failures.length})`,
+    '',
+    fmt(failures),
+    '',
+    `## Hits in allowed paths (${allowed.length})`,
+    '',
+    'Allowed: only the paths given with --allow-secret-hit. Read these before using the bundle.',
+    '',
+    fmt(allowed),
+    '',
+  ].join('\n')
+  return { failures, allowed, report }
+}
+
+function readme({ opts, projects, cards, memory, tasks, inflight, scan, questionCount }) {
+  const byColumn = {}
+  for (const c of cards) byColumn[c.column] = (byColumn[c.column] ?? 0) + 1
+  const reasons = {}
+  for (const s of tasks.skipped) reasons[s.reason] = (reasons[s.reason] ?? 0) + 1
+  return [
+    `# Firstmate export (${opts.mode})`,
+    '',
+    `Schema ${SCHEMA}. Written ${lisbonIso()} (Europe/Lisbon) by scripts/firstmate-export from a Firstmate home. Local only: it holds verbatim records, so never commit it, push it or attach it anywhere.`,
+    '',
+    `- projects: ${projects.length} (${projects.filter((p) => p.repo).length} with a GitHub repo)`,
+    `- cards: ${cards.length} (${Object.entries(byColumn).map(([k, v]) => `${k} ${v}`).join(', ')})`,
+    `- memory entries: ${memory.entries.length} (sources hold ${memory.expected})`,
+    `- in-flight cards: ${inflight.length}`,
+    `- task dirs copied: ${tasks.dirs} (${tasks.copiedFiles} top-level text files, ${tasks.copiedBytes} bytes); ${tasks.skipped.length} entries skipped (${Object.entries(reasons).map(([k, v]) => `${k}: ${v}`).join(', ') || 'none'}), listed in tasks-skipped.tsv`,
+    `- data/ directories with no card: ${tasks.withoutCard}, not copied`,
+    `- open questions: ${questionCount} (open-questions.md)`,
+    `- secret scan: ${scan.failures.length} unallowed hit(s), ${scan.allowed.length} in allowed paths (secret-scan.md)`,
+    '',
+    'Not written by the script: capabilities.md, regressions.md, handoff-letter.md and CUTOVER.md. They need judgment, and the importer does not read them. Card runs are empty: the script does not reconstruct attempts.',
+    'history/note-archive.md is hold history, copied as it is; it is not memory and none of it is a card.',
+    '',
+  ].join('\n')
+}
+
+main()
