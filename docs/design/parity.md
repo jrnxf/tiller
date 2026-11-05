@@ -33,7 +33,7 @@ Parity rows for this host, counted Thursday 2026-11-05 (Lisbon time). 71 kept ro
 
 | Status | Rows | Count |
 |---|---|---|
-| tested | P01 to P06, P08, P12, P13, P17 to P21, P23 to P32, P38 to P42, P44, P45, P51, P53, P55, P57 to P61, P63, P64, P67, P68 | 43 |
+| tested | P01 to P06, P08, P12, P13, P17 to P32, P38, P39, P41, P42, P44, P45, P51, P53, P55, P57 to P61, P63, P64, P67, P68 | 43 |
 | eval (on demand) | P16, P33, P37, P40, P54, P56, P66 | 7 |
 | live-check | P52 | 1 |
 | remote (not tested here) | P62, D01, D11 | 3 |
