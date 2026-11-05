@@ -10,12 +10,12 @@ use std::path::Path;
 
 use serde_json::json;
 use tiller_core::domain::{
-    Card, Delivery, OutboxMessage, Pane, Project, Reservation, Run, RunOutcome, Session,
+    Card, Delivery, OutboxMessage, Pane, Project, Reservation, Run, RunOutcome, RunRole, Session,
 };
 use tiller_core::state::attention::NewAttention;
 use tiller_core::state::caches::PaneReading;
 use tiller_core::state::outbox::live_orchestrator;
-use tiller_core::state::publishes::publish;
+use tiller_core::state::publishes::{publish, published_head};
 use tiller_core::state::runs::{Bind, EndRun, live_session};
 use tiller_core::state::{find, get, list};
 use tiller_core::{Result, Timestamp};
@@ -472,7 +472,12 @@ impl Reconciler {
                 continue;
             }
             let holds_work = scan.dirty != Some(false) || scan.unlanded_commits != Some(0);
-            if holds_work {
+            // A builder that ended `reported` with its head on an open PR
+            // left the work to the PR, which the card tracks to landing.
+            let on_pr = run.outcome == Some(RunOutcome::Reported)
+                && run.role == RunRole::Builder
+                && published_head(self.conn(), &run)?.is_some();
+            if holds_work && !on_pr {
                 let key = format!(
                     "reconcile:R15:unlanded:{}:{}",
                     run.id,

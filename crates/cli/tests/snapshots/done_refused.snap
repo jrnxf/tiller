@@ -5,7 +5,8 @@ exit: 5
 {
   "error": {
     "code": "refused",
-    "message": "PR #7 is not merged; stay on the card"
+    "hint": "tiller done --outcome reported",
+    "message": "PR #7 is not merged; stay on the card, or end with --outcome reported once it holds your last commit"
   },
   "ok": false
 }

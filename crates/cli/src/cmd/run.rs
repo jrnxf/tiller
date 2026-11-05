@@ -283,11 +283,14 @@ fn default_outcome(store: &tiller_core::Store, run: &Run) -> Result<RunOutcome, 
             if prs.iter().any(|pr| pr.state == PrState::Merged) {
                 return Ok(RunOutcome::Landed);
             }
+            // Ending on an open PR frees the slot but ends the session, so
+            // the builder asks for it by name.
             match prs.iter().find(|pr| pr.state == PrState::Open) {
                 Some(pr) => Err(Failure::refused(format!(
-                    "PR #{} is not merged; stay on the card",
+                    "PR #{} is not merged; stay on the card, or end with --outcome reported once it holds your last commit",
                     pr.number
-                ))),
+                ))
+                .hint("tiller done --outcome reported")),
                 None => Err(Failure::refused("the work is not landed; stay on the card")),
             }
         }
