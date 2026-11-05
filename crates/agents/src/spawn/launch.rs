@@ -31,6 +31,9 @@ use super::SpawnError;
 use super::trust::{self, ClaudeConfig};
 use crate::roles::{self, MCP_CONFIG, Placeholders, Role};
 
+/// What ends the role body in a prompt file and starts the brief.
+const BRIEF_HEADING: &str = "# Your brief\n\n";
+
 /// The first prompt a worker gets; the brief itself is in its instructions.
 pub const FIRST_PROMPT: &str = "Start on the brief at the end of your instructions.";
 
@@ -408,23 +411,27 @@ fn script(command: &Command<'_>, launch: &Launch) -> String {
     )
 }
 
-/// Writes the prompt, the fragment, the MCP config and the launch script
-/// into `spec.scratch`, which must not exist yet.
-pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
+/// The launch files' text, before any of it is written.
+struct Rendered {
+    prompt: String,
+    fragment: Vec<u8>,
+    manifest: Value,
+    config_hash: String,
+    mode: String,
+    mode_note: Option<String>,
+}
+
+/// Renders the prompt, the fragment and the manifest for `spec`.
+fn render(spec: &LaunchSpec<'_>) -> Result<Rendered, SpawnError> {
     let worktree = absolute("the worktree", spec.worktree)?;
     let scratch = absolute("the scratch directory", spec.scratch)?;
     let tiller_home = absolute("the Tiller home", spec.tiller_home)?;
     let tiller = absolute("the tiller binary", spec.tiller)?;
-    if let Some(parent) = spec.scratch.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::create_dir(spec.scratch)?;
-    fs::set_permissions(spec.scratch, fs::Permissions::from_mode(0o700))?;
 
     let front = spec.role.frontmatter()?;
     let body = spec.role.prompt_body()?;
     let prompt = match spec.brief {
-        Some(brief) => format!("{}\n\n# Your brief\n\n{}\n", body.trim_end(), brief.trim()),
+        Some(brief) => format!("{}\n\n{BRIEF_HEADING}{}\n", body.trim_end(), brief.trim()),
         None => format!("{}\n", body.trim_end()),
     };
     let (home, pool, checkouts) = match spec.roots {
@@ -465,6 +472,35 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
         spec.memory,
     );
     let config_hash = hash_of(&manifest);
+    Ok(Rendered {
+        prompt,
+        fragment,
+        manifest,
+        config_hash,
+        mode,
+        mode_note,
+    })
+}
+
+/// The first prompt words of a launch.
+fn first_prompt(spec: &LaunchSpec<'_>) -> Vec<String> {
+    // The orchestrator has no brief, so no first prompt.
+    match (spec.brief, spec.note) {
+        (None, _) => Vec::new(),
+        (Some(_), Some(note)) => vec![relaunch_prompt(note)],
+        (Some(_), None) => vec![FIRST_PROMPT.to_owned()],
+    }
+}
+
+/// Writes the prompt, the fragment, the MCP config and the launch script
+/// into `spec.scratch`, which must not exist yet.
+pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
+    let rendered = render(spec)?;
+    if let Some(parent) = spec.scratch.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::create_dir(spec.scratch)?;
+    fs::set_permissions(spec.scratch, fs::Permissions::from_mode(0o700))?;
 
     let dir = spec.scratch;
     let mut launch = Launch {
@@ -472,21 +508,15 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
         settings: dir.join("settings.json"),
         mcp: dir.join("mcp.json"),
         script: dir.join("launch.sh"),
-        config_hash,
-        manifest,
+        config_hash: rendered.config_hash,
+        manifest: rendered.manifest,
         line: String::new(),
-        mode_note,
+        mode_note: rendered.mode_note,
     };
-    write_new(&launch.prompt, prompt.as_bytes(), 0o600)?;
-    write_new(&launch.settings, &fragment, 0o600)?;
+    write_new(&launch.prompt, rendered.prompt.as_bytes(), 0o600)?;
+    write_new(&launch.settings, &rendered.fragment, 0o600)?;
     write_new(&launch.mcp, MCP_CONFIG.as_bytes(), 0o600)?;
 
-    // The orchestrator has no brief, so no first prompt.
-    let start = match (spec.brief, spec.note) {
-        (None, _) => Vec::new(),
-        (Some(_), Some(note)) => vec![relaunch_prompt(note)],
-        (Some(_), None) => vec![FIRST_PROMPT.to_owned()],
-    };
     let text = script(
         &Command {
             role: spec.role,
@@ -498,13 +528,82 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
             claude_config: spec.claude_config,
             model: spec.model,
             effort: spec.effort,
-            mode: &mode,
-            start,
+            mode: &rendered.mode,
+            start: first_prompt(spec),
         },
         &launch,
     );
     write_new(&launch.script, text.as_bytes(), 0o700)?;
     // Last, so a launch refused for any other reason records nothing.
+    trust::record(spec.claude_config, spec.worktree)?;
+    launch.line = format!("sh {}", sh_quote(&launch.script.to_string_lossy()));
+    Ok(launch)
+}
+
+/// The brief inside a prompt file [`write`] made, or `None` when the file
+/// has none (an orchestrator's).
+pub fn brief_of(prompt: &str) -> Option<&str> {
+    let (_, brief) = prompt.split_once(BRIEF_HEADING)?;
+    Some(brief.trim())
+}
+
+/// Replaces `path` with `bytes`, never leaving it half written.
+fn replace(path: &Path, bytes: &[u8], mode: u32) -> Result<(), SpawnError> {
+    let partial = path.with_extension("partial");
+    match fs::remove_file(&partial) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
+    }
+    write_new(&partial, bytes, mode)?;
+    fs::rename(&partial, path)?;
+    Ok(())
+}
+
+/// A same-run relaunch: renders the prompt, the fragment and the MCP config
+/// again from the current binary and config, over the run's own files in
+/// `spec.scratch`, which must exist. `spec.brief` is the run's brief, read
+/// back with [`brief_of`], so the session keeps its task but not the hook
+/// and command paths, the role prompt or the settings of its first launch.
+/// The script is `relaunch-<session>.sh`, as [`write_again`] names it.
+pub fn write_refreshed(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
+    if !spec.scratch.is_dir() {
+        return Err(SpawnError::Refused(format!(
+            "{} is missing, so the run's launch cannot be repeated",
+            spec.scratch.display()
+        )));
+    }
+    let rendered = render(spec)?;
+    let dir = spec.scratch;
+    let mut launch = Launch {
+        prompt: dir.join("prompt.md"),
+        settings: dir.join("settings.json"),
+        mcp: dir.join("mcp.json"),
+        script: dir.join(format!("relaunch-{}.sh", spec.session_id)),
+        config_hash: rendered.config_hash,
+        manifest: rendered.manifest,
+        line: String::new(),
+        mode_note: rendered.mode_note,
+    };
+    replace(&launch.prompt, rendered.prompt.as_bytes(), 0o600)?;
+    replace(&launch.settings, &rendered.fragment, 0o600)?;
+    replace(&launch.mcp, MCP_CONFIG.as_bytes(), 0o600)?;
+    let text = script(
+        &Command {
+            role: spec.role,
+            session_id: spec.session_id,
+            run_id: spec.run_id,
+            worktree: spec.worktree,
+            tiller_home: spec.tiller_home,
+            claude: spec.claude,
+            claude_config: spec.claude_config,
+            model: spec.model,
+            effort: spec.effort,
+            mode: &rendered.mode,
+            start: first_prompt(spec),
+        },
+        &launch,
+    );
+    replace(&launch.script, text.as_bytes(), 0o700)?;
     trust::record(spec.claude_config, spec.worktree)?;
     launch.line = format!("sh {}", sh_quote(&launch.script.to_string_lossy()));
     Ok(launch)

@@ -16,6 +16,7 @@
 #[cfg(test)]
 mod tests;
 
+use std::fs;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -466,15 +467,18 @@ pub fn relaunch(
     let role = role_of(run.role)?;
     let scratch = world.scratch_root.join(&run.id);
     if !request.new_attempt {
-        // The same run reuses its launch files; check before the stop.
-        for name in ["prompt.md", "settings.json", "mcp.json"] {
-            if !scratch.join(name).is_file() {
-                return Err(SpawnError::Refused(format!(
-                    "{} is missing, so run {} cannot be launched again; relaunch with --new-attempt --brief-file <f>; nothing was changed",
-                    scratch.join(name).display(),
-                    run.id
-                )));
-            }
+        // The same run keeps its brief and renders the rest again: check
+        // the brief is there before the stop.
+        let prompt = scratch.join("prompt.md");
+        let held = fs::read_to_string(&prompt)
+            .ok()
+            .is_some_and(|text| launch::brief_of(&text).is_some());
+        if !held {
+            return Err(SpawnError::Refused(format!(
+                "{} is missing or holds no brief, so run {} cannot be launched again; relaunch with --new-attempt --brief-file <f>; nothing was changed",
+                prompt.display(),
+                run.id
+            )));
         }
     }
     let model = match &request.asked {
@@ -596,7 +600,7 @@ fn relaunch_of(
 /// agent. Returns the proof and the pane, when it is still open, for the
 /// next session. Refuses, having changed nothing recorded, when the stop
 /// cannot be proven or would lose a draft in the composer.
-fn stop(
+pub(crate) fn stop(
     store: &Store,
     herdr: &dyn Herdr,
     waits: &Waits,
@@ -692,7 +696,7 @@ struct Again<'a> {
     run: &'a Run,
     session: &'a Session,
     note: &'a str,
-    /// A new attempt's brief; `None` reuses the run's launch files.
+    /// A new attempt's brief; `None` keeps the run's own, from its prompt file.
     brief: Option<&'a str>,
     old_scratch: &'a Path,
     /// The stopped session's pane, when it is still open and free.
@@ -721,70 +725,83 @@ fn start_again(
         old_scratch,
         old_pane,
     } = again;
-    let line = match brief {
-        // A new attempt is a new run: its own launch files and hash.
+    let attempt = brief.is_some();
+    let brief = match brief {
         Some(brief) => {
             let mut brief = brief.to_owned();
             if run.role == RunRole::Builder {
                 brief.push_str(&delivery_line(project));
             }
-            let claude_version = launch::claude_version(&world.config.spawn.claude);
-            let launched = launch::write(&LaunchSpec {
-                role,
-                session_id: &session.id,
-                run_id: &run.id,
-                worktree,
-                scratch: &world.scratch_root.join(&run.id),
-                tiller_home: world.tiller_home,
-                model: &run.model,
-                effort: run.effort,
-                brief: Some(&brief),
-                roots: None,
-                tiller: world.tiller,
-                default_branch: &project.default_branch,
-                network_allow: &world.config.spawn.network_allow,
-                no_mistakes_socket: world.config.spawn.no_mistakes_socket.as_deref(),
-                gh_login_readable: project.effective_delivery() == Delivery::NoMistakes,
-                claude: &world.config.spawn.claude,
-                claude_config: world.claude_config,
-                claude_version: claude_version.as_deref(),
-                memory: &[],
-                note: Some(note),
-            })?;
-            events.extend(
-                store
-                    .config_manifest_record(ctx, &launched.config_hash, &launched.manifest)?
-                    .events,
-            );
-            events.extend(
-                store
-                    .run_place(
-                        ctx,
-                        &run.id,
-                        Placement {
-                            config_hash: Some(launched.config_hash.clone()),
-                            ..Placement::default()
-                        },
-                    )?
-                    .events,
-            );
-            launched.line
+            brief
         }
-        None => launch::write_again(
-            &AgainSpec {
-                role,
-                session_id: &session.id,
-                run_id: &run.id,
-                worktree,
-                scratch: old_scratch,
-                tiller_home: world.tiller_home,
-                model: &run.model,
-                effort: run.effort,
-                claude: &world.config.spawn.claude,
-                claude_config: world.claude_config,
-            },
-            Start::Fresh { note },
-        )?,
+        // The same run keeps the brief it was launched with, which already
+        // carries its delivery line.
+        None => {
+            let prompt = fs::read_to_string(old_scratch.join("prompt.md"))?;
+            launch::brief_of(&prompt)
+                .ok_or_else(|| {
+                    SpawnError::Refused(format!(
+                        "{} holds no brief, so run {} cannot be launched again; relaunch with --new-attempt --brief-file <f>",
+                        old_scratch.join("prompt.md").display(),
+                        run.id
+                    ))
+                })?
+                .to_owned()
+        }
+    };
+    let claude_version = launch::claude_version(&world.config.spawn.claude);
+    let spec = LaunchSpec {
+        role,
+        session_id: &session.id,
+        run_id: &run.id,
+        worktree,
+        scratch: if attempt {
+            &world.scratch_root.join(&run.id)
+        } else {
+            old_scratch
+        },
+        tiller_home: world.tiller_home,
+        model: &run.model,
+        effort: run.effort,
+        brief: Some(&brief),
+        roots: None,
+        tiller: world.tiller,
+        default_branch: &project.default_branch,
+        network_allow: &world.config.spawn.network_allow,
+        no_mistakes_socket: world.config.spawn.no_mistakes_socket.as_deref(),
+        gh_login_readable: project.effective_delivery() == Delivery::NoMistakes,
+        claude: &world.config.spawn.claude,
+        claude_config: world.claude_config,
+        claude_version: claude_version.as_deref(),
+        memory: &[],
+        note: Some(note),
+    };
+    let line = if attempt {
+        // A new attempt is a new run: its own launch files and hash.
+        let launched = launch::write(&spec)?;
+        events.extend(
+            store
+                .config_manifest_record(ctx, &launched.config_hash, &launched.manifest)?
+                .events,
+        );
+        events.extend(
+            store
+                .run_place(
+                    ctx,
+                    &run.id,
+                    Placement {
+                        config_hash: Some(launched.config_hash.clone()),
+                        ..Placement::default()
+                    },
+                )?
+                .events,
+        );
+        launched.line
+    } else {
+        // The same run keeps its brief, branch, worktree and hash, but its
+        // launch files are rendered again, so a tiller or role prompt
+        // upgraded since the first launch reaches the new session.
+        launch::write_refreshed(&spec)?.line
     };
     let pane_id = match old_pane {
         Some(pane) => pane,

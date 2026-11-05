@@ -5,7 +5,10 @@
 //! A start runs in this order:
 //!
 //! 1. a live orchestrator for the project is returned as it is (natural
-//!    retry: never a second one);
+//!    retry: never a second one), unless the start is a restart: then the
+//!    owner's live orchestrator is stopped first, its end proven as a
+//!    relaunch's is, and its pane closed, so the new one starts from launch
+//!    files rendered by the current binary and config;
 //! 2. the launch files are written into `<scratch_root>/<session id>`, the
 //!    id minted first because the script names it, and the manifest is
 //!    recorded;
@@ -38,11 +41,15 @@ use tiller_herdr::layout;
 
 use super::launch::{self, LaunchSpec, Roots};
 use super::{Result, SpawnError, World, local_host, relayout};
+use crate::control::{self, Waits};
 use crate::roles::Role;
 
 /// The session end reason of an orchestrator whose launch line never
 /// reached its pane.
 pub const LAUNCH_FAILED: &str = "launch_failed";
+
+/// The session end reason of an orchestrator stopped by a restart.
+pub const RESTARTED: &str = "restarted";
 
 /// What a start returns: the live orchestrator and where it runs.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -80,12 +87,16 @@ struct Opened<'a> {
 /// Starts the project's orchestrator, or returns the live one.
 /// `home_root` is where orchestrator homes live, already resolved from
 /// `spawn.orchestrator_home` or its default.
+///
+/// `restart` is how long to wait for the live orchestrator to exit; with it
+/// set, a live orchestrator is stopped and replaced instead of returned.
 pub fn start(
     store: &mut Store,
     ctx: &Ctx,
     world: &World<'_>,
     home_root: &Path,
     project: &str,
+    restart: Option<&Waits>,
 ) -> Result<Applied<Orchestrator>> {
     if !matches!(ctx.actor, Actor::Owner | Actor::Daemon) {
         return Err(tiller_core::Error::Forbidden(format!(
@@ -96,8 +107,30 @@ pub fn start(
     }
     let project: Project = get(store.conn(), "project", project)?;
     let label = layout::orchestrator_label(&project.id);
+    let mut events = Vec::new();
+    let mut leftover = None;
     if let Some(live) = live_orchestrator(store.conn(), &project.id)? {
-        return Ok(existing(world.herdr, live, label));
+        let Some(waits) = restart else {
+            return Ok(existing(world.herdr, live, label));
+        };
+        if !matches!(ctx.actor, Actor::Owner) {
+            return Err(tiller_core::Error::Forbidden(format!(
+                "{} may not restart an orchestrator; the owner does",
+                ctx.actor
+            ))
+            .into());
+        }
+        let (proof, pane) = control::stop(store, world.herdr, waits, &live)?;
+        events.extend(store.session_end(ctx, &live.id, RESTARTED)?.events);
+        // The stopped session's pane is closed, not reused: herdr cannot
+        // tell a bare shell from a program running in it.
+        if let Some(pane) = pane.or(live.pane_id.clone())
+            && let Err(e) = world.herdr.close_pane(&pane)
+        {
+            leftover = Some(format!(
+                "the stopped orchestrator ({proof}) left pane {pane} open: {e}"
+            ));
+        }
     }
     if project.retired_at.is_some() {
         return Err(tiller_core::Error::Refused {
@@ -150,7 +183,6 @@ pub fn start(
         memory: &[],
         note: None,
     })?;
-    let mut events = Vec::new();
     let opened = Opened {
         herdr: world.herdr,
         scratch: &scratch,
@@ -231,10 +263,10 @@ pub fn start(
             });
         }
     };
-    let warning = match (warning, launched.mode_note) {
-        (Some(warning), Some(note)) => Some(format!("{note}; {warning}")),
-        (warning, note) => warning.or(note),
-    };
+    let warning = [warning, launched.mode_note, leftover]
+        .into_iter()
+        .flatten()
+        .reduce(|all, next| format!("{all}; {next}"));
     let session = started.value.session;
     Ok(Applied {
         value: Orchestrator {

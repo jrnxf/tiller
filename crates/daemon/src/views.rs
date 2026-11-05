@@ -238,7 +238,7 @@ pub fn attention_item(store: &Store, item: &Attention) -> Result<AttentionItem> 
             store.conn(),
             "card_id = ?1 AND kind IN ('merge', 'land_direct')
              AND state IN ('requested', 'accepted', 'stale')
-             ORDER BY requested_at DESC, id DESC LIMIT 1",
+             ORDER BY requested_at DESC, id DESC",
             &[&item.card_id],
         )?
     } else {

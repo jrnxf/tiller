@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 use serde_json::json;
+use tiller_agents::control::Waits;
 use tiller_agents::spawn::config::{Paths, SpawnConfig};
 use tiller_agents::spawn::pool::Treehouse;
 use tiller_agents::spawn::trust::ClaudeConfig;
@@ -265,8 +266,9 @@ pub fn done(
 }
 
 /// `tiller orchestrator start <project>`: the live orchestrator, or a new
-/// one launched in the project's herdr workspace.
-pub fn orchestrator_start(app: &App, project: &str) -> Done {
+/// one launched in the project's herdr workspace. With `restart`, the live
+/// one is stopped first and replaced.
+pub fn orchestrator_start(app: &App, project: &str, restart: bool) -> Done {
     let tools = Tools::load(app)?;
     let homes = match &tools.config.spawn.orchestrator_home {
         Some(root) => root.clone(),
@@ -279,6 +281,7 @@ pub fn orchestrator_start(app: &App, project: &str) -> Done {
         &tools.world(None, None),
         &homes,
         project,
+        restart.then(Waits::default).as_ref(),
     )
     .map_err(failure)?;
     let warning = applied.value.warning.clone();

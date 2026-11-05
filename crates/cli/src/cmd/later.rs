@@ -10,7 +10,13 @@ use crate::app::{App, Done};
 #[derive(Subcommand, Debug)]
 pub enum OrchestratorCmd {
     /// Open the project's herdr workspace and launch its orchestrator
-    Start { project: String },
+    Start {
+        project: String,
+        /// Stop the live orchestrator and start a new one, so it runs on
+        /// the current tiller binary and role prompt (owner only)
+        #[arg(long)]
+        restart: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -28,8 +34,8 @@ pub enum AgentCmd {
 }
 
 pub fn orchestrator(app: &App, cmd: OrchestratorCmd) -> Done {
-    let OrchestratorCmd::Start { project } = cmd;
-    super::spawn::orchestrator_start(app, &project)
+    let OrchestratorCmd::Start { project, restart } = cmd;
+    super::spawn::orchestrator_start(app, &project, restart)
 }
 
 pub fn agent(app: &App, cmd: AgentCmd) -> Done {

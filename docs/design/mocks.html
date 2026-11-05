@@ -1072,12 +1072,12 @@ th.r, td.r { text-align:right; }
 (() => {
 /* ============ DATA (sample, Sunday 2026-11-01, Lisbon time) ============ */
 const PROJECTS = [
-  { id:"alpha",  name:"alpha",  pc:"var(--p-alpha)",  host:"This Mac", repo:"jrnxf/alpha",  blurb:"" },
-  { id:"beta",   name:"beta",   pc:"var(--p-beta)",   host:"This Mac", repo:"jrnxf/beta",   blurb:"voxel editor" },
-  { id:"dot",   name:"dot",   pc:"var(--p-dot)",   host:"This Mac", repo:"jrnxf/dot",   blurb:"dotfiles" },
+  { id:"alpha",  name:"alpha",  pc:"var(--p-alpha)",  host:"This Mac", repo:"example/alpha",  blurb:"" },
+  { id:"beta",   name:"beta",   pc:"var(--p-beta)",   host:"This Mac", repo:"example/beta",   blurb:"voxel editor" },
+  { id:"dot",   name:"dot",   pc:"var(--p-dot)",   host:"This Mac", repo:"example/dot",   blurb:"dotfiles" },
   { id:"fleet", name:"fleet", pc:"var(--p-fleet)", host:"remote",   repo:"",            blurb:"home-level work", remote:true },
 ];
-const KILN = { id:"kiln", name:"kiln", pc:"var(--p-kiln)", host:"This Mac", repo:"jrnxf/kiln", blurb:"new project" };
+const KILN = { id:"kiln", name:"kiln", pc:"var(--p-kiln)", host:"This Mac", repo:"example/kiln", blurb:"new project" };
 const COLS = [
   { id:"asked",   name:"Asked",     icon:"s-asked" },
   { id:"queued",  name:"Queued",    icon:"s-queued" },
@@ -1113,9 +1113,9 @@ const CARDS = [
     runs:[{ n:1, model:"sonnet", state:"ok", start:"14:08", dur:"5 scouts, 38 to 47 min each", note:"All five reported with a contact sheet at 16, 32 and 128 px." }],
     ev:[["16:58:02","tiller","hold.raise alpha-43 kind=decision options=5"],["16:55:41","hook","worker.report scout=idot"],["16:41:19","hook","worker.report scout=dropmono"]],
     fresh:[{ k:"Orchestrator pane", sub:"waiting on your answer", s:6, lvl:"ok" },{ k:"Scout reports", sub:"5 of 5 in", s:3900, lvl:"ok" }] },
-  { id:"alpha-38", slug:"alpha-remote-hook-flake", p:"alpha", col:"done", kind:"ship", model:"sonnet", pri:3, pr:84, prRepo:"jrnxf/alpha", when:"merged 14:20",
+  { id:"alpha-38", slug:"alpha-remote-hook-flake", p:"alpha", col:"done", kind:"ship", model:"sonnet", pri:3, pr:84, prRepo:"example/alpha", when:"merged 14:20",
     title:"Fix flaky Linux CI test theHookNeverFailsTheAgentsTurn (broken pipe)",
-    desc:"Merged as jrnxf/alpha#84. The hook now reads stdin even when it queues nothing.",
+    desc:"Merged as example/alpha#84. The hook now reads stdin even when it queues nothing.",
     asks:[["Fri 30 Oct","you","reported the flaky Linux CI test"],["14:20","mate","merged <b>alpha#84</b> after a green re-check"]] },
   { id:"beta-30", slug:"beta-greedy-mesh-export", p:"beta", col:"working", kind:"ship", model:"opus", pri:2, live:{ s:"waiting", obs:8 }, attn:"permission", inboxId:"perm1", note:"Needs a keypress",
     title:"Greedy-mesh the OBJ export to cut vertex count", branch:"beta-30-greedy-mesh-export", worktree:".worktrees/beta-30",
@@ -1124,14 +1124,14 @@ const CARDS = [
     runs:[{ n:1, model:"opus", state:"run", start:"16:34", dur:"1h 28m so far", note:"Paused: asks to remove the incremental build cache." }],
     ev:[["18:00:52","herdr","pane.state blocked (└ beta-30 ship)"],["18:00:51","hook","permission.request tool=Bash"],["17:38:09","git","commit 5be02c4 greedy mesher: merge along x"]],
     fresh:[{ k:"Pane (herdr)", sub:"blocked on a prompt", s:8, lvl:"ok" },{ k:"Hook events", sub:"last: permission.request", s:70, lvl:"ok" },{ k:"Worktree git status", sub:"5 files changed", s:260, lvl:"ok" }] },
-  { id:"beta-28", slug:"beta-undo-stroke-merge", p:"beta", col:"landing", kind:"ship", model:"sonnet", pri:2, pr:52, prRepo:"jrnxf/beta", live:{ s:"waiting", obs:3 }, attn:"approval", inboxId:"pr52", note:"Re-approve",
+  { id:"beta-28", slug:"beta-undo-stroke-merge", p:"beta", col:"landing", kind:"ship", model:"sonnet", pri:2, pr:52, prRepo:"example/beta", live:{ s:"waiting", obs:3 }, attn:"approval", inboxId:"pr52", note:"Re-approve",
     title:"Merge a brush drag into one undo step", branch:"beta-28-undo-stroke-merge", worktree:".worktrees/beta-28",
     desc:"A drag with the brush used to push one undo step per voxel stamp. It now records one step per stroke, including cancelled strokes. CI is green; your earlier approval no longer matches the head commit.",
     asks:[["14:02","you","asked for one undo step per brush drag"],["14:03","mate","filed <b>beta-28</b>, spawned a ship worker on sonnet"],["16:20","you","also cover a cancelled stroke (Esc mid-drag)"],["17:35","mate","review nit fixed in 2 commits, CI green, <b>needs your re-approval</b>"]] },
-  { id:"beta-27", slug:"beta-ai-cost-fixes", p:"beta", col:"done", kind:"ship", model:"sonnet", pri:2, pr:51, prRepo:"jrnxf/beta", when:"merged 15:02",
+  { id:"beta-27", slug:"beta-ai-cost-fixes", p:"beta", col:"done", kind:"ship", model:"sonnet", pri:2, pr:51, prRepo:"example/beta", when:"merged 15:02",
     title:"Assistant cost fixes R1-R6", desc:"Same-answer done, 1 h cache, smaller prefix, price table, OpenRouter caching, batched palette_set.",
     asks:[["Fri 30 Oct","you","asked for the assistant cost fixes from the scout report"],["15:02","mate","merged <b>beta#51</b>"]] },
-  { id:"beta-26", slug:"beta-live-render-smooth", p:"beta", col:"done", kind:"ship", model:"sonnet", pri:3, pr:50, prRepo:"jrnxf/beta", when:"merged 11:40",
+  { id:"beta-26", slug:"beta-live-render-smooth", p:"beta", col:"done", kind:"ship", model:"sonnet", pri:3, pr:50, prRepo:"example/beta", when:"merged 11:40",
     title:"Live render corner tracks the camera smoothly while moving", desc:"The corner preview follows the camera with smoothing instead of updating in place.",
     asks:[["Sat 31 Oct","you","reported the live render corner jumping"],["11:40","mate","merged <b>beta#50</b>"]] },
   { id:"beta-25", slug:"beta-ai-call-batching", p:"beta", col:"done", kind:"scout", model:"haiku", pri:0, when:"reported 10:12",
@@ -1140,8 +1140,8 @@ const CARDS = [
   { id:"dot-20", slug:"dot-zsh-startup-trim", p:"dot", col:"queued", kind:"ship", model:"haiku", pri:4, note:"After alpha-42",
     title:"Profile zsh startup and trim the slowest init", desc:"Timing shell startup needs a quiet machine, so it starts after the alpha-42 render finishes.",
     asks:[["17:20","you","asked for a faster shell startup"],["17:21","mate","queued until the alpha-42 render finishes, so the timings are clean"]] },
-  { id:"dot-19", slug:"dot-alpha-hook-pin", p:"dot", col:"done", kind:"ship", model:"sonnet", pri:3, pr:70, prRepo:"jrnxf/dot", when:"merged 14:31",
-    title:"Bump the pinned alpha-remote-hook to alpha 0.1.0-pre.25", desc:"Reads stdin even when it queues nothing. Merged as jrnxf/dot#70.",
+  { id:"dot-19", slug:"dot-alpha-hook-pin", p:"dot", col:"done", kind:"ship", model:"sonnet", pri:3, pr:70, prRepo:"example/dot", when:"merged 14:31",
+    title:"Bump the pinned alpha-remote-hook to alpha 0.1.0-pre.25", desc:"Reads stdin even when it queues nothing. Merged as example/dot#70.",
     asks:[["14:22","mate","spawned from alpha#84 merge"],["14:31","mate","merged <b>dot#70</b>"]] },
   { id:"fleet-3", slug:"herdr-upstream-watch", p:"fleet", col:"queued", st:"s-parked", kind:"captain", model:"haiku", pri:4, hold:"Monday 2026-11-09", note:"Until Mon 9 Nov",
     title:"Follow herdr discussion #5582", desc:"Waiting on the herdr maintainers. Today's research: switching the local window to a remote machine is still missing upstream.",
@@ -1210,7 +1210,7 @@ const INBOX = [
     title:"Approve merging PR #52 at head d82f405?",
     ctx:"Your approval at 16:12 was bound to 7c3e9a1. Two commits landed after it, so the approval no longer covers what would merge.",
     cur:{ ok:true, head:"Current", text:"Head is still d82f405 and CI is green on it." },
-    evidence:[ ["i-git","Approved 16:12 at 7c3e9a1; now stale: 2 new commits since approval","3be91c7, d82f405"], ["i-check","CI green on d82f405 (4 of 4 checks)","build, test, lint, e2e"], ["i-user","Independent review: 0 blocking findings, 1 nit (fixed in 3be91c7)","reviewer, 17:21"], ["i-pr","+142 -37 across 6 files; the new commits only touch tests and one pointerup handler","jrnxf/beta#52"] ],
+    evidence:[ ["i-git","Approved 16:12 at 7c3e9a1; now stale: 2 new commits since approval","3be91c7, d82f405"], ["i-check","CI green on d82f405 (4 of 4 checks)","build, test, lint, e2e"], ["i-user","Independent review: 0 blocking findings, 1 nit (fixed in 3be91c7)","reviewer, 17:21"], ["i-pr","+142 -37 across 6 files; the new commits only touch tests and one pointerup handler","example/beta#52"] ],
     rec:{ who:"beta orchestrator", opt:"approve", why:"The two new commits answer the review nit and add a cancelled-stroke test. Nothing else changed since you approved 7c3e9a1." },
     options:[
       { v:"approve", l:"Approve d82f405 and merge when green", c:"Records an approval bound to <b>d82f405</b>. CI is already green, so the orchestrator squash-merges and deletes the branch within a minute." },
@@ -1308,7 +1308,7 @@ function quotaStatus() {
 /* machines in the sidebar: running agents vs capacity */
 const MACHINES = [
   { id:"mac", name:"This Mac", host:"This Mac", cap:5, tag:"", about:"This Mac runs its own Tiller. Cards, agents and answers here are live and fully controllable." },
-  { id:"agents", name:"remote", host:"remote", cap:4, tag:"view only", about:"The remote machine, seen through herdr. Read-only in v1: you can watch and open it in herdr, but answers and dispatches stay on that machine." },
+  { id:"remote", name:"remote", host:"remote", cap:4, tag:"view only", about:"The remote machine, seen through herdr. Read-only in v1: you can watch and open it in herdr, but answers and dispatches stay on that machine." },
 ];
 
 /* scorecard: ISO weeks W37 to W44 (W44 = Monday 2026-10-26 to Sunday 2026-11-01) */
@@ -1395,12 +1395,12 @@ function machineStats(m) {
 }
 function machineRow(m, deg) {
   const st = machineStats(m);
-  const stale = deg && m.id === "agents";
+  const stale = deg && m.id === "remote";
   const sel = S.machine === m.id;
   const q = QUOTA.week;
-  const quotaLine = `Claude, ${QUOTA.plan} plan${m.id === "agents" ? " (same account as this Mac)" : ""}: ${q.remainingPct}% of this week left, resets ${q.resetsShort}.`;
+  const quotaLine = `Claude, ${QUOTA.plan} plan${m.id === "remote" ? " (same account as this Mac)" : ""}: ${q.remainingPct}% of this week left, resets ${q.resetsShort}.`;
   const tip = stale
-    ? `<b>agents</b> was last seen 13 min ago. The herdr link is down, most often because the Mac slept. Tiller reconnects by itself when it wakes; cards on this machine show their last known state.<span class="tq">${quotaLine}</span>`
+    ? `<b>remote</b> was last seen 13 min ago. The herdr link is down, most often because the Mac slept. Tiller reconnects by itself when it wakes; cards on this machine show their last known state.<span class="tq">${quotaLine}</span>`
     : `<b>${esc(m.name)}</b> ${esc(m.about)}<span class="tq">${quotaLine}</span><span class="tq">Click to show only this machine on Board and Agents.</span>`;
   const pips = Array.from({ length:m.cap }, (_, i) => `<i${i < st.running ? ' class="on"' : ""}></i>`).join("");
   return `<button class="mach" type="button" data-act="machine" data-id="${m.id}" aria-pressed="${sel}" aria-describedby="tip-${m.id}" data-stale="${stale}">
@@ -1568,7 +1568,7 @@ function tabFilter(c) {
 function laneNote(p) {
   const ls = S.route === "degraded" ? DEG.lanes[p.id] : null;
   if (!ls) return "";
-  if (ls.kind === "disconnected") return `<div class="lane-note err">${ic("i-unplug", "nic")}<div class="tx"><b>herdr is disconnected</b> for the ${esc(p.host)} host. Showing the last known state from ${ls.since} (${ls.ago} ago). Answers and Open in herdr pause until it reconnects.</div><button class="btn sm" type="button" data-act="toast" data-t1="Reconnecting herdr (mock)" data-t2="herdr remote: agents">Reconnect</button></div>`;
+  if (ls.kind === "disconnected") return `<div class="lane-note err">${ic("i-unplug", "nic")}<div class="tx"><b>herdr is disconnected</b> for the ${esc(p.host)} host. Showing the last known state from ${ls.since} (${ls.ago} ago). Answers and Open in herdr pause until it reconnects.</div><button class="btn sm" type="button" data-act="toast" data-t1="Reconnecting herdr (mock)" data-t2="herdr remote: remote">Reconnect</button></div>`;
   return `<div class="lane-note warn">${ic("i-clock", "nic")}<div class="tx"><b>Stale lane.</b> No events from the ${esc(p.name)} orchestrator since ${ls.since} (${ls.ago} ago). Card positions may be out of date.</div><button class="btn sm" type="button" data-act="toast" data-t1="Refreshing ${esc(p.name)} (mock)" data-t2="tiller lane refresh ${esc(p.name)}">Refresh</button></div>`;
 }
 function laneHTML(p, cols, focusMode, colCount) {
@@ -1800,7 +1800,7 @@ const BETA28 = {
     { n:2, model:"sonnet", state:"ok", start:"15:20", end:"16:05", dur:"45m", note:"Fixed the tests, opened PR 52 at 7c3e9a1. CI green." },
     { n:3, model:"sonnet", state:"ok", start:"17:12", end:"17:34", dur:"22m", note:"Review fixes, 2 commits. Head moved to d82f405." },
   ],
-  pr:{ num:52, repo:"jrnxf/beta", state:"open", head:"d82f405", base:"main", ci:"4 of 4 checks green", diff:"+142 -37, 6 files" },
+  pr:{ num:52, repo:"example/beta", state:"open", head:"d82f405", base:"main", ci:"4 of 4 checks green", diff:"+142 -37, 6 files" },
   appr:{ stale:true, sha:"7c3e9a1", when:"16:12", head:"d82f405", since:[["3be91c7","test: cancelled stroke leaves one undo step","17:29"],["d82f405","undo: coalesce on pointerup","17:33"]] },
   ev:[["17:58:11","herdr","pane.state idle (├ beta-28 ship)",""],["17:36:02","tiller","approval.stale bound=7c3e9a1 head=d82f405","warnl"],["17:34:40","gh","ci.pass 4/4 on d82f405",""],["17:33:18","git","push d82f405 (+2 commits)",""],["17:12:05","tiller","run.start run=3 worker=ship",""],["16:12:47","tiller","approval.record bound=7c3e9a1 by=you",""],["16:05:30","gh","pr.open 52 head=7c3e9a1",""],["14:51:09","tiller","run.end run=1 failed exit=1","bad"]],
   fresh:[{ k:"Pane (herdr)", sub:"idle, worker finished", s:3 },{ k:"Hook events", sub:"last: turn.end", s:196 },{ k:"GitHub PR and CI", sub:"polled", s:41 },{ k:"Worktree git status", sub:"clean, head d82f405", s:128 }],
