@@ -7,6 +7,8 @@
 # - Case names are unique, and no prompt appears in both splits.
 # - Every role has at least one case in each split, and its model alias is
 #   pinned in pins.env.
+# - The skill-trigger eval covers every skill the parity matrix's P65 row lists,
+#   and no row it maps to is failing.
 # - evals/judge.lock matches the pinned judge model and the bytes of every
 #   llm rubric. --relock rewrites it after a deliberate rubric or judge change.
 #
@@ -98,6 +100,28 @@ for role in "${roles[@]}"; do
 		case "$covered" in *" $split:$role "*) ;; *) err "role $role has no $split case" ;; esac
 	done
 done
+
+# P65: the skill-trigger eval names every skill the parity row lists, with the
+# row each one maps to, and none of those rows is failing. A skill whose row is
+# a drop (D..) has no Tiller behavior to cover.
+parity="$root/docs/design/parity.md"
+trigger_grader="$here/cases/tuning/orchestrator_role_covers_firstmate_skill_triggers/graders/covers-each-trigger.md"
+if [ -f "$parity" ] && [ -f "$trigger_grader" ]; then
+	p65=$(grep -E '^\| P65 ' "$parity" || true)
+	[ -n "$p65" ] || err "docs/design/parity.md has no P65 row"
+	mapped=$(printf '%s\n' "$p65" | grep -oE '`[a-z-]+` [0-9]+ \([PD][0-9]+\)' || true)
+	[ -n "$mapped" ] || err "docs/design/parity.md: the P65 row lists no skill with its row"
+	while read -r skill _ row; do
+		[ -n "$skill" ] || continue
+		row=${row#(}
+		row=${row%)}
+		case "$row" in D*) continue ;; esac
+		grep -qF "$skill" "$trigger_grader" && grep -qF "($row)" "$trigger_grader" ||
+			err "the skill-trigger eval does not cover $skill ($row), which the P65 row lists"
+		grep -E "^\| $row " "$parity" | grep -q '\*\*failing\*\*' &&
+			err "the P65 row maps $skill to $row, which is failing"
+	done <<<"$mapped"
+fi
 
 # shellcheck source=SCRIPTDIR/pins.env
 . "$here/pins.env"

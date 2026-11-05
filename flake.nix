@@ -115,6 +115,8 @@
               ./crates/herdr/tests/fixtures
               # Embedded by crates/agents with include_str!.
               ./roles
+              # Embedded by crates/replay with include_str!.
+              ./crates/replay/prompts
             ];
           };
           # The version the binary reports. Cargo.toml keeps the base version; the
