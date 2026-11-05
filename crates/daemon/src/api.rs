@@ -2454,6 +2454,63 @@ pub(crate) mod tests {
         assert_eq!(anonymous.status, StatusCode::FORBIDDEN);
     }
 
+    /// A requested merge approval renders on the card page and in the inbox,
+    /// and the board's Approve records an accepted approval bound to the head.
+    #[tokio::test]
+    async fn board_renders_and_approves_a_requested_merge() {
+        let fleet = Fleet::new();
+        let store = fleet.open();
+        let now = Timestamp::now();
+        store
+            .conn()
+            .execute_batch(&format!(
+                "INSERT INTO cards (id, display_id, project_id, kind, title, created_at)
+                 VALUES ('c-m', 'alpha-9', 'alpha', 'ship', 'Ship it', '{now}');
+                 INSERT INTO prs (id, project_id, card_id, number, url, linked_at, linked_by, head_sha)
+                 VALUES ('p-m', 'alpha', 'c-m', 7, 'https://github.com/example/app/pull/7', '{now}', 'owner', 'abc1234');
+                 INSERT INTO approvals (id, kind, project_id, card_id, repo, pr_id, head_sha, action, requested_at, requested_by)
+                 VALUES ('01M6MH5FH5B0EWK3S8NQ4BARPT', 'merge', 'alpha', 'c-m', 'example/app', 'p-m', 'abc1234', 'squash', '{now}', 'tiller');
+                 INSERT INTO attention (id, card_id, kind, question, opened_at)
+                 VALUES ('a-m', 'c-m', 'merge', 'Merge the PR?', '{now}')"
+            ))
+            .unwrap();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let cookie = owner_cookie(fleet.dir.path());
+
+        let card = get(&app, "/api/v1/cards/alpha-9").await;
+        assert_eq!(card.status, StatusCode::OK, "{}", card.body);
+        let inbox = get(&app, "/api/v1/attention?state=open").await;
+        assert_eq!(inbox.status, StatusCode::OK, "{}", inbox.body);
+        let inbox: Value = serde_json::from_str(&inbox.body).unwrap();
+        let item = &inbox["items"][0];
+        assert_eq!(item["id"], "a-m");
+        assert_eq!(item["approval"]["id"], "01M6MH5FH5B0EWK3S8NQ4BARPT");
+        assert_eq!(item["approval"]["head_sha"], "abc1234");
+
+        let decided = send(
+            &app,
+            mutation(
+                "POST",
+                "/api/v1/approvals/01M6MH5FH5B0EWK3S8NQ4BARPT/decide",
+                json!({"idempotency_key": "k-1", "decision": "accept", "head_sha": "abc1234"}),
+                &[("cookie", cookie.as_str())],
+            ),
+        )
+        .await;
+        assert_eq!(decided.status, StatusCode::OK, "{}", decided.body);
+        let (state, head): (String, String) = store
+            .conn()
+            .query_row(
+                "SELECT state, head_sha FROM approvals WHERE id = '01M6MH5FH5B0EWK3S8NQ4BARPT'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((state.as_str(), head.as_str()), ("accepted", "abc1234"));
+        let card = get(&app, "/api/v1/cards/alpha-9").await;
+        assert_eq!(card.status, StatusCode::OK, "{}", card.body);
+    }
+
     /// The board's stage switch: to pre-launch it reads the default-branch
     /// head from the project's checkout, then launch opens the final pass.
     #[tokio::test]

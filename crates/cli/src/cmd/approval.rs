@@ -151,7 +151,7 @@ fn request(app: &App, args: RequestArgs) -> Done {
         ApprovalKind::LandDirect => {
             let run: Run = find(
                 store.conn(),
-                "card_id = ?1 AND role = 'builder' ORDER BY attempt DESC LIMIT 1",
+                "card_id = ?1 AND role = 'builder' ORDER BY attempt DESC",
                 &[&card.id],
             )?
             .ok_or_else(|| {
