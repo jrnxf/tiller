@@ -392,9 +392,9 @@ test("Open in herdr asks the daemon to focus that agent, and says where to find 
   const sessionId = row.dataset.testid?.replace("agent-", "");
   expect(posted[0]).toMatchObject({ path: `/api/v1/agents/${sessionId}/focus`, method: "POST" });
   await waitFor(() =>
-    expect(screen.getByRole("status").textContent).toContain("Brought herdr to the front"),
+    expect(screen.getByTestId("toast").textContent).toContain("Brought herdr to the front"),
   );
-  expect(screen.getByRole("status").textContent).toContain(
+  expect(screen.getByTestId("toast").textContent).toContain(
     "Select host-b in herdr's sidebar to see the agent's terminal.",
   );
   // Clicking the button did not also change which agent is selected.
@@ -409,7 +409,7 @@ test("Open in herdr says when herdr opened, and when no herdr window here can sh
     within(agentRow("├ alpha-42 build")).getByRole("button", { name: /Open in herdr/ }),
   );
   await waitFor(() =>
-    expect(screen.getByRole("status").textContent).toContain("Opened herdr in Ghostty"),
+    expect(screen.getByTestId("toast").textContent).toContain("Opened herdr in Ghostty"),
   );
 
   stubApi("default", 200, { opened: "unseen", terminal: null });
@@ -417,12 +417,12 @@ test("Open in herdr says when herdr opened, and when no herdr window here can sh
     within(agentRow("├ alpha-42 build")).getByRole("button", { name: /Open in herdr/ }),
   );
   await waitFor(() =>
-    expect(screen.getByRole("status").textContent).toContain("No herdr window here"),
+    expect(screen.getByTestId("toast").textContent).toContain("No herdr window here"),
   );
-  expect(screen.getByRole("status").textContent).toContain(
+  expect(screen.getByTestId("toast").textContent).toContain(
     "Start herdr there, or open the board on the machine you are at.",
   );
-  expect(screen.getByRole("status").textContent).not.toContain("Focused in herdr");
+  expect(screen.getByTestId("toast").textContent).not.toContain("Focused in herdr");
 });
 
 test("the O key opens the selected agent, and a letter typed into a field does not", async () => {
@@ -456,7 +456,7 @@ test("when herdr cannot be reached the board says so and changes nothing", async
     within(agentRow("├ alpha-42 build")).getByRole("button", { name: /Open in herdr/ }),
   );
   await waitFor(() =>
-    expect(screen.getByRole("status").textContent).toContain("herdr did not answer"),
+    expect(screen.getByTestId("toast").textContent).toContain("herdr did not answer"),
   );
 });
 

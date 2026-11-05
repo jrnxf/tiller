@@ -363,7 +363,6 @@
   margin-bottom: 2px;
 }
 .lane[data-open="false"] .lane-cells,
-.lane[data-open="false"] .ask-box,
 .lane[data-open="false"] .lane-note {
   display: none;
 }
@@ -1748,62 +1747,4 @@ a.card:hover {
   color: var(--fg-1);
   font-size: var(--fs-small);
   line-height: 1.5;
-}
-
-/* The ask box on a lane: one line tall, and its note line is always reserved,
-   so typing and sending never move the lane. */
-.ask-box {
-  margin: 2px 0 4px;
-}
-.ask-line {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-}
-.ask-in {
-  flex: 1;
-  min-width: 0;
-  height: 34px;
-  max-height: 34px;
-  resize: none;
-  overflow-y: auto;
-  border: 1px solid var(--line-2);
-  border-radius: var(--r8);
-  background: var(--bg-card);
-  padding: 7px 12px;
-  font: inherit;
-  font-size: var(--fs-small);
-  line-height: 18px;
-  color: var(--fg-1);
-  outline: none;
-}
-.ask-in:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in lch, var(--accent), transparent 80%);
-}
-.ask-in::placeholder {
-  color: var(--fg-4);
-}
-.ask-box .btn {
-  flex: none;
-  height: 34px;
-}
-.ask-fail {
-  position: relative;
-  height: 0;
-}
-
-.ask-fail > * {
-  position: absolute;
-  inset: 0 0 auto;
-  z-index: 2;
-}
-
-.ask-note {
-  min-height: 18px;
-  margin-top: 2px;
-  padding: 0 2px;
-  font-size: var(--fs-mini);
-  line-height: 18px;
-  color: var(--fg-3);
 }

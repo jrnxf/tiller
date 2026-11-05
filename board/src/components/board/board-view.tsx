@@ -18,7 +18,6 @@ import { Lane } from "./lane";
 import { COLUMNS, onHost, passesFilter, tilesOf } from "./model";
 import type { ColumnId, Tile } from "./model";
 import { LayersIcon, CloseIcon } from "../shell/icons";
-import { ToastHost } from "./toast";
 import "./board.css";
 
 const FILTER_NAME: Record<BoardFilter, string | null> = {
@@ -278,7 +277,6 @@ export function BoardView({ host, filter }: { host: string | undefined; filter: 
           );
         })}
       </div>
-      <ToastHost />
     </div>
   );
 }

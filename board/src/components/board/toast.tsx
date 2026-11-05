@@ -23,7 +23,7 @@ function clearToast() {
   toastStore.set(null);
 }
 
-// A status line that fades after a few seconds; a failure stays longer.
+// The shell mounts one, so every screen has it. A status line that fades after a few seconds; a failure stays longer.
 export function ToastHost() {
   const toast = useStore(toastStore);
   const id = toast?.id;
@@ -37,7 +37,7 @@ export function ToastHost() {
   return (
     <div
       className="toast"
-      role="status"
+      data-testid="toast"
       aria-live="polite"
       data-open={toast !== null}
       data-tone={toast?.tone}

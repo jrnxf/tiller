@@ -21,7 +21,6 @@ import { ChevronLeftIcon, PaneIcon } from "./icons";
 import { AsOf, HostChip, PeerNote } from "./host-chip";
 import { useAmbiguousIds, useStanding } from "./peer-state";
 import { ModelChip, ownerSearch } from "./tile";
-import { ToastHost } from "./toast";
 import { BoardIcon, ServerIcon } from "../shell/icons";
 import "./board.css";
 
@@ -445,7 +444,6 @@ export function AgentsView({
           />
         </aside>
       </div>
-      <ToastHost />
     </div>
   );
 }

@@ -12,7 +12,6 @@ import { PeerNote } from "./host-chip";
 import { MiniTile, TileView } from "./tile";
 import { focusReason, ownerOf, projectKey } from "../../lib/peers";
 import type { Standing } from "../../lib/peers";
-import { AskBox } from "./ask-box";
 import { useHerdrFocus } from "./herdr";
 import { ServerIcon } from "../shell/icons";
 import type { LaneHealth } from "../states/degraded";
@@ -219,7 +218,6 @@ export function Lane({
         <LaneNote health={health} projectName={project.name} hostLabel={hostLabel} />
       )}
       <PeerNote standing={standing} />
-      <AskBox project={project} />
       {body}
     </section>
   );

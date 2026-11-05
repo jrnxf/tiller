@@ -9,6 +9,7 @@ import { boardQuery, machinesQuery, projectsQuery } from "../../lib/queries";
 import { prefsStore, updatePrefs } from "../../lib/prefs";
 import { scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
+import { SendIcon } from "../attention/icons";
 import { ReconnectingBanner } from "../states/reconnecting-banner";
 import { Section } from "../states/section";
 import { ChevronIcon, CloseIcon, LayersIcon, MenuIcon, ServerIcon } from "./icons";
@@ -27,6 +28,7 @@ interface HeaderProps {
   activeHost: string | undefined;
   menuOpen: boolean;
   onOpenMenu: () => void;
+  onOpenAsk: () => void;
 }
 
 const nothing = () => null;
@@ -59,7 +61,7 @@ function ScopeCrumb({ activeHost }: { activeHost: string | undefined }) {
   );
 }
 
-export function Header({ activeHost, menuOpen, onOpenMenu }: HeaderProps) {
+export function Header({ activeHost, menuOpen, onOpenMenu, onOpenAsk }: HeaderProps) {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   // The header only decorates with these, so a failed read leaves it working:
   // the machine chip still clears and the view can still be reset.
@@ -123,6 +125,11 @@ export function Header({ activeHost, menuOpen, onOpenMenu }: HeaderProps) {
             <BoardFilterSegment />
           </Section>
         ) : null}
+        <button type="button" className="btn primary ask-open" onClick={onOpenAsk}>
+          <SendIcon />
+          Ask
+          <kbd className="kb">A</kbd>
+        </button>
       </header>
       <ReconnectingBanner />
       {pathname === "/" ? (

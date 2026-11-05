@@ -293,3 +293,16 @@ test("the palette goes to Settings", async () => {
   fireEvent.keyDown(input, { key: "Enter" });
   await vi.waitFor(() => expect(screen.getByTestId("settings")).toBeTruthy());
 });
+
+test("the top-bar Ask button and the A key open the ask dialog on the picker", async () => {
+  await renderApp();
+  expect(screen.queryByRole("dialog", { name: "Ask an orchestrator" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: /^Ask/ }));
+  expect(screen.getByRole("dialog", { name: "Ask an orchestrator" })).toBeTruthy();
+  expect(document.activeElement?.getAttribute("role")).toBe("radio");
+  fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
+  expect(screen.queryByRole("dialog", { name: "Ask an orchestrator" })).toBeNull();
+
+  fireEvent.keyDown(document.body, { key: "a" });
+  expect(screen.getByRole("dialog", { name: "Ask an orchestrator" })).toBeTruthy();
+});
