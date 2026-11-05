@@ -461,13 +461,20 @@ fn place(
 }
 
 /// One layout pass: tokens, then renames, then moves. A herdr that refuses
-/// `workspace.move` leaves correct labels in the wrong order, which is still
-/// usable (`herdr-layout.md`, Known limits), so the caller only reports it.
+/// `workspace.move`, or a client without the API socket, leaves correct
+/// labels in the wrong order, which is still usable (`herdr-layout.md`,
+/// Known limits), so the caller only reports it.
 pub(crate) fn relayout(herdr: &dyn Herdr, bindings: &[layout::Binding]) -> Result<(), String> {
     let snapshot = herdr.snapshot().map_err(|e| e.to_string())?;
-    layout::repair(herdr, &snapshot, bindings)
-        .map(drop)
-        .map_err(|e| format!("layout repair: {e}"))
+    let repair =
+        layout::repair(herdr, &snapshot, bindings).map_err(|e| format!("layout repair: {e}"))?;
+    if repair.unordered > 0 {
+        return Err(format!(
+            "layout repair: {} workspace moves skipped: workspace.move needs the herdr API socket (spawn.herdr_socket)",
+            repair.unordered
+        ));
+    }
+    Ok(())
 }
 
 /// Ends a spawn that failed after `run.start`: the run `failed`, the

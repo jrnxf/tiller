@@ -246,6 +246,9 @@ pub struct HerdrSource<H: Herdr> {
     statuses: HashMap<String, Option<String>>,
     /// Bound panes already reported gone.
     gone: HashSet<String>,
+    /// What the last layout pass could not do, said once: the pass runs on
+    /// every poll, and a complaint is logged again only when it changes.
+    layout_complaint: Option<String>,
 }
 
 impl<H: Herdr + Send + 'static> HerdrSource<H> {
@@ -272,7 +275,35 @@ impl<H: Herdr + Send + 'static> HerdrSource<H> {
             machine,
             statuses: HashMap::new(),
             gone: HashSet::new(),
+            layout_complaint: None,
         }
+    }
+
+    /// Cosmetic: a failed repair is retried on the next poll and is no
+    /// evidence that the host is unreachable. What it could not do is logged
+    /// when it first happens and again only when it changes, not every poll.
+    fn repair_layout(&mut self, snapshot: &Snapshot, bindings: &[Binding]) {
+        let complaint = match layout::repair(&self.herdr, snapshot, bindings) {
+            Ok(repair) => {
+                if repair.changed() {
+                    tracing::info!(?repair, "herdr layout repaired");
+                }
+                (repair.unordered > 0).then(|| {
+                    "workspace order drifted and workspace.move needs the herdr API socket \
+                     (spawn.herdr_socket); labels are repaired, order is not"
+                        .to_owned()
+                })
+            }
+            Err(error) => Some(format!("herdr layout repair failed: {error}")),
+        };
+        if complaint == self.layout_complaint {
+            return;
+        }
+        match &complaint {
+            Some(complaint) => tracing::warn!(%complaint, "herdr layout"),
+            None => tracing::info!("herdr layout settled"),
+        }
+        self.layout_complaint = complaint;
     }
 
     pub fn store(&self) -> &Store {
@@ -405,15 +436,7 @@ impl<H: Herdr + Send + 'static> Source for HerdrSource<H> {
         self.store.host_seen(&ctx, &self.host_id, None)?;
         self.observe(&ctx, &snapshot, &bindings)?;
         if self.machine.is_none() {
-            // Cosmetic: a failed repair is retried on the next poll and is
-            // no evidence that the host is unreachable.
-            match layout::repair(&self.herdr, &snapshot, &bindings) {
-                Ok(repair) if repair != layout::Repair::default() => {
-                    tracing::info!(?repair, "herdr layout repaired");
-                }
-                Ok(_) => {}
-                Err(error) => tracing::warn!(%error, "herdr layout repair failed"),
-            }
+            self.repair_layout(&snapshot, &bindings);
         }
         Ok(())
     }
@@ -773,6 +796,70 @@ mod tests {
         assert_eq!(host.stale_reason, None);
         assert_eq!(host.last_seen_at, Some(at(30)));
         // Renames run first, so the labels are right in the wrong order.
+        let labels: Vec<String> = herdr
+            .snapshot()
+            .unwrap()
+            .workspaces
+            .into_iter()
+            .map(|w| w.label)
+            .collect();
+        assert_eq!(labels, ["alpha", "notes", "└ alpha-1 build"]);
+    }
+
+    /// What `f` logs, as plain text.
+    fn logged(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = Buffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap()
+    }
+
+    /// The layout pass runs on every two-second poll. Without the API socket
+    /// it repairs the labels and says once that it cannot fix the order; a
+    /// real failure after that is a new complaint, said once too.
+    #[test]
+    fn a_layout_complaint_is_logged_once_until_it_changes() {
+        let mut fleet = Fleet::new();
+        fleet.worker("w2:p1");
+        let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
+        fleet.place(&herdr);
+        herdr.set_no_socket(true);
+        let registry = Registry::new();
+        let mut poller = registry
+            .register(HerdrSource::local(herdr.clone(), fleet.open(), &fleet.host))
+            .unwrap();
+        let logs = logged(|| {
+            for n in 0..5 {
+                poller.poll_once(at(n * 2));
+            }
+            herdr.set_no_socket(false);
+            herdr.refuse("move");
+            for n in 5..10 {
+                poller.poll_once(at(n * 2));
+            }
+        });
+        assert_eq!(
+            logs.matches("needs the herdr API socket").count(),
+            1,
+            "{logs}"
+        );
+        assert_eq!(logs.matches("refused by the fake").count(), 1, "{logs}");
+        assert_eq!(poller.health().consecutive_failures, 0);
         let labels: Vec<String> = herdr
             .snapshot()
             .unwrap()

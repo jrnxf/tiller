@@ -273,7 +273,7 @@ impl Reconciler {
             match layout::bindings(self.store.conn(), &self.config.host_id) {
                 Ok(bindings) => {
                     match layout::repair(self.sources.herdr.as_ref(), snapshot, &bindings) {
-                        Ok(repair) if repair != layout::Repair::default() => {
+                        Ok(repair) if repair.changed() => {
                             report.repair(format!("R18 layout repaired: {repair:?}"));
                         }
                         Ok(_) => {}
