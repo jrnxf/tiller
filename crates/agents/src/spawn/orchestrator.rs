@@ -68,6 +68,18 @@ pub struct Orchestrator {
     pub warning: Option<String>,
 }
 
+fn refuse_retired(project: &Project) -> Result<()> {
+    if project.retired_at.is_some() {
+        return Err(tiller_core::Error::Refused {
+            entity: "project",
+            id: project.id.clone(),
+            fact: "project is retired".into(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 /// The directories a start reads from the config file.
 struct Places {
     checkout: PathBuf,
@@ -113,6 +125,9 @@ pub fn start(
         let Some(waits) = restart else {
             return Ok(existing(world.herdr, live, label));
         };
+        // Refused before the stop: a restart that cannot start a new one
+        // must leave the live orchestrator running.
+        refuse_retired(&project)?;
         if !matches!(ctx.actor, Actor::Owner) {
             return Err(tiller_core::Error::Forbidden(format!(
                 "{} may not restart an orchestrator; the owner does",
@@ -124,14 +139,7 @@ pub fn start(
         events.extend(stopped.events);
         leftover = stopped.warning;
     }
-    if project.retired_at.is_some() {
-        return Err(tiller_core::Error::Refused {
-            entity: "project",
-            id: project.id.clone(),
-            fact: "project is retired".into(),
-        }
-        .into());
-    }
+    refuse_retired(&project)?;
     let host = local_host(store)?;
     let places = places(world, home_root, &project.id)?;
     let fresh_home = !places.home.exists();

@@ -947,6 +947,54 @@ impl Store {
         })
     }
 
+    /// `run.reconfigure` (a same-run relaunch): moves the run and its live
+    /// session onto the hash of launch files rendered again, since
+    /// `run.place` never changes a hash it holds. Ended sessions keep the
+    /// hash they ran with. Natural: the same hash writes nothing.
+    pub fn run_reconfigure(
+        &mut self,
+        ctx: &Ctx,
+        run: &str,
+        config_hash: &str,
+    ) -> Result<Applied<Run>> {
+        required("config_hash", config_hash)?;
+        self.write(ctx, "run.reconfigure", None, |tx| {
+            let run = load_run(tx, run)?;
+            match tx.actor() {
+                Actor::Owner | Actor::Board | Actor::Daemon => {}
+                Actor::Session(id) if *id == run.supervisor_session_id => {}
+                other => {
+                    return Err(Error::Forbidden(format!(
+                        "{other} may not reconfigure run {}; its supervisor or the owner does",
+                        run.id
+                    )));
+                }
+            }
+            require_active(&run)?;
+            if run.config_hash.as_deref() == Some(config_hash) {
+                return Ok(run);
+            }
+            tx.conn().execute(
+                "UPDATE runs SET config_hash = ?2, rev = rev + 1 WHERE id = ?1",
+                params![run.id, config_hash],
+            )?;
+            if let Some(session) = live_session(tx.conn(), &run.id)? {
+                tx.conn().execute(
+                    "UPDATE sessions SET config_hash = ?2 WHERE id = ?1",
+                    params![session.id, config_hash],
+                )?;
+            }
+            let reconfigured: Run = get(tx.conn(), "run", &run.id)?;
+            tx.event(
+                NewEvent::new("run", &run.id, "run.reconfigured")
+                    .rev(reconfigured.rev)
+                    .card(&run.card_id)
+                    .payload(json!({"from": run.config_hash, "to": config_hash})),
+            )?;
+            Ok(reconfigured)
+        })
+    }
+
     /// `run.end` (`tiller done`, reconcile). `landed` needs a succeeded
     /// approval or a confirmed outside merge; `reported` for a builder on a
     /// ship card needs its committed head on an open PR of the card; a
