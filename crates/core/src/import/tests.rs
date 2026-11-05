@@ -898,3 +898,32 @@ fn a_deleted_projects_id_numbers_on_from_its_tombstone() {
         "no display id of the deleted project is reused"
     );
 }
+
+/// P10: the import stores each project's delivery mode and registry fields
+/// on the project row. The bundle names no `checks` (`firstmate-export.md`,
+/// `projects.json`), so a project comes in with none; the owner sets them
+/// with `project.edit`.
+#[test]
+fn p10_import_stores_each_projects_delivery_and_registry_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let bundle = bundle(dir.path());
+    let mut store = store();
+    store.import_apply(&import_ctx(), &bundle).unwrap();
+
+    let alpha: Project = crate::state::get(store.conn(), "project", "alpha").unwrap();
+    assert_eq!(alpha.delivery, Delivery::DirectPr);
+    assert_eq!(alpha.repo.as_deref(), Some("example/alpha"));
+    assert_eq!(
+        alpha.remote.as_deref(),
+        Some("https://github.com/example/alpha.git")
+    );
+    assert_eq!(alpha.default_branch, "main");
+    assert_eq!(alpha.capacity, 3);
+    assert_eq!(alpha.checks, json!([]));
+
+    let beta: Project = crate::state::get(store.conn(), "project", "betasite").unwrap();
+    assert_eq!(beta.delivery, Delivery::NoMistakes);
+    assert_eq!(beta.repo.as_deref(), Some("example/beta"));
+    assert_eq!(beta.remote, None);
+    assert_eq!(beta.checks, json!([]));
+}

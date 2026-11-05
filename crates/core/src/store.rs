@@ -209,6 +209,20 @@ impl NewEvent {
     }
 }
 
+/// Limits `state.db` to its owner whatever the process umask is. SQLite gives
+/// its `-wal` and `-shm` files the database file's mode, so they follow.
+fn owner_only(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| Error::Internal(format!("chmod {}: {error}", path.display())))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 /// An open `state.db`.
 pub struct Store {
     conn: Connection,
@@ -220,6 +234,7 @@ impl Store {
     /// [`Store::open_current`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let mut conn = Connection::open(&path)?;
+        owner_only(path.as_ref())?;
         configure(&conn)?;
         crate::backup::before_migration(&conn, path.as_ref())?;
         migrate::up(&mut conn)?;

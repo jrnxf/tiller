@@ -206,6 +206,7 @@ pub(crate) struct Rig {
     pub(crate) tiller_home: PathBuf,
     /// A Claude config dir of the rig's own, never the real one.
     pub(crate) claude: ClaudeConfig,
+    pub(crate) ram_free_mb: Option<i64>,
     pub(crate) disk_free_mb: Option<i64>,
 }
 
@@ -220,7 +221,7 @@ macro_rules! world {
             scratch_root: &$rig.scratch,
             tiller_home: &$rig.tiller_home,
             claude_config: &$rig.claude,
-            ram_free_mb: Some(64_000),
+            ram_free_mb: $rig.ram_free_mb,
             disk_free_mb: $rig.disk_free_mb,
         }
     };
@@ -253,6 +254,7 @@ impl Rig {
             pool,
             herdr,
             scanner: GitScanner::new(),
+            ram_free_mb: Some(64_000),
             disk_free_mb: Some(64_000),
         }
     }
@@ -742,6 +744,46 @@ fn two_spawns_cannot_oversubscribe_capacity() {
     assert_eq!(worktrees.len(), 3, "each winner has its own worktree");
 }
 
+/// P03: spawn refuses when free RAM is below the host's RAM floor, or cannot
+/// be read at all, and leaves no run, session, worktree or pane behind.
+#[test]
+fn spawn_refuses_below_ram_floor() {
+    let mut rig = Rig::new();
+    rig.sql("UPDATE hosts SET ram_floor_mb = 8000");
+    let card = rig.card(CardKind::Ship, None);
+    let ctx = rig.orchestrator();
+    let workspaces = rig.workspace_ids();
+    let count = |rig: &Rig, table: &str| -> i64 {
+        rig.fleet
+            .store
+            .conn()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    let (runs, sessions) = (count(&rig, "runs"), count(&rig, "sessions"));
+    for free in [Some(7_999), None] {
+        rig.ram_free_mb = free;
+        let error = rig
+            .try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
+            .unwrap_err();
+        let why = refusal(&error);
+        assert!(why.contains("RAM free"), "{error}");
+        assert!(why.contains("8000 MB floor"), "{error}");
+        assert!(rig.pool.taken().is_empty());
+        assert_eq!(rig.workspace_ids(), workspaces);
+        assert_eq!(
+            (count(&rig, "runs"), count(&rig, "sessions")),
+            (runs, sessions)
+        );
+    }
+    // Exactly at the floor is enough.
+    rig.ram_free_mb = Some(8_000);
+    rig.try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
+        .unwrap();
+}
+
 #[test]
 fn spawn_refuses_below_disk_floor() {
     let mut rig = Rig::new();
@@ -1211,6 +1253,31 @@ fn failed_spawn_ends_the_run_and_returns_the_worktree() {
             .iter()
             .all(|id| id == "w1" || id == "w3")
     );
+}
+
+/// P67: the developer's own skills and slash commands stay callable in a
+/// role's session. The launch does not run Claude in `--bare` mode or switch
+/// slash commands or skills off, for a worker or a settings fragment.
+#[test]
+fn launch_keeps_the_developers_skills_callable() {
+    let mut rig = Rig::new();
+    let card = rig.card(CardKind::Ship, None);
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    let dir = rig.scratch.join(&spawned.run.id);
+    let script = std::fs::read_to_string(dir.join("launch.sh")).unwrap();
+    for flag in [
+        "--bare",
+        "--disable-slash-commands",
+        "--setting-sources",
+        "--plugin-dir",
+    ] {
+        assert!(!script.contains(flag), "launch script passes {flag}");
+    }
+    let settings: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("settings.json")).unwrap()).unwrap();
+    for key in ["skillOverrides", "disableSkillShellExecution", "skills"] {
+        assert!(settings.get(key).is_none(), "settings fragment sets {key}");
+    }
 }
 
 #[test]

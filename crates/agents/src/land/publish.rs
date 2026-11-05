@@ -26,7 +26,7 @@ use std::path::Path;
 
 use serde_json::json;
 use tiller_core::domain::{
-    AttentionKind, Delivery, OutboxKind, Pr, PrState, Project, Publish, Run,
+    AttentionKind, Delivery, OutboxKind, PipelineState, Pr, PrState, Project, Publish, Run,
 };
 use tiller_core::state::approvals::NewPr;
 use tiller_core::state::attention::NewAttention;
@@ -38,6 +38,7 @@ use tiller_core::{Store, Timestamp};
 
 use super::direct::{self, Pushed};
 use super::forge::{Identity, NewPull, PullRef, PullText};
+use super::scrub::scrub;
 use super::{DaemonLock, LandError, Lander, Result};
 
 /// How long a failed publish of an unchanged head waits before the next try.
@@ -269,6 +270,20 @@ impl Lander<'_> {
                     format!("read the worktree status: {error}"),
                 ));
             }
+        }
+        // The land scrub (P17), before anything leaves the machine: a title
+        // or body that would be refused at merge is not posted at all.
+        let asks = super::project_asks(store, &project.id)
+            .map_err(|error| failure(Step::Pr, Some(head), error.to_string()))?;
+        let description = format!("{}\n{}", record.title, record.body);
+        if let Some(why) = scrub(&description, &asks, &self.scrub, PipelineState::None) {
+            return Err(failure(
+                Step::Pr,
+                Some(head),
+                format!(
+                    "the PR description was not posted: {why}. Edit it with `tiller pr describe` and report done again"
+                ),
+            ));
         }
         let Some(repo) = project.repo.clone() else {
             return Err(failure(

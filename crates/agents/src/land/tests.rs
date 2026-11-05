@@ -18,7 +18,7 @@ use tiller_core::domain::{
 };
 use tiller_core::state::approvals::{Decision, NewApproval, NewGrant, NewPr, PrFetch};
 use tiller_core::state::cards::NewCard;
-use tiller_core::state::projects::{Init, NewProject};
+use tiller_core::state::projects::{Init, NewProject, ProjectEdit};
 use tiller_core::state::publishes::publish;
 use tiller_core::state::records::NewReview;
 use tiller_core::state::runs::{NewOrchestrator, NewRun, SpawnChecks, live_session};
@@ -2221,4 +2221,287 @@ fn publish_takes_only_described_direct_pr_runs() {
             .is_err()
     );
     assert_ne!(other_card.id, card.id);
+}
+
+// -- parity rows ----------------------------------------------------------------
+
+/// Sets what the project `alpha` runs before a direct push.
+fn set_checks(world: &mut World, checks: Value) {
+    let project: Project = get(world.store.conn(), "project", "alpha").unwrap();
+    world
+        .store
+        .project_edit(
+            &owner(),
+            "alpha",
+            project.rev,
+            ProjectEdit {
+                checks: Some(checks),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap();
+}
+
+/// P11: a direct-push project that names checks lands only once the forge
+/// reports them passed for the pushed SHA: pending waits with the approval
+/// still accepted and the remote untouched, failed stales it, success pushes.
+#[test]
+fn p11_direct_push_lands_only_after_the_project_checks_pass() {
+    let forge = FakeForge::new();
+    let (remote, work, head) = repos();
+    let mut world = World::new(Delivery::DirectPush);
+    let lock = world.lock();
+    set_checks(&mut world, json!(["cargo test"]));
+    let approval = direct_approval(&mut world, work.path(), &head);
+    let before = git(remote.path(), &["rev-parse", "refs/heads/main"]);
+
+    forge.set(|view| view.checks = Checks::Pending);
+    let landed = lander(&forge)
+        .land(&lock, &mut world.store, &approval.id)
+        .unwrap();
+    assert!(
+        matches!(&landed, Landed::Waiting { why, .. } if why.contains("pending")),
+        "{landed:?}"
+    );
+    assert_eq!(world.approval(&approval.id).state, ApprovalState::Accepted);
+    assert_eq!(
+        git(remote.path(), &["rev-parse", "refs/heads/main"]),
+        before
+    );
+
+    forge.set(|view| view.checks = Checks::Success);
+    let landed = lander(&forge)
+        .land(&lock, &mut world.store, &approval.id)
+        .unwrap();
+    assert!(matches!(landed, Landed::Succeeded { .. }), "{landed:?}");
+    assert_eq!(git(remote.path(), &["rev-parse", "refs/heads/main"]), head);
+
+    // Failed checks stale the approval and push nothing.
+    let (remote, work, head) = repos();
+    let mut world = World::new(Delivery::DirectPush);
+    let lock = world.lock();
+    set_checks(&mut world, json!(["cargo test"]));
+    let approval = direct_approval(&mut world, work.path(), &head);
+    let before = git(remote.path(), &["rev-parse", "refs/heads/main"]);
+    forge.set(|view| view.checks = Checks::Failure);
+    let landed = lander(&forge)
+        .land(&lock, &mut world.store, &approval.id)
+        .unwrap();
+    assert!(
+        matches!(&landed, Landed::Stale { why, .. } if why.contains("checks")),
+        "{landed:?}"
+    );
+    assert_eq!(
+        git(remote.path(), &["rev-parse", "refs/heads/main"]),
+        before
+    );
+}
+
+/// P13: a standing grant for one project never matches a PR of another
+/// project that has no grant of its own, even when that PR is green, in
+/// scope and reviewed. The project that holds the grant still merges.
+#[test]
+fn p13_a_standing_grant_does_not_reach_another_projects_pr() {
+    let mut world = World::new(Delivery::DirectPr);
+    let lock = world.lock();
+    let forge = FakeForge::new();
+    grant(&mut world, standing());
+
+    world
+        .store
+        .project_add(
+            &owner(),
+            NewProject {
+                id: "beta".into(),
+                name: "Beta".into(),
+                repo: Some("example/beta".into()),
+                remote: None,
+                default_branch: Some("main".into()),
+                delivery: Delivery::DirectPr,
+                checks: None,
+                capacity: Some(4),
+                deploy_workflow: None,
+                deploy_environment: None,
+                deploy_timeout_minutes: None,
+            },
+        )
+        .unwrap();
+    let beta_orchestrator = world
+        .store
+        .session_start(
+            &owner(),
+            NewOrchestrator {
+                project_id: "beta".into(),
+                claude_session_id: Some("claude-beta".into()),
+                ..NewOrchestrator::default()
+            },
+        )
+        .unwrap()
+        .value
+        .session
+        .id;
+    let beta_ctx = Ctx::new(Actor::Session(beta_orchestrator));
+    let beta_card = world
+        .store
+        .card_create(
+            &owner(),
+            None,
+            NewCard {
+                project_id: "beta".into(),
+                kind: CardKind::Ship,
+                title: "the signup page".into(),
+                ..NewCard::default()
+            },
+            None,
+        )
+        .unwrap()
+        .value;
+    let beta_run = world
+        .store
+        .run_start(
+            &beta_ctx,
+            None,
+            NewRun {
+                card: beta_card.id.clone(),
+                role: RunRole::Builder,
+                model: "test-model".into(),
+                effort: Effort::Medium,
+                host_id: None,
+                worktree_path: None,
+                branch: Some("fm/beta-8".into()),
+                base_branch: Some("main".into()),
+                base_sha: None,
+                config_hash: None,
+                checks: SpawnChecks::default(),
+            },
+        )
+        .unwrap()
+        .value
+        .run
+        .id;
+    let beta_pr = world
+        .store
+        .pr_link(
+            &owner(),
+            NewPr {
+                card: beta_card.id.clone(),
+                run_id: Some(beta_run.clone()),
+                number: 8,
+                url: "https://example.com/example/beta/pull/8".into(),
+                head_sha: Some(HEAD.into()),
+                base_ref: Some("main".into()),
+            },
+        )
+        .unwrap()
+        .value;
+    world
+        .store
+        .review_record(
+            &beta_ctx,
+            NewReview {
+                run_id: beta_run,
+                reviewer: Reviewer::CodeReview,
+                coverage: Coverage::Diff,
+                findings_high: 0,
+                findings_medium: 0,
+                findings_low: 0,
+                verdict: Verdict::Pass,
+                source_url: None,
+            },
+        )
+        .unwrap();
+
+    // Only the grantless project's PR is open and green: nothing matches.
+    let matched = lander(&forge)
+        .match_grants(&lock, &mut world.store)
+        .unwrap();
+    assert!(matched.errors.is_empty(), "{:?}", matched.errors);
+    assert!(matched.approvals.is_empty(), "{:?}", matched.approvals);
+    let approvals: Vec<Approval> = list(world.store.conn(), "pr_id = ?1", &[&beta_pr.id]).unwrap();
+    assert!(approvals.is_empty(), "{approvals:?}");
+
+    // The granted project's own green PR beside it does match, and only it.
+    let (card, alpha_pr) = world.pr();
+    review(&mut world, &card, Verdict::Pass, 0);
+    let matched = lander(&forge)
+        .match_grants(&lock, &mut world.store)
+        .unwrap()
+        .approvals;
+    assert_eq!(matched.len(), 1, "{matched:?}");
+    assert_eq!(matched[0].pr_id.as_deref(), Some(alpha_pr.as_str()));
+    assert_eq!(matched[0].project_id, "alpha");
+    let landed = lander(&forge).land_ready(&lock, &mut world.store).unwrap();
+    assert!(
+        matches!(landed[..], [Landed::Succeeded { .. }]),
+        "{landed:?}"
+    );
+    assert_eq!(forge.merges().len(), 1);
+    assert_eq!(forge.merges()[0].0.repo, "example/alpha");
+}
+
+/// P17: a description whose title or body names a scrub-list term is
+/// refused at publish, like at merge: nothing is pushed and the forge is
+/// never asked to open or edit a PR. The owner hears the rule, never the
+/// leaked words, and a corrected description publishes.
+#[test]
+fn p17_a_leaky_description_is_refused_before_the_forge_is_called() {
+    // Built at run time so this file holds no scrub-list term itself.
+    let term = ["internal", "box"].join("-");
+    let list = ScrubList::parse(&format!("{term}\n"));
+    for (title, body) in [
+        ("Publish it".to_owned(), format!("Tested on {term} first.")),
+        (
+            format!("Fix the {term} deploy"),
+            "Adds the feature.".to_owned(),
+        ),
+    ] {
+        let (remote, work, head) = repos();
+        let mut world = World::new(Delivery::DirectPr);
+        let lock = world.lock();
+        let forge = FakeForge::new();
+        let lander = Lander {
+            forge: &forge,
+            app: &NoApp,
+            scrub: list.clone(),
+        };
+        let card = world.card("publish it");
+        let run = world.builder(&card, Some(work.path()), "fm/alpha-1");
+        let session = live_session(world.store.conn(), &run).unwrap().unwrap().id;
+        let worker = Ctx::new(Actor::Session(session.clone()));
+        world
+            .store
+            .pr_describe(&worker, &run, &title, &body)
+            .unwrap();
+        report_done(&mut world, &run, &session);
+
+        let pass = lander.publish_ready(&lock, &mut world.store).unwrap();
+        assert!(pass.errors.is_empty(), "{:?}", pass.errors);
+        let [Published::Failed { error, .. }] = &pass.published[..] else {
+            panic!("{:?}", pass.published);
+        };
+        assert!(error.contains("scrub-list term"), "{error}");
+        assert!(!error.contains(&term), "{error}");
+        assert!(forge.opened().is_empty());
+        assert!(forge.edits().is_empty());
+        assert_eq!(remote_branch(remote.path()), "");
+        assert_eq!(record(&world, &run).pr_id, None);
+        let items = world.attention(&card);
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert!(!items[0].question.contains(&term), "{}", items[0].question);
+
+        // The worker fixes the description and reports done: it publishes.
+        world
+            .store
+            .pr_describe(&worker, &run, "Publish it", "Adds the feature.")
+            .unwrap();
+        report_done(&mut world, &run, &session);
+        let pass = lander.publish_ready(&lock, &mut world.store).unwrap();
+        assert!(
+            matches!(&pass.published[..], [Published::Done { opened: true, .. }]),
+            "{:?}",
+            pass.published
+        );
+        assert_eq!(forge.opened().len(), 1);
+        assert_eq!(remote_branch(remote.path()), head);
+    }
 }

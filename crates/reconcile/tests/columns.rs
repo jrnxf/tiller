@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use tiller_core::domain::{Checks, Column, RunOutcome, StatusState};
+use tiller_core::domain::{Checks, Column, PipelineState, RunOutcome, StatusState};
 use tiller_core::state::runs::EndRun;
 use tiller_reconcile::columns;
 use tiller_reconcile::thresholds::Thresholds;
@@ -92,6 +92,68 @@ fn ship_card_stays_working_without_pr() {
         "the card never reaches Done on a word"
     );
     let _ = pr;
+}
+
+/// P08 (R13): the pipeline is part of the evidence. A ship card whose PR is
+/// open but whose pipeline never ran (`pipeline_state` none) is not done on
+/// the worker's word: the pass leaves the orchestrator one note that names
+/// the missing pipeline, the card stays in Working, and the run stays open.
+#[test]
+fn a_done_report_with_an_open_pr_and_no_pipeline_notes_the_orchestrator() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let run = w.run_of(&worker);
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let mut read = open_pr("a1a1a1a1");
+    read.fetch.pipeline_state = PipelineState::None;
+    w.forge.pr(REPO, 7, read);
+    w.store_mut()
+        .run_status(
+            &session_ctx(&worker),
+            &run.id,
+            StatusState::Done,
+            "PR is up, done",
+        )
+        .unwrap();
+
+    let t0 = now();
+    let report = w.pass(t0);
+    assert_eq!(w.pr(&pr).pipeline_state, PipelineState::None);
+    assert!(report.did("R13"), "{report:?}");
+    let notes: Vec<_> = w
+        .notes()
+        .into_iter()
+        .filter(|n| n.body.contains("reports \"done"))
+        .collect();
+    assert_eq!(notes.len(), 1, "{:?}", w.notes());
+    assert!(
+        notes[0].body.contains("PR #7 is open, not merged")
+            && notes[0].body.contains("pipeline none"),
+        "{}",
+        notes[0].body
+    );
+    assert!(
+        notes[0].body.contains("Steer the worker to the pipeline"),
+        "{}",
+        notes[0].body
+    );
+    assert_eq!(
+        columns::column(w.store(), &run.card_id).unwrap().column,
+        Column::Working
+    );
+    assert!(w.run(&run.id).ended_at.is_none());
+
+    // The same word is not noted again.
+    let again = w.pass(t0.plus_minutes(1));
+    assert!(!again.did("R13"), "{again:?}");
+    assert_eq!(
+        w.notes()
+            .iter()
+            .filter(|n| n.body.contains("reports \"done"))
+            .count(),
+        1
+    );
 }
 
 /// R13 waits for the daemon on a direct-pr run: a described PR the daemon

@@ -11,6 +11,7 @@ use tiller_core::state::approvals::NewPr;
 use tiller_core::state::outbox::NewMessage;
 use tiller_core::state::publishes::publish;
 use tiller_core::state::{find, get, list, resolve_card, resolve_id};
+use tiller_herdr::client::Herdr;
 
 use super::card::herdr_name;
 use super::{KeyArg, resolve_run, resolve_session};
@@ -208,10 +209,49 @@ fn show(app: &App, reference: &str, tail: Option<u32>) -> Done {
         &[&run.id],
     )?;
     data["events"] = json!(events);
-    // The pane tail comes from herdr, which this command does not call yet.
-    let lines = tail.unwrap_or(0).min(200);
-    data["pane_tail"] = json!({"requested": lines, "lines": null, "available": false});
+    let requested = tail.unwrap_or(0).min(200);
+    data["pane_tail"] = if requested == 0 {
+        json!({"requested": 0, "lines": null, "available": false})
+    } else {
+        match read_tail(app, &store, &run, requested as usize) {
+            Ok(lines) => json!({"requested": requested, "lines": lines, "available": true}),
+            Err(reason) => {
+                json!({"requested": requested, "lines": null, "available": false, "reason": reason})
+            }
+        }
+    };
     Ok(Outcome::read(data))
+}
+
+/// The last `keep` lines of the run's live pane, read through herdr the way
+/// the board reads it: the saved machine of a remote host, or the local
+/// herdr. The error is why there is no tail, for the caller to read.
+fn read_tail(
+    app: &App,
+    store: &tiller_core::Store,
+    run: &Run,
+    keep: usize,
+) -> Result<Vec<String>, String> {
+    let conn = store.conn();
+    let session = tiller_core::state::runs::live_session(conn, &run.id)
+        .map_err(|error| error.to_string())?
+        .ok_or("the run has no live session")?;
+    let (pane, machine) = tiller_core::state::runs::focus_target(conn, &session)
+        .map_err(|_| "the session has no pane".to_owned())?;
+    let host: tiller_core::domain::Host =
+        get(conn, "host", &session.host_id).map_err(|error| error.to_string())?;
+    if host.kind == tiller_core::domain::HostKind::Remote && machine.is_none() {
+        return Err("the session is on a remote host with no saved herdr machine".into());
+    }
+    let herdr = super::spawn::configured_herdr(app).map_err(|failure| failure.message.clone())?;
+    let herdr = match machine {
+        Some(machine) => herdr.on_machine(machine),
+        None => herdr,
+    };
+    herdr
+        .read_visible(&pane)
+        .map(|screen| tiller_daemon::api::pane_tail(&screen, keep))
+        .map_err(|error| format!("herdr cannot read the pane: {error}"))
 }
 
 fn list_runs(app: &App, card: Option<String>, active: bool) -> Done {

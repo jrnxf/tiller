@@ -349,7 +349,11 @@ impl App {
     pub fn create(&self) -> Result<Store, Failure> {
         self.check_owner_marker()?;
         if let Some(dir) = self.db.parent() {
-            std::fs::create_dir_all(dir)?;
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)?;
         }
         Ok(Store::open(&self.db)?)
     }

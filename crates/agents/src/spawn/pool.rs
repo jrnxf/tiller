@@ -132,3 +132,67 @@ pub fn start_from_origin(worktree: &Path, default_branch: &str) -> Result<String
     git(worktree, &["merge", "--ff-only", "--quiet", &base])?;
     Ok(base)
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    /// A stand-in `treehouse` that appends its working directory and
+    /// arguments to `calls` and prints `worktree` for a `get`.
+    fn stand_in(dir: &Path, worktree: &str) -> (Treehouse, PathBuf) {
+        let calls = dir.join("calls");
+        let script = dir.join("treehouse");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n{{ pwd; for a in \"$@\"; do echo \"$a\"; done; echo --; }} >> '{}'\n[ \"$1\" = get ] && echo '{worktree}'\nexit 0\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (Treehouse::new(vec![script.into_os_string()]), calls)
+    }
+
+    /// P06: a run's worktree is leased from the pool with the exact `get`
+    /// arguments, in the project's checkout, and given back only while the
+    /// holder still leases it, never with `--force`.
+    #[test]
+    fn treehouse_takes_and_returns_with_the_lease_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let checkout = dir.path().join("checkout");
+        std::fs::create_dir(&checkout).unwrap();
+        let (pool, calls) = stand_in(dir.path(), "/home/user/worktrees/alpha-1");
+
+        let path = pool.take(&checkout, "fm/alpha-1", "main", "run-1").unwrap();
+        assert_eq!(path, Path::new("/home/user/worktrees/alpha-1"));
+        pool.give_back(&path, "run-1").unwrap();
+
+        let log = std::fs::read_to_string(calls).unwrap();
+        let checkout = checkout.canonicalize().unwrap();
+        let want = format!(
+            "{}\nget\n--lease\n--lease-holder\nrun-1\n--branch\nfm/alpha-1\n--base\nmain\n--\n{}\nreturn\n/home/user/worktrees/alpha-1\n--if-lease-holder\nrun-1\n--\n",
+            checkout.display(),
+            std::env::current_dir().unwrap().display(),
+        );
+        assert_eq!(log, want);
+        assert!(!log.contains("--force"));
+    }
+
+    /// P06: a pool that prints a relative path, or fails, is a refusal and
+    /// never a worktree.
+    #[test]
+    fn treehouse_refuses_a_relative_path_and_a_failing_get() {
+        let dir = tempfile::tempdir().unwrap();
+        let (pool, _) = stand_in(dir.path(), "relative/path");
+        let error = pool.take(dir.path(), "fm/alpha-1", "main", "run-1");
+        assert!(error.unwrap_err().contains("not an absolute path"));
+
+        let failing = Treehouse::new(vec!["false".into()]);
+        assert!(failing.take(dir.path(), "b", "main", "h").is_err());
+        assert!(Treehouse::new(vec![]).give_back(dir.path(), "h").is_err());
+    }
+}
