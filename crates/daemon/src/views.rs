@@ -167,6 +167,16 @@ pub fn board_row(store: &Store, card_id: &str) -> Result<Option<BoardRow>> {
     }))
 }
 
+/// One card's row as the board lists it: [`board_row`], and `None` too when
+/// the card's project is retired, as [`board`] leaves it out.
+fn listed_row(store: &Store, card_id: &str) -> Result<Option<BoardRow>> {
+    let Some(row) = board_row(store, card_id)? else {
+        return Ok(None);
+    };
+    let project = store.project(&row.project_id)?;
+    Ok(project.retired_at.is_none().then_some(row))
+}
+
 /// `GET /api/v1/board`. `host` is a host id or label; a card is on a host
 /// when it has a run there.
 pub fn board(
@@ -1844,7 +1854,9 @@ pub fn change(store: &Store, local: &LocalHealth, event: &Event, now: Timestamp)
         Value::Null
     });
     let mut card = match &event.card_id {
-        Some(card_id) => board_row(store, card_id).unwrap_or_else(|error| {
+        // A retired project's card stays off the board: the board upserts
+        // any row a change carries.
+        Some(card_id) => listed_row(store, card_id).unwrap_or_else(|error| {
             tracing::warn!(seq = event.seq, %error, "change sent without its card");
             None
         }),

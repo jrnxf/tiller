@@ -6,11 +6,23 @@ import { projectRetireQuery } from "../../lib/queries";
 import { onProjectGone } from "../../lib/sse";
 import { sendMutation } from "../attention/api";
 import { useAction } from "../attention/use-action";
+import { ConfirmDelete } from "./project-delete";
 import { AgentList, FLEET_PROJECT, ProjectDialog, agentCount, readFailure } from "./project-dialog";
 
 // The confirm step of a project archive (`project.retire`). With agents still
 // running it asks whether to stop them, and never leaves them running unsaid.
-function ConfirmArchive({ project, onClose }: { project: Project; onClose: () => void }) {
+// An open card refuses the archive before any stop, so the agents a stop
+// reaches are those left on closed cards, in practice the orchestrator; with
+// one open it offers the delete instead, which stops them all.
+function ConfirmArchive({
+  project,
+  onClose,
+  onDelete,
+}: {
+  project: Project;
+  onClose: () => void;
+  onDelete: () => void;
+}) {
   const queryClient = useQueryClient();
   const preview = useQuery(projectRetireQuery(project.id));
 
@@ -48,10 +60,14 @@ function ConfirmArchive({ project, onClose }: { project: Project; onClose: () =>
   const refused = preview.data?.refused ?? null;
   const agents = preview.data?.agents ?? [];
   const ready = preview.data !== undefined && refused === null;
+  // An open card is the refusal a delete answers, since it cancels the card.
+  const openCard = refused?.endsWith(" is open") === true;
   const running = ready && agents.length > 0;
   // Only the host an agent runs on can stop it, so with one elsewhere the
   // archive here cannot offer the stop.
   const remote = agents.filter(({ local }) => !local);
+  // What a stop reaches, the orchestrator alone in practice.
+  const lone = agents.length === 1 && agents[0]?.role === "orchestrator";
   const cancel = useRef<HTMLButtonElement>(null);
   const failure = readFailure(
     preview.error,
@@ -78,11 +94,23 @@ function ConfirmArchive({ project, onClose }: { project: Project; onClose: () =>
           <p className="delete-note">
             {remote.length > 0
               ? `Only its own host can stop an agent, and ${remote.length} of these ${remote.length === 1 ? "runs" : "run"} elsewhere. Archiving here leaves them all running.`
-              : "Stop them now, or archive and leave them running."}
+              : lone
+                ? "Stop the orchestrator now, or archive and leave it running."
+                : "Stop them now, or archive and leave them running."}
           </p>
         </>
       ) : null}
-      {refused ? (
+      {openCard ? (
+        <>
+          <p className="refusal" role="alert">
+            Archiving needs its open cards finished or cancelled first: {refused}.
+          </p>
+          <p className="delete-note">
+            Or delete the project instead: that stops its agents, cancels its cards and removes it
+            from this host.
+          </p>
+        </>
+      ) : refused ? (
         <p className="refusal" role="alert">
           {refused}
         </p>
@@ -120,9 +148,17 @@ function ConfirmArchive({ project, onClose }: { project: Project; onClose: () =>
               disabled={pending}
               onClick={stopping.trigger}
             >
-              {stopping.pending ? "Stopping..." : `Stop ${agentCount(agents)} and archive`}
+              {stopping.pending
+                ? "Stopping..."
+                : lone
+                  ? "Stop and archive"
+                  : `Stop ${agentCount(agents)} and archive`}
             </button>
           </>
+        ) : openCard ? (
+          <button type="button" className="btn danger" onClick={onDelete}>
+            Delete instead
+          </button>
         ) : (
           <button
             type="button"
@@ -147,13 +183,15 @@ export function ArchiveProject({
   project: Project;
   owner: string | undefined;
 }) {
-  const [confirming, setConfirming] = useState(false);
+  // The archive's confirm step, or the delete it offers in its place.
+  const [confirming, setConfirming] = useState<"archive" | "delete" | null>(null);
   const opener = useRef<HTMLButtonElement>(null);
   const off = owner ? `${owner} owns this project: archive it there` : undefined;
   const close = useCallback(() => {
-    setConfirming(false);
+    setConfirming(null);
     opener.current?.focus();
   }, []);
+  const toDelete = useCallback(() => setConfirming("delete"), []);
   if (project.id === FLEET_PROJECT) return null;
   return (
     <>
@@ -163,11 +201,15 @@ export function ArchiveProject({
         className="btn"
         disabled={off !== undefined}
         title={off}
-        onClick={() => setConfirming(true)}
+        onClick={() => setConfirming("archive")}
       >
         Archive
       </button>
-      {confirming ? <ConfirmArchive project={project} onClose={close} /> : null}
+      {confirming === "archive" ? (
+        <ConfirmArchive project={project} onClose={close} onDelete={toDelete} />
+      ) : confirming === "delete" ? (
+        <ConfirmDelete project={project} onClose={close} />
+      ) : null}
     </>
   );
 }

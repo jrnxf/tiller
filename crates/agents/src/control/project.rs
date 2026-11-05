@@ -117,7 +117,9 @@ pub fn delete_project(
 
 /// The owner's `project.retire`, with the project's running agents stopped
 /// first when `stop_agents` is set. Refused, before any stop, when the
-/// retire would be: an open card, or `fleet`.
+/// retire would be: an open card, or `fleet`. So only agents left on closed
+/// cards, in practice the orchestrator, are stopped. A project already
+/// retired stops nothing: the retire replays as it stands.
 pub fn retire_project(
     store: &mut Store,
     ctx: &Ctx,
@@ -136,7 +138,18 @@ pub fn retire_project(
         }
         .into());
     }
-    let (agents, mut events) = if stop_agents && !preview.agents.is_empty() {
+    let retired = store.project(project_id)?.retired_at.is_some();
+    let (agents, mut events) = if stop_agents && retired && !preview.agents.is_empty() {
+        let warning = format!(
+            "project {project_id} was already retired, so none of its {} running agents was stopped",
+            preview.agents.len()
+        );
+        let agents = AgentsStopped {
+            warnings: vec![warning],
+            ..AgentsStopped::default()
+        };
+        (agents, Vec::new())
+    } else if stop_agents && !preview.agents.is_empty() {
         let reason = format!("retiring project {project_id}");
         stop_project_agents(store, ctx, herdr, waits, project_id, &reason)?
     } else {

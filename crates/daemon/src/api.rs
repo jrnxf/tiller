@@ -1661,7 +1661,7 @@ async fn start_orchestrator(
 ) -> ApiResult<MutationResponse> {
     guard(&state, &headers)?;
     let request: StartOrchestrator = body(&bytes)?;
-    key(&request.idempotency_key)?;
+    let key = key(&request.idempotency_key)?;
     not_forwarded(&state, request.host.as_deref(), "an orchestrator start").await?;
     if let Some(reason) = state.0.damage.reason() {
         return Err(read_only(&reason));
@@ -1677,9 +1677,10 @@ async fn start_orchestrator(
         }
         let mut store = Store::open_current(&db).map_err(ApiError::from)?;
         // The same start as `tiller orchestrator start`, as the board: a
-        // live orchestrator is returned (`replayed`), never a second one.
+        // live orchestrator is returned (`replayed`), never a second one,
+        // and a retry of a start that landed replays it by its key.
         starter
-            .start(&mut store, &Ctx::new(Actor::Board), &id)
+            .start(&mut store, &Ctx::new(Actor::Board).with_key(key), &id)
             .map_err(|error| match error {
                 StartError::State { error, notes } => {
                     damage.suspect(&db, &error);
@@ -3241,7 +3242,9 @@ pub(crate) mod tests {
     }
 
     /// A retired project leaves the board with its closed cards, which the
-    /// board would otherwise keep showing for three days.
+    /// board would otherwise keep showing for three days. A later change on
+    /// one, such as a PR reconcile, carries no row for the board to put
+    /// back.
     #[tokio::test]
     async fn a_retired_projects_closed_cards_leave_the_board() {
         let mut fleet = Fleet::new();
@@ -3294,11 +3297,30 @@ pub(crate) mod tests {
                 .any(|row| row["project_id"] == "gamma")
         };
 
+        let health = views::LocalHealth {
+            failing_pollers: Vec::new(),
+            peers: crate::peer::Federation::default(),
+        };
+        let change = |store: &Store| {
+            let event: tiller_core::domain::Event = tiller_core::state::find(
+                store.conn(),
+                "card_id = ?1 ORDER BY seq DESC",
+                &[&card.id],
+            )
+            .unwrap()
+            .unwrap();
+            views::change(store, &health, &event, Timestamp::now())
+        };
+
         let before = get(&app, "/api/v1/board?filter=all").await;
         assert!(on_board(&before.body), "{}", before.body);
+        assert!(change(&fleet.store).card.is_some());
         fleet.store.project_retire(&owner, "gamma").unwrap();
         let after = get(&app, "/api/v1/board?filter=all").await;
         assert!(!on_board(&after.body), "{}", after.body);
+        let late = change(&fleet.store);
+        assert_eq!(late.card_id.as_deref(), Some(card.id.as_str()));
+        assert!(late.card.is_none(), "{:?}", late.card);
     }
 
     /// The board's project delete: the preview counts what goes and names

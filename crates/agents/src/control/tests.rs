@@ -1375,30 +1375,87 @@ fn delete_refuses_naming_the_agent_that_did_not_stop() {
 
 #[test]
 fn retire_stops_the_orchestrator_only_when_asked() {
+    for stop_agents in [false, true] {
+        let mut rig = Rig::new();
+        let orchestrator = rig.fleet.orchestrator_session.clone();
+        let retired = retire_project(
+            &mut rig.fleet.store,
+            &owner(),
+            &rig.herdr,
+            &quick(),
+            "alpha",
+            stop_agents,
+        )
+        .unwrap();
+        assert!(retired.value.project.retired_at.is_some());
+        let stopped = usize::from(stop_agents);
+        assert_eq!(retired.value.agents.stopped.len(), stopped, "{retired:?}");
+        assert_eq!(session(&rig, &orchestrator).ended_at.is_some(), stop_agents);
+    }
+}
+
+#[test]
+fn retire_of_a_retired_project_stops_nothing() {
     let mut rig = Rig::new();
     let orchestrator = rig.fleet.orchestrator_session.clone();
-    let kept = retire_project(
-        &mut rig.fleet.store,
-        &owner(),
-        &rig.herdr,
-        &quick(),
-        "alpha",
-        false,
-    )
-    .unwrap();
-    assert!(kept.value.agents.stopped.is_empty());
-    assert!(session(&rig, &orchestrator).ended_at.is_none());
+    let retire = |rig: &mut Rig, stop_agents| {
+        retire_project(
+            &mut rig.fleet.store,
+            &owner(),
+            &rig.herdr,
+            &quick(),
+            "alpha",
+            stop_agents,
+        )
+        .unwrap()
+    };
+    retire(&mut rig, false);
 
-    let retired = retire_project(
-        &mut rig.fleet.store,
-        &owner(),
-        &rig.herdr,
-        &quick(),
-        "alpha",
-        true,
-    )
-    .unwrap();
-    assert_eq!(retired.value.agents.stopped.len(), 1, "{retired:?}");
-    assert!(session(&rig, &orchestrator).ended_at.is_some());
-    assert!(retired.value.project.retired_at.is_some());
+    let again = retire(&mut rig, true);
+    assert!(again.value.agents.stopped.is_empty(), "{again:?}");
+    assert!(
+        again.value.agents.warnings[0].contains("already retired"),
+        "{again:?}"
+    );
+    assert!(session(&rig, &orchestrator).ended_at.is_none());
+    assert!(!typed(&rig, &rig.fleet.orchestrator_pane, "/exit"));
+}
+
+/// The stops wait on herdr between short writes of their own, so another
+/// request writes while a delete's agent is still exiting.
+#[test]
+fn delete_holds_no_store_write_while_an_agent_stops() {
+    let mut rig = Rig::new();
+    running(&mut rig);
+    let db = rig.fleet.db.clone();
+    let landed = std::cell::RefCell::new(Vec::new());
+    let other_write = |call: &str, text: &str| {
+        if call != "send_text" || text != "/exit" {
+            return;
+        }
+        let mut other = Store::open_current(&db).unwrap();
+        // Fails at once, rather than waiting, if the delete holds the write.
+        other.conn().pragma_update(None, "busy_timeout", 0).unwrap();
+        let rev = get::<Project>(other.conn(), "project", "fleet")
+            .unwrap()
+            .rev;
+        let edit = ProjectEdit {
+            name: Some("Fleet, edited".into()),
+            ..Default::default()
+        };
+        landed
+            .borrow_mut()
+            .push(other.project_edit(&owner(), "fleet", rev, edit).map(|_| ()));
+    };
+    let hooked = crate::spawn::tests::Hooked {
+        herdr: &rig.herdr,
+        hook: &other_write,
+    };
+
+    delete_project(&mut rig.fleet.store, &owner(), &hooked, &quick(), "alpha").unwrap();
+    let landed = landed.into_inner();
+    assert!(!landed.is_empty(), "no agent was asked to exit");
+    for write in landed {
+        write.unwrap();
+    }
 }

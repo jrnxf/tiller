@@ -56,8 +56,8 @@ function OrchestratorMini({
     <span className="orch">
       <i className={`ld ${view.dot}${view.dot === "live" ? " pulse" : ""}`} />
       <span className="tx">
-        orchestrator {orchestrator.model}, {view.label.toLowerCase()},{" "}
-        <Ago at={orchestrator.activity_observed_at} prefix="observed" />
+        {orchestrator.model ? `orchestrator ${orchestrator.model}` : "orchestrator"},{" "}
+        {view.label.toLowerCase()}, <Ago at={orchestrator.activity_observed_at} prefix="observed" />
       </span>
     </span>
   );

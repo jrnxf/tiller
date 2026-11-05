@@ -804,7 +804,7 @@ test("deleting a project with a working card lists the agents it stops and the w
 
 // ---- Project archive ----
 
-test("archiving a project with an open card says why and sends nothing", async () => {
+test("archiving a project with an open card says why and offers the delete", async () => {
   const posted = stubApi("default");
   await renderApp();
 
@@ -812,11 +812,15 @@ test("archiving a project with an open card says why and sends nothing", async (
   fireEvent.click(screen.getByRole("button", { name: "Archive" }));
   const dialog = screen.getByRole("dialog", { name: "Archive alpha?" });
   const why = await within(dialog).findByRole("alert");
-  expect(why.textContent).toMatch(/^card alpha-\d+ is open$/);
-  const archive = within(dialog).getByRole("button", { name: "Archive project" });
-  expect(archive).toHaveProperty("disabled", true);
-  fireEvent.click(archive);
-  fireEvent.keyDown(dialog, { key: "Escape" });
+  expect(why.textContent).toMatch(
+    /^Archiving needs its open cards finished or cancelled first: card alpha-\d+ is open\.$/,
+  );
+  // No archive or stop to press while a card is open.
+  expect(within(dialog).queryByRole("button", { name: /Archive|Stop/ })).toBeNull();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Delete instead" }));
+  expect(screen.queryByRole("dialog", { name: "Archive alpha?" })).toBeNull();
+  const deleting = screen.getByRole("dialog", { name: "Delete alpha?" });
+  fireEvent.keyDown(deleting, { key: "Escape" });
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(posted).toHaveLength(0);
 });
@@ -846,7 +850,8 @@ test("archiving a project with a running agent asks whether to stop it", async (
   const running = await within(dialog).findByRole("region", { name: "Still running" });
   expect(running.textContent).toBe("Still runningorchestrator");
   expect(within(dialog).getByRole("button", { name: "Archive, keep running" })).toBeTruthy();
-  fireEvent.click(within(dialog).getByRole("button", { name: "Stop 1 agent and archive" }));
+  expect(within(dialog).getByText(/^Stop the orchestrator now/)).toBeTruthy();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Stop and archive" }));
   await waitFor(() => expect(posted).toHaveLength(1));
   expect(posted[0]?.path).toBe("/api/v1/projects/kiln/retire");
   expect(posted[0]?.body).toMatchObject({ stop_agents: true });

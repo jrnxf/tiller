@@ -93,7 +93,7 @@ function Facts({ preview }: { preview: ProjectDeletePreview }) {
 
 // The confirm step of a project delete: what goes, the agents it stops first,
 // and the id typed again.
-function ConfirmDelete({ project, onClose }: { project: Project; onClose: () => void }) {
+export function ConfirmDelete({ project, onClose }: { project: Project; onClose: () => void }) {
   const queryClient = useQueryClient();
   const preview = useQuery(projectDeleteQuery(project.id));
   const [typed, setTyped] = useState("");

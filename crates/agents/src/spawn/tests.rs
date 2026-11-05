@@ -2094,6 +2094,146 @@ fn a_second_orchestrator_start_returns_the_first() {
 }
 
 #[test]
+fn a_keyed_orchestrator_start_retried_replays_the_first() {
+    let (mut rig, homes) = orchestrator_rig();
+    let keyed = || Ctx::new(Actor::Board).with_key("start-1");
+    let first = start_orchestrator(&mut rig, &homes, &keyed()).unwrap();
+    assert!(!first.replayed);
+    // The retry answers with the first, and launches nothing.
+    let id = first.value.session.id.clone();
+    let workspaces = rig.workspace_ids().len();
+    let retry = start_orchestrator(&mut rig, &homes, &keyed()).unwrap();
+    assert!(retry.replayed);
+    assert_eq!(retry.value.session.id, id);
+    assert!(!retry.events.is_empty() && first.events.ends_with(&retry.events));
+    assert_eq!(rig.workspace_ids().len(), workspaces, "no second workspace");
+
+    // Once it has ended, as a failed launch ends it, a retry starts afresh.
+    rig.fleet.store.session_end(&owner(), &id, "x").unwrap();
+    let again = start_orchestrator(&mut rig, &homes, &keyed()).unwrap();
+    assert!(!again.replayed);
+    assert_ne!(again.value.session.id, id);
+    let live = tiller_core::state::outbox::live_orchestrator(rig.fleet.store.conn(), "alpha");
+    assert_eq!(
+        live.unwrap().map(|s| s.id),
+        Some(again.value.session.id.clone())
+    );
+}
+
+/// The fake herdr, calling `hook` after each `create_workspace` and
+/// `send_text` it passes on, with the call and its text: another request's
+/// write lands mid-flight.
+pub(crate) struct Hooked<'a> {
+    pub(crate) herdr: &'a FakeHerdr,
+    pub(crate) hook: &'a dyn Fn(&str, &str),
+}
+
+impl tiller_herdr::client::Herdr for Hooked<'_> {
+    fn snapshot(&self) -> tiller_herdr::client::Result<tiller_herdr::client::Snapshot> {
+        self.herdr.snapshot()
+    }
+    fn pane(
+        &self,
+        pane_id: &str,
+    ) -> tiller_herdr::client::Result<Option<tiller_herdr::client::PaneInfo>> {
+        self.herdr.pane(pane_id)
+    }
+    fn read_visible(&self, pane_id: &str) -> tiller_herdr::client::Result<String> {
+        self.herdr.read_visible(pane_id)
+    }
+    fn send_text(&self, pane_id: &str, text: &str) -> tiller_herdr::client::Result<()> {
+        self.herdr.send_text(pane_id, text)?;
+        (self.hook)("send_text", text);
+        Ok(())
+    }
+    fn send_enter(&self, pane_id: &str) -> tiller_herdr::client::Result<()> {
+        self.herdr.send_enter(pane_id)
+    }
+    fn send_escape(&self, pane_id: &str) -> tiller_herdr::client::Result<()> {
+        self.herdr.send_escape(pane_id)
+    }
+    fn report_tokens(
+        &self,
+        pane_id: &str,
+        tokens: &std::collections::BTreeMap<String, String>,
+    ) -> tiller_herdr::client::Result<()> {
+        self.herdr.report_tokens(pane_id, tokens)
+    }
+    fn create_workspace(
+        &self,
+        label: &str,
+        cwd: Option<&Path>,
+    ) -> tiller_herdr::client::Result<tiller_herdr::client::Created> {
+        let created = self.herdr.create_workspace(label, cwd)?;
+        (self.hook)("create_workspace", label);
+        Ok(created)
+    }
+    fn rename_workspace(
+        &self,
+        workspace_id: &str,
+        label: &str,
+    ) -> tiller_herdr::client::Result<()> {
+        self.herdr.rename_workspace(workspace_id, label)
+    }
+    fn move_workspace(&self, workspace_id: &str, index: usize) -> tiller_herdr::client::Result<()> {
+        self.herdr.move_workspace(workspace_id, index)
+    }
+    fn close_pane(&self, pane_id: &str) -> tiller_herdr::client::Result<()> {
+        self.herdr.close_pane(pane_id)
+    }
+    fn notify(&self, title: &str, body: &str) -> tiller_herdr::client::Result<()> {
+        self.herdr.notify(title, body)
+    }
+}
+
+#[test]
+fn a_keyed_orchestrator_start_that_loses_its_race_closes_its_pane() {
+    let (mut rig, homes) = orchestrator_rig();
+    let db = rig.fleet.db.clone();
+    // Another request's keyed start lands while this one opens its workspace.
+    let rival = |call: &str, _: &str| {
+        if call != "create_workspace" {
+            return;
+        }
+        let mut store = tiller_core::Store::open(&db).unwrap();
+        store
+            .session_start(
+                &Ctx::new(Actor::Board).with_key("start-1"),
+                tiller_core::state::runs::NewOrchestrator {
+                    project_id: "alpha".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    };
+    let racing = Hooked {
+        herdr: &rig.herdr,
+        hook: &rival,
+    };
+    let mut world = world!(rig);
+    world.herdr = &racing;
+    let keyed = Ctx::new(Actor::Board).with_key("start-1");
+    let started =
+        orchestrator::start(&mut rig.fleet.store, &keyed, &world, &homes, "alpha", None).unwrap();
+    assert!(started.replayed);
+    let live = tiller_core::state::outbox::live_orchestrator(rig.fleet.store.conn(), "alpha")
+        .unwrap()
+        .unwrap();
+    assert_eq!(started.value.session.id, live.id, "the rival's start");
+    assert!(live.pane_id.is_none());
+    // The pane this start opened is closed and nothing was typed into it.
+    let calls = rig.herdr.calls();
+    assert!(
+        calls.iter().any(|c| c.starts_with("close_pane")),
+        "{calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|c| c.starts_with("send_text")),
+        "{calls:?}"
+    );
+}
+
+#[test]
 fn orchestrator_start_never_types_into_an_old_orchestrator_pane() {
     let (mut rig, homes) = orchestrator_rig();
     // The ended orchestrator's pane shows no agent, its tokens intact: it

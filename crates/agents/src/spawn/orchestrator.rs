@@ -34,7 +34,7 @@ use serde::Serialize;
 use tiller_core::domain::{Effort, OutboxMessage, Project, Session};
 use tiller_core::state::get;
 use tiller_core::state::outbox::live_orchestrator;
-use tiller_core::state::runs::NewOrchestrator;
+use tiller_core::state::runs::{NewOrchestrator, OrchestratorStarted};
 use tiller_core::{Actor, Applied, Ctx, Store, ids};
 use tiller_herdr::client::Herdr;
 use tiller_herdr::layout;
@@ -102,6 +102,10 @@ struct Opened<'a> {
 ///
 /// `restart` is how long to wait for the live orchestrator to exit; with it
 /// set, a live orchestrator is stopped and replaced instead of returned.
+///
+/// `ctx.key` keys the `session.start` alone, not the manifest or a stop: a
+/// retry with a key that already started replays that start without
+/// touching herdr, and one that lost a race to it closes what it opened.
 pub fn start(
     store: &mut Store,
     ctx: &Ctx,
@@ -118,8 +122,33 @@ pub fn start(
         ))
         .into());
     }
+    let keyed = ctx.clone();
+    let ctx = &Ctx {
+        key: None,
+        ..ctx.clone()
+    };
     let project: Project = get(store.conn(), "project", project)?;
     let label = layout::orchestrator_label(&project.id);
+    // A start this key made already replays while its orchestrator lives.
+    // One whose launch failed has ended, so a retry starts afresh, unkeyed.
+    let keyed = if store.key_recorded(&keyed)? {
+        let replay = store.session_start(&keyed, new_orchestrator(&project.id))?;
+        let session = &replay.value.session;
+        if session.project_id != project.id {
+            return Err(SpawnError::Refused(format!(
+                "this key started the orchestrator of project {}, not {}; start with a new key",
+                session.project_id, project.id
+            )));
+        }
+        // The stored response holds the session as it started: read it now.
+        let now: Session = get(store.conn(), "session", &session.id)?;
+        if now.ended_at.is_none() {
+            return Ok(replayed(world.herdr, replay, label));
+        }
+        ctx.clone()
+    } else {
+        keyed
+    };
     let mut events = Vec::new();
     let mut leftover = None;
     if let Some(live) = live_orchestrator(store.conn(), &project.id)? {
@@ -203,7 +232,7 @@ pub fn start(
         Err(e) => return Err(unwind(None, e.into())),
     };
     let started = store.session_start(
-        ctx,
+        &keyed,
         NewOrchestrator {
             id: Some(session_id.clone()),
             project_id: project.id.clone(),
@@ -213,6 +242,18 @@ pub fn start(
         },
     );
     let started = match started {
+        // The key started one already, in a request that won the race.
+        Ok(started) if started.replayed => {
+            let notes = opened.clean(Some(&pane.pane_id));
+            let mut found = replayed(world.herdr, started, label);
+            found.events.splice(0..0, events);
+            found.value.warning = [found.value.warning.take(), leftover]
+                .into_iter()
+                .chain(notes.into_iter().map(Some))
+                .flatten()
+                .reduce(|all, next| format!("{all}; {next}"));
+            return Ok(found);
+        }
         Ok(started) => started,
         Err(e) => {
             // Another start won the race: return its orchestrator.
@@ -283,6 +324,27 @@ pub fn start(
         events,
         replayed: false,
     })
+}
+
+/// The bare `session.start` a keyed replay looks itself up with.
+fn new_orchestrator(project_id: &str) -> NewOrchestrator {
+    NewOrchestrator {
+        project_id: project_id.to_owned(),
+        ..NewOrchestrator::default()
+    }
+}
+
+/// A keyed start's stored result: its session as recorded, where herdr
+/// shows it now, and its notes.
+fn replayed(
+    herdr: &dyn Herdr,
+    replay: Applied<OrchestratorStarted>,
+    label: String,
+) -> Applied<Orchestrator> {
+    let mut found = existing(herdr, replay.value.session, label);
+    found.value.notes = replay.value.notes;
+    found.events = replay.events;
+    found
 }
 
 /// The live orchestrator, returned as a replay. A pane herdr no longer
@@ -398,6 +460,19 @@ impl Opened<'_> {
     /// while that is still empty. Returns the original error, with what
     /// could not be undone appended.
     fn undo(&self, pane: Option<&str>, error: SpawnError) -> SpawnError {
+        let notes = self.clean(pane);
+        if notes.is_empty() {
+            return error;
+        }
+        SpawnError::Undone {
+            error: Box::new(error),
+            notes: notes.join("; "),
+        }
+    }
+
+    /// Closes the pane, removes the scratch directory and the home it made
+    /// while that is still empty. Returns what could not be undone.
+    fn clean(&self, pane: Option<&str>) -> Vec<String> {
         let mut notes = Vec::new();
         if let Some(pane) = pane
             && let Err(e) = self.herdr.close_pane(pane)
@@ -411,12 +486,6 @@ impl Opened<'_> {
         if let Some(home) = self.home {
             let _ = fs::remove_dir(home);
         }
-        if notes.is_empty() {
-            return error;
-        }
-        SpawnError::Undone {
-            error: Box::new(error),
-            notes: notes.join("; "),
-        }
+        notes
     }
 }
