@@ -88,21 +88,28 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-// The pickable pill for a project; a peer's same-named project is not one.
-const pill = (name: RegExp) => {
+// The pickable row for a project; a peer's same-named project is not one.
+const row = (name: RegExp) => {
   const found = screen
-    .getAllByRole("radio", { name })
-    .filter((radio) => radio.ariaDisabled !== "true");
-  if (found.length !== 1) throw new Error(`${found.length} pills match ${name}`);
+    .getAllByRole("option", { name })
+    .filter((option) => option.ariaDisabled !== "true");
+  if (found.length !== 1) throw new Error(`${found.length} rows match ${name}`);
   return found[0] as HTMLElement;
 };
+const search = () => document.querySelector(".ask-combo-in") as HTMLInputElement;
+const note = () => document.querySelector(".ask-note")?.textContent;
+const trigger = () => document.querySelector(".ask-combo-btn") as HTMLElement;
+const pick = (name: RegExp) => fireEvent.click(row(name));
 const input = () => screen.getByLabelText("Ask", { selector: "textarea" }) as HTMLTextAreaElement;
 const sendButton = () => screen.getByRole("button", { name: /send/i }) as HTMLButtonElement;
 
-test("focus starts on the picker and nothing is picked", () => {
+test("the list opens with the search box focused and nothing is picked", async () => {
   renderDialog();
-  expect(document.activeElement).toBe(pill(/alpha/i));
-  expect(screen.getAllByRole("radio").every((radio) => radio.ariaChecked === "false")).toBe(true);
+  await waitFor(() => expect(document.activeElement).toBe(search()));
+  expect(trigger().textContent).toContain("Pick an orchestrator");
+  expect(screen.getAllByRole("option").every((option) => option.ariaSelected !== "true")).toBe(
+    true,
+  );
 });
 
 test("Send stays off until an orchestrator is picked and there is text", () => {
@@ -111,50 +118,55 @@ test("Send stays off until an orchestrator is picked and there is text", () => {
   expect(sendButton().disabled).toBe(true);
   fireEvent.change(input(), { target: { value: "hello" } });
   expect(sendButton().disabled).toBe(true);
-  expect(screen.getByRole("status").textContent).toBe("Pick an orchestrator first.");
-  fireEvent.click(pill(/beta/i));
+  expect(note()).toBe("Pick an orchestrator first.");
+  pick(/beta/i);
   expect(sendButton().disabled).toBe(false);
-  expect(screen.getByRole("status").textContent).toBe("Goes to the beta orchestrator.");
+  expect(note()).toBe("Goes to the beta orchestrator.");
+  expect(trigger().textContent).toContain("beta");
 });
 
-test("arrows move between the pills, Enter picks, and Tab goes from the picker to the text", () => {
+test("typing filters the list", () => {
   renderDialog();
-  fireEvent.keyDown(pill(/alpha/i), { key: "ArrowRight" });
-  expect(document.activeElement).toBe(pill(/beta/i));
-  expect(pill(/beta/i).tabIndex).toBe(0);
-  expect(pill(/alpha/i).tabIndex).toBe(-1);
-  // Enter on a focused button is a click.
-  fireEvent.click(document.activeElement as HTMLElement);
-  expect(pill(/beta/i).ariaChecked).toBe("true");
+  fireEvent.change(search(), { target: { value: "gam" } });
+  expect(row(/gamma/i)).toBeTruthy();
+  expect(screen.queryAllByRole("option", { name: /alpha/i })).toHaveLength(0);
+});
 
-  // The picker is one tab stop, and the text is the next one in the dialog.
+test("a number key picks that row and the text box takes focus", async () => {
+  renderDialog();
+  fireEvent.keyDown(search(), { key: "2" });
+  expect(trigger().textContent).toContain("beta");
+  await waitFor(() => expect(document.activeElement).toBe(input()));
+});
+
+test("each row shows its number", () => {
+  renderDialog();
+  expect(row(/alpha/i).textContent).toMatch(/1$/);
+  expect(row(/gamma/i).textContent).toMatch(/3$/);
+});
+
+test("a click picks and Tab order runs from the picker to the text", async () => {
+  renderDialog();
+  pick(/alpha/i);
+  await waitFor(() => expect(document.activeElement).toBe(input()));
   const stops = [
     ...screen.getByRole("dialog").querySelectorAll<HTMLElement>("button, textarea"),
   ].filter((element) => element.tabIndex >= 0 && !(element as HTMLButtonElement).disabled);
-  expect(stops.slice(0, 2)).toEqual([pill(/beta/i), input()]);
-});
-
-test("a pill's number picks it", () => {
-  renderDialog();
-  fireEvent.keyDown(pill(/alpha/i), { key: "2" });
-  expect(pill(/alpha/i).ariaChecked).toBe("false");
-  fireEvent.keyDown(pill(/beta/i), { key: "2" });
-  expect(pill(/beta/i).ariaChecked).toBe("true");
+  expect(stops.slice(0, 2)).toEqual([trigger(), input()]);
 });
 
 test("a project another host owns is shown but cannot be picked", () => {
   renderDialog();
-  const off = screen.getAllByRole("radio").filter((radio) => radio.ariaDisabled === "true");
+  const off = screen.getAllByRole("option").filter((option) => option.ariaDisabled === "true");
   expect(off.length).toBeGreaterThan(0);
   fireEvent.click(off[0] as HTMLElement);
-  expect(off[0]?.ariaChecked).toBe("false");
-  expect(off[0]?.tabIndex).toBe(-1);
+  expect(trigger().textContent).toContain("Pick an orchestrator");
 });
 
 test("sending posts to the picked orchestrator, shows the tile and closes", async () => {
   stub(null);
   const { queryClient, onClose } = renderDialog();
-  fireEvent.click(pill(/gamma/i));
+  pick(/gamma/i);
   fireEvent.change(input(), { target: { value: "  ship the footer\nthen the header  " } });
   fireEvent.click(sendButton());
 
@@ -171,7 +183,7 @@ test("sending posts to the picked orchestrator, shows the tile and closes", asyn
 test("Enter sends, Shift+Enter adds a line", async () => {
   stub(null);
   renderDialog();
-  fireEvent.click(pill(/alpha/i));
+  pick(/alpha/i);
   fireEvent.change(input(), { target: { value: "one" } });
   fireEvent.keyDown(input(), { key: "Enter", shiftKey: true });
   expect(calls).toHaveLength(0);
@@ -179,9 +191,11 @@ test("Enter sends, Shift+Enter adds a line", async () => {
   await waitFor(() => expect(calls).toHaveLength(1));
 });
 
-test("Escape closes the dialog", () => {
+test("Escape closes the list first and the dialog next", () => {
   const { onClose } = renderDialog();
-  fireEvent.keyDown(pill(/alpha/i), { key: "Escape" });
+  fireEvent.keyDown(search(), { key: "Escape" });
+  expect(onClose).not.toHaveBeenCalled();
+  fireEvent.keyDown(trigger(), { key: "Escape" });
   expect(onClose).toHaveBeenCalled();
 });
 
@@ -189,7 +203,7 @@ test("the dialog is locked and says Sending while the ask is in flight, and send
   release = () => {};
   stub(null);
   const { onClose } = renderDialog();
-  fireEvent.click(pill(/alpha/i));
+  pick(/alpha/i);
   fireEvent.change(input(), { target: { value: "hello" } });
   fireEvent.click(sendButton());
   await waitFor(() => expect(sendButton().textContent).toContain("Sending..."));
@@ -213,8 +227,8 @@ test("with no orchestrator running it says so before and after sending", async (
       <AskDialog open onClose={() => {}} />
     </QueryClientProvider>,
   );
-  fireEvent.click(pill(/alpha/i));
-  expect(screen.getByRole("status").textContent).toBe(
+  pick(/alpha/i);
+  expect(note()).toBe(
     "No orchestrator is running for alpha: the ask is recorded and picked up when it starts.",
   );
 });
@@ -234,7 +248,7 @@ test("a failed send keeps the dialog open with the text and says why", async () 
     ),
   );
   const { onClose } = renderDialog();
-  fireEvent.click(pill(/alpha/i));
+  pick(/alpha/i);
   fireEvent.change(input(), { target: { value: "hello" } });
   fireEvent.click(sendButton());
   await waitFor(() =>

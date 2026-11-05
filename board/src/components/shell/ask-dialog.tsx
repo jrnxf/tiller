@@ -1,3 +1,4 @@
+import { Combobox } from "@base-ui/react/combobox";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { QueryClient } from "@tanstack/react-query";
@@ -11,6 +12,7 @@ import { agentsQuery, API_KEY_PREFIX, projectsQuery } from "../../lib/queries";
 import { ActionFailure } from "../attention/action-failure";
 import { sendMutation } from "../attention/api";
 import { SendIcon } from "../attention/icons";
+import { CheckIcon, ChevronIcon } from "./icons";
 import { useAction } from "../attention/use-action";
 import { showToast } from "../board/toast";
 import "./ask-dialog.css";
@@ -53,80 +55,109 @@ function offReason(project: Project): string | null {
   return owner ? `${owner} owns this project: ask its orchestrator there` : null;
 }
 
-interface PickerProps {
-  projects: Project[];
-  picked: string | null;
-  disabled: boolean;
-  onPick: (key: string) => void;
+interface Option {
+  key: string;
+  label: string;
+  color: string;
+  // Why this project cannot take an ask here; null when it can.
+  off: string | null;
 }
 
-// The orchestrator picker: pills in one tab stop. Arrows move between the
-// ones that can take an ask, Enter or Space (or the pill's number) picks, and
-// Tab moves on to the text. Nothing is picked until the owner picks it.
-function Picker({ projects, picked, disabled, onPick }: PickerProps) {
-  const pickable = projects.filter((project) => offReason(project) === null);
-  const [cursor, setCursor] = useState<string | null>(null);
-  const refs = useRef(new Map<string, HTMLButtonElement>());
-  const stop = picked ?? cursor ?? (pickable[0] ? projectKey(pickable[0]) : null);
-
-  const move = (from: string, step: number) => {
-    const at = pickable.findIndex((project) => projectKey(project) === from);
-    const next = pickable[(at + step + pickable.length) % pickable.length];
-    if (!next) return;
-    setCursor(projectKey(next));
-    refs.current.get(projectKey(next))?.focus();
+// The orchestrator picker: the Base UI combobox (the shadcn base/ variant, in
+// the Linear shape) with the board's own styles. A trigger shows the pick; the
+// list opens with a search box on top, and a number key picks that row.
+// Nothing is picked until the owner picks it.
+function Picker({
+  options,
+  picked,
+  disabled,
+  onPick,
+  onOpenChange,
+}: {
+  options: Option[];
+  picked: Option | null;
+  disabled: boolean;
+  onPick: (key: string) => void;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [open, setOpen] = useState(true);
+  const change = (next: boolean) => {
+    setOpen(next);
+    onOpenChange(next);
   };
-
   return (
-    <div className="ask-picker" role="radiogroup" aria-label="Orchestrator">
-      {projects.map((project, position) => {
-        const key = projectKey(project);
-        const off = offReason(project);
-        return (
-          <button
-            key={key}
-            ref={(element) => {
-              if (element) refs.current.set(key, element);
-              else refs.current.delete(key);
-            }}
-            type="button"
-            role="radio"
-            className="ask-pill"
-            aria-checked={picked === key}
-            aria-disabled={off !== null || undefined}
-            disabled={disabled}
-            tabIndex={key === stop && off === null ? 0 : -1}
-            title={off ?? undefined}
-            data-off={off !== null}
-            onClick={() => {
-              if (off === null) onPick(key);
-            }}
-            onFocus={() => {
-              if (off === null) setCursor(key);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "ArrowRight" || event.key === "ArrowDown") {
-                event.preventDefault();
-                move(key, 1);
-              } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
-                event.preventDefault();
-                move(key, -1);
-              } else if (/^[1-9]$/.test(event.key) && Number(event.key) === position + 1) {
-                event.preventDefault();
-                if (off === null) onPick(key);
-              }
-            }}
-          >
-            <span className="pdot" style={{ "--pc": projectColor(position) } as CSSProperties} />
-            {project.name}
-            <kbd>{position + 1}</kbd>
-            {off !== null ? (
-              <span className="ask-pill-off">{ownerOf(project)}, not pickable</span>
-            ) : null}
-          </button>
-        );
-      })}
-    </div>
+    <Combobox.Root
+      items={options}
+      value={picked}
+      open={open}
+      onOpenChange={change}
+      disabled={disabled}
+      autoHighlight
+      itemToStringLabel={(option: Option) => option.label}
+      isItemEqualToValue={(a: Option, b: Option) => a.key === b.key}
+      onValueChange={(option: Option | null) => {
+        if (option) onPick(option.key);
+      }}
+    >
+      <Combobox.Trigger className="ask-combo-btn" data-empty={picked === null}>
+        {picked ? (
+          <>
+            <span className="ask-combo-dot" style={{ "--pc": picked.color } as CSSProperties} />
+            {picked.label}
+          </>
+        ) : (
+          "Pick an orchestrator"
+        )}
+        <ChevronIcon />
+      </Combobox.Trigger>
+      <Combobox.Portal>
+        <Combobox.Positioner className="ask-combo-pos" sideOffset={4} align="start">
+          <Combobox.Popup className="ask-combo-pop">
+            <div className="ask-combo-search">
+              <Combobox.Input
+                className="ask-combo-in"
+                placeholder="Pick an orchestrator..."
+                onKeyDown={(event) => {
+                  const pick = /^[1-9]$/.test(event.key)
+                    ? options[Number(event.key) - 1]
+                    : undefined;
+                  if (!pick) return;
+                  event.preventDefault();
+                  if (pick.off === null) {
+                    onPick(pick.key);
+                    change(false);
+                  }
+                }}
+              />
+              <kbd className="ask-combo-key">A</kbd>
+            </div>
+            <Combobox.Empty className="ask-combo-empty">No project matches</Combobox.Empty>
+            <Combobox.List className="ask-combo-list">
+              {(option: Option) => (
+                <Combobox.Item
+                  key={option.key}
+                  value={option}
+                  disabled={option.off !== null}
+                  title={option.off ?? undefined}
+                  className="ask-combo-item"
+                >
+                  <span
+                    className="ask-combo-dot"
+                    style={{ "--pc": option.color } as CSSProperties}
+                  />
+                  <span className="ask-combo-name">{option.label}</span>
+                  {option.off !== null ? <span className="ask-combo-off">{option.off}</span> : null}
+                  <Combobox.ItemIndicator className="ask-combo-check">
+                    <CheckIcon />
+                  </Combobox.ItemIndicator>
+                  <kbd className="ask-combo-num">{options.indexOf(option) + 1}</kbd>
+                </Combobox.Item>
+              )}
+            </Combobox.List>
+          </Combobox.Popup>
+        </Combobox.Positioner>
+      </Combobox.Portal>
+    </Combobox.Root>
   );
 }
 
@@ -142,6 +173,16 @@ function AskBody({ projects, onClose }: { projects: Project[]; onClose: () => vo
   const dialog = useRef<HTMLDivElement>(null);
 
   const project = projects.find((candidate) => projectKey(candidate) === pickedKey) ?? null;
+  const options: Option[] = projects.map((candidate, index) => ({
+    key: projectKey(candidate),
+    label: candidate.name,
+    color: projectColor(index),
+    off: offReason(candidate),
+  }));
+  const picked = options.find((option) => option.key === pickedKey) ?? null;
+  // Escape closes an open list first and the dialog only when no list was open.
+  const listOpen = useRef(true);
+  const escapeClosesList = useRef(false);
   const body = text.trim();
   const running = project
     ? (orchestrators ?? []).some((agent) => agent.project_id === project.id && !agent.host)
@@ -184,10 +225,9 @@ function AskBody({ projects, onClose }: { projects: Project[]; onClose: () => vo
     if (ready) action.trigger();
   };
 
-  // Focus starts on the picker, so the orchestrator is chosen first, and goes
-  // back to the Ask button on close.
+  // The list opens with its search box focused, so the orchestrator is chosen
+  // first; focus goes back to the Ask button on close.
   useEffect(() => {
-    dialog.current?.querySelector<HTMLElement>('.ask-pill[tabindex="0"]:not(:disabled)')?.focus();
     return () => {
       if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
     };
@@ -208,16 +248,19 @@ function AskBody({ projects, onClose }: { projects: Project[]; onClose: () => vo
         aria-modal="true"
         aria-labelledby={titleId}
         onMouseDown={(event) => event.stopPropagation()}
+        onKeyDownCapture={(event) => {
+          if (event.key === "Escape") escapeClosesList.current = listOpen.current;
+        }}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
             event.preventDefault();
             event.stopPropagation();
-            if (!action.pending) onClose();
+            if (!action.pending && !escapeClosesList.current) onClose();
           } else if (event.key === "Tab") {
             // Keep focus on the dialog's own controls that can take it.
             const stops = [
               ...(dialog.current?.querySelectorAll<HTMLElement>(
-                'button:not(:disabled):not([tabindex="-1"]), textarea:not(:disabled)',
+                'button:not(:disabled):not([tabindex="-1"]), input:not(:disabled), textarea:not(:disabled)',
               ) ?? []),
             ];
             const [first, last] = [stops[0], stops.at(-1)];
@@ -237,10 +280,17 @@ function AskBody({ projects, onClose }: { projects: Project[]; onClose: () => vo
         <div className="ask-field">
           <span className="ask-label">Orchestrator</span>
           <Picker
-            projects={projects}
-            picked={pickedKey}
+            options={options}
+            picked={picked}
             disabled={action.pending}
-            onPick={setPickedKey}
+            onPick={(key) => {
+              setPickedKey(key);
+              // Once picked, the text is next.
+              setTimeout(() => dialog.current?.querySelector("textarea")?.focus(), 0);
+            }}
+            onOpenChange={(open) => {
+              listOpen.current = open;
+            }}
           />
         </div>
         <div className="ask-field">

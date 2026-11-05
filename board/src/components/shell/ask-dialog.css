@@ -16,57 +16,166 @@
   color: var(--fg-3);
 }
 
-.ask-picker {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.ask-pill {
+/* The orchestrator combobox: the Base UI parts with the board's tokens. */
+.ask-combo-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 8px 0 10px;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
   border: 1px solid var(--line-2);
   border-radius: var(--r8);
   background: var(--bg-card);
-  color: var(--fg-2);
+  font: inherit;
   font-size: var(--fs-small);
   font-weight: var(--w-medium);
+  color: var(--fg-1);
 }
 
-.ask-pill:hover {
+.ask-combo-btn[data-empty="true"] {
+  color: var(--fg-3);
+}
+
+.ask-combo-btn .icon {
+  transform: rotate(90deg);
+}
+
+.ask-combo-btn:hover {
   background: var(--bg-3);
-  color: var(--fg-1);
 }
 
-.ask-pill[aria-checked="true"] {
-  border-color: var(--accent);
-  background: color-mix(in lch, var(--accent), transparent 90%);
-  color: var(--fg-1);
-}
-
-.ask-pill:focus-visible {
+.ask-combo-btn:focus-visible {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in lch, var(--accent), transparent 80%);
 }
 
-.ask-pill[data-off="true"] {
-  border-style: dashed;
+.ask-combo-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 0 4px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--line-2);
+}
+
+.ask-combo-in {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 8px;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: var(--fs-small);
+  color: var(--fg-1);
+  outline: none;
+}
+
+.ask-combo-in::placeholder {
+  color: var(--fg-4);
+}
+
+.ask-combo-key,
+.ask-combo-num {
+  font-family: inherit;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.ask-combo-key {
+  padding: 1px 6px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r6, var(--r8));
+}
+
+.ask-combo-num {
+  min-width: 14px;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.ask-combo-pos {
+  z-index: 80;
+  width: min(320px, var(--available-width));
+}
+
+.ask-combo-pop {
+  max-height: min(240px, var(--available-height));
+  overflow: auto;
+  padding: 4px;
+  background: var(--bg-pop);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r8);
+  box-shadow: var(--shadow-high);
+}
+
+.ask-combo-list {
+  margin: 0;
+  padding: 0;
+}
+
+.ask-combo-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 0 8px;
+  border-radius: var(--r6, var(--r8));
+  font-size: var(--fs-small);
+  color: var(--fg-1);
+  cursor: default;
+  user-select: none;
+}
+
+.ask-combo-item[data-highlighted] {
+  background: var(--bg-3);
+}
+
+.ask-combo-item[data-disabled] {
   color: var(--fg-4);
   cursor: not-allowed;
 }
 
-.ask-pill[data-off="true"]:hover {
-  background: var(--bg-card);
+.ask-combo-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--round);
+  background: var(--pc);
+}
+
+.ask-combo-name {
+  flex: 1;
+}
+
+.ask-combo-off {
+  flex: 2;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-mini);
   color: var(--fg-4);
 }
 
-.ask-pill-off {
-  font-size: var(--fs-mini);
-  font-weight: normal;
+.ask-combo-check {
+  margin-right: 8px;
+  display: grid;
+  color: var(--accent-text);
+}
+
+.ask-combo-empty {
+  padding: 8px;
+  font-size: var(--fs-small);
+  color: var(--fg-3);
+}
+
+.ask-combo-empty:empty {
+  display: none;
 }
 
 .ask-in {
