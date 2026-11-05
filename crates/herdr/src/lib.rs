@@ -5,6 +5,7 @@ pub mod composer;
 pub mod front;
 pub mod layout;
 pub mod poller;
+pub mod submit;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod fake;

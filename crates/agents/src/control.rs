@@ -39,6 +39,7 @@ use tiller_core::{Actor, Applied, Ctx, Store, Timestamp};
 use tiller_herdr::client::{Herdr, PaneInfo};
 use tiller_herdr::composer::{self, Composer};
 use tiller_herdr::layout;
+use tiller_herdr::submit::{self, Pacing, Submit};
 use tiller_observe::tailer;
 use tiller_reconcile::recovery::sessions::{LAUNCH_BIND_SOURCE, MANUAL_RESUME_REASON};
 
@@ -58,6 +59,8 @@ pub struct Waits {
     /// For a launched session's `SessionStart` hook.
     pub bind: Duration,
     pub poll: Duration,
+    /// The pauses around the Enter that submits a line typed into Claude.
+    pub pacing: Pacing,
 }
 
 impl Default for Waits {
@@ -67,6 +70,7 @@ impl Default for Waits {
             exit: Duration::from_secs(15),
             bind: Duration::from_secs(30),
             poll: Duration::from_millis(250),
+            pacing: Pacing::default(),
         }
     }
 }
@@ -744,8 +748,6 @@ fn exit_and_prove(
     pane_id: &str,
 ) -> Result<(String, Option<String>)> {
     let pane_id = pane_id.to_owned();
-    herdr.send_text(&pane_id, "/exit")?;
-    herdr.send_enter(&pane_id)?;
     // The pane is reused only once herdr shows Claude gone from it: a
     // `SessionEnd` hook can fire while the process is still exiting, and a
     // line typed then would reach the dying composer.
@@ -759,6 +761,20 @@ fn exit_and_prove(
             Some(_) => None,
         })
     };
+    herdr.send_text(&pane_id, "/exit")?;
+    thread::sleep(waits.pacing.settle);
+    // Claude can read the Enter as a newline, leaving `/exit` typed and the
+    // session running: press again while the line stays, as delivery does.
+    // Whatever the verdict, the proof below decides the stop.
+    if let Submit::Failed(error) = submit::submit(
+        herdr,
+        &pane_id,
+        waits.pacing,
+        |composer| matches!(composer, Composer::Holds(text) if text == "/exit"),
+        || Ok::<_, SpawnError>(gone(herdr)?.is_some()),
+    )? {
+        return Err(error.into());
+    }
     let proof = wait(waits, waits.exit, || gone(herdr))?;
     let ended: Session = get(store.conn(), "session", &session.id)?;
     match (proof, ended.ended_at) {

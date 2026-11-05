@@ -389,7 +389,7 @@ impl Herdr for FakeHerdr {
             } else if takes && !p.composer.is_empty() {
                 let line = std::mem::take(&mut p.composer);
                 // Claude's `/exit` leaves the pane at a shell.
-                if line == "/exit" && !stubborn {
+                if line.trim() == "/exit" && !stubborn {
                     p.screen = Screen::Shell;
                 }
                 p.submitted.push(line);

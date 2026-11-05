@@ -22,6 +22,7 @@ fn quick() -> Waits {
         exit: Duration::from_millis(300),
         bind: Duration::from_millis(300),
         poll: Duration::from_millis(10),
+        pacing: tiller_herdr::submit::Pacing::INSTANT,
     }
 }
 
@@ -32,6 +33,7 @@ fn patient() -> Waits {
         exit: Duration::from_secs(10),
         bind: Duration::from_secs(10),
         poll: Duration::from_millis(10),
+        pacing: tiller_herdr::submit::Pacing::INSTANT,
     }
 }
 
@@ -987,6 +989,51 @@ fn stop_ends_an_ended_runs_agent_and_returns_its_worktree() {
             format!("tiller:{}", spawned.run.id)
         )]
     );
+}
+
+/// Claude reads an Enter right after `/exit` as a newline, as a Claude
+/// relaunched in the same pane does: the line sat typed and the stop was
+/// refused as unproven.
+#[test]
+fn stop_presses_enter_again_while_exit_stays_in_the_composer() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.done(&spawned.run.id, RunOutcome::Abandoned).unwrap();
+    rig.herdr.enter_as_newline(&spawned.pane_id, 2);
+
+    let stopped = stop_it(&mut rig, &owner(), &quick(), &spawned.session.id).unwrap();
+    assert!(stopped.stop_proof.contains("no agent"), "{stopped:?}");
+    assert!(stopped.session.ended_at.is_some());
+    let presses = enters_after_exit(&rig, &spawned.pane_id);
+    assert_eq!(presses, 3);
+    assert!(typed(&rig, &spawned.pane_id, "/exit"));
+}
+
+#[test]
+fn stop_that_exit_never_leaves_is_refused_after_a_bounded_number_of_presses() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.done(&spawned.run.id, RunOutcome::Abandoned).unwrap();
+    rig.herdr.enter_as_newline(&spawned.pane_id, 100);
+
+    let error = stop_it(&mut rig, &owner(), &quick(), &spawned.session.id).unwrap_err();
+    assert!(error.to_string().contains("not proven stopped"), "{error}");
+    assert!(session(&rig, &spawned.session.id).ended_at.is_none());
+    let presses = enters_after_exit(&rig, &spawned.pane_id);
+    assert_eq!(presses, tiller_herdr::submit::PRESSES as usize);
+}
+
+/// The Enters pressed in `pane` after `/exit` was typed.
+fn enters_after_exit(rig: &Rig, pane: &str) -> usize {
+    let calls = rig.herdr.calls();
+    let exit = calls
+        .iter()
+        .position(|c| *c == format!("send_text {pane} /exit"))
+        .unwrap();
+    calls[exit..]
+        .iter()
+        .filter(|c| **c == format!("send_enter {pane}"))
+        .count()
 }
 
 #[test]
