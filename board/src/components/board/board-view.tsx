@@ -37,9 +37,12 @@ const COLUMN_MARK = {
   done: "done",
 } as const;
 
-// Width of a column that has no full cards: the same 52 px the mocks use.
+// Width of the folded Done column: the same 52 px the mocks use.
 const MINI_WIDTH = 52;
-const FULL_WIDTH = 176;
+// Every other column keeps a readable width, empty or not, so the lanes a card
+// can move between stay visible. The cap keeps a lone card from filling the board.
+const FULL_WIDTH = 168;
+const MAX_WIDTH = 264;
 const GAP = 8;
 
 export function EmptyScope({ host, what }: { host: string | undefined; what: "cards" | "agents" }) {
@@ -187,11 +190,11 @@ function Board({ host, filter }: { host: string | undefined; filter: BoardFilter
   const inColumn = (id: ColumnId) => shown.filter((tile) => tile.column === id).length;
   const counts = COLUMNS.map((column) => inColumn(column.id));
   const folded = (index: number) =>
-    counts[index] === 0 || (COLUMNS[index]?.id === "done" && look.doneFolded);
-  const widths = shown.length
-    ? COLUMNS.map((_, index) => (folded(index) ? `${MINI_WIDTH}px` : "minmax(0,1fr)")).join(" ")
-    : "repeat(6,minmax(0,1fr))";
-  const full = shown.length ? COLUMNS.filter((_, index) => !folded(index)).length : 6;
+    COLUMNS[index]?.id === "done" && look.doneFolded && (counts[index] ?? 0) > 0;
+  const widths = COLUMNS.map((_, index) =>
+    folded(index) ? `${MINI_WIDTH}px` : `minmax(${FULL_WIDTH}px,${MAX_WIDTH}px)`,
+  ).join(" ");
+  const full = COLUMNS.filter((_, index) => !folded(index)).length;
   const minWidth =
     32 + (COLUMNS.length - 1) * GAP + full * FULL_WIDTH + (COLUMNS.length - full) * MINI_WIDTH;
 
@@ -212,7 +215,7 @@ function Board({ host, filter }: { host: string | undefined; filter: BoardFilter
         <div className="bhead">
           {COLUMNS.map((column, index) => {
             const isDone = column.id === "done";
-            if (isDone && folded(index) && counts[index]) {
+            if (isDone && folded(index)) {
               return (
                 <button
                   key={column.id}

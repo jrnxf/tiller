@@ -1260,10 +1260,6 @@ button.colh:hover {
   min-width: 0;
   overflow: auto;
 }
-/* Docked: the board gives up this width, so every lane stays in view. */
-.board-split[data-docked="true"] .board {
-  min-width: 0;
-}
 .drawer {
   flex: none;
   width: 480px;

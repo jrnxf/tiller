@@ -139,7 +139,7 @@ export function Lane({
           return (
             <div
               key={column.id}
-              className={`cell${items.length === 0 || folded ? " mini" : ""}`}
+              className={`cell${folded && items.length > 0 ? " mini" : ""}`}
               data-n={items.length}
               data-column={column.id}
             >
