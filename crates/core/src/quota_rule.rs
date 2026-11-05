@@ -50,13 +50,17 @@ pub fn verdict(window: &QuotaWindow, size: Size, now: Timestamp) -> Verdict {
     let Some(empty_at) = window.projected_exhaustion_at else {
         return Verdict::Go;
     };
+    // A projection at or after the reset never happens: the week renews first.
+    if !window
+        .resets_at
+        .is_some_and(|resets_at| empty_at < resets_at)
+    {
+        return Verdict::Go;
+    }
     if empty_at < now.plus_minutes(work_minutes(size)) {
         return Verdict::Hold(Hold::RunsOutFirst);
     }
-    match window.resets_at {
-        Some(resets_at) if empty_at < resets_at => Verdict::GoAheadOfPace,
-        _ => Verdict::Go,
-    }
+    Verdict::GoAheadOfPace
 }
 
 #[cfg(test)]
@@ -118,6 +122,15 @@ mod tests {
         let now = at("2026-11-05T16:00:00Z");
         assert_eq!(verdict(&w, Size::S, now), Verdict::GoAheadOfPace);
         assert_eq!(verdict(&w, Size::M, now), Verdict::Hold(Hold::RunsOutFirst));
+    }
+
+    #[test]
+    fn a_projection_after_the_reset_is_ignored() {
+        let w = window(56.0, Some("2026-11-11T00:00:00Z"), "2026-11-10T14:00:00Z");
+        assert_eq!(
+            verdict(&w, Size::L, at("2026-11-05T16:00:00Z")),
+            Verdict::Go
+        );
     }
 
     #[test]
