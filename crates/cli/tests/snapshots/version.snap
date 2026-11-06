@@ -4,7 +4,7 @@ source: crates/cli/tests/common/mod.rs
 exit: 0
 {
   "data": {
-    "schema": 11,
+    "schema": 12,
     "version": "0.1.0"
   },
   "ok": true

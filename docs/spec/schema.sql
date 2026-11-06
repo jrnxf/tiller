@@ -728,27 +728,24 @@ WITH
     WHERE state = 'open'
     GROUP BY card_id
   ),
-  pending_lands AS (
-    -- a direct land the owner has not decided yet. The builder's run stays
-    -- live until the push (it cannot end reported with no PR), so this
-    -- outranks an active run: the card waits in Landing, like a ship card
-    -- waiting on its merge
-    SELECT card_id
-    FROM approvals
-    WHERE kind = 'land_direct' AND state = 'requested'
-    GROUP BY card_id
-  ),
   progress AS (
     -- per open card, since it was created or last reopened: when its newest
-    -- run started, and when the owner last sent it back (rejected its merge
-    -- or direct land, or the merge failed). A send-back holds until the
-    -- next run starts.
-    SELECT p.card_id, p.run_at,
+    -- run started, whether it reached Landing (a PR was linked to it, or a
+    -- merge or direct land was asked for), and when the owner last sent it
+    -- back (rejected its merge or direct land, or the merge failed). A
+    -- send-back shows until the next run starts.
+    SELECT p.card_id, p.run_at, p.landed_at IS NOT NULL AS reached_landing,
            p.back_at IS NOT NULL AND p.back_at > coalesce(p.run_at, '') AS back
     FROM (
       SELECT c.id AS card_id,
              (SELECT max(r.started_at) FROM runs r
               WHERE r.card_id = c.id AND r.started_at > coalesce(ro.at, '')) AS run_at,
+             coalesce(
+               (SELECT min(pr.linked_at) FROM prs pr
+                WHERE pr.card_id = c.id AND pr.linked_at > coalesce(ro.at, '')),
+               (SELECT min(a.requested_at) FROM approvals a
+                WHERE a.card_id = c.id AND a.kind IN ('merge', 'land_direct')
+                  AND a.requested_at > coalesce(ro.at, ''))) AS landed_at,
              (SELECT max(coalesce(a.finished_at, a.decided_at)) FROM approvals a
               WHERE a.card_id = c.id AND a.kind IN ('merge', 'land_direct')
                 AND a.state IN ('rejected', 'failed')
@@ -783,11 +780,7 @@ SELECT
   c.id, c.display_id, c.project_id, c.kind,
   CASE
     WHEN c.state = 'closed' THEN 'done'
-    WHEN c.kind = 'ship' AND (lp.landing = 1 OR la.landing = 1 OR dw.landing = 1 OR pl.card_id IS NOT NULL) THEN 'landing'
-    WHEN ar.n > 0 THEN 'working'
-    WHEN oh.card_id IS NOT NULL OR od.card_id IS NOT NULL THEN 'queued'
-    WHEN pg.back THEN 'queued'
-    WHEN c.kind = 'ship' AND op.card_id IS NOT NULL THEN 'landing'
+    WHEN c.kind = 'ship' AND pg.reached_landing THEN 'landing'
     WHEN pg.run_at IS NOT NULL THEN 'working'
     ELSE 'queued'
   END AS "column",
@@ -806,7 +799,7 @@ SELECT
     WHEN ar.n > 0 THEN 'unknown'
     WHEN oh.card_id IS NOT NULL THEN 'parked'
     WHEN od.card_id IS NOT NULL THEN 'blocked'
-    WHEN pg.back THEN 'filed'
+    WHEN pg.back THEN 'sent_back'
     WHEN c.kind = 'ship' AND op.unread = 1 THEN 'checks_next'
     WHEN c.kind = 'ship' AND op.failing = 1 THEN 'checks_failed'
     WHEN c.kind = 'ship' AND op.card_id IS NOT NULL THEN 'ready'
@@ -825,7 +818,6 @@ LEFT JOIN landing_prs        lp ON lp.card_id = c.id
 LEFT JOIN landing_approvals  la ON la.card_id = c.id
 LEFT JOIN deploy_watches     dw ON dw.card_id = c.id
 LEFT JOIN open_prs           op ON op.card_id = c.id
-LEFT JOIN pending_lands      pl ON pl.card_id = c.id
 LEFT JOIN progress           pg ON pg.card_id = c.id
 LEFT JOIN open_holds         oh ON oh.card_id = c.id
 LEFT JOIN open_deps          od ON od.card_id = c.id

@@ -18,8 +18,8 @@ use tiller_reconcile::thresholds::Thresholds;
 
 /// R13 (P08): a builder's word is never enough. "done" with no PR leaves
 /// the card in Working, `run.end landed` is refused, and the orchestrator
-/// is told; an open PR with pending checks is Landing; green checks with
-/// no approval wait on the owner only once the merge item exists.
+/// is told; an open PR with pending checks is Landing, and the card stays
+/// there once the checks are green, though the builder is still at work.
 #[test]
 fn ship_card_stays_working_without_pr() {
     let mut w = World::new();
@@ -71,8 +71,9 @@ fn ship_card_stays_working_without_pr() {
     assert_eq!(column.column, Column::Landing);
     assert_eq!(column.badge, "checks");
 
-    // Checks green, not merged: Working again until an approval exists, and
-    // a fresh "done" is answered with the record as it stands now.
+    // Checks green, not merged: still Landing while the builder works (a
+    // card never moves left), and a fresh "done" is answered with the
+    // record as it stands now.
     w.forge.pr(REPO, 7, open_pr("a1a1a1a1"));
     w.store_mut()
         .run_status(
@@ -83,10 +84,9 @@ fn ship_card_stays_working_without_pr() {
         )
         .unwrap();
     w.pass(now().plus_minutes(2));
-    assert_eq!(
-        columns::column(w.store(), &run.card_id).unwrap().column,
-        Column::Working
-    );
+    let column = columns::column(w.store(), &run.card_id).unwrap();
+    assert_eq!(column.column, Column::Landing);
+    assert_ne!(column.badge, "checks");
     assert!(
         w.notes()
             .iter()
@@ -104,7 +104,7 @@ fn ship_card_stays_working_without_pr() {
 /// P08 (R13): the pipeline is part of the evidence. A ship card whose PR is
 /// open but whose pipeline never ran (`pipeline_state` none) is not done on
 /// the worker's word: the pass leaves the orchestrator one note that names
-/// the missing pipeline, the card stays in Working, and the run stays open.
+/// the missing pipeline, the card stays in Landing, and the run stays open.
 #[test]
 fn a_done_report_with_an_open_pr_and_no_pipeline_notes_the_orchestrator() {
     let mut w = World::new();
@@ -147,7 +147,7 @@ fn a_done_report_with_an_open_pr_and_no_pipeline_notes_the_orchestrator() {
     );
     assert_eq!(
         columns::column(w.store(), &run.card_id).unwrap().column,
-        Column::Working
+        Column::Landing
     );
     assert!(w.run(&run.id).ended_at.is_none());
 
@@ -247,10 +247,11 @@ fn board_groups_every_column_and_carries_thresholds() {
 /// A card moves forward only. A gated ship card whose builder ended
 /// `reported` stays in Landing while its PR waits for checks to report and
 /// then for the merge approval to be asked for; a card whose run ended with
-/// no PR stays in Working until its next run. The owner rejecting the merge
-/// approval is what sends a card back to Queued.
+/// no PR stays in Working until its next run, and a hold put on it then
+/// shows in its badge. The owner rejecting the merge approval leaves the
+/// card in Landing, sent back, and the run that reworks it keeps it there.
 #[test]
-fn a_card_never_steps_back_to_queued_between_steps() {
+fn a_card_never_steps_back_between_steps() {
     let mut w = World::new();
     let worker = w.worker("w2:p1");
     let relaunched = w.worker("w3:p1");
@@ -303,6 +304,18 @@ fn a_card_never_steps_back_to_queued_between_steps() {
         column(&w, &other.card_id),
         (Column::Working, "between_runs".into())
     );
+    w.store_mut()
+        .card_hold(
+            &owner(),
+            &other.card_id,
+            now().plus_minutes(60),
+            "waiting on a vendor",
+        )
+        .unwrap();
+    assert_eq!(
+        column(&w, &other.card_id),
+        (Column::Working, "parked".into())
+    );
 
     // Asking for the merge keeps the card in Landing: it waits on the
     // owner there, so it never moves left.
@@ -327,7 +340,32 @@ fn a_card_never_steps_back_to_queued_between_steps() {
         )
         .unwrap();
     let back = columns::column(w.store(), &run.card_id).unwrap();
-    assert_eq!((back.column, back.needs_you), (Column::Queued, false));
+    assert_eq!(
+        (back.column, back.badge.as_str(), back.needs_you),
+        (Column::Landing, "sent_back", false)
+    );
+
+    // The rework run starts: the card stays in Landing.
+    w.store_mut()
+        .run_start(
+            &owner(),
+            None,
+            NewRun {
+                card: run.card_id.clone(),
+                role: RunRole::Builder,
+                model: "test-model".into(),
+                effort: Effort::Medium,
+                host_id: None,
+                worktree_path: Some("/home/user/worktrees/rework".into()),
+                branch: None,
+                base_branch: None,
+                base_sha: None,
+                config_hash: None,
+                checks: SpawnChecks::default(),
+            },
+        )
+        .unwrap();
+    assert_eq!(column(&w, &run.card_id).0, Column::Landing);
 }
 
 /// A card that waits on the owner stays in the column its work has reached:

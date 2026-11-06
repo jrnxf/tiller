@@ -93,6 +93,7 @@ export function cardDot(row: BoardRow): DotKind | null {
       case "ready":
       case "checks_next":
       case "between_runs":
+      case "sent_back":
         return "idle";
       case "stale":
         return "stale";

@@ -705,7 +705,7 @@ fn plan_card(
         created_at,
         closed_at,
         bundle_column: card.column.clone(),
-        column: column(state, kind, &waits, pr.as_ref()),
+        column: column(state, kind, pr.as_ref()),
         waits,
         pr,
         detail: CardDetail {
@@ -723,28 +723,20 @@ fn plan_card(
 const NO_REASON: &str = "Firstmate had this card waiting on the owner with no recorded reason; answer it or close the card.";
 
 /// The `card_column` value the card derives once written: no run is
-/// imported, so an open card is Queued when it is parked or blocked, Landing
-/// when it is a ship card this import links an open PR to, and Queued
-/// otherwise. A question does not change the column: the card waits on the
-/// owner where it is.
-fn column(state: CardState, kind: CardKind, waits: &[Wait], pr: Option<&PrPlan>) -> String {
-    let waiting = waits.iter().any(|w| {
-        matches!(
-            w,
-            Wait::Hold { .. } | Wait::Dependency { released: None, .. }
-        )
-    });
+/// imported, so an open card is Landing when it is a ship card this import
+/// links a PR to, and Queued otherwise. A hold, a dependency or a question
+/// does not change the column: each shows in the badge.
+fn column(state: CardState, kind: CardKind, pr: Option<&PrPlan>) -> String {
     // only a row this import writes is on the card; one that exists stays on its own card
-    let open_pr = pr.is_some_and(|pr| {
+    let linked_pr = pr.is_some_and(|pr| {
         pr.action == Action::Create
-            && pr.state == PrState::Open
             && pr.not_linked.is_none()
             && pr.number.is_some()
             && pr.project_id.is_some()
     });
     if state == CardState::Closed {
         "done"
-    } else if kind == CardKind::Ship && open_pr && !waiting {
+    } else if kind == CardKind::Ship && linked_pr {
         "landing"
     } else {
         "queued"
@@ -968,7 +960,7 @@ fn resolve_dependencies(conn: &Connection, bundle: &Bundle, cards: &mut [CardPla
                     .unwrap_or_else(|| NO_REASON.to_owned()),
             });
         }
-        card.column = column(card.state, card.kind, &card.waits, card.pr.as_ref());
+        card.column = column(card.state, card.kind, card.pr.as_ref());
     }
     refuse_cycles(cards)
 }

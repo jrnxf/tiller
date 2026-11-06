@@ -23,6 +23,7 @@ const LABELS: Record<string, string> = {
   stale: "Stale",
   unknown: "Unknown",
   filed: "Filed",
+  sent_back: "Sent back",
   landed: "Landed",
   reported: "Reported",
   answered: "Answered",
@@ -48,7 +49,7 @@ export type BadgeTone = "warn" | "yel" | "bad" | "ghost" | "ok" | "pend";
 
 // The badges of a card between steps: no run is active and the next step has
 // not started (state.md, section 6).
-const PENDING = new Set(["between_runs", "checks_next", "ready"]);
+const PENDING = new Set(["between_runs", "checks_next", "ready", "sent_back"]);
 
 export function isPending(row: BoardRow): boolean {
   return !row.needs_you && PENDING.has(row.badge);
