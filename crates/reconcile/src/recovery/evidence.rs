@@ -546,18 +546,17 @@ impl Reconciler {
     }
 
     /// Whether the run's pane is gone from this pass's snapshot, or there
-    /// with its agent dead. Without a snapshot nothing is known. A pane row
-    /// names the session only while it is live, so the pane's own `run` and
-    /// `session` tokens find it once the agent has exited.
+    /// with its agent dead. Without a snapshot nothing is known.
     fn run_pane_closed(&self, run: &Run) -> bool {
         let Some(snapshot) = &self.snapshot else {
             return false;
         };
         let panes: Vec<Pane> = list(
             self.conn(),
-            "host_id = ?2 AND (session_id IN (SELECT id FROM sessions WHERE run_id = ?1)
-               OR json_extract(metadata, '$.run') = ?1
-               OR json_extract(metadata, '$.session') IN (SELECT id FROM sessions WHERE run_id = ?1))",
+            &format!(
+                "host_id = ?2 AND {}",
+                tiller_core::state::runs::run_panes(1)
+            ),
             &[&run.id, &self.config.host_id],
         )
         .unwrap_or_default();

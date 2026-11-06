@@ -190,6 +190,17 @@ fn herdr_idle_held(session: &Session, new: &NewObservation) -> bool {
             .is_some_and(|at| new.observed_at.as_millis() - at.as_millis() < HOOK_WORKING_HOLD_MS)
 }
 
+/// A `panes` filter for the panes of the run bound at `?{param}`. A pane row
+/// names its session only while the session is live, so the pane's own `run`
+/// and `session` tokens find it once the agent has exited.
+pub fn run_panes(param: usize) -> String {
+    format!(
+        "(session_id IN (SELECT id FROM sessions WHERE run_id = ?{param})
+          OR json_extract(metadata, '$.run') = ?{param}
+          OR json_extract(metadata, '$.session') IN (SELECT id FROM sessions WHERE run_id = ?{param}))"
+    )
+}
+
 /// The live session of a run.
 pub fn live_session(conn: &Connection, run_id: &str) -> Result<Option<Session>> {
     find(conn, "run_id = ?1 AND ended_at IS NULL", &[&run_id])
@@ -1690,13 +1701,21 @@ impl Store {
             let Some(path) = run.worktree_path.clone() else {
                 return Err(Error::refused("run", &run.id, "run has no worktree"));
             };
-            let worktree: Worktree = find(tx.conn(), "host_id = ?1 AND path = ?2", &[&run.host_id, &path])?
-                .ok_or_else(|| Error::refused("worktree", &path, "no reading of the worktree"))?;
+            let worktree: Worktree = find(
+                tx.conn(),
+                "host_id = ?1 AND path = ?2",
+                &[&run.host_id, &path],
+            )?
+            .ok_or_else(|| Error::refused("worktree", &path, "no reading of the worktree"))?;
             if worktree.gone_at.is_some() {
                 return Ok(run);
             }
             if worktree.fetched_at < ended_at {
-                return Err(Error::refused("worktree", &path, "the reading predates the run's end"));
+                return Err(Error::refused(
+                    "worktree",
+                    &path,
+                    "the reading predates the run's end",
+                ));
             }
             if worktree.unlanded_commits != Some(0) {
                 return Err(Error::refused(
@@ -1714,15 +1733,21 @@ impl Store {
                 ));
             }
             if !pane_closed {
-                return Err(Error::refused("run", &run.id, "the run's pane is still alive"));
+                return Err(Error::refused(
+                    "run",
+                    &run.id,
+                    "the run's pane is still alive",
+                ));
             }
             tx.conn().execute(
                 "UPDATE worktrees SET gone_at = ?3 WHERE host_id = ?1 AND path = ?2",
                 params![run.host_id, path, tx.now()],
             )?;
             tx.conn().execute(
-                "UPDATE panes SET gone_at = ?2
-                 WHERE gone_at IS NULL AND session_id IN (SELECT id FROM sessions WHERE run_id = ?1)",
+                &format!(
+                    "UPDATE panes SET gone_at = ?2 WHERE gone_at IS NULL AND {}",
+                    run_panes(1)
+                ),
                 params![run.id, tx.now()],
             )?;
             tx.event(
