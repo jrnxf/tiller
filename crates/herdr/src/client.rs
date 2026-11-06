@@ -240,6 +240,43 @@ impl Cli {
         size_from(&result, pane_id)
     }
 
+    /// The size a pane's screen is drawn at, in cells (`cols`, `rows`), or
+    /// `None` when herdr no longer has the pane: its PTY's size when it has
+    /// one on this machine to read (see [`Tty`]), else its layout's.
+    pub fn terminal_size(&self, pane_id: &str) -> Result<Option<(u16, u16)>> {
+        Ok(self.terminal(pane_id)?.map(|(size, _)| size))
+    }
+
+    /// A pane's screen size, as [`Cli::terminal_size`] gives it, with the
+    /// PTY it was read from, for a caller that reads it again.
+    pub fn terminal(&self, pane_id: &str) -> Result<Option<(Cells, Option<Tty>)>> {
+        let Some(layout) = self.pane_size(pane_id)? else {
+            return Ok(None);
+        };
+        let tty = self.pane_tty(pane_id);
+        Ok(Some((
+            tty.as_ref().and_then(Tty::size).unwrap_or(layout),
+            tty,
+        )))
+    }
+
+    /// A local pane's PTY, found through its shell (`herdr pane
+    /// process-info`), or `None` on a saved machine or when herdr cannot
+    /// name it.
+    pub fn pane_tty(&self, pane_id: &str) -> Option<Tty> {
+        if self.machine.is_some() {
+            return None;
+        }
+        let result = self
+            .result(&["pane", "process-info", "--pane", pane_id])
+            .ok()?;
+        let pid = result
+            .pointer("/process_info/shell_pid")
+            .and_then(Value::as_u64)
+            .and_then(|pid| u32::try_from(pid).ok())?;
+        terminal_of(pid).map(Tty)
+    }
+
     /// A pane's last `lines` rendered rows, scrollback first and the screen
     /// last, with their colors as ANSI escapes (`herdr pane read --source
     /// recent`). herdr reads 1000 rows at most.
@@ -535,6 +572,63 @@ fn size_from(result: &Value, pane_id: &str) -> Result<Option<(u16, u16)>> {
     }
 }
 
+/// A size in cells (`cols`, `rows`).
+pub type Cells = (u16, u16);
+
+/// A local pane's PTY, whose window size is the screen the agent draws at.
+/// With no herdr client attached, herdr 0.9.5 lays its tabs out at its
+/// headless size (120 by 40) but leaves each pane's PTY at the size the
+/// last client gave it, so `pane layout` can be smaller than that screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tty(PathBuf);
+
+impl Tty {
+    /// The PTY's window size (`cols`, `rows`), or `None` when it cannot be
+    /// read.
+    pub fn size(&self) -> Option<(u16, u16)> {
+        window_size(&self.0)
+    }
+}
+
+/// The terminal a process runs on: the device behind its stdin, which
+/// herdr gives a pane's shell as the PTY. The device, not the process's
+/// link to it, so a pid used again later names no other terminal.
+#[cfg(target_os = "linux")]
+fn terminal_of(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/fd/0"))
+        .ok()
+        .filter(|path| path.is_absolute())
+}
+
+/// The terminal a process runs on: its controlling terminal, which herdr
+/// makes the pane's PTY, as `ps` names it.
+#[cfg(not(target_os = "linux"))]
+fn terminal_of(pid: u32) -> Option<PathBuf> {
+    let out = Command::new("/bin/ps")
+        .args(["-o", "tty=", "-p", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let name = String::from_utf8(out.stdout).ok()?;
+    let name = name.trim();
+    let plain = !name.is_empty()
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '/')
+        && !name.starts_with('/');
+    (out.status.success() && plain).then(|| Path::new("/dev").join(name))
+}
+
+/// The window size (`cols`, `rows`) of the terminal at `path`, opened
+/// without making it this process's controlling terminal, or `None` when it
+/// is no terminal or has no size.
+fn window_size(path: &Path) -> Option<(u16, u16)> {
+    use rustix::fs::{Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::NOCTTY | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let terminal = rustix::fs::open(path, flags, Mode::empty()).ok()?;
+    let size = rustix::termios::tcgetwinsize(&terminal).ok()?;
+    (size.ws_col > 0 && size.ws_row > 0).then_some((size.ws_col, size.ws_row))
+}
+
 /// A bare program name's first match on `PATH`; a name with a slash is
 /// already a path.
 fn on_path(program: &OsString) -> Option<PathBuf> {
@@ -819,6 +913,55 @@ mod tests {
         assert_eq!(size_from(&result, "w1:p2").unwrap(), Some((128, 43)));
         assert_eq!(size_from(&result, "w1:p9").unwrap(), None);
         assert!(size_from(&json!({"layout": {}}), "w1:p2").is_err());
+    }
+
+    #[test]
+    fn a_terminal_gives_its_window_size() {
+        let pty = crate::testing::Pty::new(130, 50);
+        assert_eq!(window_size(&pty.path()), Some((130, 50)));
+        assert_eq!(window_size(Path::new("/dev/null")), None);
+        assert_eq!(window_size(Path::new("/no/such/terminal")), None);
+    }
+
+    /// herdr lays its tabs out at 120 by 40 with no client attached while
+    /// the pane's PTY keeps the size the last client gave it: the screen is
+    /// the PTY's size, so the mirror draws every row of it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_terminal_size_is_the_pty_size_not_the_layout() {
+        let pty = crate::testing::Pty::new(130, 50);
+        let dir = tempfile::tempdir().unwrap();
+        let script = format!(
+            r#"case "$*" in
+*"pane layout"*)
+  [ -e '{dir}/gone' ] && pane=gone || pane=w1:p1
+  printf '{{"result":{{"layout":{{"panes":[{{"pane_id":"%s","rect":{{"width":120,"height":40}}}}]}}}}}}\n' "$pane";;
+*"pane process-info"*)
+  [ -e '{dir}/no-shell' ] && exit 1
+  printf '{{"result":{{"process_info":{{"pane_id":"w1:p1","shell_pid":{pid}}}}}}}\n';;
+esac"#,
+            dir = dir.path().display(),
+            pid = pty.shell_pid()
+        );
+        let cli = Cli::local().program(vec!["sh".into(), "-c".into(), script.into(), "--".into()]);
+
+        assert_eq!(cli.terminal_size("w1:p1").unwrap(), Some((130, 50)));
+        pty.resize(132, 45);
+        assert_eq!(cli.terminal_size("w1:p1").unwrap(), Some((132, 45)));
+        // The PTY is the shell's device, which reads again without herdr.
+        let tty = cli.pane_tty("w1:p1").unwrap();
+        assert_eq!(tty, Tty(pty.path()));
+        pty.resize(140, 48);
+        assert_eq!(tty.size(), Some((140, 48)));
+        // A saved machine's PTY is not on this one: the layout is all there is.
+        let remote = cli.clone().on_machine("m-1");
+        assert_eq!(remote.terminal_size("w1:p1").unwrap(), Some((120, 40)));
+        // A shell herdr cannot name leaves the layout's size.
+        std::fs::write(dir.path().join("no-shell"), "").unwrap();
+        assert_eq!(cli.terminal_size("w1:p1").unwrap(), Some((120, 40)));
+        // A closed pane has no size.
+        std::fs::write(dir.path().join("gone"), "").unwrap();
+        assert_eq!(cli.terminal_size("w1:p1").unwrap(), None);
     }
 
     #[test]

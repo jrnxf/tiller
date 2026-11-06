@@ -208,3 +208,61 @@ impl Fleet {
         }
     }
 }
+
+/// A PTY with a stand-in shell on it, as herdr gives each pane: the shell
+/// reads from the PTY's terminal, so its stdin tells the PTY's window size.
+/// The shell is killed when this drops.
+pub struct Pty {
+    controller: std::os::fd::OwnedFd,
+    shell: std::process::Child,
+}
+
+impl Pty {
+    pub fn new(cols: u16, rows: u16) -> Self {
+        use rustix::pty::OpenptFlags;
+        let controller = rustix::pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
+        rustix::pty::grantpt(&controller).unwrap();
+        rustix::pty::unlockpt(&controller).unwrap();
+        let path = rustix::pty::ptsname(&controller, Vec::new()).unwrap();
+        // Never the test process's controlling terminal, which would hang
+        // it up when the controller closes.
+        let flags = rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOCTTY;
+        let terminal = rustix::fs::open(path.as_c_str(), flags, rustix::fs::Mode::empty()).unwrap();
+        let shell = std::process::Command::new("sleep")
+            .arg("600")
+            .stdin(terminal)
+            .spawn()
+            .unwrap();
+        let pty = Self { controller, shell };
+        pty.resize(cols, rows);
+        pty
+    }
+
+    /// The path of the PTY's terminal.
+    pub fn path(&self) -> PathBuf {
+        let path = rustix::pty::ptsname(&self.controller, Vec::new()).unwrap();
+        PathBuf::from(path.into_string().unwrap())
+    }
+
+    pub fn shell_pid(&self) -> u32 {
+        self.shell.id()
+    }
+
+    /// Resizes the PTY, as a herdr client does when its window changes.
+    pub fn resize(&self, cols: u16, rows: u16) {
+        let size = rustix::termios::Winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        rustix::termios::tcsetwinsize(&self.controller, size).unwrap();
+    }
+}
+
+impl Drop for Pty {
+    fn drop(&mut self) {
+        let _ = self.shell.kill();
+        let _ = self.shell.wait();
+    }
+}

@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use axum::body::{Body, Bytes};
 use serde::Deserialize;
 use serde_json::Value;
-use tiller_herdr::client::Cli;
+use tiller_herdr::client::{Cells, Cli, Tty};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{OwnedMutexGuard, mpsc, watch};
@@ -314,9 +314,11 @@ impl Fits {
     }
 
     /// Gives back every pane a Fit still held when the daemon last stopped,
-    /// at the size herdr's layout gives it now. A pane herdr no longer has,
-    /// or that another client controls, is dropped from the list all the
-    /// same: there is nothing left to undo.
+    /// at the size it had before the Fit: herdr's layout can be smaller than
+    /// the pane's PTY (see [`Tty`]), and a herdr client showing the pane lays
+    /// it out again itself. A pane herdr no longer has, or that another
+    /// client controls, is dropped from the list all the same: there is
+    /// nothing left to undo.
     pub async fn restore_left(self: &Arc<Self>, herdr: &Cli) {
         for pane in self.held().into_keys() {
             let Some(_turn) = self.turn(&pane).await else {
@@ -327,12 +329,9 @@ impl Fits {
                 continue;
             };
             let (sizer, asked) = (herdr.clone().timeout(SIZE_TIMEOUT), pane.clone());
-            let size = match tokio::task::spawn_blocking(move || sizer.pane_size(&asked)).await {
-                Ok(Ok(now)) => now,
-                _ => Some(saved),
-            };
-            if let Some(size) = size {
-                let (cols, rows) = size;
+            let gone = tokio::task::spawn_blocking(move || sizer.pane_size(&asked)).await;
+            if !matches!(gone, Ok(Ok(None))) {
+                let (cols, rows) = saved;
                 let mut command = Command::from(herdr.control_command(&pane, cols, rows));
                 command
                     .stdin(Stdio::piped())
@@ -343,7 +342,7 @@ impl Fits {
                     && let Some(stdout) = child.stdout.take()
                 {
                     let stdin = child.stdin.take();
-                    give_back(&mut child, stdin, &mut BufReader::new(stdout), size).await;
+                    give_back(&mut child, stdin, &mut BufReader::new(stdout), saved).await;
                     tracing::info!(pane, cols, rows, "gave a pane back its size after a Fit");
                 }
             }
@@ -352,14 +351,15 @@ impl Fits {
     }
 }
 
-/// The NDJSON body that streams `pane` to one viewer, starting at `size`,
-/// or at `fit` with the pane resized to it. The stream ends when the browser
+/// The NDJSON body that streams `pane` to one viewer, starting at the size
+/// in `terminal` (read again from its PTY, when it has one), or at `fit`
+/// with the pane resized to it. The stream ends when the browser
 /// leaves, the pane closes, herdr stops answering, or the daemon stops; the
 /// herdr child is killed with it, once a Fit has given the pane back.
 pub fn stream(
     herdr: Cli,
     pane: String,
-    size: (u16, u16),
+    terminal: (Cells, Option<Tty>),
     fit: Option<(u16, u16)>,
     fits: Arc<Fits>,
     stop: watch::Receiver<bool>,
@@ -368,7 +368,8 @@ pub fn stream(
     let (tx, mut rx) = mpsc::channel::<Bytes>(QUEUE);
     tokio::spawn(async move {
         let _viewer = viewer;
-        mirror(&herdr, &pane, size, fit, &fits, stop, &tx).await;
+        let (size, tty) = terminal;
+        mirror(&herdr, &pane, size, tty.as_ref(), fit, &fits, stop, &tx).await;
     });
     let lines = futures_util::stream::poll_fn(move |cx| {
         rx.poll_recv(cx).map(|line| line.map(Ok::<_, Infallible>))
@@ -399,11 +400,14 @@ enum Ended {
 }
 
 /// A Fit's hold on the pane: where its size to give back is kept, the
-/// board's size as it changes, and herdr's control input to send it to.
+/// board's size as it changes, herdr's control input to send it to, and the
+/// pane's layout size last read, which alone tells that herdr laid the pane
+/// out again while the Fit holds its PTY at the board's size.
 struct Control<'a> {
     fits: &'a Arc<Fits>,
     board: watch::Receiver<(u16, u16)>,
     stdin: ChildStdin,
+    layout: Option<(u16, u16)>,
 }
 
 /// The board's next size for a Fit; never for a plain observe, or once
@@ -422,17 +426,19 @@ fn resize_line(cols: u16, rows: u16) -> String {
     format!("{{\"type\":\"terminal.resize\",\"cols\":{cols},\"rows\":{rows}}}\n")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn mirror(
     herdr: &Cli,
     pane: &str,
     mut size: (u16, u16),
+    tty: Option<&Tty>,
     fit: Option<(u16, u16)>,
     fits: &Arc<Fits>,
     mut stop: watch::Receiver<bool>,
     tx: &mpsc::Sender<Bytes>,
 ) {
     if let Some(fit) = fit {
-        match fitted(herdr, pane, &mut size, fit, fits, &mut stop, tx).await {
+        match fitted(herdr, pane, &mut size, tty, fit, fits, &mut stop, tx).await {
             // The view goes on unfitted, at the pane's own size.
             Some(message) => {
                 if !queue(tx, &TerminalLine::Unfit { message }) {
@@ -467,6 +473,7 @@ async fn mirror(
                     herdr,
                     pane,
                     &mut size,
+                    tty,
                     None,
                     &mut reader,
                     errors,
@@ -500,14 +507,16 @@ async fn mirror(
 }
 
 /// Streams the pane at the board's size, `fit` and then any refit, through
-/// herdr's control session, then gives it back at its own size, which `size`
-/// follows if the pane's layout changes meanwhile. `None` when the stream is
-/// over; herdr's reason when it would not hand the pane over, for the caller
-/// to go on without the Fit.
+/// herdr's control session, then gives it back at its own size, read into
+/// `size` once the Fit has its turn, which becomes the layout's size if
+/// herdr lays the pane out again meanwhile. `None` when the stream is over; herdr's reason when it would
+/// not hand the pane over, for the caller to go on without the Fit.
+#[allow(clippy::too_many_arguments)]
 async fn fitted(
     herdr: &Cli,
     pane: &str,
     size: &mut (u16, u16),
+    tty: Option<&Tty>,
     fit: (u16, u16),
     fits: &Arc<Fits>,
     stop: &mut watch::Receiver<bool>,
@@ -517,6 +526,21 @@ async fn fitted(
         return Some(
             "another view holds a Fit on this pane, or is still giving it back".to_owned(),
         );
+    };
+    // Read now, not when the view opened: a Fit before this one held the
+    // pane at its board's size until it gave the pane back.
+    let (sizer, asked, read) = (
+        herdr.clone().timeout(SIZE_TIMEOUT),
+        pane.to_owned(),
+        tty.cloned(),
+    );
+    let sized = tokio::task::spawn_blocking(move || sizes(&sizer, &asked, read.as_ref())).await;
+    let layout = match sized {
+        Ok(Ok(Some((own, layout)))) => {
+            *size = own;
+            Some(layout)
+        }
+        _ => None,
     };
     fits.hold(pane, *size).await;
     let (cols, rows) = fit;
@@ -540,12 +564,14 @@ async fn fitted(
                 fits,
                 board: fits.board(pane, fit),
                 stdin,
+                layout,
             };
             let ended = if queue(tx, &TerminalLine::Size { cols, rows }) {
                 observe(
                     herdr,
                     pane,
                     size,
+                    tty,
                     Some(&mut control),
                     &mut reader,
                     errors,
@@ -625,6 +651,7 @@ async fn observe(
     herdr: &Cli,
     pane: &str,
     size: &mut (u16, u16),
+    tty: Option<&Tty>,
     mut control: Option<&mut Control<'_>>,
     reader: &mut BufReader<ChildStdout>,
     errors: JoinHandle<String>,
@@ -697,15 +724,24 @@ async fn observe(
                 continue;
             }
             Woke::Tick => {
-                let (sizer, asked) = (sizer.clone(), pane.to_owned());
-                match tokio::task::spawn_blocking(move || sizer.pane_size(&asked)).await {
-                    // A Fit gives the pane back at its layout's size now.
-                    Ok(Ok(Some(now))) if now != *size => match control.as_mut() {
-                        None => return Ended::Resized(now),
-                        Some(control) => {
-                            *size = now;
-                            control.fits.hold(pane, now).await;
+                let (sizer, asked, read) = (sizer.clone(), pane.to_owned(), tty.cloned());
+                let read =
+                    tokio::task::spawn_blocking(move || sizes(&sizer, &asked, read.as_ref()));
+                match read.await {
+                    Ok(Ok(Some((own, layout)))) => match control.as_mut() {
+                        None if own != *size => return Ended::Resized(own),
+                        None => {}
+                        // A Fit holds the PTY at the board's size, so only
+                        // the layout can say the pane moved; the Fit gives
+                        // the pane back at its new layout's size.
+                        Some(control) if control.layout != Some(layout) => {
+                            if control.layout.is_some() {
+                                *size = layout;
+                                control.fits.hold(pane, layout).await;
+                            }
+                            control.layout = Some(layout);
                         }
+                        Some(_) => {}
                     },
                     Ok(Ok(None)) => {
                         let reason = Some("pane_closed".to_owned());
@@ -763,6 +799,18 @@ async fn observe(
             _ => {}
         }
     }
+}
+
+/// A pane's own size and its layout's, or `None` when herdr no longer has
+/// the pane. Its own size is its PTY's, read from `tty` when there is one,
+/// since herdr can lay a pane out smaller than its PTY (see [`Tty`]).
+fn sizes(
+    herdr: &Cli,
+    pane: &str,
+    tty: Option<&Tty>,
+) -> tiller_herdr::client::Result<Option<(Cells, Cells)>> {
+    let layout = herdr.pane_size(pane)?;
+    Ok(layout.map(|layout| (tty.and_then(Tty::size).unwrap_or(layout), layout)))
 }
 
 /// Returns once the daemon is stopping; never when nothing can stop it.

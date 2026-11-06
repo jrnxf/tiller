@@ -2253,18 +2253,18 @@ async fn terminal(
     })?;
     let herdr = state.0.herdr.clone();
     let asked = pane.clone();
-    let size = tokio::task::spawn_blocking(move || herdr.pane_size(&asked))
+    let terminal = tokio::task::spawn_blocking(move || herdr.terminal(&asked))
         .await
         .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?;
-    let size = match size {
-        Ok(Some(size)) => size,
+    let terminal = match terminal {
+        Ok(Some(terminal)) => terminal,
         Ok(None) => return Err(pane_gone(&pane)),
         Err(error) => return Err(pane_error(&pane, &error)),
     };
     let body = mirror::stream(
         state.0.herdr.clone(),
         pane,
-        size,
+        terminal,
         fit,
         state.0.mirrors.fits(),
         state.0.stop.clone(),
@@ -2602,7 +2602,7 @@ async fn terminal_tail(
     // has gone.
     let tail = tokio::task::spawn_blocking(move || {
         let _read = read;
-        let Some(size) = herdr.pane_size(&target)? else {
+        let Some(size) = herdr.terminal_size(&target)? else {
             return Ok(None);
         };
         herdr.read_visible(&target).map(|text| Some((size, text)))
@@ -4239,6 +4239,9 @@ case "$*" in
   for pane; do :; done
   [ -e '{dir}/gone' ] && pane=gone
   printf '{{"result":{{"layout":{{"panes":[{{"pane_id":"%s","rect":{{"width":%s,"height":%s}}}}]}}}}}}\n' "$pane" "$cols" "$rows";;
+*"pane process-info"*)
+  [ -e '{dir}/shell' ] || exit 1
+  printf '{{"result":{{"process_info":{{"shell_pid":%s}}}}}}\n' "$(cat '{dir}/shell')";;
 *"terminal session observe"*)
   echo $$ >> '{dir}/observers'
   full=$(cat '{dir}/full' 2>/dev/null || echo true)
@@ -4748,6 +4751,100 @@ esac"#,
         assert!(gone(&second[1]).await, "the observe outlived its viewer");
     }
 
+    /// herdr lays its tabs out at 120 by 40 with no client attached, while
+    /// each pane's PTY keeps the size the last client gave it. The mirror
+    /// draws at the PTY's size, so no row of the agent's screen is cut off,
+    /// and a Fit gives the pane back at it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_mirror_draws_at_the_panes_pty_size_not_herdrs_headless_layout() {
+        let mut fleet = Fleet::new();
+        let session = fleet.worker("w2:p1");
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+        let app = mirror_app(&fleet, dir);
+        std::fs::write(dir.join("size"), "120 40\n").unwrap();
+        let pty = tiller_herdr::testing::Pty::new(120, 43);
+        std::fs::write(dir.join("shell"), pty.shell_pid().to_string()).unwrap();
+        let cookie = owner_cookie(fleet.dir.path());
+        let fits = fleet.dir.path().join("mirror-fits.json");
+        let held = || std::fs::read_to_string(&fits).ok();
+        let open = |request: Value| {
+            mutation(
+                "POST",
+                &format!("/api/v1/agents/{session}/terminal"),
+                request,
+                &[("cookie", &cookie)],
+            )
+        };
+
+        let response = app.clone().oneshot(open(json!({}))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let mut pending = String::new();
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "size", "cols": 120, "rows": 43})
+        );
+        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+        let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
+        assert!(
+            calls.contains("terminal session observe w2:p1 --cols 120 --rows 43"),
+            "{calls}"
+        );
+        // A herdr client resizes the PTY and the layout stays: the mirror
+        // follows the PTY.
+        pty.resize(150, 50);
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "size", "cols": 150, "rows": 50})
+        );
+        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+        drop(body);
+
+        let response = app
+            .clone()
+            .oneshot(open(json!({"fit": {"cols": 100, "rows": 30}})))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let mut pending = String::new();
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "size", "cols": 100, "rows": 30})
+        );
+        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+        assert_eq!(held().as_deref(), Some(r#"{"w2:p1":[150,50]}"#));
+        // A size read passes with the layout where it was: the size to give
+        // back is still the PTY's.
+        let reads = || {
+            std::fs::read_to_string(dir.join("calls"))
+                .unwrap()
+                .matches("pane layout --pane w2:p1")
+                .count()
+        };
+        let (before, deadline) = (
+            reads(),
+            std::time::Instant::now() + std::time::Duration::from_secs(10),
+        );
+        while reads() == before {
+            assert!(std::time::Instant::now() < deadline, "no size read came");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(held().as_deref(), Some(r#"{"w2:p1":[150,50]}"#));
+        let control = std::fs::read_to_string(dir.join("controllers")).unwrap();
+        drop(body);
+        assert!(
+            gone(control.trim()).await,
+            "the control outlived its viewer"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("control-in")).unwrap(),
+            "{\"type\":\"terminal.resize\",\"cols\":150,\"rows\":50}\n{\"type\":\"terminal.release\"}\n"
+        );
+    }
+
     #[tokio::test]
     async fn an_observe_that_never_sends_a_full_frame_gives_up() {
         let mut fleet = Fleet::new();
@@ -4951,21 +5048,35 @@ esac"#,
         std::fs::write(&fits, r#"{"w2:p1":[80,24]}"#).unwrap();
         let mirrors = Mirrors::new(home.path());
         let herdr = mirror_herdr(dir);
-        // herdr's layout changed while the daemon was down: the pane goes
-        // back to the size the layout gives it now.
-        std::fs::write(dir.join("size"), "90 28\n").unwrap();
+        // herdr's layout is not the pane's size (it lays tabs out at 120 by
+        // 40 with no client attached): the pane goes back to the size it had
+        // before the Fit.
+        std::fs::write(dir.join("size"), "120 40\n").unwrap();
         mirrors.fits().restore_left(&herdr).await;
         let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
         assert!(
-            calls.contains("terminal session control w2:p1 --cols 90 --rows 28"),
+            calls.contains("terminal session control w2:p1 --cols 80 --rows 24"),
             "{calls}"
         );
         assert_eq!(
             std::fs::read_to_string(dir.join("control-in")).unwrap(),
-            "{\"type\":\"terminal.resize\",\"cols\":90,\"rows\":28}\n{\"type\":\"terminal.release\"}\n"
+            "{\"type\":\"terminal.resize\",\"cols\":80,\"rows\":24}\n{\"type\":\"terminal.release\"}\n"
         );
         assert!(!fits.exists());
         assert!(mirrors.fits().held().is_empty());
+
+        // A pane herdr no longer has is dropped with nothing to give back.
+        std::fs::write(&fits, r#"{"w2:p1":[80,24]}"#).unwrap();
+        std::fs::write(dir.join("gone"), "").unwrap();
+        let mirrors = Mirrors::new(home.path());
+        mirrors.fits().restore_left(&herdr).await;
+        let after = std::fs::read_to_string(dir.join("calls")).unwrap();
+        assert_eq!(
+            after.matches("terminal session control").count(),
+            1,
+            "{after}"
+        );
+        assert!(!fits.exists());
     }
 
     #[test]

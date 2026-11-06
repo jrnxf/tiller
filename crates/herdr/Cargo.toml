@@ -10,10 +10,11 @@ publish = false
 
 [features]
 # The fake herdr server and the test fleet, for other crates' tests.
-testing = ["dep:tempfile"]
+testing = ["dep:tempfile", "rustix/pty"]
 
 [dependencies]
 rusqlite.workspace = true
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile = { workspace = true, optional = true }
@@ -23,6 +24,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+rustix = { workspace = true, features = ["pty"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true

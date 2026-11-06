@@ -45,6 +45,7 @@ ring = "0.17"
 rusqlite = { version = "0.40", features = ["bundled", "serde_json"] }
 rusqlite_migration = "2.6"
 rust-embed = { version = "8", features = ["mime-guess"] }
+rustix = { version = "1", features = ["fs", "termios"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.11"
