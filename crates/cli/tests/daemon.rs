@@ -599,8 +599,14 @@ fn the_login_code_signs_in_at_an_allowed_host_until_sign_out() {
     let (head, body) = read("tiller_owner=none");
     assert!(head.starts_with("HTTP/1.0 403"), "{head}");
     assert!(body.contains("signed_out"), "{body}");
+    // The signed-out page carries no snapshot. A build without board/dist,
+    // as in the Nix test sandbox, answers 503 with how to build it instead.
     let (page, html) = exchange(port, "GET / HTTP/1.0\r\nHost: tiller.example.com\r\n\r\n");
-    assert!(page.starts_with("HTTP/1.0 200"), "{page}");
+    assert!(
+        page.starts_with("HTTP/1.0 200")
+            || (page.starts_with("HTTP/1.0 503") && html.contains("bun run build")),
+        "{page}"
+    );
     assert!(!html.contains("tiller-boot"));
 
     let out = world.run(&["board", "--login"]);
