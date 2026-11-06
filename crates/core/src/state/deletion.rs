@@ -1195,6 +1195,11 @@ mod tests {
             .unwrap()
             .value;
         assert_eq!(fresh.display_id, "alpha-1");
+        assert_eq!(
+            store.deleted_card_seq("alpha").unwrap(),
+            None,
+            "a live project numbers nothing, so a replayed add warns of nothing"
+        );
     }
 
     /// A dependency between alpha's and beta's cards, either way, is cut with

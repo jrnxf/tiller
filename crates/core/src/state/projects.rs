@@ -448,8 +448,12 @@ impl Store {
     }
 
     /// The `next_card_seq` where a deleted project with this id stopped, or
-    /// `None` when no project with this id was deleted.
+    /// `None` when no project with this id was deleted or a live project holds
+    /// the id (an add of it replays or is refused, and numbers nothing).
     pub fn deleted_card_seq(&self, project_id: &str) -> Result<Option<i64>> {
+        if find::<Project>(self.conn(), "id = ?1", &[&project_id])?.is_some() {
+            return Ok(None);
+        }
         deleted_card_seq(self.conn(), project_id)
     }
 

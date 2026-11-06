@@ -47,9 +47,10 @@ pub fn numbering(
     })
 }
 
-/// The run branches of `project_id` in `checkout`, as local and
-/// remote-tracking branches and on its origin, or on `remote` when no
-/// checkout is configured.
+/// The run branches of `project_id` in `checkout` and on its origin, or on
+/// `remote` when no checkout is configured. Remote-tracking refs are not
+/// counted: they outlive a branch deleted on the remote until a prune, and
+/// `ls-remote` asks the origin itself.
 pub fn left_run_branches(
     project_id: &str,
     checkout: Option<&Path>,
@@ -60,18 +61,12 @@ pub fn left_run_branches(
         (Some(checkout), _) => {
             let refs = git(
                 Some(checkout),
-                &[
-                    "for-each-ref",
-                    "--format=%(refname)",
-                    "refs/heads/tiller/",
-                    "refs/remotes/origin/tiller/",
-                ],
+                &["for-each-ref", "--format=%(refname)", "refs/heads/tiller/"],
             )?;
-            names.extend(refs.lines().filter_map(|line| {
-                line.strip_prefix("refs/heads/")
-                    .or_else(|| line.strip_prefix("refs/remotes/origin/"))
-                    .map(str::to_owned)
-            }));
+            names.extend(
+                refs.lines()
+                    .filter_map(|line| line.strip_prefix("refs/heads/").map(str::to_owned)),
+            );
             git(Some(checkout), &["ls-remote", "--heads", "origin"])?
         }
         (None, Some(remote)) => git(None, &["ls-remote", "--heads", remote])?,
@@ -207,6 +202,32 @@ mod tests {
         assert_eq!(
             left_run_branches("alpha", Some(&clone), None).unwrap(),
             BTreeSet::from(["tiller/alpha-1-build".into(), "tiller/alpha-3-build".into()])
+        );
+        // A remote-tracking ref left after the remote branch is gone is stale.
+        run(&clone, &["fetch", "--quiet", "origin"]);
+        run(
+            &clone,
+            &[
+                "push",
+                "--quiet",
+                "origin",
+                ":refs/heads/tiller/alpha-3-build",
+            ],
+        );
+        run(&clone, &["branch", "-D", "tiller/alpha-1-build"]);
+        assert!(
+            left_run_branches("alpha", Some(&clone), None)
+                .unwrap()
+                .is_empty()
+        );
+        run(
+            &clone,
+            &[
+                "push",
+                "--quiet",
+                "origin",
+                "HEAD:refs/heads/tiller/alpha-3-build",
+            ],
         );
         let url = origin.to_str().unwrap();
         assert_eq!(

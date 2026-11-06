@@ -234,13 +234,9 @@ pub fn project(app: &App, cmd: ProjectCmd) -> Done {
             };
             // A config.toml that does not parse only hides the checkout: the
             // remote is still looked at.
-            let checkout = load_config(app).ok().and_then(|table| {
-                table
-                    .get("checkouts")
-                    .and_then(|checkouts| checkouts.get(&new.id))
-                    .and_then(toml::Value::as_str)
-                    .map(PathBuf::from)
-            });
+            let checkout = load_config(app)
+                .ok()
+                .and_then(|table| checkout_of(&table, &new.id).map(PathBuf::from));
             let (numbering, note) = numbering(&store, &new, checkout.as_deref())?;
             Ok(
                 Outcome::applied(store.project_add_numbered(&app.ctx(), new, numbering)?)
@@ -325,11 +321,7 @@ fn project_delete(app: &App, store: &mut Store, args: ProjectDelete) -> Done {
     // Read before the delete, so a config.toml that does not parse turns into
     // a warning on a delete that happened, not a failure after it.
     let warning = match load_config(app) {
-        Ok(table) => table
-            .get("checkouts")
-            .and_then(|checkouts| checkouts.get(&args.id))
-            .and_then(toml::Value::as_str)
-            .map(|path| {
+        Ok(table) => checkout_of(&table, &args.id).map(|path| {
                 format!(
                     "config.toml still has checkouts.{} = {path:?}; the checkout and that key are left as they are",
                     args.id
@@ -352,6 +344,14 @@ fn project_delete(app: &App, store: &mut Store, args: ProjectDelete) -> Done {
         .collect();
     let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
     Ok(Outcome::applied(applied).with_warning(warning))
+}
+
+/// `checkouts.<project>` in a parsed config.toml.
+fn checkout_of<'a>(config: &'a toml::Table, project: &str) -> Option<&'a str> {
+    config
+        .get("checkouts")
+        .and_then(|checkouts| checkouts.get(project))
+        .and_then(toml::Value::as_str)
 }
 
 /// `tiller project retire`: with `--stop-agents`, stops the project's
