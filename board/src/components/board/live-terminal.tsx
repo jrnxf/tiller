@@ -10,7 +10,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import type { ReactNode, Ref } from "react";
+import type { MouseEvent as ReactMouseEvent, ReactNode, Ref } from "react";
 import { createPortal } from "react-dom";
 
 import { createStore, useStore } from "../../lib/store";
@@ -968,6 +968,19 @@ export function LiveTerminal({
     ) : null;
   const historyOpen = canHistory && history !== null;
   const shownHistory = historyOpen && history !== "reading" ? history : null;
+  // A click anywhere on the screen types, not only on the pane's own cells:
+  // the stage is often wider and taller than the pane it shows.
+  const typeFromScreen = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const term = termRef.current;
+    const target = event.target as Node;
+    if (event.button !== 0 || tail || phone || typing || shownHistory) return;
+    if (!term?.element || term.options.disableStdin || term.element.contains(target)) return;
+    if (target instanceof Element && target.closest("button, a, input, textarea")) return;
+    // Else the press moves focus to the body right after the screen takes it.
+    event.preventDefault();
+    term.focus();
+  };
+
   // Esc goes back to live wherever focus is, unless a dialog takes it. The
   // scrollback's own screen catches it first and marks it taken.
   useEffect(() => {
@@ -986,6 +999,7 @@ export function LiveTerminal({
       className="mir-s"
       role="group"
       aria-label={`${tail ? "Tail" : "Live terminal"} for ${label}`}
+      onMouseDown={typeFromScreen}
       // Scrolling up on the stage reads back, as it would in the terminal.
       onWheel={(event) => {
         if (event.deltaY < 0 && canHistory && history === null && !typing) openHistory();
@@ -1120,6 +1134,7 @@ export function LiveTerminal({
                   role="group"
                   aria-label={`${tail ? "Tail" : "Live terminal"} for ${label}`}
                   hidden={!screenShown}
+                  onMouseDown={typeFromScreen}
                 >
                   <div className="mir-slot" ref={setBigBox} />
                   {veil}
