@@ -907,9 +907,10 @@ button.colh:hover {
   border-radius: var(--r8);
   overflow: hidden;
 }
+/* The time column fits an older event's "Thu 15 Nov, 23:49" on one line. */
 .evlog div {
   display: grid;
-  grid-template-columns: 76px 84px minmax(0, 1fr);
+  grid-template-columns: 17ch 84px minmax(0, 1fr);
   gap: 8px;
   padding: 4px 10px;
   border-bottom: 1px solid var(--line-soft);
@@ -1694,7 +1695,7 @@ a.card:hover {
     padding: 14px 14px 40px;
   }
   .evlog div {
-    grid-template-columns: 58px minmax(0, 1fr);
+    grid-template-columns: 17ch minmax(0, 1fr);
   }
   .evlog .src {
     display: none;
