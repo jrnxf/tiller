@@ -13,7 +13,9 @@ use tiller_core::state::cards::NewCard;
 use tiller_core::state::list;
 use tiller_core::state::projects::{Init, NewProject};
 use tiller_core::state::records::NewHandoff;
-use tiller_core::state::runs::{EndRun, NewObservation, NewOrchestrator, NewRun, SpawnChecks};
+use tiller_core::state::runs::{
+    EndRun, NewObservation, NewOrchestrator, NewRun, Relaunch, SpawnChecks,
+};
 use tiller_core::{Actor, Ctx, Store, Timestamp};
 
 use super::*;
@@ -698,6 +700,80 @@ fn a_run_in_the_same_millisecond_before_the_owner_left_is_not_spent() {
     assert_eq!(brief.spend.new_runs, 0);
     let login = w.card("alpha", "the login page");
     w.try_builder(&login, SpawnChecks::default()).unwrap();
+}
+
+#[test]
+fn a_new_attempt_during_away_is_spent_and_a_relaunch_in_place_is_not() {
+    let mut w = World::new();
+    let before = w.card("alpha", "started before the owner left");
+    let early = w
+        .store
+        .run_start(
+            &w.as_orchestrator(),
+            None,
+            NewRun {
+                card: before.id.clone(),
+                role: RunRole::Builder,
+                model: "test-model".into(),
+                effort: Effort::Medium,
+                host_id: None,
+                worktree_path: Some("/home/user/work/alpha-1".into()),
+                branch: None,
+                base_branch: None,
+                base_sha: None,
+                config_hash: None,
+                checks: SpawnChecks::default(),
+            },
+        )
+        .unwrap()
+        .value
+        .run
+        .id;
+    w.away_start(w.away_scope(json!({"max_new_runs": 1})))
+        .unwrap();
+    let relaunch = |new_attempt| Relaunch {
+        note: "fresh brief".into(),
+        new_attempt,
+        stop_proof: Some("pane exited".into()),
+        model: None,
+        checks: None,
+    };
+    let orchestrator = w.as_orchestrator();
+    w.handoff("the login is next", "start its builder");
+
+    // The same run in a new session started before the owner left.
+    w.store
+        .run_relaunch(&orchestrator, &early, relaunch(false))
+        .unwrap();
+    assert_eq!(w.brief("alpha").unwrap().away.unwrap().new_runs, 0);
+
+    // A new attempt is a new run, started while the owner is away.
+    let attempt = w
+        .store
+        .run_relaunch(&orchestrator, &early, relaunch(true))
+        .unwrap()
+        .value
+        .run;
+    assert_eq!(w.brief("alpha").unwrap().away.unwrap().new_runs, 1);
+    let brief = ReturnBrief::load(w.store.conn(), None, Timestamp::now())
+        .unwrap()
+        .unwrap();
+    assert_eq!(brief.spend.new_runs, 1);
+    assert_eq!(
+        brief
+            .runs
+            .iter()
+            .map(|line| line.run_id.as_str())
+            .collect::<Vec<_>>(),
+        [attempt.id.as_str()]
+    );
+    let login = w.card("alpha", "the login page");
+    assert_eq!(
+        w.try_builder(&login, SpawnChecks::default())
+            .unwrap_err()
+            .code(),
+        "refused"
+    );
 }
 
 #[test]

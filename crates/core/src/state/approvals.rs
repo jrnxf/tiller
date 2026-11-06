@@ -1191,15 +1191,23 @@ impl AwayContract {
     }
 
     /// A `runs` filter for the runs started after the contract began, with
-    /// the away approval's id bound at `?{param}`. It reads the event order,
-    /// not `started_at`: a timestamp has millisecond grain, so a run started
-    /// just before the owner left can share the contract's millisecond. A
-    /// contract with no event counts every run, so the cap errs closed.
+    /// the away approval's id bound at `?{param}`: a run whose first
+    /// `run.started` or `run.relaunched` event (a new attempt is a new run
+    /// with only the latter) follows the contract's first event. It reads the
+    /// event order, not `started_at`: a timestamp has millisecond grain, so a
+    /// run started just before the owner left can share the contract's
+    /// millisecond. A contract with no event counts every run, so the cap
+    /// errs closed.
     pub fn started_since(param: usize) -> String {
+        let began = format!(
+            "(SELECT coalesce(min(seq), 0) FROM events WHERE entity = 'approval' AND entity_id = ?{param})"
+        );
         format!(
-            "id IN (SELECT entity_id FROM events WHERE entity = 'run' AND kind = 'run.started'
-                    AND seq > (SELECT coalesce(min(seq), 0) FROM events
-                               WHERE entity = 'approval' AND entity_id = ?{param}))"
+            "id IN (SELECT e.entity_id FROM events e
+                    WHERE e.entity = 'run' AND e.kind IN ('run.started', 'run.relaunched') AND e.seq > {began}
+                      AND NOT EXISTS (SELECT 1 FROM events p
+                                      WHERE p.entity = 'run' AND p.entity_id = e.entity_id
+                                        AND p.kind IN ('run.started', 'run.relaunched') AND p.seq <= {began}))"
         )
     }
 }
