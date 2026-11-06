@@ -392,6 +392,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         damage: damage.clone(),
         orchestrators: config.orchestrators,
         mirrors: crate::mirror::Mirrors::new(&config.home),
+        sessions: crate::auth::Sessions::default(),
     });
 
     // A daemon that stopped mid-Fit gives those panes back their size.

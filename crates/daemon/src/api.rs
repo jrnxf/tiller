@@ -3,7 +3,9 @@
 //! and the app shell with its boot snapshot.
 //!
 //! Every request passes the `Host` check first (421 otherwise, against DNS
-//! rebinding). Mutations also need the owner cookie, a JSON body,
+//! rebinding). At an `--allow-host` name every request then needs the owner
+//! cookie too, except the signed-out screen and the two ways to sign in.
+//! Mutations also need the owner cookie, a JSON body,
 //! `Sec-Fetch-Site: same-origin` and the board's own `Origin` (`http://` on
 //! loopback, `https://` at an `--allow-host` name); no CORS header is ever
 //! sent.
@@ -86,6 +88,8 @@ pub struct Inner {
     pub orchestrators: Option<Arc<dyn OrchestratorStart>>,
     /// The terminal mirror's open views and input budget.
     pub mirrors: Mirrors,
+    /// The limit on sign-in code tries, and sign-outs for open streams.
+    pub sessions: auth::Sessions,
 }
 
 /// Starts a project's orchestrator, or returns the live one, as `tiller
@@ -455,6 +459,38 @@ async fn host_check(State(state): State<AppState>, request: Request, next: Next)
 
 /// The checks every mutation passes before its body is read.
 pub(crate) fn guard(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    same_origin(state, headers)?;
+    if owner_cookie(state, headers).is_none() {
+        return Err(not_owner());
+    }
+    Ok(())
+}
+
+fn not_owner() -> ApiError {
+    ApiError::forbidden("the board is not signed in as the owner")
+        .hint("run tiller board --login in a terminal and enter the code or open the link")
+}
+
+/// The request's owner cookie, when it is a live one.
+fn owner_cookie<'a>(state: &AppState, headers: &'a HeaderMap) -> Option<&'a str> {
+    headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(auth::cookie_value)
+        .filter(|cookie| auth::is_owner(&state.0.home, cookie, Timestamp::now()))
+}
+
+/// Whether `headers` name an `--allow-host` name rather than loopback.
+fn at_allowed_host(state: &AppState, headers: &HeaderMap) -> bool {
+    headers
+        .get(header::HOST)
+        .and_then(|host| host.to_str().ok())
+        .is_some_and(|host| allowed_host(state, host).is_some())
+}
+
+/// Every mutation check but the owner cookie: a JSON body, sent by the
+/// board's own page from its own origin. Signing in passes these too.
+fn same_origin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     let text = |name: header::HeaderName| headers.get(name).and_then(|v| v.to_str().ok());
     let json_body = text(header::CONTENT_TYPE).is_some_and(|value| {
         value
@@ -483,16 +519,42 @@ pub(crate) fn guard(state: &AppState, headers: &HeaderMap) -> Result<(), ApiErro
             "a mutation must come from the board's own origin, {origin}"
         )));
     }
-    let owner = text(header::COOKIE)
-        .and_then(auth::cookie_value)
-        .is_some_and(|cookie| auth::is_owner(&state.0.home, cookie, Timestamp::now()));
-    if !owner {
-        return Err(
-            ApiError::forbidden("the board is not signed in as the owner")
-                .hint("run tiller board --login in a terminal and open the link"),
-        );
-    }
     Ok(())
+}
+
+/// Marks a request the owner gate let through without the owner cookie: the
+/// app shell then serves the signed-out screen, with no boot snapshot.
+#[derive(Clone, Copy)]
+struct SignedOut;
+
+/// At an `--allow-host` name, the owner cookie for everything but what the
+/// signed-out screen needs: the app shell (without its boot snapshot), the
+/// built files, and the two ways to sign in. Anything else is 403
+/// `signed_out`, the board's cue to show that screen. Loopback is left as it
+/// was: its reads need no cookie, so the CLI and a local board work as
+/// before.
+async fn owner_gate(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
+    let headers = request.headers();
+    if !at_allowed_host(&state, headers) || owner_cookie(&state, headers).is_some() {
+        return next.run(request).await;
+    }
+    let path = request.uri().path();
+    let open = match *request.method() {
+        Method::GET | Method::HEAD => !path.starts_with("/api/"),
+        Method::POST => path == LOGIN_PATH,
+        _ => false,
+    };
+    if !open {
+        return ApiError::new(
+            StatusCode::FORBIDDEN,
+            "signed_out",
+            "this board is not signed in; sign in to see it",
+        )
+        .hint("run tiller board --login in a terminal and enter the code or open the link")
+        .into_response();
+    }
+    request.extensions_mut().insert(SignedOut);
+    next.run(request).await
 }
 
 /// A JSON body, refused as 400 when it does not parse.
@@ -647,8 +709,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/memory/revisions/{id}", get(memory::revision))
         .route("/api/v1/signals", get(signals))
         .route("/api/v1/events", get(events))
+        .route("/api/v1/session", get(session))
+        .route(LOGIN_PATH, post(login_code))
+        .route("/api/v1/logout", post(logout))
         .route("/login/{token}", get(login))
         .fallback(app_shell)
+        .layer(middleware::from_fn_with_state(state.clone(), owner_gate))
         .layer(middleware::from_fn_with_state(state.clone(), host_check))
         .with_state(state)
 }
@@ -1171,6 +1237,9 @@ async fn events(
     let after = sse::start(last, query.since);
     let pollers = state.0.pollers.clone();
     let peers = state.0.peers.clone();
+    // At an allowed host the stream ends when its browser signs out, so a
+    // revoked cookie stops seeing changes at once.
+    let ended = until_signed_out(state.clone(), watched_cookie(&state, &headers));
     sse::stream(
         state.db(),
         after,
@@ -1178,8 +1247,76 @@ async fn events(
         state.0.stop.clone(),
         peers.clone(),
         move || local_health(&pollers, &peers),
+        ended,
     )
     .into_response()
+}
+
+/// How often an open stream at an allowed host re-checks its cookie, so one
+/// that runs out (30 days) ends with no sign-out to wake it.
+const RECHECK: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// At an allowed host, the owner cookie a long-lived stream should end with;
+/// `None` on loopback, where reads need none.
+fn watched_cookie(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    at_allowed_host(state, headers)
+        .then(|| owner_cookie(state, headers).map(str::to_owned))
+        .flatten()
+}
+
+/// Resolves once `cookie` is no longer an owner cookie: checked on each
+/// sign-out and every [`RECHECK`]; never without a cookie to watch.
+async fn until_signed_out(state: AppState, cookie: Option<String>) {
+    let Some(cookie) = cookie else {
+        return std::future::pending().await;
+    };
+    // Subscribed before the first check, so a sign-out between the owner
+    // gate and here is seen by that check or wakes `changed`.
+    let mut sign_outs = state.0.sessions.sign_outs();
+    let mut recheck = tokio::time::interval(RECHECK);
+    recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        let home = state.0.home.clone();
+        let asked = cookie.clone();
+        let owner =
+            tokio::task::spawn_blocking(move || auth::is_owner(&home, &asked, Timestamp::now()))
+                .await
+                .unwrap_or(false);
+        if !owner {
+            return;
+        }
+        tokio::select! {
+            changed = sign_outs.changed() => {
+                if changed.is_err() {
+                    return std::future::pending().await;
+                }
+            }
+            _ = recheck.tick() => {}
+        }
+    }
+}
+
+/// The daemon's stop, or the end of this browser's sign-in at an allowed
+/// host: what ends a terminal mirror, through its usual stop path.
+fn stop_or_signed_out(state: &AppState, headers: &HeaderMap) -> watch::Receiver<bool> {
+    let mut stop = state.0.stop.clone();
+    let ended = until_signed_out(state.clone(), watched_cookie(state, headers));
+    let (tx, rx) = watch::channel(*stop.borrow());
+    tokio::spawn(async move {
+        tokio::select! {
+            () = async {
+                // A daemon with nothing to stop it never stops.
+                if stop.wait_for(|stopping| *stopping).await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            } => {}
+            () = ended => {}
+            // The mirror is over: nothing left to stop.
+            () = tx.closed() => return,
+        }
+        tx.send_replace(true);
+    });
+    rx
 }
 
 // -- mutations --------------------------------------------------------------------
@@ -2285,7 +2422,7 @@ async fn terminal(
         terminal,
         fit,
         state.0.mirrors.fits(),
-        state.0.stop.clone(),
+        stop_or_signed_out(&state, &headers),
         viewer,
     );
     Ok((
@@ -2705,6 +2842,101 @@ async fn focus(
 
 // -- login and the app shell --------------------------------------------------------
 
+/// Where the signed-out screen sends a code.
+const LOGIN_PATH: &str = "/api/v1/login";
+
+/// Whether this browser holds a live owner cookie, for the board's Sign out.
+#[utoipa::path(get, path = "/api/v1/session", tag = "session",
+    responses((status = 200, body = SessionView), (status = 403, body = ErrorBody, description = "`signed_out`: at an --allow-host name, without the owner cookie")))]
+async fn session(State(state): State<AppState>, headers: HeaderMap) -> Json<SessionView> {
+    let owner = owner_cookie(&state, &headers).is_some();
+    Json(SessionView { owner })
+}
+
+/// Signs in with the 8-digit code `tiller board --login` prints, as the
+/// link does: sets the owner cookie. It passes the mutation checks but the
+/// cookie. A wrong code counts against every pending code, each of which
+/// burns on its third, and the daemon takes only so many tries a minute. The code is never logged.
+#[utoipa::path(post, path = "/api/v1/login", tag = "session", request_body = CodeLoginBody,
+    responses((status = 200, body = SessionView, description = "signed in: the response sets the owner cookie"),
+              (status = 400, body = ErrorBody, description = "not 8 digits"),
+              (status = 403, body = ErrorBody, description = "`wrong_code`: wrong, used or expired; `code_burned`: too many wrong codes, so the pending code is spent; or a failed origin check"),
+              (status = 429, body = ErrorBody, description = "`too_many_tries`: the daemon took its tries for this minute; nothing was checked")))]
+async fn login_code(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> Result<Response, ApiError> {
+    same_origin(&state, &headers)?;
+    // Parsed here, not with `body`: a serde error would quote the code.
+    let code = serde_json::from_slice::<CodeLoginBody>(&bytes)
+        .ok()
+        .map(|body| body.code)
+        .filter(|code| code.len() == 8 && code.bytes().all(|b| b.is_ascii_digit()))
+        .ok_or_else(|| ApiError::usage("a sign-in code is 8 digits"))?;
+    if !state.0.sessions.try_code(std::time::Instant::now()) {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_tries",
+            "too many codes were tried in the last minute; wait a minute and try again",
+        ));
+    }
+    let home = state.0.home.clone();
+    let redeemed =
+        tokio::task::spawn_blocking(move || auth::redeem_code(&home, &code, Timestamp::now()))
+            .await
+            .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
+            .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?;
+    let hint = "run tiller board --login again for a new code";
+    match redeemed {
+        auth::CodeLogin::Owner(cookie) => {
+            let secure = at_allowed_host(&state, &headers);
+            Ok((
+                [(header::SET_COOKIE, auth::set_cookie(&cookie, secure))],
+                Json(SessionView { owner: true }),
+            )
+                .into_response())
+        }
+        auth::CodeLogin::Wrong => Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "wrong_code",
+            "that code is wrong or has expired",
+        )
+        .hint(hint)),
+        auth::CodeLogin::Burned => Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "code_burned",
+            "too many wrong codes: the current code no longer works",
+        )
+        .hint(hint)),
+    }
+}
+
+/// Signs this browser out: its owner cookie stops working here and now, on
+/// every host name, and the browser is told to drop it. Other browsers stay
+/// signed in.
+#[utoipa::path(post, path = "/api/v1/logout", tag = "session",
+    responses((status = 200, body = SessionView, description = "signed out: the response clears the owner cookie"),
+              (status = 403, body = ErrorBody)))]
+async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
+    same_origin(&state, &headers)?;
+    let cookie = owner_cookie(&state, &headers)
+        .ok_or_else(not_owner)?
+        .to_owned();
+    let home = state.0.home.clone();
+    tokio::task::spawn_blocking(move || auth::sign_out(&home, &cookie, Timestamp::now()))
+        .await
+        .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
+        .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?;
+    state.0.sessions.signed_out();
+    let secure = at_allowed_host(&state, &headers);
+    Ok((
+        [(header::SET_COOKIE, auth::clear_cookie(secure))],
+        Json(SessionView { owner: false }),
+    )
+        .into_response())
+}
+
 /// The one-time login link: sets the owner cookie and goes to the board.
 /// At an allowed host the cookie is `Secure`: that host is reached over https
 /// through a proxy (its mutations come only from its `https://` origin), so
@@ -2714,10 +2946,7 @@ async fn login(
     headers: HeaderMap,
     Path(token): Path<String>,
 ) -> Response {
-    let secure = headers
-        .get(header::HOST)
-        .and_then(|host| host.to_str().ok())
-        .is_some_and(|host| allowed_host(&state, host).is_some());
+    let secure = at_allowed_host(&state, &headers);
     let home = state.0.home.clone();
     let redeemed =
         tokio::task::spawn_blocking(move || auth::redeem_login(&home, &token, Timestamp::now()))
@@ -2768,6 +2997,18 @@ async fn app_shell(
     let Some(index) = state.0.assets.index() else {
         return assets::unbuilt();
     };
+    // Signed out at an allowed host: the shell alone, which asks for the
+    // snapshot, is refused, and shows the signed-out screen.
+    if request.extensions().get::<SignedOut>().is_some() {
+        return (
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            index,
+        )
+            .into_response();
+    }
     let local = state.own_health();
     let snapshot = read(&state, move |store| {
         let snapshot = views::snapshot(store, &local, Timestamp::now())?;
@@ -2795,19 +3036,20 @@ async fn app_shell(
 /// route above and the SSE message schemas (`protocol.md` 7.1).
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    info(title = "Tiller board API", version = "1", description = "The daemon's board API (docs/spec/protocol.md section 7). Every path answers only on 127.0.0.1, localhost or an --allow-host name; mutations need the owner cookie and the board's own origin."),
+    info(title = "Tiller board API", version = "1", description = "The daemon's board API (docs/spec/protocol.md section 7). Every path answers only on 127.0.0.1, localhost or an --allow-host name; at an --allow-host name every path but the signed-out screen and signing in needs the owner cookie; mutations need the owner cookie and the board's own origin."),
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
         cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, stage_project, ask_note, start_orchestrator, add_project, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
         relabel_intervention, memory::view, memory::revision,
-        memory::edit, memory::decide, memory::undo
+        memory::edit, memory::decide, memory::undo, session, login_code, logout
     ),
     components(schemas(ChangeEvent, ResetEvent, PeerEvent, LinkEvent, PeerResetEvent, TerminalLine, ErrorBody, ErrorDetail)),
     tags(
-        (name = "reads", description = "Reads, served to any request that passes the Host check"),
+        (name = "reads", description = "Reads: any request that passes the Host check on loopback; at an --allow-host name, only with the owner cookie"),
         (name = "mutations", description = "Mutations: owner cookie, JSON body, same origin"),
         (name = "stream", description = "The one SSE stream"),
+        (name = "session", description = "Signing in with a code, signing out, and whether this browser is signed in"),
     )
 )]
 pub struct ApiDoc;
@@ -2886,6 +3128,7 @@ pub(crate) mod tests {
             damage,
             orchestrators: None,
             mirrors: Mirrors::new(home),
+            sessions: auth::Sessions::default(),
         }))
     }
 
@@ -2927,7 +3170,7 @@ pub(crate) mod tests {
 
     /// The owner cookie, minted and redeemed as the login link does.
     pub(crate) fn owner_cookie(home: &std::path::Path) -> String {
-        let token = auth::mint_login(home, Timestamp::now()).unwrap();
+        let token = auth::mint_login(home, Timestamp::now()).unwrap().token;
         let cookie = auth::redeem_login(home, &token, Timestamp::now())
             .unwrap()
             .unwrap();
@@ -3289,10 +3532,12 @@ pub(crate) mod tests {
     async fn an_allowed_host_takes_writes_only_from_its_https_origin() {
         let fleet = Fleet::new();
         let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let cookie = owner_cookie(fleet.dir.path());
         for host in ["board.example.com", "Board.Example.com"] {
             for path in ["/", "/api/v1/board", "/assets/app-abc123.js"] {
                 let request = Request::get(path)
                     .header(header::HOST, host)
+                    .header(header::COOKIE, &cookie)
                     .body(Body::empty())
                     .unwrap();
                 let answer = send(&app, request).await;
@@ -3319,7 +3564,6 @@ pub(crate) mod tests {
             );
         }
 
-        let cookie = owner_cookie(fleet.dir.path());
         let at_host = |origin: &'static str| [("host", "board.example.com"), ("origin", origin)];
         // Anything but the board's own https origin is refused, cookie or not.
         let before = cards(&fleet);
@@ -3411,7 +3655,7 @@ pub(crate) mod tests {
         };
 
         // At an allowed host, reached over https, the cookie is Secure.
-        let token = auth::mint_login(home, Timestamp::now()).unwrap();
+        let token = auth::mint_login(home, Timestamp::now()).unwrap().token;
         let signed = redeem(&app, "board.example.com", &token).await;
         assert_eq!(signed.status, StatusCode::SEE_OTHER, "{}", signed.body);
         assert_eq!(signed.headers[header::LOCATION], "/");
@@ -3427,19 +3671,335 @@ pub(crate) mod tests {
         }
 
         // On loopback, plain http, so not Secure.
-        let token = auth::mint_login(home, Timestamp::now()).unwrap();
+        let token = auth::mint_login(home, Timestamp::now()).unwrap().token;
         let signed = redeem(&app, HOST, &token).await;
         assert_eq!(signed.status, StatusCode::SEE_OTHER, "{}", signed.body);
         assert!(!cookie_of(&signed).contains("Secure"));
 
         // A link past its minute is refused everywhere.
-        let stale =
-            auth::mint_login(home, Timestamp::now().plus_minutes(-auth::LOGIN_MINUTES)).unwrap();
+        let stale = auth::mint_login(home, Timestamp::now().plus_minutes(-auth::LOGIN_MINUTES))
+            .unwrap()
+            .token;
         for host in ["board.example.com", HOST] {
             let late = redeem(&app, host, &stale).await;
             assert_eq!(late.status, StatusCode::FORBIDDEN, "{host}");
             assert!(late.headers.get(header::SET_COOKIE).is_none(), "{host}");
         }
+    }
+
+    /// GET `path` at `host`, with `cookie` when there is one.
+    async fn get_at(app: &Router, host: &str, path: &str, cookie: Option<&str>) -> Answer {
+        let mut request = Request::get(path).header(header::HOST, host);
+        if let Some(cookie) = cookie {
+            request = request.header(header::COOKIE, cookie);
+        }
+        send(app, request.body(Body::empty()).unwrap()).await
+    }
+
+    fn error_code(answer: &Answer) -> String {
+        let body: Value = serde_json::from_str(&answer.body).unwrap_or_default();
+        body["error"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn signed_out_at_an_allowed_host_gets_only_the_sign_in_screen() {
+        let fleet = Fleet::new();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let cookie = owner_cookie(fleet.dir.path());
+        let host = "board.example.com";
+        for signed_out in [None, Some("tiller_owner=forged")] {
+            // The shell, without the snapshot, and the files it loads.
+            for path in ["/", "/cards/c-1?tab=runs", "/settings"] {
+                let page = get_at(&app, host, path, signed_out).await;
+                assert_eq!(page.status, StatusCode::OK, "{path}");
+                assert!(!page.body.contains("tiller-boot"), "{path}");
+            }
+            let file = get_at(&app, host, "/assets/app-abc123.js", signed_out).await;
+            assert_eq!(file.status, StatusCode::OK);
+            // Every read, the event stream and the terminal included.
+            for path in [
+                "/api/v1/snapshot",
+                "/api/v1/board",
+                "/api/v1/cards/c-1",
+                "/api/v1/agents",
+                "/api/v1/health",
+                "/api/v1/session",
+                "/api/v1/events",
+                "/api/v1/agents/s-1/terminal/stream",
+                "/api/v1/nowhere",
+            ] {
+                let read = get_at(&app, host, path, signed_out).await;
+                assert_eq!(read.status, StatusCode::FORBIDDEN, "{path}");
+                assert_eq!(error_code(&read), "signed_out", "{path}");
+                assert!(read.body.contains("tiller board --login"), "{path}");
+            }
+            let before = cards(&fleet);
+            let mut headers = vec![("host", host), ("origin", "https://board.example.com")];
+            headers.extend(signed_out.map(|cookie| ("cookie", cookie)));
+            let write = send(&app, create(&headers)).await;
+            assert_eq!(error_code(&write), "signed_out");
+            assert_eq!(cards(&fleet), before);
+        }
+        // The owner cookie opens it all.
+        let page = get_at(&app, host, "/", Some(&cookie)).await;
+        assert!(page.body.contains("tiller-boot"));
+        for path in ["/api/v1/board", "/api/v1/session"] {
+            let read = get_at(&app, host, path, Some(&cookie)).await;
+            assert_eq!(read.status, StatusCode::OK, "{path}");
+        }
+        // Loopback is as it was: reads and the snapshot need no cookie.
+        let page = get_at(&app, HOST, "/", None).await;
+        assert!(page.body.contains("tiller-boot"));
+        let read = get_at(&app, HOST, "/api/v1/board", None).await;
+        assert_eq!(read.status, StatusCode::OK);
+        let session = get_at(&app, HOST, "/api/v1/session", None).await;
+        assert_eq!(session.body, r#"{"owner":false}"#);
+        let session = get_at(&app, HOST, "/api/v1/session", Some(&cookie)).await;
+        assert_eq!(session.body, r#"{"owner":true}"#);
+    }
+
+    /// `POST /api/v1/login` as the board's signed-out screen sends it, at
+    /// `host`'s own origin.
+    async fn enter(app: &Router, host: &str, code: &str) -> Answer {
+        let origin = if host == HOST {
+            format!("http://{host}")
+        } else {
+            format!("https://{host}")
+        };
+        let headers = [("host", host), ("origin", origin.as_str())];
+        send(
+            app,
+            mutation("POST", "/api/v1/login", json!({ "code": code }), &headers),
+        )
+        .await
+    }
+
+    /// A code that is not `login`'s.
+    fn wrong(login: &auth::Login) -> String {
+        let code: u32 = login.code.parse().unwrap();
+        format!("{:08}", (code + 1) % 100_000_000)
+    }
+
+    #[tokio::test]
+    async fn the_code_signs_in_once_like_its_link() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let app = app(home, Assets::of::<Fixture>());
+        let host = "board.example.com";
+
+        let login = auth::mint_login(home, Timestamp::now()).unwrap();
+        let signed = enter(&app, host, &login.code).await;
+        assert_eq!(signed.status, StatusCode::OK, "{}", signed.body);
+        let set = signed.headers[header::SET_COOKIE].to_str().unwrap();
+        assert!(set.ends_with("; Secure"), "{set}");
+        let cookie = set.split(';').next().unwrap().to_owned();
+        let board = get_at(&app, host, "/api/v1/board", Some(&cookie)).await;
+        assert_eq!(board.status, StatusCode::OK);
+        // Once: the code is spent, and so is its link.
+        let again = enter(&app, host, &login.code).await;
+        assert_eq!(error_code(&again), "wrong_code");
+        assert!(again.headers.get(header::SET_COOKIE).is_none());
+        let link = redeem(&app, host, &login.token).await;
+        assert_eq!(link.status, StatusCode::FORBIDDEN);
+
+        // On loopback too, where the cookie is not Secure.
+        let login = auth::mint_login(home, Timestamp::now()).unwrap();
+        let signed = enter(&app, HOST, &login.code).await;
+        assert_eq!(signed.status, StatusCode::OK, "{}", signed.body);
+        let set = signed.headers[header::SET_COOKIE].to_str().unwrap();
+        assert!(!set.contains("Secure"), "{set}");
+
+        // A code past its minute is refused.
+        let stale =
+            auth::mint_login(home, Timestamp::now().plus_minutes(-auth::LOGIN_MINUTES)).unwrap();
+        let late = enter(&app, host, &stale.code).await;
+        assert_eq!(error_code(&late), "wrong_code");
+        assert!(late.body.contains("tiller board --login"));
+
+        // Only from the board's own origin, and that spends no code.
+        let login = auth::mint_login(home, Timestamp::now()).unwrap();
+        let headers = [("host", host), ("origin", "https://evil.example.com")];
+        let body = json!({ "code": login.code });
+        let foreign = send(&app, mutation("POST", "/api/v1/login", body, &headers)).await;
+        assert_eq!(foreign.status, StatusCode::FORBIDDEN);
+        assert!(foreign.headers.get(header::SET_COOKIE).is_none());
+        let signed = enter(&app, host, &login.code).await;
+        assert_eq!(signed.status, StatusCode::OK, "{}", signed.body);
+
+        // Not 8 digits: refused without echoing what was sent.
+        for code in ["1234567", "123456789", "1234567x", "１２３４５６７８"] {
+            let refused = enter(&app, host, code).await;
+            assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{code}");
+            assert!(!refused.body.contains(code), "{}", refused.body);
+        }
+        let headers = [("host", host), ("origin", "https://board.example.com")];
+        let body = json!({ "code": "87654321", "extra": "87654321" });
+        let refused = send(&app, mutation("POST", "/api/v1/login", body, &headers)).await;
+        assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+        assert!(!refused.body.contains("87654321"), "{}", refused.body);
+    }
+
+    #[tokio::test]
+    async fn wrong_codes_burn_the_code_but_not_its_link() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let app = app(home, Assets::of::<Fixture>());
+        let host = "board.example.com";
+        let login = auth::mint_login(home, Timestamp::now()).unwrap();
+        for _ in 1..auth::CODE_MISSES {
+            let miss = enter(&app, host, &wrong(&login)).await;
+            assert_eq!(error_code(&miss), "wrong_code");
+        }
+        let burned = enter(&app, host, &wrong(&login)).await;
+        assert_eq!(burned.status, StatusCode::FORBIDDEN);
+        assert_eq!(error_code(&burned), "code_burned");
+        assert!(burned.body.contains("tiller board --login"));
+        let right = enter(&app, host, &login.code).await;
+        assert_eq!(error_code(&right), "wrong_code");
+        assert!(right.headers.get(header::SET_COOKIE).is_none());
+        // The link is the owner's own terminal, not a guess: it still works.
+        let link = redeem(&app, host, &login.token).await;
+        assert_eq!(link.status, StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
+    async fn the_daemon_takes_only_so_many_codes_a_minute() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let app = app(home, Assets::of::<Fixture>());
+        let host = "board.example.com";
+        // Each try against its own code, so none burns: only the limit binds.
+        for _ in 0..auth::CODE_TRIES_PER_MINUTE {
+            let login = auth::mint_login(home, Timestamp::now()).unwrap();
+            let miss = enter(&app, host, &wrong(&login)).await;
+            assert_eq!(miss.status, StatusCode::FORBIDDEN, "{}", miss.body);
+            auth::redeem_login(home, &login.token, Timestamp::now()).unwrap();
+        }
+        // Past it even the right code is turned away unchecked, and kept.
+        let login = auth::mint_login(home, Timestamp::now()).unwrap();
+        let limited = enter(&app, host, &login.code).await;
+        assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(error_code(&limited), "too_many_tries");
+        assert!(limited.headers.get(header::SET_COOKIE).is_none());
+        let kept = auth::redeem_code(home, &login.code, Timestamp::now()).unwrap();
+        assert!(matches!(kept, auth::CodeLogin::Owner(_)));
+    }
+
+    #[test]
+    fn the_code_is_never_logged() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let app = app(home, Assets::of::<Fixture>());
+        let login = auth::mint_login(home, Timestamp::now()).unwrap();
+        let wrong = wrong(&login);
+        let logs = logged(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                for code in [wrong.as_str(), "1234567x", login.code.as_str()] {
+                    enter(&app, "board.example.com", code).await;
+                }
+            });
+        });
+        assert!(!logs.contains(&login.code), "{logs}");
+        assert!(!logs.contains(&wrong), "{logs}");
+    }
+
+    /// What `f` logs at any level, as plain text.
+    fn logged(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = Buffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap()
+    }
+
+    /// `POST /api/v1/logout` at `host`'s own origin with `cookie`.
+    async fn sign_out(app: &Router, host: &str, cookie: &str) -> Answer {
+        let origin = if host == HOST {
+            format!("http://{host}")
+        } else {
+            format!("https://{host}")
+        };
+        let headers = [
+            ("host", host),
+            ("origin", origin.as_str()),
+            ("cookie", cookie),
+        ];
+        send(app, mutation("POST", "/api/v1/logout", json!({}), &headers)).await
+    }
+
+    #[tokio::test]
+    async fn signing_out_ends_this_cookie_and_clears_it() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let app = app(home, Assets::of::<Fixture>());
+        let host = "board.example.com";
+        let mine = owner_cookie(home);
+        let other = owner_cookie(home);
+
+        // Only from the board's own origin, and only with a live cookie.
+        let headers = [
+            ("host", host),
+            ("origin", "https://evil.example.com"),
+            ("cookie", mine.as_str()),
+        ];
+        let foreign = send(
+            &app,
+            mutation("POST", "/api/v1/logout", json!({}), &headers),
+        )
+        .await;
+        assert_eq!(foreign.status, StatusCode::FORBIDDEN);
+        let forged = sign_out(&app, HOST, "tiller_owner=forged").await;
+        assert_eq!(forged.status, StatusCode::FORBIDDEN);
+        assert!(forged.headers.get(header::SET_COOKIE).is_none());
+        let board = get_at(&app, host, "/api/v1/board", Some(&mine)).await;
+        assert_eq!(board.status, StatusCode::OK);
+
+        let out = sign_out(&app, host, &mine).await;
+        assert_eq!(out.status, StatusCode::OK, "{}", out.body);
+        assert_eq!(out.body, r#"{"owner":false}"#);
+        assert_eq!(
+            out.headers[header::SET_COOKIE],
+            auth::clear_cookie(true).as_str()
+        );
+        // That cookie is dead everywhere; the other browser stays in.
+        let board = get_at(&app, host, "/api/v1/board", Some(&mine)).await;
+        assert_eq!(error_code(&board), "signed_out");
+        let page = get_at(&app, host, "/", Some(&mine)).await;
+        assert!(!page.body.contains("tiller-boot"));
+        let write = send(&app, create(&[("cookie", &mine)])).await;
+        assert_eq!(write.status, StatusCode::FORBIDDEN);
+        let board = get_at(&app, host, "/api/v1/board", Some(&other)).await;
+        assert_eq!(board.status, StatusCode::OK);
+
+        // On loopback the cleared cookie is not Secure.
+        let out = sign_out(&app, HOST, &other).await;
+        assert_eq!(out.status, StatusCode::OK, "{}", out.body);
+        assert_eq!(
+            out.headers[header::SET_COOKIE],
+            auth::clear_cookie(false).as_str()
+        );
     }
 
     #[tokio::test]
@@ -4905,6 +5465,52 @@ esac"#,
         // The viewer leaves: its observe is killed.
         drop(body);
         assert!(gone(&second[1]).await, "the observe outlived its viewer");
+    }
+
+    /// At an allowed host, signing out ends an open mirror of the pane, not
+    /// only the next one.
+    #[tokio::test]
+    async fn signing_out_ends_an_open_terminal_mirror() {
+        use futures_util::StreamExt;
+        let mut fleet = Fleet::new();
+        let session = fleet.worker("w2:p1");
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+        let app = mirror_app(&fleet, dir);
+        let host = "board.example.com";
+        let cookie = owner_cookie(fleet.dir.path());
+        let headers = [
+            ("host", host),
+            ("origin", "https://board.example.com"),
+            ("cookie", cookie.as_str()),
+        ];
+        let open = mutation(
+            "POST",
+            &format!("/api/v1/agents/{session}/terminal"),
+            json!({}),
+            &headers,
+        );
+        let response = app.clone().oneshot(open).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let mut pending = String::new();
+        assert_eq!(next_line(&mut body, &mut pending).await["type"], "size");
+        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+        let observer = std::fs::read_to_string(dir.join("observers")).unwrap();
+
+        let out = sign_out(&app, host, &cookie).await;
+        assert_eq!(out.status, StatusCode::OK, "{}", out.body);
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(chunk) = body.next().await {
+                chunk.unwrap();
+            }
+        })
+        .await;
+        assert!(ended.is_ok(), "the mirror outlived the sign-out");
+        assert!(
+            gone(observer.trim()).await,
+            "the observe outlived the sign-out"
+        );
     }
 
     /// herdr lays its tabs out at 120 by 40 with no client attached, while

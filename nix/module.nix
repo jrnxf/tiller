@@ -97,11 +97,12 @@ in
         example = [ "tiller.example.com" ];
         description = ''
           Host names a reverse proxy serves the board at over https, each
-          passed as `--allow-host`. The board answers there in full: the
-          `tiller board --login` link redeems at each name (and is also
-          printed for it, with a QR code), and mutations are taken only from
-          its `https://` origin with the owner cookie. Exact names only, no
-          wildcards; the daemon still binds 127.0.0.1 alone.
+          passed as `--allow-host`. The board answers there only to a
+          browser signed in as the owner: the `tiller board --login` code or
+          link signs in at each name (the link is also printed for it, with a
+          QR code), and mutations are taken only from its `https://` origin.
+          Exact names only, no wildcards; the daemon still binds 127.0.0.1
+          alone.
         '';
       };
       extraPath = lib.mkOption {

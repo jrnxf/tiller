@@ -29,9 +29,9 @@ pub struct Args {
     #[arg(long, default_value_t = tiller_daemon::PORT)]
     port: u16,
     /// Also serve the board to requests with exactly this `Host` header, the
-    /// name of a reverse proxy that serves it over https; repeatable. The
-    /// login link redeems there, and mutations come only from its https
-    /// origin.
+    /// name of a reverse proxy that serves it over https; repeatable. There
+    /// the board shows only to a browser signed in with the login code or
+    /// link, and mutations come only from its https origin.
     #[arg(long = "allow-host", value_name = "HOST", value_parser = tiller_daemon::allowed_host)]
     allow_hosts: Vec<String>,
 }

@@ -252,7 +252,9 @@ fn get(port: u16, path: &str) -> (String, String) {
 /// `POST <path>` with a JSON body, as the signed-in board sends it.
 fn post_as_board(world: &World, port: u16, path: &str, body: &str) -> (String, Value) {
     let now = tiller_core::Timestamp::now();
-    let token = tiller_daemon::auth::mint_login(&world.home(), now).unwrap();
+    let token = tiller_daemon::auth::mint_login(&world.home(), now)
+        .unwrap()
+        .token;
     let cookie = tiller_daemon::auth::redeem_login(&world.home(), &token, now)
         .unwrap()
         .unwrap();
@@ -550,6 +552,115 @@ fn the_login_link_signs_in_once_at_an_allowed_host() {
     assert!(written.starts_with("HTTP/1.0 200"), "{written} {body}");
 
     assert!(terminate(&mut daemon).success());
+}
+
+/// At an `--allow-host` name a signed-out browser gets nothing but the
+/// sign-in screen; the code `tiller board --login` prints signs it in, and
+/// signing out ends that cookie. Loopback reads stay open, and the daemon
+/// never logs the code, even at its most verbose.
+#[test]
+fn the_login_code_signs_in_at_an_allowed_host_until_sign_out() {
+    let world = World::initialized();
+    let mut child = daemon_command(&world)
+        .args(["--allow-host", "tiller.example.com"])
+        .env("TILLER_HERDR", "/nonexistent/herdr")
+        .env("TILLER_LOG", "trace")
+        .spawn()
+        .unwrap();
+    let line = first_line(&mut child).expect("the daemon exited before listening");
+    let port = line
+        .trim()
+        .strip_prefix("listening on http://127.0.0.1:")
+        .unwrap_or_else(|| panic!("unexpected first line {line:?}"))
+        .parse()
+        .unwrap();
+    let mut daemon = Daemon { child, port };
+    let read = |cookie: &str| {
+        exchange(
+            port,
+            &format!(
+                "GET /api/v1/board HTTP/1.0\r\nHost: tiller.example.com\r\nCookie: {cookie}\r\n\r\n"
+            ),
+        )
+    };
+    let post = |path: &str, cookie: &str, body: &str| {
+        exchange(
+            port,
+            &format!(
+                "POST {path} HTTP/1.0\r\nHost: tiller.example.com\r\n\
+                 Origin: https://tiller.example.com\r\nSec-Fetch-Site: same-origin\r\n\
+                 Cookie: {cookie}\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+    };
+
+    let (head, body) = read("tiller_owner=none");
+    assert!(head.starts_with("HTTP/1.0 403"), "{head}");
+    assert!(body.contains("signed_out"), "{body}");
+    let (page, html) = exchange(port, "GET / HTTP/1.0\r\nHost: tiller.example.com\r\n\r\n");
+    assert!(page.starts_with("HTTP/1.0 200"), "{page}");
+    assert!(!html.contains("tiller-boot"));
+
+    let out = world.run(&["board", "--login"]);
+    assert!(out.ok(), "{}", out.json);
+    let code = out.data()["code"].as_str().unwrap().to_owned();
+    assert!(
+        code.len() == 8 && code.bytes().all(|b| b.is_ascii_digit()),
+        "{code}"
+    );
+    let (wrong, body) = post(
+        "/api/v1/login",
+        "tiller_owner=none",
+        &format!(r#"{{"code":"{}"}}"#, next_code(&code)),
+    );
+    assert!(wrong.starts_with("HTTP/1.0 403"), "{wrong}");
+    assert!(body.contains("wrong_code"), "{body}");
+    let (signed, body) = post(
+        "/api/v1/login",
+        "tiller_owner=none",
+        &format!(r#"{{"code":"{code}"}}"#),
+    );
+    assert!(signed.starts_with("HTTP/1.0 200"), "{signed} {body}");
+    let set = signed
+        .lines()
+        .find_map(|line| line.strip_prefix("set-cookie: "))
+        .unwrap_or_else(|| panic!("no cookie: {signed}"));
+    assert!(set.ends_with("; Secure"), "{set}");
+    let cookie = set.split(';').next().unwrap().to_owned();
+    let (head, _) = read(&cookie);
+    assert!(head.starts_with("HTTP/1.0 200"), "{head}");
+
+    let (out, body) = post("/api/v1/logout", &cookie, "{}");
+    assert!(out.starts_with("HTTP/1.0 200"), "{out} {body}");
+    assert!(out.contains("Max-Age=0"), "{out}");
+    let (head, _) = read(&cookie);
+    assert!(head.starts_with("HTTP/1.0 403"), "{head}");
+    // Loopback reads need no cookie, as before.
+    let (local, _) = exchange(
+        port,
+        &format!("GET /api/v1/board HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+    );
+    assert!(local.starts_with("HTTP/1.0 200"), "{local}");
+
+    assert!(terminate(&mut daemon).success());
+    let mut logs = String::new();
+    daemon
+        .child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut logs)
+        .unwrap();
+    assert!(!logs.contains(&code), "{logs}");
+    assert!(!logs.contains(&next_code(&code)), "{logs}");
+}
+
+/// The 8-digit code after `code`, so never `code` itself.
+fn next_code(code: &str) -> String {
+    let code: u32 = code.parse().unwrap();
+    format!("{:08}", (code + 1) % 100_000_000)
 }
 
 #[test]

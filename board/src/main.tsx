@@ -5,9 +5,11 @@ import { createRoot } from "react-dom/client";
 
 import "./styles.css";
 import { SetupScreen } from "./components/states/setup-screen";
+import { SignedOutScreen } from "./components/states/signed-out-screen";
 import { hydrateFromSnapshot, loadBoot } from "./lib/boot";
 import { createQueryClient } from "./lib/query-client";
 import { createAppRouter } from "./lib/router";
+import { signedOutStore } from "./lib/session";
 import { connectEvents } from "./lib/sse";
 
 const root = document.getElementById("root");
@@ -34,11 +36,24 @@ async function fontReady(): Promise<void> {
 // The daemon inlines the snapshot, so this is synchronous. Without it (a dev
 // server that is not the daemon, or a machine nobody has set up) it asks.
 const [boot] = await Promise.all([loadBoot(), fontReady()]);
+const app = createRoot(root);
 
-if (boot.kind === "setup") {
+// Signed in, the daemon inlines the snapshot and a reload is the ordinary first
+// load of the board.
+function showSignedOut() {
+  app.render(
+    <StrictMode>
+      <SignedOutScreen onSignedIn={() => window.location.reload()} />
+    </StrictMode>,
+  );
+}
+
+if (boot.kind === "signed-out") {
+  showSignedOut();
+} else if (boot.kind === "setup") {
   // Once `tiller init` has run, the daemon inlines a snapshot: a reload is the
   // ordinary first load.
-  createRoot(root).render(
+  app.render(
     <StrictMode>
       <SetupScreen command={boot.command} onReady={() => window.location.reload()} />
     </StrictMode>,
@@ -52,7 +67,7 @@ if (boot.kind === "setup") {
   // screen and not a frame of nothing.
   await router.load();
 
-  createRoot(root).render(
+  app.render(
     <StrictMode>
       <QueryClientProvider client={queryClient}>
         <RouterProvider router={router} />
@@ -60,5 +75,16 @@ if (boot.kind === "setup") {
     </StrictMode>,
   );
 
-  connectEvents({ queryClient, lastEventSeq });
+  const stopEvents = connectEvents({ queryClient, lastEventSeq });
+
+  // Signing out here, or a read finding the cookie gone (signed out on another
+  // tab, or it expired), drops everything the board holds and leaves only the
+  // sign-in screen.
+  const unsubscribe = signedOutStore.subscribe(() => {
+    if (!signedOutStore.get()) return;
+    unsubscribe();
+    stopEvents();
+    queryClient.clear();
+    showSignedOut();
+  });
 }

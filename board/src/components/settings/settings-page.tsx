@@ -1,10 +1,12 @@
+import { useState } from "react";
 import type { ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import type { DaemonHealth, MergeAppHealth } from "../../lib/api-types";
 import { prefsStore, updatePrefs } from "../../lib/prefs";
 import type { Density, ThemePreference } from "../../lib/prefs";
-import { healthQuery } from "../../lib/queries";
+import { healthQuery, sessionQuery } from "../../lib/queries";
+import { signOut } from "../../lib/session";
 import { useStore } from "../../lib/store";
 import { formatAge, secondsSince } from "../board/format";
 import "./settings.css";
@@ -113,15 +115,72 @@ function HostFacts({ health }: { health: DaemonHealth }) {
   );
 }
 
+// Signing out ends this browser's owner cookie on the daemon, not the other
+// devices signed in with their own codes.
+function BrowserSession({ owner }: { owner: boolean }) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  if (!owner) {
+    return (
+      <section className="set-panel" aria-label="This browser" data-testid="browser-session">
+        <Fact label="Owner" hint="Run tiller board --login to sign this browser in">
+          <span className="set-status missing">Not signed in</span>
+        </Fact>
+      </section>
+    );
+  }
+  return (
+    <section className="set-panel" aria-label="This browser" data-testid="browser-session">
+      <div className="set-row set-action">
+        <div className="set-text">
+          <h2>Signed in as the owner</h2>
+          <p className={error ? "set-error" : undefined} role={error ? "alert" : undefined}>
+            {error ?? "Signing out ends this browser's sign-in, not other devices'"}
+          </p>
+        </div>
+        <button
+          type="button"
+          className="btn"
+          disabled={pending}
+          onClick={() => {
+            setPending(true);
+            setError(null);
+            void signOut().then((result) => {
+              // At an allowed host the app swaps to the signed-out screen; on
+              // loopback this panel turns to "Not signed in".
+              if (result.ok) {
+                void queryClient.invalidateQueries({ queryKey: sessionQuery().queryKey });
+              } else {
+                setError(result.message.replaceAll("`", ""));
+              }
+              setPending(false);
+            });
+          }}
+        >
+          Sign out
+        </button>
+      </div>
+    </section>
+  );
+}
+
 export function SettingsPage() {
   const prefs = useStore(prefsStore);
   const health = useQuery(healthQuery()).data;
+  const session = useQuery(sessionQuery()).data;
   return (
     <div className="settings-page" data-testid="settings">
       {health ? (
         <>
           <h1 className="set-title">This host</h1>
           <HostFacts health={health} />
+        </>
+      ) : null}
+      {session ? (
+        <>
+          <h1 className="set-title">This browser</h1>
+          <BrowserSession owner={session.owner} />
         </>
       ) : null}
       <h1 className="set-title">Appearance</h1>

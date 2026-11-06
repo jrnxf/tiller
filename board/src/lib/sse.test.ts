@@ -20,7 +20,9 @@ import {
   projectsPath,
   queryKeyFor,
   quotaPath,
+  ReadError,
 } from "./queries";
+import { signedOutStore } from "./session";
 import { applyChange, connectEvents } from "./sse";
 import type { EventSourceLike } from "./sse";
 
@@ -190,6 +192,7 @@ function connect(
     lastEventSeq,
     createEventSource: (url) => new FakeSource(url),
     fetchSnapshot: () => Promise.resolve(snapshot),
+    fetchSession: () => Promise.resolve({ owner: true }),
   });
 }
 
@@ -340,11 +343,13 @@ test("the connection state follows open and error, and a closed stream reopens a
   vi.useFakeTimers();
   const queryClient = seededClient();
   const fetchSnapshot = vi.fn(() => Promise.resolve(fixtureSnapshot("quota-amber", NOW)));
+  const fetchSession = vi.fn(() => Promise.resolve({ owner: true }));
   const stop = connectEvents({
     queryClient,
     lastEventSeq: 4181,
     createEventSource: (url) => new FakeSource(url),
     fetchSnapshot,
+    fetchSession,
   });
   const first = FakeSource.all[0] as FakeSource;
 
@@ -364,7 +369,33 @@ test("the connection state follows open and error, and a closed stream reopens a
   expect(connectionStore.get()).toBe("live");
   // The replay covers the gap: no snapshot refetch, no flash.
   expect(fetchSnapshot).not.toHaveBeenCalled();
+  // Still signed in, so the board stays.
+  expect(fetchSession).toHaveBeenCalledTimes(1);
+  expect(signedOutStore.get()).toBe(false);
   stop();
+});
+
+test("a stream closed because this browser signed out stops for good and shows the signed-out screen", async () => {
+  vi.useFakeTimers();
+  signedOutStore.set(false);
+  const stop = connectEvents({
+    queryClient: seededClient(),
+    lastEventSeq: 4181,
+    createEventSource: (url) => new FakeSource(url),
+    fetchSnapshot: () => Promise.resolve(fixtureSnapshot("default", NOW)),
+    fetchSession: () =>
+      Promise.reject(new ReadError("/api/v1/session", 403, null, null, "signed_out")),
+  });
+  const first = FakeSource.all[0] as FakeSource;
+  first.emit("open");
+  first.readyState = 2;
+  first.emit("error");
+
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(signedOutStore.get()).toBe(true);
+  expect(FakeSource.all).toHaveLength(1);
+  stop();
+  signedOutStore.set(false);
 });
 
 test("a card event marks that card's detail and timeline stale, and no other card's", () => {

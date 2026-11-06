@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Tiller board API",
-    "description": "The daemon's board API (docs/spec/protocol.md section 7). Every path answers only on 127.0.0.1, localhost or an --allow-host name; mutations need the owner cookie and the board's own origin.",
+    "description": "The daemon's board API (docs/spec/protocol.md section 7). Every path answers only on 127.0.0.1, localhost or an --allow-host name; at an --allow-host name every path but the signed-out screen and signing in needs the owner cookie; mutations need the owner cookie and the board's own origin.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -1966,6 +1966,97 @@
         }
       }
     },
+    "/api/v1/login": {
+      "post": {
+        "tags": [
+          "session"
+        ],
+        "summary": "Signs in with the 8-digit code `tiller board --login` prints, as the\nlink does: sets the owner cookie. It passes the mutation checks but the\ncookie. A wrong code counts against every pending code, each of which\nburns on its third, and the daemon takes only so many tries a minute. The code is never logged.",
+        "operationId": "login_code",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CodeLoginBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "signed in: the response sets the owner cookie",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "not 8 digits",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`wrong_code`: wrong, used or expired; `code_burned`: too many wrong codes, so the pending code is spent; or a failed origin check",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`too_many_tries`: the daemon took its tries for this minute; nothing was checked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/logout": {
+      "post": {
+        "tags": [
+          "session"
+        ],
+        "summary": "Signs this browser out: its owner cookie stops working here and now, on\nevery host name, and the browser is told to drop it. Other browsers stay\nsigned in.",
+        "operationId": "logout",
+        "responses": {
+          "200": {
+            "description": "signed out: the response clears the owner cookie",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionView"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines": {
       "get": {
         "tags": [
@@ -2911,6 +3002,36 @@
           },
           "503": {
             "description": "`peer_unreachable`: the cached card row is in `current`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/session": {
+      "get": {
+        "tags": [
+          "session"
+        ],
+        "summary": "Whether this browser holds a live owner cookie, for the board's Sign out.",
+        "operationId": "session",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionView"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`signed_out`: at an --allow-host name, without the owner cookie",
             "content": {
               "application/json": {
                 "schema": {
@@ -4098,6 +4219,21 @@
             "type": "string"
           }
         }
+      },
+      "CodeLoginBody": {
+        "type": "object",
+        "description": "`POST /api/v1/login`: the 8-digit code `tiller board --login` printed.\nNo `Debug`, so the code cannot reach a log line by accident.",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Exactly 8 ASCII digits.",
+            "example": "12345678"
+          }
+        },
+        "additionalProperties": false
       },
       "Comment": {
         "type": "object",
@@ -6518,6 +6654,19 @@
           }
         }
       },
+      "SessionView": {
+        "type": "object",
+        "description": "`GET /api/v1/session`, and the answer to signing in or out.",
+        "required": [
+          "owner"
+        ],
+        "properties": {
+          "owner": {
+            "type": "boolean",
+            "description": "Whether this browser holds a live owner cookie."
+          }
+        }
+      },
       "SignalsIntervention": {
         "type": "object",
         "description": "One time the developer was needed, with the label it counts under.",
@@ -7353,7 +7502,7 @@
   "tags": [
     {
       "name": "reads",
-      "description": "Reads, served to any request that passes the Host check"
+      "description": "Reads: any request that passes the Host check on loopback; at an --allow-host name, only with the owner cookie"
     },
     {
       "name": "mutations",
@@ -7362,6 +7511,10 @@
     {
       "name": "stream",
       "description": "The one SSE stream"
+    },
+    {
+      "name": "session",
+      "description": "Signing in with a code, signing out, and whether this browser is signed in"
     }
   ]
 }

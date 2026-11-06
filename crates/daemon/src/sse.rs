@@ -171,12 +171,13 @@ pub fn stream(
     mut stop: watch::Receiver<bool>,
     peers: Arc<Peers>,
     local: impl Fn() -> LocalHealth + Send + Sync + 'static,
+    ended: impl Future<Output = ()> + Send + 'static,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (tx, mut rx) = mpsc::channel::<Event>(64);
     // Subscribed before the replay: what a link sends meanwhile waits here
     // and follows the `peer_reset`s.
     let mut from_peers = peers.subscribe();
-    tokio::spawn(async move {
+    let work = async move {
         if tx
             .send(Event::default().retry(RETRY).comment("tiller"))
             .await
@@ -283,6 +284,13 @@ pub fn stream(
                 }
             }
         }
+    };
+    // `ended` (a sign-out) drops the sender, which ends the stream.
+    tokio::spawn(async move {
+        tokio::select! {
+            () = work => {}
+            () = ended => {}
+        }
     });
     let events = futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx).map(|e| e.map(Ok)));
     Sse::new(events).keep_alive(KeepAlive::new().interval(KEEPALIVE))
@@ -317,7 +325,7 @@ mod tests {
         let app = router(AppState::new(Inner {
             home: home.to_owned(),
             port,
-            allowed_hosts: Vec::new(),
+            allowed_hosts: vec!["board.example.com".into()],
             assets: Assets::board(),
             newest,
             stop: stop.clone(),
@@ -330,6 +338,7 @@ mod tests {
             damage: crate::readonly::Damage::default(),
             orchestrators: None,
             mirrors: crate::mirror::Mirrors::new(home),
+            sessions: crate::auth::Sessions::default(),
         }));
         let mut stopping = stop.clone();
         tokio::spawn(async move {
@@ -378,6 +387,25 @@ mod tests {
         }
     }
 
+    /// A raw SSE client at the `--allow-host` name with `cookie`, past the
+    /// opening comment.
+    async fn connect_signed_in(addr: SocketAddr, cookie: &str) -> TcpStream {
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "GET /api/v1/events HTTP/1.0\r\nHost: board.example.com\r\nCookie: {cookie}\r\nAccept: text/event-stream\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut head = String::new();
+        let mut buf = [0_u8; 1024];
+        while !head.contains(": tiller") {
+            let n = stream.read(&mut buf).await.unwrap();
+            assert!(n > 0, "the stream closed at once: {head}");
+            head.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        assert!(head.starts_with("HTTP/1.0 200"), "{head}");
+        stream
+    }
+
     fn add_card(fleet: &Fleet, title: &str) -> i64 {
         let mut store = fleet.open();
         store
@@ -393,6 +421,34 @@ mod tests {
             )
             .unwrap();
         store.last_seq().unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_stream_at_an_allowed_host_ends_when_its_browser_signs_out() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _stop = serve(home, listener);
+        let mine = crate::api::tests::owner_cookie(home);
+        let other = crate::api::tests::owner_cookie(home);
+        let mut mine_stream = connect_signed_in(addr, &mine).await;
+        let mut other_stream = connect_signed_in(addr, &other).await;
+
+        let mut out = TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "POST /api/v1/logout HTTP/1.0\r\nHost: board.example.com\r\nOrigin: https://board.example.com\r\nSec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\nCookie: {mine}\r\nContent-Length: 2\r\n\r\n{{}}"
+        );
+        out.write_all(request.as_bytes()).await.unwrap();
+        let mut answer = String::new();
+        out.read_to_string(&mut answer).await.unwrap();
+        assert!(answer.starts_with("HTTP/1.0 200"), "{answer}");
+
+        // The signed-out stream ends; the other browser's goes on.
+        assert_eq!(read_ids(&mut mine_stream, |_| false).await, None);
+        let seq = add_card(&fleet, "Still live");
+        let ids = read_ids(&mut other_stream, |ids| ids.contains(&seq)).await;
+        assert!(ids.is_some(), "the other stream ended");
     }
 
     #[tokio::test(flavor = "multi_thread")]

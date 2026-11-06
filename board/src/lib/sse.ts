@@ -18,6 +18,7 @@ import { connectionStore } from "./connection";
 import { isPeerRow } from "./peers";
 import { SNAPSHOT_PATH, hydrateFromSnapshot } from "./boot";
 import { recordProgress } from "./receipts";
+import { isSignedOut, signedOutStore } from "./session";
 import {
   API_KEY_PREFIX,
   attentionPath,
@@ -27,6 +28,7 @@ import {
   projectsPath,
   quotaPath,
   queryKeyFor,
+  sessionPath,
 } from "./queries";
 import type { QueryPath } from "./queries";
 
@@ -248,6 +250,9 @@ export interface EventsOptions {
   lastEventSeq: number | null;
   createEventSource?: (url: string) => EventSourceLike;
   fetchSnapshot?: () => Promise<Snapshot>;
+  // Asked when the stream is refused or cut: a `signed_out` answer means this
+  // browser's cookie is gone, so the board gives way to the signed-out screen.
+  fetchSession?: () => Promise<unknown>;
 }
 
 const CLOSED = 2;
@@ -263,6 +268,7 @@ export function connectEvents(options: EventsOptions): () => void {
   const createEventSource =
     options.createEventSource ?? ((url) => new EventSource(url) as EventSourceLike);
   const fetchSnapshot = options.fetchSnapshot ?? (() => fetchJson<Snapshot>(SNAPSHOT_PATH));
+  const fetchSession = options.fetchSession ?? (() => fetchJson(sessionPath));
 
   let lastSeq = options.lastEventSeq;
   let source: EventSourceLike | null = null;
@@ -301,6 +307,11 @@ export function connectEvents(options: EventsOptions): () => void {
       if (next.readyState === CLOSED && !stopped) {
         next.close();
         retryTimer = setTimeout(open, 1000);
+        fetchSession().catch((error: unknown) => {
+          if (stopped || !isSignedOut(error)) return;
+          stop();
+          signedOutStore.set(true);
+        });
       }
     });
     next.addEventListener("change", (message) => {
@@ -317,11 +328,13 @@ export function connectEvents(options: EventsOptions): () => void {
     });
   }
 
-  open();
-
-  return () => {
+  function stop() {
     stopped = true;
     clearTimeout(retryTimer);
     source?.close();
-  };
+  }
+
+  open();
+
+  return stop;
 }

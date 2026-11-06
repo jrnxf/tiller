@@ -213,7 +213,9 @@ impl World {
         let shim = write_shim(board.dir.path(), peer.dir.path(), &serve_pid);
         let peer_daemon = Daemon::start(peer.dir.path(), None);
         let board_daemon = Daemon::start(board.dir.path(), Some(&shim));
-        let token = auth::mint_login(board.dir.path(), Timestamp::now()).unwrap();
+        let token = auth::mint_login(board.dir.path(), Timestamp::now())
+            .unwrap()
+            .token;
         let cookie = auth::redeem_login(board.dir.path(), &token, Timestamp::now())
             .unwrap()
             .unwrap();

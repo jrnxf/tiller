@@ -40,7 +40,8 @@ pub struct BoardArgs {
     /// Only this host's label
     #[arg(long)]
     pub host: Option<String>,
-    /// Print the one-time login link that signs the browser in as the owner
+    /// Print the one-time login link and code that sign the browser in as the
+    /// owner
     #[arg(long)]
     pub login: bool,
 }
@@ -161,13 +162,15 @@ pub fn board(app: &App, args: BoardArgs) -> Done {
     Ok(Outcome::read(board_data(&store, &args)?))
 }
 
-/// `tiller board --login`: a one-time link that signs this browser in as the
-/// owner (`protocol.md` 7.1). It needs the running daemon, whose port and
+/// `tiller board --login`: a one-time link, and an 8-digit code for the
+/// board's signed-out screen, that sign a browser in as the owner
+/// (`protocol.md` 7.1). It needs the running daemon, whose port and
 /// `--allow-host` names it reads from `daemon.json`; the one token is printed
-/// for loopback and for each allowed host, works once at any of them and
-/// expires after `LOGIN_MINUTES`, so each call mints a new one. On a terminal
-/// each allowed host's link is also drawn as a QR code on stderr, for a
-/// phone to scan; stdout stays the response alone.
+/// for loopback and for each allowed host. The link and the code are one
+/// login: either works once, at any of those names, until `LOGIN_MINUTES`
+/// pass, so each call mints a new pair. On a terminal each allowed host's
+/// link is also drawn as a QR code on stderr, for a phone to scan, and the
+/// code follows; stdout stays the response alone.
 fn login(app: &App) -> Done {
     app.require_owner("tiller board --login")?;
     let running = tiller_agents::land::DaemonLock::held(&app.home)
@@ -179,8 +182,9 @@ fn login(app: &App) -> Done {
         )
         .hint("start the daemon with: tiller daemon"));
     };
-    let token = tiller_daemon::auth::mint_login(&app.home, tiller_core::Timestamp::now())
-        .map_err(|error| Failure::from(tiller_core::Error::Internal(error.to_string())))?;
+    let tiller_daemon::auth::Login { token, code } =
+        tiller_daemon::auth::mint_login(&app.home, tiller_core::Timestamp::now())
+            .map_err(|error| Failure::from(tiller_core::Error::Internal(error.to_string())))?;
     let allowed: Vec<String> = running
         .allowed_hosts
         .iter()
@@ -192,10 +196,17 @@ fn login(app: &App) -> Done {
             // A failed write to the terminal loses only the picture.
             let _ = write!(stderr, "{url}\n{}\n", qr(url));
         }
+        let _ = writeln!(
+            stderr,
+            "Or enter this code on the board: {} {}",
+            &code[..4],
+            &code[4..]
+        );
     }
     Ok(Outcome::read(json!({
         "url": format!("http://127.0.0.1:{}/login/{token}", running.port),
         "allowed_host_urls": allowed,
+        "code": code,
         "expires_in_minutes": tiller_daemon::auth::LOGIN_MINUTES,
     })))
 }

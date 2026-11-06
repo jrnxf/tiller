@@ -875,6 +875,23 @@ pub struct ErrorDetail {
     pub host: Option<String>,
 }
 
+/// `POST /api/v1/login`: the 8-digit code `tiller board --login` printed.
+/// No `Debug`, so the code cannot reach a log line by accident.
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CodeLoginBody {
+    /// Exactly 8 ASCII digits.
+    #[schema(example = "12345678")]
+    pub code: String,
+}
+
+/// `GET /api/v1/session`, and the answer to signing in or out.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct SessionView {
+    /// Whether this browser holds a live owner cookie.
+    pub owner: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct ErrorBody {
     /// Always false.

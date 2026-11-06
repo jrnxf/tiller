@@ -278,11 +278,50 @@ function startMover(res: ServerResponse) {
   }, 4000);
 }
 
+// The stand-in for an `--allow-host` name's sign-in: Settings' Sign out drops
+// it, and the code below signs back in. Signed out, every read is refused and
+// the page has no boot snapshot, so the board shows its signed-out screen.
+let signedIn = true;
+const FIXTURE_CODE = "12345678";
+
+function refuse(res: ServerResponse, code: string, message: string) {
+  res.statusCode = 403;
+  sendJson(res, { ok: false, error: { code, message } });
+}
+
+// Answers the session endpoints; true when it did.
+function sessionRoute(req: IncomingMessage, res: ServerResponse, path: string): boolean {
+  if (path === "/api/v1/session") {
+    sendJson(res, { owner: signedIn });
+    return true;
+  }
+  if (req.method !== "POST" || (path !== "/api/v1/login" && path !== "/api/v1/logout")) {
+    return false;
+  }
+  readBody(req)
+    .then((body) => {
+      if (path === "/api/v1/logout") {
+        signedIn = false;
+        for (const stream of streams) stream.end();
+        streams.clear();
+      } else if (body.code === FIXTURE_CODE) {
+        signedIn = true;
+      } else {
+        return refuse(res, "wrong_code", "that code is wrong or has expired");
+      }
+      sendJson(res, { owner: signedIn });
+    })
+    .catch(() => res.destroy());
+  return true;
+}
+
 function apiMiddleware(): Connect.NextHandleFunction {
   return (req: IncomingMessage, res, next) => {
     const url = req.url ?? "";
     if (!url.startsWith("/api/v1/")) return next();
     const scenario = scenarioOf(undefined, req.headers.referer);
+    if (sessionRoute(req, res, url.split("?")[0] ?? url)) return;
+    if (!signedIn) return refuse(res, "signed_out", "this board is not signed in");
 
     const terminal = /^\/api\/v1\/agents\/([^/]+)\/terminal(\/input|\/fit|\/history|\/tail)?$/.exec(
       url,
@@ -357,6 +396,7 @@ export function tillerFixtures(): Plugin {
       order: "pre",
       handler(html, ctx) {
         if (!ctx.server) return html;
+        if (!signedIn) return html;
         const scenario = scenarioOf(ctx.originalUrl, undefined);
         return html.replace("</head>", `${bootScript(snapshotOf(scenario))}</head>`);
       },
@@ -369,8 +409,9 @@ export function tillerFixtures(): Plugin {
         const dist = resolve(server.config.root, server.config.build.outDir, "index.html");
         readFile(dist, "utf8")
           .then((html) => {
-            const scenario = scenarioOf(req.url, undefined);
             res.setHeader("content-type", "text/html");
+            if (!signedIn) return res.end(html);
+            const scenario = scenarioOf(req.url, undefined);
             res.end(html.replace("</head>", `${bootScript(snapshotOf(scenario))}</head>`));
           })
           .catch(next);

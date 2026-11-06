@@ -1,4 +1,5 @@
 import type { ApiErrorBody, MutationResponse } from "../../lib/api-types";
+import { signedOutStore } from "../../lib/session";
 
 // A refused or failed mutation, with the server's readable message and the
 // `current` facts a refusal carries (protocol.md sections 6.1 and 7.2).
@@ -53,6 +54,8 @@ export async function sendMutation<T>(
   }
   if (isErrorBody(parsed)) {
     const { code, message, current } = parsed.error;
+    // At an `--allow-host` name the cookie was revoked or ran out.
+    if (response.status === 403 && code === "signed_out") signedOutStore.set(true);
     throw new ActionError(response.status, code, message, current);
   }
   if (response.status === 503 || response.status === 0) {

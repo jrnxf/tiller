@@ -1,7 +1,7 @@
 import { QueryClient } from "@tanstack/react-query";
 import { expect, test } from "vitest";
 
-import { BOOT_ELEMENT_ID, hydrateFromSnapshot, readBootSnapshot } from "./boot";
+import { BOOT_ELEMENT_ID, hydrateFromSnapshot, loadBoot, readBootSnapshot } from "./boot";
 import { clockStore } from "./clock";
 import { bootScript, fixtureSnapshot } from "./fixtures";
 import {
@@ -11,6 +11,7 @@ import {
   machinesQuery,
   projectsQuery,
   quotaQuery,
+  ReadError,
 } from "./queries";
 
 const NOW = Date.parse("2026-11-02T12:00:00.000Z");
@@ -68,4 +69,18 @@ test("hydrating returns the stream position and sets the server clock offset", (
   expect(hydrateFromSnapshot(queryClient, snapshot)).toBe(4181);
   expect(clockStore.get().offsetMs).toBeGreaterThan(55_000);
   expect(clockStore.get().offsetMs).toBeLessThan(65_000);
+});
+
+function refusedSignedOut(path: string) {
+  return Promise.reject(new ReadError(path, 403, "not signed in", null, "signed_out"));
+}
+
+function unreachable(path: string) {
+  return Promise.reject(new ReadError(path, 502, null));
+}
+
+test("a snapshot refused as signed out boots the signed-out screen", async () => {
+  document.body.innerHTML = "";
+  expect(await loadBoot(document, refusedSignedOut)).toEqual({ kind: "signed-out" });
+  expect(await loadBoot(document, unreachable)).toEqual({ kind: "board", snapshot: null });
 });

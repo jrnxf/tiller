@@ -1516,3 +1516,75 @@ kbd {
     animation: none;
   }
 }
+
+/* The signed-out screen at an `--allow-host` name (states/signed-out-screen.tsx) */
+
+.signin-form {
+  margin: 16px 0 0;
+}
+
+.signin-code {
+  display: block;
+  width: 100%;
+  height: 48px;
+  padding: 0 12px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r8);
+  background: var(--bg-2);
+  color: var(--fg-1);
+  font-family: var(--mono);
+  /* 16px or more, so phones do not zoom in on focus. */
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.3em;
+  /* Balances the spacing after the last digit, so the code sits centered. */
+  text-indent: 0.3em;
+  text-align: center;
+  outline: none;
+  transition:
+    border-color var(--fast) var(--ease),
+    box-shadow var(--fast) var(--ease);
+}
+
+.signin-code::placeholder {
+  color: var(--fg-4);
+}
+
+.signin-code:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in lch, var(--accent), transparent 80%);
+}
+
+.signin-code[aria-invalid="true"] {
+  border-color: color-mix(in srgb, var(--red) 60%, var(--line-2));
+}
+
+.signin-code[aria-invalid="true"]:focus {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--red), transparent 82%);
+}
+
+/* A command never breaks across lines. */
+.signin-card code {
+  white-space: nowrap;
+}
+
+.signin-code:read-only {
+  color: var(--fg-3);
+}
+
+.setup-card .signin-error {
+  margin: 10px 0 0;
+  font-size: var(--fs-small);
+  color: var(--red-text);
+}
+
+.setup-card .signin-error code {
+  color: var(--red-text);
+}
+
+.setup-card .signin-alt {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-1);
+  font-size: var(--fs-mini);
+}

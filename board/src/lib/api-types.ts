@@ -620,6 +620,11 @@ export interface SignalsResponse {
   machines_total: number;
 }
 
+// `GET /api/v1/session`: whether this browser holds a live owner cookie.
+export interface SessionView {
+  owner: boolean;
+}
+
 // `GET /api/v1/health`: the daemon's own state, answered before `tiller init`
 // too. Only what the board reads.
 export interface DaemonHealth {

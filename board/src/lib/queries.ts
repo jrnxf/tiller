@@ -17,6 +17,7 @@ import type {
   ProjectsResponse,
   QuotaResponse,
   RunDetail,
+  SessionView,
   SignalsResponse,
   TimelineResponse,
 } from "./api-types.ts";
@@ -48,14 +49,23 @@ export class ReadError extends Error {
   readonly status: number;
   readonly reason: string | null;
   readonly hint: string | null;
+  // The error body's code, such as `signed_out`.
+  readonly code: string | null;
 
-  constructor(path: string, status: number, reason: string | null, hint: string | null = null) {
+  constructor(
+    path: string,
+    status: number,
+    reason: string | null,
+    hint: string | null = null,
+    code: string | null = null,
+  ) {
     super(`${path} answered ${status}${reason ? `: ${reason}` : ""}`);
     this.name = "ReadError";
     this.path = path;
     this.status = status;
     this.reason = reason;
     this.hint = hint;
+    this.code = code;
   }
 }
 
@@ -72,7 +82,7 @@ async function readError(path: string, response: Response): Promise<ReadError> {
     const message = text(body.error?.message);
     const reason =
       code && message?.startsWith(`${code}: `) ? message.slice(code.length + 2) : message;
-    return new ReadError(path, response.status, reason, text(body.error?.hint));
+    return new ReadError(path, response.status, reason, text(body.error?.hint), code);
   } catch {
     return new ReadError(path, response.status, null);
   }
@@ -116,6 +126,10 @@ export const machinesQuery = () => readQuery<MachinesResponse>(machinesPath);
 
 export const quotaPath: QueryPath = "/api/v1/quota";
 export const quotaQuery = () => readQuery<QuotaResponse>(quotaPath);
+
+// Whether this browser is signed in as the owner, for Settings' Sign out.
+export const sessionPath: QueryPath = "/api/v1/session";
+export const sessionQuery = () => readQuery<SessionView>(sessionPath);
 
 // The daemon's own facts (version, start time, merge App), for Settings.
 const healthPath: QueryPath = "/api/v1/health";

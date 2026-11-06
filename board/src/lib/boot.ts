@@ -3,6 +3,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import type { DaemonHealth, Snapshot } from "./api-types";
 import { syncClock } from "./clock";
 import { API_KEY_PREFIX, ReadError, fetchJson } from "./queries";
+import { isSignedOut } from "./session";
 
 export const BOOT_ELEMENT_ID = "tiller-boot";
 
@@ -40,13 +41,15 @@ export function hydrateFromSnapshot(queryClient: QueryClient, snapshot: Snapshot
 export const SNAPSHOT_PATH = "/api/v1/snapshot";
 const HEALTH_PATH = "/api/v1/health";
 
-// What the page opens with: the board, with the snapshot when there is one,
-// or the setup screen when the daemon runs on a machine nobody has set up yet
+// What the page opens with: the board, with the snapshot when there is one;
+// the setup screen when the daemon runs on a machine nobody has set up yet
 // (no state.db: every read answers 503, with the command to run, until
-// `tiller init`).
+// `tiller init`); or the signed-out screen when, at an `--allow-host` name,
+// this browser has no owner cookie (every read answers 403 `signed_out`).
 export type Boot =
   | { kind: "board"; snapshot: Snapshot | null }
-  | { kind: "setup"; command: string };
+  | { kind: "setup"; command: string }
+  | { kind: "signed-out" };
 
 type Fetch = <T>(path: string) => Promise<T>;
 
@@ -60,6 +63,7 @@ export async function loadBoot(
   try {
     return { kind: "board", snapshot: await fetch<Snapshot>(SNAPSHOT_PATH) };
   } catch (error) {
+    if (isSignedOut(error)) return { kind: "signed-out" };
     if (error instanceof ReadError && error.status === 503 && error.hint) {
       const health = await fetch<DaemonHealth>(HEALTH_PATH).catch(() => null);
       if (health?.initialized === false) return { kind: "setup", command: error.hint };
