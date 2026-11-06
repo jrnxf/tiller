@@ -949,6 +949,7 @@ function cardDetailFor(
           id: `01JPR${String(row.pr_number).padStart(21, "0")}`,
           number: row.pr_number,
           repo: `example/${row.project_id}`,
+          url: `https://github.com/example/${row.project_id}/pull/${row.pr_number}`,
           title: row.title,
           state: done ? "merged" : "open",
           head_sha: row.id.endsWith("44") ? FIXTURE_HEAD_SHA : sha,

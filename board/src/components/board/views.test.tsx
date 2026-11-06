@@ -695,7 +695,10 @@ test("the page lists runs, the PR with its head, events and how fresh each signa
   expect(page.textContent).toContain("Attempt 1");
   expect(page.textContent).toContain("Attempt 2");
   expect(page.textContent).toContain("failed");
-  expect(page.textContent).toContain("example/alpha#52");
+  expect(within(page).getByRole("link", { name: "example/alpha#52" })).toHaveProperty(
+    "href",
+    "https://github.com/example/alpha/pull/52",
+  );
   expect(page.textContent).toContain("ci.pass 4/4");
   expect(page.textContent).toContain("Observation freshness");
   expect(page.textContent).toContain("Pane (herdr)");

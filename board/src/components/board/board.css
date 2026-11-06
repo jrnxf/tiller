@@ -700,6 +700,12 @@ button.colh:hover {
   font-weight: var(--w-normal);
   font-size: var(--fs-mini);
 }
+.sect-h a.c {
+  color: var(--accent-text);
+}
+.sect-h a.c:hover {
+  text-decoration: underline;
+}
 .sect-h .sp {
   flex: 1;
 }

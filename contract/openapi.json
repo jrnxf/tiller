@@ -4036,6 +4036,7 @@
           "id",
           "number",
           "repo",
+          "url",
           "title",
           "state",
           "head_sha",
@@ -4081,6 +4082,10 @@
           },
           "title": {
             "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "description": "The PR's page on the forge."
           }
         }
       },

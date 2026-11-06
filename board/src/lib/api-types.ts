@@ -213,6 +213,8 @@ export interface CardPr {
   id: string;
   number: number;
   repo: string;
+  // The PR's page on the forge.
+  url: string;
   title: string;
   state: "open" | "merged" | "closed";
   head_sha: string;

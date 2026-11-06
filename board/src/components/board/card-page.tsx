@@ -249,9 +249,9 @@ function PullRequest({
     <div className="sect">
       <div className="sect-h">
         Pull request
-        <span className="c">
+        <a className="c" href={pr.url} target="_blank" rel="noreferrer">
           {pr.repo}#{pr.number}
-        </span>
+        </a>
       </div>
       <div className={`prbox prc${stale ? " stale" : ""}`} data-standing={standing ?? "none"}>
         <div className="ph1">

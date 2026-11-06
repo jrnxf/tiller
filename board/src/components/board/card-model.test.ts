@@ -7,6 +7,7 @@ const pr = (head: string, state: CardPr["state"] = "open"): CardPr => ({
   id: "pr1",
   number: 52,
   repo: "example/alpha",
+  url: "https://github.com/example/alpha/pull/52",
   title: "t",
   state,
   head_sha: head,

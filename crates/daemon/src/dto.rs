@@ -298,6 +298,8 @@ pub struct CardPr {
     pub id: String,
     pub number: i64,
     pub repo: String,
+    /// The PR's page on the forge.
+    pub url: String,
     pub title: String,
     /// `open`, `merged` or `closed`.
     pub state: String,

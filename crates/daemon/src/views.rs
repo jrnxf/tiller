@@ -999,6 +999,7 @@ pub fn card_detail(store: &Store, reference: &str) -> Result<CardDetail> {
                 id: pr.id.clone(),
                 number: pr.number,
                 repo: repo_of(&pr.url),
+                url: pr.url.clone(),
                 title: card.title.clone(),
                 state: pr.state.to_string(),
                 head_sha: pr.head_sha.clone().unwrap_or_default(),
