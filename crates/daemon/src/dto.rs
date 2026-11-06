@@ -1276,6 +1276,26 @@ pub struct TerminalHistory {
     pub text: String,
 }
 
+/// `POST /api/v1/agents/{session}/terminal/tail`: nothing to ask beyond
+/// the agent.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalTailAsk {
+    /// A paired peer's label; a tail read is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
+/// The pane's visible screen as herdr renders it, one row per line split by
+/// `\n`, colors as ANSI escapes, and the pane's size in cells.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct TerminalTail {
+    pub session_id: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub text: String,
+}
+
 /// `POST /api/v1/agents/{session}/terminal/input`: exactly one of `keys`
 /// and `text`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]

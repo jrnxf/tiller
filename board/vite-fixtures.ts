@@ -14,6 +14,7 @@ import {
   fullFrame,
   historyText,
   promptFrame,
+  screenText,
   tickFrame,
   typeInto,
 } from "./src/lib/fixtures-terminal.ts";
@@ -225,6 +226,28 @@ function terminalHistory(req: IncomingMessage, res: ServerResponse, session: str
   );
 }
 
+// A tail read of a pane on a saved machine: refused like the stream for a
+// forbidden pane, gone for an ended one, and herdr away for an unreachable
+// one.
+function terminalTail(req: IncomingMessage, res: ServerResponse, session: string) {
+  const mode = terminalMode(req.headers.referer);
+  const refusals: Record<string, [number, string, string]> = {
+    forbidden: [403, "forbidden", "only the owner reads an agent's terminal"],
+    ended: [404, "not_found", `no pane for ${session}`],
+    unreachable: [503, "unavailable", "herdr is unreachable: no socket"],
+  };
+  const refused = refusals[mode];
+  if (refused) {
+    const [status, code, message] = refused;
+    res.statusCode = status;
+    return sendJson(res, { ok: false, error: { code, message } });
+  }
+  const pane = paneOf(session);
+  const seconds = Math.round((Date.now() - pane.started) / 1000);
+  const text = screenText(pane.typed, seconds);
+  sendJson(res, { session_id: session, cols: FIXTURE_COLS, rows: FIXTURE_ROWS, text });
+}
+
 function startMover(res: ServerResponse) {
   const board = fixtureResource("/api/v1/board?filter=all", "live") as { rows: BoardRow[] };
   const row = board.rows.find((candidate) => candidate.display_id === "alpha-42");
@@ -261,7 +284,9 @@ function apiMiddleware(): Connect.NextHandleFunction {
     if (!url.startsWith("/api/v1/")) return next();
     const scenario = scenarioOf(undefined, req.headers.referer);
 
-    const terminal = /^\/api\/v1\/agents\/([^/]+)\/terminal(\/input|\/fit|\/history)?$/.exec(url);
+    const terminal = /^\/api\/v1\/agents\/([^/]+)\/terminal(\/input|\/fit|\/history|\/tail)?$/.exec(
+      url,
+    );
     if (terminal?.[1] && req.method === "POST") {
       const session = terminal[1];
       readBody(req)
@@ -269,6 +294,7 @@ function apiMiddleware(): Connect.NextHandleFunction {
           if (terminal[2] === "/input") terminalInput(res, session, body);
           else if (terminal[2] === "/fit") terminalFit(res, session, body);
           else if (terminal[2] === "/history") terminalHistory(req, res, session);
+          else if (terminal[2] === "/tail") terminalTail(req, res, session);
           else terminalStream(req, res, session, body);
         })
         .catch(() => res.destroy());

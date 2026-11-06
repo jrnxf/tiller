@@ -45,8 +45,9 @@ function stubApi(scenario: Scenario, focusStatus = 200, focused: unknown = null)
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       const method = init?.method ?? "GET";
-      // The stage mirrors the selected agent's pane; these tests never stream it.
-      if (path.endsWith("/terminal")) return new Response("{}", { status: 404 });
+      // The stage mirrors the selected agent's pane, or tails a remote one;
+      // these tests never read it.
+      if (/\/terminal(\/tail)?$/.test(path)) return new Response("{}", { status: 404 });
       if (method !== "GET") {
         posted.push({
           path,

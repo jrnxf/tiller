@@ -588,6 +588,10 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/agents/{session}/terminal/history",
             post(terminal_history),
         )
+        .route(
+            "/api/v1/agents/{session}/terminal/tail",
+            post(terminal_tail),
+        )
         .route("/api/v1/runs/{id}", get(run))
         .route("/api/v1/machines", get(machines))
         .route("/api/v1/quota", get(quota))
@@ -2151,16 +2155,25 @@ async fn decide(
     submit(&state, &headers, Op::Decide, Some(id), &bytes).await
 }
 
-/// An agent's pane on this machine, for the terminal mirror; an agent on a
-/// saved machine is refused, since herdr's observe stream stays local.
-async fn local_pane(state: &AppState, session: String) -> Result<(String, String), ApiError> {
-    let (session_id, pane, machine) = read(state, move |store| {
+/// An agent's session id, its pane, and the saved machine it runs on, if
+/// any.
+async fn pane_of(
+    state: &AppState,
+    session: String,
+) -> Result<(String, String, Option<String>), ApiError> {
+    read(state, move |store| {
         let id = resolve_id(store.conn(), "sessions", "session", &session)?;
         let session: Session = get_row(store.conn(), "session", &id)?;
         let (pane, machine) = tiller_core::state::runs::focus_target(store.conn(), &session)?;
         Ok((session.id, pane, machine))
     })
-    .await?;
+    .await
+}
+
+/// An agent's pane on this machine, for the terminal mirror; an agent on a
+/// saved machine is refused, since herdr's observe stream stays local.
+async fn local_pane(state: &AppState, session: String) -> Result<(String, String), ApiError> {
+    let (session_id, pane, machine) = pane_of(state, session).await?;
     if let Some(machine) = machine {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -2402,6 +2415,66 @@ async fn terminal_history(
     Ok(Json(TerminalHistory { session_id, text }))
 }
 
+/// Tail reads in flight at once: each makes two herdr calls, to a saved
+/// machine for a remote agent, so a busy board never stacks them up.
+const MAX_TAIL_READS: usize = 4;
+static TAIL_READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(MAX_TAIL_READS);
+
+/// The pane's visible screen and its size, read once, for an agent on a
+/// saved machine: herdr's observe stream stays on the machine the pane runs
+/// on, but its read goes there with `--machine` (`protocol.md` 7.4). A POST
+/// with every mutation check, as the mirror is, though it writes nothing.
+#[utoipa::path(post, path = "/api/v1/agents/{session}/terminal/tail", tag = "mutations", request_body = TerminalTailAsk,
+    params(("session" = String, Path)),
+    responses((status = 200, body = TerminalTail),
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
+              (status = 503, body = ErrorBody, description = "herdr, or the saved machine, is unreachable, or 4 tail reads are in flight")))]
+async fn terminal_tail(
+    State(state): State<AppState>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<TerminalTail> {
+    guard(&state, &headers)?;
+    let request: TerminalTailAsk = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "the terminal tail").await?;
+    let (session_id, pane, machine) = pane_of(&state, session).await?;
+    let read = TAIL_READS.try_acquire().map_err(|_| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            format!("{MAX_TAIL_READS} tail reads are in flight; the next read tries again"),
+        )
+    })?;
+    let herdr = match machine {
+        Some(machine) => state.0.herdr.clone().on_machine(machine),
+        None => state.0.herdr.clone(),
+    };
+    let target = pane.clone();
+    // The read holds its place until herdr answers, even when the board
+    // has gone.
+    let tail = tokio::task::spawn_blocking(move || {
+        let _read = read;
+        let Some(size) = herdr.pane_size(&target)? else {
+            return Ok(None);
+        };
+        herdr.read_visible(&target).map(|text| Some((size, text)))
+    })
+    .await
+    .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
+    .map_err(|error| pane_error(&pane, &error))?;
+    let Some(((cols, rows), text)) = tail else {
+        return Err(pane_gone(&pane));
+    };
+    Ok(Json(TerminalTail {
+        session_id,
+        cols,
+        rows,
+        text,
+    }))
+}
+
 /// The core's refusal when the approval binds another head than the one
 /// the board showed.
 const HEAD_MOVED: &str = "the head moved since it was shown";
@@ -2419,14 +2492,7 @@ async fn focus(
     guard(&state, &headers)?;
     let request: FocusBody = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "a focus").await?;
-    let target = read(&state, move |store| {
-        let id = resolve_id(store.conn(), "sessions", "session", &session)?;
-        let session: Session = get_row(store.conn(), "session", &id)?;
-        let (pane, machine) = tiller_core::state::runs::focus_target(store.conn(), &session)?;
-        Ok((session.id, pane, machine))
-    })
-    .await?;
-    let (session_id, pane, machine) = target;
+    let (session_id, pane, machine) = pane_of(&state, session).await?;
     let herdr = match machine {
         Some(machine) => state.0.herdr.clone().on_machine(machine),
         None => state.0.herdr.clone(),
@@ -2558,7 +2624,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, stage_project, ask_note, start_orchestrator, add_project, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
+        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, stage_project, ask_note, start_orchestrator, add_project, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
         relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo
     ),
@@ -4024,7 +4090,9 @@ case "$*" in
   printf 'one\n\033[34mtwo\033[0m\n';;
 *"pane layout"*)
   read cols rows < '{dir}/size'
-  printf '{{"result":{{"layout":{{"panes":[{{"pane_id":"w2:p1","rect":{{"width":%s,"height":%s}}}}]}}}}}}\n' "$cols" "$rows";;
+  for pane; do :; done
+  [ -e '{dir}/gone' ] && pane=gone
+  printf '{{"result":{{"layout":{{"panes":[{{"pane_id":"%s","rect":{{"width":%s,"height":%s}}}}]}}}}}}\n' "$pane" "$cols" "$rows";;
 *"terminal session observe"*)
   echo $$ >> '{dir}/observers'
   full=$(cat '{dir}/full' 2>/dev/null || echo true)
@@ -4118,11 +4186,13 @@ esac"#,
         let input = format!("/api/v1/agents/{session}/terminal/input");
         let refit = format!("/api/v1/agents/{session}/terminal/fit");
         let history = format!("/api/v1/agents/{session}/terminal/history");
+        let tail = format!("/api/v1/agents/{session}/terminal/tail");
         let paths = [
             (stream.as_str(), json!({})),
             (input.as_str(), json!({"keys": ["ctrl+c"]})),
             (refit.as_str(), json!({"cols": 100, "rows": 30})),
             (history.as_str(), json!({})),
+            (tail.as_str(), json!({})),
         ];
         let cookie_header = ("cookie", cookie.as_str());
         let refusals: [(&str, Vec<(&str, &str)>); 4] = [
@@ -4224,7 +4294,7 @@ esac"#,
     }
 
     #[tokio::test]
-    async fn a_remote_agent_gets_no_terminal_mirror() {
+    async fn a_remote_agent_gets_a_tail_and_no_terminal_mirror() {
         let mut fleet = Fleet::new();
         let remote = fleet.worker("w3:p1");
         fleet
@@ -4263,6 +4333,39 @@ esac"#,
             assert!(answer.body.contains("\"refused\""), "{}", answer.body);
         }
         assert!(!scratch.path().join("calls").exists());
+
+        // Its tail is read through the saved machine instead: the pane's
+        // size, then its visible screen, colors kept.
+        let tail = format!("/api/v1/agents/{remote}/terminal/tail");
+        let read = send(
+            &app,
+            mutation("POST", &tail, json!({}), &[("cookie", &cookie)]),
+        )
+        .await;
+        assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+        let read: Value = serde_json::from_str(&read.body).unwrap();
+        assert_eq!(read["session_id"], remote);
+        assert_eq!(
+            (read["cols"].clone(), read["rows"].clone()),
+            (json!(80), json!(24))
+        );
+        assert_eq!(read["text"], "one\n\u{1b}[34mtwo\u{1b}[0m\n");
+        let calls = std::fs::read_to_string(scratch.path().join("calls")).unwrap();
+        assert_eq!(
+            calls.lines().collect::<Vec<_>>(),
+            [
+                "--machine m-1 pane layout --pane w3:p1",
+                "--machine m-1 pane read w3:p1 --source visible --format ansi"
+            ]
+        );
+        // A closed pane is a 404.
+        std::fs::write(scratch.path().join("gone"), "").unwrap();
+        let closed = send(
+            &app,
+            mutation("POST", &tail, json!({}), &[("cookie", &cookie)]),
+        )
+        .await;
+        assert_eq!(closed.status, StatusCode::NOT_FOUND, "{}", closed.body);
     }
 
     #[tokio::test]

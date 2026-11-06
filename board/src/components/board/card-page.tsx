@@ -33,7 +33,7 @@ import { useAmbiguousIds, useStanding } from "./peer-state";
 import { approvalFor, approvalStanding, mergeTimeline } from "./card-model";
 import { durationSeconds, formatAge, formatLisbonMoment, secondsSince, shortSha } from "./format";
 import { focusTooltip, useHerdrFocus, useOpenKey } from "./herdr";
-import { LiveTerminal, RemoteTerminalNote, TerminalToggle, useTerminalOpen } from "./live-terminal";
+import { LiveTerminal, TerminalToggle, useTerminalOpen } from "./live-terminal";
 import {
   BoltIcon,
   ChevronLeftIcon,
@@ -162,7 +162,8 @@ function RunCard({ run, owner }: { run: CardRun; owner: string | undefined }) {
   const hostId = run.host_id;
   const remote = machine?.kind === "remote";
   const terminalOpen = useTerminalOpen();
-  // Only the owner sees an agent's terminal, and only for this machine's agents.
+  // Only the owner sees an agent's terminal: live for this machine's agents,
+  // a read-only tail for a saved machine's.
   const mirror = active && sessionId && hostId && off === null;
   const openPane = (
     <button
@@ -210,22 +211,19 @@ function RunCard({ run, owner }: { run: CardRun; owner: string | undefined }) {
         </div>
       ) : null}
       {mirror && terminalOpen ? (
-        remote ? (
-          <RemoteTerminalNote machine={machine?.label ?? "another machine"} />
-        ) : (
-          <LiveTerminal
-            sessionId={sessionId}
-            label={`${run.role} attempt ${run.number}`}
-            heading={
-              <span className="mir-title">
-                Attempt {run.number}
-                <span className="lab sm">{run.role}</span>
-                {machine ? <span className="meta">{machine.label}</span> : null}
-              </span>
-            }
-            actions={openPane}
-          />
-        )
+        <LiveTerminal
+          sessionId={sessionId}
+          label={`${run.role} attempt ${run.number}`}
+          heading={
+            <span className="mir-title">
+              Attempt {run.number}
+              <span className="lab sm">{run.role}</span>
+              {machine ? <span className="meta">{machine.label}</span> : null}
+            </span>
+          }
+          actions={openPane}
+          machine={remote ? machine.label : undefined}
+        />
       ) : null}
     </div>
   );

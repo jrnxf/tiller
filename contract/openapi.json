@@ -485,6 +485,85 @@
         }
       }
     },
+    "/api/v1/agents/{session}/terminal/tail": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "summary": "The pane's visible screen and its size, read once, for an agent on a\nsaved machine: herdr's observe stream stays on the machine the pane runs\non, but its read goes there with `--machine` (`protocol.md` 7.4). A POST\nwith every mutation check, as the mirror is, though it writes nothing.",
+        "operationId": "terminal_tail",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TerminalTailAsk"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TerminalTail"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "no such agent, or its pane closed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "herdr, or the saved machine, is unreachable, or 4 tail reads are in flight",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/approvals/{id}/decide": {
       "post": {
         "tags": [
@@ -6767,6 +6846,48 @@
             "format": "int32",
             "description": "5 to 200.",
             "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "TerminalTail": {
+        "type": "object",
+        "description": "The pane's visible screen as herdr renders it, one row per line split by\n`\\n`, colors as ANSI escapes, and the pane's size in cells.",
+        "required": [
+          "session_id",
+          "cols",
+          "rows",
+          "text"
+        ],
+        "properties": {
+          "cols": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "rows": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "TerminalTailAsk": {
+        "type": "object",
+        "description": "`POST /api/v1/agents/{session}/terminal/tail`: nothing to ask beyond\nthe agent.",
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label; a tail read is not forwarded."
           }
         },
         "additionalProperties": false

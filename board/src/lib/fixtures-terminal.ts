@@ -123,10 +123,20 @@ export function historyText(typed: string, seconds: number, size: PaneSize = OWN
       "",
     );
   }
+  return `${[...earlier, ...screenRows(typed, seconds, size)].join("\n")}\n`;
+}
+
+// The pane's screen as herdr's visible read returns it, for a tail: rows
+// split by a bare newline.
+export function screenText(typed: string, seconds: number, size: PaneSize = OWN): string {
+  return `${screenRows(typed, seconds, size).join("\n")}\n`;
+}
+
+function screenRows(typed: string, seconds: number, size: PaneSize): string[] {
   const screen = lines(size);
   screen[thinkingRow(size) - 1] = thinking(seconds);
   screen[promptRow(size) - 1] = prompt(typed, size);
-  return `${[...earlier, ...screen].join("\n")}\n`;
+  return screen;
 }
 
 // What a key does to the prompt: printable keys type, backspace takes one

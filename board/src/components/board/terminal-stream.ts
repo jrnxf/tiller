@@ -15,6 +15,7 @@ export const terminalPath = (sessionId: string) => `/api/v1/agents/${sessionId}/
 const terminalInputPath = (sessionId: string) => `${terminalPath(sessionId)}/input`;
 const terminalFitPath = (sessionId: string) => `${terminalPath(sessionId)}/fit`;
 const terminalHistoryPath = (sessionId: string) => `${terminalPath(sessionId)}/history`;
+const terminalTailPath = (sessionId: string) => `${terminalPath(sessionId)}/tail`;
 
 // What the mirror draws on: xterm in the board, a recorder in tests.
 export interface Screen {
@@ -32,6 +33,8 @@ export type MirrorStatus =
   | { kind: "ended"; at: Date }
   | { kind: "forbidden" }
   | { kind: "remote"; detail: string }
+  // A pane on a saved machine, read every few seconds: `at` is the last read.
+  | { kind: "tail"; at: string }
   | { kind: "failed"; detail: string };
 
 export interface TerminalSize {
@@ -91,21 +94,38 @@ const NOT_OWNER =
 // the screen only, so this is the one way to read back.
 export type History = { ok: true; text: string } | { ok: false; detail: string };
 
-export async function readHistory(sessionId: string, signal?: AbortSignal): Promise<History> {
+// One read of the pane, the history or the tail: a null status means the
+// daemon did not answer.
+type PaneRead<T> = { ok: true; body: T } | { ok: false; status: number | null; detail: string };
+
+async function readPane<T>(path: string, signal?: AbortSignal): Promise<PaneRead<T>> {
   try {
-    const response = await fetch(terminalHistoryPath(sessionId), {
+    const response = await fetch(path, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json" },
       body: "{}",
       signal,
     });
     // Not a mutation, so the body is the read itself, not wrapped in `data`.
-    if (response.ok) return { ok: true, text: ((await response.json()) as { text: string }).text };
-    if (response.status === 403) return { ok: false, detail: NOT_OWNER };
-    return { ok: false, detail: (await errorOf(response)).message };
+    if (response.ok) return { ok: true, body: (await response.json()) as T };
+    if (response.status === 403) return { ok: false, status: 403, detail: NOT_OWNER };
+    return { ok: false, status: response.status, detail: (await errorOf(response)).message };
   } catch {
-    return { ok: false, detail: "The daemon did not answer." };
+    return { ok: false, status: null, detail: "The daemon did not answer." };
   }
+}
+
+export async function readHistory(sessionId: string, signal?: AbortSignal): Promise<History> {
+  const read = await readPane<{ text: string }>(terminalHistoryPath(sessionId), signal);
+  return read.ok ? { ok: true, text: read.body.text } : { ok: false, detail: read.detail };
+}
+
+// What the terminal reads the pane through: the live stream, or the tail.
+export interface Mirror {
+  start(): void;
+  stop(): void;
+  retry(): void;
+  refit(): void;
 }
 
 // Why a stream ended, and what the mirror does next.
@@ -113,7 +133,7 @@ type Outcome =
   | { next: "retry"; title?: string; detail?: string }
   | { next: "stop"; status: MirrorStatus };
 
-export class TerminalStream {
+export class TerminalStream implements Mirror {
   private readonly path: string;
   private readonly fitPath: string;
   private readonly screen: Screen;
@@ -317,6 +337,132 @@ export class TerminalStream {
         : { next: "retry", title: "The terminal is not available", detail: error.message };
     }
     return { next: "stop", status: { kind: "failed", detail: error.message } };
+  }
+}
+
+// How often a tail is read: the daemon polls a saved machine at this pace too.
+const TAIL_EVERY = 5000;
+
+// A pane on a saved machine (protocol.md 7.4, Tail). herdr streams only the
+// panes on its own machine, so the tail reads the visible screen through the
+// saved machine every few seconds instead. It never sends keys. While the
+// page is hidden it reads nothing, and it reads at once when the page is back.
+// `POST .../terminal/tail`: the pane's size and its visible rows.
+interface Tail {
+  cols: number;
+  rows: number;
+  text: string;
+}
+
+export class TerminalTail implements Mirror {
+  private readonly path: string;
+  private readonly screen: Screen;
+  private readonly onStatus: (status: MirrorStatus) => void;
+  private readonly onSize: (size: TerminalSize) => void;
+  private size: TerminalSize | null = null;
+  private abort: AbortController | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private stopped = true;
+  // Counts stops, so a read still in flight from before one is dropped.
+  private run = 0;
+  private status: MirrorStatus = { kind: "connecting" };
+
+  constructor(
+    sessionId: string,
+    screen: Screen,
+    onStatus: (status: MirrorStatus) => void,
+    onSize: (size: TerminalSize) => void,
+  ) {
+    this.path = terminalTailPath(sessionId);
+    this.screen = screen;
+    this.onStatus = onStatus;
+    this.onSize = onSize;
+  }
+
+  start() {
+    if (!this.stopped) return;
+    this.stopped = false;
+    document.addEventListener("visibilitychange", this.onVisible);
+    if (this.status.kind !== "tail") this.set({ kind: "connecting" });
+    void this.read();
+  }
+
+  stop() {
+    this.stopped = true;
+    this.run += 1;
+    document.removeEventListener("visibilitychange", this.onVisible);
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+    this.abort?.abort();
+    this.abort = null;
+  }
+
+  retry() {
+    this.stop();
+    this.start();
+  }
+
+  // A tail never resizes the pane.
+  refit() {}
+
+  private readonly onVisible = () => {
+    if (document.visibilityState !== "visible" || this.timer === null) return;
+    clearTimeout(this.timer);
+    this.timer = null;
+    void this.read();
+  };
+
+  private set(status: MirrorStatus) {
+    this.status = status;
+    this.onStatus(status);
+  }
+
+  private later() {
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      if (!this.stopped) void this.read();
+    }, TAIL_EVERY);
+  }
+
+  private async read() {
+    if (document.visibilityState === "hidden") {
+      this.later();
+      return;
+    }
+    const run = this.run;
+    const abort = new AbortController();
+    this.abort = abort;
+    const read = await readPane<Tail>(this.path, abort.signal);
+    if (this.stopped || run !== this.run) return;
+    this.abort = null;
+    if (read.ok) this.draw(read.body);
+    else if (read.status === 403) return this.set({ kind: "forbidden" });
+    // The pane closed: the last tail stays up, as a stream's last frame.
+    else if (read.status === 404) return this.set({ kind: "ended", at: new Date() });
+    else if (read.status !== null && read.status < 500) {
+      return this.set({ kind: "failed", detail: read.detail });
+    } else if (this.status.kind !== "tail") {
+      // herdr or the daemon is away. A tail already shown stays, and its age
+      // says it is getting old; either way the next read tries again.
+      const detail = read.status === 503 ? UNREACHABLE_DETAIL : read.detail;
+      this.set({ kind: "unreachable", title: "Can't read the pane", detail });
+    }
+    this.later();
+  }
+
+  private draw(tail: Tail) {
+    if (!sameSize(this.size, tail)) {
+      this.size = { cols: tail.cols, rows: tail.rows };
+      this.screen.reset(tail.cols, tail.rows);
+      this.onSize(this.size);
+    }
+    // herdr splits rows with a bare newline. The whole screen is drawn from
+    // the top each time, colors and cursor reset, with no empty row after
+    // the last. A pane resized between herdr's two reads can send more rows
+    // than its size says: the bottom ones are kept, so nothing scrolls.
+    const rows = tail.text.replace(/\n$/, "").split("\n").slice(-tail.rows).join("\r\n");
+    this.screen.write(new TextEncoder().encode(`\x1b[0m\x1b[H\x1b[2J\x1b[?25l${rows}`));
+    this.set({ kind: "tail", at: new Date().toISOString() });
   }
 }
 

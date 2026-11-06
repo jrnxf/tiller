@@ -4,6 +4,7 @@ import type { MirrorStatus, Screen } from "./terminal-stream";
 import {
   TerminalInput,
   TerminalStream,
+  TerminalTail,
   pasteChunks,
   readHistory,
   terminalPath,
@@ -389,4 +390,135 @@ test("a history read takes the daemon's plain body, and a refusal its reason", a
   expect(await readHistory("s1")).toEqual({ ok: false, detail: expect.stringContaining("owner") });
   expect(await readHistory("s1")).toEqual({ ok: false, detail: "pane w2:p1 is gone" });
   expect(paths).toEqual(Array(3).fill("/api/v1/agents/s1/terminal/history"));
+});
+
+function tail(cols: number, rows: number, text: string): Response {
+  return new Response(JSON.stringify({ session_id: "s1", cols, rows, text }), { status: 200 });
+}
+
+const TAIL_HEAD = "\x1b[0m\x1b[H\x1b[2J\x1b[?25l";
+
+test("a tail draws herdr's rows from the top, and resets only when the size changes", async () => {
+  vi.useFakeTimers();
+  const { request } = opens(
+    tail(80, 24, "one\n\x1b[34mtwo\x1b[0m\n"),
+    tail(80, 24, "one\nthree\n"),
+    tail(100, 30, "wide\n"),
+    tail(100, 2, "a\nb\nc\n"),
+  );
+  const { events, statuses, screen, onStatus } = recorder();
+  const sizes: string[] = [];
+  const reader = new TerminalTail("s1", screen, onStatus, (size) =>
+    sizes.push(`${size.cols}x${size.rows}`),
+  );
+  reader.start();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(request.mock.calls[0]?.[0]).toBe(`${terminalPath("s1")}/tail`);
+  expect(request.mock.calls[0]?.[1].body).toBe("{}");
+  await vi.advanceTimersByTimeAsync(15_000);
+  expect(events).toEqual([
+    "reset 80x24",
+    `${TAIL_HEAD}one\r\n\x1b[34mtwo\x1b[0m`,
+    `${TAIL_HEAD}one\r\nthree`,
+    "reset 100x30",
+    `${TAIL_HEAD}wide`,
+    // Resized between herdr's two reads: the bottom rows fit, nothing scrolls.
+    "reset 100x2",
+    `${TAIL_HEAD}b\r\nc`,
+  ]);
+  expect(sizes).toEqual(["80x24", "100x30", "100x2"]);
+  expect(statuses).toEqual(["connecting", "tail", "tail", "tail", "tail"]);
+  reader.stop();
+});
+
+test("a tail stays up when herdr or the daemon fails, and a closed pane ends it", async () => {
+  vi.useFakeTimers();
+  const { request } = opens(
+    tail(80, 24, "one\n"),
+    refusal(503, "unavailable", "herdr is unreachable"),
+    refusal(500, "internal", "the read panicked"),
+    refusal(404, "not_found", "no pane for s1"),
+  );
+  const { statuses, screen, onStatus } = recorder();
+  const reader = new TerminalTail("s1", screen, onStatus, () => {});
+  reader.start();
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(statuses).toEqual(["connecting", "tail"]);
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(statuses).toEqual(["connecting", "tail", "ended"]);
+  // An ended tail reads no more.
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(request).toHaveBeenCalledTimes(4);
+  reader.stop();
+});
+
+test("a tail that never drew says herdr is unreachable, and keeps trying", async () => {
+  vi.useFakeTimers();
+  const { request } = opens(refusal(503, "unavailable", "herdr is unreachable"), tail(80, 24, "x"));
+  const { statuses, screen, onStatus } = recorder();
+  const reader = new TerminalTail("s1", screen, onStatus, () => {});
+  reader.start();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(statuses).toEqual(["connecting", "unreachable"]);
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(request).toHaveBeenCalledTimes(2);
+  expect(statuses.at(-1)).toBe("tail");
+  reader.stop();
+});
+
+test("a tail whose daemon never answers says so, and keeps trying", async () => {
+  vi.useFakeTimers();
+  const request = vi.fn(async () => {
+    throw new TypeError("Failed to fetch");
+  });
+  vi.stubGlobal("fetch", request);
+  const statuses: MirrorStatus[] = [];
+  const reader = new TerminalTail(
+    "s1",
+    recorder().screen,
+    (status) => statuses.push(status),
+    () => {},
+  );
+  reader.start();
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(statuses.at(-1)).toMatchObject({
+    kind: "unreachable",
+    detail: "The daemon did not answer.",
+  });
+  expect(request).toHaveBeenCalledTimes(2);
+  reader.stop();
+});
+
+test("a retry during a failed read leaves one reader, not two", async () => {
+  vi.useFakeTimers();
+  let answer: (response: Response) => void = () => {};
+  const request = vi.fn(
+    (_path: string, init: RequestInit) =>
+      new Promise<Response>((resolve, reject) => {
+        answer = resolve;
+        init.signal?.addEventListener("abort", () => reject(new DOMException("aborted")));
+      }),
+  );
+  vi.stubGlobal("fetch", request);
+  const reader = new TerminalTail(
+    "s1",
+    recorder().screen,
+    () => {},
+    () => {},
+  );
+  reader.start();
+  await vi.advanceTimersByTimeAsync(0);
+  const first = answer;
+  reader.retry();
+  await vi.advanceTimersByTimeAsync(0);
+  // The read from before the retry answers late; only the new one goes on.
+  first(refusal(503, "unavailable", "herdr is unreachable"));
+  answer(tail(80, 24, "x"));
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(request).toHaveBeenCalledTimes(3);
+  await vi.advanceTimersByTimeAsync(0);
+  answer(tail(80, 24, "y"));
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(request).toHaveBeenCalledTimes(4);
+  reader.stop();
 });

@@ -25,7 +25,7 @@ import { EmptyScope } from "./board-view";
 import { formatLisbonMoment } from "./format";
 import { focusCommand, focusTooltip, isTyping, useHerdrFocus, useOpenKey } from "./herdr";
 import { ChevronLeftIcon, InfoIcon, LockIcon, PaneIcon } from "./icons";
-import { LiveTerminal, RemoteTerminalNote, usePhone } from "./live-terminal";
+import { LiveTerminal, usePhone } from "./live-terminal";
 import type { SwitchKey, TerminalControl } from "./live-terminal";
 import { AsOf, HostChip, PeerNote } from "./host-chip";
 import { useAmbiguousIds, useStanding } from "./peer-state";
@@ -508,18 +508,6 @@ function Stage({
         </div>
       </div>
     </div>
-  ) : remote ? (
-    <>
-      <div className="av-body-note">
-        <RemoteTerminalNote machine={host.label} />
-      </div>
-      <div className="av-foot">
-        <span className="tx">
-          <InfoIcon />
-          Keys cannot reach a pane on another machine yet.
-        </span>
-      </div>
-    </>
   ) : (
     <LiveTerminal
       key={agent.session_id}
@@ -531,6 +519,7 @@ function Stage({
       autoType={carry}
       onTyping={onTyping}
       onSwitch={onSwitch}
+      machine={remote ? host.label : undefined}
       actions={
         <button type="button" className="btn sm" title={focusTooltip(host)} onClick={onOpen}>
           <PaneIcon />

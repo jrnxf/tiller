@@ -15,7 +15,8 @@ import { createPortal } from "react-dom";
 
 import { createStore, useStore } from "../../lib/store";
 import { CloseIcon } from "../shell/icons";
-import { formatLisbonMoment } from "./format";
+import { Ago, useTick } from "./ago";
+import { formatLisbonMoment, secondsSince } from "./format";
 import {
   ArrowIcon,
   ChevronLeftIcon,
@@ -32,8 +33,8 @@ import {
   WarnIcon,
 } from "./icons";
 import { typedKeys } from "./terminal-keys";
-import { TerminalInput, TerminalStream, readHistory } from "./terminal-stream";
-import type { Fitting, MirrorStatus, TerminalSize } from "./terminal-stream";
+import { TerminalInput, TerminalStream, TerminalTail, readHistory } from "./terminal-stream";
+import type { Fitting, Mirror, MirrorStatus, Screen, TerminalSize } from "./terminal-stream";
 import { showToast } from "./toast";
 import "./terminal.css";
 
@@ -178,6 +179,8 @@ const OPTIONS: ITerminalOptions & ITerminalInitOnlyOptions = {
   // Until the stream is live: keys typed before then would go nowhere.
   disableStdin: true,
 };
+// Seconds after which a tail's age reads as old: two reads missed.
+const TAIL_OLD = 15;
 // The rows of scrollback a history read asks for: herdr's own cap.
 const HISTORY_ROWS = 1000;
 const MIN_FONT = 4;
@@ -262,18 +265,23 @@ function list(names: string[]): string {
 }
 
 function StatusMark({ status }: { status: MirrorStatus }) {
+  useTick();
+  // A tail's dot goes stale with its age, as its footer does.
+  const fresh = status.kind === "tail" && (secondsSince(status.at) ?? Infinity) <= TAIL_OLD;
   const [dot, label] =
     status.kind === "live"
       ? ["live", "Live"]
-      : status.kind === "reconnecting"
-        ? ["stale", "Reconnecting"]
-        : status.kind === "connecting"
-          ? ["stale", "Connecting"]
-          : status.kind === "ended"
-            ? ["idle", "Ended"]
-            : status.kind === "unreachable"
-              ? ["off", "herdr unreachable"]
-              : ["off", "No terminal"];
+      : status.kind === "tail"
+        ? [fresh ? "live" : "stale", "Read only"]
+        : status.kind === "reconnecting"
+          ? ["stale", "Reconnecting"]
+          : status.kind === "connecting"
+            ? ["stale", "Connecting"]
+            : status.kind === "ended"
+              ? ["idle", "Ended"]
+              : status.kind === "unreachable"
+                ? ["off", "herdr unreachable"]
+                : ["off", "No terminal"];
   return (
     <span className="mir-st">
       <i className={`ld ${dot}`} />
@@ -306,17 +314,6 @@ function Message({
           Retry
         </button>
       ) : null}
-    </div>
-  );
-}
-
-// Why a remote agent has no mirror. Shown in place of the terminal.
-export function RemoteTerminalNote({ machine }: { machine: string }) {
-  return (
-    <div className="mir">
-      <Message icon={<GlobeIcon />} title={`Runs on ${machine}`}>
-        The board mirrors terminals only for agents on this machine. Open it in herdr instead.
-      </Message>
     </div>
   );
 }
@@ -389,6 +386,9 @@ function openRenderer(term: Terminal, Webgl: typeof WebglAddon | null) {
   }
 }
 
+// A tail's screen never holds focus.
+const refuseFocus = (event: FocusEvent) => (event.target as HTMLElement).blur();
+
 function mountTerminal(
   term: Terminal,
   sessionId: string,
@@ -399,23 +399,34 @@ function mountTerminal(
     typing: (typing: boolean) => void;
   },
   fitting: Fitting,
-): { input: TerminalInput; stream: TerminalStream; dispose: () => void } {
-  const input = new TerminalInput(sessionId, (title, detail) => showToast("bad", title, detail));
-  const stream = new TerminalStream(
-    sessionId,
-    {
-      reset(cols, rows) {
-        term.reset();
-        term.resize(cols, rows);
-      },
-      write(bytes) {
-        term.write(bytes);
-      },
+  tail: boolean,
+): { input: TerminalInput | null; stream: Mirror; dispose: () => void } {
+  const screen: Screen = {
+    reset(cols, rows) {
+      term.reset();
+      term.resize(cols, rows);
     },
-    report.status,
-    report.size,
-    fitting,
-  );
+    write(bytes) {
+      term.write(bytes);
+    },
+  };
+  // A tail is read only: no keys, no pastes, and nothing to type into. A
+  // click never focuses xterm's input, so the board's keys keep working.
+  if (tail) {
+    const stream = new TerminalTail(sessionId, screen, report.status, report.size);
+    host.addEventListener("focusin", refuseFocus);
+    return {
+      input: null,
+      stream,
+      dispose() {
+        stream.stop();
+        host.removeEventListener("focusin", refuseFocus);
+        term.dispose();
+      },
+    };
+  }
+  const input = new TerminalInput(sessionId, (title, detail) => showToast("bad", title, detail));
+  const stream = new TerminalStream(sessionId, screen, report.status, report.size, fitting);
   const data = term.onData((typed) => {
     const { keys, unsent } = typedKeys(typed);
     input.keys(keys);
@@ -473,6 +484,7 @@ export function LiveTerminal({
   autoType = false,
   onTyping,
   onSwitch,
+  machine,
 }: {
   sessionId: string;
   // What the terminal is, for assistive tech: "build on beta-7".
@@ -489,8 +501,12 @@ export function LiveTerminal({
   autoType?: boolean;
   onTyping?: (typing: boolean) => void;
   onSwitch?: (key: SwitchKey) => void;
+  // The saved machine the agent runs on. herdr streams only its own panes,
+  // so this one is read as a tail every few seconds, read only.
+  machine?: string;
 }) {
   const phone = usePhone();
+  const tail = machine !== undefined;
   const stage = variant === "stage";
   const [host] = useState(() => {
     const element = document.createElement("div");
@@ -499,7 +515,7 @@ export function LiveTerminal({
   });
   const termRef = useRef<Terminal | null>(null);
   const inputRef = useRef<TerminalInput | null>(null);
-  const streamRef = useRef<TerminalStream | null>(null);
+  const streamRef = useRef<Mirror | null>(null);
   // Where the xterm sits in each view; state, so effects follow the element.
   const [inlineBox, setInlineBox] = useState<HTMLDivElement | null>(null);
   const [bigBox, setBigBox] = useState<HTMLDivElement | null>(null);
@@ -580,6 +596,7 @@ export function LiveTerminal({
               showToast("bad", "herdr kept the pane's size", detail);
             },
           },
+          tail,
         );
         termRef.current = term;
         inputRef.current = mounted.input;
@@ -609,7 +626,7 @@ export function LiveTerminal({
       setUnfit(false);
       closeHistory();
     };
-  }, [sessionId, host, closeHistory]);
+  }, [sessionId, host, closeHistory, tail]);
 
   const live = status.kind === "live";
   useEffect(() => {
@@ -718,7 +735,7 @@ export function LiveTerminal({
     if (!term.element) {
       term.open(host);
       openRenderer(term, webglRef.current);
-      term.textarea?.setAttribute("aria-label", `Type to ${label}`);
+      term.textarea?.setAttribute("aria-label", tail ? `Tail of ${label}` : `Type to ${label}`);
       // Sized first, so a Fit's first open already knows the stage's room.
       layout();
       streamRef.current?.start();
@@ -731,7 +748,7 @@ export function LiveTerminal({
       typeWhenLive.current = false;
       term.focus();
     }
-  }, [box, ready, host, label, layout]);
+  }, [box, ready, host, label, layout, tail]);
 
   // The pane changes size, or the room for it does: fit it again.
   useEffect(() => {
@@ -812,6 +829,7 @@ export function LiveTerminal({
     () => ({
       type() {
         const term = termRef.current;
+        if (tail) return;
         if (phone) {
           focusNext.current = true;
           expand();
@@ -819,12 +837,13 @@ export function LiveTerminal({
         else typeWhenLive.current = true;
       },
     }),
-    [phone, expand],
+    [phone, expand, tail],
   );
 
   const ended = status.kind === "ended";
   const screenShown =
     status.kind === "live" ||
+    status.kind === "tail" ||
     status.kind === "connecting" ||
     status.kind === "reconnecting" ||
     (ended && size !== null);
@@ -869,6 +888,15 @@ export function LiveTerminal({
       <span className="tx">The pane closed {endedAt}. This is its last screen.</span>
     ) : where === "inline" && view !== "inline" ? (
       <span className="tx">The terminal is open in the expanded view.</span>
+    ) : status.kind === "tail" ? (
+      <span className="tx">
+        <GlobeIcon />
+        <span>
+          {phone ? `Read only, on ${machine}` : `Read only: the agent runs on ${machine}`}
+          {" · "}
+          <Ago at={status.at} prefix="updated" oldAfter={TAIL_OLD} />
+        </span>
+      </span>
     ) : (
       <span className="tx">
         <PointerIcon />
@@ -889,7 +917,7 @@ export function LiveTerminal({
       </button>
     ) : null;
   const fitButton =
-    stage && !phone && screenShown && !ended && view === "inline" ? (
+    stage && !phone && !tail && screenShown && !ended && view === "inline" ? (
       <button
         type="button"
         className="btn sm mir-tog"
@@ -910,7 +938,7 @@ export function LiveTerminal({
       </button>
     ) : null;
   // The scrollback is the stage's, while the screen shows inline.
-  const canHistory = stage && screenShown && !ended && view === "inline";
+  const canHistory = stage && !tail && screenShown && !ended && view === "inline";
   const historyButton =
     canHistory && history === null ? (
       <button
@@ -942,7 +970,7 @@ export function LiveTerminal({
     <div
       className="mir-s"
       role="group"
-      aria-label={`Live terminal for ${label}`}
+      aria-label={`${tail ? "Tail" : "Live terminal"} for ${label}`}
       // Scrolling up on the stage reads back, as it would in the terminal.
       onWheel={(event) => {
         if (event.deltaY < 0 && canHistory && history === null && !typing) openHistory();
@@ -1070,7 +1098,7 @@ export function LiveTerminal({
                 <div
                   className={`mir-s ${scale}`}
                   role="group"
-                  aria-label={`Live terminal for ${label}`}
+                  aria-label={`${tail ? "Tail" : "Live terminal"} for ${label}`}
                   hidden={!screenShown}
                 >
                   <div className="mir-slot" ref={setBigBox} />
@@ -1103,7 +1131,7 @@ export function LiveTerminal({
                 className={`mir-sheet-b ${scale}`}
                 ref={setBigBox}
                 role="group"
-                aria-label={`Live terminal for ${label}`}
+                aria-label={`${tail ? "Tail" : "Live terminal"} for ${label}`}
                 hidden={!screenShown}
               />
               <div className="mir-sheet-f">
@@ -1119,33 +1147,35 @@ export function LiveTerminal({
                   footer("big")
                 )}
               </div>
-              <div className="mir-keys" role="group" aria-label="Keys a phone lacks">
-                {(
-                  [
-                    ["esc", "Esc", "Esc"],
-                    ["tab", "Tab", "Tab"],
-                    ["ctrl+c", "Ctrl-C", "Ctrl-C"],
-                    ["left", <ArrowIcon key="l" to="left" />, "Left"],
-                    ["up", <ArrowIcon key="u" to="up" />, "Up"],
-                    ["down", <ArrowIcon key="d" to="down" />, "Down"],
-                    ["right", <ArrowIcon key="r" to="right" />, "Right"],
-                    ["enter", <EnterIcon key="e" />, "Enter"],
-                  ] as const
-                ).map(([key, face, name]) => (
-                  <button
-                    key={key}
-                    type="button"
-                    className={`mir-key${key === "ctrl+c" || key === "enter" ? " w" : ""}`}
-                    aria-label={name}
-                    disabled={!live}
-                    // Keep the screen focused, so the phone keyboard stays up.
-                    onPointerDown={(event) => event.preventDefault()}
-                    onClick={() => send(key)}
-                  >
-                    {face}
-                  </button>
-                ))}
-              </div>
+              {tail ? null : (
+                <div className="mir-keys" role="group" aria-label="Keys a phone lacks">
+                  {(
+                    [
+                      ["esc", "Esc", "Esc"],
+                      ["tab", "Tab", "Tab"],
+                      ["ctrl+c", "Ctrl-C", "Ctrl-C"],
+                      ["left", <ArrowIcon key="l" to="left" />, "Left"],
+                      ["up", <ArrowIcon key="u" to="up" />, "Up"],
+                      ["down", <ArrowIcon key="d" to="down" />, "Down"],
+                      ["right", <ArrowIcon key="r" to="right" />, "Right"],
+                      ["enter", <EnterIcon key="e" />, "Enter"],
+                    ] as const
+                  ).map(([key, face, name]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      className={`mir-key${key === "ctrl+c" || key === "enter" ? " w" : ""}`}
+                      aria-label={name}
+                      disabled={!live}
+                      // Keep the screen focused, so the phone keyboard stays up.
+                      onPointerDown={(event) => event.preventDefault()}
+                      onClick={() => send(key)}
+                    >
+                      {face}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>,
             document.body,
           )
