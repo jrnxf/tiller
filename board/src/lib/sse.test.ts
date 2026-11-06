@@ -498,3 +498,31 @@ test("a proposal or memory event marks every memory view and revision stale, and
     expect(queryClient.getQueryState(queryKeyFor(projectsPath))?.isInvalidated).toBe(false);
   }
 });
+
+test("an ask event marks every board read stale, the unfiltered one too", () => {
+  const queryClient = seededClient();
+  const project = queryKeyFor(boardPath({ project: "alpha" }));
+  queryClient.setQueryData(project, { rows: [], asked: [] });
+
+  applyChange(queryClient, event({ entity: "ask", kind: "ask.resolved" }));
+
+  expect(queryClient.getQueryState(queryKeyFor(boardPath()))?.isInvalidated).toBe(true);
+  expect(queryClient.getQueryState(project)?.isInvalidated).toBe(true);
+  expect(queryClient.getQueryState(queryKeyFor(projectsPath))?.isInvalidated).toBe(false);
+});
+
+test("a card event marks the card's page stale when the page reads it by its display id", () => {
+  const queryClient = seededClient();
+  const detail = queryKeyFor("/api/v1/cards/alpha-42");
+  const timeline = queryKeyFor("/api/v1/cards/alpha-42/timeline");
+  const other = queryKeyFor("/api/v1/cards/alpha-43");
+  queryClient.setQueryData(detail, { card: { id: "01JCARD42", display_id: "alpha-42" } });
+  queryClient.setQueryData(timeline, { items: [] });
+  queryClient.setQueryData(other, { card: { id: "01JCARD43", display_id: "alpha-43" } });
+
+  applyChange(queryClient, event({ entity: "approval", card_id: "01JCARD42" }));
+
+  expect(queryClient.getQueryState(detail)?.isInvalidated).toBe(true);
+  expect(queryClient.getQueryState(timeline)?.isInvalidated).toBe(true);
+  expect(queryClient.getQueryState(other)?.isInvalidated).toBe(false);
+});

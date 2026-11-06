@@ -5,6 +5,7 @@ import type {
   AttentionResponse,
   BoardResponse,
   BoardRow,
+  CardDetail,
   ChangeEvent,
   Machine,
   MachinesResponse,
@@ -30,7 +31,6 @@ import {
   queryKeyFor,
   sessionPath,
 } from "./queries";
-import type { QueryPath } from "./queries";
 
 const EVENTS_PATH = "/api/v1/events";
 
@@ -187,6 +187,15 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
       // Moves the board's receipts on to delivered and done (section 7.2).
       if (hasState(state)) recordProgress(event.entity_id, state.state, event.at);
       break;
+    case "ask":
+      // The Asked column lists the unresolved asks, which only the server can
+      // say: an ask the orchestrator answers in chat leaves it with no card.
+      queryClient.invalidateQueries({
+        queryKey: API_KEY_PREFIX,
+        predicate: (query) => String(query.queryKey[1] ?? "").startsWith("/api/v1/board"),
+        refetchType: "active",
+      });
+      break;
     case "approval":
       if (hasState(state)) recordProgress(event.entity_id, state.state, event.at);
       // An attention item embeds its approval's state and head, so a stale or
@@ -224,17 +233,31 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
     writeBoard(queryClient, event.card);
   }
   if (event.card_id) {
-    // The detail page and its timeline: both paths start with the card's.
-    const detail: QueryPath = `/api/v1/cards/${event.card_id}`;
+    // The detail page and its timeline read the card by the name in the page
+    // URL, which from the board is the display id. The event names the ULID,
+    // so a name is also the card's when its cached detail holds that card.
+    const names = new Set([event.card_id]);
+    for (const [key, detail] of queryClient.getQueriesData<CardDetail>({
+      queryKey: API_KEY_PREFIX,
+    })) {
+      const name = cardName(String(key[1] ?? ""));
+      if (name && detail?.card?.id === event.card_id) names.add(name);
+    }
     queryClient.invalidateQueries({
       queryKey: API_KEY_PREFIX,
       predicate: (query) => {
-        const path = String(query.queryKey[1] ?? "");
-        return path === detail || path.startsWith(`${detail}/`) || path.startsWith(`${detail}?`);
+        const name = cardName(String(query.queryKey[1] ?? ""));
+        return name !== null && names.has(name);
       },
       refetchType: "active",
     });
   }
+}
+
+// The card a card read names: `<name>` in `/api/v1/cards/<name>`, with or
+// without a sub-path or query.
+function cardName(path: string): string | null {
+  return /^\/api\/v1\/cards\/([^/?]+)/.exec(path)?.[1] ?? null;
 }
 
 export interface EventSourceLike {
