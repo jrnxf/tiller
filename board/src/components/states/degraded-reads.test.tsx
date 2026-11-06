@@ -73,6 +73,9 @@ beforeEach(() => {
     media: query,
     addEventListener: () => {},
     removeEventListener: () => {},
+    // xterm still listens the old way, for the device pixel ratio.
+    addListener: () => {},
+    removeListener: () => {},
   }));
   window.scrollTo = () => {};
 });

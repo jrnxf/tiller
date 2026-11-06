@@ -17,6 +17,9 @@ function stubMedia(dark: boolean) {
     media: query,
     addEventListener: () => {},
     removeEventListener: () => {},
+    // xterm still listens the old way, for the device pixel ratio.
+    addListener: () => {},
+    removeListener: () => {},
   }));
 }
 
@@ -223,6 +226,9 @@ test("widening past the phone layout closes the drawer so the screen is not left
       if (query.includes("max-width")) listeners.push(listener);
     },
     removeEventListener: () => {},
+    // xterm still listens the old way, for the device pixel ratio.
+    addListener: () => {},
+    removeListener: () => {},
   }));
   await renderApp();
   fireEvent.click(screen.getByRole("button", { name: "Open the sidebar" }));
