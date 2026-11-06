@@ -1184,10 +1184,23 @@ impl AwayContract {
     /// Runs that started since the contract began, whoever started them.
     pub fn new_runs(&self, conn: &Connection) -> Result<i64> {
         Ok(conn.query_row(
-            "SELECT count(*) FROM runs WHERE started_at >= ?1",
-            params![self.started_at],
+            &format!("SELECT count(*) FROM runs WHERE {}", Self::started_since(1)),
+            params![self.approval_id],
             |row| row.get(0),
         )?)
+    }
+
+    /// A `runs` filter for the runs started after the contract began, with
+    /// the away approval's id bound at `?{param}`. It reads the event order,
+    /// not `started_at`: a timestamp has millisecond grain, so a run started
+    /// just before the owner left can share the contract's millisecond. A
+    /// contract with no event counts every run, so the cap errs closed.
+    pub fn started_since(param: usize) -> String {
+        format!(
+            "id IN (SELECT entity_id FROM events WHERE entity = 'run' AND kind = 'run.started'
+                    AND seq > (SELECT coalesce(min(seq), 0) FROM events
+                               WHERE entity = 'approval' AND entity_id = ?{param}))"
+        )
     }
 }
 

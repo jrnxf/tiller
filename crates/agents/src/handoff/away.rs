@@ -124,8 +124,11 @@ impl ReturnBrief {
 
         let runs: Vec<Run> = list(
             conn,
-            "started_at >= ?1 AND started_at <= ?2 ORDER BY started_at, id",
-            &[&contract.started_at, &end],
+            &format!(
+                "{} AND started_at <= ?2 ORDER BY started_at, id",
+                AwayContract::started_since(1)
+            ),
+            &[&contract.approval_id, &end],
         )?;
         let mut run_lines = Vec::new();
         for run in &runs {

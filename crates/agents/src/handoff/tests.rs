@@ -672,6 +672,35 @@ fn away_contract_caps_spend_and_writes_return_brief() {
 }
 
 #[test]
+fn a_run_in_the_same_millisecond_before_the_owner_left_is_not_spent() {
+    let mut w = World::new();
+    let before = w.card("alpha", "started before the owner left");
+    let (early, _) = w.builder(&before);
+    w.away_start(w.away_scope(json!({"max_new_runs": 1})))
+        .unwrap();
+
+    // Timestamps have millisecond grain: put the earlier run on the
+    // contract's own millisecond, as a fast host can.
+    w.store
+        .conn()
+        .execute(
+            "UPDATE runs SET started_at = (SELECT requested_at FROM approvals WHERE kind = 'away')
+             WHERE id = ?1",
+            [&early],
+        )
+        .unwrap();
+
+    w.handoff("the login is next", "start its builder");
+    assert_eq!(w.brief("alpha").unwrap().away.unwrap().new_runs, 0);
+    let brief = ReturnBrief::load(w.store.conn(), None, Timestamp::now())
+        .unwrap()
+        .unwrap();
+    assert_eq!(brief.spend.new_runs, 0);
+    let login = w.card("alpha", "the login page");
+    w.try_builder(&login, SpawnChecks::default()).unwrap();
+}
+
+#[test]
 fn away_quota_floor_binds_when_the_standing_floor_is_looser() {
     let mut w = World::new();
     let export = w.card("alpha", "the billing export");
