@@ -1,7 +1,7 @@
 // Stands in for the daemon's mutations (protocol.md section 7.4) on the dev and
 // preview servers until T2.8 lands: a keyed replay table, the stale-head
 // refusal, and the later receipt stages as change events.
-import type { ChangeEvent, Project } from "./api-types.ts";
+import type { ChangeEvent, Project, PromptDialog } from "./api-types.ts";
 import type {
   AgentsResponse,
   AttentionResponse,
@@ -608,7 +608,56 @@ function handle(
   if (method === "POST" && /^\/api\/v1\/agents\/[^/]+\/focus$/.test(path)) {
     return { reply: recorded({}, null, null), followUps: [] };
   }
+  // The permission dialog a waiting agent has up. The first tap finds it
+  // changed, to see the board refuse a stale answer; a tap on the new one
+  // is sent.
+  const prompt = /^\/api\/v1\/agents\/([^/]+)\/prompt(\/answer)?$/.exec(path);
+  if (method === "POST" && prompt?.[1]) {
+    const session = prompt[1];
+    if (!prompt[2]) {
+      const read = { session_id: session, read_at: new Date().toISOString() };
+      const dialog = fixturePrompt(changed.has(session));
+      return {
+        reply: { status: 200, body: { ...read, prompt: dialog, reason: null } },
+        followUps: [],
+      };
+    }
+    if (!changed.has(session) || body.screen !== fixturePrompt(true).screen) {
+      changed.add(session);
+      const reply = refused(
+        409,
+        "screen_changed",
+        "the prompt changed after the buttons were drawn",
+      );
+      return { reply, followUps: [] };
+    }
+    const reply = recorded({ session_id: session, sent: { option: body.option } }, null, null);
+    return { reply, followUps: [] };
+  }
   return { reply: refused(404, "not_found", `no mutation at ${method} ${path}`), followUps: [] };
+}
+
+const changed = new Set<string>();
+
+function fixturePrompt(redrawn: boolean): PromptDialog {
+  const command = redrawn
+    ? "rm -rf target && cargo build -p gamma-cert"
+    : "rm -rf target/debug/incremental && cargo build -p gamma-cert";
+  return {
+    tool: "Bash",
+    title: "Bash command",
+    command,
+    question: "Do you want to proceed?",
+    options: [
+      { n: 1, text: "Yes" },
+      {
+        n: 2,
+        text: "Yes, and don't ask again for rm and cargo build commands in /home/user/gamma",
+      },
+      { n: 3, text: "No" },
+    ],
+    screen: redrawn ? "fixture-changed" : "fixture",
+  };
 }
 
 // A known idempotency key returns the stored reply and does nothing again.

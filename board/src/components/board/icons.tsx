@@ -110,6 +110,12 @@ export const WarnIcon = () => (
   </Glyph>
 );
 
+export const ShieldIcon = () => (
+  <Glyph>
+    <path d="M8 2 13 4v4c0 3-2.2 5-5 6-2.8-1-5-3-5-6V4z" {...stroke} strokeLinejoin="round" />
+  </Glyph>
+);
+
 export const UserIcon = () => (
   <Glyph>
     <circle cx="8" cy="5.5" r="2.5" {...stroke} />

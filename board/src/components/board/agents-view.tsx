@@ -22,6 +22,7 @@ import { quietFor } from "./activity";
 import { Ago, Lasting, useTick } from "./ago";
 import { agentGroups, findLine, nextNeeding, stepLine } from "./agents-model";
 import type { AgentGroup, AgentLine } from "./agents-model";
+import { AnswerStrip } from "./answer-strip";
 import { EmptyScope } from "./board-view";
 import { formatAge, formatLisbonMoment } from "./format";
 import { focusCommand, focusTooltip, isTyping, useHerdrFocus, useOpenKey } from "./herdr";
@@ -551,6 +552,16 @@ function Stage({
       onTyping={onTyping}
       onSwitch={onSwitch}
       machine={remote ? host.label : undefined}
+      strip={
+        remote ? null : (
+          <AnswerStrip
+            key={agent.session_id}
+            sessionId={agent.session_id}
+            waiting={agent.activity === "waiting_permission"}
+            observedAt={agent.activity_observed_at}
+          />
+        )
+      }
       actions={
         <button type="button" className="btn sm" title={focusTooltip(host)} onClick={onOpen}>
           <PaneIcon />
@@ -752,7 +763,12 @@ export function AgentsView({
       else if (key === "n") goNext("key");
       else if (key === "i") setDetails((open) => !open);
       else if (key === "Escape" && details) setDetails(false);
-      else if (key === "Enter") {
+      else if (/^[1-9]$/.test(key)) {
+        // A digit is the answer button that shows it, as on the prompt itself.
+        const answer = document.querySelector<HTMLButtonElement>(`.av-ans[data-n="${key}"]`);
+        if (!answer || answer.disabled) return;
+        answer.click();
+      } else if (key === "Enter") {
         // Enter on a button or a link is that control's own.
         if (event.target instanceof Element && event.target.closest("button, a")) return;
         control.current?.type();

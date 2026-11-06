@@ -23,8 +23,8 @@ use tiller_agents::land::app::{APP_DIR, AppKey, KEY_FILE, KeyError};
 use tiller_agents::spawn::config::SpawnConfig;
 use tiller_agents::spawn::orchestrator::Orchestrator;
 use tiller_core::domain::{
-    AnsweredVia, Approval, AskSource, CardKind, CardOutcome, HoldReleaseReason, Host, PeerScope,
-    Session,
+    Activity, AnsweredVia, Approval, AskSource, CardKind, CardOutcome, HoldReleaseReason, Host,
+    PeerScope, Session,
 };
 use tiller_core::domain::{Delivery, InterventionKind, Stage};
 use tiller_core::state::approvals::Decision;
@@ -45,7 +45,7 @@ use crate::peer::link::{Forwarded, Peers};
 use crate::peer::{Federation, PeerView};
 use crate::readonly::Damage;
 use crate::views::{self, Filter, LocalHealth, PaneTarget};
-use crate::{auth, memory, sse};
+use crate::{auth, memory, prompt, sse};
 
 /// Lines of a pane the run detail shows.
 const PANE_TAIL: usize = 40;
@@ -591,6 +591,11 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/agents/{session}/terminal/tail",
             post(terminal_tail),
+        )
+        .route("/api/v1/agents/{session}/prompt", post(prompt_read))
+        .route(
+            "/api/v1/agents/{session}/prompt/answer",
+            post(prompt_answer),
         )
         .route("/api/v1/runs/{id}", get(run))
         .route("/api/v1/machines", get(machines))
@@ -2299,14 +2304,7 @@ async fn terminal_input(
     }
     .map_err(ApiError::usage)?;
     let (session_id, pane) = local_pane(&state, session).await?;
-    if !state.0.mirrors.spend() {
-        return Err(ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "unavailable",
-            "input came faster than 20 a second; nothing was sent",
-        )
-        .hint("send it again in a moment"));
-    }
+    spend_input(&state)?;
     let herdr = state.0.herdr.clone();
     let target = pane.clone();
     let sent = tokio::task::spawn_blocking(move || match input {
@@ -2333,6 +2331,154 @@ async fn terminal_input(
             approval_id: None,
         },
         data: json!({"session_id": session_id, "sent": sent}),
+        host: None,
+    }))
+}
+
+/// One spend of the mirror's input rate, which keys, pastes and prompt
+/// answers share.
+fn spend_input(state: &AppState) -> Result<(), ApiError> {
+    if state.0.mirrors.spend() {
+        return Ok(());
+    }
+    Err(ApiError::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "unavailable",
+        "input came faster than 20 a second; nothing was sent",
+    )
+    .hint("send it again in a moment"))
+}
+
+/// The tool an agent waits on a permission prompt for, as its hook named
+/// it; None when the agent is not waiting. A wait no observation named a
+/// tool for is the empty name, which no dialog's title starts with.
+async fn waiting_tool(state: &AppState, session_id: String) -> Result<Option<String>, ApiError> {
+    read(state, move |store| {
+        let session: Session = get_row(store.conn(), "session", &session_id)?;
+        if session.ended_at.is_some() || session.activity != Activity::WaitingPermission {
+            return Ok(None);
+        }
+        Ok(Some(
+            views::prompt_tool(store, &session.id)?.unwrap_or_default(),
+        ))
+    })
+    .await
+}
+
+/// The pane's visible screen, read once, and the dialog for `tool` on it.
+async fn read_dialog(
+    state: &AppState,
+    pane: &str,
+    tool: String,
+) -> Result<Option<PromptDialog>, ApiError> {
+    let herdr = state.0.herdr.clone();
+    let target = pane.to_owned();
+    let screen = tokio::task::spawn_blocking(move || herdr.read_visible(&target))
+        .await
+        .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
+        .map_err(|error| pane_error(pane, &error))?;
+    Ok(prompt::parse(&screen, &tool))
+}
+
+/// The permission dialog on a waiting agent's screen, for the board's
+/// answer buttons (`protocol.md` 7.4). The screen is read only while the
+/// agent's hook says it waits. A POST with every mutation check, as the
+/// mirror is, though it writes nothing.
+#[utoipa::path(post, path = "/api/v1/agents/{session}/prompt", tag = "mutations", request_body = PromptAsk,
+    params(("session" = String, Path)),
+    responses((status = 200, body = PromptRead),
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
+              (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a saved machine"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
+              (status = 503, body = ErrorBody, description = "herdr is unreachable, or reads and input came faster than 20 a second")))]
+async fn prompt_read(
+    State(state): State<AppState>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<PromptRead> {
+    guard(&state, &headers)?;
+    let request: PromptAsk = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "a prompt read").await?;
+    let (session_id, pane) = local_pane(&state, session).await?;
+    let (prompt, reason) = match waiting_tool(&state, session_id.clone()).await? {
+        None => (None, Some(NoPrompt::NotWaiting)),
+        Some(tool) => {
+            spend_input(&state)?;
+            match read_dialog(&state, &pane, tool).await? {
+                Some(dialog) => (Some(dialog), None),
+                None => (None, Some(NoPrompt::NoDialog)),
+            }
+        }
+    };
+    Ok(Json(PromptRead {
+        session_id,
+        read_at: Timestamp::now().to_string(),
+        prompt,
+        reason,
+    }))
+}
+
+/// One option of the permission dialog on a waiting agent's screen, pressed
+/// as its digit alone (`protocol.md` 7.4). The screen is read again first,
+/// and nothing is typed unless its dialog is the one `screen` names.
+#[utoipa::path(post, path = "/api/v1/agents/{session}/prompt/answer", tag = "mutations", request_body = PromptAnswer,
+    params(("session" = String, Path)),
+    responses((status = 200, body = MutationResponse),
+              (status = 400, body = ErrorBody, description = "an option the dialog does not offer"),
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
+              (status = 409, body = ErrorBody, description = "`screen_changed`: the agent no longer waits, or the dialog on its screen is not the one `screen` names; nothing was sent"),
+              (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a saved machine"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
+              (status = 503, body = ErrorBody, description = "herdr is unreachable, or input came faster than 20 a second; nothing was sent")))]
+async fn prompt_answer(
+    State(state): State<AppState>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers)?;
+    let request: PromptAnswer = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "a prompt answer").await?;
+    let (session_id, pane) = local_pane(&state, session).await?;
+    spend_input(&state)?;
+    let changed = || {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            "screen_changed",
+            "the prompt changed after the buttons were drawn; nothing was sent",
+        )
+        .hint("read the prompt again")
+    };
+    let tool = waiting_tool(&state, session_id.clone())
+        .await?
+        .ok_or_else(changed)?;
+    let dialog = read_dialog(&state, &pane, tool)
+        .await?
+        .filter(|dialog| dialog.screen == request.screen)
+        .ok_or_else(changed)?;
+    let option = request.option;
+    if !dialog.options.iter().any(|offered| offered.n == option) {
+        return Err(ApiError::usage(format!(
+            "the prompt has no option {option}"
+        )));
+    }
+    let herdr = state.0.herdr.clone();
+    let target = pane.clone();
+    tokio::task::spawn_blocking(move || herdr.send_keys(&target, &[&option.to_string()]))
+        .await
+        .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
+        .map_err(|error| pane_error(&pane, &error))?;
+    Ok(Json(MutationResponse {
+        ok: true,
+        replayed: false,
+        events: Vec::new(),
+        receipt: Receipt {
+            recorded_at: Timestamp::now().to_string(),
+            outbox_id: None,
+            approval_id: None,
+        },
+        data: json!({"session_id": session_id, "sent": {"option": option}}),
         host: None,
     }))
 }
@@ -2624,7 +2770,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, stage_project, ask_note, start_orchestrator, add_project, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
+        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, stage_project, ask_note, start_orchestrator, add_project, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
         relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo
     ),
@@ -4087,7 +4233,7 @@ esac"#,
             r#"echo "$*" >> '{dir}/calls'
 case "$*" in
 *"pane read"*)
-  printf 'one\n\033[34mtwo\033[0m\n';;
+  if [ -e '{dir}/screen' ]; then cat '{dir}/screen'; else printf 'one\n\033[34mtwo\033[0m\n'; fi;;
 *"pane layout"*)
   read cols rows < '{dir}/size'
   for pane; do :; done
@@ -4187,12 +4333,16 @@ esac"#,
         let refit = format!("/api/v1/agents/{session}/terminal/fit");
         let history = format!("/api/v1/agents/{session}/terminal/history");
         let tail = format!("/api/v1/agents/{session}/terminal/tail");
+        let prompt = format!("/api/v1/agents/{session}/prompt");
+        let answer = format!("/api/v1/agents/{session}/prompt/answer");
         let paths = [
             (stream.as_str(), json!({})),
             (input.as_str(), json!({"keys": ["ctrl+c"]})),
             (refit.as_str(), json!({"cols": 100, "rows": 30})),
             (history.as_str(), json!({})),
             (tail.as_str(), json!({})),
+            (prompt.as_str(), json!({})),
+            (answer.as_str(), json!({"option": 1, "screen": "x"})),
         ];
         let cookie_header = ("cookie", cookie.as_str());
         let refusals: [(&str, Vec<(&str, &str)>); 4] = [
@@ -4293,6 +4443,118 @@ esac"#,
         );
     }
 
+    /// Puts `session` on a permission prompt for `tool`, as its hook does.
+    fn waiting(fleet: &Fleet, session: &str, tool: &str) {
+        let store = fleet.open();
+        store
+            .conn()
+            .execute(
+                "INSERT INTO observations (id, session_id, source, event, observed_at, recorded_at, payload)
+                 VALUES ('wait', ?1, 'hook', 'PermissionRequest', ?2, ?2, ?3)",
+                rusqlite::params![session, at(0), json!({"tool_name": tool}).to_string()],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE sessions SET activity = 'waiting_permission', activity_observed_at = ?2
+                 WHERE id = ?1",
+                rusqlite::params![session, at(0)],
+            )
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_prompt_answer_presses_its_digit_only_on_the_dialog_it_was_drawn_from() {
+        let mut fleet = Fleet::new();
+        let session = fleet.worker("w2:p1");
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+        let app = mirror_app(&fleet, dir);
+        let cookie = owner_cookie(fleet.dir.path());
+        let owner = [("cookie", cookie.as_str())];
+        let read = format!("/api/v1/agents/{session}/prompt");
+        let answer = format!("/api/v1/agents/{session}/prompt/answer");
+        let press = |screen: &str, option: u8| json!({"option": option, "screen": screen});
+        let calls = || std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
+
+        // Both pass every mirror guard.
+        for (path, body) in [(&read, json!({})), (&answer, press("x", 1))] {
+            for headers in [vec![], vec![("cookie", "tiller_owner=forged")]] {
+                let refused = send(&app, mutation("POST", path, body.clone(), &headers)).await;
+                assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+            }
+        }
+
+        // An agent that is not waiting has its screen left unread, and an
+        // answer to it is refused.
+        let idle = send(&app, mutation("POST", &read, json!({}), &owner)).await;
+        assert_eq!(idle.status, StatusCode::OK, "{}", idle.body);
+        let idle: Value = serde_json::from_str(&idle.body).unwrap();
+        assert_eq!(idle["reason"], "not_waiting");
+        assert_eq!(idle["prompt"], Value::Null);
+        let late = send(&app, mutation("POST", &answer, press("x", 1), &owner)).await;
+        assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
+        assert_eq!(calls(), "");
+
+        waiting(&fleet, &session, "Bash");
+        let bash = include_str!("../../herdr/tests/fixtures/claude/permission-dialog.ansi");
+        std::fs::write(dir.join("screen"), bash).unwrap();
+        let shown = send(&app, mutation("POST", &read, json!({}), &owner)).await;
+        assert_eq!(shown.status, StatusCode::OK, "{}", shown.body);
+        let shown: Value = serde_json::from_str(&shown.body).unwrap();
+        assert_eq!(shown["reason"], Value::Null);
+        assert_eq!(
+            shown["prompt"]["command"],
+            "rm -f nothing-here.txt && touch made.txt"
+        );
+        assert_eq!(shown["prompt"]["options"][3]["text"], "No");
+        let screen = shown["prompt"]["screen"].as_str().unwrap();
+
+        // A dialog that changed after the buttons were drawn, or an option
+        // it does not offer, types nothing.
+        let stale = send(&app, mutation("POST", &answer, press("other", 1), &owner)).await;
+        assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.body);
+        assert!(stale.body.contains("screen_changed"), "{}", stale.body);
+        let unoffered = send(&app, mutation("POST", &answer, press(screen, 5), &owner)).await;
+        assert_eq!(
+            unoffered.status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            unoffered.body
+        );
+        assert!(!calls().contains("send-keys"), "{}", calls());
+
+        // The matching dialog gets the digit alone, with no Enter.
+        let sent = send(&app, mutation("POST", &answer, press(screen, 4), &owner)).await;
+        assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
+        let sent: Value = serde_json::from_str(&sent.body).unwrap();
+        assert_eq!(sent["data"]["sent"]["option"], 4);
+        assert_eq!(calls().lines().last(), Some("pane send-keys w2:p1 4"));
+
+        // A parallel tool call observed after the dialog opened leaves the
+        // tool it asks about alone.
+        fleet
+            .open()
+            .conn()
+            .execute(
+                "INSERT INTO observations (id, session_id, source, event, observed_at, recorded_at, payload)
+                 VALUES ('later', ?1, 'hook', 'PostToolUse', ?2, ?2, ?3)",
+                rusqlite::params![session, at(5), json!({"tool_name": "Read"}).to_string()],
+            )
+            .unwrap();
+        let still = send(&app, mutation("POST", &read, json!({}), &owner)).await;
+        let still: Value = serde_json::from_str(&still.body).unwrap();
+        assert_eq!(still["prompt"]["tool"], "Bash", "{still}");
+
+        // A dialog for another tool than the hook named is none.
+        let edit = include_str!("../tests/fixtures/prompt/edit.txt");
+        std::fs::write(dir.join("screen"), edit).unwrap();
+        let other = send(&app, mutation("POST", &read, json!({}), &owner)).await;
+        let other: Value = serde_json::from_str(&other.body).unwrap();
+        assert_eq!(other["reason"], "no_dialog");
+    }
+
     #[tokio::test]
     async fn an_agents_last_output_is_its_own_newest_turn_event() {
         let mut fleet = Fleet::new();
@@ -4367,6 +4629,11 @@ esac"#,
             (
                 format!("/api/v1/agents/{remote}/terminal/history"),
                 json!({}),
+            ),
+            (format!("/api/v1/agents/{remote}/prompt"), json!({})),
+            (
+                format!("/api/v1/agents/{remote}/prompt/answer"),
+                json!({"option": 1, "screen": "x"}),
             ),
         ] {
             let answer = send(&app, mutation("POST", &path, body, &[("cookie", &cookie)])).await;

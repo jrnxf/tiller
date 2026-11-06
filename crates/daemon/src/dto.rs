@@ -1317,6 +1317,70 @@ pub struct TerminalInput {
     pub host: Option<String>,
 }
 
+/// `POST /api/v1/agents/{session}/prompt`: nothing to ask beyond the agent.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PromptAsk {
+    /// A paired peer's label; a prompt read is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
+/// The permission dialog on a waiting agent's screen, or why there is none.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct PromptRead {
+    pub session_id: String,
+    pub read_at: String,
+    pub prompt: Option<PromptDialog>,
+    /// Why `prompt` is null; null with a prompt.
+    pub reason: Option<NoPrompt>,
+}
+
+/// Why a prompt read found no dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NoPrompt {
+    /// The agent is not waiting on a permission prompt; its screen is not read.
+    NotWaiting,
+    /// The screen holds no dialog this daemon reads.
+    NoDialog,
+}
+
+/// A permission dialog as Claude Code draws it, read off the agent's screen.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct PromptDialog {
+    /// The tool the session's hook named; the dialog's title is one Claude
+    /// Code gives it.
+    pub tool: String,
+    pub title: String,
+    /// The command a Bash dialog shows; null for other tools.
+    pub command: Option<String>,
+    pub question: String,
+    pub options: Vec<PromptOption>,
+    /// A hash of the dialog's rows: an answer carries it back, and the
+    /// daemon types nothing when the dialog on the screen no longer matches.
+    pub screen: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct PromptOption {
+    pub n: u8,
+    pub text: String,
+}
+
+/// `POST /api/v1/agents/{session}/prompt/answer`: the option to press, on
+/// the dialog `screen` names.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PromptAnswer {
+    pub option: u8,
+    /// The `screen` of the prompt read the buttons were drawn from.
+    pub screen: String,
+    /// A paired peer's label; an answer is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
 /// One line of the terminal mirror's NDJSON stream (`protocol.md` 7.4).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]

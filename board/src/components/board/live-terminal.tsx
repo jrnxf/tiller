@@ -485,6 +485,7 @@ export function LiveTerminal({
   onTyping,
   onSwitch,
   machine,
+  strip,
 }: {
   sessionId: string;
   // What the terminal is, for assistive tech: "build on beta-7".
@@ -504,6 +505,8 @@ export function LiveTerminal({
   // The saved machine the agent runs on. herdr streams only its own panes,
   // so this one is read as a tail every few seconds, read only.
   machine?: string;
+  // What the stage shows between the screen and its footer: the answer buttons.
+  strip?: ReactNode;
 }) {
   const phone = usePhone();
   const tail = machine !== undefined;
@@ -534,6 +537,7 @@ export function LiveTerminal({
   const fittingRef = useRef(fitting);
   // The stage's room in cells at the stage's font, kept up by the layout.
   const fitTarget = useRef<TerminalSize | null>(null);
+  const stripBox = useRef<HTMLDivElement>(null);
   const refitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The web font is in, so xterm measures its cells right when it opens.
   const [ready, setReady] = useState(false);
@@ -674,14 +678,13 @@ export function LiveTerminal({
     const width = box.clientWidth - PAD * 2;
     const dpr = window.devicePixelRatio || 1;
     const ratio = advance() * dpr;
-    // The largest font the room's height allows, from the rows' height now:
-    // the dialog's window, or the stage's own box.
+    // The height the rows may take: the dialog's window, or the stage's own
+    // box.
     const room = grow
       ? Math.max(200, window.innerHeight - 240)
       : stage && view === "inline"
         ? box.clientHeight - PAD * 2
         : Number.POSITIVE_INFINITY;
-    const tallest = room / (screen.offsetHeight / current);
     const least = Math.ceil(MIN_FONT * ratio);
     const most = grow ? MAX_FONT : stage && view === "inline" ? STAGE_FONT : BASE_FONT;
     // A hair over the cell, so xterm's own rounding lands on it.
@@ -692,9 +695,12 @@ export function LiveTerminal({
       const stageCell = Math.floor(STAGE_FONT * ratio);
       const metrics = cellAt(sized(stageCell), dpr);
       const high = metrics?.height ?? (screen.offsetHeight / term.rows) * dpr;
+      // The answer strip borrows its height from the stage: the pane keeps
+      // its size under it, since a resize redraws the dialog it answers.
+      const lent = stripBox.current?.offsetHeight ?? 0;
       const target = clampFit(
         Math.floor((width * dpr) / stageCell),
-        Math.floor(((box.clientHeight - PAD * 2) * dpr) / high),
+        Math.floor(((box.clientHeight + lent - PAD * 2) * dpr) / high),
       );
       const before = fitTarget.current;
       fitTarget.current = target;
@@ -706,9 +712,18 @@ export function LiveTerminal({
         }, REFIT_DELAY);
       }
     }
-    let cell = Math.floor(Math.min(most, tallest) * ratio);
+    let cell = Math.floor(most * ratio);
     if (fit) cell = Math.min(cell, Math.floor((width * dpr) / term.cols));
     cell = Math.max(least, cell);
+    // Rows are whole pixels, so their height does not grow evenly with the
+    // font: a guess from the height now can flip between two sizes on every
+    // pass. Step down to the largest cell whose own rows fit the room.
+    const rowsHigh = (cells: number) => {
+      const its = cellAt(sized(cells), dpr);
+      if (its) return (its.height * term.rows) / dpr;
+      return (screen.offsetHeight / current) * sized(cells);
+    };
+    while (cell > least && rowsHigh(cell) > room) cell -= 1;
     if (sized(cell) !== current) term.options.fontSize = sized(cell);
     // A measure off by a pixel can still come out wide: step down until it
     // is inside.
@@ -1077,6 +1092,11 @@ export function LiveTerminal({
       )}
       {message}
       {screenShown && (view === "inline" || stage) ? screen : null}
+      {screenShown && stage ? (
+        <div className="mir-strip" ref={stripBox}>
+          {strip}
+        </div>
+      ) : null}
       {screenShown ? <div className="mir-f">{stage ? stageFooter : footer("inline")}</div> : null}
       {view === "dialog"
         ? createPortal(

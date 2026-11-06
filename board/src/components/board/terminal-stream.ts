@@ -16,6 +16,7 @@ const terminalInputPath = (sessionId: string) => `${terminalPath(sessionId)}/inp
 const terminalFitPath = (sessionId: string) => `${terminalPath(sessionId)}/fit`;
 const terminalHistoryPath = (sessionId: string) => `${terminalPath(sessionId)}/history`;
 const terminalTailPath = (sessionId: string) => `${terminalPath(sessionId)}/tail`;
+export const promptPath = (sessionId: string) => `/api/v1/agents/${sessionId}/prompt`;
 
 // What the mirror draws on: xterm in the board, a recorder in tests.
 export interface Screen {
@@ -94,16 +95,20 @@ const NOT_OWNER =
 // the screen only, so this is the one way to read back.
 export type History = { ok: true; text: string } | { ok: false; detail: string };
 
-// One read of the pane, the history or the tail: a null status means the
-// daemon did not answer.
+// One read of the pane, the history, the tail or the prompt: a null status
+// means the daemon did not answer.
 type PaneRead<T> = { ok: true; body: T } | { ok: false; status: number | null; detail: string };
 
-async function readPane<T>(path: string, signal?: AbortSignal): Promise<PaneRead<T>> {
+export async function readPane<T>(
+  path: string,
+  signal?: AbortSignal,
+  body: object = {},
+): Promise<PaneRead<T>> {
   try {
     const response = await fetch(path, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json" },
-      body: "{}",
+      body: JSON.stringify(body),
       signal,
     });
     // Not a mutation, so the body is the read itself, not wrapped in `data`.

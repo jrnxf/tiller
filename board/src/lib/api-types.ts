@@ -123,6 +123,24 @@ export interface PermissionPrompt extends Federated {
   since: string;
 }
 
+// The permission dialog on a waiting agent's screen (protocol.md 7.4,
+// Prompt): `screen` goes back with an answer, so a changed dialog is refused.
+export interface PromptDialog {
+  tool: string;
+  title: string;
+  command: string | null;
+  question: string;
+  options: { n: number; text: string }[];
+  screen: string;
+}
+
+export interface PromptRead {
+  session_id: string;
+  read_at: string;
+  prompt: PromptDialog | null;
+  reason: "not_waiting" | "no_dialog" | null;
+}
+
 export interface AttentionResponse {
   items: AttentionItem[];
   permission_prompts: PermissionPrompt[];

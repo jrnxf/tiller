@@ -10,6 +10,7 @@ import type {
   Project,
   ProjectRetirePreview,
   ProjectsResponse,
+  PromptDialog,
 } from "../../lib/api-types";
 import { hydrateFromSnapshot } from "../../lib/boot";
 import { connectionStore } from "../../lib/connection";
@@ -37,6 +38,19 @@ interface Posted {
   body: Record<string, unknown>;
 }
 
+// The dialog a waiting agent's screen shows.
+const PROMPT: PromptDialog = {
+  tool: "Bash",
+  title: "Bash command",
+  command: "rm -f old.txt",
+  question: "Do you want to proceed?",
+  options: [
+    { n: 1, text: "Yes" },
+    { n: 2, text: "No" },
+  ],
+  screen: "hash",
+};
+
 // Answers the board API from the fixtures and records every write.
 function stubApi(scenario: Scenario, focusStatus = 200, focused: unknown = null) {
   const posted: Posted[] = [];
@@ -54,6 +68,10 @@ function stubApi(scenario: Scenario, focusStatus = 200, focused: unknown = null)
           method,
           body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
         });
+        if (path.endsWith("/prompt")) {
+          const read = { session_id: "s", read_at: new Date().toISOString(), reason: null };
+          return new Response(JSON.stringify({ ...read, prompt: PROMPT }), { status: 200 });
+        }
         return focusStatus === 200
           ? new Response(
               JSON.stringify({
@@ -381,6 +399,30 @@ test("J and K walk the rail, N jumps to the next agent that needs you, and a fie
   fireEvent.keyDown(screen.getByRole("combobox"), { key: "j" });
   fireEvent.keyDown(screen.getByRole("combobox"), { key: "n" });
   expect(selected()).toBe(before);
+});
+
+test("a digit taps the waiting agent's answer button, and a field keeps its digits", async () => {
+  const posted = stubApi("default");
+  // The screen stays connecting, so the stage keeps its place for the buttons.
+  const api = globalThis.fetch;
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) =>
+    String(input).endsWith("/terminal") ? new Promise(() => {}) : api(input, init),
+  );
+  await renderApp("default", "/agents");
+  await selectAgent("gamma-12");
+  await screen.findByRole("button", { name: "Answer 2: No" });
+  const answers = () => posted.filter(({ path }) => path.endsWith("/prompt/answer"));
+
+  fireEvent.keyDown(window, { key: "k", metaKey: true });
+  fireEvent.keyDown(screen.getByRole("combobox"), { key: "2" });
+  fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("combobox")).toBeNull());
+  fireEvent.keyDown(window, { key: "3" });
+  expect(answers()).toEqual([]);
+  fireEvent.keyDown(window, { key: "2" });
+  await waitFor(() =>
+    expect(answers().map(({ body }) => body)).toEqual([{ option: 2, screen: "hash" }]),
+  );
 });
 
 test("the button says it opens herdr on the remote machine first only for a remote agent", async () => {

@@ -380,13 +380,7 @@ pub fn attention(store: &Store) -> Result<AttentionResponse> {
             Some(run_id) => get::<Run>(store.conn(), "run", run_id)?.card_id,
             None => continue,
         };
-        let tool: Option<String> = one(
-            store,
-            "SELECT json_extract(payload, '$.tool_name') FROM observations
-             WHERE session_id = ?1 AND json_extract(payload, '$.tool_name') IS NOT NULL
-             ORDER BY observed_at DESC, id DESC LIMIT 1",
-            &[&session.id],
-        )?;
+        let tool = prompt_tool(store, &session.id)?;
         permission_prompts.push(PermissionPrompt {
             session_id: session.id,
             card_id,
@@ -403,6 +397,20 @@ pub fn attention(store: &Store) -> Result<AttentionResponse> {
         items,
         permission_prompts,
     })
+}
+
+/// The tool a waiting session's permission prompt is for: the one the
+/// newest `PermissionRequest` names, as the dialog opens, since a parallel
+/// tool call can be observed after it. A harness that sends none falls back
+/// to the newest observation that names a tool.
+pub fn prompt_tool(store: &Store, session_id: &str) -> Result<Option<String>> {
+    one(
+        store,
+        "SELECT json_extract(payload, '$.tool_name') FROM observations
+         WHERE session_id = ?1 AND json_extract(payload, '$.tool_name') IS NOT NULL
+         ORDER BY event = 'PermissionRequest' DESC, observed_at DESC, id DESC LIMIT 1",
+        &[&session_id],
+    )
 }
 
 // -- agents -------------------------------------------------------------------

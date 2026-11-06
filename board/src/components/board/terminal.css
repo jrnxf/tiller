@@ -280,6 +280,10 @@
   margin: 0 10px;
 }
 
+.mir.stage > .mir-strip {
+  flex: none;
+}
+
 .mir.stage .mir-s {
   display: flex;
   flex: 1;

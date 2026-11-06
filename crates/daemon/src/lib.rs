@@ -8,6 +8,7 @@ pub mod forge;
 pub mod memory;
 pub mod mirror;
 pub mod peer;
+pub mod prompt;
 pub mod quota;
 pub mod readonly;
 pub mod server;

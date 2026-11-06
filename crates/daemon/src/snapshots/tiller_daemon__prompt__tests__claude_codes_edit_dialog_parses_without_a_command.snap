@@ -1,0 +1,25 @@
+---
+source: crates/daemon/src/prompt.rs
+expression: "parse(EDIT, \"Edit\")"
+---
+{
+  "tool": "Edit",
+  "title": "Edit file",
+  "command": null,
+  "question": "Do you want to make this edit to notes.txt?",
+  "options": [
+    {
+      "n": 1,
+      "text": "Yes"
+    },
+    {
+      "n": 2,
+      "text": "Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)"
+    },
+    {
+      "n": 3,
+      "text": "No"
+    }
+  ],
+  "screen": "d3f5e3fe066a9ac7b1fc111872d59b0f210a47aece2daff55e0ee1a153092f2f"
+}

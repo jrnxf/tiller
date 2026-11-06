@@ -101,6 +101,204 @@
         }
       }
     },
+    "/api/v1/agents/{session}/prompt": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "summary": "The permission dialog on a waiting agent's screen, for the board's\nanswer buttons (`protocol.md` 7.4). The screen is read only while the\nagent's hook says it waits. A POST with every mutation check, as the\nmirror is, though it writes nothing.",
+        "operationId": "prompt_read",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromptAsk"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptRead"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "no such agent, or its pane closed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`refused`: the agent runs on a saved machine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "herdr is unreachable, or reads and input came faster than 20 a second",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{session}/prompt/answer": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "summary": "One option of the permission dialog on a waiting agent's screen, pressed\nas its digit alone (`protocol.md` 7.4). The screen is read again first,\nand nothing is typed unless its dialog is the one `screen` names.",
+        "operationId": "prompt_answer",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromptAnswer"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "an option the dialog does not offer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "no such agent, or its pane closed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`screen_changed`: the agent no longer waits, or the dialog on its screen is not the one `screen` names; nothing was sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`refused`: the agent runs on a saved machine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "herdr is unreachable, or input came faster than 20 a second; nothing was sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agents/{session}/terminal": {
       "post": {
         "tags": [
@@ -5328,6 +5526,14 @@
           }
         }
       },
+      "NoPrompt": {
+        "type": "string",
+        "description": "Why a prompt read found no dialog.",
+        "enum": [
+          "not_waiting",
+          "no_dialog"
+        ]
+      },
       "ObligationRow": {
         "type": "object",
         "required": [
@@ -5908,6 +6114,141 @@
             "items": {
               "$ref": "#/components/schemas/Project"
             }
+          }
+        }
+      },
+      "PromptAnswer": {
+        "type": "object",
+        "description": "`POST /api/v1/agents/{session}/prompt/answer`: the option to press, on\nthe dialog `screen` names.",
+        "required": [
+          "option",
+          "screen"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label; an answer is not forwarded."
+          },
+          "option": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "screen": {
+            "type": "string",
+            "description": "The `screen` of the prompt read the buttons were drawn from."
+          }
+        },
+        "additionalProperties": false
+      },
+      "PromptAsk": {
+        "type": "object",
+        "description": "`POST /api/v1/agents/{session}/prompt`: nothing to ask beyond the agent.",
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label; a prompt read is not forwarded."
+          }
+        },
+        "additionalProperties": false
+      },
+      "PromptDialog": {
+        "type": "object",
+        "description": "A permission dialog as Claude Code draws it, read off the agent's screen.",
+        "required": [
+          "tool",
+          "title",
+          "question",
+          "options",
+          "screen"
+        ],
+        "properties": {
+          "command": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The command a Bash dialog shows; null for other tools."
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptOption"
+            }
+          },
+          "question": {
+            "type": "string"
+          },
+          "screen": {
+            "type": "string",
+            "description": "A hash of the dialog's rows: an answer carries it back, and the\ndaemon types nothing when the dialog on the screen no longer matches."
+          },
+          "title": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string",
+            "description": "The tool the session's hook named; the dialog's title is one Claude\nCode gives it."
+          }
+        }
+      },
+      "PromptOption": {
+        "type": "object",
+        "required": [
+          "n",
+          "text"
+        ],
+        "properties": {
+          "n": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "PromptRead": {
+        "type": "object",
+        "description": "The permission dialog on a waiting agent's screen, or why there is none.",
+        "required": [
+          "session_id",
+          "read_at"
+        ],
+        "properties": {
+          "prompt": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PromptDialog"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "read_at": {
+            "type": "string"
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/NoPrompt",
+                "description": "Why `prompt` is null; null with a prompt."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session_id": {
+            "type": "string"
           }
         }
       },
