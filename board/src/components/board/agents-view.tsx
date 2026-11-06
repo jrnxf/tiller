@@ -1,7 +1,7 @@
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { CSSProperties, RefObject } from "react";
+import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
+import type { CSSProperties, KeyboardEvent as KeyEvent, RefObject } from "react";
 
 import type { AgentRow, Machine, PermissionPrompt, Project } from "../../lib/api-types";
 import { focusReason, ownerOf, projectKey, shownId } from "../../lib/peers";
@@ -43,9 +43,10 @@ const ROLE_COLOR: Record<string, string> = {
   verify: "var(--teal)",
 };
 
-// The motion curves from styles.css, for the Web Animations API.
-const EASE_OUT = "cubic-bezier(0.23, 1, 0.32, 1)";
-const EASE_DRAWER = "cubic-bezier(0.32, 0.72, 0, 1)";
+// A motion curve from styles.css, for the Web Animations API.
+function ease(token: "--ease-out" | "--ease-drawer"): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(token).trim() || "ease-out";
+}
 
 // How the selection last moved. A click glides and fades; a key moves at
 // once, since keys move it many times a minute.
@@ -66,6 +67,13 @@ function play(
 ): Animation | null {
   if (!element || typeof element.animate !== "function") return null;
   return element.animate(keyframes, options);
+}
+
+// The rail row of agent `id`.
+function rowOf(list: HTMLElement | null, id: string | undefined): HTMLElement | undefined {
+  return [...(list?.querySelectorAll<HTMLElement>("[data-session]") ?? [])].find(
+    (row) => row.dataset.session === id,
+  );
 }
 
 // Plays a one-off CSS animation by class, again from the start if it runs.
@@ -102,7 +110,7 @@ function Roll({ value }: { value: number }) {
     old.setAttribute("aria-hidden", "true");
     element.appendChild(old);
     const up = value > was;
-    const options = { duration: 200, easing: EASE_OUT, fill: "forwards" as const };
+    const options = { duration: 200, easing: ease("--ease-out"), fill: "forwards" as const };
     const out = old.animate(
       [
         { transform: "none", opacity: 1 },
@@ -137,6 +145,7 @@ function RailRow({
   host,
   prompt,
   selected,
+  button,
   onSelect,
 }: {
   line: AgentLine;
@@ -145,6 +154,8 @@ function RailRow({
   host: Machine | undefined;
   prompt: PermissionPrompt | undefined;
   selected: boolean;
+  // The phone's list holds no selection, so each row is a button to open.
+  button: boolean;
   onSelect: () => void;
 }) {
   const { agent } = line;
@@ -163,9 +174,18 @@ function RailRow({
   );
   return (
     <div
-      role="option"
+      {...(button
+        ? {
+            role: "button",
+            tabIndex: 0,
+            onKeyDown: (event: KeyEvent<HTMLDivElement>) => {
+              if (event.key !== "Enter" && event.key !== " ") return;
+              event.preventDefault();
+              onSelect();
+            },
+          }
+        : { role: "option", "aria-selected": selected })}
       id={`av-row-${agent.session_id}`}
-      aria-selected={selected}
       data-testid={`agent-${agent.session_id}`}
       data-session={agent.session_id}
       data-s={needs ? "needs" : activity.dot}
@@ -207,6 +227,7 @@ function Rail({
   needing,
   listRef,
   hlRef,
+  list,
   onSelect,
   onNext,
 }: {
@@ -218,6 +239,8 @@ function Rail({
   needing: number;
   listRef: RefObject<HTMLDivElement | null>;
   hlRef: RefObject<HTMLDivElement | null>;
+  // A phone's list alone: rows open an agent and nothing is selected.
+  list: boolean;
   onSelect: (id: string) => void;
   onNext: () => void;
 }) {
@@ -246,10 +269,10 @@ function Rail({
       <div
         className="av-list"
         ref={listRef}
-        role="listbox"
         aria-label="Agents"
-        tabIndex={0}
-        aria-activedescendant={`av-row-${current}`}
+        {...(list
+          ? { role: "list" }
+          : { role: "listbox", tabIndex: 0, "aria-activedescendant": `av-row-${current}` })}
       >
         <div className="av-hl" ref={hlRef} aria-hidden="true" />
         {groups.map(({ project, lines }) => {
@@ -280,6 +303,7 @@ function Rail({
                   host={hostOf(line.agent.host_id)}
                   prompt={prompts.get(line.agent.session_id)}
                   selected={line.agent.session_id === current}
+                  button={list}
                   onSelect={() => onSelect(line.agent.session_id)}
                 />
               ))}
@@ -728,30 +752,49 @@ export function AgentsView({
   };
 
   // The highlight sits under the selected row: it glides there after a click
-  // and jumps there after a key, and the row scrolls into view.
-  useLayoutEffect(() => {
-    const list = listRef.current;
+  // and jumps there after a key. It follows the row through any render and
+  // any change to the rail's size.
+  const placeHighlight = useEffectEvent((glide: boolean) => {
     const hl = hlRef.current;
-    if (!list || !hl) return;
-    const row = [...list.querySelectorAll<HTMLElement>("[data-session]")].find(
-      (element) => element.dataset.session === currentId,
-    );
-    if (!row) return;
-    const glide = via.current === "pointer" && !reducedMotion();
-    hl.style.transition = glide ? `transform 180ms ${EASE_OUT}` : "none";
+    const row = rowOf(listRef.current, currentId);
+    if (!hl || !row) return;
+    hl.style.transition = glide ? `transform 180ms ${ease("--ease-out")}` : "none";
     hl.style.width = `${row.offsetWidth}px`;
     hl.style.height = `${row.offsetHeight}px`;
     hl.style.transform = `translate(${row.offsetLeft}px, ${row.offsetTop}px)`;
     hl.dataset.shown = "true";
-    if (via.current !== "pointer") row.scrollIntoView?.({ block: "nearest" });
   });
+  useLayoutEffect(() => {
+    placeHighlight(via.current === "pointer" && !reducedMotion());
+  });
+  const rowCount = lines.length;
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list || rowCount === 0 || typeof ResizeObserver !== "function") return;
+    const observer = new ResizeObserver(() => placeHighlight(false));
+    observer.observe(list);
+    for (const row of list.querySelectorAll("[data-session]")) observer.observe(row);
+    return () => observer.disconnect();
+  }, [rowCount]);
+  // A new selection that a key or a link made scrolls into view; a refetch
+  // leaves the owner's scroll alone.
+  useLayoutEffect(() => {
+    if (via.current !== "pointer")
+      rowOf(listRef.current, currentId)?.scrollIntoView?.({ block: "nearest" });
+  }, [currentId]);
 
   // A row that joins the rail eases in and glows once; a row that starts
   // needing the owner pings, and its dot ripples.
   const seen = useRef<Map<string, boolean> | null>(null);
+  const railState = lines.map((line) => `${line.agent.session_id}:${needs(line.agent)}`).join(" ");
   useLayoutEffect(() => {
     const list = listRef.current;
-    const now = new Map(lines.map((line) => [line.agent.session_id, needs(line.agent)]));
+    const now = new Map(
+      railState.split(" ").map((entry) => {
+        const at = entry.lastIndexOf(":");
+        return [entry.slice(0, at), entry.slice(at + 1) === "true"] as const;
+      }),
+    );
     const before = seen.current;
     seen.current = now;
     if (!list || !before) return;
@@ -767,7 +810,7 @@ export function AgentsView({
                 { opacity: 0, transform: "translateY(-6px) scale(0.98)" },
                 { opacity: 1, transform: "none" },
               ],
-          { duration: calm ? 200 : 240, easing: calm ? "ease" : EASE_OUT },
+          { duration: calm ? 200 : 240, easing: calm ? "ease" : ease("--ease-out") },
         );
         flash(row, "fresh");
       } else if (now.get(id) && !before.get(id)) {
@@ -775,7 +818,7 @@ export function AgentsView({
         flash(row.querySelector(".ld"), "ripple");
       }
     }
-  });
+  }, [railState]);
 
   // A clicked switch fades the new screen in through a slight blur, which
   // hides the swap; a key switch is instant.
@@ -792,7 +835,7 @@ export function AgentsView({
             { opacity: 0.25, filter: "blur(2px)" },
             { opacity: 1, filter: "blur(0)" },
           ],
-      { duration: 140, easing: EASE_OUT },
+      { duration: 140, easing: ease("--ease-out") },
     );
   }, [currentId, phone]);
 
@@ -810,7 +853,7 @@ export function AgentsView({
       calm
         ? [{ opacity: 0 }, { opacity: 1 }]
         : [{ transform: "translateX(100%)" }, { transform: "none" }],
-      { duration: calm ? 200 : 320, easing: EASE_DRAWER },
+      { duration: calm ? 200 : 320, easing: ease("--ease-drawer") },
     );
   }, [pane]);
   const toList = () =>
@@ -826,7 +869,7 @@ export function AgentsView({
       calm
         ? [{ opacity: 1 }, { opacity: 0 }]
         : [{ transform: "none" }, { transform: "translateX(100%)" }],
-      { duration: calm ? 160 : 220, easing: EASE_DRAWER, fill: "forwards" },
+      { duration: calm ? 160 : 220, easing: ease("--ease-drawer"), fill: "forwards" },
     );
     if (!out) return toList();
     leaving.current = out;
@@ -865,28 +908,32 @@ export function AgentsView({
         needing={needing}
         listRef={listRef}
         hlRef={hlRef}
+        list={pane === "list"}
         onSelect={(id) => select(id, "pointer")}
         onNext={() => goNext("pointer")}
       />
-      <div className="av-stage" ref={stageRef}>
-        <Stage
-          line={current.line}
-          project={current.group.project}
-          color={colorOf(projectKey(current.group.project))}
-          host={hostOf(current.line.agent.host_id)}
-          prompt={prompts.get(currentId)}
-          details={details}
-          carry={carry}
-          phone={phone}
-          bodyRef={bodyRef}
-          control={control}
-          onDetails={setDetails}
-          onOpen={() => focus(current.line.agent)}
-          onBack={back}
-          onTyping={setTyping}
-          onSwitch={onSwitch}
-        />
-      </div>
+      {/* A phone's list shows alone, and no agent's stream runs behind it. */}
+      {pane === "list" ? null : (
+        <div className="av-stage" ref={stageRef}>
+          <Stage
+            line={current.line}
+            project={current.group.project}
+            color={colorOf(projectKey(current.group.project))}
+            host={hostOf(current.line.agent.host_id)}
+            prompt={prompts.get(currentId)}
+            details={details}
+            carry={carry && selected === currentId}
+            phone={phone}
+            bodyRef={bodyRef}
+            control={control}
+            onDetails={setDetails}
+            onOpen={() => focus(current.line.agent)}
+            onBack={back}
+            onTyping={setTyping}
+            onSwitch={onSwitch}
+          />
+        </div>
+      )}
     </div>
   );
 }

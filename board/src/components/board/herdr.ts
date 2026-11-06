@@ -1,5 +1,5 @@
 import { useSuspenseQuery } from "@tanstack/react-query";
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useEffectEvent } from "react";
 
 import type { AgentRow, Machine } from "../../lib/api-types";
 import { machinesQuery } from "../../lib/queries";
@@ -151,18 +151,20 @@ export function isTyping(target: EventTarget | null): boolean {
 }
 
 // The O key opens the selected agent in herdr; a key typed into a field never
-// does.
+// does. The listener stays put while `onOpen` changes from render to render.
 export function useOpenKey(onOpen: (() => void) | null) {
+  const on = onOpen !== null;
+  const open = useEffectEvent(() => onOpen?.());
   useEffect(() => {
-    if (!onOpen) return;
+    if (!on) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key.toLowerCase() !== "o") return;
       if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
       if (isTyping(event.target)) return;
       event.preventDefault();
-      onOpen();
+      open();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onOpen]);
+  }, [on]);
 }
