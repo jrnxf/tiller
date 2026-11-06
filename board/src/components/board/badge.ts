@@ -82,7 +82,8 @@ export function statusMark(row: BoardRow): StatusMark {
     if (row.badge === "cancelled" || row.badge === "superseded") return "retired";
     return "done";
   }
-  if (row.column === "queued" && (row.badge === "parked" || row.badge === "blocked")) {
+  // A held card keeps its column, so it is parked wherever it is.
+  if (row.badge === "parked" || row.badge === "blocked") {
     return "parked";
   }
   return row.column;

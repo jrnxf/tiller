@@ -166,4 +166,7 @@ LEFT JOIN open_deps          od ON od.card_id = c.id
 WHERE c.state = 'open'
    OR julianday('now') - julianday(c.closed_at) <= 3;
 
+-- The card's first linked PR decides when it reached Landing.
+CREATE INDEX prs_card ON prs(card_id, linked_at);
+
 UPDATE meta SET value = '12' WHERE key = 'schema_version';

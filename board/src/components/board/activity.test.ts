@@ -58,6 +58,9 @@ test("a card's dot follows its badge, and only live columns have one", () => {
   expect(cardDot(row("landing", "checks"))).toBe("live");
   expect(cardDot(row("working", "decision", true))).toBe("waiting");
   expect(cardDot(row("landing", "checks_next"))).toBe("idle");
+  expect(cardDot(row("working", "parked"))).toBe("idle");
+  expect(cardDot(row("landing", "blocked"))).toBe("idle");
+  expect(cardDot(row("working", "filed"))).toBe("idle");
   expect(cardDot(row("queued", "filed"))).toBeNull();
   expect(cardDot(row("done", "landed"))).toBeNull();
 });

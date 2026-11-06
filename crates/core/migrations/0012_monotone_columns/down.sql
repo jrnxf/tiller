@@ -1,6 +1,7 @@
 -- Migration 12 down: an active run, a hold, a dependency or a send-back
 -- decides the column again, and a sent-back card shows `filed`.
 
+DROP INDEX prs_card;
 DROP VIEW card_column;
 
 CREATE VIEW card_column AS

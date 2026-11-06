@@ -94,6 +94,11 @@ export function cardDot(row: BoardRow): DotKind | null {
       case "checks_next":
       case "between_runs":
       case "sent_back":
+      // A card keeps its column when it is held or has no run (it never
+      // moves left), so these badges show in Working and Landing too.
+      case "parked":
+      case "blocked":
+      case "filed":
         return "idle";
       case "stale":
         return "stale";

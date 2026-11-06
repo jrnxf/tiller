@@ -80,8 +80,9 @@ pub fn column(store: &Store, card_id: &str) -> tiller_core::Result<CardColumn> {
 }
 
 /// The board filter a card's row first falls under: a card that waits on
-/// the owner is "needs" in whatever column it is, everything else with an
-/// active run or a landing is "active".
+/// the owner is "needs" in whatever column it is, and everything else in
+/// Working or Landing is "active". Columns never move left, so a started card
+/// that is parked, blocked or sent back stays "active".
 pub fn filter(card: &CardColumn) -> &'static str {
     if card.needs_you {
         return "needs";

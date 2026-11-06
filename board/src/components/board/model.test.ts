@@ -91,6 +91,8 @@ test("the mark and tone follow the column, with failures marked as such", () => 
   expect(statusMark(row("x", "done", "landed"))).toBe("done");
   expect(statusMark(row("x", "queued", "parked"))).toBe("parked");
   expect(statusMark(row("x", "queued", "filed"))).toBe("queued");
+  expect(statusMark(row("x", "working", "parked"))).toBe("parked");
+  expect(statusMark(row("x", "landing", "blocked"))).toBe("parked");
   expect(badgeTone(row("x", "landing", "merge", "h1", true))).toBe("warn");
   expect(badgeTone(row("x", "landing", "ready"))).toBe("pend");
   expect(badgeTone(row("x", "working", "between_runs"))).toBe("pend");

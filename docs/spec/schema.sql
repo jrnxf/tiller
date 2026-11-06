@@ -340,6 +340,7 @@ CREATE TABLE prs (
 ) STRICT;
 CREATE INDEX prs_run ON prs(run_id);
 CREATE INDEX prs_card_open ON prs(card_id) WHERE state = 'open';
+CREATE INDEX prs_card ON prs(card_id, linked_at);
 
 -- A direct-pr builder run's publish (state.md, Publish): the PR title and
 -- body its worker described, and what the daemon last pushed and opened.
