@@ -54,7 +54,7 @@ export function ProjectDialog({
   name: string;
   pending: boolean;
   onClose: () => void;
-  initial: RefObject<HTMLButtonElement | null>;
+  initial: RefObject<HTMLElement | null>;
   children: ReactNode;
 }) {
   const dialog = useRef<HTMLDivElement>(null);

@@ -1807,6 +1807,71 @@
             }
           }
         }
+      },
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "add_project",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddProject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`refused`: the id is taken by a different project",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/projects/{id}/asks": {
@@ -2422,6 +2487,54 @@
   },
   "components": {
     "schemas": {
+      "AddProject": {
+        "type": "object",
+        "description": "`POST /api/v1/projects`: register a project on this host, as `tiller\nproject add` does with the fields the board asks for. `--checks`,\n`--remote`, `--default-branch` and the deploy flags stay CLI-only.",
+        "required": [
+          "idempotency_key",
+          "id",
+          "name",
+          "delivery"
+        ],
+        "properties": {
+          "capacity": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How many builders may run at once; absent takes the default."
+          },
+          "delivery": {
+            "type": "string",
+            "description": "`no-mistakes`, `no-mistakes-prod-only`, `direct-pr`, `direct-push` or\n`local-only`."
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label. Refused: a project add is not forwarded."
+          },
+          "id": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "repo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The GitHub repo, `owner/name`; absent for a project with none."
+          }
+        },
+        "additionalProperties": false
+      },
       "AgentRow": {
         "type": "object",
         "description": "A live session: an orchestrator with its workers nested, or a worker.",

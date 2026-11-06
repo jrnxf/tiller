@@ -137,17 +137,24 @@ function currentProject(id: string): Project | undefined {
 const deleted = new Set<string>();
 const retired = new Set<string>();
 const stopped = new Set<string>();
+// The projects added since the server started, listed after the fixture's.
+const added = new Map<string, Project>();
 
 // A read the stand-in server answers, without the deleted projects' rows; a
 // deleted or archived project's own previews are gone (a 404).
 export function withoutDeleted(path: string, body: unknown, scenario: Scenario): unknown {
-  if (deleted.size + retired.size === 0 || body === undefined) return body;
+  if (deleted.size + retired.size + added.size === 0 || body === undefined) return body;
   const pathname = new URL(path, "http://localhost").pathname;
   const preview = /^\/api\/v1\/projects\/([^/]+)\/(delete|retire)$/.exec(pathname);
   if (preview?.[1] && gone(preview[1])) return undefined;
   if (pathname === "/api/v1/projects") {
     const { projects } = body as ProjectsResponse;
-    return { projects: projects.filter((project) => project.host || !gone(project.id)) };
+    return {
+      projects: [
+        ...projects.filter((project) => project.host || !gone(project.id)),
+        ...added.values(),
+      ],
+    };
   }
   if (pathname === "/api/v1/agents") {
     const { orchestrators } = body as AgentsResponse;
@@ -249,6 +256,57 @@ function projectGone(kind: string, txn: string, id: string): FollowUp {
   };
 }
 
+// `project.add`: an archived project keeps its id taken, a deleted one frees it.
+function addProject(body: Record<string, unknown>): MutationResult {
+  const id = typeof body.id === "string" ? body.id : "";
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  if (!/^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$/.test(id) || id.length < 2) {
+    return refusal(
+      400,
+      "usage",
+      `project id "${id}" must be words of lowercase letters and digits`,
+    );
+  }
+  if (!name) return refusal(400, "usage", "project name is required");
+  if (id === "fleet" || added.has(id) || (currentProject(id) && !deleted.has(id))) {
+    return refusal(422, "refused", `project ${id}: project id is taken`);
+  }
+  const delivery = String(body.delivery);
+  const project: Project = {
+    id,
+    name,
+    delivery,
+    capacity: typeof body.capacity === "number" ? body.capacity : 2,
+    rev: 1,
+    stage: "launched",
+    effective_delivery: delivery,
+    reviewed_through_sha: null,
+    reviewed_at: null,
+    stage_changed_at: null,
+    next_review_due: null,
+    review_overdue: false,
+    review_open: null,
+  };
+  added.set(id, project);
+  return {
+    reply: recorded(project, null, null),
+    followUps: [
+      {
+        delayMs: 100,
+        event: {
+          kind: "project.added",
+          txn: "project.add",
+          entity: "project",
+          entity_id: id,
+          rev_after: 1,
+          card_id: null,
+          entity_state: project,
+        },
+      },
+    ],
+  };
+}
+
 function refusal(status: number, code: string, message: string): MutationResult {
   return { reply: refused(status, code, message), followUps: [] };
 }
@@ -262,6 +320,7 @@ function forwarded(
   if (typeof host !== "string") return null;
   if (
     /\/(stage|asks|focus|label|delete|retire|orchestrator)$/.test(path) ||
+    path === projectsPath ||
     /\/memory\//.test(path)
   ) {
     return refusal(502, "peer_refused", `${method} ${path} is not forwarded to ${host}`);
@@ -425,6 +484,7 @@ function handle(
       followUps: [projectGone("project.deleted", "project.delete", id)],
     };
   }
+  if (method === "POST" && path === projectsPath) return addProject(body);
   const retire = /^\/api\/v1\/projects\/([^/]+)\/retire$/.exec(path);
   if (method === "POST" && retire?.[1]) {
     const id = retire[1];

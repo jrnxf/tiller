@@ -26,7 +26,7 @@ use tiller_core::domain::{
     AnsweredVia, Approval, AskSource, CardKind, CardOutcome, HoldReleaseReason, Host, PeerScope,
     Session,
 };
-use tiller_core::domain::{InterventionKind, Stage};
+use tiller_core::domain::{Delivery, InterventionKind, Stage};
 use tiller_core::state::approvals::Decision;
 use tiller_core::state::asks::NewAsk;
 use tiller_core::state::cards::{CardEdit, NewCard};
@@ -587,7 +587,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/machines", get(machines))
         .route("/api/v1/quota", get(quota))
         .route("/api/v1/health", get(health))
-        .route("/api/v1/projects", get(projects))
+        .route("/api/v1/projects", get(projects).post(add_project))
         .route("/api/v1/contributions", get(contributions))
         .route("/api/v1/projects/{id}/stage", post(stage_project))
         .route("/api/v1/projects/{id}/asks", post(ask_note))
@@ -1862,6 +1862,41 @@ async fn delete_project(
     .await
 }
 
+#[utoipa::path(post, path = "/api/v1/projects", tag = "mutations", request_body = AddProject,
+    responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody),
+              (status = 403, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "`refused`: the id is taken by a different project"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn add_project(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers)?;
+    let request: AddProject = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "a project add").await?;
+    let delivery: Delivery = request.delivery.parse()?;
+    let new = tiller_core::state::projects::NewProject {
+        id: request.id,
+        name: request.name,
+        repo: request.repo,
+        remote: None,
+        default_branch: None,
+        delivery,
+        checks: None,
+        capacity: request.capacity,
+        deploy_workflow: None,
+        deploy_environment: None,
+        deploy_timeout_minutes: None,
+    };
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| Done::of(store.project_add(ctx, new)?),
+    )
+    .await
+}
+
 #[utoipa::path(get, path = "/api/v1/projects/{id}/retire", tag = "reads",
     params(("id" = String, Path)),
     responses((status = 200, body = ProjectRetirePreview), (status = 404, body = ErrorBody)))]
@@ -2413,7 +2448,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, stage_project, ask_note, start_orchestrator, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
+        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, stage_project, ask_note, start_orchestrator, add_project, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
         relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo
     ),
@@ -3371,6 +3406,64 @@ pub(crate) mod tests {
 
         let missing = get(&app, "/api/v1/projects/nope/setup").await;
         assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
+    }
+
+    /// The board's project add: owner-only, never forwarded, replayed by
+    /// its key, idempotent for the same values and refused for a taken id.
+    #[tokio::test]
+    async fn board_project_add_registers_a_project() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let app = app(home, Assets::of::<Fixture>());
+        let cookie = owner_cookie(home);
+        let add = |key: &str, fields: Value, cookie: &str| {
+            let mut body = json!({"idempotency_key": key, "id": "gamma", "name": "Gamma",
+                "repo": "example/gamma", "delivery": "direct-pr", "capacity": 2});
+            if let (Some(body), Some(fields)) = (body.as_object_mut(), fields.as_object()) {
+                body.extend(fields.clone());
+            }
+            let headers: Vec<(&str, &str)> = if cookie.is_empty() {
+                vec![]
+            } else {
+                vec![("cookie", cookie)]
+            };
+            mutation("POST", "/api/v1/projects", body, &headers)
+        };
+
+        let anonymous = send(&app, add("k-add-1", json!({}), "")).await;
+        assert_eq!(
+            anonymous.status,
+            StatusCode::FORBIDDEN,
+            "{}",
+            anonymous.body
+        );
+        let peer = send(&app, add("k-add-2", json!({"host": "laptop"}), &cookie)).await;
+        assert_ne!(peer.status, StatusCode::OK, "{}", peer.body);
+        let bad = send(&app, add("k-add-3", json!({"delivery": "yolo"}), &cookie)).await;
+        assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{}", bad.body);
+
+        let added = send(&app, add("k-add-4", json!({}), &cookie)).await;
+        assert_eq!(added.status, StatusCode::OK, "{}", added.body);
+        let body: Value = serde_json::from_str(&added.body).unwrap();
+        assert_eq!(body["data"]["id"], "gamma", "{body}");
+        assert_eq!(body["data"]["repo"], "example/gamma", "{body}");
+        assert_eq!(body["data"]["delivery"], "direct-pr", "{body}");
+        assert_eq!(body["data"]["capacity"], 2, "{body}");
+        let replay = send(&app, add("k-add-4", json!({}), &cookie)).await;
+        let body: Value = serde_json::from_str(&replay.body).unwrap();
+        assert_eq!(body["replayed"], true, "{body}");
+        let again = send(&app, add("k-add-5", json!({}), &cookie)).await;
+        assert_eq!(again.status, StatusCode::OK, "{}", again.body);
+        let taken = send(&app, add("k-add-6", json!({"name": "Other"}), &cookie)).await;
+        assert_eq!(
+            taken.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            taken.body
+        );
+        assert!(taken.body.contains("project id is taken"), "{}", taken.body);
+        let projects = get(&app, "/api/v1/projects").await;
+        assert!(projects.body.contains("\"gamma\""), "{}", projects.body);
     }
 
     /// A retired project leaves the board with its closed cards, which the

@@ -393,3 +393,77 @@
 .dialog-actions .btn.danger:hover {
   background: color-mix(in srgb, var(--red) 16%, transparent);
 }
+
+/* Add project: the sidebar header's "+" and its form, labels beside their
+   fields on a desktop and above them on a phone */
+
+.grp-add {
+  width: 20px;
+  height: 20px;
+  margin-right: -2px;
+  border: 0;
+  border-radius: var(--r4);
+  background: transparent;
+  color: var(--fg-3);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  flex: none;
+}
+
+.grp-add:hover {
+  background: var(--bg-hover);
+  color: var(--fg-1);
+}
+
+.dialog p code {
+  font-family: var(--mono);
+  font-size: 0.92em;
+  color: var(--fg-1);
+}
+
+.padd-fields {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 14px;
+}
+
+.padd-fields label {
+  font-size: var(--fs-mini);
+  font-weight: var(--w-medium);
+  color: var(--fg-2);
+}
+
+.padd-fields .note-in {
+  margin-top: 0;
+  height: 32px;
+}
+
+.padd-fields .note-in.mono {
+  font-family: var(--mono);
+  font-size: var(--fs-mini);
+}
+
+.padd-fields .padd-select {
+  height: 32px;
+  font-size: var(--fs-small);
+  justify-self: start;
+  min-width: 180px;
+}
+
+.padd-fields .padd-slots {
+  width: 88px;
+}
+
+@media (max-width: 480px) {
+  .padd-fields {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+
+  .padd-fields label:not(:first-child) {
+    margin-top: 6px;
+  }
+}

@@ -11,6 +11,7 @@ import type { ViewKnob } from "../../lib/prefs";
 import { useStore } from "../../lib/store";
 import { HostChip } from "../board/host-chip";
 import { CheckIcon, ChevronIcon, EyeIcon, EyeOffIcon, FocusIcon, LayersIcon } from "./icons";
+import { AddProject } from "./project-add";
 import { ProjectDetail, StageChip } from "./project-stage";
 
 const VIEWS: { value: ViewKnob; label: string }[] = [
@@ -64,7 +65,7 @@ export function ProjectsSection({ activeHost }: { activeHost: string | undefined
   return (
     <>
       <div className="grp">
-        <h4>View</h4>
+        <h4>Projects</h4>
         <span className="sp" />
         {subset || focusing ? (
           <button
@@ -75,6 +76,7 @@ export function ProjectsSection({ activeHost }: { activeHost: string | undefined
             Show all
           </button>
         ) : null}
+        <AddProject />
       </div>
       <div className="knob" role="group" aria-label="View">
         {VIEWS.map((view) => (

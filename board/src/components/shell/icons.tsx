@@ -158,6 +158,19 @@ export const CloseIcon = () => (
   </svg>
 );
 
+export const PlusIcon = () => (
+  <svg
+    className="icon"
+    width="14"
+    height="14"
+    viewBox="0 0 16 16"
+    aria-hidden="true"
+    focusable="false"
+  >
+    <path d="M8 3.5v9M3.5 8h9" stroke="currentColor" strokeWidth={1.4} strokeLinecap="round" />
+  </svg>
+);
+
 export const CheckIcon = () => (
   <Icon>
     <path

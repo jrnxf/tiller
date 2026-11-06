@@ -892,6 +892,29 @@ pub struct CreateCard {
     pub priority: Option<i64>,
 }
 
+/// `POST /api/v1/projects`: register a project on this host, as `tiller
+/// project add` does with the fields the board asks for. `--checks`,
+/// `--remote`, `--default-branch` and the deploy flags stay CLI-only.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AddProject {
+    pub idempotency_key: String,
+    /// A paired peer's label. Refused: a project add is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+    pub id: String,
+    pub name: String,
+    /// The GitHub repo, `owner/name`; absent for a project with none.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// `no-mistakes`, `no-mistakes-prod-only`, `direct-pr`, `direct-push` or
+    /// `local-only`.
+    pub delivery: String,
+    /// How many builders may run at once; absent takes the default.
+    #[serde(default)]
+    pub capacity: Option<i64>,
+}
+
 /// `POST /api/v1/projects/{id}/asks`: a note typed in the board's ask box,
 /// recorded and sent to the project's orchestrator as `tiller ask note` does.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
