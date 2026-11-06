@@ -480,7 +480,7 @@ A peer's own refusal (404, 409, 422 and their bodies) is passed through unchange
 | `GET /api/v1/cards/{id}` | card detail: card, column, runs with sessions and effective activity, holds, deps, attention, PRs, approvals, artifacts, reviews, obligations, freshness |
 | `GET /api/v1/cards/{id}/timeline?before=<seq>` | the card's events, newest first, paged |
 | `GET /api/v1/attention?state=open` | the global attention queue: question, evidence, recommendation, consequence, `still_current`, `stale` (`reason`, `subject`, `at`; null while current), `subject_session_id` and `subject_project_id`; and, separately, sessions in `waiting_permission` |
-| `GET /api/v1/agents?host=` | orchestrators with nested workers: role, model, effective activity, `activity_observed_at`, last status line, herdr name, pane, workspace label |
+| `GET /api/v1/agents?host=` | orchestrators with nested workers: role, model, effective activity, `activity_observed_at`, `state_since`, `last_output_at`, last status line, herdr name, pane, workspace label. `last_output_at` is the newest of the session's own output hooks: a tool call (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`), `SubagentStart`, `SubagentStop`, `Stop` or `StopFailure`; null before the first, and always null on a host with `intake_source = transcript`, which sees no tool calls. Owner input, notifications and herdr's polls do not count, and tool calls are coalesced (4.3), so it lags by up to 60 s. The board's rail reads a working agent as quiet when neither output nor a change of state came in the last 10 minutes |
 | `GET /api/v1/runs/{id}` | run detail with recent events and a bounded pane tail |
 | `GET /api/v1/machines` | section 9 |
 | `GET /api/v1/quota` | section 8 |

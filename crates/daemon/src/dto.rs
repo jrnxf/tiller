@@ -223,6 +223,10 @@ pub struct AgentRow {
     pub workspace_label: Option<String>,
     /// When the session entered its current activity.
     pub state_since: Option<String>,
+    /// When the agent last produced output: a tool call, a subagent or the
+    /// end of a turn, as hooks report them (`protocol.md` 7.3). Null before
+    /// its first, and on a host with hooks blocked.
+    pub last_output_at: Option<String>,
     /// The owning host's label, on every row once a peer is paired
     /// (`protocol.md` 7.3); absent on a host with none.
     #[serde(default, skip_serializing_if = "Option::is_none")]

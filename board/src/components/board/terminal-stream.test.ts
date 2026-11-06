@@ -491,11 +491,12 @@ test("a tail whose daemon never answers says so, and keeps trying", async () => 
 
 test("a retry during a failed read leaves one reader, not two", async () => {
   vi.useFakeTimers();
-  let answer: (response: Response) => void = () => {};
+  const answers: ((response: Response) => void)[] = [];
+  const answer = (response: Response) => answers.at(-1)?.(response);
   const request = vi.fn(
     (_path: string, init: RequestInit) =>
       new Promise<Response>((resolve, reject) => {
-        answer = resolve;
+        answers.push(resolve);
         init.signal?.addEventListener("abort", () => reject(new DOMException("aborted")));
       }),
   );
@@ -508,11 +509,11 @@ test("a retry during a failed read leaves one reader, not two", async () => {
   );
   reader.start();
   await vi.advanceTimersByTimeAsync(0);
-  const first = answer;
+  const first = answers[0];
   reader.retry();
   await vi.advanceTimersByTimeAsync(0);
   // The read from before the retry answers late; only the new one goes on.
-  first(refusal(503, "unavailable", "herdr is unreachable"));
+  first?.(refusal(503, "unavailable", "herdr is unreachable"));
   answer(tail(80, 24, "x"));
   await vi.advanceTimersByTimeAsync(5_000);
   expect(request).toHaveBeenCalledTimes(3);

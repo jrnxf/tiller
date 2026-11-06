@@ -2650,7 +2650,7 @@ pub(crate) mod tests {
     use super::*;
     use axum::body::to_bytes;
     use rust_embed::RustEmbed;
-    use tiller_herdr::testing::Fleet;
+    use tiller_herdr::testing::{Fleet, at};
     use tower::ServiceExt;
 
     #[derive(RustEmbed)]
@@ -4291,6 +4291,52 @@ esac"#,
             calls.lines().last(),
             Some("pane read w2:p1 --source recent --lines 1000 --format ansi")
         );
+    }
+
+    #[tokio::test]
+    async fn an_agents_last_output_is_its_own_newest_turn_event() {
+        let mut fleet = Fleet::new();
+        let quiet = fleet.worker("w3:p1");
+        let orchestrator = fleet.orchestrator_session.clone();
+        let store = fleet.open();
+        // A tool call and a turn end are the agent's output; the owner's
+        // prompt, a notification, herdr's poll and the transcript after them
+        // are not.
+        for (n, (source, event)) in [
+            ("hook", "PreToolUse"),
+            ("hook", "Stop"),
+            ("hook", "UserPromptSubmit"),
+            ("hook", "Notification:idle_prompt"),
+            ("herdr", "herdr:working"),
+            ("transcript", "transcript:turn_end"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let observed_at = at(10 * i64::try_from(n).unwrap());
+            store
+                .conn()
+                .execute(
+                    "INSERT INTO observations (id, session_id, source, event, observed_at, recorded_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                    rusqlite::params![format!("o{n}"), orchestrator, source, event, observed_at],
+                )
+                .unwrap();
+        }
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let read = get(&app, "/api/v1/agents").await;
+        assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+        let read: Value = serde_json::from_str(&read.body).unwrap();
+        let row = &read["orchestrators"][0];
+        assert_eq!(row["session_id"], orchestrator);
+        assert_eq!(row["last_output_at"], at(10).to_string());
+        let worker = row["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|worker| worker["session_id"] == quiet.as_str())
+            .unwrap();
+        assert_eq!(worker["last_output_at"], Value::Null);
     }
 
     #[tokio::test]

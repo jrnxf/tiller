@@ -23,6 +23,25 @@ function thresholdMinutes(role: string): number {
   return DEFAULT_STALE_MINUTES[role === "orchestrator" ? "orchestrator" : "worker"];
 }
 
+// A working agent with no output for this long reads as quiet: a long tool
+// call, or a stuck one.
+const QUIET_AFTER = 600;
+
+// How long a working agent has gone without output once that passes
+// QUIET_AFTER, counted from its last output or from when it started working,
+// whichever is later, so a fresh prompt is not quiet. Null before then, and
+// when the daemon reports no output.
+export function quietFor(
+  agent: Pick<AgentRow, "last_output_at" | "state_since">,
+  now?: number,
+): number | null {
+  const output = secondsSince(agent.last_output_at ?? null, now);
+  if (output === null) return null;
+  const state = secondsSince(agent.state_since ?? null, now);
+  const age = state === null ? output : Math.min(output, state);
+  return age > QUIET_AFTER ? age : null;
+}
+
 // An observation older than the role's threshold reads as stale, as the
 // `session_activity` view says; a prompt, `unknown` and `ended` do not age. A
 // dated pause also silences staleness there, but the API does not carry the

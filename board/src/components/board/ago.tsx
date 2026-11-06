@@ -50,3 +50,10 @@ export function Ago({
     </span>
   );
 }
+
+// "for 12 min": how long a state has lasted, moving with the clock.
+export function Lasting({ since }: { since: string }) {
+  useTick();
+  const seconds = secondsSince(since);
+  return seconds === null ? null : <span className="obs">for {formatAge(seconds)}</span>;
+}

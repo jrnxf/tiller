@@ -147,6 +147,9 @@ export interface AgentRow extends Federated {
   workspace_label?: string | null;
   // When the session entered its current state.
   state_since?: string | null;
+  // When the agent last produced output: a tool call, a subagent or the end
+  // of a turn (protocol.md section 7.3).
+  last_output_at?: string | null;
 }
 
 export interface AgentsResponse {

@@ -341,6 +341,13 @@ test("each orchestrator heads its workers, drawn as a tree with role, status and
   expect(document.querySelector(".av-who-1")?.textContent).toContain("opus");
 });
 
+test("a working agent with no output for 10 minutes says how long it has been quiet", async () => {
+  stubApi("default");
+  await renderApp("default", "/agents");
+  expect(agentRow("alpha-42").querySelector(".tm")?.textContent).toBe("quiet 11 min");
+  expect(agentRow("alpha-43").querySelector(".tm")?.textContent).toBe("14 min ago");
+});
+
 test("a worker that went quiet reads as stale, not working", async () => {
   stubApi("default");
   await renderApp("default", "/agents");

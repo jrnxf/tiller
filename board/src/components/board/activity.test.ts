@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "vitest";
 
 import type { BoardRow } from "../../lib/api-types";
 import { clockStore, syncClock } from "../../lib/clock";
-import { agentActivity, cardDot } from "./activity";
+import { agentActivity, cardDot, quietFor } from "./activity";
 
 const NOW = Date.parse("2026-11-02T12:00:00.000Z");
 const minutesAgo = (minutes: number) => new Date(NOW - minutes * 60_000).toISOString();
@@ -60,4 +60,21 @@ test("a card's dot follows its badge, and only live columns have one", () => {
   expect(cardDot(row("landing", "checks_next"))).toBe("idle");
   expect(cardDot(row("queued", "filed"))).toBeNull();
   expect(cardDot(row("done", "landed"))).toBeNull();
+});
+
+// The quiet age for output and a state that began so many minutes ago.
+function quiet(output: number | null, state: number) {
+  return quietFor(
+    { last_output_at: output === null ? null : minutesAgo(output), state_since: minutesAgo(state) },
+    NOW,
+  );
+}
+
+test("a working agent is quiet after 10 minutes with no output, counted from a newer prompt", () => {
+  expect(quiet(12, 30)).toBe(12 * 60);
+  expect(quiet(9, 30)).toBeNull();
+  // Idle for hours, then prompted a minute ago: working, and not yet quiet.
+  expect(quiet(180, 1)).toBeNull();
+  // A host with hooks blocked reports no output: never quiet.
+  expect(quiet(null, 30)).toBeNull();
 });

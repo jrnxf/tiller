@@ -458,6 +458,20 @@ fn agent_row(store: &Store, session: &Session) -> Result<AgentRow> {
             WHERE session_id = ?1 AND verdict IS NOT NULL AND verdict != ?2), '')",
         &[&session.id, &session.activity],
     )?;
+    // The newest sign of the agent's own output: a tool call, a subagent or
+    // the end of a turn, as hooks report them. Owner input, notifications and
+    // herdr's polls do not count, and a host with hooks blocked sees no tool
+    // calls, so it gets none. Tool calls are coalesced (4.3): this lags by up
+    // to 60 s.
+    let last_output_at: Option<Timestamp> = one(
+        store,
+        "SELECT observed_at FROM observations
+         WHERE session_id = ?1 AND source = 'hook' AND (event IN ('PreToolUse', 'PostToolUse',
+           'PostToolUseFailure', 'SubagentStart', 'SubagentStop', 'Stop')
+           OR event LIKE 'StopFailure:%')
+         ORDER BY observed_at DESC LIMIT 1",
+        &[&session.id],
+    )?;
     Ok(AgentRow {
         session_id: session.id.clone(),
         role,
@@ -474,6 +488,7 @@ fn agent_row(store: &Store, session: &Session) -> Result<AgentRow> {
         pane_id: session.pane_id.clone(),
         workspace_label: pane.and_then(|pane| pane.workspace_label),
         state_since: at_opt(state_since),
+        last_output_at: at_opt(last_output_at),
         host: None,
         as_of: None,
         link: None,

@@ -18,11 +18,12 @@ import { prefsStore } from "../../lib/prefs";
 import { scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
 import { hostAwareActivity } from "../states/degraded";
-import { Ago } from "./ago";
+import { quietFor } from "./activity";
+import { Ago, Lasting, useTick } from "./ago";
 import { agentGroups, findLine, nextNeeding, stepLine } from "./agents-model";
 import type { AgentGroup, AgentLine } from "./agents-model";
 import { EmptyScope } from "./board-view";
-import { formatLisbonMoment } from "./format";
+import { formatAge, formatLisbonMoment } from "./format";
 import { focusCommand, focusTooltip, isTyping, useHerdrFocus, useOpenKey } from "./herdr";
 import { ChevronLeftIcon, InfoIcon, LockIcon, PaneIcon } from "./icons";
 import { LiveTerminal, usePhone } from "./live-terminal";
@@ -139,6 +140,28 @@ function promptText(prompt: PermissionPrompt | undefined): string | null {
   return prompt.detail ? `${prompt.tool}: ${prompt.detail}` : `${prompt.tool} asks for permission`;
 }
 
+// How long the row has been in its state, or, for a working agent that has
+// gone quiet, how long since its last output.
+function RowAge({ agent, live }: { agent: AgentRow; live: boolean }) {
+  useTick();
+  const quiet = live ? quietFor(agent) : null;
+  if (quiet !== null) {
+    return (
+      <span className="qt" title={`Working, no output for ${formatAge(quiet)}`}>
+        quiet {formatAge(quiet)}
+      </span>
+    );
+  }
+  return agent.state_since ? <Ago at={agent.state_since} /> : null;
+}
+
+// The agent's last output, amber once a working agent has gone quiet.
+function LastOutput({ agent, live }: { agent: AgentRow; live: boolean }) {
+  useTick();
+  const quiet = live && quietFor(agent) !== null;
+  return <Ago at={agent.last_output_at ?? null} prefix="last" oldAfter={quiet ? 0 : undefined} />;
+}
+
 function RailRow({
   line,
   last,
@@ -206,9 +229,9 @@ function RailRow({
       <span className="tm">
         {needs ? (
           <span className="nt">Needs you</span>
-        ) : agent.state_since ? (
-          <Ago at={agent.state_since} />
-        ) : null}
+        ) : (
+          <RowAge agent={agent} live={activity.dot === "live"} />
+        )}
       </span>
       <span className="st">
         {needs || activity.dot !== "live" ? null : <span className="vh">{activity.label}: </span>}
@@ -406,12 +429,20 @@ function Details({
           <i className={`ld ${activity.dot}`} />
           <Ago at={agent.activity_observed_at} prefix="observed" oldAfter={300} />
         </dd>
+        {agent.last_output_at ? (
+          <>
+            <dt>Output</dt>
+            <dd>
+              <LastOutput agent={agent} live={activity.dot === "live"} />
+            </dd>
+          </>
+        ) : null}
         <dt>State</dt>
         <dd>
           {activity.label}
           {agent.state_since ? (
             <span className="meta">
-              for <Ago at={agent.state_since} />
+              <Lasting since={agent.state_since} />
             </span>
           ) : null}
         </dd>

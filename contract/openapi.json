@@ -2875,6 +2875,13 @@
           "host_id": {
             "type": "string"
           },
+          "last_output_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the agent last produced output: a tool call, a subagent or the\nend of a turn, as hooks report them (`protocol.md` 7.3). Null before\nits first, and on a host with hooks blocked."
+          },
           "last_status_line": {
             "type": [
               "string",

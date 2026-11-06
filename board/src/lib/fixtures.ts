@@ -788,6 +788,14 @@ function sessionId(key: string): string {
   return `01JSESS${key.replace(/\W/g, "").padEnd(19, "0").slice(0, 19).toUpperCase()}`;
 }
 
+// Minutes since a worker's last output: a waiting or idle one spoke when its
+// turn ended, and alpha-42 runs a long test suite, so it has gone quiet.
+function lastOutputMinutes(row: BoardRow, stale: boolean, index: number): number {
+  if (stale) return 22;
+  if (workerActivity(row) !== "working") return 8 + index * 3;
+  return row.display_id === "alpha-42" ? 12 : 0.3 + index / 10;
+}
+
 function workerFor(row: BoardRow, now: number, index: number): AgentRow {
   const role = row.kind === "scout" ? "scout" : "build";
   const stale = row.badge === "stale";
@@ -809,6 +817,7 @@ function workerFor(row: BoardRow, now: number, index: number): AgentRow {
     pane_id: `pane-${row.display_id}`,
     workspace_label: `${row.display_id} ${role}`,
     state_since: minutes(now, -(8 + index * 3)),
+    last_output_at: minutes(now, -lastOutputMinutes(row, stale, index)),
   };
 }
 
@@ -861,6 +870,7 @@ function agentsFor(
         pane_id: `pane-${project.id}`,
         workspace_label: project.id,
         state_since: minutes(now, -(40 + projectIndex * 9)),
+        last_output_at: minutes(now, quiet ? -41 : -(0.2 + projectIndex)),
       };
     });
   return {

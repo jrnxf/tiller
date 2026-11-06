@@ -456,6 +456,12 @@ export function peerAgents(now: number, rows: BoardRow[], projects: Project[]): 
         pane_id: `pane-${row.display_id}`,
         workspace_label: `${row.display_id} build`,
         state_since: at(now, 8 + workerIndex * 3),
+        last_output_at: at(
+          now,
+          workerActivity(row) === "working"
+            ? (spec(host).frameMinutes ?? 1) + workerIndex / 10
+            : 8 + workerIndex * 3,
+        ),
         ...base,
       })),
       project_id: project.id,
@@ -463,6 +469,7 @@ export function peerAgents(now: number, rows: BoardRow[], projects: Project[]): 
       pane_id: `pane-${project.id}`,
       workspace_label: project.id,
       state_since: at(now, 40 + index * 9),
+      last_output_at: at(now, spec(host).frameMinutes ?? 1),
       ...base,
     };
   });

@@ -234,6 +234,10 @@
   white-space: nowrap;
 }
 
+.av-row .qt {
+  color: var(--yellow-text);
+}
+
 .av-row .nt {
   font-size: 10.5px;
   font-weight: var(--w-semibold);
