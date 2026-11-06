@@ -463,6 +463,17 @@ impl Reconciler {
                 // Returned already; treehouse may still be removing it.
                 continue;
             }
+            // A new attempt works on in its predecessor's worktree: the
+            // newest run on the path is the one that returns it.
+            let succeeded: bool = self.conn().query_row(
+                "SELECT EXISTS (SELECT 1 FROM runs WHERE host_id = ?1 AND worktree_path = ?2
+                                AND id != ?3 AND (ended_at IS NULL OR started_at > ?4))",
+                rusqlite::params![host, path, run.id, run.started_at],
+                |row| row.get(0),
+            )?;
+            if succeeded {
+                continue;
+            }
             let pane_closed = self.run_pane_closed(&run);
             let listed_here = listed.as_ref().is_some_and(|l| {
                 l.iter()

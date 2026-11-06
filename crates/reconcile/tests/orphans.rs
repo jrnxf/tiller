@@ -262,3 +262,64 @@ fn worktree_clean_after_the_pane_closed_is_returned() {
     assert!(report.did("returned"), "{report:?}");
     assert!(w.event_kinds().contains(&"run.cleaned".to_owned()));
 }
+
+/// R15: a new attempt works on in its predecessor's worktree, so the ended
+/// predecessor never returns it, not even once the new attempt ends: the
+/// newest run on the path, with its own pane, is the one that does.
+#[test]
+fn worktree_of_an_ended_run_with_a_successor_is_kept() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let run = w.run_of(&worker);
+    let path = run.worktree_path.clone().unwrap();
+    w.scanner.list(Some(vec![path.as_str()]));
+    let t0 = now();
+    w.pass(t0);
+    w.store_mut()
+        .run_end(
+            &owner(),
+            &run.id,
+            EndRun {
+                outcome: RunOutcome::Abandoned,
+                note: Some("next attempt".into()),
+            },
+        )
+        .unwrap();
+    // The next attempt starts in the same worktree.
+    let next = tiller_core::ids::new_ulid();
+    w.store()
+        .conn()
+        .execute(
+            "INSERT INTO runs (id, card_id, role, attempt, predecessor_run_id, model, effort, host_id,
+                               worktree_path, branch, base_branch, base_sha, supervisor_session_id,
+                               started_at)
+             SELECT ?1, card_id, role, attempt + 1, id, model, effort, host_id, worktree_path, branch,
+                    base_branch, base_sha, supervisor_session_id, ?2
+             FROM runs WHERE id = ?3",
+            rusqlite::params![next, t0.plus_minutes(1), run.id],
+        )
+        .unwrap();
+    w.herdr.set_screen("w2:p1", Screen::Shell);
+    let report = w.pass(t0.plus_minutes(2));
+    assert!(
+        !report.did("returned"),
+        "the next attempt works in it: {report:?}"
+    );
+    assert!(w.scanner.released().is_empty());
+
+    // The next attempt ends too, its pane not yet seen closed.
+    w.store_mut()
+        .run_end(
+            &owner(),
+            &next,
+            EndRun {
+                outcome: RunOutcome::Abandoned,
+                note: Some("done".into()),
+            },
+        )
+        .unwrap();
+    let report = w.pass(t0.plus_minutes(3));
+    assert!(!report.did("returned"), "{report:?}");
+    assert!(w.scanner.released().is_empty());
+}
