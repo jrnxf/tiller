@@ -145,7 +145,7 @@ export function focusTooltip(host: { kind: "local" | "remote" } | undefined): st
   return host?.kind === "remote" ? FOCUS_TOOLTIP_REMOTE : FOCUS_TOOLTIP;
 }
 
-function isTyping(target: EventTarget | null): boolean {
+export function isTyping(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
 }

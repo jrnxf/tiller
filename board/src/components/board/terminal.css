@@ -239,6 +239,74 @@
   color: var(--fg-1);
 }
 
+/* The Agents view's stage: the screen takes all the room the card gives it. */
+.mir.stage {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+}
+
+.mir.stage > .mir-msg {
+  margin: 0 10px;
+}
+
+.mir.stage .mir-s {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  margin: 0 10px;
+}
+
+.mir.stage .mir-slot {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Like the terminal it stands in for: the pane sits at the top left. */
+.mir.stage .mir-x {
+  margin: 0;
+}
+
+.mir.stage .mir-f {
+  flex: none;
+  min-height: 44px;
+  margin: 0;
+  padding: 8px 10px 8px 14px;
+}
+
+.mir.stage .mir-f .tx {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mir-fr {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  margin-left: auto;
+}
+
+.mir-f .mir-fr .btn {
+  margin-left: 0;
+}
+
+.mir-sw {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--fg-3);
+  font-weight: var(--w-normal);
+}
+
+.mir-sw kbd:last-of-type {
+  margin-right: 2px;
+}
+
 /* The expanded view, a dialog over the page. */
 .mir-backdrop {
   align-items: flex-start;
@@ -432,6 +500,11 @@
 
 @media (max-width: 820px) {
   .mir-dlg-h .meta {
+    display: none;
+  }
+
+  .mir.stage .mir-sz,
+  .mir-sw {
     display: none;
   }
 }

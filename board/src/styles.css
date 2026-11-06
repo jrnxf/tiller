@@ -89,6 +89,11 @@
   --fs-small: 13px;
   --fs-regular: 15px;
   --ease: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  /* Motion: a strong ease-out for entrances, ease-in-out for moves on screen,
+     and the drawer curve for sheets and drawers. */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
   --fast: 0.1s;
   --med: 0.18s;
   /* project hues, handed out in list order */
@@ -1248,6 +1253,65 @@ kbd {
 .palette-empty {
   padding: 10px;
   color: var(--fg-3);
+}
+
+/* The Agents view folds the sidebar to its icons, so the terminal gets the
+   room. */
+
+@media (min-width: 821px) {
+  .shell:has(.av-view) {
+    --sidebar-width: 52px;
+  }
+
+  .shell:has(.av-view) .side {
+    align-items: center;
+    padding: 10px 0;
+  }
+
+  .shell:has(.av-view) .side > :not(.ws, .search, .navs) {
+    display: none;
+  }
+
+  .shell:has(.av-view) .ws {
+    padding: 4px 0 10px;
+  }
+
+  .shell:has(.av-view) .ws .name,
+  .shell:has(.av-view) .search span,
+  .shell:has(.av-view) .search kbd,
+  .shell:has(.av-view) .nav .lbl,
+  .shell:has(.av-view) .nav .count {
+    display: none;
+  }
+
+  .shell:has(.av-view) .search {
+    width: 32px;
+    margin: 0 0 8px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .shell:has(.av-view) .navs {
+    align-items: center;
+  }
+
+  .shell:has(.av-view) .nav {
+    position: relative;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .shell:has(.av-view) .nav .badge {
+    position: absolute;
+    top: 1px;
+    right: -2px;
+    min-width: 14px;
+    height: 14px;
+    padding: 0 3px;
+    font-size: 9.5px;
+  }
 }
 
 /* Phones: the sidebar becomes a drawer */

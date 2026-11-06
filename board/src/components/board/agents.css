@@ -1,0 +1,677 @@
+/* The Agents view: a rail of every agent, each orchestrator over its workers,
+   beside a stage that holds the selected agent's terminal. */
+
+.av-view {
+  display: grid;
+  grid-template-columns: 304px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.av-view .ld {
+  position: relative;
+  transition:
+    background-color 200ms var(--ease),
+    box-shadow 200ms var(--ease);
+}
+
+/* Attention: one ripple from the dot, twice, then still. */
+.av-view .ld.ripple::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--orange);
+  animation: av-ripple 900ms var(--ease-out) 2;
+}
+
+@keyframes av-ripple {
+  from {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  to {
+    transform: scale(3.2);
+    opacity: 0;
+  }
+}
+
+.av-view .vh {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The rail */
+
+.av-rail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--line-1);
+  background: var(--bg-1);
+}
+
+.av-rh {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  height: 40px;
+  padding: 0 10px 0 16px;
+  border-bottom: 1px solid var(--line-1);
+}
+
+.av-rh .sp,
+.av-gh .sp,
+.av-det-h .sp {
+  flex: 1;
+}
+
+.av-needs {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 4px 0 8px;
+  border: 1px solid color-mix(in srgb, var(--orange) 40%, var(--line-2));
+  border-radius: var(--r6);
+  background: color-mix(in srgb, var(--orange) 8%, transparent);
+  color: var(--orange-text);
+  font-size: var(--fs-mini);
+  font-weight: var(--w-medium);
+  cursor: pointer;
+  transition:
+    background-color var(--fast) var(--ease),
+    transform 160ms var(--ease-out);
+}
+
+.av-needs kbd {
+  margin-left: 2px;
+}
+
+.av-needs:active {
+  transform: scale(0.97);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .av-needs:hover {
+    background: color-mix(in srgb, var(--orange) 14%, transparent);
+  }
+}
+
+.av-cnt {
+  display: inline-grid;
+  overflow: hidden;
+  height: 16px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.av-cnt > span {
+  grid-area: 1 / 1;
+}
+
+.av-list {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 2px 8px 12px;
+  scrollbar-width: thin;
+  outline: none;
+}
+
+/* The selection's background, a separate layer so it can glide between rows. */
+.av-hl {
+  position: absolute;
+  top: 0;
+  left: 0;
+  border-radius: var(--r6);
+  background: var(--bg-active);
+  pointer-events: none;
+  will-change: transform;
+}
+
+.av-hl:not([data-shown]) {
+  opacity: 0;
+}
+
+.av-list:focus-visible .av-hl {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.av-gh {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 10px 8px 0;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+  white-space: nowrap;
+}
+
+.av-gh b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg-1);
+  font-weight: var(--w-medium);
+}
+
+.av-gh .lab {
+  height: 17px;
+}
+
+.av-gh .lab svg {
+  width: 11px;
+  height: 11px;
+}
+
+.av-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: 20px 18px;
+  column-gap: 8px;
+  align-items: center;
+  height: 48px;
+  padding: 5px 8px 5px 10px;
+  border-radius: var(--r6);
+  cursor: default;
+  user-select: none;
+}
+
+.av-row .nm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--fg-1);
+  font-weight: var(--w-medium);
+  white-space: nowrap;
+}
+
+.av-row .nm .l {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.av-row .nm .r {
+  font-size: 11px;
+  color: var(--fg-3);
+  font-weight: var(--w-normal);
+}
+
+.av-row .av-host {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--fg-3);
+  font-weight: var(--w-normal);
+}
+
+.av-row .av-host svg {
+  width: 11px;
+  height: 11px;
+  flex: none;
+}
+
+.av-row .tm {
+  font-size: 11px;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.av-row .nt {
+  font-size: 10.5px;
+  font-weight: var(--w-semibold);
+  color: var(--orange-text);
+}
+
+.av-row .st {
+  grid-column: 2 / 4;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--fg-3);
+}
+
+.av-row[data-s="needs"] .st {
+  color: var(--orange-text);
+}
+
+.av-row[data-s="off"] .nm,
+.av-row[data-s="unknown"] .nm,
+.av-row.dim .nm {
+  color: var(--fg-3);
+}
+
+.av-row.wk {
+  margin-left: 18px;
+}
+
+/* herdr's tree, drawn: a stem down from the orchestrator and an elbow into each worker. */
+.av-row.wk::before {
+  content: "";
+  position: absolute;
+  left: -9px;
+  top: -2px;
+  bottom: -2px;
+  width: 1px;
+  background: var(--line-3);
+}
+
+.av-row.wk.last::before {
+  bottom: auto;
+  height: 26px;
+}
+
+.av-row.wk::after {
+  content: "";
+  position: absolute;
+  left: -9px;
+  top: 24px;
+  width: 9px;
+  height: 1px;
+  background: var(--line-3);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .av-row:not([aria-selected="true"]):hover {
+    background: var(--bg-hover);
+  }
+}
+
+.av-row.ping {
+  animation: av-ping 1400ms var(--ease-out);
+}
+
+@keyframes av-ping {
+  0% {
+    background: color-mix(in srgb, var(--orange) 0%, transparent);
+  }
+  18% {
+    background: color-mix(in srgb, var(--orange) 16%, transparent);
+  }
+  100% {
+    background: color-mix(in srgb, var(--orange) 0%, transparent);
+  }
+}
+
+.av-row.fresh {
+  animation: av-fresh 1800ms var(--ease);
+}
+
+@keyframes av-fresh {
+  0%,
+  30% {
+    background: var(--accent-tint);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+.av-rf {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  flex: none;
+  padding: 10px 16px;
+  border-top: 1px solid var(--line-1);
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.av-rf span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* The stage: one card holds the agent's identity, its terminal and its actions. */
+
+.av-stage {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  padding: 10px;
+}
+
+.av-card {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-panel);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r8);
+}
+
+.av-card-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  min-height: 56px;
+  padding: 8px 10px 8px 14px;
+}
+
+.av-who {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.av-who-1 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--fg-1);
+  font-weight: var(--w-medium);
+  white-space: nowrap;
+}
+
+.av-who-1 .nm {
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.av-who-1 .lab {
+  flex: none;
+}
+
+.av-who-1 .ttl {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg-2);
+  font-weight: var(--w-normal);
+}
+
+.av-who-1 .ttl .id {
+  margin-right: 5px;
+  color: var(--fg-3);
+}
+
+.av-who-2 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.av-who-2[data-s="needs"] {
+  color: var(--orange-text);
+}
+
+.av-who-2[data-s="live"] .lb {
+  color: var(--green-text);
+}
+
+.av-acts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  margin-left: auto;
+}
+
+.av-acts .btn kbd {
+  margin-left: 2px;
+}
+
+.av-acts .btn[aria-pressed="true"] {
+  background: var(--bg-active);
+  color: var(--fg-1);
+}
+
+.av-card > .peer-note {
+  margin: 0 14px 8px;
+}
+
+.av-card-b {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.av-body-note {
+  padding: 0 10px;
+}
+
+.av-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  margin-top: auto;
+  padding: 8px 10px 8px 14px;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.av-foot .tx {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.av-foot svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+/* The details drawer slides over the terminal from the right. */
+.av-det {
+  position: absolute;
+  top: 56px;
+  right: 16px;
+  bottom: 50px;
+  z-index: 2;
+  width: 340px;
+  max-width: calc(100% - 32px);
+  padding: 4px 14px 14px;
+  overflow: auto;
+  background: var(--bg-panel);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r8);
+  box-shadow: var(--shadow-high);
+  transition:
+    transform 240ms var(--ease-drawer),
+    opacity 240ms var(--ease-drawer);
+}
+
+.av-det[data-open="false"] {
+  transform: translateX(calc(100% + 16px));
+  opacity: 0;
+  pointer-events: none;
+}
+
+.av-det-h {
+  display: flex;
+  align-items: center;
+  height: 36px;
+  margin-bottom: 4px;
+  color: var(--fg-1);
+}
+
+.av-det-h b {
+  font-weight: var(--w-medium);
+}
+
+.av-det .props {
+  grid-template-columns: 80px minmax(0, 1fr);
+  margin-bottom: 12px;
+  font-size: 12px;
+}
+
+.av-det .props .mono {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.av-det .props .meta {
+  color: var(--fg-3);
+}
+
+.av-hint {
+  margin: 0 0 16px;
+  font-size: var(--fs-mini);
+  line-height: 1.5;
+  color: var(--fg-3);
+}
+
+.av-hint code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-1);
+  overflow-wrap: anywhere;
+}
+
+.av-det .sect {
+  margin: 0;
+}
+
+/* Phones: the list alone, then the chosen agent's stage pushed over it. */
+
+@media (max-width: 820px) {
+  .av-view {
+    display: block;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .av-rail {
+    height: 100%;
+    border-right: 0;
+    background: var(--bg-0);
+  }
+
+  .av-view[data-pane="stage"] .av-rail,
+  .av-view[data-pane="list"] .av-stage,
+  .av-rf {
+    display: none;
+  }
+
+  .av-view[data-pane="list"] .av-hl {
+    display: none;
+  }
+
+  .av-row {
+    height: 56px;
+    grid-template-rows: 22px 20px;
+  }
+
+  .av-row .st {
+    font-size: 12.5px;
+  }
+
+  .av-row.wk.last::before {
+    height: 30px;
+  }
+
+  .av-row.wk::after {
+    top: 28px;
+  }
+
+  .av-stage {
+    height: 100%;
+    padding: 0;
+    background: var(--bg-0);
+  }
+
+  .av-card {
+    border: 0;
+    border-radius: 0;
+    background: var(--bg-0);
+  }
+
+  .av-card-h {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    padding: 8px 12px 8px 6px;
+    border-bottom: 1px solid var(--line-1);
+  }
+
+  .av-back {
+    flex: none;
+  }
+
+  .av-who {
+    flex: 1;
+    padding-top: 2px;
+  }
+
+  .av-who-1 .ttl,
+  .av-who-1 .hchip {
+    display: none;
+  }
+
+  .av-acts {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .av-acts .btn kbd,
+  .av-needs kbd {
+    display: none;
+  }
+
+  .av-card-b {
+    padding-top: 10px;
+  }
+
+  .av-det {
+    top: 8px;
+    right: 8px;
+    bottom: 8px;
+    left: 8px;
+    width: auto;
+    max-width: none;
+  }
+}
+
+/* Reduced motion: keep fades and color, drop movement. */
+@media (prefers-reduced-motion: reduce) {
+  .av-det {
+    transition: opacity 160ms var(--ease) !important;
+  }
+
+  .av-det[data-open="false"] {
+    transform: none;
+  }
+
+  .av-view .ld.ripple::after {
+    animation: none;
+  }
+
+  .av-needs:active {
+    transform: none;
+  }
+}

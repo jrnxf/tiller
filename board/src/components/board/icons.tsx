@@ -123,6 +123,13 @@ export const TerminalIcon = () => (
   </Glyph>
 );
 
+export const InfoIcon = () => (
+  <Glyph>
+    <circle cx="8" cy="8" r="5.5" {...stroke} />
+    <path d="M8 7.2v3.6M8 5.2v.1" {...stroke} {...round} />
+  </Glyph>
+);
+
 export const KeyboardIcon = () => (
   <Glyph>
     <rect x="1.5" y="4" width="13" height="8" rx="1.5" {...stroke} />

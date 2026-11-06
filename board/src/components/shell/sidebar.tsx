@@ -142,6 +142,8 @@ export function Sidebar({
             className="nav"
             activeProps={{ className: "nav", "aria-current": "page" }}
             activeOptions={{ exact: true }}
+            // The Agents view folds the sidebar to icons; the name stays on hover.
+            title={item.label}
           >
             {item.icon}
             <span className="lbl">{item.label}</span>

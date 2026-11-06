@@ -45,6 +45,8 @@ function stubApi(scenario: Scenario, focusStatus = 200, focused: unknown = null)
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
       const method = init?.method ?? "GET";
+      // The stage mirrors the selected agent's pane; these tests never stream it.
+      if (path.endsWith("/terminal")) return new Response("{}", { status: 404 });
       if (method !== "GET") {
         posted.push({
           path,
@@ -85,6 +87,9 @@ function stubMedia(matching: (query: string) => boolean = () => false) {
     media: query,
     addEventListener: () => {},
     removeEventListener: () => {},
+    // xterm still listens the old way, for the device pixel ratio.
+    addListener: () => {},
+    removeListener: () => {},
   }));
 }
 
@@ -270,54 +275,114 @@ test("a card event moves the card to its new column without remounting the other
 
 // ---- Agents ----
 
-function agentRow(label: string) {
-  // The list only: the detail panel repeats the selected agent's label.
-  const list = document.querySelector<HTMLElement>(".ag-list");
-  if (!list) throw new Error("no agent list");
-  const row = within(list).getByText(label).closest<HTMLElement>("[role=button]");
-  if (!row) throw new Error(`no row for ${label}`);
+function agentList() {
+  return screen.getByRole("listbox", { name: "Agents" });
+}
+
+function agentOptions() {
+  return within(agentList()).getAllByRole("option");
+}
+
+// A row on the rail by the name it shows: the project for an orchestrator,
+// the card for a worker.
+function agentRow(name: string) {
+  const row = agentOptions().find((option) => option.querySelector(".nm .l")?.textContent === name);
+  if (!row) throw new Error(`no row for ${name}`);
   return row;
 }
 
-test("each orchestrator heads its workers, drawn as a tree with role, model, status and last line", async () => {
+// The selected agent's Open in herdr, the rightmost action on the stage.
+function stageOpen() {
+  const acts = document.querySelector<HTMLElement>(".av-acts");
+  if (!acts) throw new Error("no agent on the stage");
+  return within(acts).getByRole("button", { name: /Open in herdr/ }) as HTMLButtonElement;
+}
+
+async function selectAgent(name: string) {
+  fireEvent.click(agentRow(name));
+  await waitFor(() => expect(agentRow(name).getAttribute("aria-selected")).toBe("true"));
+}
+
+test("each orchestrator heads its workers, drawn as a tree with role, status and last line", async () => {
   stubApi("default");
   await renderApp("default", "/agents");
 
-  const group = screen.getByRole("region", { name: "alpha" });
-  const labels = [...group.querySelectorAll(".wsl")].map((node) => node.textContent);
-  expect(labels).toEqual([
+  const group = within(agentList()).getByRole("group", { name: "alpha" });
+  const rows = within(group).getAllByRole("option");
+  expect(rows.map((row) => row.querySelector(".nm .l")?.textContent)).toEqual([
     "alpha",
-    "├ alpha-41 build",
-    "├ alpha-42 build",
-    "├ alpha-43 build",
-    "└ alpha-44 build",
+    "alpha-41",
+    "alpha-42",
+    "alpha-43",
+    "alpha-44",
+  ]);
+  expect(rows.map((row) => row.className.match(/\b(orch|wk)\b/)?.[0])).toEqual([
+    "orch",
+    "wk",
+    "wk",
+    "wk",
+    "wk",
+  ]);
+  // Only the last worker's elbow ends the tree's stem.
+  expect(rows.map((row) => row.classList.contains("last"))).toEqual([
+    false,
+    false,
+    false,
+    false,
+    true,
   ]);
 
-  const worker = agentRow("├ alpha-43 build");
+  const worker = agentRow("alpha-43");
   expect(worker.textContent).toContain("build");
-  expect(worker.textContent).toContain("opus");
   expect(worker.textContent).toContain("Working");
   expect(worker.textContent).toContain("Running tests for alpha-43");
-  expect(worker.className).toContain("nest");
-  expect(group.querySelector("[role=button]")?.className).not.toContain("nest");
+  await selectAgent("alpha-43");
+  expect(document.querySelector(".av-who-1")?.textContent).toContain("opus");
 });
 
 test("a worker that went quiet reads as stale, not working", async () => {
   stubApi("default");
   await renderApp("default", "/agents");
-  expect(agentRow("└ beta-7 build").textContent).toContain("Stale, was working");
+  expect(agentRow("beta-7").textContent).toContain("Stale, was working");
+});
+
+test("J and K walk the rail, N jumps to the next agent that needs you, and a field keeps its keys", async () => {
+  stubApi("default");
+  const { router } = await renderApp("default", "/agents");
+  const selected = () =>
+    agentOptions().findIndex((row) => row.getAttribute("aria-selected") === "true");
+  expect(selected()).toBe(0);
+
+  fireEvent.keyDown(window, { key: "j" });
+  await waitFor(() => expect(selected()).toBe(1));
+  fireEvent.keyDown(window, { key: "k" });
+  await waitFor(() => expect(selected()).toBe(0));
+  fireEvent.keyDown(window, { key: "k" });
+  await waitFor(() => expect(selected()).toBe(agentOptions().length - 1));
+  expect(router.state.location.search).toHaveProperty("agent");
+
+  fireEvent.keyDown(window, { key: "j" });
+  await waitFor(() => expect(selected()).toBe(0));
+  const needing = agentOptions().filter((row) => row.dataset.s === "needs");
+  expect(needing.length).toBeGreaterThan(0);
+  fireEvent.keyDown(window, { key: "n" });
+  await waitFor(() => expect(needing[0]?.getAttribute("aria-selected")).toBe("true"));
+
+  fireEvent.keyDown(window, { key: "k", metaKey: true });
+  const before = selected();
+  fireEvent.keyDown(screen.getByRole("combobox"), { key: "j" });
+  fireEvent.keyDown(screen.getByRole("combobox"), { key: "n" });
+  expect(selected()).toBe(before);
 });
 
 test("the button says it opens herdr on the remote machine first only for a remote agent", async () => {
   stubApi("default");
   await renderApp("default", "/agents");
 
-  const local = within(agentRow("├ alpha-42 build")).getByRole("button", { name: /Open in herdr/ });
-  const remote = within(agentRow("├ alpha-43 build")).getByRole("button", {
-    name: /Open in herdr/,
-  });
-  expect(local.getAttribute("title")).toBe("Focus this agent's terminal in herdr");
-  expect(remote.getAttribute("title")).toBe(
+  await selectAgent("alpha-42");
+  expect(stageOpen().getAttribute("title")).toBe("Focus this agent's terminal in herdr");
+  await selectAgent("alpha-43");
+  expect(stageOpen().getAttribute("title")).toBe(
     "Focuses this agent's terminal on the remote machine; select that machine in herdr's sidebar to see it",
   );
 });
@@ -326,11 +391,11 @@ test("Open in herdr asks the daemon to focus that agent, and says where to find 
   const posted = stubApi("default", 200, { opened: "raised", terminal: "Ghostty" });
   await renderApp("default", "/agents");
 
-  const row = agentRow("├ alpha-43 build");
-  fireEvent.click(within(row).getByRole("button", { name: /Open in herdr/ }));
+  await selectAgent("alpha-43");
+  fireEvent.click(stageOpen());
 
   await waitFor(() => expect(posted).toHaveLength(1));
-  const sessionId = row.dataset.testid?.replace("agent-", "");
+  const sessionId = agentRow("alpha-43").dataset.testid?.replace("agent-", "");
   expect(posted[0]).toMatchObject({ path: `/api/v1/agents/${sessionId}/focus`, method: "POST" });
   await waitFor(() =>
     expect(screen.getByTestId("toast").textContent).toContain("Brought herdr to the front"),
@@ -338,8 +403,6 @@ test("Open in herdr asks the daemon to focus that agent, and says where to find 
   expect(screen.getByTestId("toast").textContent).toContain(
     "Select host-b in herdr's sidebar to see the agent's terminal.",
   );
-  // Clicking the button did not also change which agent is selected.
-  expect(row.getAttribute("aria-selected")).toBe("false");
 });
 
 test("Start orchestrator on a lane with none posts the start and leaves the lane open", async () => {
@@ -410,17 +473,14 @@ test("Open in herdr says when herdr opened, and when no herdr window here can sh
   stubApi("default", 200, { opened: "launched", terminal: "Ghostty" });
   await renderApp("default", "/agents");
 
-  fireEvent.click(
-    within(agentRow("├ alpha-42 build")).getByRole("button", { name: /Open in herdr/ }),
-  );
+  await selectAgent("alpha-42");
+  fireEvent.click(stageOpen());
   await waitFor(() =>
     expect(screen.getByTestId("toast").textContent).toContain("Opened herdr in Ghostty"),
   );
 
   stubApi("default", 200, { opened: "unseen", terminal: null });
-  fireEvent.click(
-    within(agentRow("├ alpha-42 build")).getByRole("button", { name: /Open in herdr/ }),
-  );
+  fireEvent.click(stageOpen());
   await waitFor(() =>
     expect(screen.getByTestId("toast").textContent).toContain("No herdr window here"),
   );
@@ -434,11 +494,8 @@ test("the O key opens the selected agent, and a letter typed into a field does n
   const posted = stubApi("default");
   await renderApp("default", "/agents");
 
-  fireEvent.click(agentRow("├ alpha-42 build"));
-  await waitFor(() =>
-    expect(agentRow("├ alpha-42 build").getAttribute("aria-selected")).toBe("true"),
-  );
-  const sessionId = agentRow("├ alpha-42 build").dataset.testid?.replace("agent-", "");
+  await selectAgent("alpha-42");
+  const sessionId = agentRow("alpha-42").dataset.testid?.replace("agent-", "");
 
   fireEvent.keyDown(window, { key: "k", metaKey: true });
   fireEvent.keyDown(screen.getByRole("combobox"), { key: "o" });
@@ -457,35 +514,42 @@ test("the O key opens the selected agent, and a letter typed into a field does n
 test("when herdr cannot be reached the board says so and changes nothing", async () => {
   stubApi("default", 503);
   await renderApp("default", "/agents");
-  fireEvent.click(
-    within(agentRow("├ alpha-42 build")).getByRole("button", { name: /Open in herdr/ }),
-  );
+  await selectAgent("alpha-42");
+  fireEvent.click(stageOpen());
   await waitFor(() =>
     expect(screen.getByTestId("toast").textContent).toContain("herdr did not answer"),
   );
 });
 
-test("the detail panel shows the focus command, branch, worktree, label and recent events", async () => {
+test("the I key opens the details with the focus command, branch, worktree, label and recent events", async () => {
   stubApi("default");
-  const { router } = await renderApp("default", "/agents");
-  fireEvent.click(agentRow("├ alpha-42 build"));
-  await waitFor(() => expect(router.state.location.search).toHaveProperty("agent"));
+  await renderApp("default", "/agents");
+  await selectAgent("alpha-42");
 
   const panel = screen.getByRole("complementary", { name: "Agent details" });
+  expect(panel.dataset.open).toBe("false");
+  fireEvent.keyDown(window, { key: "i" });
+  await waitFor(() => expect(panel.dataset.open).toBe("true"));
   expect(panel.textContent).toContain("herdr agent focus alpha-42-build");
   expect(panel.textContent).toContain("ship/fixture");
   expect(panel.textContent).toContain("/home/user/work/fixture");
-  expect(panel.textContent).toContain("├ alpha-42 build");
+  expect(panel.textContent).toContain("alpha-42 build");
   expect(panel.textContent).toContain("pane.state working");
-  expect(within(panel).getByRole("link", { name: /Open card alpha-42/ })).toBeTruthy();
+  fireEvent.keyDown(window, { key: "Escape" });
+  await waitFor(() => expect(panel.dataset.open).toBe("false"));
+
+  const card = within(document.querySelector(".av-acts") as HTMLElement).getByRole("link", {
+    name: "Open card",
+  });
+  expect(card.getAttribute("href")).toBe(`/cards/${CARD_42}`);
 });
 
 test("a machine filter keeps only that machine's agents and redraws the tree", async () => {
   stubApi("default");
   await renderApp("default", `/agents?host=${HOST_B}`);
-  expect(agentRow("└ alpha-43 build")).toBeTruthy();
-  expect(screen.queryByText("├ alpha-42 build")).toBeNull();
-  expect(screen.queryByRole("region", { name: "beta" })).toBeNull();
+  expect(agentRow("alpha-43").classList.contains("last")).toBe(true);
+  expect(within(agentList()).queryByText("alpha-42")).toBeNull();
+  expect(within(agentList()).queryByRole("group", { name: "beta" })).toBeNull();
 });
 
 test("moving between views keeps the screen you were on until the next one is ready", async () => {
@@ -497,7 +561,7 @@ test("moving between views keeps the screen you were on until the next one is re
   expect(screen.queryByRole("progressbar")).toBeNull();
   await waitFor(() => expect(router.state.location.pathname).toBe("/agents"));
   expect(screen.queryByTestId("board")).toBeNull();
-  expect(screen.getByRole("complementary", { name: "Agent details" })).toBeTruthy();
+  expect(agentList()).toBeTruthy();
 });
 
 // ---- Card detail ----

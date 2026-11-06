@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 
 import type { AgentRow, AgentsResponse, BoardRow, Project } from "../../lib/api-types";
-import { agentGroups, findLine } from "./agents-model";
+import { agentGroups, findLine, nextNeeding, stepLine } from "./agents-model";
 
 const project = (id: string): Project => ({
   id,
@@ -91,4 +91,26 @@ test("a selection that is gone falls back to the first agent", () => {
   expect(findLine(groups, "w2")?.line.agent.session_id).toBe("w2");
   expect(findLine(groups, "missing")?.line.agent.session_id).toBe("o");
   expect(findLine([], "w2")).toBeNull();
+});
+
+test("J and K walk the rail across projects and wrap at the ends", () => {
+  const groups = agentGroups(roster, [project("alpha"), project("beta")], rows, undefined);
+  const id = (from: string, by: 1 | -1) => stepLine(groups, from, by)?.line.agent.session_id;
+  expect(id("w3", 1)).toBe("o2");
+  expect(id("o2", 1)).toBe("o");
+  expect(id("o", -1)).toBe("o2");
+  expect(id("missing", 1)).toBe("o");
+  expect(stepLine([], "o", 1)).toBeNull();
+});
+
+test("N finds the next agent that needs you after the current one, wrapping", () => {
+  const groups = agentGroups(roster, [project("alpha"), project("beta")], rows, undefined);
+  const waiting = new Set(["w1", "o2"]);
+  const next = (from: string | undefined, set = waiting) =>
+    nextNeeding(groups, from, (row) => set.has(row.session_id))?.line.agent.session_id;
+  expect(next("w1")).toBe("o2");
+  expect(next("o2")).toBe("w1");
+  expect(next(undefined)).toBe("w1");
+  expect(next("w1", new Set(["w1"]))).toBe("w1");
+  expect(next("w1", new Set())).toBeUndefined();
 });

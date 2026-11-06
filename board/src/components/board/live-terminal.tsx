@@ -4,12 +4,13 @@ import "@xterm/xterm/css/xterm.css";
 import {
   useCallback,
   useEffect,
+  useImperativeHandle,
   useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
 } from "react";
-import type { ReactNode } from "react";
+import type { ReactNode, Ref } from "react";
 import { createPortal } from "react-dom";
 
 import { createStore, useStore } from "../../lib/store";
@@ -87,7 +88,7 @@ function subscribePhone(change: () => void) {
   return () => media?.removeEventListener?.("change", change);
 }
 
-function usePhone(): boolean {
+export function usePhone(): boolean {
   return useSyncExternalStore(
     subscribePhone,
     () => window.matchMedia?.(PHONE)?.matches === true,
@@ -138,6 +139,9 @@ const OPTIONS: ITerminalOptions & ITerminalInitOnlyOptions = {
 };
 const MIN_FONT = 4;
 const MAX_FONT = 20;
+// The stage grows a small pane into its room, but not past a size that reads
+// as a terminal rather than a poster.
+const STAGE_FONT = 14;
 // The screen's inner padding on each side, in CSS pixels.
 const PAD = 8;
 
@@ -270,6 +274,23 @@ function NoScreen({ status, onRetry }: { status: MirrorStatus; onRetry: () => vo
 // Keys typed to the agent are not board shortcuts.
 const contain = (event: KeyboardEvent) => event.stopPropagation();
 
+// The keys that leave one agent's screen for another while typing: Option-J
+// and Option-K step through the rail, Option-N jumps to the next agent that
+// needs the owner. By key position, since Option changes the character.
+export type SwitchKey = "next" | "prev" | "needs";
+const SWITCH_KEYS: Record<string, SwitchKey> = { KeyJ: "next", KeyK: "prev", KeyN: "needs" };
+
+function switchKey(event: KeyboardEvent): SwitchKey | null {
+  if (event.type !== "keydown" || !event.altKey || event.ctrlKey || event.metaKey) return null;
+  if (event.shiftKey) return null;
+  return SWITCH_KEYS[event.code] ?? null;
+}
+
+// What the Agents view asks of its terminal: start typing to the agent.
+export interface TerminalControl {
+  type(): void;
+}
+
 // One terminal with its stream and its keys, wired to the host it draws in.
 // The WebGL renderer draws box and block characters itself, so they meet
 // cell for cell at any font size; the DOM renderer leans on whatever font has
@@ -362,6 +383,11 @@ export function LiveTerminal({
   label,
   heading,
   actions,
+  variant,
+  control,
+  autoType = false,
+  onTyping,
+  onSwitch,
 }: {
   sessionId: string;
   // What the terminal is, for assistive tech: "build on beta-7".
@@ -369,8 +395,18 @@ export function LiveTerminal({
   // The expanded view's title row, and its actions (Open in herdr).
   heading: ReactNode;
   actions?: ReactNode;
+  // The Agents view's stage: the screen fills the room it is given, with no
+  // header row, and the footer carries the size and the expand button.
+  variant?: "stage";
+  control?: Ref<TerminalControl>;
+  // Start typing as soon as the pane is live: the owner switched agents from
+  // the keyboard while typing. Read once, when the terminal mounts.
+  autoType?: boolean;
+  onTyping?: (typing: boolean) => void;
+  onSwitch?: (key: SwitchKey) => void;
 }) {
   const phone = usePhone();
+  const stage = variant === "stage";
   const [host] = useState(() => {
     const element = document.createElement("div");
     element.className = "mir-x";
@@ -392,7 +428,13 @@ export function LiveTerminal({
   const [ready, setReady] = useState(false);
   // Focus the screen once the sheet holds it: a phone tap means "type".
   const focusNext = useRef(false);
+  // Type once the pane is live: asked for before the stream had a screen.
+  const typeWhenLive = useRef(autoType);
   const webglRef = useRef<typeof WebglAddon | null>(null);
+  const switchRef = useRef(onSwitch);
+  useEffect(() => {
+    switchRef.current = onSwitch;
+  }, [onSwitch]);
 
   useEffect(() => {
     let gone = false;
@@ -402,6 +444,13 @@ export function LiveTerminal({
       ([xterm, webgl]) => {
         if (gone) return;
         const term = new xterm.Terminal(OPTIONS);
+        term.attachCustomKeyEventHandler((event) => {
+          const key = switchKey(event);
+          if (!key || !switchRef.current) return true;
+          event.preventDefault();
+          switchRef.current(key);
+          return false;
+        });
         webglRef.current = webgl.WebglAddon;
         const mounted = mountTerminal(term, sessionId, host, {
           status: setStatus,
@@ -442,7 +491,17 @@ export function LiveTerminal({
     if (!term) return;
     term.options.disableStdin = !live;
     if (!live) term.blur();
+    else if (typeWhenLive.current && term.element) {
+      typeWhenLive.current = false;
+      term.focus();
+    }
   }, [live]);
+
+  useEffect(() => {
+    onTyping?.(typing);
+  }, [typing, onTyping]);
+  // A terminal that goes away mid-typing never sees its focus leave.
+  useEffect(() => () => onTyping?.(false), [onTyping]);
 
   const box = view === "inline" ? inlineBox : bigBox;
   // The font size that shows the whole pane in the room the slot has, or
@@ -460,12 +519,17 @@ export function LiveTerminal({
     const width = box.clientWidth - PAD * 2;
     const dpr = window.devicePixelRatio || 1;
     const ratio = advance() * dpr;
-    // The largest font the room's height allows, from the rows' height now.
-    const tallest = grow
-      ? Math.max(200, window.innerHeight - 240) / (screen.offsetHeight / current)
-      : Number.POSITIVE_INFINITY;
+    // The largest font the room's height allows, from the rows' height now:
+    // the dialog's window, or the stage's own box.
+    const room = grow
+      ? Math.max(200, window.innerHeight - 240)
+      : stage && view === "inline"
+        ? box.clientHeight - PAD * 2
+        : Number.POSITIVE_INFINITY;
+    const tallest = room / (screen.offsetHeight / current);
     const least = Math.ceil(MIN_FONT * ratio);
-    let cell = Math.floor(Math.min(grow ? MAX_FONT : BASE_FONT, tallest) * ratio);
+    const most = grow ? MAX_FONT : stage && view === "inline" ? STAGE_FONT : BASE_FONT;
+    let cell = Math.floor(Math.min(most, tallest) * ratio);
     if (fit) cell = Math.min(cell, Math.floor((width * dpr) / term.cols));
     cell = Math.max(least, cell);
     // A hair over the cell, so xterm's own rounding lands on it.
@@ -484,7 +548,7 @@ export function LiveTerminal({
       }
     }
     setFont(term.options.fontSize ?? BASE_FONT);
-  }, [host, box, view, scale]);
+  }, [host, box, view, scale, stage]);
 
   // Put the one xterm in the view that shows it, opening it there the first
   // time (xterm measures its cells on open, so the host must be on the page),
@@ -502,6 +566,9 @@ export function LiveTerminal({
     layout();
     if (focusNext.current) {
       focusNext.current = false;
+      term.focus();
+    } else if (typeWhenLive.current && !term.options.disableStdin) {
+      typeWhenLive.current = false;
       term.focus();
     }
   }, [box, ready, host, label, layout]);
@@ -561,6 +628,21 @@ export function LiveTerminal({
     setView("inline");
   }, []);
 
+  useImperativeHandle(
+    control,
+    () => ({
+      type() {
+        const term = termRef.current;
+        if (phone) {
+          focusNext.current = true;
+          expand();
+        } else if (term?.element && !term.options.disableStdin) term.focus();
+        else typeWhenLive.current = true;
+      },
+    }),
+    [phone, expand],
+  );
+
   const ended = status.kind === "ended";
   const screenShown =
     status.kind === "live" ||
@@ -615,46 +697,88 @@ export function LiveTerminal({
       </span>
     );
 
-  return (
-    <div className={`mir${state}`}>
-      <div className="mir-h">
-        <StatusMark status={status} />
-        {typing && view === "inline" ? <span className="lab sm acc">Typing</span> : null}
-        {screenShown && sizeText && view === "inline" ? (
-          <span className="mir-sz">{sizeText}</span>
-        ) : null}
-        <span className="sp" />
-        {screenShown && !ended && view === "inline" ? (
-          <button
-            type="button"
-            className="ib sm"
-            title="Expand"
-            aria-label="Expand the terminal"
-            onClick={expand}
-          >
-            <ExpandIcon />
-          </button>
-        ) : null}
-      </div>
-      {message}
-      {screenShown && view === "inline" ? (
-        <div className="mir-s" role="group" aria-label={`Live terminal for ${label}`}>
-          <div className="mir-slot" ref={setInlineBox} />
-          {veil}
-          {phone && live ? (
-            <button
-              type="button"
-              className="mir-tap"
-              aria-label="Type to the agent"
-              onClick={() => {
-                focusNext.current = true;
-                expand();
-              }}
-            />
-          ) : null}
+  const expandButton =
+    screenShown && !ended && view === "inline" ? (
+      <button
+        type="button"
+        className="ib sm"
+        title="Expand"
+        aria-label="Expand the terminal"
+        onClick={expand}
+      >
+        <ExpandIcon />
+      </button>
+    ) : null;
+  const screen = (
+    <div className="mir-s" role="group" aria-label={`Live terminal for ${label}`}>
+      <div className="mir-slot" ref={setInlineBox} />
+      {stage && view === "dialog" ? (
+        <div className="mir-veil">
+          <span className="mir-pill">In the expanded view</span>
         </div>
+      ) : (
+        veil
+      )}
+      {phone && live ? (
+        <button
+          type="button"
+          className="mir-tap"
+          aria-label="Type to the agent"
+          onClick={() => {
+            focusNext.current = true;
+            expand();
+          }}
+        />
       ) : null}
-      {screenShown ? <div className="mir-f">{footer("inline")}</div> : null}
+    </div>
+  );
+  // The stage's footer: what a click does on the left, the pane's size and
+  // the expand button on the right, Done while typing.
+  const stageFooter = typing ? (
+    <>
+      <span className="tx">
+        <KeyboardIcon />
+        Typing goes to the agent. Board shortcuts are paused.
+      </span>
+      <span className="mir-fr">
+        {onSwitch ? (
+          <span className="mir-sw">
+            <kbd>⌥J</kbd>
+            <kbd>⌥K</kbd>
+            switch agents
+          </span>
+        ) : null}
+        <button type="button" className="btn sm" onClick={done}>
+          Done
+        </button>
+      </span>
+    </>
+  ) : (
+    <>
+      {footer("inline")}
+      <span className="mir-fr">
+        {sizeText ? <span className="mir-sz">{sizeText}</span> : null}
+        {expandButton}
+      </span>
+    </>
+  );
+
+  return (
+    <div className={`mir${stage ? " stage" : ""}${state}`}>
+      {stage ? null : (
+        <div className="mir-h">
+          <StatusMark status={status} />
+          {typing && view === "inline" ? <span className="lab sm acc">Typing</span> : null}
+          {screenShown && sizeText && view === "inline" ? (
+            <span className="mir-sz">{sizeText}</span>
+          ) : null}
+          <span className="sp" />
+          {expandButton}
+        </div>
+      )}
+      {message}
+      {screenShown && (view === "inline" || stage) ? screen : null}
+      {screenShown ? <div className="mir-f">{stage ? stageFooter : footer("inline")}</div> : null}
       {view === "dialog"
         ? createPortal(
             <Expanded

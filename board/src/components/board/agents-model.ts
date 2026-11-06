@@ -9,6 +9,9 @@ export interface AgentLine {
   // The herdr workspace label as drawn: the project id for an orchestrator,
   // `├ alpha-42 build` for a worker.
   label: string;
+  // The short name the rail shows: the project id for an orchestrator, the
+  // card id for a worker.
+  name: string;
   card: BoardRow | null;
 }
 
@@ -17,14 +20,8 @@ export interface AgentGroup {
   lines: AgentLine[];
 }
 
-function workerLabel(
-  glyph: string,
-  agent: AgentRow,
-  card: BoardRow | null,
-  ambiguous: Set<string>,
-): string {
-  const id = card ? shownId(card, ambiguous) : (agent.card_id ?? "no card");
-  return `${glyph} ${id} ${agent.role}`;
+function workerName(agent: AgentRow, card: BoardRow | null, ambiguous: Set<string>): string {
+  return card ? shownId(card, ambiguous) : (agent.card_id ?? "no card");
 }
 
 // Groups the roster by project, keeping only the projects the view knob shows
@@ -50,15 +47,23 @@ export function agentGroups(
       if (host && orchestrator.host_id !== host && workers.length === 0) continue;
       const lines: AgentLine[] = [];
       if (!host || orchestrator.host_id === host) {
-        lines.push({ agent: orchestrator, orchestrator: true, label: project.id, card: null });
+        lines.push({
+          agent: orchestrator,
+          orchestrator: true,
+          label: project.id,
+          name: project.id,
+          card: null,
+        });
       }
       workers.forEach((worker, index) => {
         const card = worker.card_id ? (cards.get(worker.card_id) ?? null) : null;
         const glyph = index === workers.length - 1 ? "└" : "├";
+        const name = workerName(worker, card, ambiguous);
         lines.push({
           agent: worker,
           orchestrator: false,
-          label: workerLabel(glyph, worker, card, ambiguous),
+          label: `${glyph} ${name} ${worker.role}`,
+          name,
           card,
         });
       });
@@ -68,7 +73,38 @@ export function agentGroups(
   return groups;
 }
 
+function flatLines(groups: AgentGroup[]) {
+  return groups.flatMap((group) => group.lines.map((line) => ({ group, line })));
+}
+
 export function findLine(groups: AgentGroup[], sessionId: string | undefined) {
-  const all = groups.flatMap((group) => group.lines.map((line) => ({ group, line })));
+  const all = flatLines(groups);
   return all.find(({ line }) => line.agent.session_id === sessionId) ?? all[0] ?? null;
+}
+
+// The line `by` rows from the current one in rail order, wrapping at the ends,
+// so J on the last agent lands on the first.
+export function stepLine(groups: AgentGroup[], sessionId: string | undefined, by: 1 | -1) {
+  const all = flatLines(groups);
+  if (all.length === 0) return null;
+  const at = all.findIndex(({ line }) => line.agent.session_id === sessionId);
+  if (at < 0) return all[0] ?? null;
+  return all[(at + by + all.length) % all.length] ?? null;
+}
+
+// The first line after the current one, in rail order and wrapping, whose agent
+// needs the owner. The current line comes last, so N on the only agent that
+// needs you stays put instead of finding nothing.
+export function nextNeeding(
+  groups: AgentGroup[],
+  sessionId: string | undefined,
+  needs: (agent: AgentRow) => boolean,
+) {
+  const all = flatLines(groups);
+  const at = all.findIndex(({ line }) => line.agent.session_id === sessionId);
+  for (let step = 1; step <= all.length; step += 1) {
+    const candidate = all[(at + step + all.length) % all.length];
+    if (candidate && needs(candidate.line.agent)) return candidate;
+  }
+  return null;
 }
