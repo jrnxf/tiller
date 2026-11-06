@@ -205,16 +205,18 @@ mod tests {
         );
         // A remote-tracking ref left after the remote branch is gone is stale.
         run(&clone, &["fetch", "--quiet", "origin"]);
-        run(
-            &clone,
+        run(&origin, &["branch", "-D", "tiller/alpha-3-build"]);
+        run(&clone, &["branch", "-D", "tiller/alpha-1-build"]);
+        let stale = git(
+            Some(&clone),
             &[
-                "push",
+                "rev-parse",
+                "--verify",
                 "--quiet",
-                "origin",
-                ":refs/heads/tiller/alpha-3-build",
+                "refs/remotes/origin/tiller/alpha-3-build",
             ],
         );
-        run(&clone, &["branch", "-D", "tiller/alpha-1-build"]);
+        assert!(stale.is_ok(), "the clone still holds the stale ref");
         assert!(
             left_run_branches("alpha", Some(&clone), None)
                 .unwrap()
