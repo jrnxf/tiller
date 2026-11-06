@@ -744,7 +744,7 @@ export function AgentsView({
     const listener = (event: KeyboardEvent) => onKey.current(event);
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
-  }, []);
+  }, [onKey]);
 
   const onSwitch = (key: SwitchKey) => {
     if (key === "needs") goNext("key", true);
@@ -781,7 +781,7 @@ export function AgentsView({
   useLayoutEffect(() => {
     if (via.current !== "pointer")
       rowOf(listRef.current, currentId)?.scrollIntoView?.({ block: "nearest" });
-  }, [currentId]);
+  }, [currentId, via, listRef]);
 
   // A row that joins the rail eases in and glows once; a row that starts
   // needing the owner pings, and its dot ripples.
@@ -837,7 +837,7 @@ export function AgentsView({
           ],
       { duration: 140, easing: ease("--ease-out") },
     );
-  }, [currentId, phone]);
+  }, [currentId, phone, onStage, via, bodyRef]);
 
   // On a phone the stage pushes in over the list, and Back slides it away.
   const shownPane = useRef(pane);
@@ -855,7 +855,7 @@ export function AgentsView({
         : [{ transform: "translateX(100%)" }, { transform: "none" }],
       { duration: calm ? 200 : 320, easing: ease("--ease-drawer") },
     );
-  }, [pane]);
+  }, [pane, shownPane, leaving, via, stageRef]);
   const toList = () =>
     void navigate({
       to: "/agents",

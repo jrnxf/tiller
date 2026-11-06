@@ -8,8 +8,18 @@
 //! its stream ended rather than buffered, and its reconnect starts from a
 //! fresh full frame. The pane's size is read again every 2 seconds, and a
 //! change restarts the child at the new size.
+//!
+//! The Fit is the one exception to "never resize": a view that asks for it
+//! runs `herdr terminal session control` at the board's size instead, and
+//! hands the pane back at its own size when the view ends. The size to give
+//! back is kept on disk until then, so a daemon that dies mid-Fit gives it
+//! back when it starts again. A board that changes size refits in place: the
+//! new size goes to the open control session, so the pane is never given
+//! back between two sizes.
 
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -19,9 +29,10 @@ use axum::body::{Body, Bytes};
 use serde::Deserialize;
 use serde_json::Value;
 use tiller_herdr::client::Cli;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, BufReader};
-use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, watch};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::{OwnedMutexGuard, mpsc, watch};
+use tokio::task::JoinHandle;
 
 use crate::dto::TerminalLine;
 
@@ -48,24 +59,26 @@ const STDERR_KEEP: u64 = 2048;
 /// Observe children in a row that may start on a diff before the stream
 /// gives up, so a herdr that never sends a full frame cannot spin.
 const FIRST_FULL_TRIES: u32 = 3;
+/// The sizes a Fit may ask for, in cells.
+const FIT_COLS: std::ops::RangeInclusive<u16> = 20..=500;
+const FIT_ROWS: std::ops::RangeInclusive<u16> = 5..=200;
+/// How long herdr has to take the pane back before its child is killed.
+const GIVE_BACK: Duration = Duration::from_secs(3);
+/// How long a Fit waits for the one before it on the same pane to give the
+/// pane back: longer than a give-back can take.
+const TURN_WAIT: Duration = Duration::from_secs(8);
+/// Diffs a Fit passes over while it waits for a full frame, before it gives
+/// up on herdr ever sending one.
+const FIT_DIFFS: u32 = 64;
+/// Where the sizes to give back are kept, under the daemon's home.
+const FITS_FILE: &str = "mirror-fits.json";
 
-/// The mirror's shared counters: open views and the input budget.
+/// The mirror's shared state: open views, the input budget and the Fits.
 #[derive(Debug)]
 pub struct Mirrors {
     viewers: Arc<AtomicUsize>,
     budget: Mutex<Budget>,
-}
-
-impl Default for Mirrors {
-    fn default() -> Self {
-        Self {
-            viewers: Arc::new(AtomicUsize::new(0)),
-            budget: Mutex::new(Budget {
-                tokens: INPUT_BURST,
-                at: Instant::now(),
-            }),
-        }
-    }
+    fits: Arc<Fits>,
 }
 
 /// A token bucket: `INPUT_RATE` inputs a second, `INPUT_BURST` at once.
@@ -86,6 +99,23 @@ impl Drop for Viewer {
 }
 
 impl Mirrors {
+    /// The mirror for a daemon whose home is `home`, with the Fits it left
+    /// behind read back.
+    pub fn new(home: &Path) -> Self {
+        Self {
+            viewers: Arc::new(AtomicUsize::new(0)),
+            budget: Mutex::new(Budget {
+                tokens: INPUT_BURST,
+                at: Instant::now(),
+            }),
+            fits: Arc::new(Fits::at(home.join(FITS_FILE))),
+        }
+    }
+
+    pub fn fits(&self) -> Arc<Fits> {
+        self.fits.clone()
+    }
+
     /// A slot for one more view, or `None` at the cap.
     pub fn viewer(&self) -> Option<Viewer> {
         self.viewers
@@ -148,20 +178,195 @@ pub fn check_text(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The NDJSON body that streams `pane` to one viewer, starting at `size`.
-/// The stream ends when the browser leaves, the pane closes, herdr stops
-/// answering, or the daemon stops; the observe child is killed with it.
+/// Why a Fit's size is refused before it reaches herdr.
+pub fn check_fit(cols: u16, rows: u16) -> Result<(u16, u16), String> {
+    if !FIT_COLS.contains(&cols) || !FIT_ROWS.contains(&rows) {
+        return Err(format!(
+            "fit is {} to {} cols by {} to {} rows",
+            FIT_COLS.start(),
+            FIT_COLS.end(),
+            FIT_ROWS.start(),
+            FIT_ROWS.end()
+        ));
+    }
+    Ok((cols, rows))
+}
+
+/// The panes a Fit holds at the board's size, each with the size it goes
+/// back to. One Fit runs per pane at a time.
+#[derive(Debug)]
+pub struct Fits {
+    path: PathBuf,
+    held: Mutex<BTreeMap<String, (u16, u16)>>,
+    turns: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// The board's size for each pane a Fit streams now, for a refit.
+    boards: Mutex<HashMap<String, watch::Sender<(u16, u16)>>>,
+}
+
+impl Fits {
+    fn at(path: PathBuf) -> Self {
+        let held = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+                tracing::warn!(path = %path.display(), %error, "unreadable Fit sizes; none are given back");
+                BTreeMap::new()
+            }),
+            Err(_) => BTreeMap::new(),
+        };
+        Self {
+            path,
+            held: Mutex::new(held),
+            turns: Mutex::new(HashMap::new()),
+            boards: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The panes still held, with the size each goes back to.
+    pub fn held(&self) -> BTreeMap<String, (u16, u16)> {
+        self.held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Notes that `pane` goes back to `size`, on disk before herdr resizes it.
+    async fn hold(self: &Arc<Self>, pane: &str, size: (u16, u16)) {
+        let pane = pane.to_owned();
+        self.change(move |held| held.insert(pane, size) != Some(size))
+            .await;
+    }
+
+    /// `pane` has its size back.
+    async fn release(self: &Arc<Self>, pane: &str) {
+        let pane = pane.to_owned();
+        self.change(move |held| held.remove(&pane).is_some()).await;
+    }
+
+    /// Applies `change` and saves the set when it says it changed, off the
+    /// async threads since it writes a file.
+    async fn change(
+        self: &Arc<Self>,
+        change: impl FnOnce(&mut BTreeMap<String, (u16, u16)>) -> bool + Send + 'static,
+    ) {
+        let fits = self.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let mut held = fits.held.lock().unwrap_or_else(PoisonError::into_inner);
+            if change(&mut held) {
+                fits.save(&held);
+            }
+        })
+        .await;
+    }
+
+    /// Starts following the board's size for the Fit on `pane`, at `fit`.
+    fn board(&self, pane: &str, fit: (u16, u16)) -> watch::Receiver<(u16, u16)> {
+        let (sender, receiver) = watch::channel(fit);
+        let mut boards = self.boards.lock().unwrap_or_else(PoisonError::into_inner);
+        boards.retain(|_, sender| !sender.is_closed());
+        boards.insert(pane.to_owned(), sender);
+        receiver
+    }
+
+    /// Gives the Fit streaming `pane` the board's new size; false when no
+    /// Fit streams it.
+    pub fn refit(&self, pane: &str, fit: (u16, u16)) -> bool {
+        let boards = self.boards.lock().unwrap_or_else(PoisonError::into_inner);
+        match boards.get(pane) {
+            Some(sender) if !sender.is_closed() => {
+                sender.send_if_modified(|now| std::mem::replace(now, fit) != fit);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Rewrites the file atomically; an empty set removes it.
+    fn save(&self, held: &BTreeMap<String, (u16, u16)>) {
+        let written = if held.is_empty() {
+            match std::fs::remove_file(&self.path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+                _ => Ok(()),
+            }
+        } else {
+            let temporary = self.path.with_extension("tmp");
+            serde_json::to_vec(held)
+                .map_err(std::io::Error::other)
+                .and_then(|bytes| std::fs::write(&temporary, bytes))
+                .and_then(|()| std::fs::rename(&temporary, &self.path))
+        };
+        if let Err(error) = written {
+            tracing::warn!(path = %self.path.display(), %error, "cannot keep the Fit sizes");
+        }
+    }
+
+    /// This pane's turn, once the Fit before it has given the pane back;
+    /// `None` when that takes longer than `TURN_WAIT`.
+    async fn turn(&self, pane: &str) -> Option<OwnedMutexGuard<()>> {
+        let turn = {
+            let mut turns = self.turns.lock().unwrap_or_else(PoisonError::into_inner);
+            turns.retain(|_, turn| Arc::strong_count(turn) > 1);
+            turns.entry(pane.to_owned()).or_default().clone()
+        };
+        tokio::time::timeout(TURN_WAIT, turn.lock_owned())
+            .await
+            .ok()
+    }
+
+    /// Gives back every pane a Fit still held when the daemon last stopped,
+    /// at the size herdr's layout gives it now. A pane herdr no longer has,
+    /// or that another client controls, is dropped from the list all the
+    /// same: there is nothing left to undo.
+    pub async fn restore_left(self: &Arc<Self>, herdr: &Cli) {
+        for pane in self.held().into_keys() {
+            let Some(_turn) = self.turn(&pane).await else {
+                continue;
+            };
+            // A Fit that ran meanwhile gave the pane back itself.
+            let Some(saved) = self.held().get(&pane).copied() else {
+                continue;
+            };
+            let (sizer, asked) = (herdr.clone().timeout(SIZE_TIMEOUT), pane.clone());
+            let size = match tokio::task::spawn_blocking(move || sizer.pane_size(&asked)).await {
+                Ok(Ok(now)) => now,
+                _ => Some(saved),
+            };
+            if let Some(size) = size {
+                let (cols, rows) = size;
+                let mut command = Command::from(herdr.control_command(&pane, cols, rows));
+                command
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true);
+                if let Ok(mut child) = command.spawn()
+                    && let Some(stdout) = child.stdout.take()
+                {
+                    let stdin = child.stdin.take();
+                    give_back(&mut child, stdin, &mut BufReader::new(stdout), size).await;
+                    tracing::info!(pane, cols, rows, "gave a pane back its size after a Fit");
+                }
+            }
+            self.release(&pane).await;
+        }
+    }
+}
+
+/// The NDJSON body that streams `pane` to one viewer, starting at `size`,
+/// or at `fit` with the pane resized to it. The stream ends when the browser
+/// leaves, the pane closes, herdr stops answering, or the daemon stops; the
+/// herdr child is killed with it, once a Fit has given the pane back.
 pub fn stream(
     herdr: Cli,
     pane: String,
     size: (u16, u16),
+    fit: Option<(u16, u16)>,
+    fits: Arc<Fits>,
     stop: watch::Receiver<bool>,
     viewer: Viewer,
 ) -> Body {
     let (tx, mut rx) = mpsc::channel::<Bytes>(QUEUE);
     tokio::spawn(async move {
         let _viewer = viewer;
-        mirror(&herdr, &pane, size, stop, &tx).await;
+        mirror(&herdr, &pane, size, fit, &fits, stop, &tx).await;
     });
     let lines = futures_util::stream::poll_fn(move |cx| {
         rx.poll_recv(cx).map(|line| line.map(Ok::<_, Infallible>))
@@ -173,27 +378,68 @@ pub fn stream(
 enum Woke {
     Read(std::io::Result<bool>),
     Tick,
+    /// The board asked a Fit for a new size.
+    Refit((u16, u16)),
     /// The browser left or the daemon is stopping.
     Over,
 }
 
-/// How one observe child ended.
+/// How one herdr child ended.
 enum Ended {
     /// The pane changed size: observe again at this one.
     Resized((u16, u16)),
     /// The child started on a diff: observe again for a full frame.
     NoFullFrame,
+    /// herdr would not hand the pane to a Fit, and said why.
+    Refused(String),
     /// The stream is over, for the browser or for herdr.
     Done,
+}
+
+/// A Fit's hold on the pane: where its size to give back is kept, the
+/// board's size as it changes, and herdr's control input to send it to.
+struct Control<'a> {
+    fits: &'a Arc<Fits>,
+    board: watch::Receiver<(u16, u16)>,
+    stdin: ChildStdin,
+}
+
+/// The board's next size for a Fit; never for a plain observe, or once
+/// nothing can refit it.
+async fn refitted(control: &mut Option<&mut Control<'_>>) -> (u16, u16) {
+    if let Some(control) = control
+        && control.board.changed().await.is_ok()
+    {
+        return *control.board.borrow_and_update();
+    }
+    std::future::pending().await
+}
+
+/// herdr's control line that resizes the pane.
+fn resize_line(cols: u16, rows: u16) -> String {
+    format!("{{\"type\":\"terminal.resize\",\"cols\":{cols},\"rows\":{rows}}}\n")
 }
 
 async fn mirror(
     herdr: &Cli,
     pane: &str,
     mut size: (u16, u16),
+    fit: Option<(u16, u16)>,
+    fits: &Arc<Fits>,
     mut stop: watch::Receiver<bool>,
     tx: &mpsc::Sender<Bytes>,
 ) {
+    if let Some(fit) = fit {
+        match fitted(herdr, pane, &mut size, fit, fits, &mut stop, tx).await {
+            // The view goes on unfitted, at the pane's own size.
+            Some(message) => {
+                if !queue(tx, &TerminalLine::Unfit { message }) {
+                    return;
+                }
+            }
+            None => return,
+        }
+    }
     let mut no_full = 0;
     loop {
         let (cols, rows) = size;
@@ -213,7 +459,25 @@ async fn mirror(
                 return;
             }
         };
-        let ended = observe(herdr, pane, size, &mut child, &mut stop, tx).await;
+        let ended = match outputs(&mut child) {
+            Some((mut reader, errors)) => {
+                observe(
+                    herdr,
+                    pane,
+                    &mut size,
+                    None,
+                    &mut reader,
+                    errors,
+                    &mut stop,
+                    tx,
+                )
+                .await
+            }
+            None => {
+                unavailable(tx, "herdr observe has no output");
+                Ended::Done
+            }
+        };
         let _ = child.start_kill();
         let _ = child.wait().await;
         match ended {
@@ -228,25 +492,118 @@ async fn mirror(
                     return;
                 }
             }
-            Ended::Done => return,
+            Ended::Done | Ended::Refused(_) => return,
         }
     }
 }
 
-/// Passes one child's frames on until it, the browser or the pane ends.
-async fn observe(
+/// Streams the pane at the board's size, `fit` and then any refit, through
+/// herdr's control session, then gives it back at its own size, which `size`
+/// follows if the pane's layout changes meanwhile. `None` when the stream is
+/// over; herdr's reason when it would not hand the pane over, for the caller
+/// to go on without the Fit.
+async fn fitted(
     herdr: &Cli,
     pane: &str,
-    size: (u16, u16),
-    child: &mut Child,
+    size: &mut (u16, u16),
+    fit: (u16, u16),
+    fits: &Arc<Fits>,
     stop: &mut watch::Receiver<bool>,
     tx: &mpsc::Sender<Bytes>,
-) -> Ended {
-    let (Some(stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
-        unavailable(tx, "herdr observe has no output");
-        return Ended::Done;
+) -> Option<String> {
+    let Some(_turn) = fits.turn(pane).await else {
+        return Some(
+            "another view holds a Fit on this pane, or is still giving it back".to_owned(),
+        );
     };
-    // A failing observe explains itself on stderr; only its start is kept.
+    fits.hold(pane, *size).await;
+    let (cols, rows) = fit;
+    let mut command = Command::from(herdr.control_command(pane, cols, rows));
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            fits.release(pane).await;
+            unavailable(tx, &format!("cannot run herdr: {error}"));
+            return None;
+        }
+    };
+    let ended = match (outputs(&mut child), child.stdin.take()) {
+        (Some((mut reader, errors)), Some(stdin)) => {
+            let mut control = Control {
+                fits,
+                board: fits.board(pane, fit),
+                stdin,
+            };
+            let ended = if queue(tx, &TerminalLine::Size { cols, rows }) {
+                observe(
+                    herdr,
+                    pane,
+                    size,
+                    Some(&mut control),
+                    &mut reader,
+                    errors,
+                    stop,
+                    tx,
+                )
+                .await
+            } else {
+                Ended::Done
+            };
+            give_back(&mut child, Some(control.stdin), &mut reader, *size).await;
+            ended
+        }
+        _ => {
+            unavailable(tx, "herdr control has no output");
+            Ended::Done
+        }
+    };
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+    fits.release(pane).await;
+    match ended {
+        Ended::Refused(message) => Some(message),
+        _ => None,
+    }
+}
+
+/// Asks herdr to put the pane back at `size` and let it go, then waits for
+/// the child to leave. herdr drops its resize lock as the child detaches,
+/// and a herdr client showing the pane lays it out again itself. Its output
+/// is drained meanwhile, so the child never dies on a closed pipe before
+/// the resize is sent.
+async fn give_back(
+    child: &mut Child,
+    stdin: Option<ChildStdin>,
+    reader: &mut BufReader<ChildStdout>,
+    size: (u16, u16),
+) {
+    let (cols, rows) = size;
+    if let Some(mut stdin) = stdin {
+        let lines = resize_line(cols, rows) + "{\"type\":\"terminal.release\"}\n";
+        let _ = tokio::time::timeout(GIVE_BACK, stdin.write_all(lines.as_bytes())).await;
+    }
+    let left = tokio::time::timeout(GIVE_BACK, async {
+        let _ = tokio::io::copy(reader, &mut tokio::io::sink()).await;
+        child.wait().await
+    })
+    .await;
+    if left.is_err() {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+}
+
+/// A child's output: its stdout to read, and the start of its stderr.
+fn outputs(child: &mut Child) -> Option<(BufReader<ChildStdout>, JoinHandle<String>)> {
+    let (Some(stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        return None;
+    };
+    // A failing child explains itself on stderr; only its start is kept.
     let errors = tokio::spawn(async move {
         let mut kept = String::new();
         let _ = (&mut stderr)
@@ -256,17 +613,42 @@ async fn observe(
         let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
         kept
     });
-    let mut reader = BufReader::new(stdout);
+    Some((BufReader::new(stdout), errors))
+}
+
+/// Passes one child's frames on until it, the browser or the pane ends. A
+/// Fit's `control` also takes the board's new sizes to herdr.
+#[allow(clippy::too_many_arguments)]
+async fn observe(
+    herdr: &Cli,
+    pane: &str,
+    size: &mut (u16, u16),
+    mut control: Option<&mut Control<'_>>,
+    reader: &mut BufReader<ChildStdout>,
+    errors: JoinHandle<String>,
+    stop: &mut watch::Receiver<bool>,
+    tx: &mpsc::Sender<Bytes>,
+) -> Ended {
+    let name = if control.is_some() {
+        "herdr control"
+    } else {
+        "herdr observe"
+    };
     let mut line = Vec::new();
-    let mut first = true;
+    // Whether any frame has gone to the browser yet, and whether the next
+    // one must be a full screen, as at the start and after a refit.
+    let mut framed = false;
+    let mut fresh = true;
+    let mut passed = 0;
     let mut poll = tokio::time::interval_at(tokio::time::Instant::now() + SIZE_POLL, SIZE_POLL);
     let sizer = herdr.clone().timeout(SIZE_TIMEOUT);
     loop {
         // The arms only say what happened; awaiting inside one would hold
         // the watch guard across the await.
         let woke = tokio::select! {
-            read = next_line(&mut reader, &mut line) => Woke::Read(read),
+            read = next_line(reader, &mut line) => Woke::Read(read),
             _ = poll.tick() => Woke::Tick,
+            fit = refitted(&mut control) => Woke::Refit(fit),
             () = tx.closed() => Woke::Over,
             () = stopping(stop) => Woke::Over,
         };
@@ -276,24 +658,53 @@ async fn observe(
                 let said = tokio::time::timeout(Duration::from_secs(1), errors).await;
                 let said = said.ok().and_then(Result::ok).unwrap_or_default();
                 let said = said.trim();
-                unavailable(
-                    tx,
-                    if said.is_empty() {
-                        "herdr observe ended"
-                    } else {
-                        said
-                    },
-                );
+                let said = if said.is_empty() {
+                    format!("{name} ended")
+                } else {
+                    said.to_owned()
+                };
+                // A control that ends before its first frame never had the
+                // pane: herdr refused it.
+                if !framed && control.is_some() {
+                    return Ended::Refused(said);
+                }
+                unavailable(tx, &said);
                 return Ended::Done;
             }
             Woke::Read(Err(error)) => {
-                unavailable(tx, &format!("herdr observe: {error}"));
+                unavailable(tx, &format!("{name}: {error}"));
                 return Ended::Done;
             }
+            Woke::Refit((cols, rows)) => {
+                let Some(control) = control.as_mut() else {
+                    continue;
+                };
+                let line = resize_line(cols, rows);
+                let sent =
+                    tokio::time::timeout(GIVE_BACK, control.stdin.write_all(line.as_bytes())).await;
+                if !matches!(sent, Ok(Ok(()))) {
+                    unavailable(tx, "herdr control stopped taking sizes");
+                    return Ended::Done;
+                }
+                // herdr answers a resize with a full screen at the new size.
+                if !queue(tx, &TerminalLine::Size { cols, rows }) {
+                    return Ended::Done;
+                }
+                fresh = true;
+                passed = 0;
+                continue;
+            }
             Woke::Tick => {
-                let (sizer, pane) = (sizer.clone(), pane.to_owned());
-                match tokio::task::spawn_blocking(move || sizer.pane_size(&pane)).await {
-                    Ok(Ok(Some(now))) if now != size => return Ended::Resized(now),
+                let (sizer, asked) = (sizer.clone(), pane.to_owned());
+                match tokio::task::spawn_blocking(move || sizer.pane_size(&asked)).await {
+                    // A Fit gives the pane back at its layout's size now.
+                    Ok(Ok(Some(now))) if now != *size => match control.as_mut() {
+                        None => return Ended::Resized(now),
+                        Some(control) => {
+                            *size = now;
+                            control.fits.hold(pane, now).await;
+                        }
+                    },
                     Ok(Ok(None)) => {
                         let reason = Some("pane_closed".to_owned());
                         queue(tx, &TerminalLine::Closed { reason });
@@ -313,12 +724,23 @@ async fn observe(
         };
         match observed.kind.as_str() {
             "terminal.frame" => {
-                // Diffs mean nothing without the full frame before them; a
-                // child that starts on one is asked again.
-                if first && !observed.full {
-                    return Ended::NoFullFrame;
+                // Diffs mean nothing without the full frame before them; an
+                // observe that starts on one is asked again, and a Fit waits
+                // a while for its full frame rather than resize the pane
+                // twice.
+                if fresh && !observed.full {
+                    if control.is_none() {
+                        return Ended::NoFullFrame;
+                    }
+                    passed += 1;
+                    if passed > FIT_DIFFS {
+                        unavailable(tx, "herdr control never sent a full frame");
+                        return Ended::Done;
+                    }
+                    continue;
                 }
-                first = false;
+                framed = true;
+                fresh = false;
                 let frame = TerminalLine::Frame {
                     seq: observed.seq,
                     full: observed.full,
@@ -414,7 +836,8 @@ mod tests {
 
     #[test]
     fn the_input_budget_refills_at_its_rate() {
-        let mirrors = Mirrors::default();
+        let home = tempfile::tempdir().unwrap();
+        let mirrors = Mirrors::new(home.path());
         let start = Instant::now();
         let spent = (0..100).filter(|_| mirrors.spend_at(start)).count();
         assert_eq!(spent, INPUT_BURST as usize);
@@ -426,7 +849,8 @@ mod tests {
 
     #[test]
     fn the_viewer_cap_holds_and_frees() {
-        let mirrors = Mirrors::default();
+        let home = tempfile::tempdir().unwrap();
+        let mirrors = Mirrors::new(home.path());
         let open: Vec<_> = (0..MAX_VIEWERS).filter_map(|_| mirrors.viewer()).collect();
         assert_eq!(open.len(), MAX_VIEWERS);
         assert!(mirrors.viewer().is_none());

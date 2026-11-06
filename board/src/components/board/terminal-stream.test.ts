@@ -195,6 +195,127 @@ function inputs(...answers: Response[]) {
   return { bodies, release: () => release?.() };
 }
 
+test("a live Fit takes a new size in place, and opens again when it cannot", async () => {
+  const opened: string[] = [];
+  const signals: AbortSignal[] = [];
+  const refits: string[] = [];
+  const streams = [
+    ndjson([{ type: "size", cols: 100, rows: 30 }, frame(1, true, "fitted")]),
+    ndjson([{ type: "size", cols: 130, rows: 44 }, frame(1, true, "again")]),
+    ndjson([{ type: "size", cols: 80, rows: 24 }, frame(1, true, "own")]),
+  ];
+  const answers = [new Response("{}", { status: 200 }), refusal(422, "refused", "no Fit")];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, init: RequestInit) => {
+      if (path.endsWith("/fit")) {
+        refits.push(String(init.body));
+        return answers.shift();
+      }
+      opened.push(String(init.body));
+      if (init.signal) signals.push(init.signal);
+      return streams.shift() ?? new Promise<Response>(() => {});
+    }),
+  );
+  const { events, screen, onStatus } = recorder();
+  let fit: { cols: number; rows: number } | null = { cols: 100, rows: 30 };
+  const stream = new TerminalStream("s1", screen, onStatus, () => {}, {
+    size: () => fit,
+    onUnfit: () => {},
+  });
+  stream.start();
+  await settle();
+  expect(opened).toEqual(['{"fit":{"cols":100,"rows":30}}']);
+  // The same Fit again changes nothing.
+  stream.refit();
+  await settle();
+  expect(refits).toEqual([]);
+  // A new size goes to the open Fit, and the stream stays open.
+  fit = { cols: 120, rows: 40 };
+  stream.refit();
+  await settle();
+  expect(refits).toEqual(['{"cols":120,"rows":40}']);
+  expect(opened).toHaveLength(1);
+  expect(signals[0]?.aborted).toBe(false);
+  // The daemon no longer holds the Fit: the stream opens again with it.
+  fit = { cols: 130, rows: 44 };
+  stream.refit();
+  await settle();
+  expect(refits).toHaveLength(2);
+  expect(signals[0]?.aborted).toBe(true);
+  expect(opened.at(-1)).toBe('{"fit":{"cols":130,"rows":44}}');
+  // The Fit turned off: open again without it, so herdr gets its size back.
+  fit = null;
+  stream.refit();
+  await settle();
+  expect(signals[1]?.aborted).toBe(true);
+  expect(opened.at(-1)).toBe("{}");
+  expect(events).toEqual(["reset 100x30", "fitted", "reset 130x44", "again", "reset 80x24", "own"]);
+  stream.stop();
+});
+
+test("a new Fit waits for a pending retry, and an ended stream stays ended", async () => {
+  vi.useFakeTimers();
+  const { request } = opens(
+    ndjson([{ type: "unavailable", message: "herdr went away" }], true),
+    ndjson([{ type: "closed", reason: "pane_closed" }], true),
+  );
+  const { statuses, screen, onStatus } = recorder();
+  let fit = { cols: 100, rows: 30 };
+  const stream = new TerminalStream("s1", screen, onStatus, () => {}, {
+    size: () => fit,
+    onUnfit: () => {},
+  });
+  stream.start();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(statuses.at(-1)).toBe("reconnecting");
+  fit = { cols: 120, rows: 40 };
+  stream.refit();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(request).toHaveBeenCalledTimes(1);
+  // The retry opens on its own time, with the new Fit.
+  await vi.advanceTimersByTimeAsync(250);
+  expect(request).toHaveBeenCalledTimes(2);
+  expect(request.mock.calls[1]?.[1].body).toBe('{"fit":{"cols":120,"rows":40}}');
+  expect(statuses.at(-1)).toBe("ended");
+  fit = { cols: 90, rows: 30 };
+  stream.refit();
+  await vi.advanceTimersByTimeAsync(10_000);
+  expect(request).toHaveBeenCalledTimes(2);
+  stream.stop();
+});
+
+test("a Fit herdr refuses is reported and the stream goes on at the pane's size", async () => {
+  const { request } = opens(
+    ndjson([
+      { type: "size", cols: 100, rows: 30 },
+      { type: "unfit", message: "terminal w1:p1 already has an attached client" },
+      { type: "size", cols: 80, rows: 24 },
+      frame(1, true, "own size"),
+    ]),
+  );
+  const { events, statuses, screen, onStatus } = recorder();
+  const unfit: string[] = [];
+  let fit: { cols: number; rows: number } | null = { cols: 100, rows: 30 };
+  const stream = new TerminalStream("s1", screen, onStatus, () => {}, {
+    size: () => fit,
+    onUnfit: (message) => {
+      unfit.push(message);
+      fit = null;
+    },
+  });
+  stream.start();
+  await settle();
+  expect(unfit).toEqual(["terminal w1:p1 already has an attached client"]);
+  expect(events).toEqual(["reset 80x24", "own size"]);
+  expect(statuses.at(-1)).toBe("live");
+  // Turning the Fit off after a refusal keeps the stream it has.
+  stream.refit();
+  await settle();
+  expect(request).toHaveBeenCalledTimes(1);
+  stream.stop();
+});
+
 test("keys typed while a request is out go together in the next one", async () => {
   const { bodies, release } = inputs();
   const input = new TerminalInput("s1", () => {});

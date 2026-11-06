@@ -583,6 +583,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/agents/{session}/terminal/input",
             post(terminal_input),
         )
+        .route("/api/v1/agents/{session}/terminal/fit", post(terminal_fit))
         .route("/api/v1/runs/{id}", get(run))
         .route("/api/v1/machines", get(machines))
         .route("/api/v1/quota", get(quota))
@@ -2200,7 +2201,8 @@ fn pane_gone(pane: &str) -> ApiError {
 #[utoipa::path(post, path = "/api/v1/agents/{session}/terminal", tag = "mutations", request_body = TerminalOpen,
     params(("session" = String, Path)),
     responses((status = 200, content_type = "application/x-ndjson", body = TerminalLine,
-               description = "One `TerminalLine` per line: `size`, then `frame`s, until `closed` or `unavailable` or the end of the body"),
+               description = "One `TerminalLine` per line: `size`, then `frame`s, until `closed` or `unavailable` or the end of the body; `unfit` when herdr would not resize the pane for the Fit"),
+              (status = 400, body = ErrorBody, description = "a `fit` outside 20 to 500 cols by 5 to 200 rows"),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
               (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a saved machine"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
@@ -2213,6 +2215,11 @@ async fn terminal(
 ) -> Result<Response, ApiError> {
     guard(&state, &headers)?;
     let request: TerminalOpen = body(&bytes)?;
+    let fit = request
+        .fit
+        .map(|fit| mirror::check_fit(fit.cols, fit.rows))
+        .transpose()
+        .map_err(ApiError::usage)?;
     not_forwarded(&state, request.host.as_deref(), "the terminal mirror").await?;
     let (_, pane) = local_pane(&state, session).await?;
     let viewer = state.0.mirrors.viewer().ok_or_else(|| {
@@ -2236,6 +2243,8 @@ async fn terminal(
         state.0.herdr.clone(),
         pane,
         size,
+        fit,
+        state.0.mirrors.fits(),
         state.0.stop.clone(),
         viewer,
     );
@@ -2307,6 +2316,48 @@ async fn terminal_input(
             approval_id: None,
         },
         data: json!({"session_id": session_id, "sent": sent}),
+        host: None,
+    }))
+}
+
+/// A new board size for the Fit an open stream holds on the agent's pane,
+/// sent to herdr's control session in place (`protocol.md` 7.4).
+#[utoipa::path(post, path = "/api/v1/agents/{session}/terminal/fit", tag = "mutations", request_body = TerminalRefit,
+    params(("session" = String, Path)),
+    responses((status = 200, body = MutationResponse),
+              (status = 400, body = ErrorBody, description = "a size outside 20 to 500 cols by 5 to 200 rows"),
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "`refused`: no open stream holds a Fit on the pane, or the agent runs on a saved machine"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn terminal_fit(
+    State(state): State<AppState>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers)?;
+    let request: TerminalRefit = body(&bytes)?;
+    let (cols, rows) = mirror::check_fit(request.cols, request.rows).map_err(ApiError::usage)?;
+    not_forwarded(&state, request.host.as_deref(), "the terminal Fit").await?;
+    let (session_id, pane) = local_pane(&state, session).await?;
+    if !state.0.mirrors.fits().refit(&pane, (cols, rows)) {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "refused",
+            format!("no open terminal stream holds a Fit on {pane}"),
+        )
+        .hint("open the terminal stream with a fit"));
+    }
+    Ok(Json(MutationResponse {
+        ok: true,
+        replayed: false,
+        events: Vec::new(),
+        receipt: Receipt {
+            recorded_at: Timestamp::now().to_string(),
+            outbox_id: None,
+            approval_id: None,
+        },
+        data: json!({"session_id": session_id, "fit": {"cols": cols, "rows": rows}}),
         host: None,
     }))
 }
@@ -2467,7 +2518,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, stage_project, ask_note, start_orchestrator, add_project, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
+        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, stage_project, ask_note, start_orchestrator, add_project, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
         relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo
     ),
@@ -2553,7 +2604,7 @@ pub(crate) mod tests {
             tools: Arc::new(Mutex::new(Value::Null)),
             damage,
             orchestrators: None,
-            mirrors: Mirrors::default(),
+            mirrors: Mirrors::new(home),
         }))
     }
 
@@ -3922,7 +3973,8 @@ esac"#,
     /// A herdr for the terminal mirror: it logs each call, gives the pane
     /// the size in `{dir}/size` (`cols rows`), and observes by recording
     /// its pid, writing one frame and sleeping as that same process. The
-    /// frame is full unless `{dir}/full` says `false`.
+    /// frame is full unless `{dir}/full` says `false`. Its control logs what
+    /// it reads and answers a resize with a full frame.
     fn mirror_herdr(dir: &std::path::Path) -> Cli {
         let script = format!(
             r#"echo "$*" >> '{dir}/calls'
@@ -3935,6 +3987,19 @@ case "$*" in
   full=$(cat '{dir}/full' 2>/dev/null || echo true)
   printf '{{"type":"terminal.frame","seq":1,"full":%s,"width":80,"height":24,"bytes":"aGk="}}\n' "$full"
   exec sleep 30;;
+*"terminal session control"*)
+  echo $$ >> '{dir}/controllers'
+  if [ -e '{dir}/refuse' ]; then
+    echo 'herdr: terminal attach failed: terminal w2:p1 already has an attached client; retry with --takeover' >&2
+    exit 1
+  fi
+  printf '{{"type":"terminal.frame","seq":1,"full":true,"width":100,"height":30,"bytes":"aGk="}}\n'
+  while read -r line; do
+    printf '%s\n' "$line" >> '{dir}/control-in'
+    case "$line" in *terminal.resize*)
+      printf '{{"type":"terminal.frame","seq":1,"full":true,"width":0,"height":0,"bytes":"aGk="}}\n';;
+    esac
+  done;;
 esac"#,
             dir = dir.display()
         );
@@ -4008,9 +4073,11 @@ esac"#,
         let cookie = owner_cookie(fleet.dir.path());
         let stream = format!("/api/v1/agents/{session}/terminal");
         let input = format!("/api/v1/agents/{session}/terminal/input");
+        let refit = format!("/api/v1/agents/{session}/terminal/fit");
         let paths = [
             (stream.as_str(), json!({})),
             (input.as_str(), json!({"keys": ["ctrl+c"]})),
+            (refit.as_str(), json!({"cols": 100, "rows": 30})),
         ];
         let cookie_header = ("cookie", cookie.as_str());
         let refusals: [(&str, Vec<(&str, &str)>); 4] = [
@@ -4106,6 +4173,10 @@ esac"#,
             (
                 format!("/api/v1/agents/{remote}/terminal/input"),
                 json!({"keys": ["a"]}),
+            ),
+            (
+                format!("/api/v1/agents/{remote}/terminal/fit"),
+                json!({"cols": 100, "rows": 30}),
             ),
         ] {
             let answer = send(&app, mutation("POST", &path, body, &[("cookie", &cookie)])).await;
@@ -4222,6 +4293,189 @@ esac"#,
         for pid in observers {
             assert!(gone(pid).await, "an observe outlived its try");
         }
+    }
+
+    /// Waits up to 6 seconds for `ready` to hold.
+    async fn until(mut ready: impl FnMut() -> bool) -> bool {
+        for _ in 0..120 {
+            if ready() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn a_fit_resizes_the_pane_and_gives_it_back_when_the_viewer_leaves() {
+        let mut fleet = Fleet::new();
+        let session = fleet.worker("w2:p1");
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+        let app = mirror_app(&fleet, dir);
+        let cookie = owner_cookie(fleet.dir.path());
+        let fits = fleet.dir.path().join("mirror-fits.json");
+        let held = || std::fs::read_to_string(&fits).ok();
+        let response = app
+            .clone()
+            .oneshot(mutation(
+                "POST",
+                &format!("/api/v1/agents/{session}/terminal"),
+                json!({"fit": {"cols": 100, "rows": 30}}),
+                &[("cookie", &cookie)],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let mut pending = String::new();
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "size", "cols": 100, "rows": 30})
+        );
+        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+        let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
+        assert!(
+            calls.contains("terminal session control w2:p1 --cols 100 --rows 30"),
+            "{calls}"
+        );
+        assert!(!calls.contains("--takeover"), "{calls}");
+        // The size to give back is on disk while herdr holds the Fit.
+        assert_eq!(held().as_deref(), Some(r#"{"w2:p1":[80,24]}"#));
+
+        // The board changes size: the same control resizes the pane in
+        // place, and the stream says the new size before its full frame.
+        let refit = format!("/api/v1/agents/{session}/terminal/fit");
+        let refitted = send(
+            &app,
+            mutation(
+                "POST",
+                &refit,
+                json!({"cols": 110, "rows": 32}),
+                &[("cookie", &cookie)],
+            ),
+        )
+        .await;
+        assert_eq!(refitted.status, StatusCode::OK, "{}", refitted.body);
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "size", "cols": 110, "rows": 32})
+        );
+        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+        let control = std::fs::read_to_string(dir.join("controllers")).unwrap();
+        assert_eq!(control.lines().count(), 1, "the refit ran a second control");
+
+        // The owner changes herdr's layout meanwhile: the pane goes back to
+        // the new size, and the Fit holds on.
+        std::fs::write(dir.join("size"), "90 28\n").unwrap();
+        assert!(until(|| held().as_deref() == Some(r#"{"w2:p1":[90,28]}"#)).await);
+
+        drop(body);
+        assert!(
+            gone(control.trim()).await,
+            "the control outlived its viewer"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("control-in")).unwrap(),
+            "{\"type\":\"terminal.resize\",\"cols\":110,\"rows\":32}\n\
+             {\"type\":\"terminal.resize\",\"cols\":90,\"rows\":28}\n{\"type\":\"terminal.release\"}\n"
+        );
+        assert!(until(|| held().is_none()).await, "the Fit was not let go");
+
+        // With the stream gone no Fit holds the pane, so a refit is refused.
+        let late = send(
+            &app,
+            mutation(
+                "POST",
+                &refit,
+                json!({"cols": 110, "rows": 32}),
+                &[("cookie", &cookie)],
+            ),
+        )
+        .await;
+        assert_eq!(
+            late.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            late.body
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fit_herdr_refuses_goes_on_at_the_panes_own_size() {
+        let mut fleet = Fleet::new();
+        let session = fleet.worker("w2:p1");
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+        std::fs::write(dir.join("refuse"), "").unwrap();
+        let app = mirror_app(&fleet, dir);
+        let cookie = owner_cookie(fleet.dir.path());
+        let path = format!("/api/v1/agents/{session}/terminal");
+        let tiny = send(
+            &app,
+            mutation(
+                "POST",
+                &path,
+                json!({"fit": {"cols": 10, "rows": 30}}),
+                &[("cookie", &cookie)],
+            ),
+        )
+        .await;
+        assert_eq!(tiny.status, StatusCode::BAD_REQUEST, "{}", tiny.body);
+        let response = app
+            .oneshot(mutation(
+                "POST",
+                &path,
+                json!({"fit": {"cols": 100, "rows": 30}}),
+                &[("cookie", &cookie)],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body().into_data_stream();
+        let mut pending = String::new();
+        assert_eq!(next_line(&mut body, &mut pending).await["type"], "size");
+        let unfit = next_line(&mut body, &mut pending).await;
+        assert_eq!(unfit["type"], "unfit");
+        assert!(
+            unfit["message"]
+                .as_str()
+                .unwrap()
+                .contains("already has an attached client"),
+            "{unfit}"
+        );
+        assert_eq!(
+            next_line(&mut body, &mut pending).await,
+            json!({"type": "size", "cols": 80, "rows": 24})
+        );
+        assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+        assert!(!fleet.dir.path().join("mirror-fits.json").exists());
+    }
+
+    #[tokio::test]
+    async fn a_daemon_that_stopped_mid_fit_gives_the_pane_back_when_it_starts() {
+        let home = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+        let fits = home.path().join("mirror-fits.json");
+        std::fs::write(&fits, r#"{"w2:p1":[80,24]}"#).unwrap();
+        let mirrors = Mirrors::new(home.path());
+        let herdr = mirror_herdr(dir);
+        // herdr's layout changed while the daemon was down: the pane goes
+        // back to the size the layout gives it now.
+        std::fs::write(dir.join("size"), "90 28\n").unwrap();
+        mirrors.fits().restore_left(&herdr).await;
+        let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
+        assert!(
+            calls.contains("terminal session control w2:p1 --cols 90 --rows 28"),
+            "{calls}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("control-in")).unwrap(),
+            "{\"type\":\"terminal.resize\",\"cols\":90,\"rows\":28}\n{\"type\":\"terminal.release\"}\n"
+        );
+        assert!(!fits.exists());
+        assert!(mirrors.fits().held().is_empty());
     }
 
     #[test]

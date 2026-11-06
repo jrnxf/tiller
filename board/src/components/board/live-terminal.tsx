@@ -21,6 +21,7 @@ import {
   ChevronLeftIcon,
   EnterIcon,
   ExpandIcon,
+  FitIcon,
   GlobeIcon,
   KeyboardIcon,
   LockIcon,
@@ -31,7 +32,7 @@ import {
 } from "./icons";
 import { typedKeys } from "./terminal-keys";
 import { TerminalInput, TerminalStream } from "./terminal-stream";
-import type { MirrorStatus, TerminalSize } from "./terminal-stream";
+import type { Fitting, MirrorStatus, TerminalSize } from "./terminal-stream";
 import { showToast } from "./toast";
 import "./terminal.css";
 
@@ -58,6 +59,45 @@ function toggleTerminal() {
     }
     return !open;
   });
+}
+
+// Whether the Agents view's stage fits the pane to itself in herdr. Off until
+// the owner turns it on, since it changes the pane for herdr's own window too.
+const FIT_KEY = "tiller-terminal-fit";
+
+const fitStore = createStore<boolean>(
+  (() => {
+    try {
+      return localStorage.getItem(FIT_KEY) === "1";
+    } catch {
+      return false;
+    }
+  })(),
+);
+
+function toggleFit() {
+  fitStore.update((fit) => {
+    try {
+      localStorage.setItem(FIT_KEY, fit ? "0" : "1");
+    } catch {
+      // Blocked storage: the choice lasts for this tab.
+    }
+    return !fit;
+  });
+}
+
+function subscribeVisible(change: () => void) {
+  document.addEventListener("visibilitychange", change);
+  return () => document.removeEventListener("visibilitychange", change);
+}
+
+// Whether the board is on screen: herdr has its pane back while it is not.
+function useVisible(): boolean {
+  return useSyncExternalStore(
+    subscribeVisible,
+    () => document.visibilityState !== "hidden",
+    () => true,
+  );
 }
 
 export function useTerminalOpen(): boolean {
@@ -164,6 +204,46 @@ function advance(): number {
   glyphRatio ||= 0.6;
   return glyphRatio;
 }
+
+// The cell xterm draws at a font size, in device pixels, worked out the way
+// its renderers do: the glyph's width floored, its height ceiled, then the
+// line height floored. Null where the canvas cannot say.
+type Cell = { width: number; height: number };
+const measured = new Map<string, Cell>();
+function cellAt(fontSize: number, dpr: number): Cell | null {
+  const key = `${fontSize}@${dpr}`;
+  const known = measured.get(key);
+  if (known) return known;
+  const cell = measureCell(fontSize, dpr);
+  if (cell) measured.set(key, cell);
+  return cell;
+}
+
+function measureCell(fontSize: number, dpr: number): Cell | null {
+  try {
+    const context = document.createElement("canvas").getContext("2d");
+    if (!context) return null;
+    context.font = `${fontSize}px ${FONT}`;
+    const metrics = context.measureText("W");
+    const high = metrics.fontBoundingBoxAscent + metrics.fontBoundingBoxDescent;
+    if (!metrics.width || !high) return null;
+    return {
+      width: Math.floor(metrics.width * dpr),
+      height: Math.floor(Math.ceil(high * dpr) * (OPTIONS.lineHeight ?? 1)),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// The daemon's bounds on a Fit (protocol.md 7.4).
+const clampFit = (cols: number, rows: number): TerminalSize => ({
+  cols: Math.min(500, Math.max(20, cols)),
+  rows: Math.min(200, Math.max(5, rows)),
+});
+
+// How long the stage's size has to hold before the pane follows it.
+const REFIT_DELAY = 300;
 
 function fontReady(): Promise<unknown> {
   try {
@@ -315,6 +395,7 @@ function mountTerminal(
     size: (size: TerminalSize) => void;
     typing: (typing: boolean) => void;
   },
+  fitting: Fitting,
 ): { input: TerminalInput; stream: TerminalStream; dispose: () => void } {
   const input = new TerminalInput(sessionId, (title, detail) => showToast("bad", title, detail));
   const stream = new TerminalStream(
@@ -330,6 +411,7 @@ function mountTerminal(
     },
     report.status,
     report.size,
+    fitting,
   );
   const data = term.onData((typed) => {
     const { keys, unsent } = typedKeys(typed);
@@ -424,6 +506,16 @@ export function LiveTerminal({
   const [view, setView] = useState<View>("inline");
   const [scale, setScale] = useState<Scale>("fit");
   const [font, setFont] = useState(BASE_FONT);
+  // The Fit is the stage's on a computer, while the board is on screen, the
+  // stage is not expanded, and herdr has not refused it for this agent.
+  const fitWanted = useStore(fitStore);
+  const visible = useVisible();
+  const [unfit, setUnfit] = useState(false);
+  const fitting = stage && !phone && fitWanted && !unfit && visible && view === "inline";
+  const fittingRef = useRef(fitting);
+  // The stage's room in cells at the stage's font, kept up by the layout.
+  const fitTarget = useRef<TerminalSize | null>(null);
+  const refitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The web font is in, so xterm measures its cells right when it opens.
   const [ready, setReady] = useState(false);
   // Focus the screen once the sheet holds it: a phone tap means "type".
@@ -452,11 +544,19 @@ export function LiveTerminal({
           return false;
         });
         webglRef.current = webgl.WebglAddon;
-        const mounted = mountTerminal(term, sessionId, host, {
-          status: setStatus,
-          size: setSize,
-          typing: setTyping,
-        });
+        const mounted = mountTerminal(
+          term,
+          sessionId,
+          host,
+          { status: setStatus, size: setSize, typing: setTyping },
+          {
+            size: () => (fittingRef.current ? fitTarget.current : null),
+            onUnfit: (detail) => {
+              setUnfit(true);
+              showToast("bad", "herdr kept the pane's size", detail);
+            },
+          },
+        );
         termRef.current = term;
         inputRef.current = mounted.input;
         streamRef.current = mounted.stream;
@@ -482,6 +582,7 @@ export function LiveTerminal({
       // Another agent's pane starts from nothing, not from this one's state.
       setStatus({ kind: "connecting" });
       setSize(null);
+      setUnfit(false);
     };
   }, [sessionId, host]);
 
@@ -502,6 +603,18 @@ export function LiveTerminal({
   }, [typing, onTyping]);
   // A terminal that goes away mid-typing never sees its focus leave.
   useEffect(() => () => onTyping?.(false), [onTyping]);
+
+  // The Fit turned on or off: the stream opens again with it, or without.
+  useEffect(() => {
+    fittingRef.current = fitting;
+    streamRef.current?.refit();
+  }, [fitting]);
+  useEffect(
+    () => () => {
+      if (refitTimer.current !== null) clearTimeout(refitTimer.current);
+    },
+    [],
+  );
 
   const box = view === "inline" ? inlineBox : bigBox;
   // The font size that shows the whole pane in the room the slot has, or
@@ -529,11 +642,31 @@ export function LiveTerminal({
     const tallest = room / (screen.offsetHeight / current);
     const least = Math.ceil(MIN_FONT * ratio);
     const most = grow ? MAX_FONT : stage && view === "inline" ? STAGE_FONT : BASE_FONT;
+    // A hair over the cell, so xterm's own rounding lands on it.
+    const sized = (cells: number) => (cells + 0.05) / ratio;
+    // What the stage holds at its own font, for the Fit. A new size waits
+    // for the stage to settle, so a drag of the window opens the stream once.
+    if (stage && view === "inline") {
+      const stageCell = Math.floor(STAGE_FONT * ratio);
+      const metrics = cellAt(sized(stageCell), dpr);
+      const high = metrics?.height ?? (screen.offsetHeight / term.rows) * dpr;
+      const target = clampFit(
+        Math.floor((width * dpr) / stageCell),
+        Math.floor(((box.clientHeight - PAD * 2) * dpr) / high),
+      );
+      const before = fitTarget.current;
+      fitTarget.current = target;
+      if (before && (before.cols !== target.cols || before.rows !== target.rows)) {
+        if (refitTimer.current !== null) clearTimeout(refitTimer.current);
+        refitTimer.current = setTimeout(() => {
+          refitTimer.current = null;
+          streamRef.current?.refit();
+        }, REFIT_DELAY);
+      }
+    }
     let cell = Math.floor(Math.min(most, tallest) * ratio);
     if (fit) cell = Math.min(cell, Math.floor((width * dpr) / term.cols));
     cell = Math.max(least, cell);
-    // A hair over the cell, so xterm's own rounding lands on it.
-    const sized = (cells: number) => (cells + 0.05) / ratio;
     if (sized(cell) !== current) term.options.fontSize = sized(cell);
     // A measure off by a pixel can still come out wide: step down until it
     // is inside.
@@ -561,6 +694,8 @@ export function LiveTerminal({
       term.open(host);
       openRenderer(term, webglRef.current);
       term.textarea?.setAttribute("aria-label", `Type to ${label}`);
+      // Sized first, so a Fit's first open already knows the stage's room.
+      layout();
       streamRef.current?.start();
     }
     layout();
@@ -709,6 +844,27 @@ export function LiveTerminal({
         <ExpandIcon />
       </button>
     ) : null;
+  const fitButton =
+    stage && !phone && screenShown && !ended && view === "inline" ? (
+      <button
+        type="button"
+        className="btn sm mir-tog"
+        aria-pressed={fitWanted && !unfit}
+        title={
+          fitWanted && !unfit
+            ? "Give the pane back its herdr size"
+            : "Size the pane in herdr to fill the stage, until you leave it"
+        }
+        onClick={() => {
+          // After herdr kept the pane's size, a press asks again.
+          setUnfit(false);
+          if (!unfit || !fitWanted) toggleFit();
+        }}
+      >
+        <FitIcon />
+        Fit pane
+      </button>
+    ) : null;
   const screen = (
     <div className="mir-s" role="group" aria-label={`Live terminal for ${label}`}>
       <div className="mir-slot" ref={setInlineBox} />
@@ -758,6 +914,7 @@ export function LiveTerminal({
       {footer("inline")}
       <span className="mir-fr">
         {sizeText ? <span className="mir-sz">{sizeText}</span> : null}
+        {fitButton}
         {expandButton}
       </span>
     </>

@@ -313,8 +313,15 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         tools: tool_versions,
         damage: damage.clone(),
         orchestrators: config.orchestrators,
-        mirrors: crate::mirror::Mirrors::default(),
+        mirrors: crate::mirror::Mirrors::new(&config.home),
     });
+
+    // A daemon that stopped mid-Fit gives those panes back their size.
+    {
+        let fits = state.0.mirrors.fits();
+        let herdr = state.0.herdr.clone();
+        tokio::spawn(async move { fits.restore_left(&herdr).await });
+    }
 
     // Handlers first: a SIGTERM that follows the address line at once must
     // stop the daemon cleanly, not kill it.

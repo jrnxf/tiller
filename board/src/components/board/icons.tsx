@@ -81,6 +81,13 @@ export const ExpandIcon = () => (
   </Glyph>
 );
 
+// The Fit: the pane grows into the stage.
+export const FitIcon = () => (
+  <Glyph>
+    <path d="M2.5 5.5v-3h3M10.5 2.5h3v3M13.5 10.5v3h-3M5.5 13.5h-3v-3" {...stroke} {...round} />
+  </Glyph>
+);
+
 export const ChevronRightIcon = () => (
   <Glyph size={12} grid={12}>
     <path d="M4.5 3 7.5 6 4.5 9" {...stroke} strokeWidth={1.4} {...round} />

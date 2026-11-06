@@ -276,7 +276,7 @@ The board's mutations need the owner principal. The daemon serves reads to any r
 - a `Host` of `127.0.0.1:<port>` or `localhost:<port>`, which stops DNS rebinding. A host the owner adds with `tiller daemon --allow-host` is served reads only;
 - the record's `rev` or the transition's preconditions (state.md, section 1).
 
-The terminal mirror (an agent's live pane, and the owner's keys into it) needs the same, though watching writes nothing: a pane can show anything the agent read, and a key typed there acts as the agent. It is never served to an `--allow-host` name, and it reaches panes on this machine only.
+The terminal mirror (an agent's live pane, the owner's keys into it, and the Fit that sizes the pane to the board while it shows) needs the same, though watching writes nothing: a pane can show anything the agent read, and a key typed there acts as the agent. It is never served to an `--allow-host` name, and it reaches panes on this machine only.
 
 The cookie's hash is stored under `~/.tiller`, which every fleet role is denied (G20). Sandboxed roles cannot reach localhost at all (G24). T1.3 owns the endpoint list; this spec owns the requirement.
 

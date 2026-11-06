@@ -1,23 +1,31 @@
 // A stand-in herdr pane for the fixture server: the screen an agent might
 // have up, as the bytes a terminal would get. The live terminal draws it the
-// way it draws a real pane, so its looks can be checked without herdr.
+// way it draws a real pane, so its looks can be checked without herdr. A Fit
+// draws the same screen at the size asked for, as an agent would redraw.
 
 export const FIXTURE_COLS = 100;
 export const FIXTURE_ROWS = 28;
+
+export interface PaneSize {
+  cols: number;
+  rows: number;
+}
+
+const OWN: PaneSize = { cols: FIXTURE_COLS, rows: FIXTURE_ROWS };
 
 const ESC = "\x1b";
 const dim = (text: string) => `${ESC}[2m${text}${ESC}[22m`;
 const color = (code: number, text: string) => `${ESC}[${code}m${text}${ESC}[39m`;
 const bold = (text: string) => `${ESC}[1m${text}${ESC}[22m`;
 
-// The row the thinking line is on, and the prompt's, 1-based.
-const THINKING_ROW = 22;
-const PROMPT_ROW = 25;
+// The row the thinking line is on, and the prompt's, 1-based: near the
+// bottom, like an agent's input box.
+const thinkingRow = (size: PaneSize) => size.rows - 6;
+const promptRow = (size: PaneSize) => size.rows - 3;
 
-const RULE = "─".repeat(FIXTURE_COLS - 4);
-
-function lines(): string[] {
-  return [
+function lines(size: PaneSize): string[] {
+  const rule = "─".repeat(size.cols - 4);
+  const top = [
     ` ${color(35, "✻")} ${bold("build")} ${dim("on")} beta-7 ${dim("· Rewrite the importer's dry run")}`,
     "",
     ` ${color(32, "●")} Read ${color(36, "src/importer/dry_run.rs")} ${dim("(214 lines)")}`,
@@ -39,12 +47,16 @@ function lines(): string[] {
     ` ${color(33, "●")} Bash ${dim("cargo clippy -p importer -- -D warnings")}`,
     `   ${dim("│")} ${dim("Checking importer v0.4.0")}`,
     "",
+  ].slice(0, Math.max(0, size.rows - 7));
+  return [
+    ...top,
+    ...Array.from({ length: size.rows - 7 - top.length }, () => ""),
     thinking(0),
     "",
-    ` ${dim(`╭${RULE}╮`)}`,
-    prompt(""),
-    ` ${dim(`╰${RULE}╯`)}`,
-    `  ${dim("? for shortcuts")}${" ".repeat(FIXTURE_COLS - 36)}${dim("auto-accept on")}`,
+    ` ${dim(`╭${rule}╮`)}`,
+    prompt("", size),
+    ` ${dim(`╰${rule}╯`)}`,
+    `  ${dim("? for shortcuts")}${" ".repeat(Math.max(1, size.cols - 36))}${dim("auto-accept on")}`,
   ];
 }
 
@@ -52,16 +64,16 @@ function thinking(seconds: number): string {
   return ` ${color(35, "✻")} ${color(35, "Checking the lint")} ${dim(`(${seconds}s · esc to interrupt)`)}`;
 }
 
-function prompt(typed: string): string {
-  const room = FIXTURE_COLS - 6;
+function prompt(typed: string, size: PaneSize): string {
+  const room = size.cols - 6;
   const shown = typed.length > room ? typed.slice(-room) : typed;
   return ` ${dim("│")} ${color(36, ">")} ${shown}${" ".repeat(room - shown.length - 1)}${dim("│")}`;
 }
 
 // The cursor sits after what was typed at the prompt.
-function cursor(typed: string): string {
-  const room = FIXTURE_COLS - 6;
-  return `${ESC}[${PROMPT_ROW};${6 + Math.min(typed.length, room - 1)}H`;
+function cursor(typed: string, size: PaneSize): string {
+  const room = size.cols - 6;
+  return `${ESC}[${promptRow(size)};${6 + Math.min(typed.length, room - 1)}H`;
 }
 
 const encoder = new TextEncoder();
@@ -74,23 +86,27 @@ function base64(text: string): string {
 
 // The first frame of a run: the whole screen, cleared first, the way herdr
 // sends one.
-export function fullFrame(typed: string, seconds: number): string {
-  const rows = lines();
-  rows[THINKING_ROW - 1] = thinking(seconds);
-  rows[PROMPT_ROW - 1] = prompt(typed);
+export function fullFrame(typed: string, seconds: number, size: PaneSize = OWN): string {
+  const rows = lines(size);
+  rows[thinkingRow(size) - 1] = thinking(seconds);
+  rows[promptRow(size) - 1] = prompt(typed, size);
   return base64(
-    `${ESC}[?2026h${ESC}[2J${ESC}[1;1H${rows.join("\r\n")}${cursor(typed)}${ESC}[?2026l`,
+    `${ESC}[?2026h${ESC}[2J${ESC}[1;1H${rows.join("\r\n")}${cursor(typed, size)}${ESC}[?2026l`,
   );
 }
 
 // A diff: the thinking line's clock moved.
-export function tickFrame(typed: string, seconds: number): string {
-  return base64(`${ESC}[${THINKING_ROW};1H${ESC}[2K${thinking(seconds)}${cursor(typed)}`);
+export function tickFrame(typed: string, seconds: number, size: PaneSize = OWN): string {
+  return base64(
+    `${ESC}[${thinkingRow(size)};1H${ESC}[2K${thinking(seconds)}${cursor(typed, size)}`,
+  );
 }
 
 // A diff: the prompt line, after a key.
-export function promptFrame(typed: string): string {
-  return base64(`${ESC}[${PROMPT_ROW};1H${ESC}[2K${prompt(typed)}${cursor(typed)}`);
+export function promptFrame(typed: string, size: PaneSize = OWN): string {
+  return base64(
+    `${ESC}[${promptRow(size)};1H${ESC}[2K${prompt(typed, size)}${cursor(typed, size)}`,
+  );
 }
 
 // What a key does to the prompt: printable keys type, backspace takes one

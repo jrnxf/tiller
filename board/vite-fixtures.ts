@@ -16,6 +16,7 @@ import {
   tickFrame,
   typeInto,
 } from "./src/lib/fixtures-terminal.ts";
+import type { PaneSize } from "./src/lib/fixtures-terminal.ts";
 
 // Stands in for the daemon until T2.8 lands: serves the board API from
 // fixtures and inlines the boot snapshot into index.html the way the daemon
@@ -76,21 +77,25 @@ function readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
 interface FixturePane {
   typed: string;
   started: number;
-  viewers: Set<(bytes: string) => void>;
+  // Each open mirror, drawing what was typed at its own size.
+  viewers: Set<(typed: string) => void>;
+  // The open mirror holding a Fit, which takes a new size in place.
+  refit: ((size: PaneSize) => void) | null;
 }
 const panes = new Map<string, FixturePane>();
 
 function paneOf(session: string): FixturePane {
   let pane = panes.get(session);
   if (!pane) {
-    pane = { typed: "", started: Date.now(), viewers: new Set() };
+    pane = { typed: "", started: Date.now(), viewers: new Set(), refit: null };
     panes.set(session, pane);
   }
   return pane;
 }
 
 // `?term=<mode>` on the page URL picks how the mirror's pane behaves: live (the
-// default), ended, reconnect, unreachable or forbidden.
+// default), ended, reconnect, unreachable, forbidden, or unfit (herdr refuses
+// a Fit).
 function terminalMode(referer: string | undefined): string {
   if (!referer) return "live";
   return new URL(referer, "http://localhost").searchParams.get("term") ?? "live";
@@ -100,7 +105,19 @@ function terminalMode(referer: string | undefined): string {
 // hang, so the mirror stays on Reconnecting.
 const dropped = new Set<string>();
 
-function terminalStream(req: IncomingMessage, res: ServerResponse, session: string) {
+// The Fit a stream open asks for, as the daemon takes it.
+function fitOf(body: Record<string, unknown>): PaneSize | null {
+  const fit = body.fit as { cols?: unknown; rows?: unknown } | undefined;
+  if (!fit || typeof fit.cols !== "number" || typeof fit.rows !== "number") return null;
+  return { cols: fit.cols, rows: fit.rows };
+}
+
+function terminalStream(
+  req: IncomingMessage,
+  res: ServerResponse,
+  session: string,
+  body: Record<string, unknown>,
+) {
   const mode = terminalMode(req.headers.referer);
   if (mode === "forbidden") {
     res.statusCode = 403;
@@ -127,8 +144,18 @@ function terminalStream(req: IncomingMessage, res: ServerResponse, session: stri
     frame += 1;
     send({ type: "frame", seq: frame, full: false, bytes });
   };
-  send({ type: "size", cols: FIXTURE_COLS, rows: FIXTURE_ROWS });
-  send({ type: "frame", seq: frame, full: true, bytes: fullFrame(pane.typed, seconds()) });
+  const own = { cols: FIXTURE_COLS, rows: FIXTURE_ROWS };
+  const fit = fitOf(body);
+  let size = fit && mode !== "unfit" ? fit : own;
+  if (fit && mode === "unfit") {
+    send({ type: "size", ...fit });
+    send({
+      type: "unfit",
+      message: `herdr: terminal ${session} already has an attached client; retry with --takeover`,
+    });
+  }
+  send({ type: "size", ...size });
+  send({ type: "frame", seq: frame, full: true, bytes: fullFrame(pane.typed, seconds(), size) });
   if (mode === "ended") {
     send({ type: "closed", reason: "pane closed" });
     return res.end();
@@ -137,19 +164,42 @@ function terminalStream(req: IncomingMessage, res: ServerResponse, session: stri
     dropped.add(session);
     return res.end();
   }
-  pane.viewers.add(diff);
-  const ticker = setInterval(() => diff(tickFrame(pane.typed, seconds())), 1000);
+  const typed = (text: string) => diff(promptFrame(text, size));
+  pane.viewers.add(typed);
+  const refit = (next: PaneSize) => {
+    size = next;
+    send({ type: "size", ...size });
+    frame += 1;
+    send({ type: "frame", seq: frame, full: true, bytes: fullFrame(pane.typed, seconds(), size) });
+  };
+  if (size === fit) pane.refit = refit;
+  const ticker = setInterval(() => diff(tickFrame(pane.typed, seconds(), size)), 1000);
   // The response, not the request: the request is done once its body is read.
   res.on("close", () => {
     clearInterval(ticker);
-    pane.viewers.delete(diff);
+    pane.viewers.delete(typed);
+    if (pane.refit === refit) pane.refit = null;
   });
+}
+
+function terminalFit(res: ServerResponse, session: string, body: Record<string, unknown>) {
+  const pane = paneOf(session);
+  const size = fitOf({ fit: body });
+  if (!pane.refit || !size) {
+    res.statusCode = 422;
+    return sendJson(res, {
+      ok: false,
+      error: { code: "refused", message: "no open terminal stream holds a Fit" },
+    });
+  }
+  pane.refit(size);
+  sendJson(res, { ok: true, data: { session_id: session, fit: size } });
 }
 
 function terminalInput(res: ServerResponse, session: string, body: Record<string, unknown>) {
   const pane = paneOf(session);
   pane.typed = typeInto(pane.typed, body);
-  for (const viewer of pane.viewers) viewer(promptFrame(pane.typed));
+  for (const viewer of pane.viewers) viewer(pane.typed);
   const sent = Array.isArray(body.keys) ? body.keys.length : 1;
   sendJson(res, { ok: true, data: { session_id: session, sent } });
 }
@@ -190,13 +240,15 @@ function apiMiddleware(): Connect.NextHandleFunction {
     if (!url.startsWith("/api/v1/")) return next();
     const scenario = scenarioOf(undefined, req.headers.referer);
 
-    const terminal = /^\/api\/v1\/agents\/([^/]+)\/terminal(\/input)?$/.exec(url);
+    const terminal = /^\/api\/v1\/agents\/([^/]+)\/terminal(\/input|\/fit)?$/.exec(url);
     if (terminal?.[1] && req.method === "POST") {
       const session = terminal[1];
       readBody(req)
-        .then((body) =>
-          terminal[2] ? terminalInput(res, session, body) : terminalStream(req, res, session),
-        )
+        .then((body) => {
+          if (terminal[2] === "/input") terminalInput(res, session, body);
+          else if (terminal[2] === "/fit") terminalFit(res, session, body);
+          else terminalStream(req, res, session, body);
+        })
         .catch(() => res.destroy());
       return;
     }

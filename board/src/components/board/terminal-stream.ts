@@ -4,9 +4,16 @@
 // one before. A diff only makes sense on top of the frame before it, so a gap
 // in `seq`, or a diff with no full screen under it, drops the stream and opens
 // it again for a fresh full screen. Keys go back one request at a time.
+//
+// With a Fit the open asks herdr to size the pane to the board's columns and
+// rows while the stream is open; herdr gets its own size back when it ends.
+// Herdr can refuse, and then the stream says so and goes on unfitted. A new
+// size for an open Fit goes in place, so the pane never drops back between
+// two sizes; the stream answers it with a `size` line and a full screen.
 
 export const terminalPath = (sessionId: string) => `/api/v1/agents/${sessionId}/terminal`;
 const terminalInputPath = (sessionId: string) => `${terminalPath(sessionId)}/input`;
+const terminalFitPath = (sessionId: string) => `${terminalPath(sessionId)}/fit`;
 
 // What the mirror draws on: xterm in the board, a recorder in tests.
 export interface Screen {
@@ -31,11 +38,22 @@ export interface TerminalSize {
   rows: number;
 }
 
+// The Fit: the size to ask for at each open, or null for none, and what to do
+// when herdr will not resize the pane.
+export interface Fitting {
+  size: () => TerminalSize | null;
+  onUnfit: (message: string) => void;
+}
+
+const sameSize = (one: TerminalSize | null, other: TerminalSize | null) =>
+  one === other || (!!one && !!other && one.cols === other.cols && one.rows === other.rows);
+
 type Line =
   | { type: "size"; cols: number; rows: number }
   | { type: "frame"; seq: number; full: boolean; bytes: string }
   | { type: "closed"; reason: string }
-  | { type: "unavailable"; message: string };
+  | { type: "unavailable"; message: string }
+  | { type: "unfit"; message: string };
 
 const UNREACHABLE_TITLE = "Can't reach herdr on this machine";
 const UNREACHABLE_DETAIL = "The agent may still be running. Tiller tries again on its own, or now.";
@@ -71,9 +89,13 @@ type Outcome =
 
 export class TerminalStream {
   private readonly path: string;
+  private readonly fitPath: string;
   private readonly screen: Screen;
   private readonly onStatus: (status: MirrorStatus) => void;
   private readonly onSize: (size: TerminalSize) => void;
+  private readonly fitting: Fitting | null;
+  // The Fit the open stream holds.
+  private fitted: TerminalSize | null = null;
   private abort: AbortController | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private stopped = true;
@@ -86,11 +108,14 @@ export class TerminalStream {
     screen: Screen,
     onStatus: (status: MirrorStatus) => void,
     onSize: (size: TerminalSize) => void,
+    fitting: Fitting | null = null,
   ) {
     this.path = terminalPath(sessionId);
+    this.fitPath = terminalFitPath(sessionId);
     this.screen = screen;
     this.onStatus = onStatus;
     this.onSize = onSize;
+    this.fitting = fitting;
   }
 
   start() {
@@ -114,6 +139,44 @@ export class TerminalStream {
   retry() {
     this.stop();
     this.start();
+  }
+
+  // The Fit wanted changed. A live Fit takes a new size in place; turning
+  // the Fit on or off opens again, and the screen keeps the last frame until
+  // the new open's first full screen replaces it. A retry waiting to open
+  // takes the new Fit when it does, and a stream that ended stays ended.
+  refit() {
+    const want = this.fitting?.size() ?? null;
+    if (this.stopped || sameSize(want, this.fitted)) return;
+    if (this.timer !== null || !this.abort) return;
+    if (want && this.fitted && this.status.kind === "live") {
+      void this.resize(this.abort, want);
+      return;
+    }
+    this.reopen();
+  }
+
+  private reopen() {
+    this.abort?.abort();
+    this.abort = null;
+    void this.open();
+  }
+
+  private async resize(stream: AbortController, size: TerminalSize) {
+    this.fitted = size;
+    let sent = false;
+    try {
+      const response = await fetch(this.fitPath, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify(size),
+      });
+      sent = response.ok;
+    } catch {
+      // The daemon did not answer: a new open asks again.
+    }
+    // The stream that held the Fit is gone, or herdr let it go: open again.
+    if (!sent && !this.stopped && this.abort === stream) this.reopen();
   }
 
   private set(status: MirrorStatus) {
@@ -158,10 +221,12 @@ export class TerminalStream {
   }
 
   private async read(signal: AbortSignal): Promise<Outcome> {
+    const fit = this.fitting?.size() ?? null;
+    this.fitted = fit;
     const response = await fetch(this.path, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/x-ndjson" },
-      body: "{}",
+      body: fit ? JSON.stringify({ fit }) : "{}",
       signal,
     });
     if (!response.ok) return this.refused(response);
@@ -203,6 +268,9 @@ export class TerminalStream {
           return { next: "stop", status: { kind: "ended", at: new Date() } };
         } else if (line.type === "unavailable") {
           return { next: "retry" };
+        } else if (line.type === "unfit") {
+          this.fitted = null;
+          this.fitting?.onUnfit(line.message);
         }
       }
     }

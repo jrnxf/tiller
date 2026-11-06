@@ -329,7 +329,7 @@ mod tests {
             tools: Arc::new(Mutex::new(serde_json::Value::Null)),
             damage: crate::readonly::Damage::default(),
             orchestrators: None,
-            mirrors: crate::mirror::Mirrors::default(),
+            mirrors: crate::mirror::Mirrors::new(home),
         }));
         let mut stopping = stop.clone();
         tokio::spawn(async move {

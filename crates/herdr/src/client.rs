@@ -262,6 +262,19 @@ impl Cli {
         ])
     }
 
+    /// The `herdr terminal session control` command that resizes a pane to
+    /// `cols` by `rows` and streams it as `observe` does, for the caller to
+    /// spawn with stdin piped. herdr 0.9.5 reads JSON lines on stdin:
+    /// `terminal.resize` (`cols`, `rows`) and `terminal.release`, which
+    /// detaches; stdin closing detaches too. It never passes `--takeover`, so
+    /// herdr refuses it while another client controls the pane.
+    pub fn control_command(&self, pane_id: &str, cols: u16, rows: u16) -> Command {
+        let (cols, rows) = (cols.to_string(), rows.to_string());
+        self.command(&[
+            "terminal", "session", "control", pane_id, "--cols", &cols, "--rows", &rows,
+        ])
+    }
+
     /// Whether a herdr client is attached in the foreground of this server.
     /// herdr has no read-only probe, so this asks it to clear the window
     /// title and reads why: `cleared` or `no_foreground_client`. The side
@@ -810,6 +823,16 @@ mod tests {
                 "lab"
             ]
         );
+        // The fit never takes a pane from another client.
+        let control = cli.control_command("w1:p1", 100, 30);
+        let args: Vec<_> = control.get_args().collect();
+        assert_eq!(
+            args[..8],
+            [
+                "terminal", "session", "control", "w1:p1", "--cols", "100", "--rows", "30"
+            ]
+        );
+        assert!(!args.contains(&std::ffi::OsStr::new("--takeover")));
         let quiet = Cli::local().program(vec!["true".into()]);
         assert!(quiet.send_keys("w1:p1", &["-", "ctrl+c"]).is_ok());
     }

@@ -1222,6 +1222,35 @@ pub struct TerminalOpen {
     /// 7.4).
     #[serde(default)]
     pub host: Option<String>,
+    /// The board's own size for the pane: herdr resizes the pane to it while
+    /// the stream is open and back when it ends (Terminal mirror, Fit).
+    /// Absent means the pane keeps its size and only the picture scales.
+    #[serde(default)]
+    pub fit: Option<TerminalFit>,
+}
+
+/// The size the Fit asks herdr to give a pane, in cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalFit {
+    /// 20 to 500.
+    pub cols: u16,
+    /// 5 to 200.
+    pub rows: u16,
+}
+
+/// `POST /api/v1/agents/{session}/terminal/fit`: a new board size for the
+/// Fit an open stream holds on the agent's pane.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalRefit {
+    /// 20 to 500.
+    pub cols: u16,
+    /// 5 to 200.
+    pub rows: u16,
+    /// A paired peer's label; a refit is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 /// `POST /api/v1/agents/{session}/terminal/input`: exactly one of `keys`
@@ -1256,6 +1285,10 @@ pub enum TerminalLine {
     Closed { reason: Option<String> },
     /// herdr stopped answering; the stream ends.
     Unavailable { message: String },
+    /// herdr would not resize the pane for the Fit, most often because
+    /// another client controls it. The stream goes on at the pane's own size,
+    /// with a `size` line next.
+    Unfit { message: String },
 }
 
 /// `POST /api/v1/agents/{session}/focus`.
