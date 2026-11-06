@@ -1199,15 +1199,12 @@ impl AwayContract {
     /// millisecond. A contract with no event counts every run, so the cap
     /// errs closed.
     pub fn started_since(param: usize) -> String {
-        let began = format!(
-            "(SELECT coalesce(min(seq), 0) FROM events WHERE entity = 'approval' AND entity_id = ?{param})"
-        );
         format!(
-            "id IN (SELECT e.entity_id FROM events e
-                    WHERE e.entity = 'run' AND e.kind IN ('run.started', 'run.relaunched') AND e.seq > {began}
-                      AND NOT EXISTS (SELECT 1 FROM events p
-                                      WHERE p.entity = 'run' AND p.entity_id = e.entity_id
-                                        AND p.kind IN ('run.started', 'run.relaunched') AND p.seq <= {began}))"
+            "id IN (SELECT entity_id FROM events
+                    WHERE entity = 'run' AND kind IN ('run.started', 'run.relaunched')
+                    GROUP BY entity_id
+                    HAVING min(seq) > (SELECT coalesce(min(seq), 0) FROM events
+                                       WHERE entity = 'approval' AND entity_id = ?{param}))"
         )
     }
 }
