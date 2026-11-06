@@ -761,6 +761,7 @@ fn project_shape(
     let review_open = review::live_pass(conn, &project.id)?.map(|pass| pass.kind.to_string());
     Ok(Project {
         effective_delivery: project.effective_delivery().to_string(),
+        retired_at: at_opt(project.retired_at),
         stage: project.stage.to_string(),
         reviewed_through_sha: project.reviewed_through_sha,
         reviewed_at: at_opt(reviewed_at),
@@ -782,11 +783,21 @@ fn project_shape(
 
 /// `GET /api/v1/projects`: projects not retired.
 pub fn projects(store: &Store, now: Timestamp) -> Result<ProjectsResponse> {
+    projects_where(store, now, false)
+}
+
+/// `GET /api/v1/projects?retired=true`: this host's retired projects, the
+/// ones only a delete still touches.
+pub fn retired_projects(store: &Store, now: Timestamp) -> Result<ProjectsResponse> {
+    projects_where(store, now, true)
+}
+
+fn projects_where(store: &Store, now: Timestamp, retired: bool) -> Result<ProjectsResponse> {
     Ok(ProjectsResponse {
         projects: store
             .projects()?
             .into_iter()
-            .filter(|project| project.retired_at.is_none())
+            .filter(|project| project.retired_at.is_some() == retired)
             .map(|project| project_shape(store, project, now))
             .collect::<Result<_>>()?,
     })

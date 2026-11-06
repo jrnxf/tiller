@@ -12,6 +12,7 @@ import { useStore } from "../../lib/store";
 import { HostChip } from "../board/host-chip";
 import { CheckIcon, ChevronIcon, EyeIcon, EyeOffIcon, FocusIcon, LayersIcon } from "./icons";
 import { AddProject } from "./project-add";
+import { ArchivedProjects } from "./projects-archived";
 import { ProjectDetail, StageChip } from "./project-stage";
 
 const VIEWS: { value: ViewKnob; label: string }[] = [
@@ -168,6 +169,7 @@ export function ProjectsSection({ activeHost }: { activeHost: string | undefined
         })}
       </section>
       <div className="knob-note">{note}</div>
+      <ArchivedProjects />
     </>
   );
 }

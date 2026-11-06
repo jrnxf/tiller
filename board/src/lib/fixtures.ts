@@ -1327,6 +1327,8 @@ export function fixtureResource(
   const run = /^\/api\/v1\/runs\/([^/]+)$/.exec(url.pathname);
   if (run?.[1]) return runDetailFor(run[1], now);
   if (url.pathname.startsWith("/api/v1/memory")) return memoryResource(url);
+  // No project starts archived; the stand-in server adds the ones archived since.
+  if (url.pathname === projectsPath && url.searchParams.has("retired")) return { projects: [] };
   return undefined;
 }
 

@@ -132,10 +132,12 @@ function currentProject(id: string): Project | undefined {
 }
 
 // The projects deleted or archived since the server started: the stand-in
-// server leaves them out of every read it answers. `stopped` holds the
-// projects whose agents a delete or archive stopped.
+// server leaves them out of every read it answers, except an archived one's
+// row on the archived list and its delete. `retired` maps each to when it
+// was archived. `stopped` holds the projects whose agents a delete or
+// archive stopped.
 const deleted = new Set<string>();
-const retired = new Set<string>();
+const retired = new Map<string, string>();
 const stopped = new Set<string>();
 // The projects added since the server started, listed after the fixture's.
 const added = new Map<string, Project>();
@@ -146,13 +148,28 @@ export function withoutDeleted(path: string, body: unknown, scenario: Scenario):
   if (deleted.size + retired.size + added.size === 0 || body === undefined) return body;
   const pathname = new URL(path, "http://localhost").pathname;
   const preview = /^\/api\/v1\/projects\/([^/]+)\/(delete|retire)$/.exec(pathname);
-  if (preview?.[1] && gone(preview[1])) return undefined;
+  if (preview?.[1] && (preview[2] === "delete" ? deleted.has(preview[1]) : gone(preview[1]))) {
+    return undefined;
+  }
+  if (
+    pathname === "/api/v1/projects" &&
+    new URL(path, "http://localhost").searchParams.has("retired")
+  ) {
+    return {
+      projects: [...retired]
+        .filter(([id]) => !deleted.has(id))
+        .flatMap(([id, at]) => {
+          const project = added.get(id) ?? currentProject(id);
+          return project ? [{ ...project, retired_at: at }] : [];
+        }),
+    };
+  }
   if (pathname === "/api/v1/projects") {
     const { projects } = body as ProjectsResponse;
     return {
       projects: [
         ...projects.filter((project) => project.host || !gone(project.id)),
-        ...added.values(),
+        ...[...added.values()].filter((project) => !gone(project.id)),
       ],
     };
   }
@@ -460,7 +477,7 @@ function handle(
   const deletion = /^\/api\/v1\/projects\/([^/]+)\/delete$/.exec(path);
   if (method === "POST" && deletion?.[1]) {
     const id = deletion[1];
-    const preview = gone(id)
+    const preview = deleted.has(id)
       ? undefined
       : (fixtureResource(path, scenario) as ProjectDeletePreview | undefined);
     if (!preview) return refusal(404, "not_found", `no project ${id}`);
@@ -493,7 +510,7 @@ function handle(
       : (fixtureResource(path, scenario) as ProjectRetirePreview | undefined);
     if (!preview) return refusal(404, "not_found", `no project ${id}`);
     if (preview.refused) return refusal(422, "refused", `project ${id}: ${preview.refused}`);
-    retired.add(id);
+    retired.set(id, new Date().toISOString());
     const stop = body.stop_agents === true;
     if (stop && preview.agents.length > 0) stopped.add(id);
     return {

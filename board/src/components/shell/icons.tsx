@@ -171,6 +171,26 @@ export const PlusIcon = () => (
   </svg>
 );
 
+export const TrashIcon = () => (
+  <svg
+    className="icon"
+    width="14"
+    height="14"
+    viewBox="0 0 16 16"
+    aria-hidden="true"
+    focusable="false"
+  >
+    <path
+      d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.3}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
 export const CheckIcon = () => (
   <Icon>
     <path

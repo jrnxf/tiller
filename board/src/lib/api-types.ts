@@ -357,6 +357,8 @@ export interface Project extends Federated {
   review_overdue: boolean;
   // A review pass is pending or running.
   review_open: "weekly" | "final" | null;
+  // When it was archived; only on the archived list (`?retired=true`).
+  retired_at?: string;
 }
 
 export interface ProjectsResponse {

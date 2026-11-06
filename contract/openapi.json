@@ -1794,6 +1794,18 @@
                 "null"
               ]
             }
+          },
+          {
+            "name": "retired",
+            "in": "query",
+            "description": "`true` lists this host's retired projects instead.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -5303,6 +5315,13 @@
               "null"
             ],
             "description": "When the next weekly review is due, while pre-launch."
+          },
+          "retired_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the project was retired; present only on the archived list\n(`?retired=true`)."
           },
           "rev": {
             "type": "integer",

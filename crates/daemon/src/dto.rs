@@ -528,6 +528,10 @@ pub struct Project {
     /// A peer row's link state; absent on this host's rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<LinkState>,
+    /// When the project was retired; present only on the archived list
+    /// (`?retired=true`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired_at: Option<String>,
 }
 
 /// One published PR on the contributions view: the `prs` row with the card

@@ -416,6 +416,48 @@
   color: var(--fg-1);
 }
 
+/* Archived: a folded group under the project rows, each row with its delete */
+
+.grp-fold {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: -4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.grp-fold:hover {
+  color: var(--fg-1);
+}
+
+.grp-fold .icon {
+  width: 12px;
+  height: 12px;
+  transition: transform var(--fast) var(--ease);
+}
+
+.grp-fold[aria-expanded="true"] .icon {
+  transform: rotate(90deg);
+}
+
+.grp-n {
+  color: var(--fg-4);
+  font-variant-numeric: tabular-nums;
+}
+
+.projects.archived .prow {
+  --pc: var(--fg-4);
+}
+
+.prow button.eye.delete:hover {
+  color: var(--red-text);
+  background: color-mix(in srgb, var(--red) 9%, transparent);
+}
+
 .dialog p code {
   font-family: var(--mono);
   font-size: 0.92em;

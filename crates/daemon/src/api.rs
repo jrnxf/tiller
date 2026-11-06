@@ -971,12 +971,31 @@ async fn quota(State(state): State<AppState>) -> ApiResult<QuotaResponse> {
         .map(Json)
 }
 
-#[utoipa::path(get, path = "/api/v1/projects", tag = "reads", params(HostQuery),
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct ProjectsQuery {
+    /// A host id or label.
+    pub host: Option<String>,
+    /// `true` lists this host's retired projects instead.
+    pub retired: Option<bool>,
+}
+
+#[utoipa::path(get, path = "/api/v1/projects", tag = "reads", params(ProjectsQuery),
     responses((status = 200, body = ProjectsResponse)))]
 async fn projects(
     State(state): State<AppState>,
-    Query(query): Query<HostQuery>,
+    Query(query): Query<ProjectsQuery>,
 ) -> ApiResult<ProjectsResponse> {
+    if query.retired == Some(true) {
+        // Peers cache only live projects, so the archive is this host's.
+        if query.host.is_some() {
+            return Err(ApiError::usage("retired=true lists this host only"));
+        }
+        return read(&state, |store| {
+            views::retired_projects(store, Timestamp::now())
+        })
+        .await
+        .map(Json);
+    }
     let peers = state.0.peers.federation();
     read(&state, move |store| {
         views::federated_projects(store, &peers, query.host.as_deref(), Timestamp::now())
@@ -3546,6 +3565,76 @@ pub(crate) mod tests {
         let late = change(&fleet.store);
         assert_eq!(late.card_id.as_deref(), Some(card.id.as_str()));
         assert!(late.card.is_none(), "{:?}", late.card);
+    }
+
+    /// The board's Archived list: a retired project leaves the projects
+    /// read and shows on `?retired=true`, which lists this host only, and
+    /// its delete still works from there.
+    #[tokio::test]
+    async fn retired_projects_list_apart_and_still_delete() {
+        let mut fleet = Fleet::new();
+        let owner = Ctx::new(Actor::Owner);
+        fleet
+            .store
+            .project_add(
+                &owner,
+                tiller_core::state::projects::NewProject {
+                    id: "gamma".into(),
+                    name: "Gamma".into(),
+                    repo: None,
+                    remote: None,
+                    default_branch: None,
+                    delivery: tiller_core::domain::Delivery::DirectPr,
+                    checks: None,
+                    capacity: None,
+                    deploy_workflow: None,
+                    deploy_environment: None,
+                    deploy_timeout_minutes: None,
+                },
+            )
+            .unwrap();
+        fleet.store.project_retire(&owner, "gamma").unwrap();
+        let home = fleet.dir.path();
+        let app = app(home, Assets::of::<Fixture>());
+        let ids = |body: &str| {
+            let body: Value = serde_json::from_str(body).unwrap();
+            body["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|project| project["id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        let live = get(&app, "/api/v1/projects").await;
+        assert!(
+            !ids(&live.body).contains(&"gamma".to_owned()),
+            "{}",
+            live.body
+        );
+        assert!(!live.body.contains("retired_at"), "{}", live.body);
+        let archived = get(&app, "/api/v1/projects?retired=true").await;
+        assert_eq!(archived.status, StatusCode::OK, "{}", archived.body);
+        assert_eq!(ids(&archived.body), ["gamma"], "{}", archived.body);
+        let body: Value = serde_json::from_str(&archived.body).unwrap();
+        assert!(body["projects"][0]["retired_at"].is_string(), "{body}");
+        let peer = get(&app, "/api/v1/projects?retired=true&host=laptop").await;
+        assert_eq!(peer.status, StatusCode::BAD_REQUEST, "{}", peer.body);
+
+        let cookie = owner_cookie(home);
+        let deleted = send(
+            &app,
+            mutation(
+                "POST",
+                "/api/v1/projects/gamma/delete",
+                json!({"idempotency_key": "k-arch-1", "confirm": "gamma"}),
+                &[("cookie", cookie.as_str())],
+            ),
+        )
+        .await;
+        assert_eq!(deleted.status, StatusCode::OK, "{}", deleted.body);
+        let after = get(&app, "/api/v1/projects?retired=true").await;
+        assert!(ids(&after.body).is_empty(), "{}", after.body);
     }
 
     /// The board's project delete: the preview counts what goes and names

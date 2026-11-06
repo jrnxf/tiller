@@ -127,6 +127,10 @@ export const signalsQuery = () => readQuery<SignalsResponse>(signalsPath);
 export const projectsPath: QueryPath = "/api/v1/projects";
 export const projectsQuery = () => readQuery<ProjectsResponse>(projectsPath);
 
+// This host's archived (retired) projects, which only a delete still touches.
+export const retiredProjectsQuery = () =>
+  readQuery<ProjectsResponse>(withParams(projectsPath, { retired: "true" }));
+
 const contributionsPath = (project?: string): QueryPath =>
   withParams("/api/v1/contributions", { project });
 export const contributionsQuery = (project?: string) =>
