@@ -289,6 +289,105 @@
         }
       }
     },
+    "/api/v1/agents/{session}/terminal/history": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "summary": "The pane's scrollback, for the board to read back without herdr\n(`protocol.md` 7.4). A POST, as the mirror is: it passes every mutation\ncheck, owner cookie included, though it writes nothing.",
+        "operationId": "terminal_history",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TerminalHistoryAsk"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TerminalHistory"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`lines` outside 1 to 1000",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "no such agent, or its pane closed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`refused`: the agent runs on a saved machine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "herdr is unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agents/{session}/terminal/input": {
       "post": {
         "tags": [
@@ -6422,6 +6521,45 @@
             "type": "integer",
             "format": "int32",
             "description": "5 to 200.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "TerminalHistory": {
+        "type": "object",
+        "description": "The pane's recent rows as herdr renders them: wrapped at the pane's\nwidth, oldest first, the screen itself last, with their colors as ANSI\nescapes and rows split by `\\n`.",
+        "required": [
+          "session_id",
+          "text"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "TerminalHistoryAsk": {
+        "type": "object",
+        "description": "`POST /api/v1/agents/{session}/terminal/history`: how much of the\npane's scrollback to read.",
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label; a history read is not forwarded."
+          },
+          "lines": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "1 to 1000 rendered rows, counted from the bottom of the screen;\nabsent means 1000.",
             "minimum": 0
           }
         },

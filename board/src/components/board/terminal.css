@@ -154,6 +154,34 @@
   flex: none;
 }
 
+/* The scrollback, over the live screen at its size, cell for cell. */
+.mir-hist {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  padding: 8px;
+  overflow: hidden;
+  background: var(--t-bg);
+  opacity: 1;
+  transition: opacity var(--med) var(--ease-out);
+
+  @starting-style {
+    opacity: 0;
+  }
+}
+
+.mir-hx {
+  width: max-content;
+}
+
+.mir-hx .xterm {
+  padding: 0;
+}
+
+.mir-hx .xterm-viewport {
+  background-color: transparent !important;
+}
+
 .mir-veil {
   position: absolute;
   inset: 0;

@@ -1,7 +1,13 @@
 import { afterEach, expect, test, vi } from "vitest";
 
 import type { MirrorStatus, Screen } from "./terminal-stream";
-import { TerminalInput, TerminalStream, pasteChunks, terminalPath } from "./terminal-stream";
+import {
+  TerminalInput,
+  TerminalStream,
+  pasteChunks,
+  readHistory,
+  terminalPath,
+} from "./terminal-stream";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -363,4 +369,24 @@ test("a paste is split into pieces the daemon takes, never inside a character", 
   const chunks = pasteChunks(text);
   expect(chunks.join("")).toBe(text);
   expect(chunks.map((chunk) => encoder.encode(chunk).length)).toEqual([4095, 13]);
+});
+
+test("a history read takes the daemon's plain body, and a refusal its reason", async () => {
+  const answers = [
+    new Response(JSON.stringify({ session_id: "s1", text: "one\ntwo\n" }), { status: 200 }),
+    refusal(403, "forbidden", "owner only"),
+    refusal(404, "not_found", "pane w2:p1 is gone"),
+  ];
+  const paths: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string) => {
+      paths.push(path);
+      return answers.shift();
+    }),
+  );
+  expect(await readHistory("s1")).toEqual({ ok: true, text: "one\ntwo\n" });
+  expect(await readHistory("s1")).toEqual({ ok: false, detail: expect.stringContaining("owner") });
+  expect(await readHistory("s1")).toEqual({ ok: false, detail: "pane w2:p1 is gone" });
+  expect(paths).toEqual(Array(3).fill("/api/v1/agents/s1/terminal/history"));
 });

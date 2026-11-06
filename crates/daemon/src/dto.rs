@@ -1253,6 +1253,29 @@ pub struct TerminalRefit {
     pub host: Option<String>,
 }
 
+/// `POST /api/v1/agents/{session}/terminal/history`: how much of the
+/// pane's scrollback to read.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalHistoryAsk {
+    /// 1 to 1000 rendered rows, counted from the bottom of the screen;
+    /// absent means 1000.
+    #[serde(default)]
+    pub lines: Option<u16>,
+    /// A paired peer's label; a history read is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
+/// The pane's recent rows as herdr renders them: wrapped at the pane's
+/// width, oldest first, the screen itself last, with their colors as ANSI
+/// escapes and rows split by `\n`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct TerminalHistory {
+    pub session_id: String,
+    pub text: String,
+}
+
 /// `POST /api/v1/agents/{session}/terminal/input`: exactly one of `keys`
 /// and `text`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]

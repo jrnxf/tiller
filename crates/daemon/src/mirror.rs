@@ -42,6 +42,8 @@ pub const MAX_VIEWERS: usize = 8;
 pub const MAX_KEYS: usize = 64;
 /// The most bytes of pasted text one input carries.
 pub const MAX_TEXT: usize = 4096;
+/// The most rows of scrollback one history read returns: herdr's own cap.
+pub const MAX_HISTORY: u16 = 1000;
 /// Inputs a second the owner may send on average, and in a burst.
 const INPUT_RATE: f64 = 20.0;
 const INPUT_BURST: f64 = 40.0;

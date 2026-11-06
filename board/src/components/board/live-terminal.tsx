@@ -23,6 +23,7 @@ import {
   ExpandIcon,
   FitIcon,
   GlobeIcon,
+  HistoryIcon,
   KeyboardIcon,
   LockIcon,
   PointerIcon,
@@ -31,7 +32,7 @@ import {
   WarnIcon,
 } from "./icons";
 import { typedKeys } from "./terminal-keys";
-import { TerminalInput, TerminalStream } from "./terminal-stream";
+import { TerminalInput, TerminalStream, readHistory } from "./terminal-stream";
 import type { Fitting, MirrorStatus, TerminalSize } from "./terminal-stream";
 import { showToast } from "./toast";
 import "./terminal.css";
@@ -177,6 +178,8 @@ const OPTIONS: ITerminalOptions & ITerminalInitOnlyOptions = {
   // Until the stream is live: keys typed before then would go nowhere.
   disableStdin: true,
 };
+// The rows of scrollback a history read asks for: herdr's own cap.
+const HISTORY_ROWS = 1000;
 const MIN_FONT = 4;
 const MAX_FONT = 20;
 // The stage grows a small pane into its room, but not past a size that reads
@@ -518,6 +521,15 @@ export function LiveTerminal({
   const refitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The web font is in, so xterm measures its cells right when it opens.
   const [ready, setReady] = useState(false);
+  // The pane's scrollback, read on the owner's ask and shown over the live
+  // screen until they go back to it.
+  const [history, setHistory] = useState<{ text: string } | "reading" | null>(null);
+  const historyAsk = useRef<AbortController | null>(null);
+  const closeHistory = useCallback(() => {
+    historyAsk.current?.abort();
+    historyAsk.current = null;
+    setHistory(null);
+  }, []);
   // Focus the screen once the sheet holds it: a phone tap means "type".
   const focusNext = useRef(false);
   // Type once the pane is live: asked for before the stream had a screen.
@@ -548,7 +560,19 @@ export function LiveTerminal({
           term,
           sessionId,
           host,
-          { status: setStatus, size: setSize, typing: setTyping },
+          {
+            status: (next) => {
+              setStatus(next);
+              // A closed pane has no scrollback left to read.
+              if (next.kind === "ended") closeHistory();
+            },
+            size: setSize,
+            typing: (on) => {
+              setTyping(on);
+              // Typing goes to the live screen, so the scrollback gives way.
+              if (on) closeHistory();
+            },
+          },
           {
             size: () => (fittingRef.current ? fitTarget.current : null),
             onUnfit: (detail) => {
@@ -583,8 +607,9 @@ export function LiveTerminal({
       setStatus({ kind: "connecting" });
       setSize(null);
       setUnfit(false);
+      closeHistory();
     };
-  }, [sessionId, host]);
+  }, [sessionId, host, closeHistory]);
 
   const live = status.kind === "live";
   useEffect(() => {
@@ -743,11 +768,30 @@ export function LiveTerminal({
     return () => moved.dispose();
   }, [host, bigBox, ready, view, scale]);
 
+  const openHistory = useCallback(() => {
+    if (historyAsk.current) return;
+    const ask = new AbortController();
+    historyAsk.current = ask;
+    setHistory("reading");
+    void readHistory(sessionId, ask.signal).then((read) => {
+      if (ask.signal.aborted) return;
+      historyAsk.current = null;
+      if (read.ok) {
+        setHistory({ text: read.text });
+      } else {
+        setHistory(null);
+        showToast("bad", "The scrollback did not load", read.detail);
+      }
+    });
+  }, [sessionId]);
+
   const retry = useCallback(() => streamRef.current?.retry(), []);
   const done = useCallback(() => termRef.current?.blur(), []);
   const send = useCallback((key: string) => inputRef.current?.keys([key]), []);
 
   const expand = useCallback(() => {
+    // The scrollback is the inline screen's; the large view is live.
+    closeHistory();
     if (phone) {
       setScale("one");
       setView("sheet");
@@ -756,7 +800,7 @@ export function LiveTerminal({
     // Fit grows the pane to fill the dialog, which is the point of opening it.
     setScale("fit");
     setView("dialog");
-  }, [phone]);
+  }, [phone, closeHistory]);
 
   const collapse = useCallback(() => {
     termRef.current?.blur();
@@ -865,9 +909,64 @@ export function LiveTerminal({
         Fit pane
       </button>
     ) : null;
+  // The scrollback is the stage's, while the screen shows inline.
+  const canHistory = stage && screenShown && !ended && view === "inline";
+  const historyButton =
+    canHistory && history === null ? (
+      <button
+        type="button"
+        className="ib sm"
+        title="Scroll back"
+        aria-label="Read the pane's scrollback"
+        onClick={openHistory}
+      >
+        <HistoryIcon />
+      </button>
+    ) : null;
+  const historyOpen = canHistory && history !== null;
+  const shownHistory = historyOpen && history !== "reading" ? history : null;
+  // Esc goes back to live wherever focus is, unless a dialog takes it. The
+  // scrollback's own screen catches it first and marks it taken.
+  useEffect(() => {
+    if (!historyOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (document.querySelector('[aria-modal="true"]')) return;
+      event.preventDefault();
+      closeHistory();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [historyOpen, closeHistory]);
   const screen = (
-    <div className="mir-s" role="group" aria-label={`Live terminal for ${label}`}>
+    <div
+      className="mir-s"
+      role="group"
+      aria-label={`Live terminal for ${label}`}
+      // Scrolling up on the stage reads back, as it would in the terminal.
+      onWheel={(event) => {
+        if (event.deltaY < 0 && canHistory && history === null && !typing) openHistory();
+      }}
+    >
       <div className="mir-slot" ref={setInlineBox} />
+      {shownHistory && size ? (
+        <HistoryScreen
+          text={shownHistory.text}
+          cols={size.cols}
+          rows={size.rows}
+          fontSize={font}
+          label={label}
+          onClose={closeHistory}
+        />
+      ) : null}
+      {canHistory && history === "reading" ? (
+        <div className="mir-veil">
+          <span className="mir-pill">
+            <span className="mir-spin" />
+            Reading the scrollback
+          </span>
+        </div>
+      ) : null}
       {stage && view === "dialog" ? (
         <div className="mir-veil">
           <span className="mir-pill">In the expanded view</span>
@@ -875,7 +974,7 @@ export function LiveTerminal({
       ) : (
         veil
       )}
-      {phone && live ? (
+      {phone && live && !shownHistory ? (
         <button
           type="button"
           className="mir-tap"
@@ -909,11 +1008,26 @@ export function LiveTerminal({
         </button>
       </span>
     </>
+  ) : historyOpen ? (
+    <>
+      <span className="tx">
+        <HistoryIcon />
+        {phone
+          ? "Scrollback, read-only"
+          : "Scrollback, read-only. Esc goes back to the live screen."}
+      </span>
+      <span className="mir-fr">
+        <button type="button" className="btn sm primary" onClick={closeHistory}>
+          Back to live
+        </button>
+      </span>
+    </>
   ) : (
     <>
       {footer("inline")}
       <span className="mir-fr">
         {sizeText ? <span className="mir-sz">{sizeText}</span> : null}
+        {historyButton}
         {fitButton}
         {expandButton}
       </span>
@@ -1036,6 +1150,97 @@ export function LiveTerminal({
             document.body,
           )
         : null}
+    </div>
+  );
+}
+
+// The pane's scrollback over the live screen, at its size and font, so the
+// last rows line up with the screen under it. A terminal of its own, read
+// only: the live one keeps drawing frames under it.
+function HistoryScreen({
+  text,
+  cols,
+  rows,
+  fontSize,
+  label,
+  onClose,
+}: {
+  text: string;
+  cols: number;
+  rows: number;
+  fontSize: number;
+  label: string;
+  onClose: () => void;
+}) {
+  const [box, setBox] = useState<HTMLDivElement | null>(null);
+  const termRef = useRef<Terminal | null>(null);
+  // The live screen's shape, read when xterm has loaded, so a change while it
+  // loads is not lost.
+  const shape = useRef({ cols, rows, fontSize });
+
+  useEffect(() => {
+    if (!box) return;
+    let gone = false;
+    let term: Terminal | null = null;
+    // The live screen's renderer too, so the cells measure the same.
+    void Promise.all([import("@xterm/xterm"), import("@xterm/addon-webgl")])
+      .then(([xterm, webgl]) => {
+        if (gone) return;
+        term = new xterm.Terminal({
+          ...OPTIONS,
+          ...shape.current,
+          scrollback: HISTORY_ROWS,
+          // herdr splits rows with a bare newline.
+          convertEol: true,
+          cursorBlink: false,
+          theme: {
+            ...THEME,
+            scrollbarSliderBackground: "#ffffff26",
+            scrollbarSliderHoverBackground: "#ffffff40",
+            scrollbarSliderActiveBackground: "#ffffff59",
+          },
+        });
+        // xterm keeps the keys it reads to itself, so Esc is caught here.
+        term.attachCustomKeyEventHandler((event) => {
+          if (event.key !== "Escape") return true;
+          event.preventDefault();
+          if (event.type === "keydown") onClose();
+          return false;
+        });
+        term.open(box);
+        openRenderer(term, webgl.WebglAddon);
+        term.textarea?.setAttribute("aria-label", `Scrollback of ${label}`);
+        termRef.current = term;
+        const opened = term;
+        // No cursor, and no empty row after the last one.
+        opened.write(`\x1b[?25l${text.replace(/\n$/, "")}`, () => {
+          opened.scrollToBottom();
+          opened.focus();
+        });
+      })
+      .catch(() => {
+        if (gone) return;
+        showToast("bad", "The scrollback did not load", "The terminal did not load.");
+        onClose();
+      });
+    return () => {
+      gone = true;
+      term?.dispose();
+      termRef.current = null;
+    };
+  }, [box, text, label, onClose]);
+
+  useEffect(() => {
+    shape.current = { cols, rows, fontSize };
+    const term = termRef.current;
+    if (!term) return;
+    if (term.cols !== cols || term.rows !== rows) term.resize(cols, rows);
+    if (term.options.fontSize !== fontSize) term.options.fontSize = fontSize;
+  }, [cols, rows, fontSize]);
+
+  return (
+    <div className="mir-hist">
+      <div className="mir-hx" ref={setBox} />
     </div>
   );
 }

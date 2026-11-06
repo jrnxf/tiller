@@ -12,6 +12,7 @@ import {
   FIXTURE_COLS,
   FIXTURE_ROWS,
   fullFrame,
+  historyText,
   promptFrame,
   tickFrame,
   typeInto,
@@ -204,6 +205,26 @@ function terminalInput(res: ServerResponse, session: string, body: Record<string
   sendJson(res, { ok: true, data: { session_id: session, sent } });
 }
 
+// A history read: refused like the stream for a forbidden pane, and slow
+// enough under `?term=slowhistory` to see the board wait for it.
+function terminalHistory(req: IncomingMessage, res: ServerResponse, session: string) {
+  const mode = terminalMode(req.headers.referer);
+  if (mode === "forbidden") {
+    res.statusCode = 403;
+    return sendJson(res, {
+      ok: false,
+      error: { code: "forbidden", message: "only the owner reads an agent's terminal" },
+    });
+  }
+  const pane = paneOf(session);
+  const seconds = Math.round((Date.now() - pane.started) / 1000);
+  const text = historyText(pane.typed, seconds, { cols: FIXTURE_COLS, rows: FIXTURE_ROWS });
+  setTimeout(
+    () => sendJson(res, { session_id: session, text }),
+    mode === "slowhistory" ? 60_000 : 150,
+  );
+}
+
 function startMover(res: ServerResponse) {
   const board = fixtureResource("/api/v1/board?filter=all", "live") as { rows: BoardRow[] };
   const row = board.rows.find((candidate) => candidate.display_id === "alpha-42");
@@ -240,13 +261,14 @@ function apiMiddleware(): Connect.NextHandleFunction {
     if (!url.startsWith("/api/v1/")) return next();
     const scenario = scenarioOf(undefined, req.headers.referer);
 
-    const terminal = /^\/api\/v1\/agents\/([^/]+)\/terminal(\/input|\/fit)?$/.exec(url);
+    const terminal = /^\/api\/v1\/agents\/([^/]+)\/terminal(\/input|\/fit|\/history)?$/.exec(url);
     if (terminal?.[1] && req.method === "POST") {
       const session = terminal[1];
       readBody(req)
         .then((body) => {
           if (terminal[2] === "/input") terminalInput(res, session, body);
           else if (terminal[2] === "/fit") terminalFit(res, session, body);
+          else if (terminal[2] === "/history") terminalHistory(req, res, session);
           else terminalStream(req, res, session, body);
         })
         .catch(() => res.destroy());

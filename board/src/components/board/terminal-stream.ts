@@ -14,6 +14,7 @@
 export const terminalPath = (sessionId: string) => `/api/v1/agents/${sessionId}/terminal`;
 const terminalInputPath = (sessionId: string) => `${terminalPath(sessionId)}/input`;
 const terminalFitPath = (sessionId: string) => `${terminalPath(sessionId)}/fit`;
+const terminalHistoryPath = (sessionId: string) => `${terminalPath(sessionId)}/history`;
 
 // What the mirror draws on: xterm in the board, a recorder in tests.
 export interface Screen {
@@ -79,6 +80,31 @@ async function errorOf(response: Response): Promise<{ code: string; message: str
     };
   } catch {
     return { code: "", message: `The daemon answered ${response.status}.` };
+  }
+}
+
+const NOT_OWNER =
+  "This browser is not signed in as the owner. Run `tiller board --login` for a login link.";
+
+// The pane's scrollback (protocol.md 7.4, History): its last rows as herdr
+// renders them, oldest first and the screen itself last. The stream carries
+// the screen only, so this is the one way to read back.
+export type History = { ok: true; text: string } | { ok: false; detail: string };
+
+export async function readHistory(sessionId: string, signal?: AbortSignal): Promise<History> {
+  try {
+    const response = await fetch(terminalHistoryPath(sessionId), {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: "{}",
+      signal,
+    });
+    // Not a mutation, so the body is the read itself, not wrapped in `data`.
+    if (response.ok) return { ok: true, text: ((await response.json()) as { text: string }).text };
+    if (response.status === 403) return { ok: false, detail: NOT_OWNER };
+    return { ok: false, detail: (await errorOf(response)).message };
+  } catch {
+    return { ok: false, detail: "The daemon did not answer." };
   }
 }
 
@@ -406,10 +432,7 @@ export class TerminalInput {
         return "drop";
       }
       if (response.status === 403) {
-        this.onRefused(
-          "Keys not sent",
-          "This browser is not signed in as the owner. Run `tiller board --login` for a login link.",
-        );
+        this.onRefused("Keys not sent", NOT_OWNER);
         return "drop-all";
       }
       this.onRefused("Keys not sent", error.message);

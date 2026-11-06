@@ -240,6 +240,24 @@ impl Cli {
         size_from(&result, pane_id)
     }
 
+    /// A pane's last `lines` rendered rows, scrollback first and the screen
+    /// last, with their colors as ANSI escapes (`herdr pane read --source
+    /// recent`). herdr reads 1000 rows at most.
+    pub fn read_recent(&self, pane_id: &str, lines: u16) -> Result<String> {
+        let lines = lines.to_string();
+        match self.run(&[
+            "pane", "read", pane_id, "--source", "recent", "--lines", &lines, "--format", "ansi",
+        ]) {
+            Err(HerdrError::Api { code, .. }) if code == "pane_not_found" => {
+                Err(HerdrError::NotFound {
+                    what: "pane",
+                    id: pane_id.into(),
+                })
+            }
+            other => other,
+        }
+    }
+
     /// Presses keys in a pane (`herdr pane send-keys`), in order: names such
     /// as `enter` or `ctrl+c`, or single characters. herdr 0.9.5 refuses a
     /// name it does not know (`invalid_key`), and reads a word that starts

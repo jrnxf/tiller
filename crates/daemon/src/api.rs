@@ -584,6 +584,10 @@ pub fn router(state: AppState) -> Router {
             post(terminal_input),
         )
         .route("/api/v1/agents/{session}/terminal/fit", post(terminal_fit))
+        .route(
+            "/api/v1/agents/{session}/terminal/history",
+            post(terminal_history),
+        )
         .route("/api/v1/runs/{id}", get(run))
         .route("/api/v1/machines", get(machines))
         .route("/api/v1/quota", get(quota))
@@ -2362,6 +2366,42 @@ async fn terminal_fit(
     }))
 }
 
+/// The pane's scrollback, for the board to read back without herdr
+/// (`protocol.md` 7.4). A POST, as the mirror is: it passes every mutation
+/// check, owner cookie included, though it writes nothing.
+#[utoipa::path(post, path = "/api/v1/agents/{session}/terminal/history", tag = "mutations", request_body = TerminalHistoryAsk,
+    params(("session" = String, Path)),
+    responses((status = 200, body = TerminalHistory), (status = 400, body = ErrorBody, description = "`lines` outside 1 to 1000"),
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody, description = "no such agent, or its pane closed"),
+              (status = 422, body = ErrorBody, description = "`refused`: the agent runs on a saved machine"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
+              (status = 503, body = ErrorBody, description = "herdr is unreachable")))]
+async fn terminal_history(
+    State(state): State<AppState>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<TerminalHistory> {
+    guard(&state, &headers)?;
+    let request: TerminalHistoryAsk = body(&bytes)?;
+    let lines = request.lines.unwrap_or(mirror::MAX_HISTORY);
+    if !(1..=mirror::MAX_HISTORY).contains(&lines) {
+        return Err(ApiError::usage(format!(
+            "lines is 1 to {}",
+            mirror::MAX_HISTORY
+        )));
+    }
+    not_forwarded(&state, request.host.as_deref(), "the terminal history").await?;
+    let (session_id, pane) = local_pane(&state, session).await?;
+    let herdr = state.0.herdr.clone();
+    let target = pane.clone();
+    let text = tokio::task::spawn_blocking(move || herdr.read_recent(&target, lines))
+        .await
+        .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
+        .map_err(|error| pane_error(&pane, &error))?;
+    Ok(Json(TerminalHistory { session_id, text }))
+}
+
 /// The core's refusal when the approval binds another head than the one
 /// the board showed.
 const HEAD_MOVED: &str = "the head moved since it was shown";
@@ -2518,7 +2558,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, stage_project, ask_note, start_orchestrator, add_project, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
+        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, stage_project, ask_note, start_orchestrator, add_project, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
         relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo
     ),
@@ -3974,11 +4014,14 @@ esac"#,
     /// the size in `{dir}/size` (`cols rows`), and observes by recording
     /// its pid, writing one frame and sleeping as that same process. The
     /// frame is full unless `{dir}/full` says `false`. Its control logs what
-    /// it reads and answers a resize with a full frame.
+    /// it reads and answers a resize with a full frame, and a read gives two
+    /// rows of scrollback.
     fn mirror_herdr(dir: &std::path::Path) -> Cli {
         let script = format!(
             r#"echo "$*" >> '{dir}/calls'
 case "$*" in
+*"pane read"*)
+  printf 'one\n\033[34mtwo\033[0m\n';;
 *"pane layout"*)
   read cols rows < '{dir}/size'
   printf '{{"result":{{"layout":{{"panes":[{{"pane_id":"w2:p1","rect":{{"width":%s,"height":%s}}}}]}}}}}}\n' "$cols" "$rows";;
@@ -4074,10 +4117,12 @@ esac"#,
         let stream = format!("/api/v1/agents/{session}/terminal");
         let input = format!("/api/v1/agents/{session}/terminal/input");
         let refit = format!("/api/v1/agents/{session}/terminal/fit");
+        let history = format!("/api/v1/agents/{session}/terminal/history");
         let paths = [
             (stream.as_str(), json!({})),
             (input.as_str(), json!({"keys": ["ctrl+c"]})),
             (refit.as_str(), json!({"cols": 100, "rows": 30})),
+            (history.as_str(), json!({})),
         ];
         let cookie_header = ("cookie", cookie.as_str());
         let refusals: [(&str, Vec<(&str, &str)>); 4] = [
@@ -4151,6 +4196,31 @@ esac"#,
                 "pane send-text w2:p1 rf x"
             ]
         );
+
+        // The owner reads the pane's scrollback, colors kept; a size herdr
+        // would not read is refused before it is asked.
+        let read = send(
+            &app,
+            mutation("POST", &history, json!({}), &[cookie_header]),
+        )
+        .await;
+        assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+        let read: Value = serde_json::from_str(&read.body).unwrap();
+        assert_eq!(read["session_id"], session);
+        assert_eq!(read["text"], "one\n\u{1b}[34mtwo\u{1b}[0m\n");
+        for lines in [0, 1001] {
+            let answer = send(
+                &app,
+                mutation("POST", &history, json!({"lines": lines}), &[cookie_header]),
+            )
+            .await;
+            assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{}", answer.body);
+        }
+        let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
+        assert_eq!(
+            calls.lines().last(),
+            Some("pane read w2:p1 --source recent --lines 1000 --format ansi")
+        );
     }
 
     #[tokio::test]
@@ -4177,6 +4247,10 @@ esac"#,
             (
                 format!("/api/v1/agents/{remote}/terminal/fit"),
                 json!({"cols": 100, "rows": 30}),
+            ),
+            (
+                format!("/api/v1/agents/{remote}/terminal/history"),
+                json!({}),
             ),
         ] {
             let answer = send(&app, mutation("POST", &path, body, &[("cookie", &cookie)])).await;

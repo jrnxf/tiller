@@ -88,6 +88,14 @@ export const FitIcon = () => (
   </Glyph>
 );
 
+// The scrollback: a clock turned back.
+export const HistoryIcon = () => (
+  <Glyph>
+    <path d="M2.8 8a5.2 5.2 0 1 0 1.5-3.7" {...stroke} {...round} />
+    <path d="M2.5 2.5v2.4h2.4M8 5.2V8l1.9 1.3" {...stroke} {...round} />
+  </Glyph>
+);
+
 export const ChevronRightIcon = () => (
   <Glyph size={12} grid={12}>
     <path d="M4.5 3 7.5 6 4.5 9" {...stroke} strokeWidth={1.4} {...round} />

@@ -109,6 +109,26 @@ export function promptFrame(typed: string, size: PaneSize = OWN): string {
   );
 }
 
+// The pane's scrollback as herdr's recent read returns it: earlier work
+// first, the screen last, rows split by a bare newline.
+export function historyText(typed: string, seconds: number, size: PaneSize = OWN): string {
+  const earlier: string[] = [];
+  for (let step = 1; step <= 24; step += 1) {
+    const file = `src/importer/step_${String(step).padStart(2, "0")}.rs`;
+    earlier.push(
+      ` ${color(32, "●")} Read ${color(36, file)} ${dim(`(${40 + step * 7} lines)`)}`,
+      ` ${color(32, "●")} Bash ${dim(`cargo nextest run -p importer step_${step}`)}`,
+      `   ${dim("│")} ${color(32, "PASS")} importer::step_${step}::keeps_the_order`,
+      `   ${dim("│")} ${dim(`${step + 3} tests run: ${step + 3} passed, 0 skipped`)}`,
+      "",
+    );
+  }
+  const screen = lines(size);
+  screen[thinkingRow(size) - 1] = thinking(seconds);
+  screen[promptRow(size) - 1] = prompt(typed, size);
+  return `${[...earlier, ...screen].join("\n")}\n`;
+}
+
 // What a key does to the prompt: printable keys type, backspace takes one
 // back, and enter sends it (the prompt clears).
 export function typeInto(typed: string, input: { keys?: unknown; text?: unknown }): string {
