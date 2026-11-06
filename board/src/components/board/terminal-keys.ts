@@ -143,3 +143,26 @@ export function typedKeys(data: string): TypedKeys {
   }
   return { keys, unsent };
 }
+
+// The controls a press on the stage leaves alone.
+const CONTROLS = "button, a, input, textarea, select, label, summary, [role=button], [tabindex]";
+
+export interface ScreenPress {
+  button: number;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  altKey: boolean;
+  shiftKey: boolean;
+  target: EventTarget | null;
+}
+
+// Whether a press on the screen around the pane's cells starts typing: a
+// plain primary press on the bare stage. A press on xterm's own element is
+// xterm's to handle, and a control on the stage keeps its own.
+export function pressTypes(press: ScreenPress, term: Element): boolean {
+  if (press.button !== 0) return false;
+  if (press.ctrlKey || press.metaKey || press.altKey || press.shiftKey) return false;
+  const target = press.target;
+  if (!(target instanceof Node) || term.contains(target)) return false;
+  return !(target instanceof Element && target.closest(CONTROLS));
+}

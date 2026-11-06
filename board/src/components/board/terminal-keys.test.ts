@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 
-import { typedKeys } from "./terminal-keys";
+import { pressTypes, typedKeys } from "./terminal-keys";
 
 test.each([
   ["a", ["a"]],
@@ -62,4 +62,37 @@ test.each([
 
 test("keys around a dropped report still go through", () => {
   expect(typedKeys("a\x1b[12;40Rb")).toEqual({ keys: ["a", "b"], unsent: [] });
+});
+
+function stage(): { root: HTMLElement; term: HTMLElement } {
+  const root = document.createElement("div");
+  root.innerHTML = `<div class="xterm"><textarea></textarea><span class="cell">x</span></div>
+    <button type="button"><svg></svg></button><a href="#">link</a>
+    <div tabindex="0">focusable</div><span class="bare">margin</span>`;
+  return { root, term: root.querySelector(".xterm") as HTMLElement };
+}
+
+const plain = { button: 0, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false };
+
+test("a plain press on the bare stage types", () => {
+  const { root, term } = stage();
+  expect(pressTypes({ ...plain, target: root }, term)).toBe(true);
+  expect(pressTypes({ ...plain, target: root.querySelector(".bare") }, term)).toBe(true);
+});
+
+test("a press on xterm or on a control is theirs", () => {
+  const { root, term } = stage();
+  for (const selector of [".cell", "textarea", "button", "svg", "a", "[tabindex]"]) {
+    expect(pressTypes({ ...plain, target: root.querySelector(selector) }, term), selector).toBe(
+      false,
+    );
+  }
+});
+
+test("a press with a modifier or another button does not type", () => {
+  const { root, term } = stage();
+  expect(pressTypes({ ...plain, button: 2, target: root }, term)).toBe(false);
+  for (const key of ["ctrlKey", "metaKey", "altKey", "shiftKey"]) {
+    expect(pressTypes({ ...plain, [key]: true, target: root }, term), key).toBe(false);
+  }
 });

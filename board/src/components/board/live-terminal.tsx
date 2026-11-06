@@ -32,7 +32,7 @@ import {
   TerminalIcon,
   WarnIcon,
 } from "./icons";
-import { typedKeys } from "./terminal-keys";
+import { pressTypes, typedKeys } from "./terminal-keys";
 import { TerminalInput, TerminalStream, TerminalTail, readHistory } from "./terminal-stream";
 import type { Fitting, Mirror, MirrorStatus, Screen, TerminalSize } from "./terminal-stream";
 import { showToast } from "./toast";
@@ -972,10 +972,8 @@ export function LiveTerminal({
   // the stage is often wider and taller than the pane it shows.
   const typeFromScreen = (event: ReactMouseEvent<HTMLDivElement>) => {
     const term = termRef.current;
-    const target = event.target as Node;
-    if (event.button !== 0 || tail || phone || typing || shownHistory) return;
-    if (!term?.element || term.options.disableStdin || term.element.contains(target)) return;
-    if (target instanceof Element && target.closest("button, a, input, textarea")) return;
+    if (tail || phone || typing || historyOpen) return;
+    if (!term?.element || term.options.disableStdin || !pressTypes(event, term.element)) return;
     // Else the press moves focus to the body right after the screen takes it.
     event.preventDefault();
     term.focus();
