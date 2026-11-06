@@ -41,6 +41,7 @@ ed25519-dalek = "3"
 getrandom = "0.4"
 jiff = { version = "0.2.38", features = ["serde"] }
 notify = "8"
+qrcode = { version = "0.14", default-features = false }
 ring = "0.17"
 rusqlite = { version = "0.40", features = ["bundled", "serde_json"] }
 rusqlite_migration = "2.6"

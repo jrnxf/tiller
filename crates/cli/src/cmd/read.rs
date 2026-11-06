@@ -2,7 +2,7 @@
 //! the intake statistics (`protocol.md` sections 2.5, 6.4 and 8 to 9). None
 //! of them writes.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::time::Duration;
 
 use clap::Args;
@@ -162,14 +162,18 @@ pub fn board(app: &App, args: BoardArgs) -> Done {
 }
 
 /// `tiller board --login`: a one-time link that signs this browser in as the
-/// owner (`protocol.md` 7.1). It needs the running daemon, whose port it
-/// names; a used link stops working, so each call mints a new one.
+/// owner (`protocol.md` 7.1). It needs the running daemon, whose port and
+/// `--allow-host` names it reads from `daemon.json`; the one token is printed
+/// for loopback and for each allowed host, works once at any of them and
+/// expires after `LOGIN_MINUTES`, so each call mints a new one. On a terminal
+/// each allowed host's link is also drawn as a QR code on stderr, for a
+/// phone to scan; stdout stays the response alone.
 fn login(app: &App) -> Done {
     app.require_owner("tiller board --login")?;
     let running = tiller_agents::land::DaemonLock::held(&app.home)
         .then(|| tiller_daemon::running(&app.home))
         .flatten();
-    let Some((_, port)) = running else {
+    let Some(running) = running else {
         return Err(Failure::unavailable(
             "tiller board --login mints the owner cookie link, and that needs the daemon, which is not running",
         )
@@ -177,10 +181,42 @@ fn login(app: &App) -> Done {
     };
     let token = tiller_daemon::auth::mint_login(&app.home, tiller_core::Timestamp::now())
         .map_err(|error| Failure::from(tiller_core::Error::Internal(error.to_string())))?;
+    let allowed: Vec<String> = running
+        .allowed_hosts
+        .iter()
+        .map(|host| format!("https://{host}/login/{token}"))
+        .collect();
+    if std::io::stderr().is_terminal() {
+        let mut stderr = std::io::stderr().lock();
+        for url in &allowed {
+            // A failed write to the terminal loses only the picture.
+            let _ = write!(stderr, "{url}\n{}\n", qr(url));
+        }
+    }
     Ok(Outcome::read(json!({
-        "url": format!("http://127.0.0.1:{port}/login/{token}"),
+        "url": format!("http://127.0.0.1:{}/login/{token}", running.port),
+        "allowed_host_urls": allowed,
         "expires_in_minutes": tiller_daemon::auth::LOGIN_MINUTES,
     })))
+}
+
+/// `text` as a QR code drawn in half blocks, black on white with its quiet
+/// zone whatever the terminal's colors, so a phone camera reads it.
+fn qr(text: &str) -> String {
+    use qrcode::render::unicode::Dense1x2;
+    let Ok(code) = qrcode::QrCode::new(text.as_bytes()) else {
+        // Only text longer than any QR code can hold fails, never a link.
+        return String::new();
+    };
+    let drawn = code
+        .render::<Dense1x2>()
+        .dark_color(Dense1x2::Dark)
+        .light_color(Dense1x2::Light)
+        .build();
+    drawn
+        .lines()
+        .map(|line| format!("\x1b[30;107m{line}\x1b[0m\n"))
+        .collect()
 }
 
 // -- agents -----------------------------------------------------------------
@@ -708,4 +744,29 @@ fn is_false_block(store: &Store, stop: &Observation) -> Result<bool, Failure> {
 pub fn intake(app: &App, args: IntakeStatsArgs) -> Done {
     let store = app.read()?;
     Ok(Outcome::read(intake_stats(&store, args.days)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_qr_code_is_black_on_white_rows_of_one_width() {
+        let drawn = qr("https://tiller.example.com/login/0123456789abcdef");
+        let rows: Vec<&str> = drawn.lines().collect();
+        assert!(rows.len() > 10, "{drawn}");
+        let widths: Vec<usize> = rows
+            .iter()
+            .map(|row| {
+                let inner = row
+                    .strip_prefix("\x1b[30;107m")
+                    .and_then(|row| row.strip_suffix("\x1b[0m"))
+                    .unwrap_or_else(|| panic!("an uncolored row: {row:?}"));
+                inner.chars().count()
+            })
+            .collect();
+        assert!(widths.iter().all(|width| *width == widths[0]), "{widths:?}");
+        // Half blocks pack two module rows a line, quiet zone included.
+        assert!(widths[0] >= rows.len() * 2 - 1, "{widths:?} {}", rows.len());
+    }
 }

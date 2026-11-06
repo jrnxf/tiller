@@ -28,9 +28,11 @@ pub struct Args {
     /// Port to listen on, 0 picks a free one. The daemon only binds localhost.
     #[arg(long, default_value_t = tiller_daemon::PORT)]
     port: u16,
-    /// Also serve reads to requests with this `Host` header, such as a
-    /// reverse proxy's name; repeatable. Mutations stay on 127.0.0.1.
-    #[arg(long = "allow-host", value_name = "HOST")]
+    /// Also serve the board to requests with exactly this `Host` header, the
+    /// name of a reverse proxy that serves it over https; repeatable. The
+    /// login link redeems there, and mutations come only from its https
+    /// origin.
+    #[arg(long = "allow-host", value_name = "HOST", value_parser = tiller_daemon::allowed_host)]
     allow_hosts: Vec<String>,
 }
 

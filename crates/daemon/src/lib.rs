@@ -16,4 +16,4 @@ pub mod sse;
 pub mod views;
 pub mod workers;
 
-pub use server::{Config, DaemonError, Ended, PORT, run, running};
+pub use server::{Config, DaemonError, Ended, PORT, Running, allowed_host, run, running};

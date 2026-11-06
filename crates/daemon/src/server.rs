@@ -58,6 +58,8 @@ pub enum DaemonError {
     Serve(std::io::Error),
     #[error(transparent)]
     State(#[from] tiller_core::Error),
+    #[error("an allowed host is a host name such as tiller.example.com, not {0:?}")]
+    AllowedHost(String),
 }
 
 /// Everything `run` needs.
@@ -65,7 +67,7 @@ pub struct Config {
     pub home: PathBuf,
     /// 0 picks a free port.
     pub port: u16,
-    /// Extra `Host` values served reads (`Inner::allowed_hosts`).
+    /// Extra `Host` values the board answers on (`Inner::allowed_hosts`).
     pub allowed_hosts: Vec<String>,
     pub herdr: Cli,
     /// The terminal app "Open in herdr" brings to the front
@@ -117,19 +119,43 @@ fn fail(slot: &FatalSlot, stopping: &watch::Sender<bool>, fatal: Fatal) {
     let _ = stopping.send(true);
 }
 
-/// `<home>/daemon.json`: the running daemon's pid and port, for `tiller
-/// board --login` and for a second instance to name.
+/// `<home>/daemon.json`: the running daemon's pid, port and allowed hosts,
+/// for `tiller board --login` and for a second instance to name.
 fn info_path(home: &Path) -> PathBuf {
     home.join("daemon.json")
 }
 
-/// The running daemon's `(pid, port)`, as it recorded them.
-pub fn running(home: &Path) -> Option<(u32, u16)> {
+/// The running daemon as it recorded itself in `daemon.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Running {
+    pub pid: u32,
+    pub port: u16,
+    /// Its `--allow-host` names, lowercase.
+    pub allowed_hosts: Vec<String>,
+}
+
+/// The running daemon, as it recorded itself.
+pub fn running(home: &Path) -> Option<Running> {
     let text = std::fs::read_to_string(info_path(home)).ok()?;
     let info: Value = serde_json::from_str(&text).ok()?;
     let pid = u32::try_from(info.get("pid")?.as_u64()?).ok()?;
     let port = u16::try_from(info.get("port")?.as_u64()?).ok()?;
-    Some((pid, port))
+    // A daemon from before allowed hosts were recorded has none here.
+    let allowed_hosts = info
+        .get("allowed_hosts")
+        .and_then(Value::as_array)
+        .map(|hosts| {
+            hosts
+                .iter()
+                .filter_map(|host| host.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Running {
+        pid,
+        port,
+        allowed_hosts,
+    })
 }
 
 fn private_dir(path: &Path) -> Result<(), DaemonError> {
@@ -144,13 +170,18 @@ fn private_dir(path: &Path) -> Result<(), DaemonError> {
         })
 }
 
-pub fn run(config: Config) -> Result<Ended, DaemonError> {
+pub fn run(mut config: Config) -> Result<Ended, DaemonError> {
+    config.allowed_hosts = config
+        .allowed_hosts
+        .iter()
+        .map(|host| allowed_host(host))
+        .collect::<Result<_, _>>()?;
     private_dir(&config.home)?;
     let lock = match DaemonLock::acquire(&config.home) {
         Ok(lock) => lock,
         Err(LandError::Held(_)) => {
             return Ok(Ended::AlreadyRunning {
-                pid: running(&config.home).map(|(pid, _)| pid),
+                pid: running(&config.home).map(|running| running.pid),
             });
         }
         Err(error) => return Err(DaemonError::Lock(error)),
@@ -161,6 +192,53 @@ pub fn run(config: Config) -> Result<Ended, DaemonError> {
         .build()
         .map_err(DaemonError::Runtime)?;
     runtime.block_on(serve(config, Arc::new(lock)))
+}
+
+/// An allowed host as the board matches it: the `Host` header a browser
+/// sends for that https origin, lowercase. It is a name, an IPv4 address or
+/// a bracketed IPv6 address, with an optional port; `:443` is dropped,
+/// since a browser leaves the https default port out of `Host` and
+/// `Origin`. No scheme, path or wildcard: matching stays exact.
+pub fn allowed_host(raw: &str) -> Result<String, DaemonError> {
+    let refused = || DaemonError::AllowedHost(raw.to_owned());
+    let host = raw.to_ascii_lowercase();
+    let (name, port) = match host.strip_prefix('[') {
+        Some(rest) => {
+            let (address, port) = rest.split_once(']').ok_or_else(refused)?;
+            let address_ok = !address.is_empty()
+                && address
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() || matches!(c, ':' | '.'));
+            if !address_ok {
+                return Err(refused());
+            }
+            (&host[..address.len() + 2], port)
+        }
+        None => {
+            let end = host.find(':').unwrap_or(host.len());
+            let name = &host[..end];
+            let name_ok = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'));
+            if !name_ok {
+                return Err(refused());
+            }
+            (name, &host[end..])
+        }
+    };
+    if port.is_empty() {
+        return Ok(name.to_owned());
+    }
+    let digits = port.strip_prefix(':').ok_or_else(refused)?;
+    if !digits.chars().all(|c| c.is_ascii_digit()) {
+        return Err(refused());
+    }
+    match digits.parse::<u16>() {
+        Ok(443) => Ok(name.to_owned()),
+        Ok(number) if number > 0 => Ok(format!("{name}:{number}")),
+        _ => Err(refused()),
+    }
 }
 
 /// Lanes a self-initialized host gets; `tiller host edit` changes it.
@@ -216,7 +294,12 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         .map_err(|source| DaemonError::Bind { addr, source })?;
     let bound = listener.local_addr().map_err(DaemonError::Serve)?;
     let started_at = Timestamp::now();
-    let info = json!({"pid": std::process::id(), "port": bound.port(), "started_at": started_at.to_string()});
+    let info = json!({
+        "pid": std::process::id(),
+        "port": bound.port(),
+        "allowed_hosts": config.allowed_hosts,
+        "started_at": started_at.to_string(),
+    });
     std::fs::write(info_path(&config.home), info.to_string()).map_err(|source| {
         DaemonError::Home {
             path: info_path(&config.home),
@@ -296,12 +379,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
     let state = AppState::new(Inner {
         home: config.home.clone(),
         port: bound.port(),
-        allowed_hosts: config
-            .allowed_hosts
-            .iter()
-            .map(|host| host.trim().to_ascii_lowercase())
-            .filter(|host| !host.is_empty())
-            .collect(),
+        allowed_hosts: config.allowed_hosts,
         assets: config.assets,
         newest,
         stop: stop.clone(),
@@ -475,6 +553,45 @@ fn signal() -> impl std::future::Future<Output = ()> {
         tokio::select! {
             _ = term.recv() => {}
             _ = int.recv() => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::allowed_host;
+
+    #[test]
+    fn an_allowed_host_is_a_plain_name_never_a_pattern_or_url() {
+        for (raw, host) in [
+            ("tiller.example.com", "tiller.example.com"),
+            ("Tiller.Example.COM", "tiller.example.com"),
+            ("tiller.example.com:8443", "tiller.example.com:8443"),
+            ("tiller.example.com:443", "tiller.example.com"),
+            ("192.0.2.4", "192.0.2.4"),
+            ("[2001:DB8::1]", "[2001:db8::1]"),
+            ("[2001:db8::1]:443", "[2001:db8::1]"),
+        ] {
+            assert_eq!(allowed_host(raw).unwrap(), host, "{raw}");
+        }
+        for raw in [
+            "",
+            " ",
+            "*.example.com",
+            "https://tiller.example.com",
+            "tiller.example.com/",
+            "a b",
+            "tiller.example.com:",
+            "tiller.example.com:0",
+            "tiller.example.com:65536",
+            "tiller.example.com:+80",
+            "tiller.example.com:80:80",
+            "2001:db8::1",
+            "[]",
+            "[2001:db8::1",
+            "[2001:db8::1]8443",
+        ] {
+            assert!(allowed_host(raw).is_err(), "{raw:?}");
         }
     }
 }

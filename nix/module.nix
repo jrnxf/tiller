@@ -29,7 +29,11 @@ let
     "daemon"
     "--port"
     (toString cfg.daemon.port)
-  ];
+  ]
+  ++ lib.concatMap (host: [
+    "--allow-host"
+    host
+  ]) cfg.daemon.allowHosts;
   environment = {
     # herdr, git, gh and quota-axi come from the profile, extraPath, the
     # nix-darwin and NixOS system profiles, Homebrew (macOS) or the system.
@@ -82,6 +86,23 @@ in
         type = lib.types.port;
         default = 7421;
         description = "The board's port. The daemon binds 127.0.0.1 only.";
+      };
+      allowHosts = lib.mkOption {
+        # A Host value: a name, an IPv4 or a bracketed IPv6 address, and an
+        # optional port. The daemon checks the port range.
+        type = lib.types.listOf (
+          lib.types.strMatching "([[][0-9A-Fa-f:.]+[]]|[A-Za-z0-9.-]+)(:[0-9]{1,5})?"
+        );
+        default = [ ];
+        example = [ "tiller.example.com" ];
+        description = ''
+          Host names a reverse proxy serves the board at over https, each
+          passed as `--allow-host`. The board answers there in full: the
+          `tiller board --login` link redeems at each name (and is also
+          printed for it, with a QR code), and mutations are taken only from
+          its `https://` origin with the owner cookie. Exact names only, no
+          wildcards; the daemon still binds 127.0.0.1 alone.
+        '';
       };
       extraPath = lib.mkOption {
         type = lib.types.listOf lib.types.str;

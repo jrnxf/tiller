@@ -200,7 +200,7 @@
               let
                 stubPackage = name: pkgs.writeText name name;
                 serviceFor =
-                  isDarwin: package:
+                  isDarwin: package: daemon:
                   let
                     config =
                       (lib.evalModules {
@@ -227,7 +227,7 @@
                               home.username = "user";
                               programs.tiller = {
                                 enable = true;
-                                inherit package;
+                                inherit package daemon;
                               };
                             };
                           }
@@ -242,7 +242,7 @@
                 pathFor =
                   isDarwin:
                   let
-                    service = serviceFor isDarwin (stubPackage "tiller-a");
+                    service = serviceFor isDarwin (stubPackage "tiller-a") { };
                   in
                   if isDarwin then
                     service.config.EnvironmentVariables.PATH
@@ -253,10 +253,27 @@
                       )
                     );
                 hasDir = isDarwin: dir: builtins.elem dir (lib.splitString ":" (pathFor isDarwin));
+                # The arguments after `--port <n>`, for both service managers.
+                allowHostArgs =
+                  isDarwin:
+                  let
+                    service = serviceFor isDarwin (stubPackage "tiller-a") {
+                      allowHosts = [
+                        "tiller.example.com"
+                        "board.example.com"
+                      ];
+                    };
+                  in
+                  if isDarwin then
+                    lib.drop 4 service.config.ProgramArguments
+                  else
+                    map (word: lib.removePrefix "'" (lib.removeSuffix "'" word)) (
+                      lib.drop 4 (lib.splitString " " service.Service.ExecStart)
+                    );
                 follows =
                   isDarwin:
-                  builtins.toJSON (serviceFor isDarwin (stubPackage "tiller-a"))
-                  != builtins.toJSON (serviceFor isDarwin (stubPackage "tiller-b"));
+                  builtins.toJSON (serviceFor isDarwin (stubPackage "tiller-a") { })
+                  != builtins.toJSON (serviceFor isDarwin (stubPackage "tiller-b") { });
               in
               assert lib.assertMsg (follows true)
                 "nix/module.nix: the launchd agent does not change with the package, so a rebuild leaves the old daemon running";
@@ -272,6 +289,15 @@
               assert lib.assertMsg (
                 hasDir true "/etc/profiles/per-user/user/bin" && hasDir false "/etc/profiles/per-user/user/bin"
               ) "nix/module.nix: a service PATH lacks /etc/profiles/per-user/<user>/bin";
+              assert lib.assertMsg (
+                allowHostArgs true == [
+                  "--allow-host"
+                  "tiller.example.com"
+                  "--allow-host"
+                  "board.example.com"
+                ]
+                && allowHostArgs false == allowHostArgs true
+              ) "nix/module.nix: daemon.allowHosts does not reach the daemon as --allow-host arguments";
               pkgs.runCommand "tiller-module-restarts-daemon" { } "touch $out";
           };
 

@@ -3,7 +3,7 @@
 //! the `tiller_owner` cookie it sets.
 //!
 //! Only SHA-256 hashes are stored, under `~/.tiller`, which every fleet role
-//! is denied. `board-login` holds pending login tokens (ten minutes each),
+//! is denied. `board-login` holds pending login tokens (one minute each),
 //! `board-owner` the minted cookies (30 days each). Each line is
 //! `<hex sha256> <expiry RFC 3339>`.
 
@@ -17,8 +17,9 @@ use tiller_core::Timestamp;
 pub const COOKIE: &str = "tiller_owner";
 /// How long a cookie lives: 30 days (CP2, C15).
 pub const COOKIE_SECONDS: i64 = 2_592_000;
-/// How long a login link stays usable.
-pub const LOGIN_MINUTES: i64 = 10;
+/// How long a login link stays usable: one minute, since it may be shown as
+/// a QR code on a screen others can see.
+pub const LOGIN_MINUTES: i64 = 1;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
@@ -160,9 +161,11 @@ pub fn is_owner(home: &Path, cookie: &str, now: Timestamp) -> bool {
         .any(|(hash, _)| constant_eq(hash, &wanted))
 }
 
-/// The `Set-Cookie` value for a fresh cookie.
-pub fn set_cookie(value: &str) -> String {
-    format!("{COOKIE}={value}; HttpOnly; SameSite=Strict; Path=/; Max-Age={COOKIE_SECONDS}")
+/// The `Set-Cookie` value for a fresh cookie. `secure` marks it `Secure`,
+/// for a board reached over https through a proxy.
+pub fn set_cookie(value: &str, secure: bool) -> String {
+    let secure = if secure { "; Secure" } else { "" };
+    format!("{COOKIE}={value}; HttpOnly; SameSite=Strict; Path=/; Max-Age={COOKIE_SECONDS}{secure}")
 }
 
 /// The owner cookie's value from a `Cookie` header.
@@ -243,9 +246,18 @@ mod tests {
     #[test]
     fn links_and_cookies_expire() {
         let home = tempfile::tempdir().unwrap();
+        // A link lives one minute: good at 59 seconds, gone at 60.
         let token = mint_login(home.path(), now()).unwrap();
-        let late = now().plus_minutes(LOGIN_MINUTES + 1);
-        assert_eq!(redeem_login(home.path(), &token, late).unwrap(), None);
+        assert_eq!(
+            redeem_login(home.path(), &token, later(now(), 60)).unwrap(),
+            None
+        );
+        let token = mint_login(home.path(), now()).unwrap();
+        assert!(
+            redeem_login(home.path(), &token, later(now(), 59))
+                .unwrap()
+                .is_some()
+        );
 
         let token = mint_login(home.path(), now()).unwrap();
         let cookie = redeem_login(home.path(), &token, now()).unwrap().unwrap();
@@ -259,6 +271,13 @@ mod tests {
             &cookie,
             later(now(), COOKIE_SECONDS)
         ));
+    }
+
+    #[test]
+    fn the_cookie_is_secure_only_when_asked() {
+        assert!(!set_cookie("abc", false).contains("Secure"));
+        assert!(set_cookie("abc", true).ends_with("; Secure"));
+        assert!(set_cookie("abc", true).contains("HttpOnly; SameSite=Strict; Path=/"));
     }
 
     #[test]

@@ -4,8 +4,9 @@
 //!
 //! Every request passes the `Host` check first (421 otherwise, against DNS
 //! rebinding). Mutations also need the owner cookie, a JSON body,
-//! `Sec-Fetch-Site: same-origin` and the daemon's own `Origin`; no CORS
-//! header is ever sent.
+//! `Sec-Fetch-Site: same-origin` and the board's own `Origin` (`http://` on
+//! loopback, `https://` at an `--allow-host` name); no CORS header is ever
+//! sent.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -59,8 +60,8 @@ pub struct Inner {
     pub home: PathBuf,
     /// The port the daemon listens on, for the `Host` and `Origin` checks.
     pub port: u16,
-    /// Extra `Host` values served reads, such as a reverse proxy's name
-    /// (`tiller daemon --allow-host`). Lowercase.
+    /// Extra `Host` values the board answers on, such as a TLS-terminating
+    /// reverse proxy's name (`tiller daemon --allow-host`). Lowercase.
     pub allowed_hosts: Vec<String>,
     pub assets: Assets,
     /// The newest `seq`, published by the change feed.
@@ -396,13 +397,34 @@ fn loopback_hosts(port: u16) -> [String; 2] {
     [format!("127.0.0.1:{port}"), format!("localhost:{port}")]
 }
 
+/// The `--allow-host` entry `host` matches, if any.
+fn allowed_host<'a>(state: &'a AppState, host: &str) -> Option<&'a str> {
+    state
+        .0
+        .allowed_hosts
+        .iter()
+        .find(|allowed| allowed.eq_ignore_ascii_case(host))
+        .map(String::as_str)
+}
+
+/// The origin the board has at `host`: `http://` on loopback, `https://` at
+/// an allowed host, which a TLS-terminating proxy fronts. None for any other.
+fn board_origin(state: &AppState, host: &str) -> Option<String> {
+    if loopback_hosts(state.0.port).iter().any(|own| own == host) {
+        Some(format!("http://{host}"))
+    } else {
+        allowed_host(state, host).map(|allowed| format!("https://{allowed}"))
+    }
+}
+
 /// 421 unless `Host` is exactly this daemon's loopback address, or one the
 /// owner allowed with `--allow-host`.
 ///
 /// A page opened on `localhost` is sent to `127.0.0.1`, the host the login
 /// link names: the owner cookie belongs to one host, so a board on the other
 /// could read but never write. API calls are answered on either. An allowed
-/// host is served reads only: `guard` refuses its mutations.
+/// host gets the whole board, its login link included; `guard` takes its
+/// mutations only from its `https://` origin.
 async fn host_check(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let [own, alias] = loopback_hosts(state.0.port);
     let host = request
@@ -417,13 +439,9 @@ async fn host_check(State(state): State<AppState>, request: Request, next: Next)
             .path_and_query()
             .map_or("/", |path| path.as_str());
         Redirect::permanent(&format!("http://{own}{path}")).into_response()
-    } else if host.is_some_and(|host| {
-        host == own
-            || host == alias
-            // The login link mints the owner cookie, so it stays on loopback.
-            || (!request.uri().path().starts_with("/login/")
-                && state.0.allowed_hosts.contains(&host.to_ascii_lowercase()))
-    }) {
+    } else if host
+        .is_some_and(|host| host == own || host == alias || allowed_host(&state, host).is_some())
+    {
         next.run(request).await
     } else {
         ApiError::new(
@@ -455,15 +473,15 @@ pub(crate) fn guard(state: &AppState, headers: &HeaderMap) -> Result<(), ApiErro
         ));
     }
     let host = text(header::HOST).unwrap_or_default();
-    if !loopback_hosts(state.0.port).iter().any(|own| own == host) {
+    let Some(origin) = board_origin(state, host) else {
         return Err(ApiError::forbidden(
-            "a mutation must come from the board on 127.0.0.1",
+            "a mutation must come from the board on 127.0.0.1 or an --allow-host name",
         ));
-    }
-    if text(header::ORIGIN) != Some(format!("http://{host}").as_str()) {
-        return Err(ApiError::forbidden(
-            "a mutation must come from the board's own origin",
-        ));
+    };
+    if text(header::ORIGIN) != Some(origin.as_str()) {
+        return Err(ApiError::forbidden(format!(
+            "a mutation must come from the board's own origin, {origin}"
+        )));
     }
     let owner = text(header::COOKIE)
         .and_then(auth::cookie_value)
@@ -2688,14 +2706,25 @@ async fn focus(
 // -- login and the app shell --------------------------------------------------------
 
 /// The one-time login link: sets the owner cookie and goes to the board.
-async fn login(State(state): State<AppState>, Path(token): Path<String>) -> Response {
+/// At an allowed host the cookie is `Secure`: that host is reached over https
+/// through a proxy (its mutations come only from its `https://` origin), so
+/// the daemon need not trust a forwarded header to know it.
+async fn login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(token): Path<String>,
+) -> Response {
+    let secure = headers
+        .get(header::HOST)
+        .and_then(|host| host.to_str().ok())
+        .is_some_and(|host| allowed_host(&state, host).is_some());
     let home = state.0.home.clone();
     let redeemed =
         tokio::task::spawn_blocking(move || auth::redeem_login(&home, &token, Timestamp::now()))
             .await;
     match redeemed {
         Ok(Ok(Some(cookie))) => (
-            [(header::SET_COOKIE, auth::set_cookie(&cookie))],
+            [(header::SET_COOKIE, auth::set_cookie(&cookie, secure))],
             Redirect::to("/"),
         )
             .into_response(),
@@ -2766,7 +2795,7 @@ async fn app_shell(
 /// route above and the SSE message schemas (`protocol.md` 7.1).
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    info(title = "Tiller board API", version = "1", description = "The daemon's board API (docs/spec/protocol.md section 7). Every path answers only on 127.0.0.1 or localhost; mutations need the owner cookie."),
+    info(title = "Tiller board API", version = "1", description = "The daemon's board API (docs/spec/protocol.md section 7). Every path answers only on 127.0.0.1, localhost or an --allow-host name; mutations need the owner cookie and the board's own origin."),
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
@@ -3257,7 +3286,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn allowed_host_is_served_reads_only() {
+    async fn an_allowed_host_takes_writes_only_from_its_https_origin() {
         let fleet = Fleet::new();
         let app = app(fleet.dir.path(), Assets::of::<Fixture>());
         for host in ["board.example.com", "Board.Example.com"] {
@@ -3271,12 +3300,12 @@ pub(crate) mod tests {
             }
         }
         // The allow-list names exact hosts: no suffix or other port matches,
-        // and the login link, which mints the owner cookie, stays on loopback.
+        // not even for the login link.
         for (host, path) in [
             ("evil.board.example.com", "/"),
             ("board.example.com:7421", "/"),
+            ("board.example.com.evil.example", "/login/abc"),
             ("", "/"),
-            ("board.example.com", "/login/abc"),
         ] {
             let request = Request::get(path)
                 .header(header::HOST, host)
@@ -3289,20 +3318,128 @@ pub(crate) mod tests {
                 "{host} {path}"
             );
         }
-        // A mutation through it is refused even with the owner's cookie.
-        let before = cards(&fleet);
+
         let cookie = owner_cookie(fleet.dir.path());
-        let refused = send(
-            &app,
-            create(&[
-                ("host", "board.example.com"),
-                ("origin", "http://board.example.com"),
-                ("cookie", &cookie),
-            ]),
-        )
-        .await;
-        assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+        let at_host = |origin: &'static str| [("host", "board.example.com"), ("origin", origin)];
+        // Anything but the board's own https origin is refused, cookie or not.
+        let before = cards(&fleet);
+        let refusals: [(&str, Vec<(&str, &str)>); 8] = [
+            ("plain http", at_host("http://board.example.com").to_vec()),
+            ("another site", at_host("https://evil.example.com").to_vec()),
+            (
+                "a longer name",
+                at_host("https://board.example.com.evil.example").to_vec(),
+            ),
+            (
+                "another port",
+                at_host("https://board.example.com:8443").to_vec(),
+            ),
+            (
+                "a null origin",
+                vec![("host", "board.example.com"), ("origin", "null")],
+            ),
+            (
+                "a cross-site fetch",
+                vec![
+                    ("host", "board.example.com"),
+                    ("origin", "https://board.example.com"),
+                    ("sec-fetch-site", "same-site"),
+                ],
+            ),
+            // Loopback keeps its http origin.
+            (
+                "https on loopback",
+                vec![("origin", "https://127.0.0.1:7421")],
+            ),
+            ("a forged cookie", vec![("cookie", "tiller_owner=forged")]),
+        ];
+        for (case, headers) in &refusals {
+            let mut headers = headers.clone();
+            if !headers.iter().any(|(name, _)| *name == "cookie") {
+                headers.push(("cookie", &cookie));
+            }
+            let refused = send(&app, create(&headers)).await;
+            assert_eq!(
+                refused.status,
+                StatusCode::FORBIDDEN,
+                "{case}: {}",
+                refused.body
+            );
+        }
+        let unsigned = send(&app, create(&at_host("https://board.example.com"))).await;
+        assert_eq!(unsigned.status, StatusCode::FORBIDDEN, "{}", unsigned.body);
+        assert!(
+            unsigned.body.contains("tiller board --login"),
+            "{}",
+            unsigned.body
+        );
+        // An unknown host never reaches the guard.
+        let mut stranger = at_host("https://evil.example.com").to_vec();
+        stranger[0].1 = "evil.example.com";
+        stranger.push(("cookie", &cookie));
+        let misdirected = send(&app, create(&stranger)).await;
+        assert_eq!(misdirected.status, StatusCode::MISDIRECTED_REQUEST);
         assert_eq!(cards(&fleet), before);
+
+        // The owner's own https origin writes, with the same cookie check.
+        let mut owner = at_host("https://board.example.com").to_vec();
+        owner.push(("cookie", &cookie));
+        let created = send(&app, create(&owner)).await;
+        assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+        assert_eq!(cards(&fleet), before + 1);
+    }
+
+    /// `GET /login/<token>` at `host`.
+    async fn redeem(app: &Router, host: &str, token: &str) -> Answer {
+        let request = Request::get(format!("/login/{token}"))
+            .header(header::HOST, host)
+            .body(Body::empty())
+            .unwrap();
+        send(app, request).await
+    }
+
+    #[tokio::test]
+    async fn the_login_link_redeems_once_on_loopback_or_an_allowed_host() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let app = app(home, Assets::of::<Fixture>());
+        let cookie_of = |answer: &Answer| {
+            answer.headers[header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+
+        // At an allowed host, reached over https, the cookie is Secure.
+        let token = auth::mint_login(home, Timestamp::now()).unwrap();
+        let signed = redeem(&app, "board.example.com", &token).await;
+        assert_eq!(signed.status, StatusCode::SEE_OTHER, "{}", signed.body);
+        assert_eq!(signed.headers[header::LOCATION], "/");
+        let set = cookie_of(&signed);
+        assert!(set.ends_with("; Secure"), "{set}");
+        let value = auth::cookie_value(set.split(';').next().unwrap()).unwrap();
+        assert!(auth::is_owner(home, value, Timestamp::now()));
+        // Once: not again there, nor on loopback.
+        for host in ["board.example.com", HOST] {
+            let again = redeem(&app, host, &token).await;
+            assert_eq!(again.status, StatusCode::FORBIDDEN, "{host}");
+            assert!(again.headers.get(header::SET_COOKIE).is_none(), "{host}");
+        }
+
+        // On loopback, plain http, so not Secure.
+        let token = auth::mint_login(home, Timestamp::now()).unwrap();
+        let signed = redeem(&app, HOST, &token).await;
+        assert_eq!(signed.status, StatusCode::SEE_OTHER, "{}", signed.body);
+        assert!(!cookie_of(&signed).contains("Secure"));
+
+        // A link past its minute is refused everywhere.
+        let stale =
+            auth::mint_login(home, Timestamp::now().plus_minutes(-auth::LOGIN_MINUTES)).unwrap();
+        for host in ["board.example.com", HOST] {
+            let late = redeem(&app, host, &stale).await;
+            assert_eq!(late.status, StatusCode::FORBIDDEN, "{host}");
+            assert!(late.headers.get(header::SET_COOKIE).is_none(), "{host}");
+        }
     }
 
     #[tokio::test]
@@ -4324,7 +4461,7 @@ esac"#,
     }
 
     #[tokio::test]
-    async fn the_terminal_mirror_refuses_all_but_the_owner_on_loopback() {
+    async fn the_terminal_mirror_refuses_all_but_the_owner() {
         let mut fleet = Fleet::new();
         let session = fleet.worker("w2:p1");
         let scratch = tempfile::tempdir().unwrap();
@@ -4351,9 +4488,9 @@ esac"#,
         let refusals: [(&str, Vec<(&str, &str)>); 4] = [
             ("no owner cookie", vec![]),
             ("a forged cookie", vec![("cookie", "tiller_owner=forged")]),
-            // An --allow-host name is served reads only, even with the cookie.
+            // An --allow-host name takes the owner only from its https origin.
             (
-                "an allow-host name",
+                "an allow-host name over http",
                 vec![
                     cookie_header,
                     ("host", "board.example.com"),
@@ -4444,6 +4581,25 @@ esac"#,
             calls.lines().last(),
             Some("pane read w2:p1 --source recent --lines 1000 --format ansi")
         );
+
+        // At an allowed host, the owner's keys come from its https origin.
+        let remote = send(
+            &app,
+            mutation(
+                "POST",
+                &input,
+                json!({"keys": ["enter"]}),
+                &[
+                    cookie_header,
+                    ("host", "board.example.com"),
+                    ("origin", "https://board.example.com"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(remote.status, StatusCode::OK, "{}", remote.body);
+        let calls = std::fs::read_to_string(dir.join("calls")).unwrap();
+        assert_eq!(calls.lines().last(), Some("pane send-keys w2:p1 enter"));
     }
 
     /// Puts `session` on a permission prompt for `tool`, as its hook does.

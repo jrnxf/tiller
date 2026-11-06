@@ -26,8 +26,9 @@ struct Daemon {
     port: u16,
 }
 
-fn spawn(world: &World) -> Child {
+fn spawn(world: &World, args: &[&str]) -> Child {
     daemon_command(world)
+        .args(args)
         .env("TILLER_HERDR", "/nonexistent/herdr")
         .spawn()
         .unwrap()
@@ -64,7 +65,12 @@ fn first_line(child: &mut Child) -> Option<String> {
 }
 
 fn start(world: &World) -> Daemon {
-    let mut child = spawn(world);
+    start_with(world, &[])
+}
+
+/// `start` with extra `tiller daemon` arguments.
+fn start_with(world: &World, args: &[&str]) -> Daemon {
+    let mut child = spawn(world, args);
     let line = first_line(&mut child).expect("the daemon exited before listening");
     let port = line
         .trim()
@@ -103,19 +109,24 @@ fn terminate(daemon: &mut Daemon) -> ExitStatus {
     wait(&mut daemon.child)
 }
 
-/// `GET /api/v1/health` over a plain socket.
-fn health(port: u16) -> Value {
+/// A raw HTTP/1.0 request to the daemon: the response head and body.
+fn exchange(port: u16, request: &str) -> (String, String) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    write!(
-        stream,
-        "GET /api/v1/health HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n"
-    )
-    .unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
     let mut answer = String::new();
     stream.read_to_string(&mut answer).unwrap();
     let (head, body) = answer.split_once("\r\n\r\n").unwrap();
+    (head.to_owned(), body.to_owned())
+}
+
+/// `GET /api/v1/health` over a plain socket.
+fn health(port: u16) -> Value {
+    let (head, body) = exchange(
+        port,
+        &format!("GET /api/v1/health HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+    );
     assert!(head.starts_with("HTTP/1.0 200"), "{head}");
-    serde_json::from_str(body).unwrap()
+    serde_json::from_str(&body).unwrap()
 }
 
 fn info(world: &World) -> Option<Value> {
@@ -131,7 +142,7 @@ fn a_second_daemon_names_the_first_and_exits_zero() {
     assert_eq!(health(first.port)["pid"], pid);
     assert_eq!(info(&world).unwrap()["port"], u64::from(first.port));
 
-    let mut second = spawn(&world);
+    let mut second = spawn(&world, &[]);
     let line = first_line(&mut second);
     assert!(wait(&mut second).success());
     assert_eq!(
@@ -186,7 +197,7 @@ fn a_database_newer_than_the_binary_exits_three() {
         .unwrap();
     let before = std::fs::read(world.db()).unwrap();
 
-    let mut daemon = spawn(&world);
+    let mut daemon = spawn(&world, &[]);
     let status = wait(&mut daemon);
     assert_eq!(status.code(), Some(3));
     let mut stderr = String::new();
@@ -231,16 +242,11 @@ fn a_migration_under_a_running_daemon_stops_it_with_three() {
 
 /// `GET <path>` over a plain socket: the status line and the body.
 fn get(port: u16, path: &str) -> (String, String) {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    write!(
-        stream,
-        "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n"
-    )
-    .unwrap();
-    let mut answer = String::new();
-    stream.read_to_string(&mut answer).unwrap();
-    let (head, body) = answer.split_once("\r\n\r\n").unwrap();
-    (head.lines().next().unwrap().to_owned(), body.to_owned())
+    let (head, body) = exchange(
+        port,
+        &format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+    );
+    (head.lines().next().unwrap().to_owned(), body)
 }
 
 /// `POST <path>` with a JSON body, as the signed-in board sends it.
@@ -250,22 +256,19 @@ fn post_as_board(world: &World, port: u16, path: &str, body: &str) -> (String, V
     let cookie = tiller_daemon::auth::redeem_login(&world.home(), &token, now)
         .unwrap()
         .unwrap();
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    write!(
-        stream,
-        "POST {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\n\
-         Sec-Fetch-Site: same-origin\r\nCookie: {}={cookie}\r\n\
-         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-        tiller_daemon::auth::COOKIE,
-        body.len()
-    )
-    .unwrap();
-    let mut answer = String::new();
-    stream.read_to_string(&mut answer).unwrap();
-    let (head, body) = answer.split_once("\r\n\r\n").unwrap();
+    let (head, body) = exchange(
+        port,
+        &format!(
+            "POST {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\n\
+             Sec-Fetch-Site: same-origin\r\nCookie: {}={cookie}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            tiller_daemon::auth::COOKIE,
+            body.len()
+        ),
+    );
     (
         head.lines().next().unwrap().to_owned(),
-        serde_json::from_str(body).unwrap(),
+        serde_json::from_str(&body).unwrap(),
     )
 }
 
@@ -483,4 +486,80 @@ fn the_daemon_reads_only_spawn_and_needs_its_herdr() {
         .unwrap();
     assert!(stderr.contains("spawn: herdr names a command"), "{stderr}");
     assert!(info(&world).is_none());
+}
+
+/// `tiller board --login` names each `--allow-host` name with an https link;
+/// the one token signs in once at any of them, with a `Secure` cookie at the
+/// proxy's name, and that cookie writes only from the name's https origin.
+#[test]
+fn the_login_link_signs_in_once_at_an_allowed_host() {
+    let world = World::initialized();
+    // Matched as the browser sends it: lowercase, without the https port.
+    let mut daemon = start_with(&world, &["--allow-host", "Tiller.Example.com:443"]);
+    let port = daemon.port;
+    assert_eq!(
+        info(&world).unwrap()["allowed_hosts"],
+        serde_json::json!(["tiller.example.com"])
+    );
+
+    let out = world.run(&["board", "--login"]);
+    assert!(out.ok(), "{}", out.json);
+    let local = out.data()["url"].as_str().unwrap().to_owned();
+    let token = local
+        .strip_prefix(&format!("http://127.0.0.1:{port}/login/"))
+        .unwrap_or_else(|| panic!("{local}"));
+    assert_eq!(
+        out.data()["allowed_host_urls"],
+        serde_json::json!([format!("https://tiller.example.com/login/{token}")])
+    );
+    assert_eq!(out.data()["expires_in_minutes"], 1);
+
+    let login = format!("GET /login/{token} HTTP/1.0\r\nHost: tiller.example.com\r\n\r\n");
+    let (head, _) = exchange(port, &login);
+    assert!(head.starts_with("HTTP/1.0 303"), "{head}");
+    let set = head
+        .lines()
+        .find_map(|line| line.strip_prefix("set-cookie: "))
+        .unwrap_or_else(|| panic!("no cookie: {head}"));
+    assert!(set.ends_with("; Secure"), "{set}");
+    let cookie = set.split(';').next().unwrap().to_owned();
+    // The link works once, wherever it is used next.
+    let (again, _) = exchange(port, &login);
+    assert!(again.starts_with("HTTP/1.0 403"), "{again}");
+    let (local_again, _) = exchange(
+        port,
+        &format!("GET /login/{token} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n"),
+    );
+    assert!(local_again.starts_with("HTTP/1.0 403"), "{local_again}");
+
+    let ask = |origin: &str| {
+        let body = r#"{"idempotency_key":"k1","text":"From the phone"}"#;
+        exchange(
+            port,
+            &format!(
+                "POST /api/v1/projects/alpha/asks HTTP/1.0\r\nHost: tiller.example.com\r\n\
+                 Origin: {origin}\r\nSec-Fetch-Site: same-origin\r\nCookie: {cookie}\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+    };
+    let (refused, body) = ask("http://tiller.example.com");
+    assert!(refused.starts_with("HTTP/1.0 403"), "{refused} {body}");
+    let (written, body) = ask("https://tiller.example.com");
+    assert!(written.starts_with("HTTP/1.0 200"), "{written} {body}");
+
+    assert!(terminate(&mut daemon).success());
+}
+
+#[test]
+fn an_allow_host_that_is_not_a_plain_name_is_refused() {
+    let world = World::initialized();
+    let out = daemon_command(&world)
+        .args(["--allow-host", "*.example.com"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--allow-host"), "{stderr}");
 }
