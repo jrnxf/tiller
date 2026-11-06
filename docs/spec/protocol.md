@@ -501,7 +501,7 @@ Every mutation body carries `idempotency_key` (a ULID the board mints when the c
 
 | Endpoint | Mutation | Body |
 |---|---|---|
-| `POST /api/v1/cards` | `ask.record` + `ask.resolve new` + `card.create`, then `outbox.enqueue` | `project`, `kind`, `title`, `body?`, `priority?` |
+| `POST /api/v1/cards` | `ask.record` + `ask.resolve new` + `card.create`, then `outbox.enqueue`. The board sends it from a lane header's New card and from an Inbox item's follow-up | `project`, `kind`, `title`, `body?`, `priority?` |
 | `PATCH /api/v1/cards/{id}` | `card.edit` (reprioritize is an edit) | `rev`, changed fields |
 | `POST /api/v1/cards/{id}/comment` | `outbox.enqueue` (`note`) | `text` |
 | `POST /api/v1/cards/{id}/hold` / `DELETE .../hold` | `card.hold` / `hold.release` | `until`, `reason` |

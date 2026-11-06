@@ -1,4 +1,5 @@
-import type { CSSProperties } from "react";
+import { useCallback, useRef, useState } from "react";
+import type { CSSProperties, KeyboardEvent, MouseEvent } from "react";
 
 import type { AgentRow, Machine, Project } from "../../lib/api-types";
 import { agentActivity } from "./activity";
@@ -13,8 +14,9 @@ import { MiniTile, TileView } from "./tile";
 import { focusReason, isPeerRow, ownerOf, projectKey } from "../../lib/peers";
 import type { Standing } from "../../lib/peers";
 import { useHerdrFocus } from "./herdr";
+import { NewCardDialog } from "./new-card";
 import { StartOrchestratorButton } from "./orchestrator-start";
-import { ServerIcon } from "../shell/icons";
+import { PlusIcon, ServerIcon } from "../shell/icons";
 import type { LaneHealth } from "../states/degraded";
 import { LaneNote } from "../states/lane-note";
 
@@ -96,6 +98,12 @@ export function Lane({
   filterName,
 }: LaneProps) {
   const focus = useHerdrFocus();
+  const [filing, setFiling] = useState(false);
+  const newCard = useRef<HTMLButtonElement>(null);
+  const closeFiling = useCallback(() => {
+    setFiling(false);
+    newCard.current?.focus();
+  }, []);
   const key = projectKey(project);
   const off = focusReason(ownerOf(project));
   // Only this host's own projects start here: a peer's start is not forwarded.
@@ -222,12 +230,29 @@ export function Lane({
           ) : null}
         </span>
         <span className="sp" />
+        <button
+          ref={newCard}
+          type="button"
+          className="btn sm new-card"
+          aria-label="New card"
+          disabled={!standing.canAct}
+          title={standing.reason ?? `File a card in ${project.name}`}
+          onClick={(event: MouseEvent) => {
+            event.stopPropagation();
+            setFiling(true);
+          }}
+          onKeyDown={(event: KeyboardEvent) => event.stopPropagation()}
+        >
+          <PlusIcon />
+          <span>New card</span>
+        </button>
         {orchestrator ? (
           <OrchestratorMini orchestrator={orchestrator} health={health} />
         ) : startable ? (
           <StartOrchestratorButton projectId={project.id} projectName={project.name} />
         ) : null}
       </div>
+      {filing ? <NewCardDialog project={project} onClose={closeFiling} /> : null}
       {health.kind === "ok" ? null : (
         <LaneNote health={health} projectName={project.name} hostLabel={hostLabel} />
       )}

@@ -362,6 +362,29 @@ test("Start orchestrator on a lane with none posts the start and leaves the lane
   expect(within(alpha).queryByRole("button", { name: "Start orchestrator" })).toBeNull();
 });
 
+test("New card files a card for its lane's project and never folds the lane", async () => {
+  const posted = stubApi("degraded");
+  await renderApp("degraded");
+
+  const header = screen.getByTestId("lane-kiln").querySelector(".lane-h") as HTMLElement;
+  fireEvent.click(within(header).getByRole("button", { name: "New card" }));
+  const dialog = await screen.findByRole("dialog", { name: "New card in kiln" });
+  const title = within(dialog).getByLabelText("Title");
+  // The dialog sits outside the header's toggle: a space typed into it stays text.
+  fireEvent.keyDown(title, { key: " " });
+  fireEvent.change(title, { target: { value: "Fix the flaky upload" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "File card" }));
+
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]).toMatchObject({
+    path: "/api/v1/cards",
+    method: "POST",
+    body: { project: "kiln", kind: "ship", title: "Fix the flaky upload", priority: 2, body: null },
+  });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(header.getAttribute("aria-expanded")).toBe("true");
+});
+
 test("no lane offers Start orchestrator while the agents cannot be read", async () => {
   stubApi("degraded");
   const served = globalThis.fetch;

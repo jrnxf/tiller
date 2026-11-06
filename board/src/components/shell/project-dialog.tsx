@@ -85,7 +85,9 @@ export function ProjectDialog({
           } else if (event.key === "Tab") {
             // Keep focus on the dialog's own controls that can take it.
             const stops = [
-              ...(dialog.current?.querySelectorAll<HTMLElement>("input, button, a[href]") ?? []),
+              ...(dialog.current?.querySelectorAll<HTMLElement>(
+                "input, select, textarea, button, a[href]",
+              ) ?? []),
             ].filter((element) => !(element as HTMLButtonElement).disabled);
             const [first, last] = [stops[0], stops.at(-1)];
             if (!first) {

@@ -422,7 +422,7 @@
   color: var(--fg-1);
 }
 
-.padd-fields {
+.form-fields {
   display: grid;
   grid-template-columns: 96px minmax(0, 1fr);
   align-items: center;
@@ -430,40 +430,53 @@
   margin-top: 14px;
 }
 
-.padd-fields label {
+.form-fields label {
   font-size: var(--fs-mini);
   font-weight: var(--w-medium);
   color: var(--fg-2);
 }
 
-.padd-fields .note-in {
+.form-fields .note-in {
   margin-top: 0;
   height: 32px;
 }
 
-.padd-fields .note-in.mono {
+.form-fields .note-in.mono {
   font-family: var(--mono);
   font-size: var(--fs-mini);
 }
 
-.padd-fields .padd-select {
+.form-fields .form-select {
   height: 32px;
   font-size: var(--fs-small);
   justify-self: start;
   min-width: 180px;
 }
 
-.padd-fields .padd-slots {
+.form-fields .form-slots {
   width: 88px;
 }
 
+.form-fields .note-in.area {
+  height: 84px;
+}
+
+.form-fields label.at-top {
+  align-self: start;
+  padding-top: 8px;
+}
+
 @media (max-width: 480px) {
-  .padd-fields {
+  .form-fields {
     grid-template-columns: minmax(0, 1fr);
     gap: 4px;
   }
 
-  .padd-fields label:not(:first-child) {
+  .form-fields label:not(:first-child) {
     margin-top: 6px;
+  }
+
+  .form-fields label.at-top {
+    padding-top: 0;
   }
 }

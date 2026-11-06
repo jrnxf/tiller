@@ -74,13 +74,12 @@ function AddDialog({ onClose }: { onClose: () => void }) {
         checkout with <code>tiller config set checkouts.&lt;id&gt;</code> before its first builder.
       </p>
       <form
-        className="padd-form"
         onSubmit={(event) => {
           event.preventDefault();
           submit();
         }}
       >
-        <div className="padd-fields">
+        <div className="form-fields">
           <label htmlFor={`${fields}-id`}>Id</label>
           <input
             ref={first}
@@ -119,7 +118,7 @@ function AddDialog({ onClose }: { onClose: () => void }) {
           <label htmlFor={`${fields}-delivery`}>Delivery</label>
           <select
             id={`${fields}-delivery`}
-            className="ca-select padd-select"
+            className="ca-select form-select"
             value={delivery}
             disabled={action.pending}
             onChange={(event) => setDelivery(event.target.value)}
@@ -133,7 +132,7 @@ function AddDialog({ onClose }: { onClose: () => void }) {
           <label htmlFor={`${fields}-capacity`}>Builder slots</label>
           <input
             id={`${fields}-capacity`}
-            className="note-in padd-slots"
+            className="note-in form-slots"
             type="number"
             inputMode="numeric"
             min={1}

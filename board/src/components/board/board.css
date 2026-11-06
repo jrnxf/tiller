@@ -301,6 +301,30 @@
   flex: 1;
   min-width: 4px;
 }
+.lane-h .btn {
+  flex: none;
+}
+.lane-h .new-card {
+  gap: 4px;
+  padding-left: 6px;
+}
+@media (max-width: 480px) {
+  .lane-h .nm {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .lane-h .new-card {
+    width: 24px;
+    padding: 0;
+    justify-content: center;
+  }
+  .lane-h .new-card span {
+    display: none;
+  }
+}
 .lane-h .orch {
   display: flex;
   align-items: center;
