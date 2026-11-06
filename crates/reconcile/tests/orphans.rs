@@ -214,3 +214,51 @@ fn alive_pane_naming_only_its_run_names_its_session() {
     let notes = w.notes();
     assert!(notes.iter().any(|n| n.body.contains(&stop)), "{notes:?}");
 }
+
+/// R15: a run can end with work its PR has not landed yet. The agent exits
+/// first, so the pane loses its session before it closes; once the work
+/// lands, the closed pane is still found by its `run` token and the clean
+/// worktree is returned.
+#[test]
+fn worktree_clean_after_the_pane_closed_is_returned() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let run = w.run_of(&worker);
+    let path = run.worktree_path.clone().unwrap();
+    let head = "aaaa1111";
+    w.scanner.list(Some(vec![path.as_str()]));
+    w.scanner.worktree(&path, "fm/work", head, false, Some(1));
+    let t0 = now();
+    w.pass(t0);
+    w.store_mut()
+        .run_end(
+            &owner(),
+            &run.id,
+            EndRun {
+                outcome: RunOutcome::Abandoned,
+                note: None,
+            },
+        )
+        .unwrap();
+    // The agent exits: its session ends while the pane still shows a shell.
+    w.store_mut()
+        .session_end(&daemon(), &worker, "prompt_input_exit")
+        .unwrap();
+    w.herdr.set_screen("w2:p1", Screen::Shell);
+    w.pass(t0.plus_minutes(1));
+    assert_eq!(
+        w.count("SELECT count(*) FROM panes WHERE pane_id = 'w2:p1' AND session_id IS NULL"),
+        1,
+        "the pane row no longer names the ended session"
+    );
+    w.herdr.remove_pane("w2:p1");
+    let report = w.pass(t0.plus_minutes(2));
+    assert!(!report.did("returned"), "unlanded work stays: {report:?}");
+
+    // The work lands.
+    w.scanner.worktree(&path, "fm/work", head, false, Some(0));
+    let report = w.pass(t0.plus_minutes(3));
+    assert!(report.did("returned"), "{report:?}");
+    assert!(w.event_kinds().contains(&"run.cleaned".to_owned()));
+}
