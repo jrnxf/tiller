@@ -854,6 +854,10 @@ pub struct MutationResponse {
     /// absent for this host's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    /// What the owner should know about a mutation that applied, such as
+    /// why a re-added project's cards do not start at 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]

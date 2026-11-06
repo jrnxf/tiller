@@ -61,6 +61,18 @@ pub struct NewProject {
     pub deploy_timeout_minutes: Option<i64>,
 }
 
+/// Where the cards of a project added under a deleted project's id start
+/// (`state.md`, Deleting a project).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Numbering {
+    /// On from the tombstone's `next_card_seq`: a run branch of the deleted
+    /// project may still be named after one of its display ids.
+    Continue,
+    /// At 1 again: the caller looked and found no run branch of the deleted
+    /// project left in its checkout or on its remote.
+    Restart,
+}
+
 /// The owner-editable project fields; `None` leaves a field as it is.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProjectEdit {
@@ -315,6 +327,7 @@ impl Store {
                 },
                 &host_id,
                 "none",
+                Numbering::Continue,
             )?;
             let health_card = create_card(
                 tx,
@@ -428,8 +441,26 @@ impl Store {
         })
     }
 
-    /// `project.add`. Natural: the same values return the existing row.
+    /// `project.add`. Natural: the same values return the existing row. The
+    /// cards of a deleted project's id number on from its tombstone.
     pub fn project_add(&mut self, ctx: &Ctx, new: NewProject) -> Result<Applied<Project>> {
+        self.project_add_numbered(ctx, new, Numbering::Continue)
+    }
+
+    /// The `next_card_seq` where a deleted project with this id stopped, or
+    /// `None` when no project with this id was deleted.
+    pub fn deleted_card_seq(&self, project_id: &str) -> Result<Option<i64>> {
+        deleted_card_seq(self.conn(), project_id)
+    }
+
+    /// `project.add` with the numbering of a deleted project's id chosen by
+    /// the caller, which looked for that project's run branches.
+    pub fn project_add_numbered(
+        &mut self,
+        ctx: &Ctx,
+        new: NewProject,
+        numbering: Numbering,
+    ) -> Result<Applied<Project>> {
         require_owner(&ctx.actor, "project.add")?;
         ids::validate_project_id(&new.id)?;
         if new.id == FLEET_PROJECT {
@@ -447,7 +478,7 @@ impl Store {
                 }
                 return Err(Error::refused("project", &new.id, "project id is taken"));
             }
-            insert_project(tx, &new, &host_id, forge)?;
+            insert_project(tx, &new, &host_id, forge, numbering)?;
             get(tx.conn(), "project", &new.id)
         })
     }
@@ -612,25 +643,39 @@ fn project_matches(existing: &Project, new: &NewProject) -> bool {
 }
 
 /// The `next_card_seq` a new project with this id starts at: 1, or where a
-/// deleted project of the same id stopped, so display ids are never reused
-/// (state.md, invariant 9). `project.add` and import both start here.
+/// deleted project of the same id stopped, so a display id that a run branch
+/// may still carry is not minted again (state.md, invariant 9). Import and
+/// `project.add` start here unless the add's caller found no such branch.
 pub(crate) fn first_card_seq(conn: &rusqlite::Connection, project_id: &str) -> Result<i64> {
+    Ok(deleted_card_seq(conn, project_id)?.unwrap_or(1))
+}
+
+fn deleted_card_seq(conn: &rusqlite::Connection, project_id: &str) -> Result<Option<i64>> {
     Ok(conn.query_row(
-        "SELECT coalesce(max(json_extract(payload, '$.next_card_seq')), 1) FROM events
+        "SELECT max(json_extract(payload, '$.next_card_seq')) FROM events
          WHERE kind = 'project.deleted' AND entity = 'project' AND entity_id = ?1",
         [project_id],
         |row| row.get(0),
     )?)
 }
 
-fn insert_project(tx: &mut Tx<'_>, new: &NewProject, host_id: &str, forge: &str) -> Result<()> {
+fn insert_project(
+    tx: &mut Tx<'_>,
+    new: &NewProject,
+    host_id: &str,
+    forge: &str,
+    numbering: Numbering,
+) -> Result<()> {
     let capacity = new.capacity.unwrap_or(2);
     positive("capacity", capacity)?;
     let timeout = new.deploy_timeout_minutes.unwrap_or(60);
     positive("deploy timeout", timeout)?;
     let checks = new.checks.clone().unwrap_or_else(|| json!([]));
     check_plan(&checks)?;
-    let first_seq = first_card_seq(tx.conn(), &new.id)?;
+    let first_seq = match numbering {
+        Numbering::Continue => first_card_seq(tx.conn(), &new.id)?,
+        Numbering::Restart => 1,
+    };
     tx.conn().execute(
         "INSERT INTO projects (id, name, repo, remote, default_branch, delivery, checks, capacity,
                                deploy_workflow, deploy_environment, deploy_timeout_minutes,

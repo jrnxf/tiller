@@ -828,7 +828,7 @@ mod tests {
     use crate::state::asks::NewAsk;
     use crate::state::attention::NewAttention;
     use crate::state::cards::NewCard;
-    use crate::state::projects::NewProject;
+    use crate::state::projects::{NewProject, Numbering};
     use crate::state::runs::EndRun;
     use crate::state::tests::{builder_run, card, memory_store, owner};
 
@@ -1180,6 +1180,21 @@ mod tests {
             ),
             2
         );
+
+        // A caller that found none of alpha's run branches left starts it at 1.
+        assert_eq!(
+            store.deleted_card_seq("alpha").unwrap(),
+            Some(tombstone["next_card_seq"].as_i64().unwrap() + 1)
+        );
+        assert_eq!(store.deleted_card_seq("beta").unwrap(), None);
+        store
+            .project_add_numbered(&owner(), project("alpha"), Numbering::Restart)
+            .unwrap();
+        let fresh = store
+            .card_create(&owner(), None, card(CardKind::Ship, "fresh"), None)
+            .unwrap()
+            .value;
+        assert_eq!(fresh.display_id, "alpha-1");
     }
 
     /// A dependency between alpha's and beta's cards, either way, is cut with

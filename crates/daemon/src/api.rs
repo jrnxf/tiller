@@ -609,6 +609,7 @@ struct Done {
     replayed: bool,
     outbox_id: Option<String>,
     approval_id: Option<String>,
+    warning: Option<String>,
 }
 
 impl Done {
@@ -619,7 +620,13 @@ impl Done {
             replayed: applied.replayed,
             outbox_id: None,
             approval_id: None,
+            warning: None,
         })
+    }
+
+    fn with_warning(mut self, warning: Option<String>) -> Self {
+        self.warning = warning;
+        self
     }
 
     fn response(self) -> MutationResponse {
@@ -634,6 +641,7 @@ impl Done {
             },
             data: self.data,
             host: None,
+            warning: self.warning,
         }
     }
 }
@@ -1521,6 +1529,7 @@ impl Mutation {
                     replayed: applied.replayed,
                     outbox_id,
                     approval_id: None,
+                    warning: None,
                 })
             }
             Parsed::Decide(request, accept) => {
@@ -2077,10 +2086,25 @@ async fn add_project(
         deploy_environment: None,
         deploy_timeout_minutes: None,
     };
+    let home = state.0.home.clone();
+    let (new, numbering, note) = read(&state, move |store| {
+        // A config.toml that does not parse only hides the checkout: the
+        // remote is still looked at.
+        let checkout = checkout_of(&home, &new.id).ok().flatten();
+        let (numbering, note) = tiller_agents::numbering::numbering(
+            store,
+            &new,
+            checkout.as_deref().map(std::path::Path::new),
+        )?;
+        Ok((new, numbering, note))
+    })
+    .await?;
     mutate(
         &state,
         key(&request.idempotency_key)?,
-        move |store, ctx, _| Done::of(store.project_add(ctx, new)?),
+        move |store, ctx, _| {
+            Ok(Done::of(store.project_add_numbered(ctx, new, numbering)?)?.with_warning(note))
+        },
     )
     .await
 }
@@ -2487,6 +2511,7 @@ async fn terminal_input(
         },
         data: json!({"session_id": session_id, "sent": sent}),
         host: None,
+        warning: None,
     }))
 }
 
@@ -2635,6 +2660,7 @@ async fn prompt_answer(
         },
         data: json!({"session_id": session_id, "sent": {"option": option}}),
         host: None,
+        warning: None,
     }))
 }
 
@@ -2677,6 +2703,7 @@ async fn terminal_fit(
         },
         data: json!({"session_id": session_id, "fit": {"cols": cols, "rows": rows}}),
         host: None,
+        warning: None,
     }))
 }
 
@@ -2837,6 +2864,7 @@ async fn focus(
         },
         data,
         host: None,
+        warning: None,
     }))
 }
 

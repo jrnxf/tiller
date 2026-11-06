@@ -270,6 +270,7 @@ async fn write(
         },
         data,
         host: None,
+        warning: None,
     }))
 }
 

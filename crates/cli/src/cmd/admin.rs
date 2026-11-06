@@ -3,12 +3,13 @@
 //! [`super::peer`].
 
 use std::io::{BufRead, IsTerminal, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use tiller_agents::control::{self, Waits};
+use tiller_agents::numbering::numbering;
 use tiller_core::Applied;
 use tiller_core::Store;
 use tiller_core::domain::{Boundary, Delivery, HostKind, Project, Stage};
@@ -218,22 +219,33 @@ pub fn project(app: &App, cmd: ProjectCmd) -> Done {
                 .as_deref()
                 .map(|text| json_arg(text, "--checks"))
                 .transpose()?;
-            Ok(Outcome::applied(store.project_add(
-                &app.ctx(),
-                NewProject {
-                    id: args.id,
-                    name: args.name,
-                    repo: args.repo,
-                    remote: args.remote,
-                    default_branch: args.default_branch,
-                    delivery: args.delivery,
-                    checks,
-                    capacity: args.capacity,
-                    deploy_workflow: args.deploy_workflow,
-                    deploy_environment: args.deploy_environment,
-                    deploy_timeout_minutes: args.deploy_timeout_minutes,
-                },
-            )?))
+            let new = NewProject {
+                id: args.id,
+                name: args.name,
+                repo: args.repo,
+                remote: args.remote,
+                default_branch: args.default_branch,
+                delivery: args.delivery,
+                checks,
+                capacity: args.capacity,
+                deploy_workflow: args.deploy_workflow,
+                deploy_environment: args.deploy_environment,
+                deploy_timeout_minutes: args.deploy_timeout_minutes,
+            };
+            // A config.toml that does not parse only hides the checkout: the
+            // remote is still looked at.
+            let checkout = load_config(app).ok().and_then(|table| {
+                table
+                    .get("checkouts")
+                    .and_then(|checkouts| checkouts.get(&new.id))
+                    .and_then(toml::Value::as_str)
+                    .map(PathBuf::from)
+            });
+            let (numbering, note) = numbering(&store, &new, checkout.as_deref())?;
+            Ok(
+                Outcome::applied(store.project_add_numbered(&app.ctx(), new, numbering)?)
+                    .with_warning(note),
+            )
         }
         ProjectCmd::Edit(args) => {
             let checks = args

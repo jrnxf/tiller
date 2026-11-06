@@ -24,7 +24,7 @@ Every entity's primary key is a ULID: 26 characters of Crockford base32, time-or
 
 ### Display ids
 
-Cards get a display id for chat and the board: `<project>-<n>`, for example `alpha-42`. `n` is `projects.next_card_seq`, read and incremented inside the `card.create` transaction, so two concurrent creates cannot mint the same id. A display id is unique per host (`cards.display_id` is unique), never reused, and survives the card's whole life, including import and a deleted project's id being added again (section 8, Deleting a project): an imported Firstmate task keeps its original id as `legacy_id` and gets a fresh display id.
+Cards get a display id for chat and the board: `<project>-<n>`, for example `alpha-42`. `n` is `projects.next_card_seq`, read and incremented inside the `card.create` transaction, so two concurrent creates cannot mint the same id. A display id is unique per host (`cards.display_id` is unique) and survives the card's whole life, including import: an imported Firstmate task keeps its original id as `legacy_id` and gets a fresh display id. A display id is never reused while anything still names it. A deleted project's id that is added again starts at `<project>-1` only when none of the deleted project's run branches is left (section 8, Deleting a project).
 
 Project ids are short lowercase slugs, 2 to 32 characters: words of lowercase letters and digits joined by single hyphens, each word starting with a letter (`^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$`), so an id can match its repo, as in `acme-web2-staging`. The id `fleet` is reserved on every host for host-level work that belongs to no project.
 
@@ -504,7 +504,11 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 - **Work not landed.** The delete never removes a worktree, a branch or a PR. The confirmation lists the worktrees with commits not pushed or uncommitted changes and the open PRs, so nothing goes unsaid, and the owner still types the id.
 - **Preconditions.** Nothing may be in flight when the delete transaction runs: a live run, a live session (the orchestrator included) or an executing approval refuses it with the one it found. After the stops above, only an executing approval or a session that started since is left to refuse it. Any other row of another project that requires one of the project's rows (a `NOT NULL` reference across projects that is not a link) refuses it too, naming the table. `fleet` and a project another host owns are refused before any row is counted.
 - **Confirmation.** The CLI refuses without `--yes` and prints the counts it would remove, the agents it would stop and the work it leaves; on a terminal it may instead ask the owner to type the id. The board shows the same (`GET /api/v1/projects/{id}/delete`) and sends the typed id as `confirm` (`protocol.md` section 7.4).
-- **The id afterwards.** `project.add` may take the id again. Its cards number on from the tombstone's `next_card_seq`, and so do an import's cards for that id, so a display id of the deleted project is never minted again (section 2, Display ids).
+- **The id afterwards.** `project.add` may take the id again. A run branch is named after its card (`tiller/<project>-<n>-<role>`), so the add first looks for the deleted project's run branches: the local and remote-tracking branches of the configured checkout (`checkouts.<id>`) and the branches on its `origin`, or, with no checkout configured, the branches on the project's remote (`remote`, else `https://github.com/<repo>.git`).
+  - No run branch is left: the cards start at `<project>-1`.
+  - A run branch is left, or the branches cannot be listed: the cards number on from the tombstone's `next_card_seq`. The add applies and its response carries a `warning` that gives the first display id and names the branches, or the reason they could not be listed. The board's add dialog shows the warning. To start at 1, delete the branches, then delete and add the project again.
+
+  An import for that id always numbers on from the tombstone (section 2, Display ids). Test: `deletion::tests` in `tiller-core` and `numbering::tests` in `tiller-agents`.
 
 Every row in the events table names its mutation, so a timeline query answers "who changed this, under which transaction, with which preconditions".
 
@@ -562,7 +566,7 @@ Tests in T2.1 and T2.7 prove each one.
 6. Two concurrent `run.start` calls on a full host or project cannot both succeed.
 7. An `accepted` approval whose PR head differs from `head_sha` is `stale` before any execution starts.
 8. An outbox message in `acked` has a `delivered_at` or a recorded poll pickup; a `failed` answer always has a `recovery` attention item.
-9. Display ids are unique per host and never reused, including across import and across a deleted project's id being added again.
+9. Display ids are unique per host. A display id is never reused across import, nor across a deleted project's id being added again while one of its run branches is left.
 10. A mutation carrying a known idempotency key returns the stored response and writes nothing.
 11. No row in `state.db` belongs to a project another host owns: every `cards.project_id` names a project whose `owner_host_id = meta.host_id` (ADR 0003 keeps principle 1).
 12. Every event with `actor = board@<label>` carries `payload.via_peer.key_id`, which names an `act` row of `peer_keys` that was unrevoked when the event was written.

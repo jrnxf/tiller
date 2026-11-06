@@ -942,6 +942,46 @@ test("deleting a project with a working card lists the agents it stops and the w
   expect(posted[0]?.path).toBe("/api/v1/projects/alpha/delete");
 });
 
+// ---- Project add ----
+
+test("adding a project closes the dialog, or keeps it open to show the add's warning", async () => {
+  const warning =
+    "cards continue at alpha-9: the deleted project's run branches are left (tiller/alpha-8-build)";
+  const posted = stubApi("default");
+  const fixtures = globalThis.fetch;
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+    const reply = await fixtures(input, init);
+    if (String(input) !== "/api/v1/projects" || init?.method !== "POST") return reply;
+    const body = (await reply.json()) as Record<string, unknown>;
+    const id = posted.at(-1)?.body.id;
+    return new Response(JSON.stringify(id === "alpha" ? { ...body, warning } : body), {
+      status: 200,
+    });
+  });
+  await renderApp();
+
+  const add = async (id: string) => {
+    fireEvent.click(screen.getByRole("button", { name: "Add project" }));
+    const dialog = screen.getByRole("dialog", { name: "Add project" });
+    fireEvent.change(within(dialog).getByLabelText("Id"), { target: { value: id } });
+    fireEvent.change(within(dialog).getByLabelText("Name"), { target: { value: id } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add project" }));
+    await waitFor(() => expect(posted.at(-1)?.body.id).toBe(id));
+  };
+
+  await add("delta");
+  expect(posted.at(-1)?.path).toBe("/api/v1/projects");
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+  await add("alpha");
+  const added = await screen.findByRole("dialog", { name: "Project added" });
+  expect(within(added).getByRole("status").textContent).toBe(warning);
+  const done = within(added).getByRole("button", { name: "Done" });
+  await waitFor(() => expect(document.activeElement).toBe(done));
+  fireEvent.click(done);
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
 // ---- Project archive ----
 
 test("archiving a project with an open card says why and offers the delete", async () => {

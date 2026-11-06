@@ -521,6 +521,9 @@ export interface MutationResponse<T = unknown> {
   events: number[];
   receipt: Receipt;
   data: T;
+  // What the owner should know about a mutation that applied, such as why a
+  // re-added project's cards do not start at 1.
+  warning?: string;
 }
 
 export interface ApiErrorBody {

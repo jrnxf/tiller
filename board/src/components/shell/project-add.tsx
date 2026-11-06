@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useId, useRef, useState } from "react";
 
-import type { Project } from "../../lib/api-types";
+import type { MutationResponse, Project } from "../../lib/api-types";
 import { projectsQuery } from "../../lib/queries";
 import { sendMutation } from "../attention/api";
 import { useAction } from "../attention/use-action";
@@ -31,6 +31,10 @@ function AddDialog({ onClose }: { onClose: () => void }) {
   const [capacity, setCapacity] = useState(String(DEFAULT_CAPACITY));
   const fields = useId();
   const first = useRef<HTMLInputElement>(null);
+  // Why a re-added project's cards do not start at 1: the dialog stays open
+  // to say so.
+  const [added, setAdded] = useState<string | null>(null);
+  const done = useRef<HTMLButtonElement>(null);
 
   const slots = Number(capacity);
   const send = useCallback(
@@ -45,10 +49,14 @@ function AddDialog({ onClose }: { onClose: () => void }) {
       }),
     [capacity, delivery, id, name, repo],
   );
-  const recorded = useCallback(() => {
-    onClose();
-    void queryClient.invalidateQueries({ queryKey: projectsQuery().queryKey });
-  }, [onClose, queryClient]);
+  const recorded = useCallback(
+    (response: MutationResponse<Project>) => {
+      void queryClient.invalidateQueries({ queryKey: projectsQuery().queryKey });
+      if (response.warning) setAdded(response.warning);
+      else onClose();
+    },
+    [onClose, queryClient],
+  );
   // Each set of values is its own click: a refused id fixed and sent again
   // is a new add, while a retry of the same values reuses its key.
   const action = useAction({
@@ -65,6 +73,22 @@ function AddDialog({ onClose }: { onClose: () => void }) {
   const submit = () => {
     if (armed) action.trigger();
   };
+
+  if (added !== null) {
+    return (
+      <ProjectDialog name="add" pending={false} onClose={onClose} initial={done}>
+        <h2 id="add-dialog-title">Project added</h2>
+        <p className="delete-note" role="status" id="add-dialog-body">
+          {added}
+        </p>
+        <div className="dialog-actions">
+          <button ref={done} type="button" className="btn primary" onClick={onClose}>
+            Done
+          </button>
+        </div>
+      </ProjectDialog>
+    );
+  }
 
   return (
     <ProjectDialog name="add" pending={action.pending} onClose={onClose} initial={first}>

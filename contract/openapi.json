@@ -5645,6 +5645,13 @@
           },
           "replayed": {
             "type": "boolean"
+          },
+          "warning": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the owner should know about a mutation that applied, such as\nwhy a re-added project's cards do not start at 1."
           }
         }
       },
