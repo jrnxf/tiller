@@ -1,7 +1,7 @@
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 import type {
   AttentionItem,
@@ -27,6 +27,8 @@ import { Ago } from "./ago";
 import { badgeText, statusMark } from "./badge";
 import { HostChip, PeerNote } from "./host-chip";
 import { ApproveActions } from "../attention/approve";
+import { CommentControl } from "../attention/card-actions";
+import "../attention/inbox.css";
 import { useAmbiguousIds, useStanding } from "./peer-state";
 import { approvalFor, approvalStanding, mergeTimeline } from "./card-model";
 import { durationSeconds, formatAge, formatLisbonMoment, secondsSince, shortSha } from "./format";
@@ -59,7 +61,15 @@ function ActorIcon({ actor }: { actor: TimelineEntry["actor"] }) {
   return <PaneIcon />;
 }
 
-function Timeline({ cardId, owner }: { cardId: string; owner: string | undefined }) {
+function Timeline({
+  cardId,
+  owner,
+  composer,
+}: {
+  cardId: string;
+  owner: string | undefined;
+  composer: ReactNode;
+}) {
   const { data: first } = useSuspenseQuery(timelineQuery(cardId, owner));
   // Earlier pages belong to the first page they were loaded under. When an event
   // refetches the first page, the pages below it may no longer join it, so they
@@ -103,6 +113,7 @@ function Timeline({ cardId, owner }: { cardId: string; owner: string | undefined
       <div className="sect-h">
         Timeline<span className="c">{entries.length} newest first</span>
       </div>
+      {composer}
       {entries.length === 0 ? (
         <div className="run">
           <p style={{ margin: 0 }}>Nothing has happened on this card yet.</p>
@@ -532,7 +543,11 @@ export function CardPage({
         ) : null}
       </dl>
 
-      <Timeline cardId={cardId} owner={owner} />
+      <Timeline
+        cardId={cardId}
+        owner={owner}
+        composer={<CommentControl card={column} off={standing.canAct ? null : standing.reason} />}
+      />
 
       <div className="sect">
         <div className="sect-h">

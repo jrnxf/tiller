@@ -230,6 +230,27 @@ test("this host's own card sends no host field", async () => {
   expect("host" in (posted[0]?.body ?? {})).toBe(false);
 });
 
+test("the card page's comment goes to the card's host, and is off for a down peer", async () => {
+  const posted = stubApi("federated");
+  await renderApp("federated", `/cards/${GAMMA_12_D}?owner=host-d`);
+  const page = await screen.findByTestId("card-page");
+  fireEvent.change(within(page).getByLabelText("Comment to the orchestrator"), {
+    target: { value: "ship it" },
+  });
+  fireEvent.click(within(page).getByRole("button", { name: /Send/ }));
+  await flush();
+  expect(posted).toHaveLength(1);
+  expect(posted[0]?.path).toBe(`/api/v1/cards/${GAMMA_12_D}/comment`);
+  expect(posted[0]?.body.host).toBe("host-d");
+  cleanup();
+
+  await renderApp("federated", `/cards/${LEDGER_5_E}?owner=host-e`);
+  const down = await screen.findByTestId("card-page");
+  const comment = within(down).getByLabelText("Comment to the orchestrator") as HTMLInputElement;
+  expect(comment.disabled).toBe(true);
+  expect(comment.title).toContain("host-e is unreachable");
+});
+
 test("a forward the peer did not confirm reads 'Sent, not confirmed' and a retry keeps its key", async () => {
   const posted = stubApi("federated");
   await renderApp("federated", `/inbox?item=${ASK_D}`);

@@ -69,8 +69,9 @@ function PriorityControl({ card, off }: { card: BoardRow; off: string | null }) 
   );
 }
 
-// A comment is an outbox note to the card's orchestrator.
-function CommentControl({ card, off }: { card: BoardRow; off: string | null }) {
+// A comment is an outbox note to the card's orchestrator, as `tiller card
+// comment` sends. The Inbox and the card page both carry it.
+export function CommentControl({ card, off }: { card: BoardRow; off: string | null }) {
   const [text, setText] = useState("");
   const [lastReceipt, setLastReceipt] = useState<string | null>(null);
   const send = useCallback(
