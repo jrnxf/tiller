@@ -761,7 +761,7 @@ esac
     /// `config.toml`, a worktree of it the run worked in, the daemon's own
     /// scanner, and a `treehouse` that logs each call it gets.
     struct Pool {
-        _fleet: tiller_herdr::testing::Fleet,
+        fleet: tiller_herdr::testing::Fleet,
         dir: tempfile::TempDir,
         herdr: tiller_herdr::fake::FakeHerdr,
         home: PathBuf,
@@ -877,7 +877,7 @@ esac
             };
             let reconciler = Reconciler::new(fleet.open(), config, sources);
             Self {
-                _fleet: fleet,
+                fleet,
                 dir,
                 herdr,
                 home,
@@ -919,7 +919,7 @@ esac
         }
 
         fn dir_db(&self) -> PathBuf {
-            self._fleet.db.clone()
+            self.fleet.db.clone()
         }
 
         fn treehouse_calls(&self) -> Vec<String> {

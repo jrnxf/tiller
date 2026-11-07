@@ -75,6 +75,7 @@ pub struct FakeScanner {
     scans: Arc<Mutex<HashMap<PathBuf, WorktreeScan>>>,
     listed: Arc<Mutex<Option<Vec<PathBuf>>>>,
     released: Arc<Mutex<Vec<(PathBuf, String)>>>,
+    refusal: Arc<Mutex<Option<String>>>,
 }
 
 impl FakeScanner {
@@ -92,6 +93,11 @@ impl FakeScanner {
             .iter()
             .map(|(_, holder)| holder.clone())
             .collect()
+    }
+
+    /// The pool refuses every return with `error`.
+    pub fn refuse_returns(&self, error: &str) {
+        *lock(&self.refusal) = Some(error.to_owned());
     }
 
     pub fn set(&self, scan: WorktreeScan) {
@@ -158,6 +164,9 @@ impl Scanner for FakeScanner {
     /// The pool takes the worktree back: the path is gone from the next
     /// scan and from the list.
     fn release(&self, path: &Path, holder: &str) -> Result<(), String> {
+        if let Some(error) = lock(&self.refusal).clone() {
+            return Err(error);
+        }
         lock(&self.scans).remove(path);
         if let Some(listed) = lock(&self.listed).as_mut() {
             listed.retain(|p| p != path);

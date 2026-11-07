@@ -149,15 +149,6 @@ impl Daemon {
         let end = body.rfind('}').unwrap();
         serde_json::from_str(&body[start..=end]).unwrap()
     }
-
-    /// Whether a reconcile pass has finished, with or without errors.
-    fn reconciled(&self) -> bool {
-        self.health()["pollers"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|poller| poller["source"] == "reconcile" && !poller["last_attempt_at"].is_null())
-    }
 }
 
 impl Drop for Daemon {
@@ -289,7 +280,6 @@ esac"#,
     .unwrap();
 
     let daemon = Daemon::start(fleet.dir.path(), &herdr, &git_dir(lab.path()));
-    until("a reconcile pass", || daemon.reconciled().then_some(()));
     let calls = || {
         std::fs::read_to_string(&log)
             .unwrap_or_default()
@@ -297,13 +287,24 @@ esac"#,
             .map(str::to_owned)
             .collect::<Vec<_>>()
     };
-    let errors = std::fs::read_to_string(fleet.dir.path().join("daemon.err")).unwrap_or_default();
-    let herdr_calls = std::fs::read_to_string(lab.path().join("herdr.log")).unwrap_or_default();
+    // A pass may need more than one go (a pane probe, a slow herdr), so
+    // wait for the return itself, then for one more pass.
+    until("the empty run's return", || {
+        (cleaned(&fleet, &empty.0) && !calls().is_empty()).then_some(())
+    });
+    let passes = |health: &Value| {
+        health["pollers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|poller| poller["source"] == "reconcile")
+            .map(|poller| poller["last_attempt_at"].clone())
+    };
+    let seen = passes(&daemon.health());
+    until("one more reconcile pass", || {
+        (passes(&daemon.health()) != seen).then_some(())
+    });
 
-    assert!(
-        cleaned(&fleet, &empty.0),
-        "the empty run is clean: {errors}\n{herdr_calls}"
-    );
     assert_eq!(
         calls(),
         vec![format!(

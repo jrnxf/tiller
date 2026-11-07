@@ -81,7 +81,7 @@ fn leaked_reservation_is_released() {
 
 /// R15: an ended run's pane with a dead agent is closed, and its worktree
 /// returned only on the five positive facts: run ended, scanned in this
-/// pass, nothing unlanded, clean, listed by treehouse, agent dead.
+/// pass, nothing unlanded, clean, in the worktree list, agent dead.
 #[test]
 fn dead_pane_of_ended_run_is_closed_and_clean_worktree_returned() {
     let mut w = World::new();
@@ -148,6 +148,58 @@ fn dead_pane_of_ended_run_is_closed_and_clean_worktree_returned() {
     let report = v.pass(t0.plus_minutes(1));
     assert!(!report.did("returned"), "{report:?}");
     assert!(!v.event_kinds().contains(&"run.cleaned".to_owned()));
+    assert!(
+        report.errors.iter().any(|e| e.starts_with("worktree list")),
+        "an unreadable list is reported, not silent: {report:?}"
+    );
+}
+
+/// R15: a return the pool refuses after `run.clean` is recorded is not
+/// tried again by a pass, so it goes to the developer with the command.
+#[test]
+fn refused_return_goes_to_the_developer() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let run = w.run_of(&worker);
+    let path = run.worktree_path.clone().unwrap();
+    w.scanner.list(Some(vec![path.as_str()]));
+    w.scanner.refuse_returns("treehouse return exited 1: busy");
+    let t0 = now();
+    w.pass(t0);
+    w.store_mut()
+        .run_end(
+            &owner(),
+            &run.id,
+            EndRun {
+                outcome: RunOutcome::Abandoned,
+                note: Some("not needed".into()),
+            },
+        )
+        .unwrap();
+    w.herdr.set_screen("w2:p1", Screen::Shell);
+    let report = w.pass(t0.plus_minutes(1));
+    assert!(report.did("return failed: recovery item"), "{report:?}");
+    assert!(
+        report.errors.iter().any(|e| e.contains("busy")),
+        "{report:?}"
+    );
+    let items: Vec<_> = w
+        .items()
+        .into_iter()
+        .filter(|item| item.kind == AttentionKind::Recovery)
+        .collect();
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert!(
+        items[0].question.contains(&format!(
+            "treehouse return {path} --if-lease-holder tiller:{}",
+            run.id
+        )),
+        "{}",
+        items[0].question
+    );
+    let again = w.pass(t0.plus_minutes(2));
+    assert!(!again.did("return failed"), "one item per run: {again:?}");
 }
 
 /// R15: a run tiller landed through a squash merge holds no unlanded work,

@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tiller_core::domain::{
-    Card, Delivery, OutboxMessage, Pane, Project, Reservation, Run, RunOutcome, RunRole, Session,
+    Card, CardState, Delivery, OutboxMessage, Pane, Project, Reservation, Run, RunOutcome, RunRole,
+    Session,
 };
 use tiller_core::state::attention::NewAttention;
 use tiller_core::state::caches::PaneReading;
@@ -352,14 +353,10 @@ impl Reconciler {
             "host_id = ?1 AND worktree_path IS NOT NULL ORDER BY started_at",
             &[&host],
         )?;
-        // Compared by where each path leads, so a symlink in one spelling
-        // (`/var` against `/private/var`) still matches.
-        let listed: Option<Vec<PathBuf>> = self
-            .sources
-            .scanner
-            .listed()
-            .ok()
-            .map(|paths| paths.iter().map(|p| canonical(p)).collect());
+        // Read once, and only when an ended run needs it. Compared by where
+        // each path leads, so a symlink in one spelling (`/var` against
+        // `/private/var`) still matches.
+        let mut listed: Option<Option<Vec<PathBuf>>> = None;
         let mut rescanned = false;
         for run in runs {
             let Some(path) = run.worktree_path.clone() else {
@@ -482,6 +479,14 @@ impl Reconciler {
                 continue;
             }
             let pane_closed = self.run_pane_closed(&run);
+            let listed = listed.get_or_insert_with(|| match self.sources.scanner.listed() {
+                Ok(paths) => Some(paths.iter().map(|p| canonical(p)).collect()),
+                Err(error) => {
+                    // Nothing is returned this pass; say why.
+                    report.error("worktree list", &error);
+                    None
+                }
+            });
             let listed_here = listed
                 .as_ref()
                 .is_some_and(|l| l.contains(&canonical(Path::new(&path))));
@@ -493,13 +498,40 @@ impl Reconciler {
                     self.scan_worktrees(now)?;
                     rescanned = true;
                 }
-                let holder = lease_holder(self.conn(), &run)?;
+                let holder = match lease_holder(self.conn(), &run) {
+                    Ok(holder) => holder,
+                    Err(error) => {
+                        report.error(&format!("lease holder of run {}", run.id), &error);
+                        continue;
+                    }
+                };
                 match self.store.run_clean(&self.ctx(now), &run.id, true) {
                     Ok(applied) if !applied.replayed => {
                         report.repair(format!("R15 run {} worktree {path} returned: ended, clean, nothing unlanded, pane closed", run.id));
                         if let Err(error) = self.sources.scanner.release(Path::new(&path), &holder)
                         {
                             report.error(&format!("treehouse return of {path}"), &error);
+                            // The records say returned, so no later pass
+                            // tries again: hand the return to the developer.
+                            let key = format!("reconcile:R15:return-failed:{}", run.id);
+                            if self.recovery(
+                                now,
+                                &key,
+                                NewAttention {
+                                    card: if card.state == CardState::Open { card.id.clone() } else { String::new() },
+                                    run_id: Some(run.id.clone()),
+                                    question: format!(
+                                        "{} {} run {}: worktree {path} is clean and recorded as returned, but treehouse did not take it back ({error}). Return it with: treehouse return {path} --if-lease-holder {holder}",
+                                        card.display_id,
+                                        run.role.short_name(),
+                                        run.id,
+                                    ),
+                                    evidence: Self::json_text(json!({"run_id": run.id, "worktree_path": path, "holder": holder, "error": error})),
+                                    ..NewAttention::default()
+                                },
+                            )? {
+                                report.repair(format!("R15 run {} worktree return failed: recovery item", run.id));
+                            }
                         }
                     }
                     Ok(_) => {}

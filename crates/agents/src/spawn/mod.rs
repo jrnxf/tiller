@@ -832,7 +832,8 @@ pub struct Cleaned {
     pub closed_panes: Vec<String>,
     pub returned: Option<String>,
     /// A step after `run.clean` that failed: a treehouse return or the
-    /// relabel. The records are already right; reconcile retries.
+    /// relabel. The records are already right; the warning says how to
+    /// finish by hand.
     pub warnings: Vec<String>,
 }
 
