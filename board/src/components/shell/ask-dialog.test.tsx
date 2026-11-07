@@ -1,13 +1,13 @@
 import { QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { Editor } from "@tiptap/core";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
-import type { AskRecorded, BoardResponse } from "../../lib/api-types";
+import type { AgentRow, AskRecorded, BoardResponse } from "../../lib/api-types";
 import { hydrateFromSnapshot } from "../../lib/boot";
 import { fixtureSnapshot } from "../../lib/fixtures";
 import { boardPath, queryKeyFor } from "../../lib/queries";
 import { createQueryClient } from "../../lib/query-client";
-import { receiptsStore } from "../../lib/receipts";
 import { AskDialog } from "./ask-dialog";
 
 interface Call {
@@ -16,59 +16,73 @@ interface Call {
 }
 
 let calls: Call[] = [];
-let release: (() => void) | null = null;
+// Paths whose next call fails once, as a daemon refusing it.
+let failing = new Set<string>();
 
-function reply(project: string, warning: string | null): Response {
-  const data: AskRecorded = {
-    ask: {
-      id: "01JASK0000000000000000001",
-      project_id: project,
-      session_id: null,
-      source: "board",
-      text: "ship the footer",
-      received_at: "2026-11-05T12:00:00Z",
-    },
-    message: warning ? null : { id: "01JOUTB", target_session_id: "01JSESS" },
-    warning,
-  };
+function ok(data: unknown): Response {
   return new Response(
     JSON.stringify({
       ok: true,
       replayed: false,
       events: [],
-      receipt: {
-        recorded_at: "2026-11-05T12:00:00Z",
-        outbox_id: data.message?.id ?? null,
-        approval_id: null,
-      },
+      receipt: { recorded_at: "2026-11-05T12:00:00Z", outbox_id: null, approval_id: null },
       data,
     }),
     { status: 200, headers: { "content-type": "application/json" } },
   );
 }
 
-function stub(warning: string | null) {
+function stub() {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
-      calls.push({ path, body: JSON.parse(String(init?.body ?? "{}")) });
-      const project = /projects\/([^/]+)\/asks/.exec(path)?.[1] ?? "alpha";
-      if (release !== null) {
-        await new Promise<void>((resolve) => {
-          release = resolve;
-        });
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      calls.push({ path, body });
+      const target = `${body.host ?? ""}${path}`;
+      if (failing.has(target)) {
+        failing.delete(target);
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: { code: "peer_unreachable", message: "host-d did not answer." },
+          }),
+          { status: 502 },
+        );
       }
-      return reply(project, warning);
+      if (path.endsWith("/orchestrator")) return ok({});
+      const project = /projects\/([^/]+)\/asks/.exec(path)?.[1] ?? "alpha";
+      const data: AskRecorded = {
+        ask: {
+          id: `01JASK${String(calls.length).padStart(20, "0")}`,
+          project_id: project,
+          session_id: null,
+          source: "board",
+          text: String(body.text),
+          received_at: "2026-11-05T12:00:00Z",
+        },
+        message: null,
+        warning: null,
+      };
+      return ok(data);
     }),
   );
 }
 
-function renderDialog(onClose = vi.fn()) {
+// Which orchestrators run: alpha and beta here, fleet on host-d. gamma and the
+// peers' other projects have none.
+const RUNNING = [
+  { project_id: "alpha" },
+  { project_id: "beta" },
+  { project_id: "fleet", host: "host-d" },
+] as AgentRow[];
+
+function renderDialog(onClose = vi.fn(), running: AgentRow[] = RUNNING) {
   const queryClient = createQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot("federated"));
   const board: BoardResponse = { rows: [], asked: [] };
   queryClient.setQueryData(queryKeyFor(boardPath()), board);
+  queryClient.setQueryData(queryKeyFor("/api/v1/agents"), { orchestrators: running });
   render(
     <QueryClientProvider client={queryClient}>
       <AskDialog open onClose={onClose} />
@@ -79,8 +93,7 @@ function renderDialog(onClose = vi.fn()) {
 
 beforeEach(() => {
   calls = [];
-  release = null;
-  receiptsStore.set({ byKey: {}, progress: {} });
+  failing = new Set();
 });
 
 afterEach(() => {
@@ -88,172 +101,271 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-// The pickable row for a project; a peer's same-named project is not one.
-const row = (name: RegExp) => {
-  const found = screen
-    .getAllByRole("option", { name })
-    .filter((option) => option.ariaDisabled !== "true");
-  if (found.length !== 1) throw new Error(`${found.length} rows match ${name}`);
-  return found[0] as HTMLElement;
-};
-const search = () => document.querySelector(".ask-combo-in") as HTMLInputElement;
-const note = () => document.querySelector(".ask-note")?.textContent;
-const trigger = () => document.querySelector(".ask-combo-btn") as HTMLElement;
-const pick = (name: RegExp) => fireEvent.click(row(name));
-const input = () => screen.getByLabelText("Ask", { selector: "textarea" }) as HTMLTextAreaElement;
-const sendButton = () => screen.getByRole("button", { name: /send/i }) as HTMLButtonElement;
+type Part = string | { key: string; name: string };
+const chip = (name: string, key = name): Part => ({ key, name });
 
-test("the list opens with the search box focused and nothing is picked", async () => {
-  renderDialog();
-  await waitFor(() => expect(document.activeElement).toBe(search()));
-  expect(trigger().textContent).toContain("Pick an orchestrator");
-  expect(screen.getAllByRole("option").every((option) => option.ariaSelected !== "true")).toBe(
-    true,
-  );
-});
+const prose = () => document.querySelector(".ProseMirror") as HTMLElement & { editor: Editor };
 
-test("Send stays off until an orchestrator is picked and there is text", () => {
-  stub(null);
+// Puts these words and chips in the editor, as typing and picking would.
+function write(...parts: Part[]) {
+  act(() => {
+    prose().editor.commands.setContent(
+      {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: parts.map((part) =>
+              typeof part === "string"
+                ? { type: "text", text: part }
+                : { type: "mention", attrs: { id: part.key, label: part.name } },
+            ),
+          },
+        ],
+      },
+      { emitUpdate: true },
+    );
+  });
+}
+
+const sendButton = () =>
+  screen.getByRole("button", { name: /^(send|retry)/i, hidden: false }) as HTMLButtonElement;
+const rows = () => within(screen.getByRole("status")).queryAllByRole("listitem");
+const row = (name: string) => screen.getByTestId(`ask-row-${name}`);
+const asksTo = (project: string) =>
+  calls.filter((call) => call.path === `/api/v1/projects/${project}/asks`);
+
+test("it opens with nothing picked and says how to pick", async () => {
   renderDialog();
+  await waitFor(() => expect(prose()).toBeTruthy());
+  expect(screen.getByRole("status").textContent).toContain("Type @ to pick the projects");
   expect(sendButton().disabled).toBe(true);
-  fireEvent.change(input(), { target: { value: "hello" } });
-  expect(sendButton().disabled).toBe(true);
-  expect(note()).toBe("Pick an orchestrator first.");
-  pick(/beta/i);
-  expect(sendButton().disabled).toBe(false);
-  expect(note()).toBe("Goes to the beta orchestrator.");
-  expect(trigger().textContent).toContain("beta");
+  expect(prose().getAttribute("aria-labelledby")).toBeTruthy();
 });
 
-test("typing filters the list", () => {
+test("typing @ lists the projects, filters as you type and Enter picks one", async () => {
   renderDialog();
-  fireEvent.change(search(), { target: { value: "gam" } });
-  expect(row(/gamma/i)).toBeTruthy();
-  expect(screen.queryAllByRole("option", { name: /alpha/i })).toHaveLength(0);
-});
-
-test("a number key picks that row and the text box takes focus", async () => {
-  renderDialog();
-  fireEvent.keyDown(search(), { key: "2" });
-  expect(trigger().textContent).toContain("beta");
-  await waitFor(() => expect(document.activeElement).toBe(input()));
-});
-
-test("each row shows its number", () => {
-  renderDialog();
-  expect(row(/alpha/i).textContent).toMatch(/1$/);
-  expect(row(/gamma/i).textContent).toMatch(/3$/);
-});
-
-test("a click picks and Tab order runs from the picker to the text", async () => {
-  renderDialog();
-  pick(/alpha/i);
-  await waitFor(() => expect(document.activeElement).toBe(input()));
-  const stops = [
-    ...screen.getByRole("dialog").querySelectorAll<HTMLElement>("button, textarea"),
-  ].filter((element) => element.tabIndex >= 0 && !(element as HTMLButtonElement).disabled);
-  expect(stops.slice(0, 2)).toEqual([trigger(), input()]);
-});
-
-test("a project another host owns is shown but cannot be picked", () => {
-  renderDialog();
-  const off = screen.getAllByRole("option").filter((option) => option.ariaDisabled === "true");
-  expect(off.length).toBeGreaterThan(0);
-  fireEvent.click(off[0] as HTMLElement);
-  expect(trigger().textContent).toContain("Pick an orchestrator");
-});
-
-test("sending posts to the picked orchestrator, shows the tile and closes", async () => {
-  stub(null);
-  const { queryClient, onClose } = renderDialog();
-  pick(/gamma/i);
-  fireEvent.change(input(), { target: { value: "  ship the footer\nthen the header  " } });
-  fireEvent.click(sendButton());
-
-  await waitFor(() => expect(onClose).toHaveBeenCalled());
-  expect(calls).toHaveLength(1);
-  expect(calls[0]?.path).toBe("/api/v1/projects/gamma/asks");
-  expect(calls[0]?.body.text).toBe("ship the footer\nthen the header");
-  expect(typeof calls[0]?.body.idempotency_key).toBe("string");
-  expect(calls[0]?.body).not.toHaveProperty("host");
-  const all = queryClient.getQueryData<BoardResponse>(queryKeyFor(boardPath()));
-  expect(all?.asked.map((ask) => ask.id)).toEqual(["01JASK0000000000000000001"]);
-});
-
-test("Enter sends, Shift+Enter adds a line", async () => {
-  stub(null);
-  renderDialog();
-  pick(/alpha/i);
-  fireEvent.change(input(), { target: { value: "one" } });
-  fireEvent.keyDown(input(), { key: "Enter", shiftKey: true });
+  await waitFor(() => expect(prose()).toBeTruthy());
+  act(() => {
+    prose().editor.commands.insertContent("@be");
+  });
+  const list = await screen.findByRole("listbox", { name: "Projects" });
+  expect(within(list).getAllByRole("option")).toHaveLength(1);
+  expect(within(list).getByRole("option").textContent).toContain("beta");
+  fireEvent.keyDown(prose(), { key: "Enter" });
+  expect(screen.queryByRole("listbox")).toBeNull();
   expect(calls).toHaveLength(0);
-  fireEvent.keyDown(input(), { key: "Enter" });
-  await waitFor(() => expect(calls).toHaveLength(1));
+  // The chip reads as the name, with no @.
+  expect(document.querySelector(".ask-chip")?.textContent).toBe("beta");
+  expect(row("beta")).toBeTruthy();
 });
 
-test("Escape closes the list first and the dialog next", () => {
+test("Escape closes the list first and the dialog next", async () => {
   const { onClose } = renderDialog();
-  fireEvent.keyDown(search(), { key: "Escape" });
+  await waitFor(() => expect(prose()).toBeTruthy());
+  act(() => {
+    prose().editor.commands.insertContent("@");
+  });
+  await screen.findByRole("listbox");
+  fireEvent.keyDown(prose(), { key: "Escape" });
   expect(onClose).not.toHaveBeenCalled();
-  fireEvent.keyDown(trigger(), { key: "Escape" });
+  fireEvent.keyDown(prose(), { key: "Escape" });
   expect(onClose).toHaveBeenCalled();
 });
 
-test("the dialog is locked and says Sending while the ask is in flight, and sends once", async () => {
-  release = () => {};
-  stub(null);
-  const { onClose } = renderDialog();
-  pick(/alpha/i);
-  fireEvent.change(input(), { target: { value: "hello" } });
+test("a project another host owns is listed with why it cannot take an ask", async () => {
+  renderDialog();
+  await waitFor(() => expect(prose()).toBeTruthy());
+  act(() => {
+    prose().editor.commands.insertContent("@ledger");
+  });
+  const option = await screen.findByRole("option", { name: /ledger/ });
+  expect(option.getAttribute("aria-disabled")).toBe("true");
+  expect(option.textContent).toMatch(/host-e/);
+  fireEvent.click(option);
+  expect(rows()).toHaveLength(0);
+});
+
+test("one ask goes to each mentioned project, without the leading chips", async () => {
+  stub();
+  const { onClose, queryClient } = renderDialog();
+  await waitFor(() => expect(prose()).toBeTruthy());
+  write(chip("alpha"), " ", chip("beta"), " optimize fonts");
+  expect(rows().map((item) => item.textContent)).toEqual([
+    expect.stringContaining("alpha"),
+    expect.stringContaining("beta"),
+  ]);
   fireEvent.click(sendButton());
-  await waitFor(() => expect(sendButton().textContent).toContain("Sending..."));
-  expect(sendButton().disabled).toBe(true);
-  expect(input().readOnly).toBe(true);
-  fireEvent.keyDown(input(), { key: "Enter" });
-  expect(calls).toHaveLength(1);
-  await act(async () => release?.());
   await waitFor(() => expect(onClose).toHaveBeenCalled());
-  expect(calls).toHaveLength(1);
+
+  expect(calls.map((call) => call.path)).toEqual([
+    "/api/v1/projects/alpha/asks",
+    "/api/v1/projects/beta/asks",
+  ]);
+  expect(asksTo("alpha")[0]?.body.text).toBe("optimize fonts\n\nAlso asked of: beta");
+  expect(asksTo("beta")[0]?.body.text).toBe("optimize fonts\n\nAlso asked of: alpha");
+  expect(calls[0]?.body.idempotency_key).not.toBe(calls[1]?.body.idempotency_key);
+  expect(calls[0]?.body).not.toHaveProperty("host");
+  const all = queryClient.getQueryData<BoardResponse>(queryKeyFor(boardPath()));
+  expect(all?.asked).toHaveLength(2);
 });
 
-test("with no orchestrator running it says so before and after sending", async () => {
-  stub("no_orchestrator");
-  const queryClient = createQueryClient();
-  const snapshot = fixtureSnapshot("federated");
-  hydrateFromSnapshot(queryClient, snapshot);
-  queryClient.setQueryData(queryKeyFor("/api/v1/agents"), { orchestrators: [] });
-  render(
-    <QueryClientProvider client={queryClient}>
-      <AskDialog open onClose={() => {}} />
-    </QueryClientProvider>,
-  );
-  pick(/alpha/i);
-  expect(note()).toBe(
-    "No orchestrator is running for alpha: the ask is recorded and picked up when it starts.",
-  );
-});
-
-test("a failed send keeps the dialog open with the text and says why", async () => {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(
-      async () =>
-        new Response(
-          JSON.stringify({
-            ok: false,
-            error: { code: "read_only", message: "The store is read only." },
-          }),
-          { status: 409 },
-        ),
-    ),
-  );
+test("a chip in the middle of the sentence stays as the plain project name", async () => {
+  stub();
   const { onClose } = renderDialog();
-  pick(/alpha/i);
-  fireEvent.change(input(), { target: { value: "hello" } });
+  await waitFor(() => expect(prose()).toBeTruthy());
+  write(chip("alpha"), " match what ", chip("beta"), " ships");
   fireEvent.click(sendButton());
-  await waitFor(() =>
-    expect(screen.getByRole("alert").textContent).toBe("The store is read only."),
-  );
-  expect(input().value).toBe("hello");
+  await waitFor(() => expect(onClose).toHaveBeenCalled());
+  expect(asksTo("alpha")[0]?.body.text).toBe("match what beta ships\n\nAlso asked of: beta");
+  expect(asksTo("beta")[0]?.body.text).toBe("match what beta ships\n\nAlso asked of: alpha");
+});
+
+test("a single project gets the plain ask with no footer", async () => {
+  stub();
+  const { onClose } = renderDialog();
+  await waitFor(() => expect(prose()).toBeTruthy());
+  write(chip("alpha"), "  ship the footer ");
+  fireEvent.click(sendButton());
+  await waitFor(() => expect(onClose).toHaveBeenCalled());
+  expect(asksTo("alpha")[0]?.body.text).toBe("ship the footer");
+});
+
+test("Enter sends and Shift+Enter adds a line", async () => {
+  stub();
+  const { onClose } = renderDialog();
+  await waitFor(() => expect(prose()).toBeTruthy());
+  write(chip("alpha"), " one");
+  fireEvent.keyDown(prose(), { key: "Enter", shiftKey: true });
+  expect(calls).toHaveLength(0);
+  expect(prose().querySelectorAll("p")).toHaveLength(2);
+  fireEvent.keyDown(prose(), { key: "Enter" });
+  await waitFor(() => expect(onClose).toHaveBeenCalled());
+  expect(asksTo("alpha")).toHaveLength(1);
+});
+
+test("text with no project, or a project with no text, cannot be sent", async () => {
+  stub();
+  renderDialog();
+  await waitFor(() => expect(prose()).toBeTruthy());
+  write("optimize fonts");
+  expect(screen.getByRole("status").textContent).toContain("Add a project with @ first");
+  expect(sendButton().disabled).toBe(true);
+  write(chip("alpha"));
+  expect(sendButton().disabled).toBe(true);
+  fireEvent.keyDown(prose(), { key: "Enter" });
+  expect(calls).toHaveLength(0);
+});
+
+test("a project can be removed from the summary", async () => {
+  renderDialog();
+  await waitFor(() => expect(prose()).toBeTruthy());
+  write(chip("alpha"), " ", chip("beta"), " go");
+  fireEvent.click(screen.getByRole("button", { name: "Remove alpha" }));
+  expect(rows()).toHaveLength(1);
+  expect(prose().textContent).not.toContain("alpha");
+});
+
+test("a project with no orchestrator running says so, and the send starts one first", async () => {
+  stub();
+  const { onClose } = renderDialog();
+  await waitFor(() => expect(prose()).toBeTruthy());
+  write(chip("gamma"), " ", chip("alpha"), " go");
+  expect(row("gamma").textContent).toContain("will start orchestrator");
+  expect(row("alpha").textContent).toContain("orchestrator running");
+  fireEvent.click(sendButton());
+  await waitFor(() => expect(onClose).toHaveBeenCalled());
+  const gamma = calls.filter((call) => call.path.startsWith("/api/v1/projects/gamma/"));
+  expect(gamma.map((call) => call.path)).toEqual([
+    "/api/v1/projects/gamma/orchestrator",
+    "/api/v1/projects/gamma/asks",
+  ]);
+  expect(calls.some((call) => call.path === "/api/v1/projects/alpha/orchestrator")).toBe(false);
+});
+
+test("a peer's project is asked through the board host with its host label", async () => {
+  stub();
+  const { onClose, queryClient } = renderDialog();
+  await waitFor(() => expect(prose()).toBeTruthy());
+  write(chip("alpha"), " ", chip("fleet", "host-d/fleet"), " go");
+  expect(row("fleet").textContent).toContain("on host-d");
+  fireEvent.click(sendButton());
+  await waitFor(() => expect(onClose).toHaveBeenCalled());
+  expect(asksTo("alpha")[0]?.body).not.toHaveProperty("host");
+  expect(asksTo("fleet")[0]?.body.host).toBe("host-d");
+  expect(asksTo("fleet")[0]?.body.text).toBe("go\n\nAlso asked of: alpha");
+  // Only this host's ask joins the Asked column now; the peer's comes by event.
+  const all = queryClient.getQueryData<BoardResponse>(queryKeyFor(boardPath()));
+  expect(all?.asked.map((ask) => ask.project_id)).toEqual(["alpha"]);
+});
+
+test("a peer's project with no orchestrator is started on its own host", async () => {
+  stub();
+  const { onClose } = renderDialog();
+  await waitFor(() => expect(prose()).toBeTruthy());
+  write(chip("gamma", "host-d/gamma"), " go");
+  expect(row("gamma").textContent).toContain("will start orchestrator");
+  fireEvent.click(sendButton());
+  await waitFor(() => expect(onClose).toHaveBeenCalled());
+  expect(calls.map((call) => [call.path, call.body.host])).toEqual([
+    ["/api/v1/projects/gamma/orchestrator", "host-d"],
+    ["/api/v1/projects/gamma/asks", "host-d"],
+  ]);
+});
+
+test("a view-only peer cannot take an ask", async () => {
+  stub();
+  renderDialog();
+  await waitFor(() => expect(prose()).toBeTruthy());
+  act(() => {
+    prose().editor.commands.insertContent("@atlas");
+  });
+  const option = await screen.findByRole("option", { name: /atlas/ });
+  expect(option.getAttribute("aria-disabled")).toBe("true");
+  expect(option.textContent).toContain("view only pairing");
+  // A chip that got in anyway (the pairing changed) holds the send back.
+  write(chip("atlas", "host-f/atlas"), " go");
+  expect(row("atlas").textContent).toContain("view only pairing");
+  expect(sendButton().disabled).toBe(true);
+});
+
+test("a failed project keeps the dialog open and a retry sends only that one", async () => {
+  stub();
+  failing.add("host-d/api/v1/projects/fleet/asks");
+  const { onClose } = renderDialog();
+  await waitFor(() => expect(prose()).toBeTruthy());
+  write(chip("alpha"), " ", chip("fleet", "host-d/fleet"), " go");
+  fireEvent.click(sendButton());
+
+  await waitFor(() => expect(row("fleet").textContent).toContain("Could not send"));
+  expect(row("alpha").textContent).toContain("Sent");
+  expect(screen.getByRole("alert").textContent).toBe("host-d did not answer.");
   expect(onClose).not.toHaveBeenCalled();
+  // The words are locked while some projects are sent.
+  expect(prose().getAttribute("contenteditable")).toBe("false");
+  expect(sendButton().textContent).toContain("Retry 1 failed");
+  expect(asksTo("alpha")).toHaveLength(1);
+  const first = asksTo("fleet")[0]?.body.idempotency_key;
+
+  fireEvent.click(sendButton());
+  await waitFor(() => expect(onClose).toHaveBeenCalled());
+  expect(asksTo("alpha")).toHaveLength(1);
+  expect(asksTo("fleet")).toHaveLength(2);
+  expect(asksTo("fleet")[1]?.body.idempotency_key).toBe(first);
+});
+
+test("a project whose orchestrator started but whose ask failed retries without starting twice", async () => {
+  stub();
+  failing.add("/api/v1/projects/gamma/asks");
+  const { onClose } = renderDialog();
+  await waitFor(() => expect(prose()).toBeTruthy());
+  write(chip("gamma"), " go");
+  fireEvent.click(sendButton());
+  await waitFor(() => expect(row("gamma").textContent).toContain("Could not send"));
+  const start = calls[0]?.body.idempotency_key;
+  fireEvent.click(sendButton());
+  await waitFor(() => expect(onClose).toHaveBeenCalled());
+  // The start carries the same key, so the daemon replays it.
+  const starts = calls.filter((call) => call.path.endsWith("/orchestrator"));
+  expect(starts.every((call) => call.body.idempotency_key === start)).toBe(true);
 });

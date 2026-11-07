@@ -1,245 +1,215 @@
-import { Combobox } from "@base-ui/react/combobox";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useId, useRef, useState } from "react";
-import type { QueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
+import type { Editor } from "@tiptap/core";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 
-import type { AskedRow, AskRecorded, BoardResponse, Project } from "../../lib/api-types";
-import { ownerOf, projectKey } from "../../lib/peers";
+import type { Project } from "../../lib/api-types";
+import { askFor, mentionedKeys, messageFor } from "../../lib/ask-plan";
+import type { AskPiece } from "../../lib/ask-plan";
+import { isFederated, ownerOf, projectKey, standingOf } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
-import { agentsQuery, API_KEY_PREFIX, projectsQuery } from "../../lib/queries";
+import { agentsQuery, machinesQuery, projectsQuery } from "../../lib/queries";
 import { ActionFailure } from "../attention/action-failure";
-import { sendMutation } from "../attention/api";
 import { SendIcon } from "../attention/icons";
-import { CheckIcon, ChevronIcon } from "./icons";
-import { useAction } from "../attention/use-action";
 import { showToast } from "../board/toast";
+import { AskEditor, removeMention } from "./ask-editor";
+import type { MentionOption } from "./ask-editor";
+import { useAskSends } from "./ask-send";
+import type { AskTarget, Outcome } from "./ask-send";
 import "./ask-dialog.css";
 
-const BOARD_PATH = "/api/v1/board";
 const ASK_MAX_CHARS = 8000;
 
-// The new ask joins the Asked column from the response, before the change
-// event reaches the board. Only the reads that list this project's asks take it.
-function showAsk(queryClient: QueryClient, row: AskedRow) {
-  for (const [key, board] of queryClient.getQueriesData<BoardResponse>({
-    queryKey: API_KEY_PREFIX,
-  })) {
-    const path = String(key[1] ?? "");
-    if (!board || !path.startsWith(BOARD_PATH)) continue;
-    const params = new URL(path, "http://localhost").searchParams;
-    const project = params.get("project");
-    if (params.get("host") || (project && project !== row.project_id)) continue;
-    if (board.asked.some((ask) => ask.id === row.id)) continue;
-    queryClient.setQueryData<BoardResponse>(key, { ...board, asked: [...board.asked, row] });
-  }
-}
-
-// What the board tells the owner once the ask is recorded. With no
-// orchestrator running the ask is still on the board, and the next one is told
-// about it when it starts.
-function receiptLine(project: Project, recorded: AskRecorded): [string, string | null] {
-  return recorded.warning === "no_orchestrator"
-    ? [
-        "Ask recorded",
-        `No orchestrator is running for ${project.name}: it will pick this up when it starts.`,
-      ]
-    : [`Sent to the ${project.name} orchestrator`, null];
-}
-
-// The board host does not forward an ask (protocol.md section 7.4), so a
-// project another host owns cannot be picked here.
-function offReason(project: Project): string | null {
-  const owner = ownerOf(project);
-  return owner ? `${owner} owns this project: ask its orchestrator there` : null;
-}
-
-interface Option {
-  key: string;
-  label: string;
-  color: string;
-  // Why this project cannot take an ask here; null when it can.
-  off: string | null;
-}
-
-// The orchestrator picker: the Base UI combobox (the shadcn base/ variant, in
-// the Linear shape) with the board's own styles. A trigger shows the pick; the
-// list opens with a search box on top, and a number key picks that row.
-// Nothing is picked until the owner picks it.
-function Picker({
-  options,
-  picked,
-  disabled,
-  onPick,
-  onOpenChange,
-}: {
-  options: Option[];
-  picked: Option | null;
-  disabled: boolean;
-  onPick: (key: string) => void;
-  onOpenChange: (open: boolean) => void;
-}) {
-  const [open, setOpen] = useState(true);
-  const change = (next: boolean) => {
-    setOpen(next);
-    onOpenChange(next);
+// The toast once every ask is sent.
+function sentToast(targets: AskTarget[], outcomes: Record<string, Outcome>) {
+  const started = (target: AskTarget) => {
+    const outcome = outcomes[projectKey(target.project)];
+    return outcome?.status === "sent" && outcome.started;
   };
+  if (targets.length === 1 && targets[0]) {
+    const [only] = targets;
+    showToast(
+      "ok",
+      `Sent to the ${only.project.name} orchestrator`,
+      started(only) ? "Its orchestrator was not running, so one was started." : null,
+    );
+    return;
+  }
+  const startedCount = targets.filter(started).length;
+  showToast(
+    "ok",
+    `Sent ${targets.length} asks`,
+    startedCount > 0
+      ? `${startedCount} orchestrator${startedCount === 1 ? " was" : "s were"} started first.`
+      : null,
+  );
+}
+
+// What a row of the summary says about its project. Before the send it is the
+// orchestrator's state; after, how that project's send ended.
+function statusOf(
+  running: boolean,
+  outcome: Outcome | undefined,
+): { text: string; tone: "ok" | "warn" | "fail" } {
+  if (outcome?.status === "sending") return { text: "Sending...", tone: "ok" };
+  if (outcome?.status === "sent") {
+    return { text: outcome.started ? "Orchestrator started, ask sent" : "Sent", tone: "ok" };
+  }
+  if (outcome?.status === "failed") return { text: "Could not send", tone: "fail" };
+  return running
+    ? { text: "orchestrator running", tone: "ok" }
+    : { text: "will start orchestrator", tone: "warn" };
+}
+
+// One project the ask goes to, with the state of its orchestrator and, once
+// the send has begun, how it went.
+function SendRow({
+  project,
+  color,
+  running,
+  where,
+  outcome,
+  off,
+  onRemove,
+}: {
+  project: Project;
+  color: string;
+  running: boolean;
+  where: string | null;
+  outcome: Outcome | undefined;
+  off: string | null;
+  onRemove: (() => void) | null;
+}) {
+  const status = statusOf(running, outcome);
   return (
-    <Combobox.Root
-      items={options}
-      value={picked}
-      open={open}
-      onOpenChange={change}
-      disabled={disabled}
-      autoHighlight
-      itemToStringLabel={(option: Option) => option.label}
-      isItemEqualToValue={(a: Option, b: Option) => a.key === b.key}
-      onValueChange={(option: Option | null) => {
-        if (option) onPick(option.key);
-      }}
-    >
-      <Combobox.Trigger className="ask-combo-btn" data-empty={picked === null}>
-        {picked ? (
-          <>
-            <span className="ask-combo-dot" style={{ "--pc": picked.color } as CSSProperties} />
-            {picked.label}
-          </>
-        ) : (
-          "Pick an orchestrator"
-        )}
-        <ChevronIcon />
-      </Combobox.Trigger>
-      <Combobox.Portal>
-        <Combobox.Positioner className="ask-combo-pos" sideOffset={4} align="start">
-          <Combobox.Popup className="ask-combo-pop">
-            <div className="ask-combo-search">
-              <Combobox.Input
-                className="ask-combo-in"
-                placeholder="Pick an orchestrator..."
-                onKeyDown={(event) => {
-                  const pick = /^[1-9]$/.test(event.key)
-                    ? options[Number(event.key) - 1]
-                    : undefined;
-                  if (!pick) return;
-                  event.preventDefault();
-                  if (pick.off === null) {
-                    onPick(pick.key);
-                    change(false);
-                  }
-                }}
-              />
-            </div>
-            <Combobox.Empty className="ask-combo-empty">No project matches</Combobox.Empty>
-            <Combobox.List className="ask-combo-list">
-              {(option: Option) => (
-                <Combobox.Item
-                  key={option.key}
-                  value={option}
-                  disabled={option.off !== null}
-                  title={option.off ?? undefined}
-                  className="ask-combo-item"
-                >
-                  <span
-                    className="ask-combo-dot"
-                    style={{ "--pc": option.color } as CSSProperties}
-                  />
-                  <span className="ask-combo-name">{option.label}</span>
-                  {option.off !== null ? <span className="ask-combo-off">{option.off}</span> : null}
-                  <Combobox.ItemIndicator className="ask-combo-check">
-                    <CheckIcon />
-                  </Combobox.ItemIndicator>
-                  <kbd className="ask-combo-num">{options.indexOf(option) + 1}</kbd>
-                </Combobox.Item>
-              )}
-            </Combobox.List>
-          </Combobox.Popup>
-        </Combobox.Positioner>
-      </Combobox.Portal>
-    </Combobox.Root>
+    <li style={{ "--pc": color } as CSSProperties} data-testid={`ask-row-${project.name}`}>
+      <span className="ask-dot" />
+      <span className="ask-row-name">{project.name}</span>
+      {where ? <span className="ask-tag">{where}</span> : null}
+      <span className="ask-row-state" data-tone={off ? "fail" : status.tone}>
+        {off ?? status.text}
+      </span>
+      {onRemove ? (
+        <button
+          type="button"
+          className="ask-remove"
+          aria-label={`Remove ${project.name}`}
+          onClick={onRemove}
+        >
+          ×
+        </button>
+      ) : null}
+      {outcome?.status === "failed" ? (
+        <div className="ask-row-note">
+          <ActionFailure error={outcome.error} host={ownerOf(project)} />
+        </div>
+      ) : null}
+    </li>
   );
 }
 
 function AskBody({ projects, onClose }: { projects: Project[]; onClose: () => void }) {
   const [opener] = useState(() => document.activeElement);
-  const queryClient = useQueryClient();
   const orchestrators = useQuery(agentsQuery()).data?.orchestrators;
-  const [pickedKey, setPickedKey] = useState<string | null>(null);
-  const [text, setText] = useState("");
-  // A new click per ask: the same words can go to the same project twice.
-  const [round, setRound] = useState(0);
+  const machines = useQuery(machinesQuery()).data?.machines;
+  const [pieces, setPieces] = useState<AskPiece[]>([]);
+  const { outcomes, send } = useAskSends();
   const titleId = useId();
+  const labelId = useId();
   const dialog = useRef<HTMLDivElement>(null);
-
-  const project = projects.find((candidate) => projectKey(candidate) === pickedKey) ?? null;
-  const options: Option[] = projects.map((candidate, index) => ({
-    key: projectKey(candidate),
-    label: candidate.name,
-    color: projectColor(index),
-    off: offReason(candidate),
-  }));
-  const picked = options.find((option) => option.key === pickedKey) ?? null;
+  const editor = useRef<Editor | null>(null);
   // Escape closes an open list first and the dialog only when no list was open.
-  const listOpen = useRef(true);
+  const listOpen = useRef(false);
   const escapeClosesList = useRef(false);
-  const body = text.trim();
-  const running = project
-    ? (orchestrators ?? []).some((agent) => agent.project_id === project.id && !agent.host)
-    : null;
 
-  const send = useCallback(
-    (idempotency_key: string) =>
-      sendMutation<AskRecorded>("POST", `/api/v1/projects/${project?.id}/asks`, {
-        text: body,
-        idempotency_key,
+  const federated = isFederated(machines ?? []);
+  const options: MentionOption[] = useMemo(
+    () =>
+      projects.map((project, index) => {
+        const standing = standingOf(project, machines ?? []);
+        return {
+          key: projectKey(project),
+          name: project.name,
+          color: projectColor(index),
+          host: ownerOf(project) ?? null,
+          off: standing.canAct ? null : standing.reason,
+        };
       }),
-    [project?.id, body],
+    [projects, machines],
   );
-  const onRecorded = useCallback(
-    (response: { data: AskRecorded }) => {
-      const { ask } = response.data;
-      showAsk(queryClient, {
-        id: ask.id,
-        project_id: ask.project_id,
-        session_id: ask.session_id,
-        received_at: ask.received_at,
-        age_seconds: 0,
-      });
-      if (project) {
-        const [title, detail] = receiptLine(project, response.data);
-        showToast("ok", title, detail);
-      }
-      setRound((n) => n + 1);
-      onClose();
-    },
-    [onClose, project, queryClient],
-  );
-  const action = useAction<AskRecorded>({
-    binding: `${round}:${pickedKey}:${body}`,
-    send,
-    onRecorded,
+
+  const message = messageFor(pieces);
+  const picked = mentionedKeys(pieces).flatMap((key) => {
+    const at = projects.findIndex((project) => projectKey(project) === key);
+    const project = projects[at];
+    return project ? [{ project, color: projectColor(at), off: options[at]?.off ?? null }] : [];
   });
-  const ready = project !== null && body !== "" && !action.pending;
-  const submit = () => {
-    if (ready) action.trigger();
+  const targets: AskTarget[] = picked.map(({ project }) => ({
+    project,
+    running: (orchestrators ?? []).some(
+      (agent) => agent.project_id === project.id && (agent.host ?? undefined) === ownerOf(project),
+    ),
+    text: askFor(
+      message,
+      picked.filter((other) => other.project !== project).map((other) => other.project.name),
+    ),
+  }));
+
+  const attempted = Object.keys(outcomes).length > 0;
+  const sending = Object.values(outcomes).some((outcome) => outcome.status === "sending");
+  const failed = targets.filter(
+    (target) => outcomes[projectKey(target.project)]?.status === "failed",
+  );
+  const tooLong = targets.some((target) => target.text.length > ASK_MAX_CHARS);
+  const blocked = picked.some((entry) => entry.off !== null);
+  const canSend =
+    !sending &&
+    (attempted ? failed.length > 0 : targets.length > 0 && message !== "" && !tooLong && !blocked);
+
+  const submit = async () => {
+    if (!canSend) return;
+    // The first press sends to every project; a press after a failure only to
+    // the ones that failed.
+    const batch = attempted ? failed : targets;
+    const landed = await send(batch);
+    const now = { ...outcomes, ...landed };
+    if (targets.every((target) => now[projectKey(target.project)]?.status === "sent")) {
+      sentToast(targets, now);
+      onClose();
+    }
   };
 
-  // The list opens with its search box focused, so the orchestrator is chosen
-  // first; focus goes back to the Ask button on close.
   useEffect(() => {
     return () => {
       if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
     };
   }, [opener]);
 
-  const note = project
-    ? running === false
-      ? `No orchestrator is running for ${project.name}: the ask is recorded and picked up when it starts.`
-      : `Goes to the ${project.name} orchestrator.`
-    : "Pick an orchestrator first.";
+  const sendLabel = sending
+    ? "Sending..."
+    : attempted
+      ? `Retry ${failed.length} failed`
+      : targets.length > 1
+        ? `Send to ${targets.length}`
+        : "Send";
+
+  let hint: string | null = null;
+  if (!attempted) {
+    if (targets.length === 0) {
+      hint =
+        message === ""
+          ? "Type @ to pick the projects this goes to."
+          : "Add a project with @ first: this ask has nowhere to go.";
+    } else if (message === "") {
+      hint = "Say what they should do.";
+    } else if (tooLong) {
+      hint = `The ask is longer than ${ASK_MAX_CHARS} characters.`;
+    }
+  }
 
   return createPortal(
-    <div className="dialog-backdrop" onMouseDown={() => !action.pending && onClose()}>
+    <div className="dialog-backdrop" onMouseDown={() => !sending && onClose()}>
       <div
         ref={dialog}
         className="dialog ask-dialog"
@@ -254,12 +224,12 @@ function AskBody({ projects, onClose }: { projects: Project[]; onClose: () => vo
           if (event.key === "Escape") {
             event.preventDefault();
             event.stopPropagation();
-            if (!action.pending && !escapeClosesList.current) onClose();
+            if (!sending && !escapeClosesList.current) onClose();
           } else if (event.key === "Tab") {
             // Keep focus on the dialog's own controls that can take it.
             const stops = [
               ...(dialog.current?.querySelectorAll<HTMLElement>(
-                'button:not(:disabled):not([tabindex="-1"]), input:not(:disabled), textarea:not(:disabled)',
+                'button:not(:disabled):not([tabindex="-1"]), [contenteditable="true"]',
               ) ?? []),
             ];
             const [first, last] = [stops[0], stops.at(-1)];
@@ -275,59 +245,75 @@ function AskBody({ projects, onClose }: { projects: Project[]; onClose: () => vo
           }
         }}
       >
-        <h2 id={titleId}>Ask an orchestrator</h2>
+        <h2 id={titleId}>Ask orchestrators</h2>
         <div className="ask-field">
-          <span className="ask-label">Orchestrator</span>
-          <Picker
+          <span className="ask-label" id={labelId}>
+            Ask
+          </span>
+          <AskEditor
             options={options}
-            picked={picked}
-            disabled={action.pending}
-            onPick={(key) => {
-              setPickedKey(key);
-              // Once picked, the text is next.
-              setTimeout(() => dialog.current?.querySelector("textarea")?.focus(), 0);
-            }}
-            onOpenChange={(open) => {
+            used={picked.map((entry) => projectKey(entry.project))}
+            locked={attempted}
+            placeholder="Type @ to pick projects, then say what they should do"
+            labelledBy={labelId}
+            editorRef={editor}
+            onChange={setPieces}
+            onSubmit={() => void submit()}
+            onListOpen={(open) => {
               listOpen.current = open;
             }}
           />
-        </div>
-        <div className="ask-field">
-          <label className="ask-label" htmlFor={`${titleId}-text`}>
-            Ask
-          </label>
-          <textarea
-            id={`${titleId}-text`}
-            className="ask-in"
-            rows={4}
-            maxLength={ASK_MAX_CHARS}
-            placeholder={project ? `Ask the ${project.name} orchestrator` : "What should it do?"}
-            value={text}
-            readOnly={action.pending}
-            onChange={(event) => setText(event.target.value)}
-            onKeyDown={(event) => {
-              // Enter sends; Shift+Enter adds a line.
-              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-                event.preventDefault();
-                submit();
-              }
-            }}
-          />
-          <div className="ask-note" role="status" aria-live="polite" data-warn={running === false}>
-            {action.error ? null : note}
-          </div>
-          <div className="ask-fail">
-            <ActionFailure error={action.error} host={project ? ownerOf(project) : undefined} />
+          <div className="ask-sends" role="status" aria-live="polite">
+            {targets.length > 0 ? (
+              <>
+                <div className="ask-sends-title">
+                  {attempted
+                    ? "Sends"
+                    : `Sends to ${targets.length} project${targets.length === 1 ? "" : "s"}`}
+                </div>
+                <ul>
+                  {picked.map(({ project, color, off }, index) => (
+                    <SendRow
+                      key={projectKey(project)}
+                      project={project}
+                      color={color}
+                      running={targets[index]?.running ?? false}
+                      where={federated ? `on ${ownerOf(project) ?? "this host"}` : null}
+                      outcome={outcomes[projectKey(project)]}
+                      off={off}
+                      onRemove={
+                        attempted
+                          ? null
+                          : () => {
+                              if (editor.current)
+                                removeMention(editor.current, projectKey(project));
+                            }
+                      }
+                    />
+                  ))}
+                </ul>
+              </>
+            ) : null}
+            {hint ? (
+              <p className="ask-hint-line" data-warn={message !== "" && targets.length === 0}>
+                {hint}
+              </p>
+            ) : null}
           </div>
         </div>
         <div className="dialog-actions">
           <span className="ask-hint">Enter sends, Shift+Enter adds a line</span>
-          <button type="button" className="btn" disabled={action.pending} onClick={onClose}>
+          <button type="button" className="btn" disabled={sending} onClick={onClose}>
             Cancel
           </button>
-          <button type="button" className="btn primary" disabled={!ready} onClick={submit}>
+          <button
+            type="button"
+            className="btn primary"
+            disabled={!canSend}
+            onClick={() => void submit()}
+          >
             <SendIcon />
-            {action.pending ? "Sending..." : "Send"}
+            {sendLabel}
           </button>
         </div>
       </div>
