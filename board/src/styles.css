@@ -432,54 +432,29 @@ kbd {
   color: var(--fg-1);
 }
 
-/* The view knob and the project rows */
+/* The view tabs (the Segmented component in the sidebar) and the project rows */
 
-.knob {
+.seg.knob {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 2px;
   margin: 0 2px 6px;
-  padding: 2px;
-  border: 1px solid var(--line-2);
-  border-radius: var(--r8);
-  background: var(--bg-card);
   flex: none;
 }
 
-.knob button {
-  height: 26px;
-  border: 0;
-  border-radius: var(--r6);
-  background: transparent;
-  color: var(--fg-3);
-  font-size: var(--fs-mini);
-  font-weight: var(--w-medium);
+.seg.knob button {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  white-space: nowrap;
-  transition:
-    background var(--fast) var(--ease),
-    color var(--fast) var(--ease);
 }
 
-.knob button .icon {
+.seg.knob button .icon {
   width: 14px;
   height: 14px;
 }
 
-.knob button:hover {
-  color: var(--fg-1);
-}
-
-.knob button[aria-pressed="true"] {
-  background: var(--accent-tint);
-  color: var(--fg-1);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 50%, transparent);
-}
-
-.knob button[aria-pressed="true"] .icon {
+.seg.knob button[aria-pressed="true"] .icon {
   color: var(--accent);
 }
 
@@ -1113,6 +1088,9 @@ kbd {
 
 .seg button {
   border: 0;
+  transition:
+    background var(--fast) var(--ease),
+    color var(--fast) var(--ease);
   background: transparent;
   height: 26px;
   padding: 0 10px;
@@ -1583,4 +1561,122 @@ kbd {
   padding-top: 14px;
   border-top: 1px solid var(--line-1);
   font-size: var(--fs-mini);
+}
+
+/* The board's select (components/ui/select.tsx) */
+
+.sel-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 28px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 6px 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r6);
+  background: var(--bg-card);
+  color: var(--fg-1);
+  font: inherit;
+  font-size: var(--fs-mini);
+  white-space: nowrap;
+  text-align: left;
+  transition:
+    border-color var(--fast) var(--ease),
+    background var(--fast) var(--ease);
+}
+
+.sel-trigger:hover:not([data-disabled]) {
+  border-color: var(--line-3);
+  background: var(--bg-card-hover);
+}
+
+.sel-trigger[data-popup-open] {
+  border-color: var(--accent);
+}
+
+.sel-trigger[data-disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sel-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sel-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--fg-3);
+}
+
+/* Above the dialogs (70 and 80), since a select opens inside one. */
+.sel-pos {
+  z-index: 90;
+}
+
+.sel-popup {
+  box-sizing: border-box;
+  min-width: var(--anchor-width);
+  max-height: min(var(--available-height), 320px);
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r8);
+  background: var(--bg-pop);
+  box-shadow: var(--shadow-high);
+  color: var(--fg-1);
+  font-size: var(--fs-small);
+  outline: 0;
+  transform-origin: var(--transform-origin);
+  transition:
+    opacity var(--fast) var(--ease-out),
+    transform var(--fast) var(--ease-out);
+}
+
+.sel-popup[data-starting-style],
+.sel-popup[data-ending-style] {
+  opacity: 0;
+  transform: scale(0.97);
+}
+
+.sel-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px 6px 6px;
+  border-radius: var(--r6);
+  cursor: default;
+  user-select: none;
+  outline: 0;
+}
+
+.sel-item[data-highlighted] {
+  background: var(--bg-hover);
+}
+
+.sel-item[data-disabled] {
+  color: var(--fg-4);
+}
+
+.sel-check {
+  display: inline-flex;
+  width: 14px;
+  flex: none;
+  color: var(--accent);
+}
+
+.sel-group-label {
+  padding: 6px 10px 4px 26px;
+  color: var(--fg-3);
+  font-size: var(--fs-mini);
+  font-weight: var(--w-medium);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sel-popup {
+    transition: none;
+  }
 }

@@ -23,6 +23,7 @@ import { boardPath, projectsPath, queryKeyFor } from "../../lib/queries";
 import { createAppRouter } from "../../lib/router";
 import { applyChange } from "../../lib/sse";
 import { ArchiveProject } from "../shell/project-archive";
+import { ProjectDetail } from "../shell/project-stage";
 import { DeleteProject } from "../shell/project-delete";
 import { resetBoardLook } from "./board-prefs";
 
@@ -985,6 +986,17 @@ test("the fleet project has no archive or delete control", () => {
     </>,
   );
   expect(screen.queryByRole("button")).toBeNull();
+});
+
+test("the fleet project offers no stage switch and no checkout setting", () => {
+  const projects = fixtureResource(projectsPath) as ProjectsResponse;
+  const gamma = projects.projects.find((project) => project.id === "gamma");
+  if (!gamma) throw new Error("the fixtures lost gamma");
+  const fleet = { ...gamma, id: "fleet", name: "Fleet" };
+  const { container } = render(<ProjectDetail project={fleet} id="fleet-detail" />);
+  expect(screen.queryByRole("button")).toBeNull();
+  expect(container.textContent).not.toContain("Checkout");
+  expect(container.textContent).toContain("Builders follow");
 });
 
 test("deleting a project with a working card lists the agents it stops and the work it leaves", async () => {

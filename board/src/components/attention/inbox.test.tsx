@@ -14,6 +14,7 @@ import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
 import { applyChange } from "../../lib/sse";
 import { answeredStore, withdrawnStore } from "./answered";
+import { choose } from "../../test-select";
 
 const RETRY = "01JATTN0000000000000000000";
 const MERGE = "01JATTN0000000000000000001";
@@ -374,7 +375,7 @@ test("reprioritize sends the card's rev, and a conflict is shown as the server w
   ];
   await renderInbox("default", RETRY);
 
-  fireEvent.change(screen.getByLabelText("Priority"), { target: { value: "0" } });
+  await choose(screen.getByLabelText("Priority"), /^P0 /);
   fireEvent.click(screen.getByRole("button", { name: "Save" }));
   await flush();
 

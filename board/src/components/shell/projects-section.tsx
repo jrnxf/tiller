@@ -10,14 +10,16 @@ import { projectsOnHost } from "../../lib/scope";
 import type { ViewKnob } from "../../lib/prefs";
 import { useStore } from "../../lib/store";
 import { HostChip } from "../board/host-chip";
+import { Segmented } from "../ui/segmented";
+import type { SegmentedOption } from "../ui/segmented";
 import { CheckIcon, ChevronIcon, EyeIcon, EyeOffIcon, FocusIcon, LayersIcon } from "./icons";
 import { AddProject } from "./project-add";
 import { ArchivedProjects } from "./projects-archived";
 import { ProjectDetail, StageChip } from "./project-stage";
 
-const VIEWS: { value: ViewKnob; label: string }[] = [
-  { value: "all", label: "All projects" },
-  { value: "focus", label: "Focus" },
+const VIEWS: SegmentedOption<ViewKnob>[] = [
+  { value: "all", label: "All projects", icon: <LayersIcon /> },
+  { value: "focus", label: "Focus", icon: <FocusIcon /> },
 ];
 
 // A weekly review turns overdue a day after it came due, with no event to
@@ -79,19 +81,13 @@ export function ProjectsSection({ activeHost }: { activeHost: string | undefined
         ) : null}
         <AddProject />
       </div>
-      <div className="knob" role="group" aria-label="View">
-        {VIEWS.map((view) => (
-          <button
-            key={view.value}
-            type="button"
-            aria-pressed={prefs.view === view.value}
-            onClick={() => updatePrefs({ view: view.value })}
-          >
-            {view.value === "all" ? <LayersIcon /> : <FocusIcon />}
-            {view.label}
-          </button>
-        ))}
-      </div>
+      <Segmented
+        className="knob"
+        label="View"
+        options={VIEWS}
+        value={prefs.view}
+        onChange={(view) => updatePrefs({ view })}
+      />
       <section aria-label="Projects" className="projects">
         {projects.projects.map((project, index) => {
           const key = projectKey(project);
