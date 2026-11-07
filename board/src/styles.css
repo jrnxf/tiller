@@ -47,6 +47,7 @@
   --line-2: #e4e2e4;
   --line-3: #dcdbdd;
   --line-soft: #0000000d;
+  --logo: #667c15;
   --accent: #5f7552;
   --accent-hover: #6c8460;
   --accent-tint: #f0f3ec;
@@ -132,6 +133,7 @@
   --line-2: #34343a;
   --line-3: #3e3e44;
   --line-soft: #ffffff0d;
+  --logo: #c2de67;
   --accent: #b2c9a1;
   --accent-hover: #c4d8b5;
   --accent-tint: #171c14;
@@ -292,21 +294,10 @@ kbd {
 }
 
 .logo {
-  width: 20px;
   height: 20px;
-  border-radius: 5px;
-  background: linear-gradient(135deg, var(--indigo), var(--teal));
-  color: #fff;
-  display: grid;
-  place-items: center;
-  font-size: 11px;
-  font-weight: var(--w-bold);
-}
-
-.ws .name {
-  font-weight: var(--w-semibold);
+  width: auto;
+  flex: none;
   color: var(--fg-1);
-  flex: 1;
 }
 
 .search {
@@ -1277,7 +1268,11 @@ kbd {
     padding: 4px 0 10px;
   }
 
-  .shell:has(.av-view) .ws .name,
+  /* The rail shows the leaf alone: the wordmark is clipped off. */
+  .shell:has(.av-view) .ws .logo {
+    width: 20px;
+  }
+
   .shell:has(.av-view) .search span,
   .shell:has(.av-view) .search kbd,
   .shell:has(.av-view) .nav .lbl,

@@ -18,6 +18,7 @@ import {
   SearchIcon,
   SettingsIcon,
 } from "./icons";
+import { Logo } from "./logo";
 import { MachinesSection } from "./machines-section";
 import { ProjectsSection } from "./projects-section";
 import { QuotaFooter, QuotaUnavailable } from "./quota-footer";
@@ -116,8 +117,7 @@ export function Sidebar({
   return (
     <aside className="side" aria-label="Sidebar">
       <div className="ws">
-        <div className="logo">T</div>
-        <div className="name">tiller</div>
+        <Logo />
       </div>
       <button
         type="button"
