@@ -1612,8 +1612,9 @@ kbd {
   color: var(--fg-3);
 }
 
+/* Above the dialogs (70 and 80), since a select opens inside one. */
 .sel-pos {
-  z-index: 60;
+  z-index: 90;
 }
 
 .sel-popup {
