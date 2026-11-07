@@ -343,6 +343,16 @@ fn open_watch(pushed: Timestamp) -> (Store, String, String) {
         )
         .unwrap()
         .value;
+    // The watch counts from the obligation's opening, which the store
+    // stamps a moment after `pushed`: pin it, so the minute marks the
+    // tests poll at are exact.
+    store
+        .conn()
+        .execute(
+            "UPDATE obligations SET opened_at = ?2 WHERE id = ?1",
+            rusqlite::params![obligation.id, pushed],
+        )
+        .unwrap();
     (store, card.id, obligation.id)
 }
 
