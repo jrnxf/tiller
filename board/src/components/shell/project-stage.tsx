@@ -97,7 +97,7 @@ function Facts({ project }: { project: Project }) {
       <Fact label="Builders follow">
         <code className="stage-sha">{project.effective_delivery}</code>
       </Fact>
-      {ownerOf(project) ? null : <SetupFacts project={project} />}
+      {ownerOf(project) || project.id === FLEET_PROJECT ? null : <SetupFacts project={project} />}
     </dl>
   );
 }
@@ -300,16 +300,18 @@ export function ProjectDetail({ project, id }: { project: Project; id: string })
   return (
     <div className="pdetail" id={id} role="group" aria-label={`${project.name} stage`}>
       <Facts project={project} />
-      <button
-        ref={opener}
-        type="button"
-        className="btn stage-switch"
-        disabled={off !== undefined}
-        title={off}
-        onClick={() => setConfirming(true)}
-      >
-        Switch to {target}
-      </button>
+      {project.id === FLEET_PROJECT ? null : (
+        <button
+          ref={opener}
+          type="button"
+          className="btn stage-switch"
+          disabled={off !== undefined}
+          title={off}
+          onClick={() => setConfirming(true)}
+        >
+          Switch to {target}
+        </button>
+      )}
       {receipt ? (
         <div className="stage-receipt">
           <InlineReceipt receiptKey={receipt.key} text={receipt.text} />
