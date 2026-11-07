@@ -98,11 +98,18 @@ export function Select({
       </BaseSelect.Trigger>
       <BaseSelect.Portal>
         <BaseSelect.Positioner className="sel-pos" sideOffset={4} alignItemWithTrigger={false}>
-          <BaseSelect.Popup className="sel-popup">
+          <BaseSelect.Popup
+            className="sel-popup"
+            // The list is portalled but React events still reach the parents
+            // of the Select: a click or Escape here must not reach a row or a
+            // dialog around it.
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+          >
             <BaseSelect.List className="sel-list">
               {groups
-                ? groups.map((group) => (
-                    <BaseSelect.Group key={group.label} className="sel-group">
+                ? groups.map((group, index) => (
+                    <BaseSelect.Group key={`${index}:${group.label}`} className="sel-group">
                       <BaseSelect.GroupLabel className="sel-group-label">
                         {group.label}
                       </BaseSelect.GroupLabel>
