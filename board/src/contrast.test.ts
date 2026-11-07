@@ -95,13 +95,12 @@ for (const [name, vars] of [
     }
   });
 
-  test(`${name}: white on the solid accent and accent text on its tint reach 4.5:1`, () => {
-    expect(contrast([255, 255, 255], rgb(vars["accent-solid"] as string))).toBeGreaterThanOrEqual(
+  test(`${name}: the accent foreground on the solid accent and accent text on its tint reach 4.5:1`, () => {
+    const onSolid = rgb(vars["accent-fg"] as string);
+    expect(contrast(onSolid, rgb(vars["accent-solid"] as string))).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(onSolid, rgb(vars["accent-solid-hover"] as string))).toBeGreaterThanOrEqual(
       4.5,
     );
-    expect(
-      contrast([255, 255, 255], rgb(vars["accent-solid-hover"] as string)),
-    ).toBeGreaterThanOrEqual(4.5);
     expect(
       contrast(rgb(vars["accent-text"] as string), rgb(vars["accent-tint"] as string)),
     ).toBeGreaterThanOrEqual(4.5);

@@ -299,7 +299,7 @@ const STATUS = {
       <path
         d="M4.3 7.2 6.2 9 9.8 5.2"
         fill="none"
-        stroke="#fff"
+        stroke="var(--accent-fg)"
         strokeWidth="1.5"
         strokeLinecap="round"
         strokeLinejoin="round"

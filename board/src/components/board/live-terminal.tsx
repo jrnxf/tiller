@@ -145,7 +145,7 @@ const THEME = {
   foreground: "#c9ced6",
   cursor: "#e6e9ee",
   cursorAccent: SCREEN,
-  selectionBackground: "#5e6ad266",
+  selectionBackground: "#b2c9a166",
   black: "#1d1f23",
   red: "#ef7c7c",
   green: "#5fcf86",
