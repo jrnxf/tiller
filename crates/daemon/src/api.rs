@@ -1354,6 +1354,8 @@ enum Parsed {
     Reopen(String),
     Answer(AnswerBody),
     Decide(DecideBody, bool),
+    AskNote(AskNote),
+    StartOrchestrator,
 }
 
 impl Mutation {
@@ -1442,6 +1444,27 @@ impl Mutation {
                     request.idempotency_key.clone(),
                     request.host.clone(),
                     Parsed::Decide(request, accept),
+                )
+            }
+            Op::AskNote => {
+                let request: AskNote = body(bytes)?;
+                if request.text.trim().chars().count() > ASK_NOTE_MAX_CHARS {
+                    return Err(ApiError::usage(format!(
+                        "an ask is at most {ASK_NOTE_MAX_CHARS} characters"
+                    )));
+                }
+                (
+                    request.idempotency_key.clone(),
+                    request.host.clone(),
+                    Parsed::AskNote(request),
+                )
+            }
+            Op::StartOrchestrator => {
+                let request: StartOrchestrator = body(bytes)?;
+                (
+                    request.idempotency_key,
+                    request.host,
+                    Parsed::StartOrchestrator,
                 )
             }
         };
@@ -1551,18 +1574,45 @@ impl Mutation {
                 done.approval_id = approval_id;
                 Ok(done)
             }
+            Parsed::AskNote(request) => {
+                // The same core call as `tiller ask note`, from the board's ask box.
+                let applied = store.ask_record(
+                    ctx,
+                    Some(key),
+                    NewAsk {
+                        project_id: id.to_owned(),
+                        session_id: None,
+                        source: AskSource::Board,
+                        text: request.text.trim().to_owned(),
+                    },
+                )?;
+                let outbox_id = applied.value.message.as_ref().map(|m| m.id.clone());
+                let mut done = Done::of(applied)?;
+                done.outbox_id = outbox_id;
+                Ok(done)
+            }
+            // Needs the daemon's starter, so it never reaches the store alone.
+            Parsed::StartOrchestrator => Err(Error::Internal(
+                "an orchestrator start runs through its starter".into(),
+            )),
         }
     }
 
     /// Applies on `store` at once, as `peer serve` does for a verified
     /// frame: the response, or the refusal with what the board needs to
-    /// recover from it.
+    /// recover from it. `starter` serves an orchestrator start.
     pub(crate) fn apply_here(
         self,
         store: &mut Store,
         ctx: &Ctx,
+        starter: Option<&dyn OrchestratorStart>,
     ) -> Result<MutationResponse, ApiError> {
         let (op, target) = (self.op, self.target.clone());
+        if matches!(self.parsed, Parsed::StartOrchestrator) {
+            let project = target.as_deref().unwrap_or_default();
+            let applied = start_here(starter, store, ctx, project, |_| {})?;
+            return Ok(Done::of(applied)?.response());
+        }
         match self.apply(store, ctx) {
             Ok(done) => Ok(done.response()),
             Err(error) => {
@@ -1575,6 +1625,44 @@ impl Mutation {
             }
         }
     }
+}
+
+/// The same start as `tiller orchestrator start`, as the board: a live
+/// orchestrator is returned (`replayed`), never a second one, and a retry of
+/// a start that landed replays it by its key. `suspect` sees a store error,
+/// so the daemon can check the database for damage.
+fn start_here(
+    starter: Option<&dyn OrchestratorStart>,
+    store: &mut Store,
+    ctx: &Ctx,
+    project: &str,
+    suspect: impl FnOnce(&Error),
+) -> Result<Applied<Orchestrator>, ApiError> {
+    let Some(starter) = starter else {
+        return Err(Error::Unavailable("this host cannot start orchestrators".into()).into());
+    };
+    starter
+        .start(store, ctx, project)
+        .map_err(|error| match error {
+            StartError::State { error, notes } => {
+                suspect(&error);
+                let mut api = ApiError::from(*error);
+                if let Some(notes) = notes {
+                    api.body.error.message = format!("{}; {notes}", api.body.error.message);
+                }
+                api
+            }
+            StartError::Refused {
+                exit,
+                code,
+                message,
+                hint,
+            } => {
+                let mut api = ApiError::new(status_of_exit(exit), code, message);
+                api.body.error.hint = hint;
+                api
+            }
+        })
 }
 
 /// The head an approval binds now, for a 422 after the head moved.
@@ -1850,51 +1938,22 @@ async fn stage_project(
     params(("id" = String, Path)),
     responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+              (status = 502, body = ErrorBody, description = "`peer_refused`"),
+              (status = 503, body = ErrorBody, description = "`peer_unreachable`: nothing was sent or queued")))]
 async fn ask_note(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
-    let request: AskNote = body(&bytes)?;
-    not_forwarded(&state, request.host.as_deref(), "an ask").await?;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, key| {
-            let text = request.text.trim().to_owned();
-            if text.chars().count() > ASK_NOTE_MAX_CHARS {
-                return Err(Error::Usage(format!(
-                    "an ask is at most {ASK_NOTE_MAX_CHARS} characters"
-                )));
-            }
-            // The same core call as `tiller ask note`, from the board's ask box.
-            let applied = store.ask_record(
-                ctx,
-                Some(key),
-                NewAsk {
-                    project_id: id,
-                    session_id: None,
-                    source: AskSource::Board,
-                    text,
-                },
-            )?;
-            let outbox_id = applied.value.message.as_ref().map(|m| m.id.clone());
-            let mut done = Done::of(applied)?;
-            done.outbox_id = outbox_id;
-            Ok(done)
-        },
-    )
-    .await
+    submit(&state, &headers, Op::AskNote, Some(id), &bytes).await
 }
 
 #[utoipa::path(post, path = "/api/v1/projects/{id}/orchestrator", tag = "mutations", request_body = StartOrchestrator,
     params(("id" = String, Path)),
     responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody),
               (status = 404, body = ErrorBody), (status = 422, body = ErrorBody), (status = 503, body = ErrorBody),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+              (status = 502, body = ErrorBody, description = "`peer_refused`")))]
 async fn start_orchestrator(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1902,15 +1961,17 @@ async fn start_orchestrator(
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
     guard(&state, &headers)?;
-    let request: StartOrchestrator = body(&bytes)?;
-    let key = key(&request.idempotency_key)?;
-    not_forwarded(&state, request.host.as_deref(), "an orchestrator start").await?;
+    let mutation = Mutation::parse(Op::StartOrchestrator, Some(id.clone()), &bytes)?;
+    if let Some(view) = peer_for(&state, mutation.host()).await? {
+        return forward(&state, &view, mutation, &bytes).await;
+    }
     if let Some(reason) = state.0.damage.reason() {
         return Err(read_only(&reason));
     }
     let Some(starter) = state.0.orchestrators.clone() else {
         return Err(Error::Unavailable("this daemon cannot start orchestrators".into()).into());
     };
+    let key = mutation.key().to_owned();
     let db = state.db();
     let damage = state.0.damage.clone();
     let joined = tokio::task::spawn_blocking(move || {
@@ -1918,31 +1979,13 @@ async fn start_orchestrator(
             return Err(uninitialized());
         }
         let mut store = Store::open_current(&db).map_err(ApiError::from)?;
-        // The same start as `tiller orchestrator start`, as the board: a
-        // live orchestrator is returned (`replayed`), never a second one,
-        // and a retry of a start that landed replays it by its key.
-        starter
-            .start(&mut store, &Ctx::new(Actor::Board).with_key(key), &id)
-            .map_err(|error| match error {
-                StartError::State { error, notes } => {
-                    damage.suspect(&db, &error);
-                    let mut api = ApiError::from(*error);
-                    if let Some(notes) = notes {
-                        api.body.error.message = format!("{}; {notes}", api.body.error.message);
-                    }
-                    api
-                }
-                StartError::Refused {
-                    exit,
-                    code,
-                    message,
-                    hint,
-                } => {
-                    let mut api = ApiError::new(status_of_exit(exit), code, message);
-                    api.body.error.hint = hint;
-                    api
-                }
-            })
+        start_here(
+            Some(starter.as_ref()),
+            &mut store,
+            &Ctx::new(Actor::Board).with_key(key),
+            &id,
+            |error| damage.suspect(&db, error),
+        )
     })
     .await;
     let applied = match joined {

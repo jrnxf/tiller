@@ -31,6 +31,7 @@ use super::link::{Connecting, Connection, Connector, PeerMessage, Peers, Target}
 use super::serve::{ServeConfig, own_snapshot, serve};
 use super::{Frame, Hello, HelloKey, Timing, Welcome};
 use crate::api::tests::{Answer, app_with_peers, get, mutation, owner_cookie, send};
+use crate::api::{OrchestratorStart, StartError};
 use crate::dto::{BoardResponse, ErrorBody, ErrorDetail, LinkState, MutationResponse};
 use crate::readonly::Damage;
 
@@ -146,12 +147,22 @@ fn hello(pair: &Pair, last_seq: Option<i64>) -> Frame {
 /// `tiller peer serve` for `home` on one end of a socket pair; the other
 /// end is returned.
 fn serve_on_socket(home: &Path, from: &str) -> UnixStream {
+    serve_with_starter(home, from, None)
+}
+
+/// [`serve_on_socket`] with the starter a peer's binary would provide.
+fn serve_with_starter(
+    home: &Path,
+    from: &str,
+    orchestrators: Option<Arc<dyn OrchestratorStart>>,
+) -> UnixStream {
     let (ours, theirs) = UnixStream::pair().unwrap();
     let config = ServeConfig {
         home: home.to_owned(),
         from: from.to_owned(),
         timing: quick(),
         herdr: None,
+        orchestrators,
     };
     let input = BufReader::new(theirs.try_clone().unwrap());
     std::thread::spawn(move || {
@@ -1391,6 +1402,7 @@ struct Wire {
     home: PathBuf,
     sent: Arc<Mutex<Vec<u8>>>,
     lose_results: Arc<AtomicUsize>,
+    starter: Option<Arc<dyn OrchestratorStart>>,
 }
 
 impl Wire {
@@ -1399,13 +1411,19 @@ impl Wire {
             home: home.to_owned(),
             sent: Arc::default(),
             lose_results: Arc::default(),
+            starter: None,
         }
+    }
+
+    fn with_starter(mut self, starter: Arc<dyn OrchestratorStart>) -> Self {
+        self.starter = Some(starter);
+        self
     }
 }
 
 impl Connector for Wire {
     fn connect(&self, target: &Target) -> Connecting {
-        let socket = serve_on_socket(&self.home, &target.from);
+        let socket = serve_with_starter(&self.home, &target.from, self.starter.clone());
         let sent = self.sent.clone();
         let lose = self.lose_results.clone();
         Box::pin(async move {
@@ -1465,5 +1483,180 @@ impl Connector for Switch {
             return Box::pin(async { Err(std::io::Error::other("no route to host")) });
         }
         Wire::new(&self.home).connect(target)
+    }
+}
+
+// -- asks and orchestrator starts ---------------------------------------------------
+
+/// A peer's starter that records what it was asked and refuses, so a test
+/// sees the forwarded start arrive without spawning anything.
+#[derive(Default)]
+struct RecordingStarter {
+    seen: Mutex<Vec<(String, String, Option<String>)>>,
+}
+
+impl OrchestratorStart for RecordingStarter {
+    fn start(
+        &self,
+        _store: &mut Store,
+        ctx: &tiller_core::Ctx,
+        project: &str,
+    ) -> Result<tiller_core::Applied<tiller_agents::spawn::orchestrator::Orchestrator>, StartError>
+    {
+        self.seen.lock().unwrap().push((
+            project.to_owned(),
+            ctx.actor.to_string(),
+            ctx.key.clone(),
+        ));
+        Err(StartError::Refused {
+            exit: 5,
+            code: "stub_refused",
+            message: "the stub starter refuses".into(),
+            hint: None,
+        })
+    }
+}
+
+fn ask_count(fleet: &Fleet, text: &str) -> i64 {
+    fleet
+        .open()
+        .conn()
+        .query_row("SELECT count(*) FROM asks WHERE text = ?1", [text], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn forwarded_ask_is_recorded_on_the_peer_once() {
+    let pair = pair();
+    let (peers, _stop) = start(pair.board.dir.path(), Wire::new(pair.peer.dir.path()));
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let ask = |key: &str| {
+        mutation(
+            "POST",
+            "/api/v1/projects/alpha/asks",
+            json!({"idempotency_key": key, "host": "peer", "text": "optimize fonts"}),
+            &[("cookie", &cookie)],
+        )
+    };
+    let first = send(&app, ask("k-1")).await;
+    let first = applied(&first);
+    assert_eq!(first.host.as_deref(), Some("peer"));
+    assert!(!first.replayed);
+    assert_eq!(ask_count(&pair.peer, "optimize fonts"), 1);
+    assert_eq!(ask_count(&pair.board, "optimize fonts"), 0);
+
+    // The same key again is the stored answer, not a second ask.
+    let again = send(&app, ask("k-1")).await;
+    assert!(applied(&again).replayed);
+    assert_eq!(ask_count(&pair.peer, "optimize fonts"), 1);
+
+    // A project the peer does not have is its 404.
+    let missing = send(
+        &app,
+        mutation(
+            "POST",
+            "/api/v1/projects/nope/asks",
+            json!({"idempotency_key": "k-2", "host": "peer", "text": "hello"}),
+            &[("cookie", &cookie)],
+        ),
+    )
+    .await;
+    let error = refusal(&missing, StatusCode::NOT_FOUND);
+    assert_eq!(error.host.as_deref(), Some("peer"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn forwarded_orchestrator_start_runs_the_peers_starter() {
+    let pair = pair();
+    let starter = Arc::new(RecordingStarter::default());
+    let wire = Wire::new(pair.peer.dir.path()).with_starter(starter.clone());
+    let (peers, _stop) = start(pair.board.dir.path(), wire);
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let answer = send(
+        &app,
+        mutation(
+            "POST",
+            "/api/v1/projects/alpha/orchestrator",
+            json!({"idempotency_key": "k-1", "host": "peer"}),
+            &[("cookie", &cookie)],
+        ),
+    )
+    .await;
+    // The stub's refusal comes back as the peer's own, with `host`.
+    let error = refusal(&answer, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error.code, "stub_refused");
+    assert_eq!(error.host.as_deref(), Some("peer"));
+    let seen = starter.seen.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![(
+            "alpha".to_owned(),
+            "board@test-host".to_owned(),
+            Some("k-1".to_owned())
+        )]
+    );
+}
+
+#[test]
+fn forwarded_orchestrator_start_without_a_starter_is_unavailable() {
+    let pair = pair();
+    let mut link = linked(&pair);
+    let order = Order {
+        op: Op::StartOrchestrator,
+        target: Some("alpha".to_owned()),
+        body: json!({"idempotency_key": "k-1"}),
+        idempotency_key: "k-1".to_owned(),
+    };
+    let frame = Mutate::signed(&signer(&pair), &pair.peer.host, order, Timestamp::now());
+    let (status, body) = link.mutate(frame);
+    assert_eq!(status, 503, "{body}");
+}
+
+/// G25 on the peer: an ask or a start for a project another host owns is
+/// refused before anything is written.
+#[test]
+fn foreign_project_ask_and_start_refused() {
+    let pair = pair();
+    let mut link = linked(&pair);
+    {
+        let store = pair.peer.open();
+        let other = "01JHOSTC0000000000000000000";
+        store
+            .conn()
+            .execute(
+                "INSERT INTO hosts (id, label, kind) VALUES (?1, 'host-c', 'remote')",
+                [other],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE projects SET owner_host_id = ?1 WHERE id = 'alpha'",
+                [other],
+            )
+            .unwrap();
+    }
+    let before = last_seq(&pair.peer);
+    for (op, body) in [
+        (
+            Op::AskNote,
+            json!({"idempotency_key": "k-1", "text": "optimize fonts"}),
+        ),
+        (Op::StartOrchestrator, json!({"idempotency_key": "k-1"})),
+    ] {
+        let order = Order {
+            op,
+            target: Some("alpha".to_owned()),
+            body,
+            idempotency_key: "k-1".to_owned(),
+        };
+        let frame = Mutate::signed(&signer(&pair), &pair.peer.host, order, Timestamp::now());
+        assert_refused(&pair, link.mutate(frame), "foreign_project", before);
     }
 }

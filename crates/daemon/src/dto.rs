@@ -952,8 +952,8 @@ pub struct AddProject {
 #[serde(deny_unknown_fields)]
 pub struct AskNote {
     pub idempotency_key: String,
-    /// A paired peer's label. Not forwarded: a note for a peer's project is
-    /// 502 `peer_refused` (`protocol.md` 7.4).
+    /// A paired peer's label: the note is recorded on that host
+    /// (`protocol.md` 7.4).
     #[serde(default)]
     pub host: Option<String>,
     /// The ask, in the owner's words; multi-line.
@@ -1236,7 +1236,8 @@ pub struct DecideBody {
 #[serde(deny_unknown_fields)]
 pub struct StartOrchestrator {
     pub idempotency_key: String,
-    /// A paired peer's label; a start is not forwarded (`protocol.md` 7.4).
+    /// A paired peer's label: the peer starts its own orchestrator
+    /// (`protocol.md` 7.4).
     #[serde(default)]
     pub host: Option<String>,
 }

@@ -56,6 +56,8 @@ pub struct ServeConfig {
     pub timing: Timing,
     /// The local herdr server, for a run's pane tail; none in tests.
     pub herdr: Option<Cli>,
+    /// Starts an orchestrator for a forwarded start; none refuses it 503.
+    pub orchestrators: Option<std::sync::Arc<dyn crate::api::OrchestratorStart>>,
 }
 
 /// Serves one link until the board host hangs up, `input` ends, the
@@ -325,7 +327,7 @@ impl Link<'_> {
                 // The daemon found `state.db` damaged (`recovery.md` R10):
                 // a forwarded write is refused as a local one is.
                 Ok(reason) => crate::api::read_only(reason.trim()).into_result(),
-                Err(_) => forward::apply(&mut self.store, &self.key, frame, op),
+                Err(_) => forward::apply(&mut self.store, self.config, &self.key, frame, op),
             },
             Err(Denied::Refused(reason, message)) => {
                 tracing::warn!(reason, %message, "forwarded mutation refused");

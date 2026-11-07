@@ -38,10 +38,12 @@ pub enum Op {
     Reopen,
     Answer,
     Decide,
+    AskNote,
+    StartOrchestrator,
 }
 
 impl Op {
-    pub const ALL: [Op; 10] = [
+    pub const ALL: [Op; 12] = [
         Op::CreateCard,
         Op::EditCard,
         Op::Comment,
@@ -52,6 +54,8 @@ impl Op {
         Op::Reopen,
         Op::Answer,
         Op::Decide,
+        Op::AskNote,
+        Op::StartOrchestrator,
     ];
 
     /// The 7.4 endpoint, as a `mutate` frame's `op` names it.
@@ -67,6 +71,8 @@ impl Op {
             Op::Reopen => "POST /api/v1/cards/{id}/reopen",
             Op::Answer => "POST /api/v1/attention/{id}/answer",
             Op::Decide => "POST /api/v1/approvals/{id}/decide",
+            Op::AskNote => "POST /api/v1/projects/{id}/asks",
+            Op::StartOrchestrator => "POST /api/v1/projects/{id}/orchestrator",
         }
     }
 
@@ -86,7 +92,7 @@ pub struct Mutate {
     /// The 7.4 endpoint, as [`Op::as_str`] writes it. A string, so an op
     /// this build does not know is refused rather than unreadable.
     pub op: String,
-    /// The card, attention item or approval the path names; null for
+    /// The card, attention item, approval or project the path names; null for
     /// `POST /api/v1/cards`, whose project is in the body.
     pub target: Option<String>,
     /// The request body, without `host`.
@@ -278,6 +284,8 @@ fn target_project(store: &Store, op: Op, frame: &Mutate) -> tiller_core::Result<
             }
             None => None,
         },
+        // The path names the project by its id, as the core calls read it.
+        Op::AskNote | Op::StartOrchestrator => Some(target.to_owned()),
         Op::EditCard
         | Op::Comment
         | Op::Hold
@@ -308,8 +316,14 @@ fn found<T>(result: tiller_core::Result<T>) -> tiller_core::Result<Option<T>> {
 /// label>` and `via_peer` in every event's payload (`authority.md` section
 /// 3). The `result` status and body; the `idempotency_key` table makes a
 /// repeat return the stored response.
-pub(super) fn apply(store: &mut Store, key: &PeerKey, frame: &Mutate, op: Op) -> (u16, Value) {
-    match applied(store, key, frame, op) {
+pub(super) fn apply(
+    store: &mut Store,
+    config: &ServeConfig,
+    key: &PeerKey,
+    frame: &Mutate,
+    op: Op,
+) -> (u16, Value) {
+    match applied(store, config, key, frame, op) {
         Ok(response) => match serde_json::to_value(response) {
             Ok(body) => (200, body),
             Err(error) => ApiError::from(Error::Internal(format!(
@@ -323,6 +337,7 @@ pub(super) fn apply(store: &mut Store, key: &PeerKey, frame: &Mutate, op: Op) ->
 
 fn applied(
     store: &mut Store,
+    config: &ServeConfig,
     key: &PeerKey,
     frame: &Mutate,
     op: Op,
@@ -348,7 +363,7 @@ fn applied(
             "viewer_label": key.viewer_label,
             "frame_id": frame.id,
         }));
-    mutation.apply_here(store, &ctx)
+    mutation.apply_here(store, &ctx, config.orchestrators.as_deref())
 }
 
 #[cfg(test)]

@@ -2515,7 +2515,17 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`peer_unreachable`: nothing was sent or queued",
             "content": {
               "application/json": {
                 "schema": {
@@ -2704,7 +2714,7 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`",
             "content": {
               "application/json": {
                 "schema": {
@@ -3386,7 +3396,7 @@
               "string",
               "null"
             ],
-            "description": "A paired peer's label. Not forwarded: a note for a peer's project is\n502 `peer_refused` (`protocol.md` 7.4)."
+            "description": "A paired peer's label: the note is recorded on that host\n(`protocol.md` 7.4)."
           },
           "idempotency_key": {
             "type": "string"
@@ -7083,7 +7093,7 @@
               "string",
               "null"
             ],
-            "description": "A paired peer's label; a start is not forwarded (`protocol.md` 7.4)."
+            "description": "A paired peer's label: the peer starts its own orchestrator\n(`protocol.md` 7.4)."
           },
           "idempotency_key": {
             "type": "string"

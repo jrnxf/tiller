@@ -136,6 +136,13 @@ pub fn serve(app: &App, from: String) -> Result<ExitCode, Failure> {
         from,
         timing: Timing::default(),
         herdr: Some(super::spawn::configured_herdr(app)?),
+        orchestrators: Some(std::sync::Arc::new(super::spawn::BoardStart {
+            app: App {
+                home: app.home.clone(),
+                db: app.db.clone(),
+                actor: app.actor.clone(),
+            },
+        })),
     };
     let input = std::io::BufReader::new(std::io::stdin());
     match tiller_daemon::peer::serve::serve(&config, input, std::io::stdout().lock()) {
