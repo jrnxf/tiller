@@ -6,6 +6,7 @@ import { projectsQuery } from "../../lib/queries";
 import { sendMutation } from "../attention/api";
 import { useAction } from "../attention/use-action";
 import { PlusIcon } from "./icons";
+import { Select } from "../ui/select";
 import { ProjectDialog } from "./project-dialog";
 
 // `tiller project add`'s delivery modes, the one CP5 uses first.
@@ -140,19 +141,14 @@ function AddDialog({ onClose }: { onClose: () => void }) {
             onChange={(event) => setRepo(event.target.value)}
           />
           <label htmlFor={`${fields}-delivery`}>Delivery</label>
-          <select
+          <Select
             id={`${fields}-delivery`}
-            className="ca-select form-select"
+            className="form-select"
             value={delivery}
             disabled={action.pending}
-            onChange={(event) => setDelivery(event.target.value)}
-          >
-            {DELIVERIES.map((mode) => (
-              <option key={mode} value={mode}>
-                {mode}
-              </option>
-            ))}
-          </select>
+            onValueChange={setDelivery}
+            options={DELIVERIES.map((mode) => ({ value: mode, label: mode }))}
+          />
           <label htmlFor={`${fields}-capacity`}>Builder slots</label>
           <input
             id={`${fields}-capacity`}

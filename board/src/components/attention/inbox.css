@@ -743,17 +743,6 @@ a.irow:hover {
   min-width: 64px;
 }
 
-.ca-select {
-  height: 28px;
-  border: 1px solid var(--line-2);
-  border-radius: var(--r6);
-  background: var(--bg-card);
-  color: var(--fg-1);
-  font: inherit;
-  font-size: var(--fs-mini);
-  padding: 0 8px;
-}
-
 .ca-form {
   display: flex;
   flex-direction: column;

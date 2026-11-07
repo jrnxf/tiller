@@ -14,6 +14,7 @@ import { sendMutation } from "./api";
 import { PRIORITIES } from "./format";
 import { PaneIcon, SendIcon } from "./icons";
 import { InlineReceipt, ReceiptPanel } from "./receipt";
+import { Select } from "../ui/select";
 import { useAction } from "./use-action";
 
 // Reprioritize is a field edit, so it carries the card's `rev` and a stale
@@ -37,20 +38,17 @@ function PriorityControl({ card, off }: { card: BoardRow; off: string | null }) 
       <label className="ca-l" htmlFor={`pri-${card.id}`}>
         Priority
       </label>
-      <select
+      <Select
         id={`pri-${card.id}`}
-        className="ca-select"
-        value={priority}
+        value={String(priority)}
         disabled={action.pending || off !== null}
         title={off ?? undefined}
-        onChange={(event) => setPriority(Number(event.target.value))}
-      >
-        {PRIORITIES.map((name, value) => (
-          <option key={name} value={value}>
-            P{value} {name}
-          </option>
-        ))}
-      </select>
+        onValueChange={(next) => setPriority(Number(next))}
+        options={PRIORITIES.map((name, value) => ({
+          value: String(value),
+          label: `P${value} ${name}`,
+        }))}
+      />
       {action.recorded ? (
         <InlineReceipt receiptKey={action.receiptKey} text={`Saved P${priority}`} />
       ) : (
@@ -203,51 +201,39 @@ function AddCardControl({
             onChange={(event) => setTitle(event.target.value)}
           />
           <div className="ca-line">
-            <select
-              aria-label="Project"
-              className="ca-select"
+            <Select
+              label="Project"
               value={project}
-              onChange={(event) => setProject(event.target.value)}
-            >
-              {groups.map((group) => {
-                const options = group.projects.map((p) => (
-                  <option
-                    key={ownerKey(p.id, p)}
-                    value={ownerKey(p.id, p)}
-                    disabled={!group.standing.canAct}
-                  >
-                    {p.name}
-                  </option>
-                ));
-                return grouped ? (
-                  <optgroup
-                    key={`${group.peer}:${group.host}`}
-                    label={
-                      group.standing.reason
+              onValueChange={setProject}
+              {...(grouped
+                ? {
+                    groups: groups.map((group) => ({
+                      label: group.standing.reason
                         ? `${group.host} - ${group.standing.reason}`
-                        : (group.host ?? "")
-                    }
-                    disabled={!group.standing.canAct}
-                  >
-                    {options}
-                  </optgroup>
-                ) : (
-                  options
-                );
-              })}
-            </select>
-            <select
-              aria-label="Kind"
-              className="ca-select"
+                        : (group.host ?? ""),
+                      disabled: !group.standing.canAct,
+                      options: group.projects.map((p) => ({
+                        value: ownerKey(p.id, p),
+                        label: p.name,
+                      })),
+                    })),
+                  }
+                : {
+                    options: groups.flatMap((group) =>
+                      group.projects.map((p) => ({
+                        value: ownerKey(p.id, p),
+                        label: p.name,
+                        disabled: !group.standing.canAct,
+                      })),
+                    ),
+                  })}
+            />
+            <Select
+              label="Kind"
               value={kind}
-              onChange={(event) => setKind(event.target.value)}
-            >
-              {KINDS.map((k) => (
-                <option key={k} value={k}>
-                  {k}
-                </option>
-              ))}
-            </select>
+              onValueChange={setKind}
+              options={KINDS.map((k) => ({ value: k, label: k }))}
+            />
             <span className="sp" />
             <button type="button" className="btn ghost" onClick={() => setOpen(false)}>
               Cancel

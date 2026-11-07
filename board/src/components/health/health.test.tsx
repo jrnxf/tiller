@@ -14,14 +14,8 @@ import { createQueryClient } from "../../lib/query-client";
 import { createAppRouter } from "../../lib/router";
 import { niceAxis } from "./charts";
 import { lisbonDay, lisbonWeekLabel } from "./lisbon";
-import {
-  BUSY_WEEK_FACTOR,
-  SLOW_ANSWER_MINUTES,
-  quotaBlockOf,
-  signalsOf,
-  verdictOf,
-  weekRange,
-} from "./model";
+import { BUSY_WEEK_FACTOR, SLOW_ANSWER_MINUTES, quotaBlockOf, signalsOf } from "./model";
+import { choose } from "../../test-select";
 
 // Tue 2026-11-03 14:00 Lisbon is the fixture quota reset; this Sunday evening
 // is inside the last fixture week, which therefore is in progress.
@@ -95,7 +89,6 @@ test("shipping is on watch only after two weeks with nothing landed", () => {
   expect(signal(counts(empty, { landed: 2 }), "shipping").state).toBe("good");
   const quiet = signal(counts(empty, empty), "shipping");
   expect(quiet.state).toBe("watch");
-  expect(quiet.reason).toBe("nothing has landed for two weeks");
 });
 
 test("your time reads the median answer time against the last one", () => {
@@ -118,10 +111,8 @@ test("your time reads the median answer time against the last one", () => {
 test("your time is on watch for slow answers or a week far busier than usual", () => {
   const slow = signal(counts({ median_answer_minutes: SLOW_ANSWER_MINUTES + 1 }), "time");
   expect(slow.state).toBe("watch");
-  expect(slow.reason).toBe("answers are taking about 31 minutes");
   const busy = signal(counts({ needed: 4 * BUSY_WEEK_FACTOR + 1 }, { needed: 4 }), "time");
   expect(busy.state).toBe("watch");
-  expect(busy.reason).toBe("you were needed 9 times, well above the usual 4");
   // Few asks are never a busy week, however far above a quiet average.
   expect(signal(counts({ needed: 4 }, { needed: 1 }), "time").state).toBe("good");
 });
@@ -141,7 +132,6 @@ test("quality counts reverts and escaped bugs as problems and shows rework per l
   expect(slipped.state).toBe("watch");
   expect(slipped.big).toBe(1);
   expect(slipped.unit).toBe("problem this week");
-  expect(slipped.reason).toBe("1 revert this week");
   expect(slipped.read).toBe("1 revert slipped in. No escaped bugs. Worth a look.");
 });
 
@@ -156,55 +146,20 @@ test("safety sums lost work, duplicate dispatches and unauthorized actions", () 
   const hit = signal(counts({ lost_work: 1, duplicate_dispatches: 2, unauthorized: 0 }), "safety");
   expect(hit.big).toBe(3);
   expect(hit.state).toBe("watch");
-  expect(hit.reason).toBe("1 piece of work lost and 2 duplicate dispatches this week");
 });
 
 test("a machine that is down puts Safety on watch without calling the system broken", () => {
   const response = { ...counts(), machines_live: 1 };
   const safety = signal(response, "safety");
   expect(safety.state).toBe("watch");
-  expect(safety.reason).toBe("only 1 of 2 machines are live");
-  const verdict = verdictOf(signalsOf(response, done), response, done);
-  expect(verdict?.tone).toBe("good");
-  expect(verdict?.watch).toContain("One thing to watch: safety, only 1 of 2 machines are live.");
-});
-
-test("the verdict is plain, names one thing to watch and says which week it covers", () => {
-  const response = counts({ landed: 9, reported: 3, needed: 8, reverts: 1 });
-  const verdict = verdictOf(signalsOf(response, done), response, done);
-  expect(verdict).toEqual({
-    tone: "good",
-    head: "Working.",
-    text: " 12 cards landed, you were needed 8 times, and nothing was lost.",
-    watch:
-      "One thing to watch: quality, 1 revert this week. Week 44, Monday 2026-10-26 to Sunday 2026-11-01.",
-  });
-  const calm = counts();
-  expect(verdictOf(signalsOf(calm, done), calm, done)?.watch).toMatch(/^Nothing to watch\./);
-});
-
-test("lost work or an unauthorized action makes the verdict say so first", () => {
-  const response = counts({ lost_work: 1, reverts: 1 });
-  const verdict = verdictOf(signalsOf(response, done), response, done);
-  expect(verdict?.tone).toBe("bad");
-  expect(verdict?.head).toBe("Not working.");
-  expect(verdict?.text).toBe(" Safety needs your attention first.");
-  expect(verdict?.watch).toContain("One thing to watch: safety");
 });
 
 test("weeks are Lisbon weeks: the ISO number and the dates follow Lisbon, summer or winter", () => {
   const winter = week();
   expect(lisbonWeekLabel(winter.start)).toBe("W44");
-  expect(weekRange(winter, done)).toBe("Week 44, Monday 2026-10-26 to Sunday 2026-11-01.");
   // Lisbon is an hour ahead of UTC in summer, so Monday starts at 23:00 UTC on Sunday.
   const summer = week({ start: "2026-06-14T23:00:00.000Z", end: "2026-06-21T23:00:00.000Z" });
   expect(lisbonDay(summer.start)).toMatchObject({ weekday: "Monday", date: "2026-06-15" });
-  expect(weekRange(summer, Date.parse("2026-06-30T00:00:00.000Z"))).toBe(
-    "Week 25, Monday 2026-06-15 to Sunday 2026-06-21.",
-  );
-  expect(weekRange(week(), NOW)).toBe(
-    "Week 44, Monday 2026-10-26 to Sunday 2026-11-01, still in progress.",
-  );
   // The first days of January can belong to the last week of the year before.
   expect(lisbonWeekLabel("2027-01-01T12:00:00.000Z")).toBe("W53");
 });
@@ -215,8 +170,7 @@ test("the quota block says it in a sentence, with the weekday in Lisbon time", (
   expect(block).toMatchObject({
     tone: "ok",
     percentLeft: 27,
-    percentUsed: 73,
-    elapsedPercent: 71,
+    paceMarker: 29,
     resetsShort: "Tue 14:00",
     resetsFull: "Tuesday 2026-11-03, 14:00 Lisbon time",
     verdict: "On pace to last until reset.",
@@ -324,11 +278,11 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-test("Health shows the verdict, four signals and the quota, with the numbers collapsed", async () => {
+test("Health shows four signals and the quota, with the numbers collapsed and no summary card", async () => {
   await renderHealth();
   const page = screen.getByTestId("health");
 
-  expect(within(page).getByLabelText("Verdict").textContent).toMatch(/^Working\./);
+  expect(within(page).queryByLabelText("Verdict")).toBeNull();
   for (const title of ["Shipping", "Your time", "Quality", "Safety"]) {
     expect(within(page).getByRole("article", { name: new RegExp(`^${title}: `) })).toBeTruthy();
   }
@@ -340,6 +294,10 @@ test("Health shows the verdict, four signals and the quota, with the numbers col
   expect(quota.textContent).toContain(
     "27% of this week left. Resets Tue 14:00. On pace to last until reset.",
   );
+  expect(quota.textContent).toContain("27% left");
+  expect(quota.textContent).toContain("even pace would have 29% left");
+  expect(quota.querySelector(".qmeter.big i")?.getAttribute("style")).toContain("width: 27%");
+  expect(quota.querySelector(".qmeter.big u")?.getAttribute("style")).toContain("left: 29%");
   expect(quota.textContent).toContain("reserve 8 points");
   expect(quota.textContent).toContain("burn 0.8x the even pace");
 
@@ -448,8 +406,8 @@ test("a time you were needed can be relabeled from the list, and Reset gives it 
   const select = within(list).getByLabelText(
     "Why you were needed: Use the existing date helper, not a new one",
   );
-  expect((select as HTMLSelectElement).value).toBe("correction");
-  fireEvent.change(select, { target: { value: "planned" } });
+  expect(select.textContent).toContain("Correction");
+  await choose(select, "Planned");
   await vi.waitFor(() => expect(sent).toHaveLength(1));
   expect(sent[0]?.url).toBe("/api/v1/interventions/01JNOTE0000000000000000B18/label");
   expect(sent[0]?.body).toMatchObject({ label: "planned" });
@@ -468,12 +426,10 @@ test("the per-project table follows the view knob", async () => {
   expect(rows[0]?.textContent).toContain("beta");
 });
 
-test("an incident turns the verdict red, and Health never compares with Firstmate or names an account", async () => {
+test("an incident puts Safety on watch, and Health never compares with Firstmate or names an account", async () => {
   await renderHealth("health-bad");
   const page = screen.getByTestId("health");
-  const verdict = within(page).getByLabelText("Verdict");
-  expect(verdict.className).toContain("bad");
-  expect(verdict.textContent).toContain("Not working. Safety needs your attention first.");
+  expect(within(page).getByRole("article", { name: "Safety: Watch" })).toBeTruthy();
   fireEvent.click(within(page).getByRole("button", { name: /Show the numbers/ }));
   expect(page.textContent).not.toMatch(/firstmate|baseline|compared with|@|account|email/i);
 });

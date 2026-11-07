@@ -7,6 +7,7 @@ import { sendMutation } from "../attention/api";
 import { PRIORITIES } from "../attention/format";
 import { useAction } from "../attention/use-action";
 import { ProjectDialog } from "../shell/project-dialog";
+import { Select } from "../ui/select";
 import "../shell/project-stage.css";
 import { showToast } from "./toast";
 
@@ -89,33 +90,23 @@ export function NewCardDialog({ project, onClose }: { project: Project; onClose:
             onChange={(event) => setTitle(event.target.value)}
           />
           <label htmlFor={`${fields}-kind`}>Kind</label>
-          <select
+          <Select
             id={`${fields}-kind`}
-            className="ca-select form-select"
+            className="form-select"
             value={kind}
             disabled={action.pending}
-            onChange={(event) => setKind(event.target.value)}
-          >
-            {KINDS.map((k) => (
-              <option key={k} value={k}>
-                {k}
-              </option>
-            ))}
-          </select>
+            onValueChange={setKind}
+            options={KINDS.map((k) => ({ value: k, label: k }))}
+          />
           <label htmlFor={`${fields}-priority`}>Priority</label>
-          <select
+          <Select
             id={`${fields}-priority`}
-            className="ca-select form-select"
+            className="form-select"
             value={priority}
             disabled={action.pending}
-            onChange={(event) => setPriority(event.target.value)}
-          >
-            {PRIORITIES.map((label, index) => (
-              <option key={label} value={index}>
-                {label}
-              </option>
-            ))}
-          </select>
+            onValueChange={setPriority}
+            options={PRIORITIES.map((label, index) => ({ value: String(index), label }))}
+          />
           <label htmlFor={`${fields}-body`} className="at-top">
             Body
           </label>

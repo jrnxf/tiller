@@ -279,17 +279,21 @@ test("the new-card picker groups projects by host and turns off a group that can
   await renderApp("federated", `/inbox?item=${ASK_D}`);
   const actions = await screen.findByTestId("card-actions");
   fireEvent.click(within(actions).getByRole("button", { name: "Add card" }));
-  const picker = within(actions).getByLabelText("Project") as HTMLSelectElement;
-  const groups = [...picker.querySelectorAll("optgroup")];
-  expect(groups.map((group) => group.label)).toEqual([
-    "host-a",
-    "host-d",
-    expect.stringContaining("host-e - host-e is unreachable"),
-    "host-f - view only pairing",
-  ]);
-  expect(groups.map((group) => group.disabled)).toEqual([false, false, true, true]);
+  const picker = within(actions).getByLabelText("Project");
   // The card's own project is chosen, and it lives on host-d.
-  expect(picker.value).toBe("host-d/gamma");
+  expect(picker.textContent).toBe("gamma");
+  fireEvent.click(picker);
+  const list = await screen.findByRole("listbox");
+  const groups = [...list.querySelectorAll(".sel-group")].map((group) => ({
+    label: group.querySelector(".sel-group-label")?.textContent,
+    off: group.querySelector("[role=option]")?.getAttribute("aria-disabled") === "true",
+  }));
+  expect(groups).toEqual([
+    { label: "host-a", off: false },
+    { label: "host-d", off: false },
+    { label: expect.stringContaining("host-e - host-e is unreachable"), off: true },
+    { label: "host-f - view only pairing", off: true },
+  ]);
 });
 
 // ---- Attention and agents ----

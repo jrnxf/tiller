@@ -1,6 +1,6 @@
 import type { QuotaResponse, QuotaWindow, SignalsResponse, SignalsWeek } from "../../lib/api-types";
 import { formatLisbonRounded } from "../../lib/clock";
-import { lisbonDay, lisbonWeekLabel } from "./lisbon";
+import { lisbonDay } from "./lisbon";
 
 // Everything the Health page says is computed here from `GET /api/v1/signals`
 // and `GET /api/v1/quota`, so a test can pin each number to its source. The
@@ -16,18 +16,9 @@ export interface Signal {
   unit: string;
   read: string;
   facts: string[];
-  // Why the signal is on watch, as the end of "One thing to watch: x, ...".
-  reason: string | null;
   // The big number for each of the weeks, oldest first.
   values: number[];
   last: string;
-}
-
-export interface Verdict {
-  tone: "good" | "bad";
-  head: string;
-  text: string;
-  watch: string;
 }
 
 // A median answer slower than this is worth watching, and so is a week that
@@ -98,7 +89,6 @@ function shipping(response: SignalsResponse, now: number): Signal | null {
     unit: cur === 1 ? "card landed this week" : "cards landed this week",
     read,
     facts,
-    reason: quiet ? "nothing has landed for two weeks" : null,
     values: response.weeks.map(accepted),
     last: prev === null ? "no earlier week" : `last week: ${prev}`,
   };
@@ -148,7 +138,6 @@ function yourTime(response: SignalsResponse): Signal | null {
       ...(median === null ? [] : [`median ${minutes(median)} min to answer`]),
       ...(now.needed === 0 && avoidable(now) === 0 ? [] : [avoidableFact(now)]),
     ],
-    reason,
     values: response.weeks.map((week) => week.needed),
     last: weeks.before ? `last week: ${weeks.before.needed}` : "no earlier week",
   };
@@ -167,10 +156,6 @@ function quality(response: SignalsResponse): Signal | null {
   ]
     .filter(Boolean)
     .join(" ");
-  const listed = [
-    now.reverts > 0 ? count(now.reverts, "revert") : null,
-    now.escaped > 0 ? count(now.escaped, "escaped bug") : null,
-  ].filter(Boolean);
   return {
     id: "quality",
     title: "Quality",
@@ -184,7 +169,6 @@ function quality(response: SignalsResponse): Signal | null {
       count(now.escaped, "escaped bug"),
       ...(done > 0 ? [avoidableFact(now)] : []),
     ],
-    reason: total > 0 ? `${listed.join(" and ")} this week` : null,
     values: response.weeks.map(problems),
     last: weeks.before ? `last week: ${problems(weeks.before)}` : "no earlier week",
   };
@@ -228,12 +212,6 @@ function safety(response: SignalsResponse): Signal | null {
       `unauthorized actions ${now.unauthorized}`,
       `machines live ${live} of ${machines}`,
     ],
-    reason:
-      total > 0
-        ? `${named.join(" and ")} this week`
-        : offline
-          ? `only ${live} of ${machines} machines are live`
-          : null,
     values: response.weeks.map(incidents),
     last: weeks.before ? `last week: ${incidents(weeks.before)}` : "no earlier week",
   };
@@ -245,45 +223,6 @@ export function signalsOf(response: SignalsResponse, now: number): Signal[] {
   );
 }
 
-// Safety first, then the rest in the order of the page.
-const WATCH_ORDER: SignalId[] = ["safety", "quality", "shipping", "time"];
-
-export function verdictOf(
-  signals: Signal[],
-  response: SignalsResponse,
-  now: number,
-): Verdict | null {
-  const latest = response.weeks.at(-1);
-  if (!latest) return null;
-  const range = weekRange(latest, now);
-  const unsafe = incidents(latest) > 0;
-  const watched = WATCH_ORDER.map((id) => signals.find((signal) => signal.id === id)).find(
-    (signal) => signal?.state === "watch",
-  );
-  const watch = watched
-    ? `One thing to watch: ${watched.title.toLowerCase()}, ${watched.reason}. ${range}`
-    : `Nothing to watch. ${range}`;
-  if (unsafe) {
-    return {
-      tone: "bad",
-      head: "Not working.",
-      text: " Safety needs your attention first.",
-      watch,
-    };
-  }
-  const landed = accepted(latest);
-  const text = ` ${landed === 0 ? "Nothing has landed yet" : `${count(landed, "card")} landed`}, you were needed ${count(latest.needed, "time")}, and nothing was lost.`;
-  return { tone: "good", head: "Working.", text, watch };
-}
-
-// "Week 44, Monday 2026-10-26 to Sunday 2026-11-01." in Lisbon time.
-export function weekRange(week: SignalsWeek, now: number): string {
-  const first = lisbonDay(week.start);
-  const last = lisbonDay(new Date(Date.parse(week.end) - 1).toISOString());
-  const label = lisbonWeekLabel(week.start);
-  return `Week ${label.slice(1)}, ${first.weekday} ${first.date} to ${last.weekday} ${last.date}${inProgress(week, now) ? ", still in progress" : ""}.`;
-}
-
 interface QuotaOther {
   label: string;
   percentLeft: number | null;
@@ -293,8 +232,8 @@ export interface QuotaBlock {
   tone: "ok" | "warn" | "bad" | "unk";
   word: string;
   percentLeft: number | null;
-  percentUsed: number | null;
-  elapsedPercent: number | null;
+  // Where an even spend would stand now: the share of the week still to come.
+  paceMarker: number | null;
   resetsShort: string | null;
   resetsFull: string | null;
   verdict: string;
@@ -328,8 +267,7 @@ export function quotaBlockOf(quota: QuotaResponse): QuotaBlock | null {
     tone: tone[week.dot],
     word: word[week.dot],
     percentLeft: left === null ? null : Math.round(left),
-    percentUsed: left === null ? null : 100 - left,
-    elapsedPercent: week.elapsed_percent === null ? null : clamp(week.elapsed_percent),
+    paceMarker: week.elapsed_percent === null ? null : clamp(100 - week.elapsed_percent),
     resetsShort: formatLisbonRounded(week.resets_at),
     resetsFull: week.resets_at ? lisbonLong(week.resets_at) : null,
     verdict: verdict[week.dot],

@@ -10,6 +10,7 @@ import { healthQuery, machinesQuery, sessionQuery } from "../../lib/queries";
 import { signOut } from "../../lib/session";
 import { useStore } from "../../lib/store";
 import { formatAge, secondsSince } from "../board/format";
+import { Segmented } from "../ui/segmented";
 import { AddHost } from "./add-host";
 import "./settings.css";
 
@@ -43,18 +44,7 @@ function Choice<Value extends string>({
         <h2>{label}</h2>
         <p>{hint}</p>
       </div>
-      <div className="seg" role="group" aria-label={label}>
-        {options.map((option) => (
-          <button
-            key={option.value}
-            type="button"
-            aria-pressed={value === option.value}
-            onClick={() => onChange(option.value)}
-          >
-            {option.label}
-          </button>
-        ))}
-      </div>
+      <Segmented label={label} options={options} value={value} onChange={onChange} />
     </div>
   );
 }

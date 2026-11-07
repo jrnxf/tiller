@@ -15,12 +15,12 @@ import {
 import { useStore } from "../../lib/store";
 import { ActionError, sendMutation } from "../attention/api";
 import { ulid } from "../attention/ulid";
-import { ChevronDownIcon, ChevronRightIcon, WarnIcon } from "../board/icons";
-import { CheckIcon } from "../shell/icons";
+import { ChevronDownIcon, ChevronRightIcon } from "../board/icons";
+import { Select } from "../ui/select";
 import { BarChart, LineChart, Spark, StackedBarChart } from "./charts";
 import type { Point } from "./charts";
 import { lisbonShortDay, lisbonWeekLabel } from "./lisbon";
-import { accepted, projectRows, quotaBlockOf, sampleLines, signalsOf, verdictOf } from "./model";
+import { accepted, projectRows, quotaBlockOf, sampleLines, signalsOf } from "./model";
 import type { QuotaBlock, Signal } from "./model";
 import "../board/board.css";
 import "./health.css";
@@ -82,8 +82,8 @@ function Quota({ block }: { block: QuotaBlock | null }) {
       </section>
     );
   }
-  const used = block.percentUsed === null ? null : Math.round(block.percentUsed);
-  const elapsed = block.elapsedPercent === null ? null : Math.round(block.elapsedPercent);
+  const left = block.percentLeft;
+  const pace = block.paceMarker === null ? null : Math.round(block.paceMarker);
   return (
     <section className="quota" aria-label="Claude quota" data-tone={block.tone}>
       <div className="q-main">
@@ -105,28 +105,28 @@ function Quota({ block }: { block: QuotaBlock | null }) {
           {block.resetsShort ? ` Resets ${block.resetsShort}.` : ""} {block.verdict}
         </p>
         <div
-          className={`qmeter big${used === null ? " unk" : ""}`}
+          className={`qmeter big${left === null ? " unk" : ""}`}
           role="img"
           aria-label={
-            used === null
+            left === null
               ? "Weekly use is not reported"
-              : `${used}% used${elapsed === null ? "" : `, ${elapsed}% of the week gone`}`
+              : `${left}% left${pace === null ? "" : `, an even spend would have ${pace}% left by now`}`
           }
         >
-          {used === null ? null : <i style={{ width: `${block.percentUsed}%` }} />}
-          {elapsed === null ? null : <u style={{ left: `${block.elapsedPercent}%` }} />}
+          {left === null ? null : <i style={{ width: `${left}%` }} />}
+          {block.paceMarker === null ? null : <u style={{ left: `${block.paceMarker}%` }} />}
         </div>
         <div className="q-key">
-          {used === null ? null : (
+          {left === null ? null : (
             <span>
               <i className="k-fill" />
-              {used}% used
+              {left}% left
             </span>
           )}
-          {elapsed === null ? null : (
+          {pace === null ? null : (
             <span>
               <i className="k-tick" />
-              {elapsed}% of the week gone
+              even pace would have {pace}% left
             </span>
           )}
           {block.resetsFull ? <span className="muted">Resets {block.resetsFull}</span> : null}
@@ -146,7 +146,7 @@ function Quota({ block }: { block: QuotaBlock | null }) {
             ) : (
               <>
                 <span className="qmeter sm" aria-hidden="true">
-                  <i style={{ width: `${100 - other.percentLeft}%` }} />
+                  <i style={{ width: `${other.percentLeft}%` }} />
                 </span>
                 <span className="qo-v">{other.percentLeft}% left</span>
               </>
@@ -213,19 +213,14 @@ function InterventionRow({ item }: { item: SignalsIntervention }) {
           </span>
         ) : null}
       </div>
-      <select
+      <Select
         className="iv-sel"
-        aria-label={`Why you were needed: ${item.summary}`}
+        label={`Why you were needed: ${item.summary}`}
         value={item.kind}
         disabled={pending}
-        onChange={(event) => relabel(event.target.value as InterventionKind)}
-      >
-        {KINDS.map((candidate) => (
-          <option key={candidate.kind} value={candidate.kind}>
-            {candidate.label}
-          </option>
-        ))}
-      </select>
+        onValueChange={(next) => relabel(next as InterventionKind)}
+        options={KINDS.map((candidate) => ({ value: candidate.kind, label: candidate.label }))}
+      />
       {item.relabeled ? (
         <button type="button" className="btn sm" disabled={pending} onClick={() => relabel(null)}>
           Reset
@@ -431,7 +426,6 @@ export function HealthPage() {
   const [open, setOpen] = useState(false);
   const now = serverNow();
   const signals = signalsOf(data, now);
-  const verdict = verdictOf(signals, data, now);
   const weeks = data.weeks.map((week) => ({
     label: lisbonWeekLabel(week.start),
     start: lisbonShortDay(week.start),
@@ -441,32 +435,6 @@ export function HealthPage() {
   return (
     <div className="health" data-testid="health">
       <div className="h-in">
-        {verdict ? (
-          <section
-            className={`verdict ${verdict.tone === "bad" ? "bad" : ""}`}
-            aria-label="Verdict"
-          >
-            <span className="v-ic">{verdict.tone === "bad" ? <WarnIcon /> : <CheckIcon />}</span>
-            <div>
-              <h2>
-                <span>{verdict.head}</span>
-                {verdict.text}
-              </h2>
-              <p>{verdict.watch}</p>
-            </div>
-          </section>
-        ) : (
-          <section className="verdict" aria-label="Verdict">
-            <span className="v-ic">
-              <CheckIcon />
-            </span>
-            <div>
-              <h2>
-                <span>Nothing to judge yet.</span> No week has been recorded.
-              </h2>
-            </div>
-          </section>
-        )}
         {signals.length > 0 ? (
           <div className="sigs">
             {signals.map((signal) => (
