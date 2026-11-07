@@ -127,9 +127,13 @@ function hostHint(machine: Machine, peer: boolean, mark: string | null, boardVer
 // whether a release reached every machine.
 function HostVersions({ machines, boardVersion }: { machines: Machine[]; boardVersion: string }) {
   const others = machines.filter((machine) => machine.kind !== "local");
-  if (others.length === 0) return null;
   return (
     <section className="set-panel" aria-label="Other hosts" data-testid="host-versions">
+      {others.length === 0 ? (
+        <Fact label="No other host is paired" hint="Run this once on this host, in a terminal.">
+          <code>tiller peer add &lt;label&gt; --ssh &lt;alias&gt;</code>
+        </Fact>
+      ) : null}
       {others.map((machine) => {
         const view = machineRowView(machine, undefined, boardVersion);
         const mark = view.versionMark ? VERSION_MARK_WORD[view.versionMark] : null;

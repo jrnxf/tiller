@@ -119,3 +119,23 @@ test("Settings lists each other host's version and marks the ones that differ fr
   const facts = screen.getByTestId("host-facts");
   expect(within(facts).getByText("0.1.0-pre.17")).toBeTruthy();
 });
+
+test("with no other host, Settings says none is paired and shows the pairing command", async () => {
+  const fetch = serve(true);
+  const federated = fetch.getMockImplementation();
+  fetch.mockImplementation(async (input, init) => {
+    if (String(input) === "/api/v1/machines") {
+      const body = fixtureResource("/api/v1/machines", "federated") as {
+        machines: { kind: string }[];
+      };
+      const machines = body.machines.filter((machine) => machine.kind === "local");
+      return new Response(JSON.stringify({ ...body, machines }));
+    }
+    return federated!(input, init);
+  });
+  renderSettings();
+  const panel = await screen.findByRole("region", { name: "Other hosts" });
+  expect(within(panel).getByText("No other host is paired")).toBeTruthy();
+  expect(within(panel).getByText("tiller peer add <label> --ssh <alias>")).toBeTruthy();
+  expect(within(panel).queryByText("host-d")).toBeNull();
+});
