@@ -10,6 +10,7 @@
 
 pub mod forward;
 pub mod link;
+pub mod pair;
 pub mod serve;
 
 use std::path::Path;

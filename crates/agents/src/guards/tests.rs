@@ -254,6 +254,7 @@ fn http_clients_denied() {
         "aria2c https://example.com/f",
         "nc example.com 443",
         "curl -X POST http://127.0.0.1:7421/api/v1/approvals/01J/decide",
+        "curl -X POST http://127.0.0.1:7421/api/v1/peers -d '{\"label\":\"host-b\",\"ssh\":\"host-b\"}'",
         "socat - TCP:example.com:443",
         "openssl s_client -connect example.com:443",
         "env curl example.com",
@@ -795,6 +796,7 @@ fn peer_commands_denied() {
         "tiller peer add host-b --alias host-b --scope act",
         "tiller peer accept --from host-a --key abc",
         "tiller peer serve --from host-a",
+        "tiller peer accept --from host-a --viewer-host-id 01JABC --pubkey abc --scope act --unattended --json",
         "tiller peer revoke 01JABC",
         "tiller --json peer remove host-b",
         "/nix/store/abc-tiller-0.1.0/bin/tiller peer list",
@@ -810,6 +812,7 @@ fn ssh_remote_tiller_denied() {
     for command in [
         "ssh host-b tiller approve 01JABC",
         "ssh -t host-b tiller peer accept --from host-a",
+        "ssh -T -o BatchMode=yes -- host-b tiller peer accept --from host-a --unattended --json",
         "sh -c 'ssh host-b tiller card close alpha-1'",
         "ssh host-b 'tiller card comment alpha-1 hi'",
         "ssh -p 2222 user@192.0.2.10 -- /home/user/.nix-profile/bin/tiller status",

@@ -787,8 +787,9 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
         &["config", "get", "dispatch.default.model"],
     );
     step(&world, "config_hash", &["config", "hash"]);
-    // Pairing needs the owner at a terminal on both hosts; the harness has
-    // none, so the happy path is the core's tests and a live pairing.
+    // Pairing needs the owner at a terminal on both hosts, or sshd on the
+    // peer; the harness has neither, so the happy path is the core's tests,
+    // the daemon's peer e2e test and a live pairing.
     fails(
         &world,
         6,
@@ -808,6 +809,9 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
         "act",
     ];
     fails(&world, 6, "peer_accept_needs_a_terminal", &accept);
+    // The board's Add a host: sshd must start it, as it starts `peer serve`.
+    let unattended = [&accept[..], &["--unattended"]].concat();
+    fails(&world, 6, "peer_accept_unattended_needs_sshd", &unattended);
     fails(
         &world,
         2,
@@ -820,6 +824,12 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
         &["config", "set", "federation.accept", "false"],
     );
     fails(&world, 5, "peer_accept_refused_accept_off", &accept);
+    fails(
+        &world,
+        5,
+        "peer_accept_unattended_refused_accept_off",
+        &unattended,
+    );
     step(
         &world,
         "config_set_federation_accept_on",

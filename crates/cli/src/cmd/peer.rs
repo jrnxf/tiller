@@ -1,25 +1,25 @@
 //! `tiller peer`: pairing for the federated board (ADR 0003; `protocol.md`
 //! sections 6.4 and 10.1). `add` runs on the board host and reaches the
-//! peer's `accept` over `ssh -t`; both need the owner at a terminal.
-//! `serve` is the peer's half of a link (10.2), started by sshd for the
-//! board host's daemon.
+//! peer's `accept` over `ssh -t`; both need the owner at a terminal. The
+//! board's Add a host runs `accept --unattended` instead, which sshd must
+//! start, as it starts `serve`, the peer's half of a link (10.2).
 
 use std::io::{BufRead, IsTerminal, Read, Write};
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD_NO_PAD;
 use clap::Subcommand;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use tiller_core::Applied;
 use tiller_core::domain::PeerScope;
 use tiller_core::state::peers::{
-    self, KeyFile, NewPairing, NewPeerKey, PEER_PROTOCOL, check_label, parse_public_key,
+    self, KeyFile, NewPairing, NewPeerKey, PEER_PROTOCOL, check_alias, check_label, fingerprint,
+    parse_public_key,
 };
 use tiller_core::state::projects::meta;
+use tiller_core::store::{Actor, Ctx};
 use tiller_daemon::peer::Timing;
+use tiller_daemon::peer::pair::{self, NotAccepted, Reply};
 use tiller_daemon::peer::serve::{ServeConfig, ServeError};
 
 use super::admin::{get_path, load_config, set_config};
@@ -54,6 +54,10 @@ pub enum PeerCmd {
         /// read, or act: read and forward the owner's mutations
         #[arg(long)]
         scope: PeerScope,
+        /// Accept with no prompt: the board host's daemon asks over ssh
+        /// when the owner adds this host on its board. sshd must start it.
+        #[arg(long)]
+        unattended: bool,
     },
     /// The hosts this one is paired with, and the board hosts it accepted
     List,
@@ -94,6 +98,7 @@ pub fn run(app: &App, cmd: PeerCmd) -> Done {
             viewer_host_id,
             pubkey,
             scope,
+            unattended,
         } => accept(
             app,
             NewPeerKey {
@@ -101,6 +106,7 @@ pub fn run(app: &App, cmd: PeerCmd) -> Done {
                 viewer_host_id,
                 public_key: pubkey,
                 scope,
+                unattended,
             },
         ),
         PeerCmd::List => list(app),
@@ -124,13 +130,7 @@ pub fn run(app: &App, cmd: PeerCmd) -> Done {
 /// check passes, stdout is the link: nothing else is printed there, and an
 /// error goes to stderr.
 pub fn serve(app: &App, from: String) -> Result<ExitCode, Failure> {
-    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
-    serve_start_check(
-        set("TILLER_SESSION_ID"),
-        set("CLAUDECODE"),
-        set("SSH_CONNECTION"),
-        ancestors,
-    )?;
+    require_sshd_owner("tiller peer serve")?;
     let config = ServeConfig {
         home: app.home.clone(),
         from,
@@ -158,20 +158,33 @@ pub fn serve(app: &App, from: String) -> Result<ExitCode, Failure> {
     }
 }
 
-/// `peer serve` starts only when sshd started it for the owner
-/// (`authority.md` G44): `SSH_CONNECTION` set, no `TILLER_SESSION_ID`, no
-/// `CLAUDECODE` and no Claude Code process among its ancestors.
+/// The start check of `peer serve` and `peer accept --unattended`, read
+/// from this process.
+fn require_sshd_owner(what: &str) -> Result<(), Failure> {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    serve_start_check(
+        what,
+        set("TILLER_SESSION_ID"),
+        set("CLAUDECODE"),
+        set("SSH_CONNECTION"),
+        ancestors,
+    )
+}
+
+/// `peer serve` and `peer accept --unattended` start only when sshd started
+/// them for the owner (`authority.md` G44, G45): `SSH_CONNECTION` set, no
+/// `TILLER_SESSION_ID`, no `CLAUDECODE` and no Claude Code process among
+/// the ancestors.
 fn serve_start_check(
+    what: &str,
     session: bool,
     claudecode: bool,
     ssh_connection: bool,
     ancestors: impl FnOnce() -> std::io::Result<Vec<Process>>,
 ) -> Result<(), Failure> {
     let refuse = |why: String| {
-        Failure::forbidden(format!(
-            "tiller peer serve runs only under sshd for the owner: {why}"
-        ))
-        .hint("a paired board host's daemon starts it over ssh; never run it from an agent")
+        Failure::forbidden(format!("{what} runs only under sshd for the owner: {why}"))
+            .hint("the board host's daemon starts it over ssh; never run it from an agent")
     };
     if session {
         return Err(refuse("TILLER_SESSION_ID is set".into()));
@@ -202,9 +215,7 @@ fn add(
     herdr_machine: Option<String>,
 ) -> Done {
     check_label(label)?;
-    if alias.is_empty() || alias.starts_with('-') {
-        return Err(Failure::usage("an ssh alias is a host name, not an option"));
-    }
+    check_alias(alias)?;
     require_terminal_owner("tiller peer add")?;
     let mut store = app.write()?;
     let this = store.this_host()?;
@@ -321,18 +332,6 @@ fn add(
     }))
 }
 
-/// What the peer's `tiller peer accept --json` answered.
-#[derive(Debug, PartialEq)]
-struct Reply {
-    host_id: String,
-    label: String,
-    key_id: String,
-    scope: Value,
-    schema_version: Value,
-    peer_protocol: Value,
-    tiller_version: Value,
-}
-
 /// Runs the peer's accept with a terminal (`-t`), so its owner sees the
 /// prompt and types the answer here. Everything the peer prints reaches
 /// this terminal; only its JSON response is kept back.
@@ -401,50 +400,18 @@ fn peer_replaced(answer: &Value, paired_to: Option<&str>) -> bool {
 /// Checks the peer's response: a failure comes back as one here, with the
 /// peer's code where it is one this side knows.
 fn accepted_reply(label: &str, scope: PeerScope, reply: &Value) -> Result<Reply, Failure> {
-    if reply.get("ok") != Some(&Value::Bool(true)) {
-        let error = reply.get("error");
-        let code = error
-            .and_then(|e| e.get("code"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let message = error
-            .and_then(|e| e.get("message"))
-            .and_then(Value::as_str)
-            .unwrap_or("no message");
-        let text = format!("{label} did not accept the pairing: {message}");
-        return Err(match code {
-            "refused" => Failure::refused(text),
-            "forbidden" => Failure::forbidden(text),
-            "usage" => Failure::usage(text),
-            _ => Failure::unavailable(text),
-        });
-    }
-    let data = reply.get("data").cloned().unwrap_or(Value::Null);
-    let text = |field: &str| {
-        data.get(field)
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-            .ok_or_else(|| {
-                Failure::unavailable(format!("{label} answered the accept without {field}"))
-            })
-    };
-    let reply = Reply {
-        host_id: text("host_id")?,
-        label: text("label")?,
-        key_id: text("key_id")?,
-        scope: data.get("scope").cloned().unwrap_or(Value::Null),
-        schema_version: data.get("schema_version").cloned().unwrap_or(Value::Null),
-        peer_protocol: data.get("peer_protocol").cloned().unwrap_or(Value::Null),
-        tiller_version: data.get("tiller_version").cloned().unwrap_or(Value::Null),
-    };
-    if reply.scope != json!(scope) {
-        return Err(Failure::unavailable(format!(
-            "{label} accepted scope {}, not {scope}",
-            reply.scope
-        )));
-    }
-    Ok(reply)
+    pair::accepted_reply(label, scope, reply).map_err(|not| match not {
+        NotAccepted::Answered { code, message } => {
+            let text = format!("{label} did not accept the pairing: {message}");
+            match code.as_str() {
+                "refused" => Failure::refused(text),
+                "forbidden" => Failure::forbidden(text),
+                "usage" => Failure::usage(text),
+                _ => Failure::unavailable(text),
+            }
+        }
+        NotAccepted::Malformed(message) => Failure::unavailable(message),
+    })
 }
 
 /// Splits what `ssh -t` prints into what the owner sees and the JSON lines
@@ -500,15 +467,23 @@ impl Relay {
 // -- accept, on the peer ---------------------------------------------------
 
 fn accept(app: &App, new: NewPeerKey) -> Done {
+    let unattended = new.unattended;
     check_label(&new.viewer_label)?;
     peers::check_host_id("viewer host id", &new.viewer_host_id)?;
     parse_public_key(&new.public_key)?;
+    // An unattended accept is the board host's owner, through its board
+    // (`authority.md` section 3): the event says `board@<label>`.
+    let ctx = if unattended {
+        Ctx::new(Actor::Peer(new.viewer_label.clone()))
+    } else {
+        app.ctx()
+    };
     let mut store = app.write()?;
     match get_path(&load_config(app)?, "federation.accept") {
         None | Some(toml::Value::Boolean(true)) => {}
         Some(toml::Value::Boolean(false)) => {
             // The core refusal carries the reason.
-            store.peer_accept(&app.ctx(), false, new)?;
+            store.peer_accept(&ctx, false, new)?;
             return Err(Failure::refused("config federation.accept is false"));
         }
         Some(other) => {
@@ -517,30 +492,15 @@ fn accept(app: &App, new: NewPeerKey) -> Done {
             )));
         }
     }
-    require_terminal_owner("tiller peer accept")?;
     let this = store.this_host()?;
-    let what = match new.scope {
-        PeerScope::Act => "read this host and act on its records for you",
-        PeerScope::Read => "read this host",
-    };
-    eprint!(
-        "{} ({}) asks to {what}.\nKey {}\nAccept it on {}? [y/N] ",
-        new.viewer_label,
-        new.viewer_host_id,
-        fingerprint(new.public_key.trim()),
-        this.label
-    );
-    let _ = std::io::stderr().flush();
-    let mut answer = String::new();
-    std::io::stdin().lock().read_line(&mut answer)?;
-    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-        return Err(Failure::refused(format!(
-            "the owner of {} did not accept {}",
-            this.label, new.viewer_label
-        )));
+    if unattended {
+        require_sshd_owner("tiller peer accept --unattended")?;
+    } else {
+        require_terminal_owner("tiller peer accept")?;
+        confirm(&this.label, &new)?;
     }
     let host_id = meta(store.conn(), "host_id")?.unwrap_or_default();
-    let applied = store.peer_accept(&app.ctx(), true, new)?;
+    let applied = store.peer_accept(&ctx, true, new)?;
     Ok(Outcome::applied_as(applied, |key| {
         json!({
             "host_id": host_id,
@@ -552,6 +512,30 @@ fn accept(app: &App, new: NewPeerKey) -> Done {
             "tiller_version": env!("CARGO_PKG_VERSION"),
         })
     }))
+}
+
+/// The y/N the owner types at the board host's terminal, through `ssh -t`.
+fn confirm(this: &str, new: &NewPeerKey) -> Result<(), Failure> {
+    let what = match new.scope {
+        PeerScope::Act => "read this host and act on its records for you",
+        PeerScope::Read => "read this host",
+    };
+    eprint!(
+        "{} ({}) asks to {what}.\nKey {}\nAccept it on {this}? [y/N] ",
+        new.viewer_label,
+        new.viewer_host_id,
+        fingerprint(new.public_key.trim()),
+    );
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        return Err(Failure::refused(format!(
+            "the owner of {this} did not accept {}",
+            new.viewer_label
+        )));
+    }
+    Ok(())
 }
 
 /// Config `federation.accept`: pairing and the peer link are allowed when it
@@ -619,15 +603,6 @@ fn key_json(key: &tiller_core::domain::PeerKey) -> Value {
         "revoked_at": key.revoked_at,
         "rev": key.rev,
     })
-}
-
-/// `SHA256:<base64>` of the key bytes, as ssh prints a key, so the owner can
-/// compare the two ends.
-fn fingerprint(public_key: &str) -> String {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(public_key.trim())
-        .unwrap_or_default();
-    format!("SHA256:{}", STANDARD_NO_PAD.encode(Sha256::digest(bytes)))
 }
 
 // -- the owner at a terminal -----------------------------------------------
@@ -803,11 +778,11 @@ mod tests {
             process("sshd", "sshd: user@notty"),
             process("sshd", "/usr/sbin/sshd -D"),
         ];
-        serve_start_check(false, false, true, chain(sshd.clone())).unwrap();
+        serve_start_check("serve", false, false, true, chain(sshd.clone())).unwrap();
 
         let refused = |session, claudecode, ssh, processes| {
             let failure =
-                serve_start_check(session, claudecode, ssh, chain(processes)).unwrap_err();
+                serve_start_check("serve", session, claudecode, ssh, chain(processes)).unwrap_err();
             assert_eq!(failure.exit, 6);
             failure.message.clone()
         };
@@ -817,9 +792,10 @@ mod tests {
         let mut under_claude = sshd.clone();
         under_claude.insert(0, process("claude", "claude"));
         assert!(refused(false, false, true, under_claude).contains("Claude Code"));
-        let unreadable =
-            serve_start_check(false, false, true, || Err(std::io::Error::other("gone")))
-                .unwrap_err();
+        let unreadable = serve_start_check("serve", false, false, true, || {
+            Err(std::io::Error::other("gone"))
+        })
+        .unwrap_err();
         assert_eq!(unreadable.exit, 6, "an unreadable chain never serves");
     }
 

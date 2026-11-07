@@ -81,7 +81,8 @@ pub struct Config {
     /// The GitHub CLI the land loop and the direct-pr publish run as the
     /// owner's login: `gh`, or `TILLER_GH`.
     pub gh: String,
-    /// The SSH client peer links run (`protocol.md` 10.2): `ssh`, or
+    /// The SSH client peer links and Add a host run (`protocol.md` 10.1,
+    /// 10.2): `ssh`, or
     /// `TILLER_SSH` split on whitespace.
     pub ssh: Vec<OsString>,
     pub assets: Assets,
@@ -393,6 +394,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         orchestrators: config.orchestrators,
         mirrors: crate::mirror::Mirrors::new(&config.home),
         sessions: crate::auth::Sessions::default(),
+        ssh: config.ssh.clone(),
     });
 
     // A daemon that stopped mid-Fit gives those panes back their size.

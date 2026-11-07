@@ -1,0 +1,13 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 5
+{
+  "error": {
+    "code": "refused",
+    "entity": "peer key",
+    "id": "host-b",
+    "message": "peer key host-b: this host refuses pairing: config federation.accept is false"
+  },
+  "ok": false
+}

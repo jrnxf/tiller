@@ -157,6 +157,7 @@ impl World {
                     viewer_host_id: board.host.clone(),
                     public_key: public_key_text(&key),
                     scope: PeerScope::Act,
+                    unattended: false,
                 },
             )
             .unwrap()
@@ -208,7 +209,11 @@ impl World {
                 },
             )
             .unwrap();
+        Self::run(board, peer)
+    }
 
+    /// Starts both homes' daemons, the board host's with the SSH shim.
+    fn run(board: Fleet, peer: Fleet) -> Self {
         let serve_pid = board.dir.path().join("serve.pid");
         let shim = write_shim(board.dir.path(), peer.dir.path(), &serve_pid);
         let peer_daemon = Daemon::start(peer.dir.path(), None);
@@ -291,8 +296,9 @@ impl World {
 }
 
 /// What the board host's daemon runs as `ssh`: it drops the options, takes
-/// the alias and runs the real `tiller peer serve` for the peer's home, the
-/// way sshd would on the other machine.
+/// the alias and runs the real `tiller peer serve` (or Add a host's `tiller
+/// peer accept --unattended`) for the peer's home, the way sshd would on the
+/// other machine.
 fn write_shim(dir: &Path, peer_home: &Path, serve_pid: &Path) -> PathBuf {
     let shim = dir.join("ssh-shim");
     let script = format!(
@@ -301,6 +307,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) shift 2 ;;
     -T) shift ;;
+    --) shift; break ;;
     *) break ;;
   esac
 done
@@ -650,4 +657,53 @@ fn frozen_peer_leaves_the_board_host_unaffected() {
         ),
         1
     );
+}
+
+/// Add a host from the board: with nothing paired, the owner's `POST
+/// /api/v1/peers` runs the peer's real `tiller peer accept --unattended`
+/// through the SSH shim, and the link goes live with no other step. The
+/// peer's audit marks the accept as one no terminal saw.
+#[test]
+fn board_pairing_brings_the_link_up() {
+    let world = World::run(Fleet::new(), Fleet::new());
+    assert_eq!(world.link(), None);
+
+    let (status, paired) = world.post(
+        "/api/v1/peers",
+        &json!({"idempotency_key": "pair-1", "label": LABEL, "ssh": ALIAS, "scope": "act"}),
+    );
+    assert_eq!(status, 200, "{paired}");
+    assert_eq!(paired["data"]["label"], LABEL);
+    assert_eq!(paired["data"]["ssh"], ALIAS);
+    assert!(
+        paired["data"]["fingerprint"]
+            .as_str()
+            .is_some_and(|print| print.starts_with("SHA256:")),
+        "{paired}"
+    );
+    world.live();
+
+    let (actor, payload): (String, String) = world
+        .peer
+        .open()
+        .conn()
+        .query_row(
+            "SELECT actor, payload FROM events WHERE kind = 'peer.accepted'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(actor, "board@test-host");
+    let payload: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["unattended"], true, "{payload}");
+    assert_eq!(payload["scope"], "act", "{payload}");
+
+    // A second pairing of the label is refused before ssh runs.
+    let (status, again) = world.post(
+        "/api/v1/peers",
+        &json!({"idempotency_key": "pair-2", "label": LABEL, "ssh": ALIAS, "scope": "act"}),
+    );
+    assert_eq!(status, 422, "{again}");
+    assert_eq!(again["error"]["code"], "label_taken", "{again}");
+    assert_eq!(count(&world.peer, "SELECT count(*) FROM peer_keys"), 1);
 }

@@ -120,22 +120,162 @@ test("Settings lists each other host's version and marks the ones that differ fr
   expect(within(facts).getByText("0.1.0-pre.17")).toBeTruthy();
 });
 
-test("with no other host, Settings says none is paired and shows the pairing command", async () => {
-  const fetch = serve(true);
-  const federated = fetch.getMockImplementation();
+interface MachineRow {
+  id: string;
+  kind: string;
+  label: string;
+}
+
+// Settings with only this host paired. `pair` answers `POST /api/v1/peers`;
+// once it answers 200 the machines list holds the new host.
+function serveUnpaired(pair: () => Promise<[number, unknown]>, owner = true) {
+  const fetch = serve(owner, undefined, false);
+  const federated = fetch.getMockImplementation()!;
+  const body = fixtureResource("/api/v1/machines", "federated") as { machines: MachineRow[] };
+  const local = body.machines.filter((machine) => machine.kind === "local");
+  const peer = body.machines.find((machine) => machine.label === "host-g")!;
+  let machines = local;
   fetch.mockImplementation(async (input, init) => {
-    if (String(input) === "/api/v1/machines") {
-      const body = fixtureResource("/api/v1/machines", "federated") as {
-        machines: { kind: string }[];
-      };
-      const machines = body.machines.filter((machine) => machine.kind === "local");
+    const path = String(input);
+    if (path === "/api/v1/machines") {
       return new Response(JSON.stringify({ ...body, machines }));
     }
-    return federated!(input, init);
+    if (path === "/api/v1/peers" && init?.method === "POST") {
+      const [status, answer] = await pair();
+      if (status === 200) machines = [...local, { ...peer, id: "h-z", label: "host-z" }];
+      return new Response(JSON.stringify(answer), { status });
+    }
+    return federated(input, init);
   });
+  return fetch;
+}
+
+const PAIRED = {
+  ok: true,
+  replayed: false,
+  events: [41, 42],
+  receipt: { recorded_at: "2026-11-07T17:00:00Z", outbox_id: null, approval_id: null },
+  data: { label: "host-z", ssh: "z.example.com", fingerprint: "SHA256:abc" },
+};
+
+async function openForm() {
+  const panel = await screen.findByRole("region", { name: "Other hosts" });
+  fireEvent.click(within(panel).getByRole("button", { name: "Add a host" }));
+  const form = within(panel).getByRole("form", { name: "Add a host" });
+  const field = (name: string) => within(form).getByLabelText<HTMLInputElement>(name);
+  return { panel, form, field };
+}
+
+test("with no other host, Settings says none is paired and offers Add a host", async () => {
+  serveUnpaired(async () => [200, PAIRED]);
   renderSettings();
   const panel = await screen.findByRole("region", { name: "Other hosts" });
   expect(within(panel).getByText("No other host is paired")).toBeTruthy();
-  expect(within(panel).getByText("tiller peer add <label> --ssh <alias>")).toBeTruthy();
+  const row = within(panel).getByTestId("add-host");
+  expect(row.lastElementChild).toBe(within(row).getByRole("button", { name: "Add a host" }));
   expect(within(panel).queryByText("host-d")).toBeNull();
 });
+
+test("a browser not signed in as the owner is told to sign in, with no Add a host", async () => {
+  serveUnpaired(async () => [200, PAIRED], false);
+  renderSettings();
+  const panel = await screen.findByRole("region", { name: "Other hosts" });
+  await within(panel).findByText("Sign this browser in as the owner to add one");
+  expect(within(panel).getByText("No other host is paired")).toBeTruthy();
+  expect(within(panel).queryByRole("button", { name: "Add a host" })).toBeNull();
+});
+
+test("Add a host opens a form that Pair arms only with a label and an alias, and Cancel closes", async () => {
+  const fetch = serveUnpaired(async () => [200, PAIRED]);
+  renderSettings();
+  const { panel, form, field } = await openForm();
+  expect(document.activeElement).toBe(field("Label"));
+  const pair = within(form).getByRole<HTMLButtonElement>("button", { name: "Pair" });
+  expect(pair.disabled).toBe(true);
+  fireEvent.change(field("Label"), { target: { value: "host-z" } });
+  expect(pair.disabled).toBe(true);
+  fireEvent.change(field("SSH alias"), { target: { value: "z.example.com" } });
+  expect(pair.disabled).toBe(false);
+  expect(within(form).getByText("ssh z.example.com tiller peer accept")).toBeTruthy();
+
+  fireEvent.click(within(form).getByRole("button", { name: "Cancel" }));
+  expect(within(panel).queryByRole("form")).toBeNull();
+  expect(within(panel).getByRole("button", { name: "Add a host" })).toBeTruthy();
+  expect(fetch).not.toHaveBeenCalledWith("/api/v1/peers", expect.anything());
+});
+
+test("Pair sends the pairing, shows its progress, and lists the new host", async () => {
+  let answer: ((value: [number, unknown]) => void) | undefined;
+  const fetch = serveUnpaired(() => new Promise((resolve) => (answer = resolve)));
+  renderSettings();
+  const { panel, form, field } = await openForm();
+  fireEvent.change(field("Label"), { target: { value: " host-z " } });
+  fireEvent.change(field("SSH alias"), { target: { value: "z.example.com" } });
+  fireEvent.click(within(form).getByRole("button", { name: "Read only" }));
+  fireEvent.click(within(form).getByRole("button", { name: "Pair" }));
+
+  const progress = await within(form).findByRole("status");
+  expect(progress.textContent).toBe("Pairing with host-z through ssh z.example.com...");
+  expect(field("Label").disabled).toBe(true);
+  expect(within(form).getByRole<HTMLButtonElement>("button", { name: "Cancel" }).disabled).toBe(
+    true,
+  );
+  const call = fetch.mock.calls.find(([path]) => String(path) === "/api/v1/peers");
+  const sent = JSON.parse(String(call?.[1]?.body)) as Record<string, unknown>;
+  expect(sent).toEqual({
+    label: "host-z",
+    ssh: "z.example.com",
+    scope: "read",
+    idempotency_key: expect.any(String),
+  });
+
+  answer?.([200, PAIRED]);
+  expect(await within(panel).findByText("Paired host-z")).toBeTruthy();
+  expect(within(panel).getByText(/Key SHA256:abc/)).toBeTruthy();
+  await waitFor(() => expect(within(panel).getByText("host-z")).toBeTruthy());
+  expect(within(panel).queryByRole("form")).toBeNull();
+  expect(within(panel).queryByText("No other host is paired")).toBeNull();
+});
+
+test.each([
+  [
+    503,
+    "peer_unreachable",
+    "z.example.com is not reachable through ssh: Host key verification failed. (ssh exit 255)",
+    "run ssh z.example.com once in a terminal on this host: it must connect with no password or question",
+    "Run ssh z.example.com once in a terminal on this host: it must connect with no password or question",
+  ],
+  [
+    502,
+    "peer_refused",
+    "z.example.com refuses pairing: its config has federation.accept = false",
+    undefined,
+    null,
+  ],
+  [
+    422,
+    "label_taken",
+    "host-z is already paired; pick another label, or run tiller peer remove host-z in a terminal first",
+    undefined,
+    null,
+  ],
+])(
+  "a %i %s pairing says why in plain words and keeps the form",
+  async (status, code, message, hint, shown) => {
+    serveUnpaired(async () => [status, { ok: false, error: { code, message, hint } }]);
+    renderSettings();
+    const { form, field } = await openForm();
+    fireEvent.change(field("Label"), { target: { value: "host-z" } });
+    fireEvent.change(field("SSH alias"), { target: { value: "z.example.com" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Pair" }));
+
+    const alert = await within(form).findByRole("alert");
+    const lines = [...alert.querySelectorAll("p")].map((line) => line.textContent);
+    expect(lines).toEqual(shown ? [message, shown] : [message]);
+    expect(field("Label").disabled).toBe(false);
+    expect(field("Label").value).toBe("host-z");
+    expect(within(form).getByRole<HTMLButtonElement>("button", { name: "Pair" }).disabled).toBe(
+      false,
+    );
+  },
+);

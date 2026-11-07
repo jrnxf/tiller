@@ -952,6 +952,24 @@ pub struct AddProject {
     pub capacity: Option<i64>,
 }
 
+/// `POST /api/v1/peers`: Add a host in Settings pairs this host with another
+/// one, as `tiller peer add` does (`protocol.md` 10.1, From the board).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AddPeer {
+    pub idempotency_key: String,
+    /// A paired peer's label. Refused: a pairing is never forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// The name the new host goes by on this board: a letter or digit, then
+    /// letters, digits, `_` or `-`.
+    pub label: String,
+    /// The ssh alias that reaches it from this host, with no password.
+    pub ssh: String,
+    /// `act`: read it and forward the owner's mutations; or `read`.
+    pub scope: String,
+}
+
 /// `POST /api/v1/projects/{id}/asks`: a note typed in the board's ask box,
 /// recorded and sent to the project's orchestrator as `tiller ask note` does.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]

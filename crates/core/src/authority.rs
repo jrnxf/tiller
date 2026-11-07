@@ -288,6 +288,7 @@ mod tests {
                     viewer_host_id: host.into(),
                     public_key: public_key_text(&generate_key().unwrap()),
                     scope,
+                    unattended: false,
                 },
             )
             .unwrap()

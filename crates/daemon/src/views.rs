@@ -608,6 +608,13 @@ pub fn machines(store: &Store, local: &LocalHealth, now: Timestamp) -> Result<Ma
             machines.push(peer_machine(&host, peer));
             continue;
         }
+        // Paired before the link supervisor re-read the pairings: a peer whose
+        // link has not opened yet, not a herdr machine.
+        if let (Some(scope), Some(peer_host_id)) = (host.peer_scope, host.peer_host_id.as_deref()) {
+            let pending = PeerView::new(&host.label, &host.id, peer_host_id, scope);
+            machines.push(peer_machine(&host, &pending));
+            continue;
+        }
         let slots = capacity.iter().find(|row| row.host_id == host.id);
         let (health, stale_reason, last_seen_at) = if is_local {
             let degraded =

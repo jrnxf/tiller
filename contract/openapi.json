@@ -2341,6 +2341,84 @@
         }
       }
     },
+    "/api/v1/peers": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "add_peer",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddPeer"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The paired host row, with `ssh`, `key_id` and the key's `fingerprint`; never the key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`label_taken`: this host's own label, or one already paired; `already_paired`: the alias or the host it reaches is paired under another label",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: the new host refused the pairing (`reason`), or a `host` was sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`peer_unreachable`: ssh did not reach the new host, or it gave no answer in 30 s",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects": {
       "get": {
         "tags": [
@@ -3104,6 +3182,41 @@
   },
   "components": {
     "schemas": {
+      "AddPeer": {
+        "type": "object",
+        "description": "`POST /api/v1/peers`: Add a host in Settings pairs this host with another\none, as `tiller peer add` does (`protocol.md` 10.1, From the board).",
+        "required": [
+          "idempotency_key",
+          "label",
+          "ssh",
+          "scope"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label. Refused: a pairing is never forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string",
+            "description": "The name the new host goes by on this board: a letter or digit, then\nletters, digits, `_` or `-`."
+          },
+          "scope": {
+            "type": "string",
+            "description": "`act`: read it and forward the owner's mutations; or `read`."
+          },
+          "ssh": {
+            "type": "string",
+            "description": "The ssh alias that reaches it from this host, with no password."
+          }
+        },
+        "additionalProperties": false
+      },
       "AddProject": {
         "type": "object",
         "description": "`POST /api/v1/projects`: register a project on this host, as `tiller\nproject add` does with the fields the board asks for. `--checks`,\n`--remote`, `--default-branch` and the deploy flags stay CLI-only.",

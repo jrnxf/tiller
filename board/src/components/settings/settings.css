@@ -117,3 +117,101 @@
     gap: 10px;
   }
 }
+
+/* Add a host: the form opens in place of its row. */
+
+.set-form {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 14px;
+}
+
+.set-text code {
+  font-family: var(--mono);
+  font-size: 0.92em;
+  color: var(--fg-2);
+}
+
+.set-form .form-fields {
+  margin-top: 0;
+  max-width: 460px;
+}
+
+.set-form .form-label {
+  font-size: var(--fs-mini);
+  font-weight: var(--w-medium);
+  color: var(--fg-2);
+}
+
+.set-form .seg {
+  justify-self: start;
+}
+
+.set-form .seg button[disabled] {
+  pointer-events: none;
+}
+
+.set-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--fs-small);
+  color: var(--fg-2);
+}
+
+.set-spin {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: currentColor;
+  animation: spin 0.8s linear infinite;
+}
+
+.set-refusal {
+  padding: 8px 12px;
+  border-radius: var(--r8);
+  border: 1px solid color-mix(in srgb, var(--red) 40%, var(--line-2));
+  background: color-mix(in srgb, var(--red) 7%, transparent);
+  color: var(--fg-1);
+  font-size: var(--fs-small);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.set-refusal p {
+  margin: 0;
+}
+
+.set-refusal p + p {
+  color: var(--fg-2);
+}
+
+.set-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.set-form-actions .btn.primary {
+  background: var(--accent-solid);
+  border-color: transparent;
+  color: var(--accent-fg);
+}
+
+.set-form-actions .btn.primary:hover {
+  background: var(--accent-solid-hover);
+}
+
+.set-form-actions .btn[disabled] {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .set-spin {
+    animation: none;
+  }
+}

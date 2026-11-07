@@ -1,0 +1,12 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 6
+{
+  "error": {
+    "code": "forbidden",
+    "hint": "the board host's daemon starts it over ssh; never run it from an agent",
+    "message": "tiller peer accept --unattended runs only under sshd for the owner: SSH_CONNECTION is not set"
+  },
+  "ok": false
+}

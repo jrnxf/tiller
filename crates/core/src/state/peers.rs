@@ -33,6 +33,10 @@ pub struct NewPeerKey {
     /// Ed25519, base64.
     pub public_key: String,
     pub scope: PeerScope,
+    /// Asked for by the board host's daemon over ssh, with no terminal to
+    /// confirm it (`tiller peer accept --unattended`).
+    #[serde(default)]
+    pub unattended: bool,
 }
 
 /// What `tiller peer add` records on the board host once the peer accepted.
@@ -117,6 +121,7 @@ impl Store {
                         "viewer_host_id": new.viewer_host_id,
                         "public_key": new.public_key,
                         "scope": new.scope,
+                        "unattended": new.unattended,
                     })),
             )?;
             get(tx.conn(), "peer key", &id)
@@ -401,6 +406,24 @@ pub fn check_label(label: &str) -> Result<()> {
     }
 }
 
+/// An ssh alias is one word on ssh's command line, after `--`: a host name,
+/// an address or `user@host`, never an option. At most 255 characters.
+pub fn check_alias(alias: &str) -> Result<()> {
+    let plain = !alias.is_empty()
+        && !alias.starts_with('-')
+        && alias.len() <= 255
+        && alias
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | ':' | '-'));
+    if plain {
+        Ok(())
+    } else {
+        Err(Error::Usage(format!(
+            "an ssh alias is a host name: letters, digits, '.', '_', '@', ':' or '-', and not an option: {alias:?}"
+        )))
+    }
+}
+
 /// A host id is the other host's `meta.host_id`, a ULID. It reaches the
 /// owner's confirmation prompt, so nothing else gets through.
 pub fn check_host_id(what: &str, id: &str) -> Result<()> {
@@ -424,6 +447,15 @@ pub fn generate_key() -> Result<SigningKey> {
 /// The public half as `peer_keys.public_key` and the accept command carry it.
 pub fn public_key_text(key: &SigningKey) -> String {
     BASE64.encode(key.verifying_key().to_bytes())
+}
+
+/// `SHA256:<base64>` of the key bytes, as ssh prints a key, so the owner can
+/// compare the two ends.
+pub fn fingerprint(public_key: &str) -> String {
+    use base64::engine::general_purpose::STANDARD_NO_PAD;
+    use sha2::{Digest, Sha256};
+    let bytes = BASE64.decode(public_key.trim()).unwrap_or_default();
+    format!("SHA256:{}", STANDARD_NO_PAD.encode(Sha256::digest(bytes)))
 }
 
 /// Parses a base64 Ed25519 public key; anything else is a usage error.
@@ -612,6 +644,7 @@ mod tests {
             viewer_host_id: BOARD_HOST.into(),
             public_key: public_key_text(&generate_key().unwrap()),
             scope,
+            unattended: false,
         }
     }
 
@@ -653,6 +686,7 @@ mod tests {
             viewer_host_id: BOARD_HOST.into(),
             public_key: format!(" {}\n", first.value.public_key),
             scope: PeerScope::Act,
+            unattended: false,
         };
         let replay = store.peer_accept(&owner(), true, again).unwrap();
         assert!(
@@ -675,6 +709,44 @@ mod tests {
         assert_eq!(keys[0].rev, 2);
         assert!(keys[1].revoked_at.is_none());
         assert_eq!(keys[1].scope, PeerScope::Read);
+    }
+
+    #[test]
+    fn an_accept_through_the_board_host_is_marked_unattended() {
+        let mut store = store();
+        let payload = |store: &Store, seq: i64| -> (String, serde_json::Value) {
+            store
+                .conn()
+                .query_row(
+                    "SELECT actor, payload FROM events WHERE seq = ?1",
+                    [seq],
+                    |row| Ok((row.get(0)?, row.get::<_, String>(1)?)),
+                )
+                .map(|(actor, payload)| (actor, serde_json::from_str(&payload).unwrap()))
+                .unwrap()
+        };
+        let terminal = store
+            .peer_accept(&owner(), true, accept("board", PeerScope::Act))
+            .unwrap();
+        let (actor, body) = payload(&store, terminal.events[0]);
+        assert_eq!(actor, "owner");
+        assert_eq!(body["unattended"], false);
+
+        let board = Ctx::new(Actor::Peer("board".into()));
+        let unattended = store
+            .peer_accept(
+                &board,
+                true,
+                NewPeerKey {
+                    unattended: true,
+                    ..accept("board", PeerScope::Act)
+                },
+            )
+            .unwrap();
+        let (actor, body) = payload(&store, *unattended.events.last().unwrap());
+        assert_eq!(actor, "board@board");
+        assert_eq!(body["unattended"], true);
+        assert!(body.get("private_key").is_none());
     }
 
     #[test]
@@ -860,6 +932,24 @@ mod tests {
         store
             .peer_pair(&owner(), pairing("host-b", "01JC00000000000000000PEER2"))
             .unwrap();
+    }
+
+    #[test]
+    fn aliases_are_one_word_and_never_an_option() {
+        for good in ["host-b", "host-b.example.com", "user@192.0.2.10", "b_2:22"] {
+            check_alias(good).unwrap();
+        }
+        for bad in [
+            "",
+            "-oProxyCommand=x",
+            "host b",
+            "a;b",
+            "a$(x)",
+            "a/b",
+            &"a".repeat(256),
+        ] {
+            assert_eq!(check_alias(bad).unwrap_err().code(), "usage", "{bad:?}");
+        }
     }
 
     #[test]

@@ -92,6 +92,7 @@ fn pair_onto(board: &Fleet, peer: &Fleet, label: &str) -> (SigningKey, String) {
                 viewer_host_id: board.host.clone(),
                 public_key: public_key_text(&key),
                 scope: PeerScope::Act,
+                unattended: false,
             },
         )
         .unwrap()

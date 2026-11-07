@@ -10,6 +10,7 @@
 //! loopback, `https://` at an `--allow-host` name); no CORS header is ever
 //! sent.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -25,6 +26,7 @@ use serde_json::{Value, json};
 use tiller_agents::land::app::{APP_DIR, AppKey, KEY_FILE, KeyError};
 use tiller_agents::spawn::config::SpawnConfig;
 use tiller_agents::spawn::orchestrator::Orchestrator;
+use tiller_core::config_file as config_toml;
 use tiller_core::domain::{
     Activity, AnsweredVia, Approval, AskSource, CardKind, CardOutcome, HoldReleaseReason, Host,
     PeerScope, Session,
@@ -33,6 +35,10 @@ use tiller_core::domain::{Delivery, InterventionKind, Stage};
 use tiller_core::state::approvals::Decision;
 use tiller_core::state::asks::NewAsk;
 use tiller_core::state::cards::{CardEdit, NewCard};
+use tiller_core::state::peers::{
+    self as pairing, KeyFile, NewPairing, check_alias, check_label, fingerprint,
+};
+use tiller_core::state::projects::meta;
 use tiller_core::state::{get as get_row, resolve_id};
 use tiller_core::{Actor, Applied, Ctx, Error, Store, Timestamp, ids};
 use tiller_herdr::client::{Cli, Herdr, HerdrError};
@@ -45,6 +51,7 @@ use crate::dto::*;
 use crate::mirror::{self, MAX_VIEWERS, Mirrors};
 use crate::peer::forward::{Op, Order};
 use crate::peer::link::{Forwarded, Peers};
+use crate::peer::pair::{self, Accept, Cause, NoAnswer, NotAccepted};
 use crate::peer::{Federation, PeerView};
 use crate::readonly::Damage;
 use crate::views::{self, Filter, LocalHealth, PaneTarget};
@@ -90,6 +97,9 @@ pub struct Inner {
     pub mirrors: Mirrors,
     /// The limit on sign-in code tries, and sign-outs for open streams.
     pub sessions: auth::Sessions,
+    /// `ssh`, or `TILLER_SSH` split on whitespace: what Add a host runs to
+    /// reach the new host (`protocol.md` 10.1).
+    pub ssh: Vec<OsString>,
 }
 
 /// Starts a project's orchestrator, or returns the live one, as `tiller
@@ -690,6 +700,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/quota", get(quota))
         .route("/api/v1/health", get(health))
         .route("/api/v1/projects", get(projects).post(add_project))
+        .route("/api/v1/peers", post(add_peer))
         .route("/api/v1/contributions", get(contributions))
         .route("/api/v1/projects/{id}/stage", post(stage_project))
         .route("/api/v1/projects/{id}/asks", post(ask_note))
@@ -2152,6 +2163,342 @@ async fn add_project(
     .await
 }
 
+/// What Add a host reads before it reaches the new host.
+struct PairingStart {
+    replay: bool,
+    this: Host,
+    host_id: Option<String>,
+    paired: Option<Host>,
+    /// Every paired host: `(label, peer_host_id)`.
+    peers: Vec<(String, Option<String>)>,
+}
+
+#[utoipa::path(post, path = "/api/v1/peers", tag = "mutations", request_body = AddPeer,
+    responses((status = 200, body = MutationResponse, description = "The paired host row, with `ssh`, `key_id` and the key's `fingerprint`; never the key"),
+              (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "`label_taken`: this host's own label, or one already paired; `already_paired`: the alias or the host it reaches is paired under another label"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: the new host refused the pairing (`reason`), or a `host` was sent"),
+              (status = 503, body = ErrorBody, description = "`peer_unreachable`: ssh did not reach the new host, or it gave no answer in 30 s")))]
+async fn add_peer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers)?;
+    let request: AddPeer = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "a pairing").await?;
+    let key = key(&request.idempotency_key)?;
+    let scope: PeerScope = request.scope.parse()?;
+    check_label(&request.label)?;
+    check_alias(&request.ssh)?;
+    // Refused before the new host accepts a key this host could not record.
+    if let Some(reason) = state.0.damage.reason() {
+        return Err(read_only(&reason));
+    }
+    // Its own task: a browser that goes away mid-ssh does not cut a pairing
+    // off between the new host's accept and this host's record of it.
+    let task = tokio::spawn(pair_host(state, key, request.label, request.ssh, scope));
+    match task.await {
+        Ok(result) => result,
+        Err(error) => Err(Error::Internal(error.to_string()).into()),
+    }
+}
+
+/// Add a host's steps 2 to 4 (`protocol.md` 10.1), one pairing at a time.
+async fn pair_host(
+    state: AppState,
+    key: String,
+    label: String,
+    alias: String,
+    scope: PeerScope,
+) -> ApiResult<MutationResponse> {
+    let _alone = pair::PAIRING.lock().await;
+    let home = state.0.home.clone();
+    let start = {
+        let (label, key) = (label.clone(), key.clone());
+        read(&state, move |store| {
+            Ok(PairingStart {
+                replay: store.key_recorded(&Ctx::new(Actor::Board).with_key(key))?,
+                this: store.this_host()?,
+                host_id: meta(store.conn(), "host_id")?,
+                paired: store
+                    .host_labelled(&label)?
+                    .filter(|host| host.peer_scope.is_some()),
+                peers: store
+                    .hosts()?
+                    .into_iter()
+                    .filter(|host| host.peer_scope.is_some())
+                    .map(|host| (host.label, host.peer_host_id))
+                    .collect(),
+            })
+        })
+        .await?
+    };
+    // `config.toml` is read now: one that does not parse would fail the
+    // pairing only after the new host accepted.
+    let config = config_toml::load(&home.join("config.toml"))
+        .map_err(|error| Error::Unavailable(format!("{error}; fix it before adding a host")))?;
+    if start.replay {
+        // The stored response answers before `peer.pair` reads its input,
+        // with the alias and key the first request recorded.
+        let Some(peer_host_id) = start.paired.and_then(|host| host.peer_host_id) else {
+            return Err(Error::Usage(format!(
+                "the pairing this idempotency key made is gone: {label} is no longer paired; add the host again"
+            ))
+            .into());
+        };
+        let alias = config_toml::get(&config, &format!("peers.{label}.ssh"))
+            .and_then(toml::Value::as_str)
+            .map_or(alias, str::to_owned);
+        return mutate(&state, key, move |store, ctx, _| {
+            let paired = store.peer_pair(
+                ctx,
+                NewPairing {
+                    label: label.clone(),
+                    herdr_machine: None,
+                    scope,
+                    peer_host_id,
+                },
+            )?;
+            let key = pairing::key_path(&home, &label)
+                .and_then(|path| pairing::read_key_file(&path))
+                .ok()
+                .map(|key| (key.key_id, fingerprint(&key.public_key)));
+            Ok(paired_done(&alias, paired, key, None))
+        })
+        .await;
+    }
+    if start.this.label == label {
+        return Err(label_taken(format!(
+            "{label} is this host's own label; pick another"
+        )));
+    }
+    if start.paired.is_some() {
+        return Err(label_taken(format!(
+            "{label} is already paired; pick another label, or run tiller peer remove {label} in a terminal first"
+        )));
+    }
+    // A host paired again under a new label would take the new key in
+    // place of the key its first label dials with.
+    if let Some(other) = pair::labels_for(&config, &alias)
+        .into_iter()
+        .find(|other| start.peers.iter().any(|(label, _)| label == other))
+    {
+        return Err(already_paired(format!(
+            "{alias} is already paired here as {other}"
+        )));
+    }
+    // This host's label is a word on the new host's command line.
+    check_label(&start.this.label)?;
+    let host_id = start.host_id.ok_or_else(|| {
+        ApiError::from(Error::Unavailable(
+            "state.db has no host id; run tiller init".into(),
+        ))
+    })?;
+
+    // Step 2: the key, under a pending name until the new host accepts it.
+    let signing = pairing::generate_key()?;
+    let public_key = pairing::public_key_text(&signing);
+    let path = pairing::key_path(&home, &label)?;
+    // Its own name: `tiller peer add` for the same label pends `.<label>.key.pending`.
+    let pending = path.with_file_name(format!(".{label}.board.key.pending"));
+    let file = KeyFile::new(&label, scope, &signing);
+    drop(signing);
+    pairing::write_key_file(&pending, &file)?;
+    let drop_pending = |error: ApiError| {
+        let _ = pairing::remove_key_file(&pending);
+        error
+    };
+
+    // Step 3: the new host's unattended accept, over ssh.
+    let accept = Accept {
+        alias: &alias,
+        from: &start.this.label,
+        host_id: &host_id,
+        public_key: &public_key,
+        scope,
+    };
+    let answer = pair::run(&state.0.ssh, &accept, pair::ACCEPT_LIMIT)
+        .await
+        .map_err(|no| drop_pending(not_reached(&label, &alias, &no)))?;
+    let reply = pair::accepted_reply(&label, scope, &answer)
+        .map_err(|not| drop_pending(not_accepted(&label, &alias, not)))?;
+    if let Some((other, _)) = start
+        .peers
+        .iter()
+        .find(|(_, id)| id.as_deref() == Some(reply.host_id.as_str()))
+    {
+        return Err(drop_pending(already_paired(format!(
+            "{alias} is {other}, already paired here; it now holds this pairing's key in place of {other}'s, so run tiller peer add {other} in a terminal to restore that link"
+        ))));
+    }
+
+    // Step 4: the key file, the alias, then `peer.pair` and the alias's
+    // `config.set`. A failure deletes the key file: Add a host again
+    // replaces the key the new host holds.
+    let file = file.accepted(&reply.host_id, &reply.key_id);
+    let key_id = reply.key_id.clone();
+    let printed = fingerprint(&public_key);
+    pairing::write_key_file(&path, &file).map_err(|error| drop_pending(error.into()))?;
+    let _ = pairing::remove_key_file(&pending);
+    let done = {
+        let (home, label, alias) = (home.clone(), label.clone(), alias.clone());
+        mutate(&state, key, move |store, ctx, _| {
+            // The alias first: a `peers.<label>.ssh` with no pairing is
+            // harmless, a pairing with no alias dials the label.
+            let changed = pair::write_alias(&home, &label, &alias)
+                .map_err(|error| Error::Internal(error.to_string()))?;
+            let paired = store.peer_pair(
+                ctx,
+                NewPairing {
+                    label: label.clone(),
+                    herdr_machine: None,
+                    scope,
+                    peer_host_id: reply.host_id.clone(),
+                },
+            )?;
+            // The key went with `peer.pair`; this event is its own write.
+            let recorded = changed.then(|| {
+                store.config_changed(
+                    &Ctx {
+                        key: None,
+                        ..ctx.clone()
+                    },
+                    &format!("peers.{label}.ssh"),
+                    json!(alias),
+                )
+            });
+            Ok(paired_done(
+                &alias,
+                paired,
+                Some((Some(key_id), printed)),
+                recorded,
+            ))
+        })
+        .await
+    };
+    if done.is_err() {
+        let _ = pairing::remove_key_file(&path);
+    }
+    done
+}
+
+/// A 422 `label_taken`: Add a host never re-pairs a label.
+fn label_taken(message: String) -> ApiError {
+    ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "label_taken", message)
+}
+
+/// A 422 `already_paired`: the alias, or the host it reaches, is paired
+/// under another label.
+fn already_paired(message: String) -> ApiError {
+    ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "already_paired", message)
+}
+
+/// The accept gave no answer: a 503 `peer_unreachable` when ssh did not get
+/// through or ran out of time, a 502 `peer_refused` when the new host's
+/// shell has no `tiller`.
+fn not_reached(label: &str, alias: &str, no: &NoAnswer) -> ApiError {
+    let why = &no.why;
+    let error = match no.cause {
+        Cause::Unreached => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "peer_unreachable",
+            format!("{alias} is not reachable through ssh: {why}"),
+        )
+        .hint(&format!(
+            "run ssh {alias} once in a terminal on this host: it must connect with no password or question"
+        )),
+        Cause::TimedOut => ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "peer_unreachable",
+            format!("{alias} gave no answer through ssh: {why}"),
+        )
+        .hint("it may have accepted the key; adding the host again replaces that key"),
+        Cause::NoTiller => ApiError::peer_refused(
+            "no_tiller",
+            format!("{alias} has no tiller command for ssh to run: {why}"),
+        )
+        .hint(&format!(
+            "install Tiller there, so ssh {alias} tiller --version answers, then add the host again"
+        )),
+    };
+    error.host(label)
+}
+
+/// A 502 `peer_refused`: the new host answered, and not with an accept.
+fn not_accepted(label: &str, alias: &str, not: NotAccepted) -> ApiError {
+    let (reason, message) = match not {
+        NotAccepted::Answered { code, message } if code == "refused" => {
+            if message.contains("federation.accept") {
+                (
+                    "accept_off",
+                    format!("{alias} refuses pairing: its config has federation.accept = false"),
+                )
+            } else {
+                ("refused", format!("{alias} refused the pairing: {message}"))
+            }
+        }
+        NotAccepted::Answered { code, message } if code == "forbidden" => (
+            "forbidden",
+            format!("{alias} refused the pairing: {message}"),
+        ),
+        // An older Tiller has no `--unattended`.
+        NotAccepted::Answered { code, message }
+            if code == "usage" && message.contains("--unattended") =>
+        {
+            (
+                "version",
+                format!(
+                    "{alias} runs a Tiller that cannot pair from the board; update it there, or run tiller peer add in a terminal"
+                ),
+            )
+        }
+        NotAccepted::Answered { message, .. } => (
+            "failed",
+            format!("{alias} could not accept the pairing: {message}"),
+        ),
+        NotAccepted::Malformed(message) => ("bad_answer", message),
+    };
+    ApiError::peer_refused(reason, message).host(label)
+}
+
+/// The paired host row with its alias and key, never the key's secret half.
+/// `key` is the key's id and fingerprint.
+fn paired_done(
+    alias: &str,
+    paired: Applied<Host>,
+    key: Option<(Option<String>, String)>,
+    recorded: Option<tiller_core::Result<Applied<i64>>>,
+) -> Done {
+    let (key_id, printed) = key.unzip();
+    let mut data = serde_json::to_value(&paired.value).unwrap_or(Value::Null);
+    data["ssh"] = json!(alias);
+    data["key_id"] = json!(key_id.flatten());
+    data["fingerprint"] = json!(printed);
+    let mut events = paired.events;
+    let warning = match recorded {
+        Some(Ok(applied)) => {
+            events.extend(applied.events);
+            None
+        }
+        Some(Err(error)) => {
+            tracing::warn!(%error, "recording the pairing's ssh alias failed");
+            Some(format!(
+                "the ssh alias is in config.toml, but its config.changed event was not recorded: {error}"
+            ))
+        }
+        None => None,
+    };
+    Done {
+        data,
+        events,
+        replayed: paired.replayed,
+        outbox_id: None,
+        approval_id: None,
+        warning,
+    }
+}
+
 #[utoipa::path(get, path = "/api/v1/projects/{id}/retire", tag = "reads",
     params(("id" = String, Path)),
     responses((status = 200, body = ProjectRetirePreview), (status = 404, body = ErrorBody)))]
@@ -3149,7 +3496,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, stage_project, ask_note, start_orchestrator, add_project, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
+        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, stage_project, ask_note, start_orchestrator, add_project, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
         relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, session, login_code, logout
     ),
@@ -3219,6 +3566,27 @@ pub(crate) mod tests {
         herdr: Cli,
         terminal: Option<Arc<dyn Terminal>>,
     ) -> Router {
+        app_ssh(
+            home,
+            assets,
+            damage,
+            peers,
+            herdr,
+            terminal,
+            vec!["ssh".into()],
+        )
+    }
+
+    /// The board API whose Add a host runs `ssh`.
+    fn app_ssh(
+        home: &std::path::Path,
+        assets: Assets,
+        damage: Damage,
+        peers: Arc<Peers>,
+        herdr: Cli,
+        terminal: Option<Arc<dyn Terminal>>,
+        ssh: Vec<OsString>,
+    ) -> Router {
         let (_newest_tx, newest) = watch::channel(0);
         let (_stop_tx, stop) = watch::channel(false);
         router(AppState::new(Inner {
@@ -3238,6 +3606,7 @@ pub(crate) mod tests {
             orchestrators: None,
             mirrors: Mirrors::new(home),
             sessions: auth::Sessions::default(),
+            ssh,
         }))
     }
 
@@ -4692,6 +5061,523 @@ pub(crate) mod tests {
         assert!(taken.body.contains("project id is taken"), "{}", taken.body);
         let projects = get(&app, "/api/v1/projects").await;
         assert!(projects.body.contains("\"gamma\""), "{}", projects.body);
+    }
+
+    /// A fake `ssh` for Add a host: it records its arguments and what the
+    /// peers directory held while it ran, then runs `body`.
+    fn fake_ssh(dir: &std::path::Path, home: &std::path::Path, body: &str) -> Vec<OsString> {
+        let script = dir.join("ssh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{args}'\nls -a '{peers}' > '{during}' 2>/dev/null\n{body}\n",
+                args = dir.join("args").display(),
+                peers = home.join("peers").display(),
+                during = dir.join("during").display(),
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        vec![script.into_os_string()]
+    }
+
+    /// The peer's accept of `scope`, as `tiller peer accept --json` prints it.
+    fn accepts(scope: &str) -> String {
+        format!(
+            "echo '{}'",
+            json!({"ok": true, "data": {
+                "host_id": "01JC00000000000000000PEER1", "label": "host-b",
+                "key_id": "01JC00000000000000000KEY01", "scope": scope,
+                "schema_version": 1, "peer_protocol": "tiller-peer/1", "tiller_version": "0.1.0",
+            }})
+        )
+    }
+
+    fn pairing_app(home: &std::path::Path, ssh: Vec<OsString>) -> Router {
+        app_ssh(
+            home,
+            Assets::of::<Fixture>(),
+            Damage::default(),
+            Peers::idle(),
+            Cli::local(),
+            None,
+            ssh,
+        )
+    }
+
+    /// `POST /api/v1/peers` as Settings sends it.
+    fn pair_request(key: &str, fields: Value, cookie: &str) -> Request<Body> {
+        let mut body = json!({"idempotency_key": key, "label": "host-b",
+            "ssh": "b.example.com", "scope": "act"});
+        if let (Some(body), Some(fields)) = (body.as_object_mut(), fields.as_object()) {
+            body.extend(fields.clone());
+        }
+        let headers: Vec<(&str, &str)> = if cookie.is_empty() {
+            vec![]
+        } else {
+            vec![("cookie", cookie)]
+        };
+        mutation("POST", "/api/v1/peers", body, &headers)
+    }
+
+    fn error_of(answer: &Answer) -> Value {
+        let body: Value = serde_json::from_str(&answer.body).unwrap();
+        body["error"].clone()
+    }
+
+    #[tokio::test]
+    async fn pairing_needs_the_owner_cookie() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let scratch = tempfile::tempdir().unwrap();
+        let app = pairing_app(home, fake_ssh(scratch.path(), home, &accepts("act")));
+
+        let anonymous = send(&app, pair_request("k-pair-1", json!({}), "")).await;
+        assert_eq!(
+            anonymous.status,
+            StatusCode::FORBIDDEN,
+            "{}",
+            anonymous.body
+        );
+        // Refused before ssh: nothing ran and no key was made.
+        assert!(!scratch.path().join("args").exists());
+        assert!(!home.join("peers").exists());
+        let no_origin = mutation(
+            "POST",
+            "/api/v1/peers",
+            json!({"idempotency_key": "k-pair-2", "label": "host-b", "ssh": "b", "scope": "act"}),
+            &[
+                ("cookie", &owner_cookie(home)),
+                ("origin", "https://evil.example.com"),
+            ],
+        );
+        let foreign = send(&app, no_origin).await;
+        assert_eq!(foreign.status, StatusCode::FORBIDDEN, "{}", foreign.body);
+        assert!(!scratch.path().join("args").exists());
+    }
+
+    #[tokio::test]
+    async fn pairing_is_never_forwarded() {
+        let mut fleet = Fleet::new();
+        fleet
+            .store
+            .peer_pair(
+                &Ctx::new(Actor::Owner),
+                NewPairing {
+                    label: "laptop".into(),
+                    herdr_machine: None,
+                    scope: PeerScope::Act,
+                    peer_host_id: "01JC00000000000000000PEER2".into(),
+                },
+            )
+            .unwrap();
+        let home = fleet.dir.path();
+        let scratch = tempfile::tempdir().unwrap();
+        let app = pairing_app(home, fake_ssh(scratch.path(), home, &accepts("act")));
+        let cookie = owner_cookie(home);
+
+        let forwarded = send(
+            &app,
+            pair_request("k-pair-1", json!({"host": "laptop"}), &cookie),
+        )
+        .await;
+        assert_eq!(
+            forwarded.status,
+            StatusCode::BAD_GATEWAY,
+            "{}",
+            forwarded.body
+        );
+        assert_eq!(
+            error_of(&forwarded)["reason"],
+            "not_allowlisted",
+            "{}",
+            forwarded.body
+        );
+        assert!(!scratch.path().join("args").exists());
+    }
+
+    #[tokio::test]
+    async fn pairing_refuses_a_taken_label() {
+        let mut fleet = Fleet::new();
+        fleet
+            .store
+            .peer_pair(
+                &Ctx::new(Actor::Owner),
+                NewPairing {
+                    label: "host-b".into(),
+                    herdr_machine: None,
+                    scope: PeerScope::Read,
+                    peer_host_id: "01JC00000000000000000PEER1".into(),
+                },
+            )
+            .unwrap();
+        let home = fleet.dir.path();
+        let scratch = tempfile::tempdir().unwrap();
+        let app = pairing_app(home, fake_ssh(scratch.path(), home, &accepts("act")));
+        let cookie = owner_cookie(home);
+
+        let paired = send(&app, pair_request("k-pair-1", json!({}), &cookie)).await;
+        assert_eq!(
+            paired.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            paired.body
+        );
+        assert_eq!(error_of(&paired)["code"], "label_taken", "{}", paired.body);
+        assert!(
+            paired.body.contains("host-b is already paired"),
+            "{}",
+            paired.body
+        );
+        let own = send(
+            &app,
+            pair_request("k-pair-2", json!({"label": "test-host"}), &cookie),
+        )
+        .await;
+        assert_eq!(own.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", own.body);
+        assert!(own.body.contains("this host's own label"), "{}", own.body);
+        for (key, fields) in [
+            ("k-pair-3", json!({"label": "Host B"})),
+            ("k-pair-4", json!({"ssh": "-oProxyCommand=sh"})),
+            ("k-pair-5", json!({"ssh": "b.example.com;id"})),
+            ("k-pair-6", json!({"scope": "admin"})),
+        ] {
+            let bad = send(&app, pair_request(key, fields.clone(), &cookie)).await;
+            assert_eq!(
+                bad.status,
+                StatusCode::BAD_REQUEST,
+                "{fields}: {}",
+                bad.body
+            );
+        }
+        assert!(!scratch.path().join("args").exists());
+    }
+
+    #[tokio::test]
+    async fn pairing_maps_peer_refusal_and_unreachable_ssh() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let cookie = owner_cookie(home);
+        let cases = [
+            (
+                "echo 'ssh: connect to host b.example.com port 22: Connection refused' >&2; exit 255",
+                StatusCode::SERVICE_UNAVAILABLE,
+                "peer_unreachable",
+                None,
+                "Connection refused (ssh exit 255)",
+            ),
+            (
+                "echo 'Host key verification failed.' >&2; exit 255",
+                StatusCode::SERVICE_UNAVAILABLE,
+                "peer_unreachable",
+                None,
+                "Host key verification failed.",
+            ),
+            (
+                r#"echo '{"ok":false,"error":{"code":"refused","message":"federation.accept is false here"}}'; exit 5"#,
+                StatusCode::BAD_GATEWAY,
+                "peer_refused",
+                Some("accept_off"),
+                "federation.accept = false",
+            ),
+            (
+                r#"echo '{"ok":false,"error":{"code":"forbidden","message":"runs only under sshd"}}'; exit 6"#,
+                StatusCode::BAD_GATEWAY,
+                "peer_refused",
+                Some("forbidden"),
+                "runs only under sshd",
+            ),
+            (
+                r#"echo '{"ok":false,"error":{"code":"usage","message":"unexpected argument --unattended"}}'; exit 2"#,
+                StatusCode::BAD_GATEWAY,
+                "peer_refused",
+                Some("version"),
+                "update it there",
+            ),
+            (
+                r#"echo '{"ok":false,"error":{"code":"usage","message":"host-a is not a label"}}'; exit 2"#,
+                StatusCode::BAD_GATEWAY,
+                "peer_refused",
+                Some("failed"),
+                "host-a is not a label",
+            ),
+            (
+                "echo 'bash: line 1: tiller: command not found' >&2; exit 127",
+                StatusCode::BAD_GATEWAY,
+                "peer_refused",
+                Some("no_tiller"),
+                "has no tiller command",
+            ),
+            (
+                &accepts("read"),
+                StatusCode::BAD_GATEWAY,
+                "peer_refused",
+                Some("bad_answer"),
+                "accepted scope",
+            ),
+        ];
+        for (n, (body, status, code, reason, words)) in cases.into_iter().enumerate() {
+            let scratch = tempfile::tempdir().unwrap();
+            let app = pairing_app(home, fake_ssh(scratch.path(), home, body));
+            let key = format!("k-pair-{n}");
+            let answer = send(&app, pair_request(&key, json!({}), &cookie)).await;
+            assert_eq!(answer.status, status, "{body}: {}", answer.body);
+            let error = error_of(&answer);
+            assert_eq!(error["code"], code, "{}", answer.body);
+            if let Some(reason) = reason {
+                assert_eq!(error["reason"], reason, "{}", answer.body);
+            }
+            assert!(answer.body.contains(words), "{words}: {}", answer.body);
+            assert_eq!(error["host"], "host-b", "{}", answer.body);
+        }
+        let hosts = get(&app(home, Assets::of::<Fixture>()), "/api/v1/machines").await;
+        assert!(!hosts.body.contains("host-b"), "{}", hosts.body);
+    }
+
+    #[tokio::test]
+    async fn pairing_writes_the_key_file_0600_and_never_returns_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let scratch = tempfile::tempdir().unwrap();
+        let app = pairing_app(home, fake_ssh(scratch.path(), home, &accepts("act")));
+        let cookie = owner_cookie(home);
+
+        let paired = send(&app, pair_request("k-pair-1", json!({}), &cookie)).await;
+        assert_eq!(paired.status, StatusCode::OK, "{}", paired.body);
+        let path = home.join("peers").join("host-b.key");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let raw: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let secret = raw["secret_key"].as_str().unwrap();
+        assert!(!paired.body.contains(secret), "{}", paired.body);
+        let file = pairing::read_key_file(&path).unwrap();
+        assert_eq!(
+            file.peer_host_id.as_deref(),
+            Some("01JC00000000000000000PEER1")
+        );
+        assert_eq!(file.key_id.as_deref(), Some("01JC00000000000000000KEY01"));
+
+        let body: Value = serde_json::from_str(&paired.body).unwrap();
+        assert_eq!(body["data"]["label"], "host-b", "{body}");
+        assert_eq!(body["data"]["ssh"], "b.example.com", "{body}");
+        assert_eq!(
+            body["data"]["key_id"], "01JC00000000000000000KEY01",
+            "{body}"
+        );
+        assert_eq!(
+            body["data"]["fingerprint"],
+            json!(fingerprint(&file.public_key)),
+            "{body}"
+        );
+        // The new host got this host's label and the public half, unattended.
+        let args = std::fs::read_to_string(scratch.path().join("args")).unwrap();
+        let args: Vec<&str> = args.lines().collect();
+        let after = |flag: &str| args[args.iter().position(|a| *a == flag).unwrap() + 1];
+        assert_eq!(after("--"), "b.example.com");
+        assert_eq!(after("--from"), "test-host");
+        assert_eq!(after("--pubkey"), file.public_key);
+        assert_eq!(after("--scope"), "act");
+        assert!(args.contains(&"--unattended") && args.contains(&"BatchMode=yes"));
+        assert!(!args.iter().any(|a| a.contains(secret)));
+        // While ssh ran, the key waited under its pending name.
+        let during = std::fs::read_to_string(scratch.path().join("during")).unwrap();
+        assert!(
+            during.lines().any(|f| f == ".host-b.board.key.pending"),
+            "{during}"
+        );
+        assert!(
+            !home
+                .join("peers")
+                .join(".host-b.board.key.pending")
+                .exists()
+        );
+
+        let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        assert!(config.contains("b.example.com"), "{config}");
+        let hosts = get(&app, "/api/v1/machines").await;
+        let hosts: Value = serde_json::from_str(&hosts.body).unwrap();
+        let row = hosts["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["label"] == "host-b")
+            .unwrap();
+        // Listed at once as a peer whose link has not opened, before the
+        // link supervisor reads the new pairing.
+        assert_eq!(row["link"], "never", "{row}");
+        assert_eq!(row["peer_scope"], "act", "{row}");
+        let events: Vec<String> = fleet
+            .open()
+            .conn()
+            .prepare("SELECT txn || ' ' || kind || ' ' || actor FROM events ORDER BY seq")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            events.iter().any(|e| e == "peer.pair host.added board"),
+            "{events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e == "config.set config.changed board"),
+            "{events:?}"
+        );
+
+        // The same key replays the stored answer and runs no ssh again.
+        std::fs::remove_file(scratch.path().join("args")).unwrap();
+        let replay = send(&app, pair_request("k-pair-1", json!({}), &cookie)).await;
+        let body: Value = serde_json::from_str(&replay.body).unwrap();
+        assert_eq!(body["replayed"], true, "{body}");
+        assert!(!scratch.path().join("args").exists());
+        let again = send(&app, pair_request("k-pair-2", json!({}), &cookie)).await;
+        assert_eq!(
+            again.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            again.body
+        );
+
+        // Once removed, a replay of the key pairs nothing.
+        fleet
+            .open()
+            .peer_remove(&Ctx::new(Actor::Owner), "host-b")
+            .unwrap();
+        let gone = send(&app, pair_request("k-pair-1", json!({}), &cookie)).await;
+        assert_eq!(gone.status, StatusCode::BAD_REQUEST, "{}", gone.body);
+        assert!(gone.body.contains("no longer paired"), "{}", gone.body);
+        assert!(!scratch.path().join("args").exists());
+    }
+
+    #[tokio::test]
+    async fn pairing_refuses_a_host_paired_under_another_label() {
+        let mut fleet = Fleet::new();
+        fleet
+            .store
+            .peer_pair(
+                &Ctx::new(Actor::Owner),
+                NewPairing {
+                    label: "laptop".into(),
+                    herdr_machine: None,
+                    scope: PeerScope::Act,
+                    peer_host_id: "01JC00000000000000000PEER1".into(),
+                },
+            )
+            .unwrap();
+        let home = fleet.dir.path();
+        let cookie = owner_cookie(home);
+        let scratch = tempfile::tempdir().unwrap();
+        let app = pairing_app(home, fake_ssh(scratch.path(), home, &accepts("act")));
+
+        // The same alias: refused before ssh.
+        std::fs::write(
+            home.join("config.toml"),
+            "[peers.laptop]\nssh = \"b.example.com\"\n",
+        )
+        .unwrap();
+        let alias = send(&app, pair_request("k-pair-1", json!({}), &cookie)).await;
+        assert_eq!(
+            alias.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            alias.body
+        );
+        assert_eq!(error_of(&alias)["code"], "already_paired", "{}", alias.body);
+        assert!(
+            alias.body.contains("paired here as laptop"),
+            "{}",
+            alias.body
+        );
+        assert!(!scratch.path().join("args").exists());
+
+        // Another alias to the same host: its answer names it.
+        std::fs::write(
+            home.join("config.toml"),
+            "[peers.laptop]\nssh = \"laptop.example.com\"\n",
+        )
+        .unwrap();
+        let host = send(&app, pair_request("k-pair-2", json!({}), &cookie)).await;
+        assert_eq!(
+            host.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            host.body
+        );
+        assert_eq!(error_of(&host)["code"], "already_paired", "{}", host.body);
+        assert!(
+            host.body.contains("tiller peer add laptop"),
+            "{}",
+            host.body
+        );
+        assert!(scratch.path().join("args").exists());
+        let left: Vec<_> = std::fs::read_dir(home.join("peers"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+        let hosts = get(&app, "/api/v1/machines").await;
+        assert!(!hosts.body.contains("host-b"), "{}", hosts.body);
+    }
+
+    #[tokio::test]
+    async fn pairing_refuses_a_config_that_does_not_parse() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let scratch = tempfile::tempdir().unwrap();
+        let app = pairing_app(home, fake_ssh(scratch.path(), home, &accepts("act")));
+        std::fs::write(home.join("config.toml"), "[peers\n").unwrap();
+
+        let answer = send(
+            &app,
+            pair_request("k-pair-1", json!({}), &owner_cookie(home)),
+        )
+        .await;
+        assert_eq!(
+            answer.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{}",
+            answer.body
+        );
+        assert!(
+            answer.body.contains("config.toml does not parse"),
+            "{}",
+            answer.body
+        );
+        assert!(!scratch.path().join("args").exists());
+        assert!(!home.join("peers").exists());
+    }
+
+    #[tokio::test]
+    async fn a_failed_pairing_deletes_the_pending_key() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let scratch = tempfile::tempdir().unwrap();
+        let refuse = r#"echo '{"ok":false,"error":{"code":"refused","message":"federation.accept is false here"}}'; exit 5"#;
+        let app = pairing_app(home, fake_ssh(scratch.path(), home, refuse));
+        let cookie = owner_cookie(home);
+
+        let refused = send(&app, pair_request("k-pair-1", json!({}), &cookie)).await;
+        assert_eq!(refused.status, StatusCode::BAD_GATEWAY, "{}", refused.body);
+        let during = std::fs::read_to_string(scratch.path().join("during")).unwrap();
+        assert!(
+            during.lines().any(|f| f == ".host-b.board.key.pending"),
+            "{during}"
+        );
+        let left: Vec<_> = std::fs::read_dir(home.join("peers"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+        assert!(
+            !home.join("config.toml").exists() || {
+                let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+                !config.contains("b.example.com")
+            }
+        );
     }
 
     /// A retired project leaves the board with its closed cards, which the

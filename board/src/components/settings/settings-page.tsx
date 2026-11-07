@@ -10,6 +10,7 @@ import { healthQuery, machinesQuery, sessionQuery } from "../../lib/queries";
 import { signOut } from "../../lib/session";
 import { useStore } from "../../lib/store";
 import { formatAge, secondsSince } from "../board/format";
+import { AddHost } from "./add-host";
 import "./settings.css";
 
 const THEMES: { value: ThemePreference; label: string }[] = [
@@ -124,16 +125,19 @@ function hostHint(machine: Machine, peer: boolean, mark: string | null, boardVer
 }
 
 // Each other host's Tiller version beside the board host's, so one look shows
-// whether a release reached every machine.
-function HostVersions({ machines, boardVersion }: { machines: Machine[]; boardVersion: string }) {
+// whether a release reached every machine, then Add a host.
+function HostVersions({
+  machines,
+  boardVersion,
+  owner,
+}: {
+  machines: Machine[];
+  boardVersion: string;
+  owner: boolean;
+}) {
   const others = machines.filter((machine) => machine.kind !== "local");
   return (
     <section className="set-panel" aria-label="Other hosts" data-testid="host-versions">
-      {others.length === 0 ? (
-        <Fact label="No other host is paired" hint="Run this once on this host, in a terminal.">
-          <code>tiller peer add &lt;label&gt; --ssh &lt;alias&gt;</code>
-        </Fact>
-      ) : null}
       {others.map((machine) => {
         const view = machineRowView(machine, undefined, boardVersion);
         const mark = view.versionMark ? VERSION_MARK_WORD[view.versionMark] : null;
@@ -154,6 +158,7 @@ function HostVersions({ machines, boardVersion }: { machines: Machine[]; boardVe
           </Fact>
         );
       })}
+      <AddHost empty={others.length === 0} owner={owner} />
     </section>
   );
 }
@@ -179,7 +184,7 @@ function BrowserSession({ owner }: { owner: boolean }) {
         <div className="set-text">
           <h2>Signed in as the owner</h2>
           <p className={error ? "set-error" : undefined} role={error ? "alert" : undefined}>
-            {error ?? "Signing out ends this browser's sign-in, not other devices'"}
+            {error ?? "Signing out ends the sign-in on this browser only"}
           </p>
         </div>
         <button
@@ -222,7 +227,11 @@ export function SettingsPage() {
           {machines ? (
             <>
               <h1 className="set-title">Other hosts</h1>
-              <HostVersions machines={machines} boardVersion={health.version} />
+              <HostVersions
+                machines={machines}
+                boardVersion={health.version}
+                owner={session?.owner ?? false}
+              />
             </>
           ) : null}
         </>

@@ -1,19 +1,28 @@
 import type { ApiErrorBody, MutationResponse } from "../../lib/api-types";
 import { signedOutStore } from "../../lib/session";
 
-// A refused or failed mutation, with the server's readable message and the
-// `current` facts a refusal carries (protocol.md sections 6.1 and 7.2).
+// A refused or failed mutation, with the server's readable message, the
+// `current` facts a refusal carries and its hint (protocol.md sections 6.1
+// and 7.2).
 export class ActionError extends Error {
   readonly status: number;
   readonly code: string;
   readonly current: Record<string, unknown> | null;
+  readonly hint: string | null;
 
-  constructor(status: number, code: string, message: string, current?: Record<string, unknown>) {
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    current?: Record<string, unknown>,
+    hint?: string,
+  ) {
     super(message);
     this.name = "ActionError";
     this.status = status;
     this.code = code;
     this.current = current ?? null;
+    this.hint = hint ?? null;
   }
 }
 
@@ -53,10 +62,10 @@ export async function sendMutation<T>(
     return parsed as MutationResponse<T>;
   }
   if (isErrorBody(parsed)) {
-    const { code, message, current } = parsed.error;
+    const { code, message, current, hint } = parsed.error;
     // At an `--allow-host` name the cookie was revoked or ran out.
     if (response.status === 403 && code === "signed_out") signedOutStore.set(true);
-    throw new ActionError(response.status, code, message, current);
+    throw new ActionError(response.status, code, message, current, hint);
   }
   if (response.status === 503 || response.status === 0) {
     throw new ActionError(response.status, "unavailable", UNREACHABLE);

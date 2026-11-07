@@ -339,6 +339,7 @@ mod tests {
             orchestrators: None,
             mirrors: crate::mirror::Mirrors::new(home),
             sessions: crate::auth::Sessions::default(),
+            ssh: vec!["ssh".into()],
         }));
         let mut stopping = stop.clone();
         tokio::spawn(async move {
