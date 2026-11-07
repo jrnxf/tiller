@@ -2883,13 +2883,16 @@ async fn session(State(state): State<AppState>, headers: HeaderMap) -> Json<Sess
 
 /// Signs in with the 8-digit code `tiller board --login` prints, as the
 /// link does: sets the owner cookie. It passes the mutation checks but the
-/// cookie. A wrong code counts against every pending code, each of which
-/// burns on its third, and the daemon takes only so many tries a minute. The code is never logged.
+/// cookie. The limits count per client (`auth::Client`): a client's wrong
+/// code counts against every pending code, each of which burns for that
+/// client on its third, and each client has only so many tries a minute;
+/// a pending code burns for everyone only at `auth::CODE_MISS_CEILING`.
+/// The code is never logged.
 #[utoipa::path(post, path = "/api/v1/login", tag = "session", request_body = CodeLoginBody,
     responses((status = 200, body = SessionView, description = "signed in: the response sets the owner cookie"),
               (status = 400, body = ErrorBody, description = "not 8 digits"),
-              (status = 403, body = ErrorBody, description = "`wrong_code`: wrong, used or expired; `code_burned`: too many wrong codes, so the pending code is spent; or a failed origin check"),
-              (status = 429, body = ErrorBody, description = "`too_many_tries`: the daemon took its tries for this minute; nothing was checked")))]
+              (status = 403, body = ErrorBody, description = "`wrong_code`: wrong, used, expired or burned for this client; `code_burned`: too many wrong codes, so the pending code no longer works for this client; or a failed origin check"),
+              (status = 429, body = ErrorBody, description = "`too_many_tries`: this client, or its IPv6 network, had its tries for this minute; nothing was checked")))]
 async fn login_code(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2902,19 +2905,18 @@ async fn login_code(
         .map(|body| body.code)
         .filter(|code| code.len() == 8 && code.bytes().all(|b| b.is_ascii_digit()))
         .ok_or_else(|| ApiError::usage("a sign-in code is 8 digits"))?;
-    if !state.0.sessions.try_code(std::time::Instant::now()) {
-        return Err(ApiError::new(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too_many_tries",
-            "too many codes were tried in the last minute; wait a minute and try again",
-        ));
-    }
-    let home = state.0.home.clone();
-    let redeemed =
-        tokio::task::spawn_blocking(move || auth::redeem_code(&home, &code, Timestamp::now()))
-            .await
-            .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
-            .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?;
+    let client = code_client(&headers);
+    let shared = state.clone();
+    let redeemed = tokio::task::spawn_blocking(move || {
+        let state = &shared.0;
+        let (now, at) = (Timestamp::now(), std::time::Instant::now());
+        state
+            .sessions
+            .redeem_code(&state.home, client, &code, now, at)
+    })
+    .await
+    .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
+    .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?;
     let hint = "run tiller board --login again for a new code";
     match redeemed {
         auth::CodeLogin::Owner(cookie) => {
@@ -2937,7 +2939,43 @@ async fn login_code(
             "too many wrong codes: the current code no longer works",
         )
         .hint(hint)),
+        auth::CodeLogin::TooManyTries => Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_tries",
+            "too many codes were tried from this address or its network in the last minute; wait a minute and try again",
+        )),
     }
+}
+
+/// Who sent a sign-in code, for its limits. The daemon listens on loopback
+/// only, so a browser elsewhere reaches it through the `--allow-host`
+/// proxy, which names the browser's address as the last `X-Forwarded-For`
+/// entry; entries before it are the browser's own word, read past even when
+/// they are not text. With no header, the try is loopback's, a client of
+/// its own; with a last entry that is no address, it is
+/// [`auth::Client::UNKNOWN`]'s.
+///
+/// Only the limits read this, never access. Behind a proxy that does not
+/// set the header, a guesser can name any address: that buys it more tries,
+/// never past [`auth::CODE_MISS_CEILING`] for every client together, and
+/// lets it spend the tries of an address it names.
+fn code_client(headers: &HeaderMap) -> auth::Client {
+    let Some(value) = headers.get_all("x-forwarded-for").iter().next_back() else {
+        return auth::Client::new(std::net::Ipv4Addr::LOCALHOST.into());
+    };
+    let last = value.as_bytes().rsplit(|byte| *byte == b',').next();
+    std::str::from_utf8(last.unwrap_or_default())
+        .ok()
+        .map(str::trim)
+        .and_then(|entry| {
+            entry.parse::<std::net::IpAddr>().ok().or_else(|| {
+                entry
+                    .parse::<std::net::SocketAddr>()
+                    .ok()
+                    .map(|addr| addr.ip())
+            })
+        })
+        .map_or(auth::Client::UNKNOWN, auth::Client::new)
 }
 
 /// Signs this browser out: its owner cookie stops working here and now, on
@@ -3805,6 +3843,66 @@ pub(crate) mod tests {
         .await
     }
 
+    /// [`enter`] at `host` through a proxy that names the browser's address
+    /// `from` in `X-Forwarded-For`.
+    async fn enter_from(app: &Router, host: &str, from: &str, code: &str) -> Answer {
+        let origin = format!("https://{host}");
+        let headers = [
+            ("host", host),
+            ("origin", origin.as_str()),
+            ("x-forwarded-for", from),
+        ];
+        send(
+            app,
+            mutation("POST", "/api/v1/login", json!({ "code": code }), &headers),
+        )
+        .await
+    }
+
+    /// The board is public, so anyone can guess: a stranger's wrong codes,
+    /// as many as it sends, never keep the owner's fresh code from signing in.
+    #[tokio::test]
+    async fn a_stranger_flooding_wrong_codes_never_blocks_a_fresh_code() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let app = app(home, Assets::of::<Fixture>());
+        let host = "board.example.com";
+        let (stranger, owner) = ("198.51.100.7", "192.0.2.10");
+
+        // While the owner's code is pending, until the stranger is turned
+        // away: the pending code still signs the owner in, and so does one
+        // minted after.
+        let pending = auth::mint_login(home, Timestamp::now()).unwrap();
+        for _ in 0..auth::CODE_TRIES_PER_MINUTE {
+            let miss = enter_from(&app, host, stranger, &wrong(&pending)).await;
+            assert_eq!(miss.status, StatusCode::FORBIDDEN, "{}", miss.body);
+        }
+        let limited = enter_from(&app, host, stranger, &wrong(&pending)).await;
+        assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(error_code(&limited), "too_many_tries");
+        let signed = enter_from(&app, host, owner, &pending.code).await;
+        assert_eq!(signed.status, StatusCode::OK, "{}", signed.body);
+        let login = auth::mint_login(home, Timestamp::now()).unwrap();
+        let signed = enter_from(&app, host, owner, &login.code).await;
+        assert_eq!(signed.status, StatusCode::OK, "{}", signed.body);
+
+        // While the owner's code is pending: a guesser burns it only for
+        // itself, even with the right code after.
+        let guesser = "198.51.100.8";
+        let login = auth::mint_login(home, Timestamp::now()).unwrap();
+        for _ in 1..auth::CODE_MISSES {
+            let miss = enter_from(&app, host, guesser, &wrong(&login)).await;
+            assert_eq!(error_code(&miss), "wrong_code");
+        }
+        let burned = enter_from(&app, host, guesser, &wrong(&login)).await;
+        assert_eq!(error_code(&burned), "code_burned");
+        let right = enter_from(&app, host, guesser, &login.code).await;
+        assert_eq!(error_code(&right), "wrong_code");
+        assert!(right.headers.get(header::SET_COOKIE).is_none());
+        let signed = enter_from(&app, host, owner, &login.code).await;
+        assert_eq!(signed.status, StatusCode::OK, "{}", signed.body);
+    }
+
     /// A code that is not `login`'s.
     fn wrong(login: &auth::Login) -> String {
         let code: u32 = login.code.parse().unwrap();
@@ -3894,26 +3992,66 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn the_daemon_takes_only_so_many_codes_a_minute() {
+    async fn a_client_takes_only_so_many_codes_a_minute() {
         let fleet = Fleet::new();
         let home = fleet.dir.path();
         let app = app(home, Assets::of::<Fixture>());
         let host = "board.example.com";
+        let guesser = "198.51.100.7";
         // Each try against its own code, so none burns: only the limit binds.
         for _ in 0..auth::CODE_TRIES_PER_MINUTE {
             let login = auth::mint_login(home, Timestamp::now()).unwrap();
-            let miss = enter(&app, host, &wrong(&login)).await;
+            let miss = enter_from(&app, host, guesser, &wrong(&login)).await;
             assert_eq!(miss.status, StatusCode::FORBIDDEN, "{}", miss.body);
             auth::redeem_login(home, &login.token, Timestamp::now()).unwrap();
         }
         // Past it even the right code is turned away unchecked, and kept.
         let login = auth::mint_login(home, Timestamp::now()).unwrap();
-        let limited = enter(&app, host, &login.code).await;
+        let limited = enter_from(&app, host, guesser, &login.code).await;
         assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(error_code(&limited), "too_many_tries");
         assert!(limited.headers.get(header::SET_COOKIE).is_none());
-        let kept = auth::redeem_code(home, &login.code, Timestamp::now()).unwrap();
-        assert!(matches!(kept, auth::CodeLogin::Owner(_)));
+        // The address is the proxy's last entry: what the guesser put
+        // before it changes nothing.
+        let forged = "192.0.2.10, 198.51.100.7";
+        let limited = enter_from(&app, host, forged, &login.code).await;
+        assert_eq!(error_code(&limited), "too_many_tries");
+        // Another address, or loopback with no proxy, is a client of its own.
+        let kept = enter_from(&app, host, "[2001:db8::7]:443", &login.code).await;
+        assert_eq!(kept.status, StatusCode::OK, "{}", kept.body);
+        let login = auth::mint_login(home, Timestamp::now()).unwrap();
+        let local = enter(&app, HOST, &login.code).await;
+        assert_eq!(local.status, StatusCode::OK, "{}", local.body);
+    }
+
+    #[test]
+    fn the_code_client_is_the_proxys_last_forwarded_address() {
+        let client = |lines: &[&[u8]]| {
+            let mut headers = HeaderMap::new();
+            for line in lines {
+                let value = header::HeaderValue::from_bytes(line).unwrap();
+                headers.append("x-forwarded-for", value);
+            }
+            code_client(&headers)
+        };
+        let address = |text: &str| auth::Client::new(text.parse().unwrap());
+        assert_eq!(client(&[]), address("127.0.0.1"));
+        assert_eq!(
+            client(&[b"192.0.2.1, 198.51.100.7"]),
+            address("198.51.100.7")
+        );
+        // Of several header lines, the proxy's is the last.
+        let lines: &[&[u8]] = &[b"192.0.2.1", b"198.51.100.7"];
+        assert_eq!(client(lines), address("198.51.100.7"));
+        // What the browser sent before it, even bytes that are not text,
+        // never hides the proxy's entry.
+        let garbled: &[&[u8]] = &[b"\xff\xfe, 198.51.100.7"];
+        assert_eq!(client(garbled), address("198.51.100.7"));
+        assert_eq!(client(&[b"[2001:db8::7]:443"]), address("2001:db8::7"));
+        // A last entry that is no address is no one's, loopback least.
+        for unread in [&b"proxy"[..], b"198.51.100.7, \xff", b""] {
+            assert_eq!(client(&[unread]), auth::Client::UNKNOWN);
+        }
     }
 
     #[test]

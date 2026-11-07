@@ -50,7 +50,7 @@ test("each refusal reads as plain text", async () => {
   answer(403, refusal("code_burned"));
   expect(await signIn("12345678")).toMatchObject({ message: /^Too many wrong codes/ });
   answer(429, refusal("too_many_tries"));
-  expect(await signIn("12345678")).toMatchObject({ message: /Wait a minute/ });
+  expect(await signIn("12345678")).toMatchObject({ message: /from this network.*Wait a minute/ });
   answer(500, "not json either");
   expect(await signIn("12345678")).toEqual({
     ok: false,

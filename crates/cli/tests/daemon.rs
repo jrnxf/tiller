@@ -663,6 +663,51 @@ fn the_login_code_signs_in_at_an_allowed_host_until_sign_out() {
     assert!(!logs.contains(&next_code(&code)), "{logs}");
 }
 
+/// The board is public, so a stranger can flood the sign-in code through
+/// the proxy. That spends only the stranger's own tries: the owner's fresh
+/// `tiller board --login` code still signs in from the owner's address.
+#[test]
+fn a_stranger_flooding_codes_never_locks_the_owner_out() {
+    let world = World::initialized();
+    let mut daemon = start_with(&world, &["--allow-host", "tiller.example.com"]);
+    let port = daemon.port;
+    let enter = |from: &str, code: &str| {
+        let body = format!(r#"{{"code":"{code}"}}"#);
+        exchange(
+            port,
+            &format!(
+                "POST /api/v1/login HTTP/1.0\r\nHost: tiller.example.com\r\n\
+                 Origin: https://tiller.example.com\r\nSec-Fetch-Site: same-origin\r\n\
+                 X-Forwarded-For: {from}\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+    };
+    let mint = || {
+        let out = world.run(&["board", "--login"]);
+        assert!(out.ok(), "{}", out.json);
+        out.data()["code"].as_str().unwrap().to_owned()
+    };
+
+    let code = mint();
+    let mut limited = false;
+    for _ in 0..20 {
+        let (head, body) = enter("198.51.100.7", &next_code(&code));
+        assert!(head.starts_with("HTTP/1.0 403") || head.starts_with("HTTP/1.0 429"));
+        limited = head.starts_with("HTTP/1.0 429");
+        assert!(!limited || body.contains("too_many_tries"), "{body}");
+    }
+    assert!(limited, "the stranger was never limited");
+    let (signed, body) = enter("192.0.2.10", &code);
+    assert!(signed.starts_with("HTTP/1.0 200"), "{signed} {body}");
+    // And a code minted after the flood works too.
+    let (signed, body) = enter("192.0.2.10", &mint());
+    assert!(signed.starts_with("HTTP/1.0 200"), "{signed} {body}");
+
+    assert!(terminate(&mut daemon).success());
+}
+
 /// The 8-digit code after `code`, so never `code` itself.
 fn next_code(code: &str) -> String {
     let code: u32 = code.parse().unwrap();

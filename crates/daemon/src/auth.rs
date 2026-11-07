@@ -7,9 +7,17 @@
 //! line as `<token hash> <expiry RFC 3339> <code hash or -> <wrong codes>`;
 //! `board-owner` holds the minted cookies (30 days each), one per line as
 //! `<hash> <expiry RFC 3339>`.
+//!
+//! The board may be public, so anyone can type codes. The limits on them
+//! count per [`Client`], and for IPv6 per network as well, so a stranger's
+//! wrong codes spend only the stranger's own tries and never stop the
+//! owner's code from working; the one limit shared by every client is
+//! [`CODE_MISS_CEILING`], high enough that only a guesser spread over a
+//! hundred networks or more can reach it.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
+use std::net::{IpAddr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -25,12 +33,27 @@ pub const COOKIE_SECONDS: i64 = 2_592_000;
 /// How long a login link stays usable: one minute, since it may be shown as
 /// a QR code on a screen others can see.
 pub const LOGIN_MINUTES: i64 = 1;
-/// Wrong codes tried while a code is pending that burn it: its link still
-/// works, its code no longer does.
+/// Wrong codes one client may try while a code is pending: on its third
+/// the code burns for that client, and works for every other client still.
+/// Its link works for everyone.
 pub const CODE_MISSES: u32 = 3;
-/// Code tries the daemon takes in any one minute, from every client
-/// together.
+/// Wrong codes the IPv6 clients of one network may try while a code is
+/// pending, together: on the tenth the code burns for all of them. One
+/// subscriber can hold a /48, 65,536 clients, for free.
+pub const NETWORK_MISSES: u32 = 10;
+/// Wrong codes from every client together that burn a pending code for
+/// everyone, its link aside. A code is one of 10^8 and lives a minute, so
+/// the chance that guessing finds it is at most 1000 in 10^8, 1 in 100,000,
+/// however many addresses the guesser has; and since each client has only
+/// [`CODE_MISSES`] and each network [`NETWORK_MISSES`], denying the owner
+/// the code takes 334 IPv4 addresses or 100 IPv6 networks guessing within
+/// that minute.
+pub const CODE_MISS_CEILING: u32 = 1000;
+/// Code tries one client may make in any one minute.
 pub const CODE_TRIES_PER_MINUTE: usize = 10;
+/// Code tries the IPv6 clients of one network may make in any one minute,
+/// together.
+pub const NETWORK_TRIES_PER_MINUTE: usize = 30;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
@@ -265,45 +288,61 @@ pub fn redeem_login(home: &Path, token: &str, now: Timestamp) -> Result<Option<S
 pub enum CodeLogin {
     /// It matched a pending login, now spent: the cookie value to set.
     Owner(String),
-    /// It matched nothing pending: wrong, expired, used or burned.
+    /// It matched nothing this client may still use: wrong, expired, used
+    /// or burned.
     Wrong,
-    /// It matched nothing, and that miss burned at least one pending code.
+    /// It matched nothing, and that miss burned at least one pending code
+    /// for this client.
     Burned,
+    /// The client had its [`CODE_TRIES_PER_MINUTE`], or its network its
+    /// [`NETWORK_TRIES_PER_MINUTE`]; nothing was checked.
+    TooManyTries,
 }
 
-/// Spends a login by its code, as [`redeem_login`] does by its token. A
-/// wrong code counts against every pending code, since it may have been
-/// meant for any of them, and each burns on its [`CODE_MISSES`]th.
-pub fn redeem_code(home: &Path, code: &str, now: Timestamp) -> Result<CodeLogin, AuthError> {
-    let wanted = hash(code);
-    locked(home, || {
-        let mut pending = read_pending(&login_file(home), now);
-        let hit = pending.iter().position(|login| {
-            login
-                .code
-                .as_deref()
-                .is_some_and(|code| constant_eq(code, &wanted))
-        });
-        if let Some(hit) = hit {
-            pending.remove(hit);
-            write_pending(&login_file(home), &pending)?;
-            return mint_owner(home, now).map(CodeLogin::Owner);
+/// Who typed a code, as the code limits count it: the browser's address,
+/// with an IPv6 address cut to its /64, the block one device usually
+/// holds, so rotating through it buys no extra tries. An IPv6 client also
+/// counts against its network, the /48 around it, which one subscriber may
+/// hold whole. No address at all is [`Client::UNKNOWN`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Client(Option<IpAddr>);
+
+impl Client {
+    /// Every browser whose address the daemon could not read, as one client.
+    pub const UNKNOWN: Self = Self(None);
+
+    pub fn new(address: IpAddr) -> Self {
+        match address {
+            IpAddr::V4(_) => Self(Some(address)),
+            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) => Self(Some(IpAddr::V4(v4))),
+                None => Self(Some(IpAddr::V6(
+                    (u128::from(v6) & (u128::MAX << 64)).into(),
+                ))),
+            },
         }
-        let mut burned = false;
-        for login in pending.iter_mut().filter(|login| login.code.is_some()) {
-            login.misses += 1;
-            if login.misses >= CODE_MISSES {
-                login.code = None;
-                burned = true;
-            }
-        }
-        write_pending(&login_file(home), &pending)?;
-        Ok(if burned {
-            CodeLogin::Burned
-        } else {
-            CodeLogin::Wrong
-        })
-    })
+    }
+
+    /// What `self`'s tries count against, each with its tries a minute and
+    /// its wrong codes a pending code: itself, and an IPv6 client's network.
+    fn scopes(self) -> impl Iterator<Item = (Scope, usize, u32)> {
+        let network = match self.0 {
+            None | Some(IpAddr::V4(_)) => None,
+            Some(IpAddr::V6(v6)) => Some((
+                Scope::Network((u128::from(v6) & (u128::MAX << 80)).into()),
+                NETWORK_TRIES_PER_MINUTE,
+                NETWORK_MISSES,
+            )),
+        };
+        std::iter::once((Scope::Client(self), CODE_TRIES_PER_MINUTE, CODE_MISSES)).chain(network)
+    }
+}
+
+/// What a code limit counts: one client, or the IPv6 /48 of many.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Scope {
+    Client(Client),
+    Network(Ipv6Addr),
 }
 
 /// Signs one browser out: its cookie is never owner again. False when it
@@ -343,39 +382,174 @@ pub fn clear_cookie(secure: bool) -> String {
     format!("{COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{secure}")
 }
 
-/// The daemon's own side of signing in, in memory: the limit on code tries
+/// The daemon's own side of signing in, in memory: the limits on code tries
 /// and the signal that ends a signed-out browser's open streams.
 pub struct Sessions {
-    tries: Mutex<VecDeque<Instant>>,
+    codes: Mutex<Tries>,
     signed_out: watch::Sender<()>,
 }
 
 impl Default for Sessions {
     fn default() -> Self {
         Self {
-            tries: Mutex::default(),
+            codes: Mutex::default(),
             signed_out: watch::channel(()).0,
         }
     }
 }
 
-impl Sessions {
-    /// Takes one code try, or refuses it when the last minute already had
-    /// [`CODE_TRIES_PER_MINUTE`].
-    pub fn try_code(&self, now: Instant) -> bool {
-        const WINDOW: Duration = Duration::from_secs(60);
-        let mut tries = self.tries.lock().unwrap_or_else(PoisonError::into_inner);
-        while tries
-            .front()
-            .is_some_and(|at| now.saturating_duration_since(*at) >= WINDOW)
-        {
-            tries.pop_front();
-        }
-        if tries.len() >= CODE_TRIES_PER_MINUTE {
+/// The code tries each client and network made. In memory only: a restart
+/// forgets them, which gives a guesser at most [`CODE_MISSES`] more against
+/// a code from each client, and [`NETWORK_MISSES`] from each network, while [`CODE_MISS_CEILING`] is counted on disk.
+#[derive(Default)]
+struct Tries {
+    /// Each scope's tries in the last minute.
+    recent: HashMap<Scope, VecDeque<Instant>>,
+    /// The wrong codes against each pending login, by the login's token
+    /// hash: when it expires, and each scope's count, kept until then.
+    misses: HashMap<String, (Timestamp, HashMap<Scope, u32>)>,
+    /// When entries of clients long gone were last dropped.
+    swept: Option<Instant>,
+}
+
+/// How far back a client's tries count.
+const WINDOW: Duration = Duration::from_secs(60);
+
+impl Tries {
+    /// Takes one try for `client`, or refuses it when the last minute already
+    /// had [`CODE_TRIES_PER_MINUTE`] of its own or its network had
+    /// [`NETWORK_TRIES_PER_MINUTE`].
+    fn take(&mut self, client: Client, at: Instant) -> bool {
+        let full = client.scopes().any(|(scope, limit, _)| {
+            let tries = self.recent.entry(scope).or_default();
+            while tries
+                .front()
+                .is_some_and(|try_at| at.saturating_duration_since(*try_at) >= WINDOW)
+            {
+                tries.pop_front();
+            }
+            tries.len() >= limit
+        });
+        if full {
             return false;
         }
-        tries.push_back(now);
+        for (scope, _, _) in client.scopes() {
+            self.recent.entry(scope).or_default().push_back(at);
+        }
         true
+    }
+
+    /// Whether `client` may still try the pending login `token`'s code: it
+    /// burns for `client` once `client` or its network had all its misses.
+    fn open(&self, client: Client, token: &str) -> bool {
+        let counts = self.misses.get(token).map(|(_, counts)| counts);
+        client.scopes().all(|(scope, _, limit)| {
+            counts
+                .and_then(|counts| counts.get(&scope))
+                .map_or(0, |misses| *misses)
+                < limit
+        })
+    }
+
+    /// Counts one more wrong code by `client` against `login`; true when that
+    /// was the one that burns it for `client`.
+    fn miss(&mut self, client: Client, login: &Pending) -> bool {
+        let (_, counts) = self
+            .misses
+            .entry(login.token.clone())
+            .or_insert_with(|| (login.expiry, HashMap::new()));
+        let mut burned = false;
+        for (scope, _, limit) in client.scopes() {
+            let misses = counts.entry(scope).or_default();
+            *misses += 1;
+            burned |= *misses >= limit;
+        }
+        burned
+    }
+
+    /// Drops what no longer counts, at most once a second, so a flood from
+    /// many addresses costs memory only for its last minute.
+    fn sweep(&mut self, now: Timestamp, at: Instant) {
+        if self
+            .swept
+            .is_some_and(|swept| at.saturating_duration_since(swept) < Duration::from_secs(1))
+        {
+            return;
+        }
+        self.swept = Some(at);
+        self.recent.retain(|_, tries| {
+            tries
+                .back()
+                .is_some_and(|try_at| at.saturating_duration_since(*try_at) < WINDOW)
+        });
+        self.misses.retain(|_, (expiry, _)| *expiry > now);
+    }
+}
+
+impl Sessions {
+    /// Spends a login by its code, as [`redeem_login`] does by its token,
+    /// for `client`. A wrong code counts against every pending code that
+    /// `client` may still use, since it may have been meant for any of them:
+    /// each burns for `client` on its [`CODE_MISSES`]th from `client` or its
+    /// [`NETWORK_MISSES`]th from `client`'s network, and for everyone on its
+    /// [`CODE_MISS_CEILING`]th from all clients. Only
+    /// [`CODE_TRIES_PER_MINUTE`] tries a minute are checked per client, and
+    /// [`NETWORK_TRIES_PER_MINUTE`] per network.
+    pub fn redeem_code(
+        &self,
+        home: &Path,
+        client: Client,
+        code: &str,
+        now: Timestamp,
+        at: Instant,
+    ) -> Result<CodeLogin, AuthError> {
+        let mut tries = self.codes.lock().unwrap_or_else(PoisonError::into_inner);
+        tries.sweep(now, at);
+        if !tries.take(client, at) {
+            return Ok(CodeLogin::TooManyTries);
+        }
+        let wanted = hash(code);
+        locked(home, || {
+            let mut pending = read_pending(&login_file(home), now);
+            // The pending codes `client` may still try.
+            let open: Vec<usize> = (0..pending.len())
+                .filter(|&index| {
+                    pending[index].code.is_some() && tries.open(client, &pending[index].token)
+                })
+                .collect();
+            // Nothing to count, so nothing to write: a flood with no code
+            // pending only reads.
+            if open.is_empty() {
+                return Ok(CodeLogin::Wrong);
+            }
+            let hit = open.iter().copied().find(|&index| {
+                pending[index]
+                    .code
+                    .as_deref()
+                    .is_some_and(|code| constant_eq(code, &wanted))
+            });
+            if let Some(hit) = hit {
+                pending.remove(hit);
+                write_pending(&login_file(home), &pending)?;
+                return mint_owner(home, now).map(CodeLogin::Owner);
+            }
+            let mut burned = false;
+            for index in open {
+                let login = &mut pending[index];
+                login.misses += 1;
+                burned |= tries.miss(client, login);
+                if login.misses >= CODE_MISS_CEILING {
+                    login.code = None;
+                    burned = true;
+                }
+            }
+            write_pending(&login_file(home), &pending)?;
+            Ok(if burned {
+                CodeLogin::Burned
+            } else {
+                CodeLogin::Wrong
+            })
+        })
     }
 
     /// Tells every open stream a browser signed out.
@@ -494,6 +668,34 @@ mod tests {
         ));
     }
 
+    /// The owner's browser, at its own address.
+    fn owner() -> Client {
+        Client::new("192.0.2.10".parse().unwrap())
+    }
+
+    /// A stranger's browser: the board is public, so anyone can type codes.
+    fn stranger(n: u8) -> Client {
+        Client::new(IpAddr::from([198, 51, 100, n]))
+    }
+
+    /// The owner types `code` at `now`.
+    fn typed(sessions: &Sessions, home: &Path, code: &str, now: Timestamp) -> CodeLogin {
+        typed_by(sessions, home, owner(), code, now)
+    }
+
+    /// `client` types `code` at `now`.
+    fn typed_by(
+        sessions: &Sessions,
+        home: &Path,
+        client: Client,
+        code: &str,
+        now: Timestamp,
+    ) -> CodeLogin {
+        sessions
+            .redeem_code(home, client, code, now, Instant::now())
+            .unwrap()
+    }
+
     /// A code no pending login has.
     fn other_than(login: &Login) -> String {
         let wrong = (login.code.parse::<u32>().unwrap() + 1) % 100_000_000;
@@ -503,16 +705,17 @@ mod tests {
     #[test]
     fn a_code_is_eight_digits_and_signs_in_once_like_its_link() {
         let home = tempfile::tempdir().unwrap();
+        let sessions = Sessions::default();
         let login = mint_login(home.path(), now()).unwrap();
         assert_eq!(login.code.len(), 8);
         assert!(login.code.bytes().all(|b| b.is_ascii_digit()));
-        let CodeLogin::Owner(cookie) = redeem_code(home.path(), &login.code, now()).unwrap() else {
+        let CodeLogin::Owner(cookie) = typed(&sessions, home.path(), &login.code, now()) else {
             panic!("the code did not sign in");
         };
         assert!(is_owner(home.path(), &cookie, now()));
         // The code and its link are one login: both are spent.
         assert_eq!(
-            redeem_code(home.path(), &login.code, now()).unwrap(),
+            typed(&sessions, home.path(), &login.code, now()),
             CodeLogin::Wrong
         );
         assert_eq!(
@@ -527,7 +730,7 @@ mod tests {
                 .is_some()
         );
         assert_eq!(
-            redeem_code(home.path(), &login.code, now()).unwrap(),
+            typed(&sessions, home.path(), &login.code, now()),
             CodeLogin::Wrong
         );
         // The code is stored only as a hash.
@@ -539,14 +742,15 @@ mod tests {
     #[test]
     fn a_code_expires_with_its_link() {
         let home = tempfile::tempdir().unwrap();
+        let sessions = Sessions::default();
         let login = mint_login(home.path(), now()).unwrap();
         assert_eq!(
-            redeem_code(home.path(), &login.code, later(now(), 60)).unwrap(),
+            typed(&sessions, home.path(), &login.code, later(now(), 60)),
             CodeLogin::Wrong
         );
         let login = mint_login(home.path(), now()).unwrap();
         assert!(matches!(
-            redeem_code(home.path(), &login.code, later(now(), 59)).unwrap(),
+            typed(&sessions, home.path(), &login.code, later(now(), 59)),
             CodeLogin::Owner(_)
         ));
     }
@@ -554,21 +758,22 @@ mod tests {
     #[test]
     fn wrong_codes_burn_the_code_but_not_its_link() {
         let home = tempfile::tempdir().unwrap();
+        let sessions = Sessions::default();
         let login = mint_login(home.path(), now()).unwrap();
         let wrong = other_than(&login);
         for _ in 1..CODE_MISSES {
             assert_eq!(
-                redeem_code(home.path(), &wrong, now()).unwrap(),
+                typed(&sessions, home.path(), &wrong, now()),
                 CodeLogin::Wrong
             );
         }
         assert_eq!(
-            redeem_code(home.path(), &wrong, now()).unwrap(),
+            typed(&sessions, home.path(), &wrong, now()),
             CodeLogin::Burned
         );
         // The right code is now refused too; the link still works.
         assert_eq!(
-            redeem_code(home.path(), &login.code, now()).unwrap(),
+            typed(&sessions, home.path(), &login.code, now()),
             CodeLogin::Wrong
         );
         assert!(
@@ -579,11 +784,11 @@ mod tests {
         // A login minted after the misses starts afresh.
         let fresh = mint_login(home.path(), now()).unwrap();
         assert_eq!(
-            redeem_code(home.path(), &other_than(&fresh), now()).unwrap(),
+            typed(&sessions, home.path(), &other_than(&fresh), now()),
             CodeLogin::Wrong
         );
         assert!(matches!(
-            redeem_code(home.path(), &fresh.code, now()).unwrap(),
+            typed(&sessions, home.path(), &fresh.code, now()),
             CodeLogin::Owner(_)
         ));
     }
@@ -616,14 +821,190 @@ mod tests {
     }
 
     #[test]
-    fn code_tries_are_limited_per_minute() {
+    fn a_guessers_wrong_codes_burn_the_code_only_for_the_guesser() {
+        let home = tempfile::tempdir().unwrap();
+        let sessions = Sessions::default();
+        let login = mint_login(home.path(), now()).unwrap();
+        let wrong = other_than(&login);
+        for _ in 1..CODE_MISSES {
+            let miss = typed_by(&sessions, home.path(), stranger(7), &wrong, now());
+            assert_eq!(miss, CodeLogin::Wrong);
+        }
+        let burned = typed_by(&sessions, home.path(), stranger(7), &wrong, now());
+        assert_eq!(burned, CodeLogin::Burned);
+        // Even the right code no longer works for the guesser.
+        let right = typed_by(&sessions, home.path(), stranger(7), &login.code, now());
+        assert_eq!(right, CodeLogin::Wrong);
+        // A code minted after its misses is open to it again, three tries.
+        let fresh = mint_login(home.path(), now()).unwrap();
+        let miss = typed_by(
+            &sessions,
+            home.path(),
+            stranger(7),
+            &other_than(&fresh),
+            now(),
+        );
+        assert_eq!(miss, CodeLogin::Wrong);
+        // The owner's codes still work, the burned one and the fresh one.
+        for code in [&login.code, &fresh.code] {
+            assert!(matches!(
+                typed(&sessions, home.path(), code, now()),
+                CodeLogin::Owner(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn wrong_codes_from_many_clients_burn_the_code_for_everyone_at_the_ceiling() {
+        let home = tempfile::tempdir().unwrap();
+        let sessions = Sessions::default();
+        // Two pending codes, and every miss counts against both.
+        let first = mint_login(home.path(), now()).unwrap();
+        let second = mint_login(home.path(), now()).unwrap();
+        let wrong = (0u32..)
+            .map(|n| format!("{n:08}"))
+            .find(|code| *code != first.code && *code != second.code)
+            .unwrap();
+        // Each address, a /64 of its own, spends all its misses until the
+        // codes are one short of the ceiling.
+        let mut left = CODE_MISS_CEILING - 1;
+        for n in 0u16.. {
+            if left == 0 {
+                break;
+            }
+            let client = Client::new(IpAddr::from([0x2001, 0xdb8, n, 0, 0, 0, 0, 1]));
+            for _ in 0..CODE_MISSES.min(left) {
+                typed_by(&sessions, home.path(), client, &wrong, now());
+                left -= 1;
+            }
+        }
+        // One short of the ceiling, a code still signs the owner in.
+        assert!(matches!(
+            typed(&sessions, home.path(), &first.code, now()),
+            CodeLogin::Owner(_)
+        ));
+        let last = typed_by(&sessions, home.path(), stranger(9), &wrong, now());
+        assert_eq!(last, CodeLogin::Burned);
+        assert_eq!(
+            typed(&sessions, home.path(), &second.code, now()),
+            CodeLogin::Wrong
+        );
+        // Its link still works, and a fresh code starts its own count.
+        assert!(
+            redeem_login(home.path(), &second.token, now())
+                .unwrap()
+                .is_some()
+        );
+        let fresh = mint_login(home.path(), now()).unwrap();
+        assert!(matches!(
+            typed(&sessions, home.path(), &fresh.code, now()),
+            CodeLogin::Owner(_)
+        ));
+    }
+
+    #[test]
+    fn code_tries_are_limited_per_client_per_minute() {
+        let home = tempfile::tempdir().unwrap();
         let sessions = Sessions::default();
         let start = Instant::now();
+        let try_at = |client, code: &str, at| {
+            sessions
+                .redeem_code(home.path(), client, code, now(), at)
+                .unwrap()
+        };
         for _ in 0..CODE_TRIES_PER_MINUTE {
-            assert!(sessions.try_code(start));
+            assert_eq!(try_at(stranger(7), "00000000", start), CodeLogin::Wrong);
         }
-        assert!(!sessions.try_code(start + Duration::from_secs(59)));
-        assert!(sessions.try_code(start + Duration::from_secs(60)));
+        let limited = try_at(stranger(7), "00000000", start + Duration::from_secs(59));
+        assert_eq!(limited, CodeLogin::TooManyTries);
+        // Past the limit even the right code goes unchecked, and is kept.
+        let login = mint_login(home.path(), now()).unwrap();
+        let limited = try_at(stranger(7), &login.code, start + Duration::from_secs(59));
+        assert_eq!(limited, CodeLogin::TooManyTries);
+        // Every other client still tries, the owner first.
+        let signed = try_at(owner(), &login.code, start + Duration::from_secs(59));
+        assert!(matches!(signed, CodeLogin::Owner(_)), "{signed:?}");
+        // And the limited client again once its minute has passed.
+        let again = try_at(stranger(7), "00000000", start + Duration::from_secs(60));
+        assert_eq!(again, CodeLogin::Wrong);
+    }
+
+    #[test]
+    fn tries_are_forgotten_once_they_no_longer_count() {
+        let home = tempfile::tempdir().unwrap();
+        let sessions = Sessions::default();
+        let start = Instant::now();
+        let login = mint_login(home.path(), now()).unwrap();
+        for n in 1..=100 {
+            let miss =
+                sessions.redeem_code(home.path(), stranger(n), &other_than(&login), now(), start);
+            assert_eq!(miss.unwrap(), CodeLogin::Wrong);
+        }
+        let held = |sessions: &Sessions| {
+            let tries = sessions.codes.lock().unwrap();
+            let misses = tries.misses.values().map(|(_, counts)| counts.len());
+            (tries.recent.len(), misses.sum::<usize>())
+        };
+        assert_eq!(held(&sessions), (100, 100));
+        // A minute on, the login has expired and the tries are past their
+        // window: the next try drops them all.
+        let later_at = start + WINDOW;
+        let miss =
+            sessions.redeem_code(home.path(), owner(), "00000000", later(now(), 60), later_at);
+        assert_eq!(miss.unwrap(), CodeLogin::Wrong);
+        assert_eq!(held(&sessions), (1, 0));
+    }
+
+    #[test]
+    fn the_clients_of_one_ipv6_network_share_its_limits() {
+        let home = tempfile::tempdir().unwrap();
+        let sessions = Sessions::default();
+        let login = mint_login(home.path(), now()).unwrap();
+        let wrong = other_than(&login);
+        // Clients a /64 apart in one /48, each well under its own three.
+        let neighbour = |n: u16| Client::new(IpAddr::from([0x2001, 0xdb8, 7, n, 0, 0, 0, 1]));
+        for n in 1..NETWORK_MISSES {
+            let miss = typed_by(&sessions, home.path(), neighbour(n as u16), &wrong, now());
+            assert_eq!(miss, CodeLogin::Wrong);
+        }
+        let burned = typed_by(&sessions, home.path(), neighbour(100), &wrong, now());
+        assert_eq!(burned, CodeLogin::Burned);
+        // The code is burned for the whole network, even a client new to it.
+        let right = typed_by(&sessions, home.path(), neighbour(200), &login.code, now());
+        assert_eq!(right, CodeLogin::Wrong);
+        // Another network still signs in with it.
+        let elsewhere = Client::new(IpAddr::from([0x2001, 0xdb8, 8, 0, 0, 0, 0, 1]));
+        let signed = typed_by(&sessions, home.path(), elsewhere, &login.code, now());
+        assert!(matches!(signed, CodeLogin::Owner(_)), "{signed:?}");
+
+        // The network's tries a minute are shared the same way.
+        let start = Instant::now();
+        let try_at = |client| {
+            sessions
+                .redeem_code(home.path(), client, "00000000", now(), start)
+                .unwrap()
+        };
+        let other = |n: u16| Client::new(IpAddr::from([0x2001, 0xdb8, 9, n, 0, 0, 0, 1]));
+        for n in 0..NETWORK_TRIES_PER_MINUTE {
+            assert_eq!(try_at(other(n as u16)), CodeLogin::Wrong);
+        }
+        assert_eq!(try_at(other(1000)), CodeLogin::TooManyTries);
+        assert_eq!(try_at(elsewhere), CodeLogin::Wrong);
+    }
+
+    #[test]
+    fn a_client_is_an_ipv4_address_or_an_ipv6_64() {
+        let client = |text: &str| Client::new(text.parse().unwrap());
+        assert_eq!(
+            client("2001:db8:1:2:aaaa::1"),
+            client("2001:db8:1:2:bbbb::2")
+        );
+        assert_ne!(client("2001:db8:1:2::1"), client("2001:db8:1:3::1"));
+        assert_eq!(client("::ffff:192.0.2.10"), client("192.0.2.10"));
+        assert_ne!(client("192.0.2.10"), client("192.0.2.11"));
+        for address in ["127.0.0.1", "::1", "::"] {
+            assert_ne!(Client::UNKNOWN, client(address));
+        }
     }
 
     #[test]

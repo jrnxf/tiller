@@ -102,7 +102,9 @@ in
           link signs in at each name (the link is also printed for it, with a
           QR code), and mutations are taken only from its `https://` origin.
           Exact names only, no wildcards; the daemon still binds 127.0.0.1
-          alone.
+          alone. The proxy should append the browser's address to
+          `X-Forwarded-For`, which the daemon reads only to count sign-in
+          code tries per browser.
         '';
       };
       extraPath = lib.mkOption {

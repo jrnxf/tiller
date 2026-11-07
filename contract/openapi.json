@@ -1971,7 +1971,7 @@
         "tags": [
           "session"
         ],
-        "summary": "Signs in with the 8-digit code `tiller board --login` prints, as the\nlink does: sets the owner cookie. It passes the mutation checks but the\ncookie. A wrong code counts against every pending code, each of which\nburns on its third, and the daemon takes only so many tries a minute. The code is never logged.",
+        "summary": "Signs in with the 8-digit code `tiller board --login` prints, as the\nlink does: sets the owner cookie. It passes the mutation checks but the\ncookie. The limits count per client (`auth::Client`): a client's wrong\ncode counts against every pending code, each of which burns for that\nclient on its third, and each client has only so many tries a minute;\na pending code burns for everyone only at `auth::CODE_MISS_CEILING`.\nThe code is never logged.",
         "operationId": "login_code",
         "requestBody": {
           "content": {
@@ -2005,7 +2005,7 @@
             }
           },
           "403": {
-            "description": "`wrong_code`: wrong, used or expired; `code_burned`: too many wrong codes, so the pending code is spent; or a failed origin check",
+            "description": "`wrong_code`: wrong, used, expired or burned for this client; `code_burned`: too many wrong codes, so the pending code no longer works for this client; or a failed origin check",
             "content": {
               "application/json": {
                 "schema": {
@@ -2015,7 +2015,7 @@
             }
           },
           "429": {
-            "description": "`too_many_tries`: the daemon took its tries for this minute; nothing was checked",
+            "description": "`too_many_tries`: this client, or its IPv6 network, had its tries for this minute; nothing was checked",
             "content": {
               "application/json": {
                 "schema": {

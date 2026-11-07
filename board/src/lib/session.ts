@@ -29,7 +29,8 @@ const RUN_AGAIN = "Run `tiller board --login` again for a new code.";
 const REFUSALS: Record<string, string> = {
   wrong_code: `That code is wrong or has expired. ${RUN_AGAIN}`,
   code_burned: `Too many wrong codes, so that code no longer works. ${RUN_AGAIN}`,
-  too_many_tries: "Too many codes were tried in the last minute. Wait a minute and try again.",
+  too_many_tries:
+    "Too many codes were tried from this network in the last minute. Wait a minute and try again.",
   usage: "A code is 8 digits.",
 };
 

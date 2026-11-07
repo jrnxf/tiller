@@ -31,7 +31,9 @@ pub struct Args {
     /// Also serve the board to requests with exactly this `Host` header, the
     /// name of a reverse proxy that serves it over https; repeatable. There
     /// the board shows only to a browser signed in with the login code or
-    /// link, and mutations come only from its https origin.
+    /// link, and mutations come only from its https origin. The proxy should
+    /// append the browser's address to X-Forwarded-For, which counts sign-in
+    /// code tries per browser.
     #[arg(long = "allow-host", value_name = "HOST", value_parser = tiller_daemon::allowed_host)]
     allow_hosts: Vec<String>,
 }
