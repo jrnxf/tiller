@@ -11,6 +11,7 @@ import type {
   BoardRow,
   CardDetail,
   CardPr,
+  DaemonHealth,
   ContributionsResponse,
   EventLine,
   Machine,
@@ -207,6 +208,9 @@ function quotaFor(scenario: Scenario, now: number): QuotaResponse {
   }
 }
 
+// What the fixture board host runs; the federated peers report their own.
+const FIXTURE_VERSION = "0.1.0-pre.17";
+
 function machinesFor(scenario: Scenario, now: number): MachinesResponse {
   const hostA: Machine = {
     id: "01JHOSTA00000000000000000A",
@@ -219,6 +223,7 @@ function machinesFor(scenario: Scenario, now: number): MachinesResponse {
     free_slots: 2,
     last_seen_at: minutes(now, 0),
     stale_reason: null,
+    version: FIXTURE_VERSION,
     rev: 4,
   };
   const hostB: Machine = {
@@ -1309,6 +1314,18 @@ function retirePreviewFor(
 
 // Anything the stand-in server can answer: the board's lists, a card, its
 // timeline, a run. `undefined` means no such resource (a 404).
+function healthFor(now: number): DaemonHealth {
+  return {
+    ok: true,
+    version: FIXTURE_VERSION,
+    initialized: true,
+    schema: 12,
+    pid: 4242,
+    started_at: minutes(now, -3 * 60),
+    merge_app: { status: "missing", app_id: null, detail: "No merge App is set up" },
+  };
+}
+
 export function fixtureResource(
   path: string,
   scenario: Scenario = "default",
@@ -1337,6 +1354,7 @@ export function fixtureResource(
   if (retire?.[1]) return retirePreviewFor(served, board, retire[1], now);
   const run = /^\/api\/v1\/runs\/([^/]+)$/.exec(url.pathname);
   if (run?.[1]) return runDetailFor(run[1], now);
+  if (url.pathname === "/api/v1/health") return healthFor(now);
   if (url.pathname.startsWith("/api/v1/memory")) return memoryResource(url);
   // No project starts archived; the stand-in server adds the ones archived since.
   if (url.pathname === projectsPath && url.searchParams.has("retired")) return { projects: [] };

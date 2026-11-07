@@ -29,6 +29,43 @@ const LINK_WORD = {
   never: "never connected",
 } as const;
 
+export type VersionMark = "older" | "newer" | "different";
+
+// `0.1.0` or `0.1.0-pre.17`; a `-dev+<rev>` build has no order against either.
+const RELEASE = /^(\d+)\.(\d+)\.(\d+)(?:-pre\.(\d+))?$/;
+
+function releaseKey(version: string): number[] | null {
+  const parts = RELEASE.exec(version);
+  if (!parts) return null;
+  // A release outranks every pre-release of the same number.
+  const [, major, minor, patch, pre] = parts;
+  return [Number(major), Number(minor), Number(patch), pre === undefined ? Infinity : Number(pre)];
+}
+
+// How a host's version stands against the board host's: `older` or `newer`
+// when both are release or pre-release versions, `different` when they differ
+// but cannot be ordered, null when they match or either is unknown.
+export function versionMark(
+  version: string | null | undefined,
+  boardVersion: string | null | undefined,
+): VersionMark | null {
+  if (!version || !boardVersion || version === boardVersion) return null;
+  const mine = releaseKey(version);
+  const board = releaseKey(boardVersion);
+  if (!mine || !board) return "different";
+  for (const [index, part] of mine.entries()) {
+    const other = board[index] ?? 0;
+    if (part !== other) return part < other ? "older" : "newer";
+  }
+  return null;
+}
+
+export const VERSION_MARK_WORD: Record<VersionMark, string> = {
+  older: "Older than this host",
+  newer: "Newer than this host",
+  different: "Differs from this host",
+};
+
 export interface MachineRowView {
   tone: DotTone;
   summary: string | null;
@@ -39,6 +76,8 @@ export interface MachineRowView {
   // A paired peer: the link state and the sentence that explains it.
   peer: boolean;
   linkReason: string | null;
+  // Set when the host runs another version than the board host.
+  versionMark: VersionMark | null;
 }
 
 function peerStaleText(machine: Machine, link: "lagging" | "down" | "refused" | "never"): string {
@@ -51,7 +90,11 @@ function peerStaleText(machine: Machine, link: "lagging" | "down" | "refused" | 
   return when ? `${LINK_WORD[link]} since ${when}` : LINK_WORD[link];
 }
 
-export function machineRowView(machine: Machine, now?: number): MachineRowView {
+export function machineRowView(
+  machine: Machine,
+  now?: number,
+  boardVersion?: string | null,
+): MachineRowView {
   const stale = machine.health === "stale";
   let summary: string | null = null;
   if (!stale && machine.running_agents !== null) {
@@ -84,5 +127,6 @@ export function machineRowView(machine: Machine, now?: number): MachineRowView {
             : null
           : linkReason(machine.label, link, machine.last_seen_at, machine.link_reason)
         : null,
+    versionMark: versionMark(machine.version, boardVersion),
   };
 }

@@ -659,6 +659,7 @@ pub fn machines(store: &Store, local: &LocalHealth, now: Timestamp) -> Result<Ma
             },
             last_seen_at: at_opt(last_seen_at),
             stale_reason,
+            version: is_local.then(|| env!("CARGO_PKG_VERSION").to_owned()),
             link: None,
             peer_scope: None,
             link_reason: None,
@@ -1771,6 +1772,7 @@ fn peer_machine(host: &tiller_core::domain::Host, view: &PeerView) -> Machine {
         free_slots: cached.and_then(|row| row.free_slots),
         last_seen_at: at_opt(view.last_frame_at.max(host.last_seen_at)),
         stale_reason,
+        version: cached.and_then(|row| row.version.clone()),
         link: Some(view.link),
         peer_scope: Some(view.scope.to_string()),
         link_reason: view.link_reason.clone(),
@@ -2000,6 +2002,75 @@ mod tests {
         assert_eq!(peer_column(&never_ran), ("queued", true));
         assert!(!Filter::Active.keeps(peer_column(&never_ran).0, true));
         assert!(Filter::Needs.keeps(peer_column(&never_ran).0, true));
+    }
+
+    fn peer_with_machine_row(row: Value) -> PeerView {
+        use crate::peer::PeerQueries;
+        use tiller_core::domain::PeerScope;
+        let queries: PeerQueries = serde_json::from_value(json!({
+            "/api/v1/board?filter=all": {"rows": [], "asked": []},
+            "/api/v1/attention?state=open": {"items": [], "permission_prompts": []},
+            "/api/v1/agents": {"orchestrators": []},
+            "/api/v1/machines": {"machines": [row]},
+            "/api/v1/projects": {"projects": []},
+        }))
+        .unwrap();
+        let mut view = PeerView::new("peer", "h-peer", "peer-host", PeerScope::Act);
+        view.link = LinkState::Live;
+        view.queries = Some(std::sync::Arc::new(queries));
+        view
+    }
+
+    fn peer_host() -> tiller_core::domain::Host {
+        tiller_core::domain::Host {
+            id: "h-peer".into(),
+            label: "peer".into(),
+            kind: tiller_core::domain::HostKind::Remote,
+            herdr_machine: None,
+            lane_capacity: None,
+            ram_floor_mb: None,
+            disk_floor_mb: None,
+            last_seen_at: None,
+            stale_reason: None,
+            peer_scope: None,
+            peer_host_id: Some("peer-host".into()),
+            rev: 1,
+        }
+    }
+
+    fn peer_row(version: Option<&str>) -> Value {
+        let mut row = json!({
+            "id": "h-peer", "label": "peer", "kind": "local", "view_only": false,
+            "health": "ok", "running_agents": 1, "capacity": 2, "free_slots": 1,
+            "last_seen_at": null, "stale_reason": null, "rev": 3,
+        });
+        if let Some(version) = version {
+            row["version"] = json!(version);
+        }
+        row
+    }
+
+    /// A paired peer's version is what its own machine row reports; a peer
+    /// that reports none (an older build, or no snapshot yet) shows none.
+    #[test]
+    fn a_peer_machine_carries_the_version_its_row_reports() {
+        let host = peer_host();
+        let reported = peer_machine(
+            &host,
+            &peer_with_machine_row(peer_row(Some("0.1.0-pre.17"))),
+        );
+        assert_eq!(reported.version.as_deref(), Some("0.1.0-pre.17"));
+        let silent = peer_machine(&host, &peer_with_machine_row(peer_row(None)));
+        assert_eq!(silent.version, None);
+        let never = PeerView::new(
+            "peer",
+            "h-peer",
+            "peer-host",
+            tiller_core::domain::PeerScope::Act,
+        );
+        assert_eq!(peer_machine(&host, &never).version, None);
+        let json = serde_json::to_value(&silent).unwrap();
+        assert!(json.get("version").is_none(), "{json}");
     }
 
     #[test]

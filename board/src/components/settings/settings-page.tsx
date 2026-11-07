@@ -2,10 +2,11 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
-import type { DaemonHealth, MergeAppHealth } from "../../lib/api-types";
+import type { DaemonHealth, Machine, MergeAppHealth } from "../../lib/api-types";
+import { machineRowView, VERSION_MARK_WORD } from "../../lib/machines";
 import { prefsStore, updatePrefs } from "../../lib/prefs";
 import type { Density, ThemePreference } from "../../lib/prefs";
-import { healthQuery, sessionQuery } from "../../lib/queries";
+import { healthQuery, machinesQuery, sessionQuery } from "../../lib/queries";
 import { signOut } from "../../lib/session";
 import { useStore } from "../../lib/store";
 import { formatAge, secondsSince } from "../board/format";
@@ -115,6 +116,44 @@ function HostFacts({ health }: { health: DaemonHealth }) {
   );
 }
 
+function hostHint(machine: Machine, peer: boolean, mark: string | null, boardVersion: string) {
+  if (mark) return `${mark} (${boardVersion})`;
+  if (machine.version === boardVersion) return "Same as this host";
+  if (machine.version) return "Runs another version";
+  return peer ? "Paired peer, has not reported a version" : "herdr machine, no version to read";
+}
+
+// Each other host's Tiller version beside the board host's, so one look shows
+// whether a release reached every machine.
+function HostVersions({ machines, boardVersion }: { machines: Machine[]; boardVersion: string }) {
+  const others = machines.filter((machine) => machine.kind !== "local");
+  if (others.length === 0) return null;
+  return (
+    <section className="set-panel" aria-label="Other hosts" data-testid="host-versions">
+      {others.map((machine) => {
+        const view = machineRowView(machine, undefined, boardVersion);
+        const mark = view.versionMark ? VERSION_MARK_WORD[view.versionMark] : null;
+        return (
+          <Fact
+            key={machine.id}
+            label={machine.label}
+            hint={hostHint(machine, view.peer, mark, boardVersion)}
+          >
+            {machine.version ? (
+              <>
+                {mark ? <span className="set-status warn">{view.versionMark}</span> : null}
+                <code>{machine.version}</code>
+              </>
+            ) : (
+              <span className="set-muted">Not reported</span>
+            )}
+          </Fact>
+        );
+      })}
+    </section>
+  );
+}
+
 // Signing out ends this browser's owner cookie on the daemon, not the other
 // devices signed in with their own codes.
 function BrowserSession({ owner }: { owner: boolean }) {
@@ -169,12 +208,19 @@ export function SettingsPage() {
   const prefs = useStore(prefsStore);
   const health = useQuery(healthQuery()).data;
   const session = useQuery(sessionQuery()).data;
+  const machines = useQuery(machinesQuery()).data?.machines;
   return (
     <div className="settings-page" data-testid="settings">
       {health ? (
         <>
           <h1 className="set-title">This host</h1>
           <HostFacts health={health} />
+          {machines ? (
+            <>
+              <h1 className="set-title">Other hosts</h1>
+              <HostVersions machines={machines} boardVersion={health.version} />
+            </>
+          ) : null}
         </>
       ) : null}
       {session ? (

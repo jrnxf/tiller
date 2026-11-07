@@ -16,6 +16,7 @@ exit: 0
         "running_agents": 1,
         "short": "<id1.short>",
         "stale_reason": null,
+        "version": "0.1.0",
         "view_only": false
       }
     ]

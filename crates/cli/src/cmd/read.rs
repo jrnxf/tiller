@@ -406,6 +406,7 @@ fn machines_data(store: &Store, local_only: bool) -> Result<Value, Failure> {
             "free_slots": slots.and_then(|row| row.free),
             "last_seen_at": host.last_seen_at,
             "stale_reason": stale_reason,
+            "version": local.then_some(env!("CARGO_PKG_VERSION")),
         }));
     }
     Ok(json!({"machines": rows}))

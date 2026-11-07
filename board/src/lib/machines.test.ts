@@ -2,7 +2,7 @@ import { expect, test } from "vitest";
 
 import type { Machine, MachinesResponse } from "./api-types";
 import { fixtureSnapshot } from "./fixtures";
-import { machineRowView } from "./machines";
+import { machineRowView, versionMark } from "./machines";
 import { machinesPath } from "./queries";
 
 const NOW = Date.parse("2026-11-02T12:00:00.000Z");
@@ -84,4 +84,37 @@ test("a host with no peers keeps the rows it always had", () => {
     expect(view.peer).toBe(false);
     expect(view.linkReason).toBeNull();
   }
+});
+
+test("a host on an older or newer version than the board host is marked, a match is not", () => {
+  expect(versionMark("0.1.0-pre.15", "0.1.0-pre.17")).toBe("older");
+  expect(versionMark("0.1.0-pre.18", "0.1.0-pre.17")).toBe("newer");
+  expect(versionMark("0.1.0-pre.17", "0.1.0-pre.17")).toBeNull();
+  // Ten sorts after nine by number, not as text.
+  expect(versionMark("0.1.0-pre.9", "0.1.0-pre.10")).toBe("older");
+  // A release outranks its pre-releases, and a later number outranks both.
+  expect(versionMark("0.1.0-pre.17", "0.1.0")).toBe("older");
+  expect(versionMark("0.2.0-pre.1", "0.1.0")).toBe("newer");
+});
+
+test("versions that cannot be ordered are different, and a missing version has no mark", () => {
+  expect(versionMark("0.1.0-dev+abc1234", "0.1.0-pre.17")).toBe("different");
+  expect(versionMark("0.1.0-pre.17", "0.1.0-dev+abc1234")).toBe("different");
+  expect(versionMark(null, "0.1.0-pre.17")).toBeNull();
+  expect(versionMark(undefined, "0.1.0-pre.17")).toBeNull();
+  expect(versionMark("0.1.0-pre.17", undefined)).toBeNull();
+});
+
+test("a peer's row carries its reported version and the mark against the board host", () => {
+  const board = machines("federated")[0] as Machine;
+  expect(board.version).toBe("0.1.0-pre.17");
+  expect(machineRowView(peer("host-d"), NOW, board.version).versionMark).toBeNull();
+  expect(machineRowView(peer("host-e"), NOW, board.version).versionMark).toBe("older");
+  expect(machineRowView(peer("host-f"), NOW, board.version).versionMark).toBe("newer");
+  // A peer that reports none and a herdr-only machine show no mark.
+  expect(peer("host-g").version).toBeUndefined();
+  expect(machineRowView(peer("host-g"), NOW, board.version).versionMark).toBeNull();
+  expect(machineRowView(machines("default")[1] as Machine, NOW, board.version).versionMark).toBe(
+    null,
+  );
 });

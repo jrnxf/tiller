@@ -632,6 +632,16 @@ async fn frozen_serve_reaches_down_and_reconnects() {
         .unwrap_or_else(|| panic!("no peer row in {machines}"))
         .clone();
     assert_eq!(row["link"], "live", "{row}");
+    // The peer's own build reaches the board on its row, and this host's
+    // row carries the board host's.
+    assert_eq!(row["version"], env!("CARGO_PKG_VERSION"), "{row}");
+    let local = machines["machines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["kind"] == "local")
+        .unwrap_or_else(|| panic!("no local row in {machines}"));
+    assert_eq!(local["version"], env!("CARGO_PKG_VERSION"), "{local}");
 }
 
 #[test]
@@ -670,6 +680,10 @@ fn serve_never_opens_onward_link() {
     let machines = &snapshot.queries.machines.machines;
     assert_eq!(machines.len(), 1);
     assert_eq!(machines[0].id, pair.peer.host);
+    assert_eq!(
+        machines[0].version.as_deref(),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
 
     // It never reads on another host's behalf.
     let mut ask = |id: &str, path: String| {

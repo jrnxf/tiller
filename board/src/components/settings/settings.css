@@ -57,10 +57,17 @@
 }
 
 .set-value {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex: none;
   color: var(--fg-1);
   font-size: var(--fs-small);
   font-variant-numeric: tabular-nums;
+}
+
+.set-muted {
+  color: var(--fg-3);
 }
 
 .set-value code {

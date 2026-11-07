@@ -1,7 +1,7 @@
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 
-import { machineRowView } from "../../lib/machines";
+import { machineRowView, VERSION_MARK_WORD } from "../../lib/machines";
 import { machinesQuery, quotaQuery } from "../../lib/queries";
 import { quotaFooterView } from "../../lib/quota";
 import type { Machine } from "../../lib/api-types";
@@ -30,6 +30,8 @@ export function MachinesSection({ activeHost }: { activeHost: string | undefined
       ? `Claude: ${Math.round(quotaView.percentLeft)}% of this week left${quotaView.resets ? `, ${quotaView.resets}` : ""}.`
       : null;
 
+  const boardVersion = data.machines.find((machine) => machine.kind === "local")?.version;
+
   return (
     <>
       <div className="grp">
@@ -48,7 +50,7 @@ export function MachinesSection({ activeHost }: { activeHost: string | undefined
       </div>
       <section aria-labelledby="machines-heading" className="machines">
         {data.machines.map((machine) => {
-          const view = machineRowView(machine);
+          const view = machineRowView(machine, undefined, boardVersion);
           const active = activeHost === machine.id;
           const tipId = `tip-${machine.id}`;
           return (
@@ -68,6 +70,11 @@ export function MachinesSection({ activeHost }: { activeHost: string | undefined
                 <b>{machine.label}</b>
                 {view.peer ? <em className="mtag">peer</em> : null}
                 {view.viewOnly ? <em className="mtag">view only</em> : null}
+                {view.versionMark ? (
+                  <em className="mtag" data-testid={`version-${machine.label}`}>
+                    {view.versionMark === "different" ? "other version" : view.versionMark}
+                  </em>
+                ) : null}
                 {active ? (
                   <span className="mfilt">
                     <CheckIcon />
@@ -97,6 +104,11 @@ export function MachinesSection({ activeHost }: { activeHost: string | undefined
                       : view.viewOnly
                         ? "can be watched and opened in herdr from here. Answers and dispatches stay on that machine."
                         : "runs agents for this board."}
+                {view.versionMark ? (
+                  <span className="tq">
+                    {`${VERSION_MARK_WORD[view.versionMark]}: runs ${machine.version}, this host runs ${boardVersion}.`}
+                  </span>
+                ) : null}
                 {quotaLine ? <span className="tq">{quotaLine}</span> : null}
                 {view.stale ? null : (
                   <span className="tq">Click to show only this machine on Board and Agents.</span>

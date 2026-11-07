@@ -4957,6 +4957,13 @@
             ],
             "description": "`herdr_link_down`, `host_asleep`, `poll_failed` or `never_seen`; for a\npaired peer also `peer_link_down`, `peer_refused` or `peer_version`."
           },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `tiller version` string this host runs, for example\n`0.1.0-pre.17`: this host's own build, or what a paired peer reports\non its own row. Absent for a herdr-only machine and for a peer that\nhas not reported one."
+          },
           "view_only": {
             "type": "boolean"
           }

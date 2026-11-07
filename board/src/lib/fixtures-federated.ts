@@ -34,6 +34,8 @@ interface PeerSpec {
   // Minutes before now of the last frame from the peer; null when none came.
   frameMinutes: number | null;
   refusal?: string;
+  // What the peer's own row reports; absent when it reports none.
+  version?: string;
 }
 
 const PEER_SPECS: readonly PeerSpec[] = [
@@ -43,6 +45,7 @@ const PEER_SPECS: readonly PeerSpec[] = [
     link: "live",
     scope: "act",
     frameMinutes: 0.1,
+    version: "0.1.0-pre.17",
   },
   {
     host: "host-e",
@@ -50,6 +53,7 @@ const PEER_SPECS: readonly PeerSpec[] = [
     link: "down",
     scope: "act",
     frameMinutes: 6,
+    version: "0.1.0-pre.15",
   },
   {
     host: "host-f",
@@ -57,6 +61,7 @@ const PEER_SPECS: readonly PeerSpec[] = [
     link: "live",
     scope: "read",
     frameMinutes: 0.2,
+    version: "0.1.0-pre.18",
   },
   {
     host: "host-g",
@@ -103,6 +108,7 @@ export function peerMachines(now: number): Machine[] {
       last_seen_at: peer.frameMinutes === null ? null : at(now, peer.frameMinutes),
       stale_reason:
         peer.link === "down" ? "peer_link_down" : peer.link === "refused" ? "peer_refused" : null,
+      ...(peer.version ? { version: peer.version } : {}),
       link: peer.link,
       peer_scope: peer.scope,
       link_reason: peer.refusal ?? null,

@@ -2,6 +2,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
+import { fixtureResource } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
 import { createQueryClient } from "../../lib/query-client";
 import { signedOutStore } from "../../lib/session";
@@ -22,6 +23,9 @@ function serve(owner: boolean, logout: [number, unknown] = [200, { owner: false 
     if (path === "/api/v1/logout" && init?.method === "POST") {
       if (logout[0] === 200) signedIn = false;
       return new Response(JSON.stringify(logout[1]), { status: logout[0] });
+    }
+    if (path === "/api/v1/health" || path === "/api/v1/machines") {
+      return new Response(JSON.stringify(fixtureResource(path, "federated")));
     }
     return new Response("{}", { status: 404 });
   });
@@ -87,4 +91,31 @@ test("on loopback, a browser that is not signed in has nothing to sign out", asy
   const panel = await screen.findByRole("region", { name: "This browser" });
   expect(within(panel).getByText("Not signed in")).toBeTruthy();
   expect(within(panel).queryByRole("button")).toBeNull();
+});
+
+test("Settings lists each other host's version and marks the ones that differ from this host", async () => {
+  serve(true);
+  renderSettings();
+  const panel = await screen.findByRole("region", { name: "Other hosts" });
+  const row = (label: string) => within(panel).getByText(label).closest(".set-row") as HTMLElement;
+
+  // Same version: no mark.
+  expect(within(row("host-d")).getByText("0.1.0-pre.17")).toBeTruthy();
+  expect(within(row("host-d")).getByText("Same as this host")).toBeTruthy();
+  expect(row("host-d").querySelector(".set-status")).toBeNull();
+
+  // Older and newer, in plain words, beside the version.
+  expect(within(row("host-e")).getByText("0.1.0-pre.15")).toBeTruthy();
+  expect(within(row("host-e")).getByText("Older than this host (0.1.0-pre.17)")).toBeTruthy();
+  expect(within(row("host-e")).getByText("older")).toBeTruthy();
+  expect(within(row("host-f")).getByText("Newer than this host (0.1.0-pre.17)")).toBeTruthy();
+
+  // No report: no version and no guess.
+  expect(within(row("host-g")).getByText("Not reported")).toBeTruthy();
+  expect(within(row("host-g")).getByText("Paired peer, has not reported a version")).toBeTruthy();
+  expect(within(row("host-b")).getByText("herdr machine, no version to read")).toBeTruthy();
+
+  // This host keeps its own facts card with the same version.
+  const facts = screen.getByTestId("host-facts");
+  expect(within(facts).getByText("0.1.0-pre.17")).toBeTruthy();
 });

@@ -448,6 +448,12 @@ pub struct Machine {
     /// `herdr_link_down`, `host_asleep`, `poll_failed` or `never_seen`; for a
     /// paired peer also `peer_link_down`, `peer_refused` or `peer_version`.
     pub stale_reason: Option<String>,
+    /// The `tiller version` string this host runs, for example
+    /// `0.1.0-pre.17`: this host's own build, or what a paired peer reports
+    /// on its own row. Absent for a herdr-only machine and for a peer that
+    /// has not reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     /// A paired peer's link state (`protocol.md` 10.2); absent for this
     /// host and for a herdr-only machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]

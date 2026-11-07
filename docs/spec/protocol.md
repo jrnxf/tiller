@@ -634,9 +634,12 @@ One row per host the board shows: this host, and every remote host it knows thro
 | `running_agents` | live sessions with an active run, plus orchestrators | from the peer's own row over the link; else live panes in `panes` whose `agent_status` is not `done` |
 | `capacity`, `free_slots` | the `capacity` view | from the peer's own row over the link; null without one |
 | `last_seen_at` | now, while the daemon runs | the last frame from the peer link, or `hosts.last_seen_at` from the herdr poller, whichever is newer |
+| `version` | this host's own build, the `tiller version` string (`0.1.0-pre.17`, or `0.1.0-dev+<rev>` for an unstamped Nix build) | for a paired peer: the `version` on the peer's own local row, as the snapshot's `machines` query carries it; null for a herdr-only machine and for a peer whose row has none (an older build, or no snapshot yet). Never guessed, and never taken from the `welcome` frame |
 | `stale_reason` | null | `herdr_link_down` (the saved machine does not answer), `host_asleep` (herdr reports the remote server suspended, I; T2.5 confirms what herdr exposes), `poll_failed` (an answer that did not parse), `never_seen`, `peer_link_down`, `peer_refused`, `peer_version` |
 
-Exposed through `GET /api/v1/machines`, `tiller machines`, the snapshot and `host.changed` events. A click on a row filters Board and Agents by `host`.
+Exposed through `GET /api/v1/machines`, `tiller machines` (which carries `version` on the local row and null on the others), the snapshot and `host.changed` events. A click on a row filters Board and Agents by `host`.
+
+The board shows `version` per host on the Settings page and marks a host whose version differs from the board host's: `older` or `newer` when both parse as `X.Y.Z` or `X.Y.Z-pre.N` (a release outranks its pre-releases), otherwise `different`. A host with no `version` shows none and no mark. The mark never changes the peer compatibility rule (section 10.2), which stays on `peer_protocol` and `schema_version`.
 
 ## 10. Kept Firstmate capabilities: other harnesses, remote homes, config push
 

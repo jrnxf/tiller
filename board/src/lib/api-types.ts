@@ -325,6 +325,9 @@ export interface Machine {
   free_slots: number | null;
   last_seen_at: string | null;
   stale_reason: StaleReason | null;
+  // The `tiller version` string the host runs (`0.1.0-pre.17`); absent for a
+  // herdr-only machine and for a peer that has not reported one.
+  version?: string | null;
   // For a paired peer (section 9): the link state and the pairing's scope; null
   // or absent for this host and for a herdr-only machine.
   link?: LinkState | null;
