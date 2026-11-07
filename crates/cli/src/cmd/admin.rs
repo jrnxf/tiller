@@ -12,6 +12,7 @@ use tiller_agents::control::{self, Waits};
 use tiller_agents::numbering::numbering;
 use tiller_core::Applied;
 use tiller_core::Store;
+use tiller_core::config_file::{self as config_toml, ConfigError};
 use tiller_core::domain::{Boundary, Delivery, HostKind, Project, Stage};
 use tiller_core::state::deletion::{DeletionPreview, LiveAgent};
 use tiller_core::state::get;
@@ -526,58 +527,23 @@ pub fn load_config(app: &App) -> Result<toml::Table, Failure> {
 
 /// [`load_config`] for a `config.toml` path; a missing file is an empty table.
 pub fn load_config_at(path: &Path) -> Result<toml::Table, Failure> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => text.parse::<toml::Table>().map_err(|error| {
-            Failure::new(
-                "internal",
-                1,
-                format!("config.toml does not parse: {error}"),
-            )
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(toml::Table::new()),
-        Err(error) => Err(error.into()),
-    }
+    config_toml::load(path).map_err(config_failure)
 }
 
-/// Writes through a temporary file in the same directory and renames it, so a
-/// reader never sees half a file.
-fn write_atomic(path: &Path, text: &str) -> Result<(), Failure> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(".{}.tmp", tiller_core::ids::new_ulid()));
-    let mut file = std::fs::File::create(&tmp)?;
-    file.write_all(text.as_bytes())?;
-    file.sync_all()?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+/// A `config.toml` error as the CLI reports it.
+fn config_failure(error: ConfigError) -> Failure {
+    match error {
+        ConfigError::Io(error) => error.into(),
+        ConfigError::BadKey(_) => Failure::usage(error.to_string()),
+        ConfigError::NotATable(_) => Failure::refused(error.to_string()),
+        ConfigError::Parse(_) | ConfigError::Serialize(_) => {
+            Failure::new("internal", 1, error.to_string())
+        }
+    }
 }
 
 pub(crate) fn get_path<'a>(table: &'a toml::Table, key: &str) -> Option<&'a toml::Value> {
-    let mut parts = key.split('.');
-    let mut current = table.get(parts.next()?)?;
-    for part in parts {
-        current = current.as_table()?.get(part)?;
-    }
-    Some(current)
-}
-
-fn set_path(table: &mut toml::Table, key: &str, value: toml::Value) -> Result<(), Failure> {
-    let parts: Vec<&str> = key.split('.').collect();
-    if parts.iter().any(|part| part.is_empty()) {
-        return Err(Failure::usage(format!("not a config key: {key:?}")));
-    }
-    let (last, parents) = parts.split_last().unwrap_or((&"", &[]));
-    let mut current = table;
-    for part in parents {
-        let entry = current
-            .entry((*part).to_owned())
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-        current = entry
-            .as_table_mut()
-            .ok_or_else(|| Failure::refused(format!("{part} is not a table in config.toml")))?;
-    }
-    current.insert((*last).to_owned(), value);
-    Ok(())
+    config_toml::get(table, key)
 }
 
 /// A value typed on the command line: TOML when it parses (`3`, `true`,
@@ -614,15 +580,8 @@ pub(crate) fn set_config(
             replayed: true,
         });
     }
-    set_path(&mut table, key, value.clone())?;
-    let text = toml::to_string_pretty(&table).map_err(|error| {
-        Failure::new(
-            "internal",
-            1,
-            format!("config.toml cannot be written: {error}"),
-        )
-    })?;
-    write_atomic(&config_file(app), &text)?;
+    config_toml::set(&mut table, key, value.clone()).map_err(config_failure)?;
+    config_toml::store(&config_file(app), &table).map_err(config_failure)?;
     let recorded = serde_json::to_value(&value).unwrap_or(Value::Null);
     Ok(store.config_changed(&app.ctx(), key, recorded)?)
 }
@@ -779,7 +738,7 @@ pub fn owner(app: &App, cmd: OwnerCmd) -> Done {
                     replayed: true,
                 }));
             }
-            write_atomic(&app.home.join("owner"), &format!("{name}\n"))?;
+            config_toml::write_atomic(&app.home.join("owner"), &format!("{name}\n"))?;
             // Flipping back to tiller is recorded; the other direction leaves
             // state.db to the system that now owns the host.
             let mut events = Vec::new();

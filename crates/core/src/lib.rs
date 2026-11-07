@@ -5,6 +5,7 @@
 
 pub mod authority;
 pub mod backup;
+pub mod config_file;
 pub mod domain;
 pub mod error;
 #[cfg(test)]
