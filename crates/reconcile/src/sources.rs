@@ -77,15 +77,18 @@ impl WorktreeScan {
 
 /// The worktree scanner: treehouse's list plus git.
 pub trait Scanner: Send {
-    /// The worktrees treehouse lists on this host. `Err` means the list
-    /// could not be read; the scan then covers only the paths records name.
+    /// The worktrees of this host's project checkouts, each checkout's own
+    /// working tree left out. `Err` means some checkout's list could not be
+    /// read; the scan then covers only the paths records name, and R15
+    /// returns nothing.
     fn listed(&self) -> Result<Vec<PathBuf>, String>;
     /// One worktree against its project's default branch and the heads of
     /// its merged PRs.
     fn scan(&self, path: &Path, project: &Project, merged_heads: &[String]) -> WorktreeScan;
-    /// Returns the worktree to treehouse, after `run.clean` recorded that it
-    /// provably holds nothing. The default has nowhere to return it to.
-    fn release(&self, path: &Path) -> Result<(), String> {
+    /// Returns the worktree to treehouse, only while `holder` still leases
+    /// it, after `run.clean` recorded that it provably holds nothing. The
+    /// default has nowhere to return it to.
+    fn release(&self, path: &Path, _holder: &str) -> Result<(), String> {
         Err(format!(
             "no worktree pool is configured to take back {}",
             path.display()

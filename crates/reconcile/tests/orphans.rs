@@ -120,10 +120,15 @@ fn dead_pane_of_ended_run_is_closed_and_clean_worktree_returned() {
         vec![std::path::PathBuf::from(&path)],
         "handed back to the pool"
     );
+    assert_eq!(
+        w.scanner.release_holders(),
+        vec![format!("tiller:{}", run.id)],
+        "only while the run still leases it"
+    );
     let again = w.pass(t0.plus_minutes(2));
     assert!(!again.did("returned"), "{again:?}");
 
-    // Without treehouse listing it, nothing is returned.
+    // Without the worktree list showing it, nothing is returned.
     let mut v = World::new();
     let worker = v.worker("w2:p1");
     v.place();

@@ -206,6 +206,22 @@ pub fn live_session(conn: &Connection, run_id: &str) -> Result<Option<Session>> 
     find(conn, "run_id = ?1 AND ended_at IS NULL", &[&run_id])
 }
 
+/// The treehouse lease holder a run takes a worktree from the pool under.
+pub fn holder(run: &Run) -> String {
+    format!("tiller:{}", run.id)
+}
+
+/// The lease holder of the worktree a run works in: the run that took it
+/// from the pool. A promotion or a new attempt continues in its
+/// predecessor's worktree, so the chain's first run holds the lease.
+pub fn lease_holder(conn: &Connection, run: &Run) -> Result<String> {
+    let mut root = run.clone();
+    while let Some(id) = root.predecessor_run_id.clone() {
+        root = get(conn, "run", &id)?;
+    }
+    Ok(holder(&root))
+}
+
 /// Where `herdr agent focus` finds a session's agent (`tiller agent focus`,
 /// the board's "Open in herdr"): its pane, from the `panes` cache first and
 /// the session's own `pane_id` after, and the saved herdr machine of a

@@ -17,6 +17,8 @@ use tiller_agents::land::publish::Published;
 use tiller_agents::land::reconcile::{Local, ReconcileForge};
 use tiller_agents::land::scrub::ScrubList;
 use tiller_agents::land::{DaemonLock, Landed, Lander};
+use tiller_agents::spawn::config::SpawnConfig;
+use tiller_agents::spawn::pool::{Pool as _, Treehouse};
 use tiller_agents::spawn::readings;
 use tiller_core::domain::{Host, HostKind, PipelineState, Session};
 use tiller_core::state::list;
@@ -27,7 +29,7 @@ use tiller_delivery::sources::{Lavish, PageAnswers};
 use tiller_herdr::client::{Cli, Herdr};
 use tiller_herdr::poller::{HerdrSource, PollError, Registry, Source};
 use tiller_observe::tailer::Tailer;
-use tiller_reconcile::git::GitScanner;
+use tiller_reconcile::git::{GitScanner, WorktreePool};
 use tiller_reconcile::sources::{
     Forge, HerdrLauncher, HerdrStatusProbe, HostReadings, NoHarness, Readings,
 };
@@ -140,6 +142,46 @@ impl Source for Reconcile {
             ))))
         }
     }
+}
+
+/// The treehouse pool as `config.toml` names it now: the `[checkouts]`
+/// table and the `[spawn] treehouse` command, read again on every call so
+/// an edit needs no restart. A file that does not parse lists nothing and
+/// takes nothing back (`recovery.md` R15).
+struct ConfiguredPool {
+    config: PathBuf,
+}
+
+impl ConfiguredPool {
+    fn read(&self) -> Result<SpawnConfig, String> {
+        let table = match std::fs::read_to_string(&self.config) {
+            Ok(text) => text
+                .parse::<toml::Table>()
+                .map_err(|error| format!("config.toml does not parse: {error}"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+            Err(error) => return Err(format!("read config.toml: {error}")),
+        };
+        SpawnConfig::from_table(&table).map_err(|error| format!("config.toml: {error}"))
+    }
+}
+
+impl WorktreePool for ConfiguredPool {
+    fn checkouts(&self) -> Result<Vec<PathBuf>, String> {
+        Ok(self.read()?.checkouts.into_values().collect())
+    }
+
+    fn give_back(&self, path: &Path, holder: &str) -> Result<(), String> {
+        let treehouse = self.read()?.spawn.treehouse;
+        Treehouse::new(treehouse.into_iter().map(OsString::from).collect()).give_back(path, holder)
+    }
+}
+
+/// The worktree scanner reconcile reads through: git, plus the pool of
+/// `<home>/config.toml` that R15 lists worktrees from and returns them to.
+pub fn scanner(home: &Path) -> GitScanner {
+    GitScanner::with_pool(ConfiguredPool {
+        config: home.join("config.toml"),
+    })
 }
 
 /// How long a read of the tool versions stands: the host check runs with
@@ -603,7 +645,7 @@ pub fn start(
     let sources = Sources {
         herdr: Box::new(tools.herdr.clone()),
         probe: Box::new(HerdrStatusProbe),
-        scanner: Box::new(GitScanner::new()),
+        scanner: Box::new(scanner(home)),
         forge: reconcile_forge(home, open()?, &tools.gh),
         // Reconcile closes a dead pane through herdr (R15).
         launcher: Box::new(HerdrLauncher::new(tools.herdr.clone(), {
@@ -713,6 +755,289 @@ esac
         assert_eq!(read.fetch.merge_sha.as_deref(), Some("e1e1e1e1"));
         assert_eq!(read.merged_by.as_deref(), Some("owner"));
         assert_eq!(read.fetch.fetch_error, None);
+    }
+
+    /// R15 as the running daemon wires it: a real git checkout named in
+    /// `config.toml`, a worktree of it the run worked in, the daemon's own
+    /// scanner, and a `treehouse` that logs each call it gets.
+    struct Pool {
+        _fleet: tiller_herdr::testing::Fleet,
+        dir: tempfile::TempDir,
+        herdr: tiller_herdr::fake::FakeHerdr,
+        home: PathBuf,
+        worktree: PathBuf,
+        run_id: String,
+        reconciler: Option<Reconciler>,
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    fn commit(dir: &Path, file: &str, text: &str) {
+        std::fs::write(dir.join(file), text).unwrap();
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", text]);
+    }
+
+    impl Pool {
+        /// Project `alpha`'s checkout with one commit on `main`, a worktree
+        /// of it on the run's branch, and a builder run working there whose
+        /// agent sits idle in pane `w2:p1`.
+        fn new() -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let mut fleet = tiller_herdr::testing::Fleet::new();
+            let session = fleet.worker("w2:p1");
+            let run_id = fleet
+                .workers
+                .iter()
+                .find(|(s, _, _)| *s == session)
+                .map(|(_, run, _)| run.clone())
+                .unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let checkout = dir.path().join("checkouts").join("alpha");
+            std::fs::create_dir_all(&checkout).unwrap();
+            git(&checkout, &["init", "-q", "-b", "main"]);
+            git(&checkout, &["config", "user.email", "dev@example.com"]);
+            git(&checkout, &["config", "user.name", "Dev"]);
+            commit(&checkout, "base.txt", "base");
+            let worktree = dir.path().join("pool").join("alpha-1");
+            git(
+                &checkout,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "tiller/alpha-1-build",
+                    worktree.to_str().unwrap(),
+                ],
+            );
+            fleet
+                .store
+                .conn()
+                .execute(
+                    "UPDATE runs SET worktree_path = ?2, branch = 'tiller/alpha-1-build' WHERE id = ?1",
+                    rusqlite::params![run_id, worktree.to_string_lossy()],
+                )
+                .unwrap();
+
+            let home = dir.path().join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let treehouse = dir.path().join("treehouse");
+            std::fs::write(
+                &treehouse,
+                format!(
+                    "#!/bin/sh\necho \"$*\" >> '{}'\n",
+                    dir.path().join("treehouse.log").display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&treehouse, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::write(
+                home.join("config.toml"),
+                format!(
+                    "[spawn]\ntreehouse = [{:?}]\n\n[checkouts]\nalpha = {:?}\n",
+                    treehouse.to_str().unwrap(),
+                    checkout.to_str().unwrap()
+                ),
+            )
+            .unwrap();
+
+            let herdr = tiller_herdr::fake::FakeHerdr::new(dir.path().join("herdr.json"));
+            fleet.place(&herdr);
+            for binding in tiller_herdr::layout::bindings(fleet.store.conn(), &fleet.host).unwrap()
+            {
+                herdr.set_tokens(&binding.pane_id, binding.tokens());
+            }
+            let config = ReconcileConfig::new(&fleet.host, &home);
+            let sources = Sources {
+                herdr: Box::new(herdr.clone()),
+                probe: Box::new(HerdrStatusProbe),
+                scanner: Box::new(scanner(&home)),
+                forge: Box::new(tiller_reconcile::sources::NoForge),
+                launcher: Box::new(HerdrLauncher::new(herdr.clone(), {
+                    let herdr = herdr.clone();
+                    move |pane: &str| herdr.close_pane(pane).map_err(|error| error.to_string())
+                })),
+                readings: Box::new(tiller_reconcile::sources::NoReadings),
+                harness: Box::new(NoHarness),
+            };
+            let reconciler = Reconciler::new(fleet.open(), config, sources);
+            Self {
+                _fleet: fleet,
+                dir,
+                herdr,
+                home,
+                worktree,
+                run_id,
+                reconciler: Some(reconciler),
+            }
+        }
+
+        fn pass(&mut self, now: Timestamp) -> tiller_reconcile::Report {
+            self.reconciler.as_mut().unwrap().pass(now).unwrap()
+        }
+
+        /// Ends the run and lets its agent exit, then runs the passes that
+        /// close its pane and judge its worktree.
+        fn end_run(&mut self) -> tiller_reconcile::Report {
+            let t0 = Timestamp::now();
+            self.pass(t0);
+            let mut store = Store::open(self.dir_db()).unwrap();
+            store
+                .run_end(
+                    &Ctx::new(Actor::Owner),
+                    &self.run_id,
+                    tiller_core::state::runs::EndRun {
+                        outcome: tiller_core::domain::RunOutcome::Abandoned,
+                        note: Some("not needed".into()),
+                    },
+                )
+                .unwrap();
+            self.herdr
+                .set_screen("w2:p1", tiller_herdr::fake::Screen::Shell);
+            let first = self.pass(t0.plus_minutes(1));
+            let second = self.pass(t0.plus_minutes(2));
+            tiller_reconcile::Report {
+                repairs: [first.repairs, second.repairs].concat(),
+                errors: [first.errors, second.errors].concat(),
+                ..first
+            }
+        }
+
+        fn dir_db(&self) -> PathBuf {
+            self._fleet.db.clone()
+        }
+
+        fn treehouse_calls(&self) -> Vec<String> {
+            std::fs::read_to_string(self.dir.path().join("treehouse.log"))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        }
+
+        fn cleaned(&self) -> bool {
+            Store::open(self.dir_db())
+                .unwrap()
+                .conn()
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM events WHERE entity = 'run' AND entity_id = ?1 AND kind = 'run.cleaned')",
+                    [&self.run_id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        }
+
+        /// Asserts the worktree was kept: no `run.clean`, no treehouse
+        /// call, the files where they were.
+        fn assert_kept(&self, report: &tiller_reconcile::Report) {
+            assert!(!report.did("returned"), "{report:?}");
+            assert!(!self.cleaned(), "{report:?}");
+            assert_eq!(self.treehouse_calls(), Vec::<String>::new());
+            assert!(self.worktree.join("base.txt").exists());
+        }
+    }
+
+    /// The leak: an ended run whose worktree holds nothing goes back to the
+    /// pool through `treehouse return`, under the run's own lease.
+    #[test]
+    fn daemon_returns_an_ended_runs_empty_worktree() {
+        let mut pool = Pool::new();
+        let report = pool.end_run();
+        assert!(report.did("R15 pane w2:p1 closed"), "{report:?}");
+        assert!(report.did("returned"), "{report:?}");
+        assert!(pool.cleaned());
+        assert_eq!(
+            pool.treehouse_calls(),
+            vec![format!(
+                "return {} --if-lease-holder tiller:{}",
+                pool.worktree.display(),
+                pool.run_id
+            )]
+        );
+    }
+
+    /// A tracked file changed and never committed keeps the worktree.
+    #[test]
+    fn daemon_keeps_a_worktree_with_uncommitted_changes() {
+        let mut pool = Pool::new();
+        std::fs::write(pool.worktree.join("base.txt"), "edited").unwrap();
+        let report = pool.end_run();
+        pool.assert_kept(&report);
+    }
+
+    /// An untracked file keeps the worktree, even when the repository's own
+    /// config hides untracked files from `git status`.
+    #[test]
+    fn daemon_keeps_a_worktree_with_untracked_files() {
+        let mut pool = Pool::new();
+        git(
+            &pool.worktree,
+            &["config", "status.showUntrackedFiles", "no"],
+        );
+        std::fs::write(pool.worktree.join("notes.md"), "draft").unwrap();
+        let report = pool.end_run();
+        pool.assert_kept(&report);
+        assert!(pool.worktree.join("notes.md").exists());
+    }
+
+    /// A commit not on `main` keeps the worktree, and so does a stash.
+    #[test]
+    fn daemon_keeps_a_worktree_with_unlanded_commits_or_a_stash() {
+        let mut pool = Pool::new();
+        git(&pool.worktree, &["config", "user.email", "dev@example.com"]);
+        git(&pool.worktree, &["config", "user.name", "Dev"]);
+        commit(&pool.worktree, "feature.txt", "feature");
+        let report = pool.end_run();
+        pool.assert_kept(&report);
+
+        let mut stashed = Pool::new();
+        git(
+            &stashed.worktree,
+            &["config", "user.email", "dev@example.com"],
+        );
+        git(&stashed.worktree, &["config", "user.name", "Dev"]);
+        std::fs::write(stashed.worktree.join("base.txt"), "edited").unwrap();
+        git(&stashed.worktree, &["stash", "-q"]);
+        let report = stashed.end_run();
+        stashed.assert_kept(&report);
+    }
+
+    /// A lister that cannot read every checkout lists nothing, so nothing
+    /// is returned: here a second configured checkout is missing, and then
+    /// `config.toml` does not parse.
+    #[test]
+    fn daemon_keeps_every_worktree_when_the_lister_fails() {
+        let mut pool = Pool::new();
+        let config = pool.home.join("config.toml");
+        let text = std::fs::read_to_string(&config).unwrap();
+        let missing = pool.dir.path().join("checkouts").join("beta");
+        std::fs::write(
+            &config,
+            format!("{text}beta = {:?}\n", missing.to_str().unwrap()),
+        )
+        .unwrap();
+        let report = pool.end_run();
+        pool.assert_kept(&report);
+
+        let mut broken = Pool::new();
+        std::fs::write(broken.home.join("config.toml"), "[checkouts\n").unwrap();
+        let report = broken.end_run();
+        broken.assert_kept(&report);
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! (R14); live panes a restore or an owner flip left unbound are adopted
 //! back by their metadata (R10, R20).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tiller_core::domain::{
@@ -16,14 +16,14 @@ use tiller_core::state::attention::NewAttention;
 use tiller_core::state::caches::PaneReading;
 use tiller_core::state::outbox::live_orchestrator;
 use tiller_core::state::publishes::{publish, published_head};
-use tiller_core::state::runs::{Bind, EndRun, live_session};
+use tiller_core::state::runs::{Bind, EndRun, lease_holder, live_session};
 use tiller_core::state::{find, get, list};
 use tiller_core::{Result, Timestamp};
 use tiller_herdr::client::Snapshot;
 use tiller_herdr::layout::Binding;
 use tiller_observe::liveness::Probe;
 
-use crate::pass::{Reconciler, Report, minutes_since};
+use crate::pass::{Reconciler, Report, canonical, minutes_since};
 
 /// The pane cache rows for one snapshot, as the herdr poller builds them.
 pub fn pane_readings(snapshot: &Snapshot, bindings: &[Binding]) -> Vec<PaneReading> {
@@ -352,7 +352,14 @@ impl Reconciler {
             "host_id = ?1 AND worktree_path IS NOT NULL ORDER BY started_at",
             &[&host],
         )?;
-        let listed = self.sources.scanner.listed().ok();
+        // Compared by where each path leads, so a symlink in one spelling
+        // (`/var` against `/private/var`) still matches.
+        let listed: Option<Vec<PathBuf>> = self
+            .sources
+            .scanner
+            .listed()
+            .ok()
+            .map(|paths| paths.iter().map(|p| canonical(p)).collect());
         let mut rescanned = false;
         for run in runs {
             let Some(path) = run.worktree_path.clone() else {
@@ -475,10 +482,9 @@ impl Reconciler {
                 continue;
             }
             let pane_closed = self.run_pane_closed(&run);
-            let listed_here = listed.as_ref().is_some_and(|l| {
-                l.iter()
-                    .any(|p| p.as_os_str() == Path::new(&path).as_os_str())
-            });
+            let listed_here = listed
+                .as_ref()
+                .is_some_and(|l| l.contains(&canonical(Path::new(&path))));
             if scan.provably_clean() && listed_here && pane_closed {
                 // The reading `run.clean` checks is the cache row, which must
                 // be newer than the run's end: scan now when this pass has
@@ -487,10 +493,12 @@ impl Reconciler {
                     self.scan_worktrees(now)?;
                     rescanned = true;
                 }
+                let holder = lease_holder(self.conn(), &run)?;
                 match self.store.run_clean(&self.ctx(now), &run.id, true) {
                     Ok(applied) if !applied.replayed => {
                         report.repair(format!("R15 run {} worktree {path} returned: ended, clean, nothing unlanded, pane closed", run.id));
-                        if let Err(error) = self.sources.scanner.release(Path::new(&path)) {
+                        if let Err(error) = self.sources.scanner.release(Path::new(&path), &holder)
+                        {
                             report.error(&format!("treehouse return of {path}"), &error);
                         }
                     }

@@ -1,10 +1,10 @@
 //! `recovery.md` section 6: no automatic repair removes unlanded work.
 //!
-//! Every combination of run state, scan result, pane state and treehouse
+//! Every combination of run state, scan result, pane state and worktree
 //! listing is run through passes against the fakes (the whole space, not a
 //! sample), and `run.clean` must happen exactly when the five positive facts
 //! hold: run ended, scanned in this pass, `unlanded_commits = 0`, `dirty = 0`,
-//! treehouse lists it, and the pane's agent is dead or the pane is closed.
+//! the worktree list shows it, and the pane's agent is dead or the pane is closed.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;

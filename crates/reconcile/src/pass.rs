@@ -507,8 +507,9 @@ impl Reconciler {
             }
         }
         if let Ok(listed) = self.sources.scanner.listed() {
+            let known: Vec<PathBuf> = paths.iter().map(|(p, _, _)| canonical(p)).collect();
             for path in listed {
-                if !paths.iter().any(|(p, _, _)| *p == path) {
+                if !known.contains(&canonical(&path)) {
                     paths.push((path, None, None));
                 }
             }
@@ -577,6 +578,12 @@ impl Reconciler {
     pub(crate) fn json_text(value: Value) -> Option<String> {
         Some(value.to_string())
     }
+}
+
+/// Where `path` leads once every symlink is followed, or `path` itself
+/// when it cannot be resolved (it is gone, say).
+pub(crate) fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned())
 }
 
 /// The age of `at` in whole minutes at `now`.

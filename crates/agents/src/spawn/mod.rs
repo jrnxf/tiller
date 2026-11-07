@@ -51,7 +51,9 @@ use tiller_core::domain::{
 use tiller_core::state::caches::{WorktreeReading, landed_heads};
 use tiller_core::state::projects::meta;
 use tiller_core::state::publishes::published_head;
-use tiller_core::state::runs::{EndRun, NewRun, Placement, SpawnChecks, Started, live_session};
+use tiller_core::state::runs::{
+    EndRun, NewRun, Placement, SpawnChecks, Started, holder, lease_holder, live_session,
+};
 use tiller_core::state::{find, get, list, resolve_card};
 use tiller_core::{Applied, Ctx, Store};
 use tiller_herdr::client::{Herdr, HerdrError};
@@ -257,22 +259,6 @@ pub fn agent_name(display_id: &str, role: RunRole, attempt: i64) -> String {
 /// collides with an earlier attempt's branch.
 pub fn branch_name(display_id: &str, role: RunRole, attempt: i64) -> String {
     format!("tiller/{}", agent_name(display_id, role, attempt))
-}
-
-/// The treehouse lease holder of a run.
-fn holder(run: &Run) -> String {
-    format!("tiller:{}", run.id)
-}
-
-/// The lease holder of the worktree a run works in: the run that took it
-/// from the pool. A promotion or a new attempt continues in its
-/// predecessor's worktree, so the chain's first run holds the lease.
-fn lease_holder(store: &Store, run: &Run) -> Result<String> {
-    let mut root = run.clone();
-    while let Some(id) = root.predecessor_run_id.clone() {
-        root = get(store.conn(), "run", &id)?;
-    }
-    Ok(holder(&root))
 }
 
 pub(crate) fn role_of(role: RunRole) -> Result<roles::Role> {
@@ -946,7 +932,7 @@ pub fn cleanup(
             replayed: false,
         });
     };
-    let lease = lease_holder(store, &run)?;
+    let lease = lease_holder(store.conn(), &run)?;
     let project = project_of(store, &run)?;
     let (scan, mut events) =
         scan_and_record(store, ctx, world.scanner, &run, &project, Path::new(&path))?;

@@ -74,13 +74,24 @@ impl AgentProbe for FakeProbe {
 pub struct FakeScanner {
     scans: Arc<Mutex<HashMap<PathBuf, WorktreeScan>>>,
     listed: Arc<Mutex<Option<Vec<PathBuf>>>>,
-    released: Arc<Mutex<Vec<PathBuf>>>,
+    released: Arc<Mutex<Vec<(PathBuf, String)>>>,
 }
 
 impl FakeScanner {
     /// Paths returned to the pool, in order.
     pub fn released(&self) -> Vec<PathBuf> {
-        lock(&self.released).clone()
+        lock(&self.released)
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+
+    /// The lease holder each return named, in order.
+    pub fn release_holders(&self) -> Vec<String> {
+        lock(&self.released)
+            .iter()
+            .map(|(_, holder)| holder.clone())
+            .collect()
     }
 
     pub fn set(&self, scan: WorktreeScan) {
@@ -111,7 +122,7 @@ impl FakeScanner {
         lock(&self.scans).remove(Path::new(path));
     }
 
-    /// What treehouse lists; `None` makes the list unreadable.
+    /// What the worktree list shows; `None` makes the list unreadable.
     pub fn list(&self, paths: Option<Vec<&str>>) {
         *lock(&self.listed) = paths.map(|p| p.into_iter().map(PathBuf::from).collect());
     }
@@ -146,12 +157,12 @@ impl Scanner for FakeScanner {
 
     /// The pool takes the worktree back: the path is gone from the next
     /// scan and from the list.
-    fn release(&self, path: &Path) -> Result<(), String> {
+    fn release(&self, path: &Path, holder: &str) -> Result<(), String> {
         lock(&self.scans).remove(path);
         if let Some(listed) = lock(&self.listed).as_mut() {
             listed.retain(|p| p != path);
         }
-        lock(&self.released).push(path.to_owned());
+        lock(&self.released).push((path.to_owned(), holder.to_owned()));
         Ok(())
     }
 }
