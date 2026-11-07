@@ -1,3 +1,4 @@
+import { Tooltip } from "@base-ui/react/tooltip";
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Component, Suspense, useEffect } from "react";
@@ -37,12 +38,12 @@ const COLUMN_MARK = {
   done: "done",
 } as const;
 
-// Width of the folded Done column: the same 52 px the mocks use.
+// Width of a folded column, an empty one or Done folded by hand: the same
+// 52 px the mocks use.
 const MINI_WIDTH = 52;
-// Every other column keeps a readable width, empty or not, so the lanes a card
-// can move between stay visible. The cap keeps a lone card from filling the board.
+// Every column with cards shares the board's width, down to a readable width:
+// below it the board scrolls sideways instead of squeezing the cards.
 const FULL_WIDTH = 168;
-const MAX_WIDTH = 264;
 const GAP = 8;
 
 export function EmptyScope({ host, what }: { host: string | undefined; what: "cards" | "agents" }) {
@@ -190,10 +191,13 @@ function Board({ host, filter }: { host: string | undefined; filter: BoardFilter
 
   const inColumn = (id: ColumnId) => shown.filter((tile) => tile.column === id).length;
   const counts = COLUMNS.map((column) => inColumn(column.id));
+  // An empty column folds to its icon, unless no column has a card: then
+  // every column keeps its width rather than all of them folding.
+  const empty = (index: number) => shown.length > 0 && counts[index] === 0;
   const folded = (index: number) =>
-    COLUMNS[index]?.id === "done" && look.doneFolded && (counts[index] ?? 0) > 0;
+    empty(index) || (COLUMNS[index]?.id === "done" && look.doneFolded && (counts[index] ?? 0) > 0);
   const widths = COLUMNS.map((_, index) =>
-    folded(index) ? `${MINI_WIDTH}px` : `minmax(${FULL_WIDTH}px,${MAX_WIDTH}px)`,
+    folded(index) ? `${MINI_WIDTH}px` : `minmax(${FULL_WIDTH}px,1fr)`,
   ).join(" ");
   const full = COLUMNS.filter((_, index) => !folded(index)).length;
   const minWidth =
@@ -216,6 +220,30 @@ function Board({ host, filter }: { host: string | undefined; filter: BoardFilter
         <div className="bhead">
           {COLUMNS.map((column, index) => {
             const isDone = column.id === "done";
+            if (empty(index)) {
+              const label = `${column.name} ${counts[index]}`;
+              return (
+                <div key={column.id} className="colh mini" data-empty="true">
+                  <Tooltip.Root>
+                    <Tooltip.Trigger
+                      delay={250}
+                      render={
+                        <span className="colh-t" role="img" tabIndex={0} aria-label={label} />
+                      }
+                    >
+                      <Status mark={COLUMN_MARK[column.id]} />
+                    </Tooltip.Trigger>
+                    <Tooltip.Portal>
+                      <Tooltip.Positioner className="colh-tip-pos" side="bottom" sideOffset={6}>
+                        <Tooltip.Popup className="colh-tip">
+                          <b>{column.name}</b> {counts[index]}
+                        </Tooltip.Popup>
+                      </Tooltip.Positioner>
+                    </Tooltip.Portal>
+                  </Tooltip.Root>
+                </div>
+              );
+            }
             if (isDone && folded(index)) {
               return (
                 <button
