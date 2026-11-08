@@ -15,6 +15,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use axum::body::{Body, Bytes};
 use serde_json::Value;
 use tiller_core::domain::PeerScope;
 use tiller_core::state::peers::{KeyFile, key_path, read_key_file};
@@ -27,6 +28,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 
 use super::forward::{Mutate, Order};
+use super::pane::{PaneKind, PaneOpen};
 use super::{Federation, Frame, Hello, HelloKey, PeerView, Timing, peer_alias, stale_reason};
 use crate::dto::{LinkEvent, LinkHealth, LinkState, PeerEvent, PeerResetEvent};
 use crate::readonly::Damage;
@@ -76,11 +78,167 @@ pub enum Forwarded {
     Answered(u16, Value),
 }
 
+/// How a pane link opened (`protocol.md` 10.7).
+pub enum Paned {
+    /// Not dialed or no answer in time: the link is not live, or the peer
+    /// would not take a second session.
+    Unreachable,
+    /// The peer answered with a `result` instead of a stream: the scrollback,
+    /// or a refusal with the status and body its own board API gives.
+    Answered(u16, Value),
+    /// The pane's mirror stream, its first line already read.
+    Stream(Box<PaneStream>),
+}
+
+/// An open pane link. Dropping it closes the peer's stdin, which ends the
+/// stream there, and kills the SSH child.
+pub struct PaneStream {
+    first: String,
+    lines: tokio::io::Lines<Box<dyn AsyncBufRead + Send + Unpin>>,
+    _writer: Box<dyn AsyncWrite + Send + Unpin>,
+    _child: Option<Child>,
+}
+
+/// Lines waiting for a browser before its stream is dropped, as the local
+/// mirror holds them.
+const PANE_QUEUE: usize = 64;
+
+impl PaneStream {
+    /// The stream as the browser's NDJSON body, line for line as the peer
+    /// sent them. It ends when the browser leaves, the peer closes, `stop`
+    /// turns true or the browser falls a whole queue behind; a link that
+    /// ends is followed by an `unavailable` line, so the browser
+    /// opens again and learns whether the peer is still there.
+    pub fn relay(
+        self,
+        label: String,
+        stop: watch::Receiver<bool>,
+        viewer: crate::mirror::Viewer,
+    ) -> Body {
+        let (tx, mut rx) = mpsc::channel::<Bytes>(PANE_QUEUE);
+        tokio::spawn(async move {
+            let _viewer = viewer;
+            let PaneStream {
+                first,
+                mut lines,
+                _writer,
+                _child,
+            } = self;
+            let mut stop = stop;
+            let queue = |line: String| {
+                let mut bytes = line.into_bytes();
+                bytes.push(b'\n');
+                tx.try_send(Bytes::from(bytes)).is_ok()
+            };
+            if !queue(first) {
+                return;
+            }
+            loop {
+                tokio::select! {
+                    line = lines.next_line() => match line {
+                        Ok(Some(line)) => {
+                            if !queue(line) {
+                                return;
+                            }
+                        }
+                        Ok(None) | Err(_) => {
+                            let ended = crate::dto::TerminalLine::Unavailable {
+                                message: format!("the link to {label} ended"),
+                            };
+                            if let Ok(line) = serde_json::to_string(&ended) {
+                                queue(line);
+                            }
+                            return;
+                        }
+                    },
+                    _ = stop.wait_for(|stop| *stop) => return,
+                    () = tx.closed() => return,
+                }
+            }
+        });
+        Body::from_stream(futures_util::stream::poll_fn(move |cx| {
+            rx.poll_recv(cx)
+                .map(|line| line.map(Ok::<_, std::convert::Infallible>))
+        }))
+    }
+}
+
+async fn dial_pane(
+    connector: &dyn Connector,
+    pairing: &Pairing,
+    session: &str,
+    kind: PaneKind,
+    lines: Option<u16>,
+) -> std::io::Result<Paned> {
+    let key_file = pairing
+        .key
+        .as_ref()
+        .map_err(|e| std::io::Error::other(e.clone()))?;
+    let (Some(key_id), Ok(signing)) = (&key_file.key_id, key_file.signing_key()) else {
+        return Err(std::io::Error::other("the key file has no accepted key"));
+    };
+    let signer = HelloKey {
+        key: &signing,
+        from: &pairing.local_label,
+        key_id,
+        viewer_host_id: &pairing.local_host_id,
+    };
+    let target = Target {
+        label: pairing.label.clone(),
+        alias: pairing.alias.clone(),
+        from: pairing.local_label.clone(),
+    };
+    let Connection {
+        reader,
+        mut writer,
+        child,
+    } = connector.connect_pane(&target).await?;
+    let open = PaneOpen::signed(
+        &signer,
+        &pairing.peer_host_id,
+        session,
+        kind,
+        lines,
+        Timestamp::now(),
+    );
+    write_frame(&mut writer, &Frame::PaneOpen(Box::new(open))).await?;
+    let mut lines = reader.lines();
+    let Some(first) = lines.next_line().await? else {
+        return Err(std::io::Error::other("the peer closed the pane link"));
+    };
+    match serde_json::from_str::<Frame>(&first) {
+        Ok(Frame::Result {
+            http_status, body, ..
+        }) => Ok(Paned::Answered(http_status, body)),
+        Ok(Frame::Refused { reason, message }) => Ok(Paned::Answered(
+            502,
+            serde_json::json!({
+                "ok": false,
+                "error": {
+                    "code": "peer_refused",
+                    "reason": reason,
+                    "message": message.unwrap_or_else(|| reason.clone()),
+                },
+            }),
+        )),
+        _ => Ok(Paned::Stream(Box::new(PaneStream {
+            first,
+            lines,
+            _writer: writer,
+            _child: child,
+        }))),
+    }
+}
+
 /// Every paired peer's link, shared by the read handlers and SSE streams.
 pub struct Peers {
     /// By the peer's `hosts` row id here.
     views: Mutex<BTreeMap<String, PeerView>>,
     queries: Mutex<HashMap<String, mpsc::Sender<Request>>>,
+    /// What a pane link dials with, by the peer's `hosts` row id.
+    pairings: Mutex<HashMap<String, Pairing>>,
+    /// Opens the pane links; none for [`Peers::idle`].
+    connector: Option<Arc<dyn Connector>>,
     tx: broadcast::Sender<PeerMessage>,
     timing: Timing,
     /// A damaged `state.db` is never written, not even a link state
@@ -89,10 +247,12 @@ pub struct Peers {
 }
 
 impl Peers {
-    fn new(timing: Timing, damage: Damage) -> Self {
+    fn new(timing: Timing, damage: Damage, connector: Option<Arc<dyn Connector>>) -> Self {
         Self {
             views: Mutex::default(),
             queries: Mutex::default(),
+            pairings: Mutex::default(),
+            connector,
             tx: broadcast::channel(256).0,
             timing,
             damage,
@@ -101,7 +261,7 @@ impl Peers {
 
     /// No links at all, for tests.
     pub fn idle() -> Arc<Self> {
-        Arc::new(Self::new(Timing::default(), Damage::default()))
+        Arc::new(Self::new(Timing::default(), Damage::default(), None))
     }
 
     /// Starts the supervisor: it re-reads which hosts are paired every
@@ -115,7 +275,7 @@ impl Peers {
         damage: Damage,
         stop: watch::Receiver<bool>,
     ) -> Arc<Self> {
-        let peers = Arc::new(Self::new(timing, damage));
+        let peers = Arc::new(Self::new(timing, damage, Some(connector.clone())));
         tokio::spawn(supervise(peers.clone(), home, connector, stop));
         peers
     }
@@ -176,6 +336,41 @@ impl Peers {
         }
     }
 
+    /// Opens a pane link to a peer whose link is live (`protocol.md`
+    /// 10.7): dials a second session, sends one signed request and reads
+    /// its first line. The pane's stream, or the `result` the peer answered
+    /// in its place.
+    pub async fn open_pane(
+        &self,
+        host_id: &str,
+        session: &str,
+        kind: PaneKind,
+        lines: Option<u16>,
+    ) -> Paned {
+        let live = self
+            .lock_views()
+            .get(host_id)
+            .is_some_and(|view| view.link == LinkState::Live);
+        let pairing = self
+            .pairings
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(host_id)
+            .cloned();
+        let (true, Some(pairing), Some(connector)) = (live, pairing, self.connector.clone()) else {
+            return Paned::Unreachable;
+        };
+        let dial = dial_pane(&*connector, &pairing, session, kind, lines);
+        match timeout(self.timing.query, dial).await {
+            Ok(Ok(paned)) => paned,
+            Ok(Err(error)) => {
+                tracing::warn!(peer = %pairing.label, %error, "pane link failed");
+                Paned::Unreachable
+            }
+            Err(_) => Paned::Unreachable,
+        }
+    }
+
     /// A live link's request channel.
     fn sender(&self, host_id: &str) -> Option<mpsc::Sender<Request>> {
         let live = self
@@ -219,6 +414,10 @@ impl Peers {
             .collect()
     }
 
+    fn lock_pairings(&self) -> std::sync::MutexGuard<'_, HashMap<String, Pairing>> {
+        self.pairings.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn lock_views(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, PeerView>> {
         self.views.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -260,6 +459,12 @@ pub type Connecting = Pin<Box<dyn Future<Output = std::io::Result<Connection>> +
 /// Opens links. The daemon's is [`SshConnector`]; tests connect in memory.
 pub trait Connector: Send + Sync {
     fn connect(&self, target: &Target) -> Connecting;
+
+    /// Opens a pane link (`tiller peer pane`); a connector that has none
+    /// refuses it.
+    fn connect_pane(&self, _target: &Target) -> Connecting {
+        Box::pin(async { Err(std::io::Error::other("this connector has no pane links")) })
+    }
 }
 
 /// `ssh -T -o BatchMode=yes -o ServerAliveInterval=15 -o
@@ -271,6 +476,15 @@ pub struct SshConnector {
 
 impl SshConnector {
     pub fn args(target: &Target) -> Vec<String> {
+        Self::command(target, "serve")
+    }
+
+    /// The same session for `tiller peer pane`.
+    pub fn pane_args(target: &Target) -> Vec<String> {
+        Self::command(target, "pane")
+    }
+
+    fn command(target: &Target, subcommand: &str) -> Vec<String> {
         [
             "-T",
             "-o",
@@ -282,19 +496,16 @@ impl SshConnector {
             &target.alias,
             "tiller",
             "peer",
-            "serve",
+            subcommand,
             "--from",
             &target.from,
         ]
         .map(str::to_owned)
         .to_vec()
     }
-}
 
-impl Connector for SshConnector {
-    fn connect(&self, target: &Target) -> Connecting {
+    fn dial(&self, args: Vec<String>) -> Connecting {
         let program = self.program.clone();
-        let args = Self::args(target);
         Box::pin(async move {
             let Some((ssh, leading)) = program.split_first() else {
                 return Err(std::io::Error::other("no ssh program"));
@@ -316,6 +527,16 @@ impl Connector for SshConnector {
                 child: Some(child),
             })
         })
+    }
+}
+
+impl Connector for SshConnector {
+    fn connect(&self, target: &Target) -> Connecting {
+        self.dial(Self::args(target))
+    }
+
+    fn connect_pane(&self, target: &Target) -> Connecting {
+        self.dial(Self::pane_args(target))
     }
 }
 
@@ -427,6 +648,7 @@ async fn supervise(
                         task.abort();
                         let _ = task.await;
                         peers.lock_views().remove(&host_id);
+                        peers.lock_pairings().remove(&host_id);
                     }
                 }
                 for pairing in wanted {
@@ -442,6 +664,9 @@ async fn supervise(
                             pairing.scope,
                         ),
                     );
+                    peers
+                        .lock_pairings()
+                        .insert(pairing.host_id.clone(), pairing.clone());
                     let task = tokio::spawn(run_link(
                         peers.clone(),
                         pairing.clone(),

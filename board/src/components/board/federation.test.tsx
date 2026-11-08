@@ -340,7 +340,7 @@ test("an option that changes a peer's project is picked on that host's board", a
   expect(posted[0]?.body).toMatchObject({ answer: "Keep 2", host: "host-d" });
 });
 
-test("the Agents screen shows the host of every agent, and a peer's pane cannot be opened from here", async () => {
+test("the Agents screen shows the host of every agent, and a peer's pane is watched here and opened in herdr only on its host", async () => {
   stubApi("federated");
   const agents = (fixtureSnapshot("federated").queries[agentsPath()] as AgentsResponse)
     .orchestrators;
@@ -351,9 +351,7 @@ test("the Agents screen shows the host of every agent, and a peer's pane cannot 
     (await screen.findAllByTestId("host-chip")).map((chip) => chip.textContent),
   );
   expect(hosts).toEqual(new Set(["host-a", "host-d", "host-e", "host-f"]));
-  const detail = document.querySelector<HTMLElement>(".av-acts");
-  if (!detail) throw new Error("no agent on the stage");
-  const open = within(detail).getByRole("button", { name: /Open in herdr/ }) as HTMLButtonElement;
+  const open = (await screen.findByRole("button", { name: /Open in herdr/ })) as HTMLButtonElement;
   expect(open.disabled).toBe(true);
   expect(open.title).toBe("host-d owns this pane: open it from that host");
 });

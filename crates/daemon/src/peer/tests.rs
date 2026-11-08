@@ -28,9 +28,12 @@ use tokio::time::Instant;
 
 use super::forward::{Mutate, Op, Order};
 use super::link::{Connecting, Connection, Connector, PeerMessage, Peers, Target};
+use super::pane::{self, PaneKind, PaneOpen};
 use super::serve::{ServeConfig, own_snapshot, serve};
 use super::{Frame, Hello, HelloKey, Timing, Welcome};
-use crate::api::tests::{Answer, app_with_peers, get, mutation, owner_cookie, send};
+use crate::api::tests::{
+    Answer, app_with_peers, get, mirror_herdr, mutation, next_line, owner_cookie, send,
+};
 use crate::api::{OrchestratorStart, StartError};
 use crate::dto::{BoardResponse, ErrorBody, ErrorDetail, LinkState, MutationResponse};
 use crate::readonly::Damage;
@@ -1674,4 +1677,407 @@ fn foreign_project_ask_and_start_refused() {
         let frame = Mutate::signed(&signer(&pair), &pair.peer.host, order, Timestamp::now());
         assert_refused(&pair, link.mutate(frame), "foreign_project", before);
     }
+}
+
+// -- watching a peer's pane (`protocol.md` 10.7) --------------------------------------
+
+/// `peer serve` over a socket pair for the link, and `peer pane` over an
+/// in-memory pipe for each watch, on a peer whose herdr is [`mirror_herdr`].
+struct PaneWire {
+    home: PathBuf,
+    herdr: tiller_herdr::client::Cli,
+    /// Pane links dialed.
+    dialed: Arc<AtomicUsize>,
+}
+
+impl Connector for PaneWire {
+    fn connect(&self, target: &Target) -> Connecting {
+        Wire::new(&self.home).connect(target)
+    }
+
+    fn connect_pane(&self, target: &Target) -> Connecting {
+        self.dialed.fetch_add(1, Ordering::SeqCst);
+        let config = ServeConfig {
+            home: self.home.clone(),
+            from: target.from.clone(),
+            timing: quick(),
+            herdr: Some(self.herdr.clone()),
+            orchestrators: None,
+        };
+        let (board_out, peer_in) = tokio::io::duplex(1 << 20);
+        let (peer_out, board_in) = tokio::io::duplex(1 << 20);
+        tokio::spawn(async move {
+            let _ = pane::serve(&config, tokio::io::BufReader::new(peer_in), peer_out).await;
+        });
+        Box::pin(async move {
+            Ok(Connection {
+                reader: Box::new(tokio::io::BufReader::new(board_in)),
+                writer: Box::new(board_out),
+                child: None,
+            })
+        })
+    }
+}
+
+/// A paired board and peer with an agent in pane `w2:p1` on the peer, and
+/// the board's app over live links. Returns the peer's session id.
+async fn watching(
+    scratch: &Path,
+) -> (
+    Pair,
+    String,
+    Router,
+    String,
+    Arc<AtomicUsize>,
+    watch::Sender<bool>,
+) {
+    let mut pair = pair();
+    let session = pair.peer.worker("w2:p1");
+    let dialed = Arc::new(AtomicUsize::new(0));
+    let wire = PaneWire {
+        home: pair.peer.dir.path().to_owned(),
+        herdr: mirror_herdr(scratch),
+        dialed: dialed.clone(),
+    };
+    let (peers, stop) = start(pair.board.dir.path(), wire);
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers);
+    (pair, session, app, cookie, dialed, stop)
+}
+
+fn pane_path(session: &str, tail: &str) -> String {
+    format!("/api/v1/agents/{session}/{tail}")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_pane_streams_to_the_board_read_only() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (_pair, session, app, cookie, dialed, _stop) = watching(scratch.path()).await;
+    let response = tower::ServiceExt::oneshot(
+        app.clone(),
+        mutation(
+            "POST",
+            &pane_path(&session, "terminal"),
+            json!({"host": "peer"}),
+            &[("cookie", cookie.as_str())],
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    let mut pending = String::new();
+    assert_eq!(next_line(&mut body, &mut pending).await["type"], "size");
+    assert_eq!(next_line(&mut body, &mut pending).await["full"], true);
+    assert_eq!(dialed.load(Ordering::SeqCst), 1);
+    // The peer only observed: it never sent a key or text to the pane.
+    let calls = std::fs::read_to_string(scratch.path().join("calls")).unwrap();
+    assert!(calls.contains("terminal session observe"), "{calls}");
+    assert!(
+        !calls.contains("send-keys") && !calls.contains("send-text"),
+        "{calls}"
+    );
+    assert!(!scratch.path().join("controllers").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_pane_history_comes_from_the_peer() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (_pair, session, app, cookie, _dialed, _stop) = watching(scratch.path()).await;
+    let answer = send(
+        &app,
+        mutation(
+            "POST",
+            &pane_path(&session, "terminal/history"),
+            json!({"host": "peer", "lines": 50}),
+            &[("cookie", cookie.as_str())],
+        ),
+    )
+    .await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    let body: Value = serde_json::from_str(&answer.body).unwrap();
+    assert_eq!(body["session_id"], session);
+    assert_eq!(body["text"], "one\n\u{1b}[34mtwo\u{1b}[0m\n");
+    let calls = std::fs::read_to_string(scratch.path().join("calls")).unwrap();
+    assert!(
+        calls.contains("pane read w2:p1 --source recent --lines 50"),
+        "{calls}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_pane_cannot_be_typed_into() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (_pair, session, app, cookie, dialed, _stop) = watching(scratch.path()).await;
+    let owner = [("cookie", cookie.as_str())];
+    let refused = [
+        (
+            "terminal/input",
+            json!({"host": "peer", "keys": ["ctrl+c"]}),
+        ),
+        (
+            "terminal/input",
+            json!({"host": "peer", "text": "rm -rf x"}),
+        ),
+        (
+            "terminal/fit",
+            json!({"host": "peer", "cols": 100, "rows": 30}),
+        ),
+        (
+            "terminal",
+            json!({"host": "peer", "fit": {"cols": 100, "rows": 30}}),
+        ),
+        ("terminal/tail", json!({"host": "peer"})),
+        ("prompt", json!({"host": "peer"})),
+        (
+            "prompt/answer",
+            json!({"host": "peer", "option": 1, "screen": "x"}),
+        ),
+    ];
+    for (tail, body) in refused {
+        let answer = send(
+            &app,
+            mutation("POST", &pane_path(&session, tail), body, &owner),
+        )
+        .await;
+        let error = refusal(&answer, StatusCode::BAD_GATEWAY);
+        assert_eq!(error.code, "peer_refused", "{tail}: {}", answer.body);
+        assert!(
+            error.message.contains("watch only") || error.message.contains("not forwarded"),
+            "{tail}: {}",
+            answer.body
+        );
+    }
+    // No pane link opened and nothing reached the peer's herdr.
+    assert_eq!(dialed.load(Ordering::SeqCst), 0);
+    assert!(!scratch.path().join("calls").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_pane_needs_the_owner_cookie() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (_pair, session, app, _cookie, dialed, _stop) = watching(scratch.path()).await;
+    for tail in ["terminal", "terminal/history"] {
+        for headers in [vec![], vec![("cookie", "tiller_owner=forged")]] {
+            let answer = send(
+                &app,
+                mutation(
+                    "POST",
+                    &pane_path(&session, tail),
+                    json!({"host": "peer"}),
+                    &headers,
+                ),
+            )
+            .await;
+            assert_eq!(
+                answer.status,
+                StatusCode::FORBIDDEN,
+                "{tail}: {}",
+                answer.body
+            );
+        }
+    }
+    assert_eq!(
+        dialed.load(Ordering::SeqCst),
+        0,
+        "a pane link opened unauthenticated"
+    );
+    assert!(!scratch.path().join("calls").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_pane_on_a_down_link_says_unreachable() {
+    let scratch = tempfile::tempdir().unwrap();
+    let pair = {
+        let mut pair = pair();
+        pair.peer.worker("w2:p1");
+        pair
+    };
+    let up = Arc::new(AtomicBool::new(false));
+    let (peers, _stop) = start(
+        pair.board.dir.path(),
+        Switch {
+            home: pair.peer.dir.path().to_owned(),
+            up,
+        },
+    );
+    let _ = scratch;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers);
+    for tail in ["terminal", "terminal/history"] {
+        let answer = send(
+            &app,
+            mutation(
+                "POST",
+                &pane_path("anything", tail),
+                json!({"host": "peer"}),
+                &[("cookie", cookie.as_str())],
+            ),
+        )
+        .await;
+        let error = refusal(&answer, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "peer_unreachable", "{tail}");
+        assert_eq!(error.host.as_deref(), Some("peer"));
+    }
+}
+
+/// Opens a pane link on the peer's `pane::serve` with `open` and returns
+/// the peer's lines, then the peer's end of herdr's calls.
+async fn open_pane(pair: &Pair, scratch: &Path, open: PaneOpen, extra: &str) -> Vec<String> {
+    let config = ServeConfig {
+        home: pair.peer.dir.path().to_owned(),
+        from: "test-host".into(),
+        timing: quick(),
+        herdr: Some(mirror_herdr(scratch)),
+        orchestrators: None,
+    };
+    let (mut board_out, peer_in) = tokio::io::duplex(1 << 16);
+    let (peer_out, board_in) = tokio::io::duplex(1 << 16);
+    let serving = tokio::spawn(async move {
+        let _ = pane::serve(&config, tokio::io::BufReader::new(peer_in), peer_out).await;
+    });
+    let line = Frame::PaneOpen(Box::new(open)).line().unwrap();
+    board_out.write_all(line.as_bytes()).await.unwrap();
+    board_out.write_all(extra.as_bytes()).await.unwrap();
+    let mut lines = tokio::io::BufReader::new(board_in).lines();
+    let first = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .into_iter()
+        .collect::<Vec<_>>();
+    drop(board_out);
+    let _ = tokio::time::timeout(Duration::from_secs(10), serving).await;
+    first
+}
+
+fn pane_open(pair: &Pair, session: &str, kind: PaneKind) -> PaneOpen {
+    PaneOpen::signed(
+        &signer(pair),
+        &pair.peer.host,
+        session,
+        kind,
+        Some(10),
+        Timestamp::now(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pane_link_refuses_what_the_peer_would_refuse() {
+    let mut pair = pair();
+    let session = pair.peer.worker("w2:p1");
+    let scratch = tempfile::tempdir().unwrap();
+    let refused = |lines: &[String], reason: &str| {
+        let frame: Frame = serde_json::from_str(&lines[0]).unwrap();
+        match frame {
+            Frame::Refused { reason: got, .. } => assert_eq!(got, reason),
+            other => panic!("expected refused {reason}, got {other:?}"),
+        }
+    };
+
+    // A signature over other fields.
+    let mut forged = pane_open(&pair, &session, PaneKind::Stream);
+    forged.session = "another".into();
+    let lines = open_pane(&pair, scratch.path(), forged, "").await;
+    refused(&lines, "bad_sig");
+
+    // A request meant for another host.
+    let mut elsewhere = pane_open(&pair, &session, PaneKind::Stream);
+    elsewhere.peer_host_id = "h-other".into();
+    let stranger = generate_key().unwrap();
+    elsewhere.sign(&stranger);
+    let lines = open_pane(&pair, scratch.path(), elsewhere, "").await;
+    assert!(matches!(
+        serde_json::from_str::<Frame>(&lines[0]).unwrap(),
+        Frame::Refused { .. }
+    ));
+
+    // A revoked key.
+    pair.peer
+        .open()
+        .conn()
+        .execute(
+            "UPDATE peer_keys SET revoked_at = ?1",
+            [Timestamp::now().to_string()],
+        )
+        .unwrap();
+    let lines = open_pane(
+        &pair,
+        scratch.path(),
+        pane_open(&pair, &session, PaneKind::Stream),
+        "",
+    )
+    .await;
+    assert!(matches!(
+        serde_json::from_str::<Frame>(&lines[0]).unwrap(),
+        Frame::Refused { .. }
+    ));
+    assert!(
+        !scratch.path().join("calls").exists(),
+        "a refused link reached herdr"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pane_link_has_no_way_to_type() {
+    let mut pair = pair();
+    let session = pair.peer.worker("w2:p1");
+    let scratch = tempfile::tempdir().unwrap();
+    // After the open, the board host sends a mutate and keys: the link reads
+    // none of it as input.
+    let card = {
+        add_card(&pair.peer, "a peer card");
+        card_id(&pair.peer, "a peer card")
+    };
+    let before = last_seq(&pair.peer);
+    let extra = Frame::Mutate(Box::new(comment(&pair, &card, "k-1")))
+        .line()
+        .unwrap()
+        + "{\"type\":\"keys\",\"keys\":[\"ctrl+c\"]}\n";
+    let lines = open_pane(
+        &pair,
+        scratch.path(),
+        pane_open(&pair, &session, PaneKind::Stream),
+        &extra,
+    )
+    .await;
+    assert!(lines[0].contains(r#""type":"size""#), "{lines:?}");
+    let calls = std::fs::read_to_string(scratch.path().join("calls")).unwrap();
+    assert!(
+        !calls.contains("send-keys") && !calls.contains("send-text"),
+        "{calls}"
+    );
+    assert!(!scratch.path().join("controllers").exists());
+    assert_eq!(
+        last_seq(&pair.peer),
+        before,
+        "a pane link wrote to the peer"
+    );
+}
+
+#[test]
+fn a_pane_link_refuses_an_open_in_place_of_the_first_frame() {
+    // Any first frame but `pane_open` gets no answer and no herdr call.
+    let pair = pair();
+    let scratch = tempfile::tempdir().unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let config = ServeConfig {
+        home: pair.peer.dir.path().to_owned(),
+        from: "test-host".into(),
+        timing: quick(),
+        herdr: Some(mirror_herdr(scratch.path())),
+        orchestrators: None,
+    };
+    let hello = hello(&pair, None).line().unwrap();
+    let mut output = Vec::new();
+    runtime
+        .block_on(pane::serve(
+            &config,
+            tokio::io::BufReader::new(std::io::Cursor::new(hello)),
+            &mut output,
+        ))
+        .unwrap();
+    assert!(output.is_empty());
+    assert!(!scratch.path().join("calls").exists());
 }

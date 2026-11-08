@@ -26,7 +26,7 @@ import { AnswerStrip } from "./answer-strip";
 import { EmptyScope } from "./board-view";
 import { formatAge, formatLisbonMoment } from "./format";
 import { focusCommand, focusTooltip, isTyping, useHerdrFocus, useOpenKey } from "./herdr";
-import { ChevronLeftIcon, InfoIcon, LockIcon, PaneIcon } from "./icons";
+import { ChevronLeftIcon, InfoIcon, PaneIcon } from "./icons";
 import { LiveTerminal, usePhone } from "./live-terminal";
 import type { SwitchKey, TerminalControl } from "./live-terminal";
 import { AsOf, HostChip, PeerNote } from "./host-chip";
@@ -516,6 +516,7 @@ function Stage({
   const standing = useStanding(agent);
   const ambiguous = useAmbiguousIds();
   const off = focusReason(ownerOf(agent));
+  const peerHost = ownerOf(agent);
   const activity = hostAwareActivity(agent, host);
   const needs = activity.dot === "waiting";
   const remote = host?.kind === "remote";
@@ -530,17 +531,7 @@ function Stage({
       {host ? <span className="meta">{host.label}</span> : null}
     </span>
   );
-  const body = off ? (
-    <div className="av-body-note">
-      <div className="mir-msg">
-        <LockIcon />
-        <div>
-          <b>The terminal is on {agent.host}</b>
-          {off}. Only the board on the machine that runs an agent mirrors its pane.
-        </div>
-      </div>
-    </div>
-  ) : (
+  const body = (
     <LiveTerminal
       key={agent.session_id}
       variant="stage"
@@ -552,8 +543,9 @@ function Stage({
       onTyping={onTyping}
       onSwitch={onSwitch}
       machine={remote ? host.label : undefined}
+      peer={peerHost}
       strip={
-        remote ? null : (
+        remote || peerHost ? null : (
           <AnswerStrip
             key={agent.session_id}
             sessionId={agent.session_id}
