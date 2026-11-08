@@ -3,14 +3,15 @@ import { Link, useSearch } from "@tanstack/react-router";
 import type { BoardRow } from "../../lib/api-types";
 import { cardDot } from "./activity";
 import type { DotKind } from "./activity";
-import { ownerOf, shownId } from "../../lib/peers";
+import { HOST_PROJECT, hostName, ownerOf, shownId } from "../../lib/peers";
 import { Ago } from "./ago";
 import { badgeText, badgeTone, isPending, statusMark } from "./badge";
 import { cardNumber } from "./format";
 import { Glide } from "./glide";
 import { AsOf, HostChip } from "./host-chip";
-import { HelpIcon, PrIcon, Status } from "./icons";
-import { useAmbiguousIds, useStanding } from "./peer-state";
+import { isTillerBug, isUntriaged } from "./bugs";
+import { HelpIcon, PrIcon, RouteIcon, Status } from "./icons";
+import { useAmbiguousIds, useHostLabel, useStanding } from "./peer-state";
 import type { Tile } from "./model";
 import type { LaneHealth } from "../states/degraded";
 
@@ -46,6 +47,20 @@ function PrChip({ number }: { number: number }) {
   );
 }
 
+// Where a routed Tiller bug came from: a project on the same host, or that
+// host's own `fleet` project.
+function FiledFrom({ row }: { row: BoardRow }) {
+  const label = useHostLabel(row);
+  const from = row.filed_from;
+  if (!from || from === row.project_id || isUntriaged(row)) return null;
+  return (
+    <div className="c-from">
+      <RouteIcon />
+      <span>from {from === HOST_PROJECT ? hostName(label) : from}</span>
+    </div>
+  );
+}
+
 // What a card's live line says when its lane cannot be trusted: the dot and
 // wording drop to the lane's state (mocks, "Board, degraded").
 function laneDot(dot: DotKind | null, lane: LaneHealth["kind"]): DotKind | null {
@@ -64,6 +79,7 @@ export function ownerSearch(row: BoardRow) {
 function CardTile({ row, lane }: { row: BoardRow; lane: LaneHealth["kind"] }) {
   const dot = laneDot(cardDot(row), lane);
   const tone = badgeTone(row);
+  const untriaged = isUntriaged(row);
   const standing = useStanding(row);
   const id = shownId(row, useAmbiguousIds());
   const owner = ownerOf(row);
@@ -100,13 +116,18 @@ function CardTile({ row, lane }: { row: BoardRow; lane: LaneHealth["kind"] }) {
       <div className="c-title">
         <span>{row.title}</span>
       </div>
+      <FiledFrom row={row} />
       <div className="c-chips">
         <HostChip entity={row} />
         {row.pr_number ? <PrChip number={row.pr_number} /> : null}
-        <span className={`lab sm ${tone}`}>
-          {dot === "unknown" ? <HelpIcon /> : null}
-          {badgeText(row)}
-        </span>
+        {untriaged ? <span className="lab sm yel">Untriaged</span> : null}
+        {isTillerBug(row) ? <span className="lab sm bad">Bug</span> : null}
+        {untriaged && row.badge === "filed" ? null : (
+          <span className={`lab sm ${tone}`}>
+            {dot === "unknown" ? <HelpIcon /> : null}
+            {badgeText(row)}
+          </span>
+        )}
       </div>
     </Link>
   );

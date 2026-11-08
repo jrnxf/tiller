@@ -702,6 +702,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/projects", get(projects).post(add_project))
         .route("/api/v1/projects/checkout", get(project_checkout))
         .route("/api/v1/peers", post(add_peer))
+        .route("/api/v1/bug-project", post(pick_bug_project))
         .route("/api/v1/contributions", get(contributions))
         .route("/api/v1/projects/{id}/stage", post(stage_project))
         .route("/api/v1/projects/{id}/asks", post(ask_note))
@@ -1513,6 +1514,7 @@ impl Mutation {
                         title: request.title,
                         body: request.body,
                         priority: request.priority,
+                        category: request.category,
                         ..NewCard::default()
                     },
                 )?;
@@ -2807,6 +2809,34 @@ fn checkout_of(home: &std::path::Path, project: &str) -> Result<Option<String>, 
         .map(str::to_owned))
 }
 
+#[utoipa::path(post, path = "/api/v1/bug-project", tag = "mutations", request_body = PickBugProject,
+    responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 409, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "`refused`: fleet, a retired project, or another host's project"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn pick_bug_project(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers)?;
+    let request: PickBugProject = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "a bug project pick").await?;
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| {
+            let host = store.local_host()?;
+            let edit = tiller_core::state::projects::HostEdit {
+                bug_project_id: Some(request.project),
+                ..Default::default()
+            };
+            Done::of(store.host_edit(ctx, &host.id, request.rev, edit)?)
+        },
+    )
+    .await
+}
+
 #[utoipa::path(post, path = "/api/v1/projects/{id}/retire", tag = "mutations", request_body = RetireProject,
     params(("id" = String, Path)),
     responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody),
@@ -3745,7 +3775,7 @@ async fn app_shell(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
         cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, stage_project, ask_note, start_orchestrator, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
-        relabel_intervention, memory::view, memory::revision,
+        pick_bug_project, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, session, login_code, logout
     ),
     components(schemas(ChangeEvent, ResetEvent, PeerEvent, LinkEvent, PeerResetEvent, TerminalLine, ErrorBody, ErrorDetail)),
@@ -7404,6 +7434,107 @@ esac"#,
         let screen = "\u{1b}[1mbold\u{1b}[0m line\n\u{1b}]0;title\u{7}second\n\n   \n";
         assert_eq!(pane_tail(screen, PANE_TAIL), vec!["bold line", "second"]);
         assert_eq!(pane_tail(screen, 1), vec!["second"]);
+    }
+
+    /// The owner picks this host's bug project on the board; a Tiller bug
+    /// then routes there, and its row and timeline say where it came from.
+    #[tokio::test]
+    async fn a_bug_project_pick_routes_tiller_bugs_and_the_board_shows_it() {
+        let mut fleet = Fleet::new();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let cookie = owner_cookie(fleet.dir.path());
+        let headers = [("cookie", cookie.as_str())];
+        let machine = |app: Router| async move {
+            let answer = get(&app, "/api/v1/machines").await;
+            let body: Value = serde_json::from_str(&answer.body).unwrap();
+            body["machines"][0].clone()
+        };
+        let pick = |key: &str, project: Value, rev: &Value| {
+            mutation(
+                "POST",
+                "/api/v1/bug-project",
+                json!({"idempotency_key": key, "project": project, "rev": rev}),
+                &headers,
+            )
+        };
+
+        let before = machine(app.clone()).await;
+        assert!(before.get("bug_project").is_none(), "{before}");
+        let refused = send(&app, pick("k-fleet", json!("fleet"), &before["rev"])).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            refused.body
+        );
+        let picked = send(&app, pick("k-alpha", json!("alpha"), &before["rev"])).await;
+        assert_eq!(picked.status, StatusCode::OK, "{}", picked.body);
+        let after = machine(app.clone()).await;
+        assert_eq!(after["bug_project"], "alpha");
+
+        let filed = fleet
+            .store
+            .bug_file(
+                &Ctx::new(Actor::Session(fleet.orchestrator_session.clone())),
+                None,
+                tiller_core::state::cards::NewBug {
+                    title: "list exits 3".into(),
+                    body: "seen".into(),
+                    evidence: None,
+                },
+            )
+            .unwrap()
+            .value
+            .card;
+        let board = get(&app, "/api/v1/board?filter=all").await;
+        let body: Value = serde_json::from_str(&board.body).unwrap();
+        let row = body["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == filed.id.as_str())
+            .unwrap()
+            .clone();
+        assert_eq!(row["project_id"], "alpha");
+        assert_eq!(row["category"], "tiller-bug");
+        assert_eq!(row["filed_from"], "alpha");
+        let timeline = get(&app, &format!("/api/v1/cards/{}/timeline", filed.id)).await;
+        assert!(
+            timeline
+                .body
+                .contains("filed as a Tiller bug from alpha into alpha"),
+            "{}",
+            timeline.body
+        );
+
+        // A board create carries its category, as Move sends it.
+        let created = send(
+            &app,
+            mutation(
+                "POST",
+                "/api/v1/cards",
+                json!({"idempotency_key": "k-move", "project": "alpha", "kind": "ship",
+                       "title": "moved", "category": "tiller-bug"}),
+                &headers,
+            ),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+        let category: Option<String> = fleet
+            .open()
+            .conn()
+            .query_row(
+                "SELECT category FROM cards WHERE title = 'moved'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(category.as_deref(), Some("tiller-bug"));
+
+        // Clearing it sends bugs back to fleet.
+        let cleared = send(&app, pick("k-clear", Value::Null, &after["rev"])).await;
+        assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.body);
+        assert!(machine(app.clone()).await.get("bug_project").is_none());
     }
 
     /// CI fails when `contract/openapi.json` is stale. Regenerate it with

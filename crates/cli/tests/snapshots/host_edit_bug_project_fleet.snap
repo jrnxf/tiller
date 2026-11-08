@@ -1,0 +1,13 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 5
+{
+  "error": {
+    "code": "refused",
+    "entity": "host",
+    "id": "<id3>",
+    "message": "host <id3>: fleet cannot be the bug project; with none, Tiller bugs already land in fleet"
+  },
+  "ok": false
+}

@@ -15,6 +15,7 @@ import { createQueryClient } from "../../lib/query-client";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
 import { answeredStore, withdrawnStore } from "../attention/answered";
+import { choose } from "../../test-select";
 import { resetBoardLook } from "./board-prefs";
 
 // The cards the `federated` fixture scenario gives each paired peer.
@@ -364,4 +365,125 @@ test("a link to another screen leaves the card page's owner behind", async () =>
   const links = within(screen.getByRole("navigation", { name: "Screens" })).getAllByRole("link");
   expect(links.length).toBeGreaterThan(0);
   for (const link of links) expect(link.getAttribute("href")).not.toContain("owner=");
+});
+
+// ---- Tiller bugs ----
+
+const FLEET_2 = "01JCARDBUG0000000000000002";
+const FLEET_5_D = "01JPCARDD00000000000000005";
+
+test("a Tiller bug in fleet reads Untriaged, and each host lane says where its Tiller bugs go", async () => {
+  stubApi("federated");
+  await renderApp("federated");
+  const fleet = screen.getByTestId("lane-fleet");
+  // The route sits in the lane head, and on a line of its own on a narrow screen.
+  expect(within(fleet).getAllByText("Tiller bugs go to tiller")).toHaveLength(2);
+  const fleet2 = within(fleet).getByRole("link", { name: /fleet-2/ });
+  expect(within(fleet2).getByText("Untriaged")).toBeTruthy();
+  expect(within(fleet2).getByText("Bug")).toBeTruthy();
+  expect(within(fleet).getByTestId("waiting-bugs").textContent).toContain(
+    "1 Tiller bug waits here from before tiller took them.",
+  );
+  // fleet-1 is the standing Host health card, never a Tiller bug to move.
+  expect(
+    within(within(fleet).getByRole("link", { name: /fleet-1/ })).queryByText("Untriaged"),
+  ).toBeNull();
+
+  const peerFleet = screen.getByTestId("lane-host-d/fleet");
+  expect(within(peerFleet).getAllByText("No project takes Tiller bugs here")).toHaveLength(2);
+  expect(within(peerFleet).queryByTestId("waiting-bugs")).toBeNull();
+
+  const tiller = screen.getByTestId("lane-tiller");
+  expect(within(tiller).getByText("Takes Tiller bugs")).toBeTruthy();
+  expect(within(tiller).getByText("from alpha")).toBeTruthy();
+});
+
+test("Move on a peer's Tiller bug files it in the bug project, shows a close that failed, and a retry reuses both keys", async () => {
+  const posted = stubApi("federated");
+  await renderApp("federated", `/cards/${FLEET_5_D}?owner=host-d`);
+  const triage = await screen.findByTestId("bug-triage");
+  expect(triage.textContent).toContain("host-d has no project that takes Tiller bugs");
+  const pick = within(triage).getByRole("button", {
+    name: "Pick a bug project for host-d",
+  }) as HTMLButtonElement;
+  expect(pick.disabled).toBe(true);
+
+  fireEvent.click(within(triage).getByRole("button", { name: /^Move to host-a · tiller/ }));
+  await flush();
+  expect(posted).toHaveLength(2);
+  expect(posted[0]).toMatchObject({ method: "POST", path: "/api/v1/cards" });
+  expect(posted[0]?.body).toMatchObject({ project: "tiller", category: "tiller-bug" });
+  expect(posted[0]?.body.host).toBeUndefined();
+  expect(String(posted[0]?.body.body)).toContain("Moved from host-d · fleet-5, filed from gamma.");
+  expect(posted[1]?.path).toBe(`/api/v1/cards/${FLEET_5_D}/close`);
+  expect(posted[1]?.body).toMatchObject({ outcome: "superseded", host: "host-d" });
+  const made = String(posted[1]?.body.reason).replace("Moved to ", "");
+  expect(made).toMatch(/^host-a · tiller-\d+$/);
+  const partial = within(triage).getByTestId("move-partial");
+  expect(partial.textContent).toContain(`Made ${made}, but could not close host-d · fleet-5.`);
+
+  fireEvent.click(within(triage).getByRole("button", { name: /^Move to host-a · tiller/ }));
+  await flush();
+  expect(posted).toHaveLength(4);
+  expect(posted[2]?.body.idempotency_key).toBe(posted[0]?.body.idempotency_key);
+  expect(posted[3]?.body.idempotency_key).toBe(posted[1]?.body.idempotency_key);
+  expect(posted[3]?.body.reason).toBe(`Moved to ${made}`);
+  await vi.waitFor(() =>
+    expect(screen.getByTestId("toast").textContent).toContain(`Moved to ${made}`),
+  );
+});
+
+test("Close as not a bug cancels this host's card with the reason and no host field", async () => {
+  const posted = stubApi("federated");
+  await renderApp("federated", `/cards/${FLEET_2}`);
+  const triage = await screen.findByTestId("bug-triage");
+  expect(triage.textContent).toContain("host-a files Tiller bugs into tiller now");
+  fireEvent.click(within(triage).getByRole("button", { name: "Close as not a bug" }));
+  await flush();
+  expect(posted).toHaveLength(1);
+  expect(posted[0]?.path).toBe(`/api/v1/cards/${FLEET_2}/close`);
+  expect(posted[0]?.body).toMatchObject({ outcome: "cancelled", reason: "Not a Tiller bug" });
+  expect(posted[0]?.body.host).toBeUndefined();
+});
+
+test("the owner picks this host's bug project from a Tiller bug, against the host's rev", async () => {
+  const posted = stubApi("federated");
+  await renderApp("federated", `/cards/${FLEET_2}`);
+  const triage = await screen.findByTestId("bug-triage");
+  fireEvent.click(within(triage).getByRole("button", { name: "Pick a bug project for host-a" }));
+  const dialog = await screen.findByRole("dialog", { name: "Pick a bug project for host-a" });
+  const save = within(dialog).getByRole("button", { name: "Save" }) as HTMLButtonElement;
+  expect(save.disabled).toBe(true);
+  await choose(within(dialog).getByRole("combobox"), "alpha");
+  fireEvent.click(save);
+  await flush();
+  expect(posted).toHaveLength(1);
+  expect(posted[0]?.path).toBe("/api/v1/bug-project");
+  expect(posted[0]?.body).toMatchObject({ project: "alpha" });
+  expect(typeof posted[0]?.body.rev).toBe("number");
+  // The daemon answers with the host record, whose field is `bug_project_id`.
+  await vi.waitFor(() => {
+    const toast = screen.getByTestId("toast").textContent;
+    expect(toast).toContain("alpha takes Tiller bugs on host-a");
+    expect(toast).toContain("Move the ones that wait in host / host-a.");
+  });
+});
+
+test("the fleet lane moves the Tiller bugs that wait there to the new bug project", async () => {
+  const posted = stubApi("federated");
+  await renderApp("federated");
+  const strip = screen.getByTestId("waiting-bugs");
+  fireEvent.click(within(strip).getByRole("button", { name: /Move 1 to tiller/ }));
+  const dialog = await screen.findByRole("dialog", { name: "Move Tiller bugs to host-a · tiller" });
+  expect(dialog.textContent).toContain("host-a · fleet-2");
+  fireEvent.click(within(dialog).getByRole("button", { name: "Move 1" }));
+  await vi.waitFor(() => expect(posted).toHaveLength(2));
+  expect(posted[0]?.body).toMatchObject({ project: "tiller", category: "tiller-bug" });
+  expect(posted[1]?.path).toBe(`/api/v1/cards/${FLEET_2}/close`);
+  expect(posted[1]?.body).toMatchObject({ outcome: "superseded" });
+  await vi.waitFor(() =>
+    expect(screen.getByTestId("toast").textContent).toContain(
+      "Moved 1 Tiller bug to host-a · tiller",
+    ),
+  );
 });

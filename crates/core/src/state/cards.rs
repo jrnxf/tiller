@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use super::approvals::mark_stale;
 use super::attention::{NewAttention, open_attention, withdraw_attention};
 use super::outbox::{NewMessage, enqueue, live_orchestrator};
+use super::projects::local_host;
 use super::runs::{EndRun, end_run};
 use super::{check_rev, find, get, list, refuse, required, resolve_card};
 use crate::authority::{CardAction, require_card_scope};
@@ -157,6 +158,51 @@ pub(crate) fn create_card(tx: &mut Tx<'_>, new: &NewCard, ask_id: Option<&str>) 
         link_ask(tx, ask_id, &id, LinkRelation::Created)?;
     }
     get(tx.conn(), "card", &id)
+}
+
+/// The category of a card `tiller bug file` files (`protocol.md`, 6.4).
+pub const TILLER_BUG: &str = "tiller-bug";
+
+/// A Tiller bug to file: `tiller bug file`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NewBug {
+    pub title: String,
+    pub body: String,
+    /// What the filer saw, as JSON; quoted at the end of the card's body.
+    pub evidence: Option<Value>,
+}
+
+/// Why a Tiller bug went where it did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BugRoute {
+    /// The host's bug project took it.
+    BugProject,
+    /// The host has no bug project, so it waits in `fleet`.
+    NoBugProject,
+    /// The host's bug project is retired, so it waits in `fleet`.
+    BugProjectRetired,
+}
+
+/// A filed Tiller bug: its card and the route it took.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FiledBug {
+    pub card: Card,
+    pub route: BugRoute,
+    /// The host's bug project when it was filed, open or not.
+    pub bug_project_id: Option<String>,
+}
+
+/// The card body of a Tiller bug: the filer's text, then the evidence.
+fn bug_body(bug: &NewBug) -> Result<String> {
+    let Some(evidence) = &bug.evidence else {
+        return Ok(bug.body.clone());
+    };
+    let quoted = serde_json::to_string_pretty(evidence)?;
+    Ok(format!(
+        "{}\n\nEvidence:\n\n```json\n{quoted}\n```",
+        bug.body.trim_end()
+    ))
 }
 
 /// The note that tells a project's orchestrator about a card somebody else
@@ -472,6 +518,71 @@ impl Store {
             let card = create_card(tx, &new, ask_id.as_deref())?;
             announce_card(tx, &card)?;
             Ok(card)
+        })
+    }
+
+    /// `bug.file`: a Tiller bug, filed in this host's bug project while it
+    /// names an open project, else in `fleet`, where it waits for the owner
+    /// (`state.md`, Host). Never on `fleet-1`: a bug is always a new card. The
+    /// `card.routed` event records the route and who filed it, with the
+    /// filer's project.
+    pub fn bug_file(
+        &mut self,
+        ctx: &Ctx,
+        key: Option<&str>,
+        bug: NewBug,
+    ) -> Result<Applied<FiledBug>> {
+        required("title", &bug.title)?;
+        required("body", &bug.body)?;
+        let body = bug_body(&bug)?;
+        self.write(ctx, "bug.file", key, |tx| {
+            let host = local_host(tx.conn())?;
+            let configured = match &host.bug_project_id {
+                Some(id) => Some(get::<Project>(tx.conn(), "project", id)?),
+                None => None,
+            };
+            let (project_id, route) = match &configured {
+                Some(project) if project.retired_at.is_some() => {
+                    (ids::FLEET_PROJECT.to_owned(), BugRoute::BugProjectRetired)
+                }
+                Some(project) => (project.id.clone(), BugRoute::BugProject),
+                None => (ids::FLEET_PROJECT.to_owned(), BugRoute::NoBugProject),
+            };
+            require_card_scope(tx.conn(), tx.actor(), &project_id, CardAction::Create)?;
+            let filer = match tx.actor().session_id() {
+                Some(id) => find::<Session>(tx.conn(), "id = ?1", &[&id])?,
+                None => None,
+            };
+            let card = create_card(
+                tx,
+                &NewCard {
+                    project_id: project_id.clone(),
+                    kind: CardKind::Ship,
+                    title: bug.title.clone(),
+                    body: Some(body.clone()),
+                    category: Some(TILLER_BUG.into()),
+                    ..NewCard::default()
+                },
+                None,
+            )?;
+            tx.event(
+                NewEvent::new("card", &card.id, "card.routed")
+                    .card(&card.id)
+                    .payload(json!({
+                        "project_id": project_id,
+                        "route": route,
+                        "bug_project_id": host.bug_project_id,
+                        "filed_by_session_id": filer.as_ref().map(|session| &session.id),
+                        "filed_from_project_id": filer.as_ref().map(|session| &session.project_id),
+                        "evidence": bug.evidence,
+                    })),
+            )?;
+            announce_card(tx, &card)?;
+            Ok(FiledBug {
+                card,
+                route,
+                bug_project_id: host.bug_project_id,
+            })
         })
     }
 

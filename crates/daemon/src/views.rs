@@ -13,6 +13,7 @@ use tiller_core::domain::{
     Session,
 };
 use tiller_core::state::attention::{OwnerAction as CoreOwnerAction, stale};
+use tiller_core::state::cards::TILLER_BUG;
 use tiller_core::state::interventions::InterventionSource;
 use tiller_core::state::signals::lisbon_weeks;
 use tiller_core::state::{find, get, list, review};
@@ -129,6 +130,21 @@ fn row_extras(store: &Store, card_id: &str) -> Result<RowExtras> {
     })
 }
 
+/// The project of the session that filed a Tiller bug, from the card's
+/// `card.routed` event. Only a Tiller bug has one, so no other card pays the
+/// read.
+fn filed_from(store: &Store, card: &Card) -> Result<Option<String>> {
+    if card.category.as_deref() != Some(TILLER_BUG) {
+        return Ok(None);
+    }
+    one(
+        store,
+        "SELECT json_extract(payload, '$.filed_from_project_id') FROM events
+         WHERE card_id = ?1 AND kind = 'card.routed' ORDER BY seq DESC LIMIT 1",
+        &[&card.id],
+    )
+}
+
 /// One card's board row, or `None` when the card has left the board (closed
 /// more than three days ago).
 pub fn board_row(store: &Store, card_id: &str) -> Result<Option<BoardRow>> {
@@ -142,6 +158,7 @@ pub fn board_row(store: &Store, card_id: &str) -> Result<Option<BoardRow>> {
         pr_number,
         observed_at,
     } = row_extras(store, card_id)?;
+    let filed_from = filed_from(store, &card)?;
     Ok(Some(BoardRow {
         id: card.id,
         display_id: card.display_id,
@@ -161,6 +178,8 @@ pub fn board_row(store: &Store, card_id: &str) -> Result<Option<BoardRow>> {
         model,
         pr_number,
         observed_at,
+        category: card.category,
+        filed_from,
         host: None,
         as_of: None,
         link: None,
@@ -670,6 +689,7 @@ pub fn machines(store: &Store, local: &LocalHealth, now: Timestamp) -> Result<Ma
             link: None,
             peer_scope: None,
             link_reason: None,
+            bug_project: open_bug_project(store, host.bug_project_id)?,
             rev: host.rev,
         });
     }
@@ -677,6 +697,19 @@ pub fn machines(store: &Store, local: &LocalHealth, now: Timestamp) -> Result<Ma
 }
 
 /// One host's machine row, for an SSE `host.changed` event.
+/// A host's bug project while it is open. A retired one routes nothing, so
+/// Tiller bugs wait in `fleet`.
+fn open_bug_project(store: &Store, id: Option<String>) -> Result<Option<String>> {
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    one(
+        store,
+        "SELECT id FROM projects WHERE id = ?1 AND retired_at IS NULL",
+        &[&id],
+    )
+}
+
 pub fn machine(
     store: &Store,
     local: &LocalHealth,
@@ -956,6 +989,8 @@ pub fn card_detail(store: &Store, reference: &str) -> Result<CardDetail> {
             model: None,
             pr_number: None,
             observed_at: None,
+            category: card.category.clone(),
+            filed_from: filed_from(store, &card)?,
             host: None,
             as_of: None,
             link: None,
@@ -1279,11 +1314,32 @@ pub fn timeline(store: &Store, reference: &str, before: Option<i64>) -> Result<T
 }
 
 fn timeline_text(event: &Event) -> String {
+    if event.kind == "card.routed" {
+        return routed_text(&event.payload);
+    }
     let words = event.kind.replace(['.', '_'], " ");
     match event.payload.get("reason").and_then(Value::as_str) {
         Some(reason) => format!("{words}: {reason}"),
         None => words,
     }
+}
+
+/// Where `tiller bug file` put a Tiller bug, and why.
+fn routed_text(payload: &Value) -> String {
+    let field = |name: &str| payload.get(name).and_then(Value::as_str);
+    let project = field("project_id").unwrap_or("fleet");
+    let from = field("filed_from_project_id")
+        .map(|from| format!(" from {from}"))
+        .unwrap_or_default();
+    let why = match field("route") {
+        Some("no_bug_project") => ": this host has no bug project".to_owned(),
+        Some("bug_project_retired") => format!(
+            ": bug project {} is retired",
+            field("bug_project_id").unwrap_or("?")
+        ),
+        _ => String::new(),
+    };
+    format!("filed as a Tiller bug{from} into {project}{why}")
 }
 
 // -- runs ---------------------------------------------------------------------
@@ -1783,6 +1839,7 @@ fn peer_machine(host: &tiller_core::domain::Host, view: &PeerView) -> Machine {
         link: Some(view.link),
         peer_scope: Some(view.scope.to_string()),
         link_reason: view.link_reason.clone(),
+        bug_project: cached.and_then(|row| row.bug_project.clone()),
         rev: host.rev,
     }
 }
@@ -2041,6 +2098,7 @@ mod tests {
             stale_reason: None,
             peer_scope: None,
             peer_host_id: Some("peer-host".into()),
+            bug_project_id: None,
             rev: 1,
         }
     }

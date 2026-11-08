@@ -3,6 +3,7 @@
 
 use rusqlite::{OptionalExtension, params};
 
+use super::projects::local_host;
 use super::{get, list, resolve_card};
 use crate::domain::*;
 use crate::error::Result;
@@ -31,6 +32,11 @@ impl Store {
 
     pub fn hosts(&self) -> Result<Vec<Host>> {
         list(self.conn(), "1 = 1 ORDER BY kind, label", &[])
+    }
+
+    /// This host's own row, refused before `tiller init`.
+    pub fn local_host(&self) -> Result<Host> {
+        local_host(self.conn())
     }
 
     /// The `card_column` view: open cards and those closed in the last three

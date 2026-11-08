@@ -15,8 +15,8 @@ use serde_json::Value;
 
 use app::{App, Done, Failure};
 use cmd::{
-    admin, ahoy, approval, ask, attention, backup, card, doctor, health, import, later, learn, mem,
-    peer, read, records, review, run, spawn,
+    admin, ahoy, approval, ask, attention, backup, bug, card, doctor, health, import, later, learn,
+    mem, peer, read, records, review, run, spawn,
 };
 
 #[derive(Parser)]
@@ -45,6 +45,9 @@ enum Command {
     /// Cards
     #[command(subcommand)]
     Card(card::Cmd),
+    /// Tiller bugs: file one where this host triages them
+    #[command(subcommand)]
+    Bug(bug::Cmd),
     /// Recap and walk through the open decisions (the owner's `/ahoy`)
     Ahoy(ahoy::Ahoy),
     /// Questions waiting for the owner
@@ -172,6 +175,7 @@ fn dispatch(app: &App, command: Command) -> Done {
         Command::Ask(cmd) => ask::run(app, cmd),
         Command::Intake(IntakeCmd::Stats(args)) => read::intake(app, args),
         Command::Card(cmd) => card::run(app, cmd),
+        Command::Bug(cmd) => bug::run(app, cmd),
         Command::Ahoy(args) => ahoy::run(app, args),
         Command::Attention(cmd) => attention::run(app, cmd),
         Command::Approval(cmd) => approval::run_request(app, cmd),

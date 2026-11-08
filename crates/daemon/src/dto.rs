@@ -43,6 +43,14 @@ pub struct BoardRow {
     pub pr_number: Option<i64>,
     /// When the newest observation of the card's active run was made.
     pub observed_at: Option<String>,
+    /// The card's category, for example `tiller-bug` (`state.md`, Cards);
+    /// absent with none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// The project of the session that filed a Tiller bug, from its
+    /// `card.routed` event; absent for every other card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filed_from: Option<String>,
     /// The owning host's label, on every row once a peer is paired
     /// (`protocol.md` 7.3); absent on a host with none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -466,6 +474,11 @@ pub struct Machine {
     /// `host_id` is not the paired one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_reason: Option<String>,
+    /// The open project `tiller bug file` routes to on this host (`state.md`,
+    /// Host); absent with none, when Tiller bugs wait in `fleet`. A peer's
+    /// is what its own row reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bug_project: Option<String>,
     pub rev: i64,
 }
 
@@ -927,6 +940,9 @@ pub struct CreateCard {
     pub body: Option<String>,
     #[serde(default)]
     pub priority: Option<i64>,
+    /// The card's category; the board's Move sends `tiller-bug`.
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 /// `POST /api/v1/projects`: register a project on this host, as `tiller
@@ -1160,6 +1176,22 @@ pub struct RetireProject {
     /// leaves them running.
     #[serde(default)]
     pub stop_agents: bool,
+}
+
+/// `POST /api/v1/bug-project`: pick or clear the project `tiller bug file`
+/// routes to on this host, as `tiller host edit --bug-project` does. Local to
+/// this host; it is not forwarded to a peer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PickBugProject {
+    pub idempotency_key: String,
+    /// A paired peer's label. Refused: a bug project pick is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// An open project this host owns, never `fleet`; null clears it.
+    pub project: Option<String>,
+    /// This host's `rev`, from its Machines row.
+    pub rev: i64,
 }
 
 /// The owner's way past a refused delete.

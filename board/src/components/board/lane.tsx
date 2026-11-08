@@ -5,16 +5,18 @@ import type { AgentRow, Machine, Project } from "../../lib/api-types";
 import { agentActivity } from "./activity";
 import { Ago } from "./ago";
 import { toggleLane } from "./board-prefs";
-import { ChevronDownIcon, PaneIcon, Status } from "./icons";
+import { isUntriaged } from "./bugs";
+import { ChevronDownIcon, PaneIcon, RouteIcon, Status, WarnIcon } from "./icons";
 import type { StatusMark } from "./icons";
 import { COLUMNS, openCount } from "./model";
 import type { ColumnId, Tile } from "./model";
 import { PeerNote } from "./host-chip";
 import { MiniTile, TileView } from "./tile";
-import { focusReason, isPeerRow, ownerOf, projectKey } from "../../lib/peers";
+import { HOST_PROJECT, focusReason, isPeerRow, ownerOf, projectKey } from "../../lib/peers";
 import type { Standing } from "../../lib/peers";
 import { useHerdrFocus } from "./herdr";
 import { NewCardDialog } from "./new-card";
+import { MoveBugsDialog } from "./triage";
 import { StartOrchestratorButton } from "./orchestrator-start";
 import { PlusIcon, ServerIcon } from "../shell/icons";
 import type { LaneHealth } from "../states/degraded";
@@ -78,8 +80,78 @@ interface LaneProps {
   health: LaneHealth;
   standing: Standing;
   hostLabel: string;
+  // The host that owns the lane's project, and the project that takes its
+  // Tiller bugs (state.md, hosts.bug_project_id).
+  owner: Machine | undefined;
+  bugProject: Project | undefined;
   doneFolded: boolean;
   filterName: string | null;
+}
+
+// Where `tiller bug file` sends a host's Tiller bugs, on that host's `fleet`
+// lane: the inline form for the header, the line form below it on a phone.
+function BugRoute({ bugProject, line }: { bugProject: Project | undefined; line?: boolean }) {
+  return (
+    <span className={`bug-route${line ? " line" : ""}`} data-none={bugProject ? undefined : "true"}>
+      {bugProject ? <RouteIcon /> : <WarnIcon />}
+      {bugProject ? `Tiller bugs go to ${bugProject.name}` : "No project takes Tiller bugs here"}
+    </span>
+  );
+}
+
+// The Tiller bugs that waited in `fleet` before the host took them, with the
+// action that moves them all to its bug project.
+function WaitingBugs({
+  tiles,
+  owner,
+  bugProject,
+  standing,
+}: {
+  tiles: Tile[];
+  owner: Machine;
+  bugProject: Project;
+  standing: Standing;
+}) {
+  const [open, setOpen] = useState(false);
+  const button = useRef<HTMLButtonElement>(null);
+  const rows = tiles.flatMap((tile) => (tile.row && isUntriaged(tile.row) ? [tile.row] : []));
+  if (rows.length === 0) return null;
+  const target = {
+    machine: owner,
+    project: bugProject,
+    label: `${owner.label} · ${bugProject.name}`,
+  };
+  const n = rows.length === 1 ? "1 Tiller bug waits" : `${rows.length} Tiller bugs wait`;
+  return (
+    <div className="lane-bugs" data-testid="waiting-bugs">
+      <WarnIcon />
+      <span className="tx">
+        {n} here from before {bugProject.name} took them.
+      </span>
+      <button
+        ref={button}
+        type="button"
+        className="btn sm"
+        disabled={!standing.canAct}
+        title={standing.reason ?? `Move them to ${target.label}`}
+        onClick={() => setOpen(true)}
+      >
+        <RouteIcon />
+        Move {rows.length} to {bugProject.name}
+      </button>
+      {open ? (
+        <MoveBugsDialog
+          rows={rows}
+          target={target}
+          hostLabel={owner.label}
+          onClose={() => {
+            setOpen(false);
+            button.current?.focus();
+          }}
+        />
+      ) : null}
+    </div>
+  );
 }
 
 export function Lane({
@@ -94,6 +166,8 @@ export function Lane({
   health,
   standing,
   hostLabel,
+  owner,
+  bugProject,
   doneFolded,
   filterName,
 }: LaneProps) {
@@ -113,6 +187,8 @@ export function Lane({
     count: tiles.filter((tile) => tile.column === column.id).length,
   })).filter(({ count }) => count > 0);
   const waiting = tiles.filter((tile) => tile.row?.needs_you).length;
+  const hostLane = project.id === HOST_PROJECT;
+  const takesBugs = bugProject !== undefined && projectKey(bugProject) === key;
 
   let body;
   if (tiles.length === 0) {
@@ -209,6 +285,7 @@ export function Lane({
         <span className="pdot" />
         <span className="nm">{project.name}</span>
         <span className="c">{openCount(tiles)} open</span>
+        {takesBugs ? <span className="lab sm acc takes-bugs">Takes Tiller bugs</span> : null}
         {remoteHost ? (
           <span className="host-t">
             <ServerIcon />
@@ -230,6 +307,7 @@ export function Lane({
           ) : null}
         </span>
         <span className="sp" />
+        {hostLane ? <BugRoute bugProject={bugProject} /> : null}
         <button
           ref={newCard}
           type="button"
@@ -256,6 +334,10 @@ export function Lane({
       {health.kind === "ok" ? null : (
         <LaneNote health={health} projectName={project.name} hostLabel={hostLabel} />
       )}
+      {hostLane ? <BugRoute bugProject={bugProject} line /> : null}
+      {hostLane && owner && bugProject ? (
+        <WaitingBugs tiles={tiles} owner={owner} bugProject={bugProject} standing={standing} />
+      ) : null}
       <PeerNote standing={standing} />
       {body}
     </section>

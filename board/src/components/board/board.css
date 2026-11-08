@@ -1571,3 +1571,179 @@ a.card:hover {
   font-size: var(--fs-small);
   line-height: 1.5;
 }
+
+/* Tiller bugs (mocks, "Board" and "Fallback card") */
+.card .c-from {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+.card .c-from svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+.card .c-from span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lane-h .takes-bugs {
+  flex: none;
+}
+.bug-route {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--fg-3);
+  font-weight: var(--w-normal);
+  font-size: var(--fs-mini);
+  white-space: nowrap;
+}
+.bug-route[data-none="true"] {
+  color: var(--yellow-text);
+}
+.bug-route svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+.bug-route.line {
+  display: none;
+  padding: 0 6px 4px 46px;
+  white-space: normal;
+}
+.bug-route.line svg {
+  display: none;
+}
+.lane[data-open="false"] .lane-bugs {
+  display: none;
+}
+.lane-bugs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  margin: 2px 0 6px;
+  padding: 6px 8px 6px 10px;
+  border-radius: var(--r8);
+  border: 1px solid color-mix(in srgb, var(--yellow) 45%, var(--line-2));
+  background: color-mix(in srgb, var(--yellow) 8%, transparent);
+  font-size: var(--fs-mini);
+  color: var(--fg-2);
+}
+.lane-bugs > svg {
+  width: 14px;
+  height: 14px;
+  color: var(--yellow-text);
+  flex: none;
+}
+.lane-bugs .tx {
+  flex: 1;
+  min-width: 0;
+}
+.lane-bugs .btn svg {
+  width: 12px;
+  height: 12px;
+}
+.card-page .callout {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 0 18px;
+  padding: 12px 14px 14px;
+  border-radius: var(--r8);
+  border: 1px solid color-mix(in srgb, var(--yellow) 48%, var(--line-2));
+  background: color-mix(in srgb, var(--yellow) 9%, var(--bg-panel));
+}
+.callout-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-1);
+  font-weight: var(--w-semibold);
+}
+.callout-h svg {
+  width: 16px;
+  height: 16px;
+  color: var(--yellow-text);
+  flex: none;
+}
+.callout > p {
+  margin: 0;
+  color: var(--fg-2);
+  line-height: 1.5;
+}
+.callout .acts {
+  margin-top: 0;
+}
+.callout .acts .btn svg {
+  width: 14px;
+  height: 14px;
+}
+.callout .refusal,
+.callout .sent-unsure {
+  margin: 0;
+}
+.callout .preview {
+  padding: 10px 12px;
+  border: 1px dashed var(--line-3);
+  border-radius: var(--r6);
+  background: var(--bg-0);
+  color: var(--fg-1);
+  line-height: 1.5;
+}
+.preview-l {
+  margin-bottom: 4px;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+.move-partial {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.move-partial p {
+  margin: 0;
+  color: var(--fg-2);
+  line-height: 1.5;
+}
+.move-partial b {
+  color: var(--fg-1);
+  font-weight: var(--w-medium);
+}
+.card-page .props .mono {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+.props .route-arrow {
+  display: inline-flex;
+  color: var(--fg-3);
+}
+.props .route-arrow svg {
+  width: 12px;
+  height: 12px;
+}
+.move-list li > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.move-list li b {
+  font-weight: var(--w-medium);
+}
+@media (max-width: 820px) {
+  .lane-h .bug-route {
+    display: none;
+  }
+  .lane[data-open="true"] .bug-route.line,
+  .lane[data-open="false"] .bug-route.line {
+    display: block;
+  }
+}

@@ -621,8 +621,9 @@ mod tests {
 
     /// P42: the always-loaded context stays under a budget. The whole
     /// startup budget (role plus approved memory) is 7,500 tokens; a role
-    /// body gets a third of it, at the usual four bytes per token.
-    const ROLE_TOKEN_BUDGET: usize = 2_500;
+    /// body gets 3,000 of it, which leaves 4,500 for approved memory, at the
+    /// usual four bytes per token.
+    const ROLE_TOKEN_BUDGET: usize = 3_000;
 
     /// The common deny list as `role` carries it: the orchestrator alone may
     /// run the chat approval form `tiller approve <id> --ask <ask>`, so its

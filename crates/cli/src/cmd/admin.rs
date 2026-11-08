@@ -147,7 +147,7 @@ pub struct ProjectEditArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum HostCmd {
-    /// Edit this host's capacity and floors against the rev you read
+    /// Edit this host's capacity, floors and bug project against the rev you read
     Edit(HostEditArgs),
 }
 
@@ -161,6 +161,12 @@ pub struct HostEditArgs {
     pub ram_floor_mb: Option<i64>,
     #[arg(long)]
     pub disk_floor_mb: Option<i64>,
+    /// The open project `tiller bug file` files Tiller bugs in
+    #[arg(long, conflicts_with = "no_bug_project")]
+    pub bug_project: Option<String>,
+    /// File Tiller bugs in fleet again, where they wait for the owner
+    #[arg(long)]
+    pub no_bug_project: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -506,6 +512,11 @@ pub fn host(app: &App, cmd: HostCmd) -> Done {
         lane_capacity: args.lane_capacity,
         ram_floor_mb: args.ram_floor_mb.map(Some),
         disk_floor_mb: args.disk_floor_mb.map(Some),
+        bug_project_id: if args.no_bug_project {
+            Some(None)
+        } else {
+            args.bug_project.map(Some)
+        },
     };
     Ok(Outcome::applied(store.host_edit(
         &app.ctx(),

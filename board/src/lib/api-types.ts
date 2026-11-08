@@ -42,6 +42,12 @@ export interface BoardRow extends Federated {
   pr_number?: number | null;
   // When the newest observation of the card's active run was made.
   observed_at?: string | null;
+  // `tiller-bug` for a card `tiller bug file` made (state.md, Card); absent or
+  // null for any other card.
+  category?: string | null;
+  // The project the filer worked in, when `tiller bug file` routed the card
+  // out of it.
+  filed_from?: string | null;
 }
 
 export interface AskedRow {
@@ -335,6 +341,9 @@ export interface Machine {
   // Why the peer refused the link (`revoked`, `unknown_key`, `bad_sig`,
   // `clock_skew`, `version`, `accept_off`), when it did.
   link_reason?: string | null;
+  // The project that takes Tiller bugs on this host (`bugs.project`), when one
+  // is set and still open; absent for a herdr-only machine.
+  bug_project?: string | null;
   rev: number;
 }
 

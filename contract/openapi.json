@@ -1100,6 +1100,82 @@
         }
       }
     },
+    "/api/v1/bug-project": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "pick_bug_project",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PickBugProject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`refused`: fleet, a retired project, or another host's project",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/cards": {
       "post": {
         "tags": [
@@ -3922,6 +3998,13 @@
               "null"
             ]
           },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The card's category, for example `tiller-bug` (`state.md`, Cards);\nabsent with none."
+          },
           "closed_at": {
             "type": [
               "string",
@@ -3934,6 +4017,13 @@
           },
           "display_id": {
             "type": "string"
+          },
+          "filed_from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The project of the session that filed a Tiller bug, from its\n`card.routed` event; absent for every other card."
           },
           "host": {
             "type": [
@@ -4597,6 +4687,13 @@
               "null"
             ]
           },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The card's category; the board's Move sends `tiller-bug`."
+          },
           "host": {
             "type": [
               "string",
@@ -5116,6 +5213,13 @@
           "rev"
         ],
         "properties": {
+          "bug_project": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The open project `tiller bug file` routes to on this host (`state.md`,\nHost); absent with none, when Tiller bugs wait in `fleet`. A peer's\nis what its own row reports."
+          },
           "capacity": {
             "type": [
               "integer",
@@ -6115,6 +6219,39 @@
             "type": "string"
           }
         }
+      },
+      "PickBugProject": {
+        "type": "object",
+        "description": "`POST /api/v1/bug-project`: pick or clear the project `tiller bug file`\nroutes to on this host, as `tiller host edit --bug-project` does. Local to\nthis host; it is not forwarded to a peer.",
+        "required": [
+          "idempotency_key",
+          "rev"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label. Refused: a bug project pick is not forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An open project this host owns, never `fleet`; null clears it."
+          },
+          "rev": {
+            "type": "integer",
+            "format": "int64",
+            "description": "This host's `rev`, from its Machines row."
+          }
+        },
+        "additionalProperties": false
       },
       "PollerHealth": {
         "type": "object",

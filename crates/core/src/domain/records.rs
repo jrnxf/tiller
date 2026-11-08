@@ -59,6 +59,7 @@ record!(Host in "hosts" {
     stale_reason: Option<String>,
     peer_scope: Option<PeerScope>,
     peer_host_id: Option<String>,
+    bug_project_id: Option<String>,
     rev: i64,
 });
 

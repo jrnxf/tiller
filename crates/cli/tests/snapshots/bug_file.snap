@@ -1,0 +1,42 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "bug_project_id": "alpha",
+    "card": {
+      "acceptance": null,
+      "body": "the lane stayed empty\n\nEvidence:\n\n```json\n{\n  \"command\": \"tiller board\",\n  \"exit\": 0\n}\n```",
+      "category": "tiller-bug",
+      "closed_at": null,
+      "closed_by": null,
+      "created_at": "<time>",
+      "created_by_ask_id": null,
+      "dispatch_override": null,
+      "display_id": "alpha-1",
+      "fixes_card_id": null,
+      "id": "<id5>",
+      "kind": "ship",
+      "legacy_id": null,
+      "outcome": null,
+      "priority": 2,
+      "project_id": "alpha",
+      "rev": 1,
+      "short": "<id5.short>",
+      "size": null,
+      "state": "open",
+      "title": "board misses a peer"
+    },
+    "route": "bug_project"
+  },
+  "events": [
+    "<seq>",
+    "<seq>"
+  ],
+  "help": [
+    "filed as [alpha-1]; the alpha orchestrator triages it"
+  ],
+  "ok": true,
+  "replayed": false
+}

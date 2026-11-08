@@ -44,6 +44,8 @@ pub struct HostEdit {
     pub lane_capacity: Option<i64>,
     pub ram_floor_mb: Option<Option<i64>>,
     pub disk_floor_mb: Option<Option<i64>>,
+    /// The project `tiller bug file` routes to; `Some(None)` clears it.
+    pub bug_project_id: Option<Option<String>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -146,6 +148,11 @@ pub(crate) fn local_host_id(conn: &rusqlite::Connection) -> Result<String> {
             "state.db is not initialized; run tiller init",
         )
     })
+}
+
+/// This host's own row, refused like [`local_host_id`] before `tiller init`.
+pub(crate) fn local_host(conn: &rusqlite::Connection) -> Result<Host> {
+    get(conn, "host", &local_host_id(conn)?)
 }
 
 /// Reads one `meta` value.
@@ -378,7 +385,9 @@ impl Store {
         })
     }
 
-    /// `host.edit`: capacity and resource floors, against `expected_rev`.
+    /// `host.edit`: capacity, resource floors and the bug project, against
+    /// `expected_rev`. The bug project must be an open project this host
+    /// owns, never `fleet`, which is where a bug goes without one.
     pub fn host_edit(
         &mut self,
         ctx: &Ctx,
@@ -404,10 +413,14 @@ impl Store {
             if let Some(n) = edit.disk_floor_mb.filter(|n| host.disk_floor_mb != *n) {
                 changed.insert("disk_floor_mb".into(), json!(n));
             }
+            if let Some(id) = edit.bug_project_id.as_ref().filter(|id| host.bug_project_id != **id) {
+                changed.insert("bug_project_id".into(), json!(id));
+            }
             let named = [
                 ("lane_capacity", edit.lane_capacity.is_some()),
                 ("ram_floor_mb", edit.ram_floor_mb.is_some()),
                 ("disk_floor_mb", edit.disk_floor_mb.is_some()),
+                ("bug_project_id", edit.bug_project_id.is_some()),
             ]
             .into_iter()
             .find_map(|(field, sent)| sent.then_some(field));
@@ -423,13 +436,42 @@ impl Store {
             if host.kind == HostKind::Remote && changed.contains_key("lane_capacity") {
                 return Err(Error::refused("host", &host.id, "a remote host has no lane capacity here"));
             }
+            if let Some(Some(id)) = &edit.bug_project_id {
+                if host.kind == HostKind::Remote {
+                    return Err(Error::refused(
+                        "host",
+                        &host.id,
+                        "a remote host picks its bug project on that host",
+                    ));
+                }
+                let project: Project = get(tx.conn(), "project", id)?;
+                if project.id == FLEET_PROJECT {
+                    return Err(Error::refused(
+                        "host",
+                        &host.id,
+                        "fleet cannot be the bug project; with none, Tiller bugs already land in fleet",
+                    ));
+                }
+                if project.retired_at.is_some() {
+                    return Err(Error::refused("host", &host.id, format!("{id} is retired")));
+                }
+                if project.owner_host_id != host.id {
+                    return Err(Error::refused(
+                        "host",
+                        &host.id,
+                        format!("{id} belongs to another host"),
+                    ));
+                }
+            }
             tx.conn().execute(
-                "UPDATE hosts SET lane_capacity = ?2, ram_floor_mb = ?3, disk_floor_mb = ?4, rev = rev + 1 WHERE id = ?1",
+                "UPDATE hosts SET lane_capacity = ?2, ram_floor_mb = ?3, disk_floor_mb = ?4,
+                     bug_project_id = ?5, rev = rev + 1 WHERE id = ?1",
                 params![
                     host.id,
                     edit.lane_capacity.or(host.lane_capacity),
                     edit.ram_floor_mb.unwrap_or(host.ram_floor_mb),
                     edit.disk_floor_mb.unwrap_or(host.disk_floor_mb),
+                    edit.bug_project_id.clone().unwrap_or(host.bug_project_id.clone()),
                 ],
             )?;
             tx.event(
