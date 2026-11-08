@@ -179,8 +179,12 @@
               commonArgs
               // {
                 inherit cargoArtifacts;
-                # The landing tests drive real git repositories.
-                nativeCheckInputs = [ pkgs.git ];
+                # The landing tests drive real git repositories, and the
+                # checkout tests read process states with ps.
+                nativeCheckInputs = [
+                  pkgs.git
+                  pkgs.procps
+                ];
               }
             );
             bunNixFresh =
