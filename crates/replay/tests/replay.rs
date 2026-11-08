@@ -353,6 +353,17 @@ fn a_spawn_on_another_projects_card_is_refused_as_live() {
     let asks = baseline::read(&dir.join("baseline").join("replay.jsonl")).unwrap();
     let mut sandbox = Sandbox::create(&temp.path().join("sandbox"), &bundle, None).unwrap();
     let imported = sandbox.imported(&bundle).unwrap();
+    // The owner reopens the web card. Orbit's orchestrator may not, since
+    // the card is in another project (`authority.md` section 4).
+    sandbox
+        .world()
+        .0
+        .card_reopen(
+            &tiller_core::Ctx::new(tiller_core::Actor::Owner),
+            &imported["web-login"].id,
+            "broke again",
+        )
+        .unwrap();
     let history = History::new(&bundle.cards, &asks);
     let mut replay = Replay::new(&mut sandbox, "orbit".into(), imported, history);
     // The card-less question goes to orbit's orchestrator, which works a
@@ -373,9 +384,16 @@ fn a_spawn_on_another_projects_card_is_refused_as_live() {
         .filter(|s| !s.ok)
         .map(|s| s.result.as_str().unwrap())
         .collect();
-    assert_eq!(refused.len(), 1, "{:?}", record.decisions);
+    // The reopen and the follow-up are edits of a card in another project.
+    assert_eq!(refused.len(), 3, "{:?}", record.decisions);
+    for edit in &refused[..2] {
+        assert!(
+            edit.contains("is the orchestrator of orbit and may not edit a card in acmeweb"),
+            "{refused:?}"
+        );
+    }
     assert!(
-        refused[0].contains("is not the live orchestrator of acmeweb"),
+        refused[2].contains("is not the live orchestrator of acmeweb"),
         "{refused:?}"
     );
     assert!(record.runs.is_empty());

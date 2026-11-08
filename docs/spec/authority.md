@@ -75,12 +75,12 @@ Rules:
 
 ## 4. Role matrix
 
-What each principal may do. "Own" means only on its own run, card or worktree. Every "no" for a fleet role is refused by `tiller` itself (G04, G22, G28) and, where the action is a shell command, by the deny rules and the backstop too (section 8). The table-driven test `core::authority::matrix_matches_spec` encodes this table: every pair of mutation and principal is either allowed with the stated scope or refused.
+What each principal may do. "Own" means only on its own run, card or worktree. Every "no" for a fleet role is refused by `tiller` itself (G04, G22, G28) and, where the action is a shell command, by the deny rules and the backstop too (section 8). The table-driven test `core::authority::matrix_matches_spec` reads this table and checks the rows core scopes by project (resolve, create or edit; hold, depend, reprioritize; start a run; close a card): every pair of mutation and principal is either allowed with the stated scope or refused. Core makes that check for every caller, CLI and board alike. An orchestrator may create a card in another project on its own host, so it can hand that project's orchestrator work; it edits, holds or closes only its own project's cards.
 
 | Action | Owner | Daemon | Orchestrator | Scout | Builder | Reviewer | Verifier | Hook, script |
 |---|---|---|---|---|---|---|---|---|
 | Record an ask | board add, board ask box | no | no | no | no | no | no | hook (prompt), script (note) |
-| Resolve an ask, create or edit a card | yes | no | own project | no | no | no | no | no |
+| Resolve an ask, create or edit a card | yes | no | own project; also create a card in another project on its host | no | no | no | no | no |
 | Hold, depend, reprioritize | yes | release due holds | own project | no | no | no | no | no |
 | Start a run (the execute decision) | yes | no | own project, within capacity, quota and model rules | no | no | no | no | no |
 | Relaunch, pause or interrupt a run | yes | no | own runs | no | no | no | no | no |
