@@ -82,6 +82,10 @@ beforeEach(() => {
     media: query,
     addEventListener: () => {},
     removeEventListener: () => {},
+    // xterm still listens the old way, for the device pixel ratio. A peer's
+    // pane mounts a real terminal here, and a throw would unmount the app.
+    addListener: () => {},
+    removeListener: () => {},
   }));
   window.scrollTo = () => {};
 });
