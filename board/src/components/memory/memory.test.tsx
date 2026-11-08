@@ -88,18 +88,68 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const rewrite = () => {
-  const row = document.querySelector<HTMLElement>(".de.sug.edit");
-  if (!row) throw new Error("no rewrite suggestion on the page");
+const card = (op: "add" | "rewrite" | "retire") => {
+  const found = document.querySelector<HTMLElement>(`.a-sug[data-op="${op}"]`);
+  if (!found) throw new Error(`no ${op} suggestion on the page`);
+  return found;
+};
+const rewrite = () => card("rewrite");
+
+const rail = () => screen.getByRole("complementary", { name: "Recent changes" });
+
+// The line row that shows `text`.
+const lineOf = (text: string | RegExp) => {
+  const row = page().getByText(text, { selector: ".a-ln .tx" }).closest<HTMLElement>(".a-ln");
+  if (!row) throw new Error("no line row");
   return row;
 };
+
+const type = (box: HTMLElement, value: string) => fireEvent.change(box, { target: { value } });
+
+test("each document is a tab, with the suggestions waiting on it or its line count", async () => {
+  await renderMemory();
+
+  const tabs = within(screen.getByRole("navigation", { name: "Memory documents" }));
+  const fleet = tabs.getByRole("link", { name: /^All projects \(shared\)/ });
+  expect(fleet.getAttribute("aria-current")).toBe("page");
+  expect(fleet.textContent).toBe("All projects (shared)2");
+  expect(tabs.getByRole("link", { name: /^alpha/ }).getAttribute("aria-current")).toBeNull();
+});
+
+test("only the open document's tab is current, not the shared one too", async () => {
+  await renderMemory("/memory?doc=alpha");
+
+  const tabs = within(screen.getByRole("navigation", { name: "Memory documents" }));
+  const current = tabs.getAllByRole("link").filter((tab) => tab.getAttribute("aria-current"));
+  expect(current.map((tab) => tab.textContent)).toEqual(["alpha1"]);
+});
+
+test("each line shows who wrote it and the day in their own columns, as plain text", async () => {
+  await renderMemory("/memory?doc=alpha");
+
+  const row = lineOf(/^The remote hook must read stdin/);
+  expect(row.querySelector(":scope > .who")?.textContent).toBe("alpha-38");
+  expect(row.querySelector(":scope > .day")?.textContent).toMatch(
+    /^[A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2}$/,
+  );
+  // The source is in the editor, not a chip on the line.
+  expect(within(row).queryByRole("button", { name: /alpha-38/ })).toBeNull();
+  expect(
+    within(row)
+      .getAllByRole("button")
+      .map((button) => button.getAttribute("aria-label")),
+  ).toEqual(["Edit this line", "Remove this line"]);
+});
 
 test("suggestions show inline as tinted text, a rewrite as a word diff, until kept or discarded", async () => {
   await renderMemory();
 
   expect(screen.getByRole("heading", { level: 1, name: "All projects (shared)" })).toBeTruthy();
-  expect(screen.getByText(/2 suggestions from agents/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: "2 suggestions to review" })).toBeTruthy();
   const row = rewrite();
+  // A rewrite sits right under the line it changes.
+  expect(row.previousElementSibling?.textContent).toMatch(/^Stop new worker dispatch/);
+  expect(within(row).getByText("of the line above")).toBeTruthy();
   expect([...row.querySelectorAll("del")].map((el) => el.textContent)).toEqual([
     "worker dispatch when",
     "weekly quota reaches 3%.",
@@ -112,8 +162,11 @@ test("suggestions show inline as tinted text, a rewrite as a word diff, until ke
   expect(within(row).getByText(/Suggested by the curator/).textContent).toMatch(
     /Startup prompt after: orchestrator 5,940, worker 4,210 tokens\./,
   );
-  const add = document.querySelector(".de.sug.add .de-t.sg");
-  expect(add?.textContent).toMatch(/^If a project's pipeline cannot run its checks off screen/);
+  const add = card("add");
+  expect(within(add).getByText("for Watch out for")).toBeTruthy();
+  expect(add.querySelector("ins")?.textContent).toMatch(
+    /^If a project's pipeline cannot run its checks off screen/,
+  );
   // Nothing is written by showing them.
   expect(calls).toEqual([]);
 });
@@ -122,8 +175,10 @@ test("Keep sends one decision against the blob shown and the line takes the new 
   const blob = view().doc.blob;
   await renderMemory();
 
-  const bar = within(rewrite()).getByRole("group", { name: "Suggestion from the curator" });
-  fireEvent.click(within(bar).getByRole("button", { name: "Keep" }));
+  const group = rewrite();
+  expect(group.getAttribute("role")).toBe("group");
+  expect(group.getAttribute("aria-label")).toBe("Suggestion from the curator");
+  fireEvent.click(within(group).getByRole("button", { name: "Keep" }));
   await settle();
 
   expect(calls).toHaveLength(1);
@@ -131,19 +186,18 @@ test("Keep sends one decision against the blob shown and the line takes the new 
   expect(calls[0]?.body.decisions).toEqual([
     { proposal: expect.any(String), decision: "keep", base_blob: blob },
   ]);
-  expect(document.querySelector(".de.sug.edit")).toBeNull();
+  expect(document.querySelector('.a-sug[data-op="rewrite"]')).toBeNull();
   expect(page().getByText(/^Stop starting new small-model workers at 3%/)).toBeTruthy();
-  const rail = screen.getByRole("complementary", { name: "Recent changes" });
-  expect(within(rail).getByText("Edited a line")).toBeTruthy();
-  expect(screen.getByText(/1 suggestion from agents/)).toBeTruthy();
+  expect(within(rail()).getByText("Edited a line")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "1 suggestion to review" })).toBeTruthy();
+  expect(screen.getByTestId("toast").textContent).toBe("Kept. Undo it from Recent changes.");
 });
 
 test("Discard drops the suggestion and leaves the line as it was", async () => {
   const blob = view().doc.blob;
   await renderMemory();
 
-  const bar = within(rewrite()).getByRole("group", { name: "Suggestion from the curator" });
-  fireEvent.click(within(bar).getByRole("button", { name: "Discard" }));
+  fireEvent.click(within(rewrite()).getByRole("button", { name: "Discard" }));
   await settle();
 
   expect(calls[0]?.body.decisions).toEqual([
@@ -154,25 +208,31 @@ test("Discard drops the suggestion and leaves the line as it was", async () => {
   ).toBeTruthy();
   // A discard records the decision only; the file is not written.
   expect(view().doc.blob).toBe(blob);
-  const rail = screen.getByRole("complementary", { name: "Recent changes" });
-  expect(within(rail).getAllByText("Discarded a suggestion")).toHaveLength(2);
+  expect(within(rail()).getAllByText("Discarded a suggestion")).toHaveLength(2);
 });
 
-test("editing a line in place sends a rewrite of that line; Esc puts the text back", async () => {
+test("a click on a line opens its editor in place; Esc closes it, Enter sends a rewrite", async () => {
   const blob = view().doc.blob;
   await renderMemory();
 
-  const [first] = screen.getAllByRole("textbox", { name: "Edit this line" });
-  if (!first) throw new Error("no editable line");
-  first.focus();
-  first.textContent = "Escape me";
-  fireEvent.keyDown(first, { key: "Escape" });
+  const first = /^Before asking me to merge a sizeable PR/;
+  fireEvent.click(lineOf(first));
+  let box = screen.getByRole("textbox", { name: "Edit this line" }) as HTMLTextAreaElement;
+  expect(box.value).toMatch(first);
+  expect(document.activeElement).toBe(box);
+  // The line it edits steps aside for the editor.
+  expect(lineOf(first).hidden).toBe(true);
+  type(box, "Escape me");
+  fireEvent.keyDown(box, { key: "Escape" });
   await settle();
   expect(calls).toEqual([]);
-  expect(first.textContent).toMatch(/^Before asking me to merge a sizeable PR/);
+  expect(screen.queryByRole("textbox", { name: "Edit this line" })).toBeNull();
+  expect(lineOf(first).hidden).toBe(false);
 
-  first.textContent = "  Offer an independent review   before a sizeable merge. ";
-  fireEvent.blur(first);
+  fireEvent.click(within(lineOf(first)).getByRole("button", { name: "Edit this line" }));
+  box = screen.getByRole("textbox", { name: "Edit this line" }) as HTMLTextAreaElement;
+  type(box, "  Offer an independent review   before a sizeable merge. ");
+  fireEvent.keyDown(box, { key: "Enter" });
   await settle();
 
   expect(calls).toEqual([
@@ -190,6 +250,57 @@ test("editing a line in place sends a rewrite of that line; Esc puts the text ba
     },
   ]);
   expect(page().getByText("Offer an independent review before a sizeable merge.")).toBeTruthy();
+  expect(screen.queryByRole("textbox", { name: "Edit this line" })).toBeNull();
+});
+
+test("an Enter that picks an input method's candidate does not save", async () => {
+  await renderMemory();
+
+  fireEvent.click(lineOf(/^Before asking me to merge a sizeable PR/));
+  const box = screen.getByRole("textbox", { name: "Edit this line" });
+  type(box, "Offer a review first.");
+  fireEvent.keyDown(box, { key: "Enter", isComposing: true });
+  await settle();
+  expect(calls).toEqual([]);
+  expect(screen.getByRole("textbox", { name: "Edit this line" })).toBe(box);
+});
+
+test("a line removed above an open editor leaves the editor open with its draft", async () => {
+  await renderMemory("/memory?doc=alpha");
+
+  const logo = /^Logo explorations run as five parallel scouts/;
+  fireEvent.click(lineOf(logo));
+  type(screen.getByRole("textbox", { name: "Edit this line" }), "Logo scouts run in parallel.");
+  const hook = lineOf(/^The remote hook must read stdin/);
+  fireEvent.click(within(hook).getByRole("button", { name: "Remove this line" }));
+  await settle();
+
+  expect(calls[0]?.body).toMatchObject({ op: "remove", index: 0, section: "How we work here" });
+  expect(page().queryByText(/^The remote hook must read stdin/)).toBeNull();
+  const box = screen.getByRole("textbox", { name: "Edit this line" }) as HTMLTextAreaElement;
+  expect(box.value).toBe("Logo scouts run in parallel.");
+  // The line moved up, and the rewrite goes to where it is now.
+  fireEvent.keyDown(box, { key: "Enter" });
+  await settle();
+  expect(calls[1]?.body).toMatchObject({
+    op: "rewrite",
+    index: 0,
+    text: "Logo scouts run in parallel.",
+  });
+  expect(screen.queryByRole("textbox", { name: "Edit this line" })).toBeNull();
+  expect(page().getByText("Logo scouts run in parallel.")).toBeTruthy();
+});
+
+test("Remove in the editor removes that line", async () => {
+  await renderMemory();
+
+  fireEvent.click(lineOf(/^Before asking me to merge a sizeable PR/));
+  fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+  await settle();
+
+  expect(calls[0]?.body).toMatchObject({ op: "remove", index: 0, section: "How we work here" });
+  expect(page().queryByText(/^Before asking me to merge a sizeable PR/)).toBeNull();
+  expect(within(rail()).getByText("Removed a line")).toBeTruthy();
 });
 
 test("a write against a text that moved on is refused, shown, and the current text is read again", async () => {
@@ -206,8 +317,7 @@ test("a write against a text that moved on is refused, shown, and the current te
     base_blob: moved.blob,
   });
 
-  const bar = within(rewrite()).getByRole("group", { name: "Suggestion from the curator" });
-  fireEvent.click(within(bar).getByRole("button", { name: "Keep" }));
+  fireEvent.click(within(rewrite()).getByRole("button", { name: "Keep" }));
   await settle();
 
   expect(screen.getByRole("alert").textContent).toBe(
@@ -215,7 +325,7 @@ test("a write against a text that moved on is refused, shown, and the current te
   );
   expect(page().getByText("Added from another tab.")).toBeTruthy();
   // The suggestion is still waiting: the refused Keep changed nothing.
-  expect(document.querySelector(".de.sug.edit")).toBeTruthy();
+  expect(document.querySelector('.a-sug[data-op="rewrite"]')).toBeTruthy();
 });
 
 test("a document with uncommitted changes cannot be edited from the page", async () => {
@@ -225,23 +335,64 @@ test("a document with uncommitted changes cannot be edited from the page", async
   expect(screen.getByRole("status").textContent).toMatch(
     /projects\/gamma\.md has changes that are not committed/,
   );
-  const [line] = screen.getAllByRole("textbox", { name: "Edit this line" });
-  expect(line?.getAttribute("contenteditable")).toBeNull();
+  const [line] = page().getAllByRole("button", { name: "Edit this line" });
+  if (!line) throw new Error("no line");
+  expect((line as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(line.closest(".a-ln") as HTMLElement);
+  expect(screen.queryByRole("textbox")).toBeNull();
   for (const button of screen.getAllByRole("button", { name: "Add a line" })) {
     expect((button as HTMLButtonElement).disabled).toBe(true);
   }
 });
 
+test("each Recent changes entry is one Undo button, and a click anywhere on it only undoes", async () => {
+  await renderMemory();
+
+  const entries = rail().querySelectorAll(".rc");
+  expect(entries.length).toBeGreaterThan(0);
+  // Nothing in the rail acts but the entries, and nothing inside an entry acts
+  // on its own.
+  const controls = rail().querySelectorAll("button, a, input, textarea, [tabindex]");
+  expect([...controls]).toEqual([...entries]);
+  for (const entry of entries) {
+    expect(entry.tagName).toBe("BUTTON");
+    expect(entry.getAttribute("title")).toBe("Undo this change");
+    expect(entry.querySelector("button, a, [tabindex], [role='button']")).toBeNull();
+  }
+  const first = entries[0] as HTMLElement;
+  expect(within(rail()).getAllByRole("button", { name: /^Undo / })[0]).toBe(first);
+
+  // A click on the label of a fresh change undoes it, the same as a click on Undo.
+  fireEvent.click(within(rewrite()).getByRole("button", { name: "Keep" }));
+  await settle();
+  const kept = rail().querySelector<HTMLElement>(".rc");
+  if (!kept) throw new Error("expected the kept change");
+  const before = view().doc.blob;
+  const proposal = kept.dataset.proposal;
+  fireEvent.click(kept.querySelector(".rc-t") as HTMLElement);
+  await settle();
+  expect(calls.slice(1)).toEqual([
+    {
+      path: `/api/v1/memory/changes/${proposal}/undo`,
+      body: { idempotency_key: expect.any(String), base_blob: before },
+    },
+  ]);
+  // The entry is gone, the rail is still Recent changes and no other view opened.
+  expect(rail().querySelector(`[data-proposal="${proposal}"]`)).toBeNull();
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
 test("Undo reverts the newest change; an older one that overlaps is refused with the reason", async () => {
   await renderMemory();
 
-  const bar = within(rewrite()).getByRole("group", { name: "Suggestion from the curator" });
-  fireEvent.click(within(bar).getByRole("button", { name: "Keep" }));
+  fireEvent.click(within(rewrite()).getByRole("button", { name: "Keep" }));
   await settle();
 
-  const rail = screen.getByRole("complementary", { name: "Recent changes" });
-  const [newest, older] = within(rail).getAllByRole("button", { name: "Undo" });
-  if (!newest || !older) throw new Error("expected two changes with Undo");
+  const [newest] = within(rail()).getAllByRole("button", { name: /^Undo / });
+  if (!newest) throw new Error("expected the kept change");
+  expect(newest.getAttribute("aria-label")).toMatch(
+    /^Undo edited a line: Stop starting .* at 8%, from the curator, [A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2}, \d{2}:\d{2}$/,
+  );
   const kept = view().doc.blob;
   fireEvent.click(newest);
   await settle();
@@ -251,9 +402,10 @@ test("Undo reverts the newest change; an older one that overlaps is refused with
   expect(
     page().getByText("Stop new worker dispatch when the weekly quota reaches 3%."),
   ).toBeTruthy();
-  expect(within(rail).queryByText("Edited a line")).toBeNull();
+  expect(within(rail()).queryByText("Edited a line")).toBeNull();
+  expect(screen.getByTestId("toast").textContent).toBe("Undone: edited a line.");
 
-  const [seeded] = within(rail).getAllByRole("button", { name: "Undo" });
+  const [seeded] = within(rail()).getAllByRole("button", { name: /^Undo / });
   if (!seeded) throw new Error("expected the seeded change");
   fireEvent.click(seeded);
   await settle();
@@ -262,24 +414,28 @@ test("Undo reverts the newest change; an older one that overlaps is refused with
   );
 });
 
-test("a line's source opens its revision: provenance, approval and the sessions that loaded it", async () => {
+test("the Source link in a line's editor opens its revision over the page", async () => {
   await renderMemory("/memory?doc=alpha");
 
-  fireEvent.click(screen.getAllByRole("button", { name: /^alpha-38, / })[0] as HTMLElement);
+  fireEvent.click(lineOf(/^The remote hook must read stdin/));
+  fireEvent.click(screen.getByRole("button", { name: "Source" }));
   await settle();
 
-  const rail = screen.getByRole("complementary", { name: "Source of this line" });
-  expect(within(rail).getByRole("heading", { name: "projects/alpha.md" })).toBeTruthy();
-  expect(within(rail).getByText("Carried over")).toBeTruthy();
-  expect(within(rail).getByText("Loaded by")).toBeTruthy();
-  expect(within(rail).getByText(/^## How we work here/)).toBeTruthy();
+  const dialog = within(screen.getByRole("dialog", { name: "Source of this line" }));
+  expect(dialog.getByRole("heading", { name: "projects/alpha.md" })).toBeTruthy();
+  expect(dialog.getByText("Carried over")).toBeTruthy();
+  expect(dialog.getByText("Loaded by")).toBeTruthy();
+  expect(dialog.getByText(/^## How we work here/)).toBeTruthy();
+  // Recent changes stays as it was behind it.
+  expect(rail()).toBeTruthy();
 
-  fireEvent.click(within(rail).getByRole("button", { name: "Recent changes" }));
+  fireEvent.click(dialog.getByRole("button", { name: "Close" }));
   await settle();
-  expect(screen.getByRole("complementary", { name: "Recent changes" })).toBeTruthy();
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(screen.getByRole("textbox", { name: "Edit this line" })).toBeTruthy();
 });
 
-test("an entry written over several lines sends no write when it is focused and left as it was", async () => {
+test("an entry written over several lines sends no write when it is saved as it was", async () => {
   // The file wraps the first entry; the page shows it as one line.
   const served = globalThis.fetch;
   vi.stubGlobal("fetch", async (path: string, init?: RequestInit) => {
@@ -292,14 +448,37 @@ test("an entry written over several lines sends no write when it is focused and 
   });
   await renderMemory();
 
-  const [first] = screen.getAllByRole("textbox", { name: "Edit this line" });
-  if (!first) throw new Error("no editable line");
-  expect(first.textContent).toContain("\n  a sizeable");
-  first.focus();
-  first.textContent = (first.textContent ?? "").replace("\n  ", " ");
-  fireEvent.blur(first);
+  fireEvent.click(lineOf(/^Before asking me to merge/));
+  const box = screen.getByRole("textbox", { name: "Edit this line" }) as HTMLTextAreaElement;
+  expect(box.value).toContain("\n  a sizeable");
+  type(box, box.value.replace("\n  ", " "));
+  fireEvent.keyDown(box, { key: "Enter" });
   await settle();
   expect(calls).toEqual([]);
+  expect(screen.queryByRole("textbox", { name: "Edit this line" })).toBeNull();
+});
+
+test("Add a line opens the editor at the end of its section and sends an add", async () => {
+  await renderMemory();
+
+  const section = within(screen.getByRole("region", { name: "Watch out for" }));
+  fireEvent.click(section.getByRole("button", { name: "Add a line" }));
+  expect(section.queryByRole("button", { name: "Add a line" })).toBeNull();
+  expect(section.getByText("Adds to Watch out for as")).toBeTruthy();
+  const box = section.getByRole("textbox", { name: "New line" });
+  type(box, "Ask me before you install anything outside the dev shell");
+  fireEvent.click(section.getByRole("button", { name: "Add line" }));
+  await settle();
+
+  expect(calls[0]?.body).toMatchObject({
+    op: "add",
+    section: "Watch out for",
+    text: "Ask me before you install anything outside the dev shell",
+  });
+  expect(
+    section.getByText("Ask me before you install anything outside the dev shell"),
+  ).toBeTruthy();
+  expect(section.getByRole("button", { name: "Add a line" })).toBeTruthy();
 });
 
 test("a new line that is refused stays open with its text", async () => {
@@ -308,9 +487,8 @@ test("a new line that is refused stays open with its text", async () => {
   const [addLine] = screen.getAllByRole("button", { name: "Add a line" });
   if (!addLine) throw new Error("no Add a line button");
   fireEvent.click(addLine);
-  await settle();
   const fresh = screen.getByRole("textbox", { name: "New line" });
-  fresh.textContent = "Keep this wording";
+  type(fresh, "Keep this wording");
 
   // Someone else lands an edit first, so the add is refused as stale.
   fixtureMutation("POST", "/api/v1/memory/edits", {
@@ -321,19 +499,20 @@ test("a new line that is refused stays open with its text", async () => {
     text: "Added from another tab.",
     base_blob: view().doc.blob,
   });
-  fireEvent.blur(fresh);
+  fireEvent.keyDown(fresh, { key: "Enter" });
   await settle();
 
   expect(calls.map((c) => c.path)).toEqual(["/api/v1/memory/edits"]);
   expect(screen.getByRole("alert").textContent).toMatch(/changed since you opened it/);
-  expect(screen.getByRole("textbox", { name: "New line" }).textContent).toBe("Keep this wording");
+  expect((screen.getByRole("textbox", { name: "New line" }) as HTMLTextAreaElement).value).toBe(
+    "Keep this wording",
+  );
 });
 
 test("Keep waits for the holdout gate, with the reason and the command beside it", async () => {
   await renderMemory();
 
-  const row = document.querySelector<HTMLElement>(".de.sug.add");
-  if (!row) throw new Error("no add suggestion on the page");
+  const row = card("add");
   const keep = within(row).getByRole("button", { name: "Keep" }) as HTMLButtonElement;
   expect(keep.disabled).toBe(true);
   const note = document.getElementById(keep.getAttribute("aria-describedby") ?? "");

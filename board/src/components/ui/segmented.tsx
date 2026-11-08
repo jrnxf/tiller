@@ -15,6 +15,7 @@ export function Segmented<Value extends string>({
   label,
   labelledBy,
   className,
+  disabled,
 }: {
   options: SegmentedOption<Value>[];
   value: Value;
@@ -22,6 +23,7 @@ export function Segmented<Value extends string>({
   label?: string;
   labelledBy?: string;
   className?: string;
+  disabled?: boolean;
 }) {
   return (
     <div
@@ -35,6 +37,7 @@ export function Segmented<Value extends string>({
           key={option.value}
           type="button"
           aria-pressed={value === option.value}
+          disabled={disabled}
           onClick={() => onChange(option.value)}
         >
           {option.icon}

@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import type { DaemonHealth, Machine, MergeAppHealth } from "../../lib/api-types";
-import { machineRowView, VERSION_MARK_WORD } from "../../lib/machines";
+import { machineRowView } from "../../lib/machines";
+import type { MachineRowView, VersionMark } from "../../lib/machines";
 import { prefsStore, updatePrefs } from "../../lib/prefs";
 import type { Density, ThemePreference } from "../../lib/prefs";
 import { healthQuery, machinesQuery, sessionQuery } from "../../lib/queries";
@@ -11,7 +12,10 @@ import { signOut } from "../../lib/session";
 import { useStore } from "../../lib/store";
 import { formatAge, secondsSince } from "../board/format";
 import { Segmented } from "../ui/segmented";
-import { AddHost } from "./add-host";
+import { WarnIcon } from "../board/icons";
+import { PlusIcon } from "../shell/icons";
+import { AddHostForm } from "./add-host";
+import type { Paired } from "./add-host";
 import "./settings.css";
 
 const THEMES: { value: ThemePreference; label: string }[] = [
@@ -49,24 +53,6 @@ function Choice<Value extends string>({
   );
 }
 
-// Always with the weekday: "Thu 5 Nov, 23:40".
-const startedAt = new Intl.DateTimeFormat("en-GB", {
-  timeZone: "Europe/Lisbon",
-  weekday: "short",
-  day: "numeric",
-  month: "short",
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23",
-});
-
-const MERGE_APP_LABEL: Record<MergeAppHealth["status"], string> = {
-  ok: "Ready",
-  missing: "Not set up",
-  warn: "Not used",
-  fail: "Key exposed",
-};
-
 function Fact({ label, hint, children }: { label: string; hint: string; children: ReactNode }) {
   return (
     <div className="set-row">
@@ -79,76 +65,253 @@ function Fact({ label, hint, children }: { label: string; hint: string; children
   );
 }
 
-// What `tiller --version`, the service's start time and `tiller doctor`'s merge
-// App line tell the owner, read from the daemon serving this board.
-function HostFacts({ health }: { health: DaemonHealth }) {
-  const up = secondsSince(health.started_at);
-  const started = new Date(health.started_at);
-  const { merge_app: app } = health;
+// Always with the weekday: "Thu 5 Nov, 23:40".
+const startedAt = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Lisbon",
+  weekday: "short",
+  day: "numeric",
+  month: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
+// The warning above the hosts when the merge App is not ready, as `tiller
+// doctor`'s `merge app` line words it.
+const MERGE_APP_TITLE: Record<Exclude<MergeAppHealth["status"], "ok">, string> = {
+  missing: "Merge App not set up",
+  warn: "Merge App not used",
+  fail: "Merge App key exposed",
+};
+
+// The merge App belongs to the daemon serving this board, so it is named by
+// that host's label like any other host's fact.
+function MergeApp({ app, host }: { app: MergeAppHealth; host: string | null }) {
+  const on = host ? ` on ${host}` : "";
+  if (app.status === "ok") {
+    return (
+      <p className="set-note" data-testid="merge-app">
+        <span className="set-dot green" aria-hidden="true" />
+        {app.app_id === null ? "Merge App ready" : `Merge App ${app.app_id} ready`}
+        {on}
+      </p>
+    );
+  }
   return (
-    <section className="set-panel" aria-label="This host" data-testid="host-facts">
-      <Fact label="Version" hint={`Schema ${health.schema}`}>
-        <code>{health.version}</code>
-      </Fact>
-      <Fact
-        label="Started"
-        hint={`${up === null ? "Running" : `Up ${formatAge(up)}`}, process ${health.pid}`}
-      >
-        {Number.isNaN(started.getTime()) ? "unknown" : startedAt.format(started)}
-      </Fact>
-      <Fact label="Merge App" hint={app.detail}>
-        <span className={`set-status ${app.status}`}>
-          {app.status === "ok" && app.app_id !== null
-            ? `App ${app.app_id}`
-            : MERGE_APP_LABEL[app.status]}
-        </span>
-      </Fact>
-    </section>
+    <div className="set-alert" data-status={app.status} role="status" data-testid="merge-app">
+      <WarnIcon />
+      <b>
+        {MERGE_APP_TITLE[app.status]}
+        {on}
+      </b>
+      <p>{app.detail}</p>
+    </div>
   );
 }
 
-function hostHint(machine: Machine, peer: boolean, mark: string | null, boardVersion: string) {
-  if (mark) return `${mark} (${boardVersion})`;
-  if (machine.version === boardVersion) return "Same as this host";
-  if (machine.version) return "Runs another version";
-  return peer ? "Paired peer, has not reported a version" : "herdr machine, no version to read";
+// "Older than host-a (0.1.0-pre.17)": against the host serving this board,
+// named by its label.
+const VERSION_MARK_TEXT: Record<VersionMark, string> = {
+  older: "Older than",
+  newer: "Newer than",
+  different: "Differs from",
+};
+
+function hostStatus(
+  machine: Machine,
+  view: MachineRowView,
+  board: { label: string; version: string },
+): string {
+  if (machine.kind === "local") return "Serves this board";
+  if (view.staleText) return view.staleText.charAt(0).toUpperCase() + view.staleText.slice(1);
+  if (view.versionMark) {
+    return `${VERSION_MARK_TEXT[view.versionMark]} ${board.label} (${board.version})`;
+  }
+  if (machine.version) return `Same as ${board.label}`;
+  return view.peer
+    ? "Paired peer, has not reported a version"
+    : "herdr machine, no version to read";
 }
 
-// Each other host's Tiller version beside the board host's, so one look shows
-// whether a release reached every machine, then Add a host.
-function HostVersions({
+// A start time and process only the serving daemon reports today; a peer's
+// row says so instead of guessing.
+const NOT_REPORTED = "Only the host serving this board reports this";
+
+// One row per host, this one among them: version, start, process and status.
+function HostRow({
+  machine,
+  board,
+  health,
+}: {
+  machine: Machine;
+  board: { label: string; version: string };
+  health: DaemonHealth;
+}) {
+  const local = machine.kind === "local";
+  const version = local ? health.version : (machine.version ?? null);
+  const view = machineRowView(machine, undefined, board.version);
+  const started = new Date(health.started_at);
+  const up = secondsSince(health.started_at);
+  return (
+    <tr data-testid={`host-${machine.label}`}>
+      <th scope="row" className="set-host">
+        {machine.label}
+      </th>
+      <td className="set-ver" data-label="Version">
+        {version ? (
+          <>
+            <span>{version}</span>
+            {view.versionMark ? <span className="set-status warn">{view.versionMark}</span> : null}
+            {local ? <small>Schema {health.schema}</small> : null}
+          </>
+        ) : (
+          <span className="set-muted">Not reported</span>
+        )}
+      </td>
+      <td className="set-start" data-label="Started" data-empty={local ? undefined : "true"}>
+        {local ? (
+          <>
+            {Number.isNaN(started.getTime()) ? "unknown" : startedAt.format(started)}
+            {up === null ? null : <small>up {formatAge(up)}</small>}
+          </>
+        ) : (
+          <span className="set-muted" title={NOT_REPORTED}>
+            -
+          </span>
+        )}
+      </td>
+      <td className="set-pid" data-label="Process" data-empty={local ? undefined : "true"}>
+        {local ? (
+          <code>{health.pid}</code>
+        ) : (
+          <span className="set-muted" title={NOT_REPORTED}>
+            -
+          </span>
+        )}
+      </td>
+      <td className="set-st">
+        <span className={`set-dot ${view.tone}`} aria-hidden="true" />
+        <span title={view.tooltip ?? undefined}>{hostStatus(machine, view, board)}</span>
+      </td>
+    </tr>
+  );
+}
+
+// The host serving this board, from its own health, while the hosts list
+// loads or when it cannot be read.
+const serving = (health: DaemonHealth): Machine => ({
+  id: "local",
+  label: "This host",
+  kind: "local",
+  view_only: false,
+  health: "ok",
+  running_agents: null,
+  capacity: null,
+  free_slots: null,
+  last_seen_at: null,
+  stale_reason: null,
+  version: health.version,
+  rev: 0,
+});
+
+// Every host the same way, so one look shows whether a release reached each
+// machine; then Add a host, which pairs another through ssh.
+function Hosts({
   machines,
-  boardVersion,
+  health,
   owner,
 }: {
-  machines: Machine[];
-  boardVersion: string;
+  machines: Machine[] | undefined;
+  health: DaemonHealth;
   owner: boolean;
 }) {
-  const others = machines.filter((machine) => machine.kind !== "local");
+  const [adding, setAdding] = useState(false);
+  const [paired, setPaired] = useState<Paired | null>(null);
+  const opener = useRef<HTMLButtonElement>(null);
+  const close = useCallback(() => {
+    setAdding(false);
+    // The form unmounts on the next commit; focus goes back to its opener.
+    requestAnimationFrame(() => opener.current?.focus());
+  }, []);
+  const done = useCallback((host: Paired) => {
+    setPaired(host);
+    setAdding(false);
+  }, []);
+  const local = machines?.find((machine) => machine.kind === "local");
+  const board = { label: local?.label ?? "this host", version: health.version };
+  const sorted = local ? [...(machines ?? [])] : [serving(health), ...(machines ?? [])];
+  sorted.sort((a, b) => a.label.localeCompare(b.label));
+  // Unknown until the hosts list is read.
+  const alone = machines?.every((machine) => machine.kind === "local") ?? false;
   return (
-    <section className="set-panel" aria-label="Other hosts" data-testid="host-versions">
-      {others.map((machine) => {
-        const view = machineRowView(machine, undefined, boardVersion);
-        const mark = view.versionMark ? VERSION_MARK_WORD[view.versionMark] : null;
-        return (
-          <Fact
-            key={machine.id}
-            label={machine.label}
-            hint={hostHint(machine, view.peer, mark, boardVersion)}
-          >
-            {machine.version ? (
+    <section className="set-sec" aria-label="Hosts" data-testid="hosts">
+      <div className="set-sec-h">
+        <div>
+          <h2>Hosts</h2>
+          <p>
+            {owner ? (
               <>
-                {mark ? <span className="set-status warn">{view.versionMark}</span> : null}
-                <code>{machine.version}</code>
+                Pair another machine through ssh, as <code>tiller peer add</code> does.
               </>
             ) : (
-              <span className="set-muted">Not reported</span>
+              "Sign this browser in as the owner to add one"
             )}
-          </Fact>
-        );
-      })}
-      <AddHost empty={others.length === 0} owner={owner} />
+          </p>
+        </div>
+        {owner ? (
+          <button
+            ref={opener}
+            type="button"
+            className="btn"
+            onClick={() => {
+              setPaired(null);
+              setAdding(true);
+            }}
+          >
+            <PlusIcon />
+            Add a host
+          </button>
+        ) : null}
+      </div>
+      <div className="set-panel">
+        <table className="set-hosts">
+          <thead>
+            <tr>
+              <th scope="col">Host</th>
+              <th scope="col">Version</th>
+              <th scope="col">Started</th>
+              <th scope="col">Process</th>
+              <th scope="col">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((machine) => (
+              <HostRow key={machine.id} machine={machine} board={board} health={health} />
+            ))}
+          </tbody>
+        </table>
+        {adding ? <AddHostForm onClose={close} onPaired={done} /> : null}
+        {!adding && paired ? (
+          <div className="set-row set-foot" role="status">
+            <div className="set-text">
+              <h2>Paired {paired.label}</h2>
+              <p>
+                {paired.fingerprint
+                  ? `Its link opens within a few seconds. Key ${paired.fingerprint}`
+                  : "Its link opens within a few seconds."}
+              </p>
+            </div>
+          </div>
+        ) : null}
+        {!adding && !paired && alone ? (
+          <div className="set-row set-foot" data-testid="no-hosts">
+            <div className="set-text">
+              <h2>No other host is paired</h2>
+              <p>Agents run only on {board.label} until another host is added.</p>
+            </div>
+          </div>
+        ) : null}
+      </div>
     </section>
   );
 }
@@ -161,45 +324,41 @@ function BrowserSession({ owner }: { owner: boolean }) {
   const queryClient = useQueryClient();
   if (!owner) {
     return (
-      <section className="set-panel" aria-label="This browser" data-testid="browser-session">
-        <Fact label="Owner" hint="Run tiller board --login to sign this browser in">
-          <span className="set-status missing">Not signed in</span>
-        </Fact>
-      </section>
+      <Fact label="Owner" hint="Run tiller board --login to sign this browser in">
+        <span className="set-status missing">Not signed in</span>
+      </Fact>
     );
   }
   return (
-    <section className="set-panel" aria-label="This browser" data-testid="browser-session">
-      <div className="set-row set-action">
-        <div className="set-text">
-          <h2>Signed in as the owner</h2>
-          <p className={error ? "set-error" : undefined} role={error ? "alert" : undefined}>
-            {error ?? "Signing out ends the sign-in on this browser only"}
-          </p>
-        </div>
-        <button
-          type="button"
-          className="btn"
-          disabled={pending}
-          onClick={() => {
-            setPending(true);
-            setError(null);
-            void signOut().then((result) => {
-              // At an allowed host the app swaps to the signed-out screen; on
-              // loopback this panel turns to "Not signed in".
-              if (result.ok) {
-                void queryClient.invalidateQueries({ queryKey: sessionQuery().queryKey });
-              } else {
-                setError(result.message.replaceAll("`", ""));
-              }
-              setPending(false);
-            });
-          }}
-        >
-          Sign out
-        </button>
+    <div className="set-row set-action" data-testid="browser-session">
+      <div className="set-text">
+        <h2>Signed in as the owner</h2>
+        <p className={error ? "set-error" : undefined} role={error ? "alert" : undefined}>
+          {error ?? "Signing out ends the sign-in on this browser only"}
+        </p>
       </div>
-    </section>
+      <button
+        type="button"
+        className="btn"
+        disabled={pending}
+        onClick={() => {
+          setPending(true);
+          setError(null);
+          void signOut().then((result) => {
+            // At an allowed host the app swaps to the signed-out screen; on
+            // loopback this panel turns to "Not signed in".
+            if (result.ok) {
+              void queryClient.invalidateQueries({ queryKey: sessionQuery().queryKey });
+            } else {
+              setError(result.message.replaceAll("`", ""));
+            }
+            setPending(false);
+          });
+        }}
+      >
+        Sign out
+      </button>
+    </div>
   );
 }
 
@@ -208,46 +367,37 @@ export function SettingsPage() {
   const health = useQuery(healthQuery()).data;
   const session = useQuery(sessionQuery()).data;
   const machines = useQuery(machinesQuery()).data?.machines;
+  const host = machines?.find((machine) => machine.kind === "local")?.label ?? null;
   return (
     <div className="settings-page" data-testid="settings">
+      {health ? <MergeApp app={health.merge_app} host={host} /> : null}
       {health ? (
-        <>
-          <h1 className="set-title">This host</h1>
-          <HostFacts health={health} />
-          {machines ? (
-            <>
-              <h1 className="set-title">Other hosts</h1>
-              <HostVersions
-                machines={machines}
-                boardVersion={health.version}
-                owner={session?.owner ?? false}
-              />
-            </>
-          ) : null}
-        </>
+        <Hosts machines={machines} health={health} owner={session?.owner ?? false} />
       ) : null}
-      {session ? (
-        <>
-          <h1 className="set-title">This browser</h1>
-          <BrowserSession owner={session.owner} />
-        </>
-      ) : null}
-      <h1 className="set-title">Appearance</h1>
-      <section className="set-panel" aria-label="Appearance">
-        <Choice
-          label="Theme"
-          hint="Follow the system, or stay light or dark"
-          options={THEMES}
-          value={prefs.theme}
-          onChange={(theme) => updatePrefs({ theme })}
-        />
-        <Choice
-          label="Density"
-          hint="How much room rows and cards take"
-          options={DENSITIES}
-          value={prefs.density}
-          onChange={(density) => updatePrefs({ density })}
-        />
+      <section className="set-sec" aria-label="This browser">
+        <div className="set-sec-h">
+          <div>
+            <h2>This browser</h2>
+            <p>Kept in this browser only.</p>
+          </div>
+        </div>
+        <div className="set-panel">
+          {session ? <BrowserSession owner={session.owner} /> : null}
+          <Choice
+            label="Theme"
+            hint="Follow the system, or stay light or dark"
+            options={THEMES}
+            value={prefs.theme}
+            onChange={(theme) => updatePrefs({ theme })}
+          />
+          <Choice
+            label="Density"
+            hint="How much room rows and cards take"
+            options={DENSITIES}
+            value={prefs.density}
+            onChange={(density) => updatePrefs({ density })}
+          />
+        </div>
       </section>
     </div>
   );

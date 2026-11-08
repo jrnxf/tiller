@@ -2507,7 +2507,7 @@
             }
           },
           "422": {
-            "description": "`refused`: the id is taken by a different project",
+            "description": "`refused`: the id is taken by a different project; `unsuitable_checkout`: the Local checkout folder does not suit",
             "content": {
               "application/json": {
                 "schema": {
@@ -2517,7 +2517,82 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "description": "`peer_refused`: not forwarded; `clone_failed`: the clone into the Local checkout folder failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/checkout": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "project_checkout",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "description": "The project id; an empty Local checkout folder is named after it.\nAbsent is the same as empty: the board drops empty parameters.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "repo",
+            "in": "query",
+            "description": "The GitHub repo, `owner/name`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "The folder as typed; absent or empty is `<spawn.checkouts_root>/<id>`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "clone",
+            "in": "query",
+            "description": "`true` checks the folder as one to clone into.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckoutCheck"
+                }
+              }
+            }
+          },
+          "503": {
             "content": {
               "application/json": {
                 "schema": {
@@ -3223,7 +3298,6 @@
         "required": [
           "idempotency_key",
           "id",
-          "name",
           "delivery"
         ],
         "properties": {
@@ -3234,6 +3308,17 @@
             ],
             "format": "int64",
             "description": "How many builders may run at once; absent takes the default."
+          },
+          "checkout": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/NewCheckout",
+                "description": "The local checkout to set as `checkouts.<id>`, as `tiller config set`\ndoes; absent leaves the key as it is."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "delivery": {
             "type": "string",
@@ -3253,7 +3338,11 @@
             "type": "string"
           },
           "name": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Absent or empty: the id. The board's Add project asks for no name."
           },
           "repo": {
             "type": [
@@ -4345,6 +4434,40 @@
           },
           "txn": {
             "type": "string"
+          }
+        }
+      },
+      "CheckoutCheck": {
+        "type": "object",
+        "description": "`GET /api/v1/projects/checkout`: what Add project would do with a Local\ncheckout folder, checked as it is typed.",
+        "properties": {
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The folder `checkouts.<id>` would name; absent when the path itself\nis refused."
+          },
+          "plan": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`use` (a checkout of the repo is there) or `clone`; absent when the\nfolder is refused."
+          },
+          "problem": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the folder does not suit; absent when it does."
+          },
+          "remote": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The remote a clone would fetch."
           }
         }
       },
@@ -5784,6 +5907,21 @@
             "description": "What the owner should know about a mutation that applied, such as\nwhy a re-added project's cards do not start at 1."
           }
         }
+      },
+      "NewCheckout": {
+        "type": "object",
+        "description": "Add project's Local checkout: a folder that is a checkout of the project\nalready, or one to clone the project into before it is added.",
+        "properties": {
+          "clone": {
+            "type": "boolean",
+            "description": "Clone the repo into the folder, which must be missing or empty.\n`false`: the folder must be a checkout of the repo already."
+          },
+          "path": {
+            "type": "string",
+            "description": "An absolute path, or one that starts with `~/`. Empty:\n`<spawn.checkouts_root>/<id>`."
+          }
+        },
+        "additionalProperties": false
       },
       "NewerCommit": {
         "type": "object",

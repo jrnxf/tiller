@@ -1,12 +1,21 @@
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { CSSProperties, KeyboardEvent, ReactNode } from "react";
+import type {
+  CSSProperties,
+  Dispatch,
+  KeyboardEvent,
+  MouseEvent,
+  ReactNode,
+  RefObject,
+  SetStateAction,
+} from "react";
 
 import type {
   MemoryChange,
   MemoryDocument,
   MemoryLine,
+  MemoryProvenance,
   MemoryRevision,
   MemorySection,
   MemorySuggestion,
@@ -18,24 +27,37 @@ import { API_KEY_PREFIX, memoryQuery, projectsQuery, revisionQuery } from "../..
 import { useStore } from "../../lib/store";
 import { ActionError, sendMutation } from "../attention/api";
 import { ulid } from "../attention/ulid";
+import { WarnIcon } from "../board/icons";
+import { showToast } from "../board/toast";
 import { lisbonDay, lisbonShortDay } from "../health/lisbon";
 import { CheckIcon, LayersIcon } from "../shell/icons";
+import { ProjectDialog } from "../shell/project-dialog";
 import { Section } from "../states/section";
-import { BackIcon, CrossIcon, EditIcon, PlusIcon, RevertIcon, TrashIcon } from "./icons";
+import {
+  ClockIcon,
+  EditIcon,
+  LinesIcon,
+  PlusIcon,
+  RevertIcon,
+  SparkIcon,
+  TrashIcon,
+} from "./icons";
 import { inlineDiff } from "./inline-diff";
+import "../shell/project-stage.css";
 import "./memory.css";
 
 const FLEET = "fleet";
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-// "Wed 4 Nov" and "Wed 4 Nov 17:48", in Lisbon time.
+// "Wed 4 Nov" and "Wed 4 Nov, 17:48", in Lisbon time.
 const day = (iso: string) => lisbonShortDay(iso);
-const when = (iso: string) => `${lisbonShortDay(iso)} ${lisbonDay(iso).time}`;
+const when = (iso: string) => `${lisbonShortDay(iso)}, ${lisbonDay(iso).time}`;
 
 const oneLine = (text: string | null | undefined) => (text ?? "").replace(/\s+/g, " ").trim();
 
-type Write = (path: string, body: Record<string, unknown>) => Promise<boolean>;
+// The note a landed change shows, so the page says it worked.
+type Write = (path: string, body: Record<string, unknown>, landed: string) => Promise<boolean>;
 
 // Every change names the blob the page showed, so a click that lands twice, or
 // one made against a text that moved on, is refused instead of applied again.
@@ -48,7 +70,7 @@ function useMemoryWrite() {
   const [error, setError] = useState<ActionError | null>(null);
 
   const write = useCallback<Write>(
-    async (path, body) => {
+    async (path, body, note) => {
       if (inFlight.current) return false;
       inFlight.current = true;
       setPending(true);
@@ -70,6 +92,7 @@ function useMemoryWrite() {
       });
       inFlight.current = false;
       setPending(false);
+      if (landed) showToast("ok", note);
       return landed;
     },
     [queryClient],
@@ -78,7 +101,14 @@ function useMemoryWrite() {
   return { write, pending, error };
 }
 
-function DocList({ current }: { current: string }) {
+function colorOf(projects: { id: string }[], id: string): string {
+  const index = projects.findIndex((project) => project.id === id);
+  return index === -1 ? "var(--fg-3)" : projectColor(index);
+}
+
+// One tab per memory document, the shared one first. A tab shows the
+// suggestions waiting on it, or its line count when there are none.
+function DocTabs({ current }: { current: string }) {
   const { data } = useSuspenseQuery(memoryQuery(current === FLEET ? undefined : current));
   const { data: projects } = useSuspenseQuery(projectsQuery());
   const prefs = useStore(prefsStore);
@@ -88,25 +118,27 @@ function DocList({ current }: { current: string }) {
     (doc) => doc.project_id === FLEET || doc.project_id === current || shown.has(doc.project_id),
   );
   return (
-    <nav className="doc-list" aria-label="Memory pages">
-      <div className="dl-h">Memory</div>
+    <nav className="m2-tabs" aria-label="Memory documents">
       {docs.map((doc) => (
         <Link
           key={doc.project_id}
           to="/memory"
           search={doc.project_id === FLEET ? {} : { doc: doc.project_id }}
-          className="doc-li"
-          aria-current={doc.project_id === current ? "true" : undefined}
+          // The shared tab's empty search is part of every other tab's, so
+          // only an exact match counts as the open one.
+          activeOptions={{ exact: true }}
+          className="m2-tab"
+          aria-current={doc.project_id === current ? "page" : undefined}
           style={{ "--pc": colorOf(local, doc.project_id) } as CSSProperties}
         >
           {doc.project_id === FLEET ? <LayersIcon /> : <span className="pdot" />}
-          <span className="nm">{doc.name}</span>
+          {doc.name}
           {doc.suggestions > 0 ? (
-            <span className="sn" title={`${plural(doc.suggestions, "suggestion")} waiting`}>
+            <span className="s" title={`${plural(doc.suggestions, "suggestion")} waiting`}>
               {doc.suggestions}
             </span>
           ) : (
-            <span className="ln" title={plural(doc.lines, "line")}>
+            <span className="n" title={plural(doc.lines, "line")}>
               {doc.lines}
             </span>
           )}
@@ -116,28 +148,263 @@ function DocList({ current }: { current: string }) {
   );
 }
 
-function colorOf(projects: { id: string }[], id: string): string {
-  const index = projects.findIndex((project) => project.id === id);
-  return index === -1 ? "var(--fg-3)" : projectColor(index);
+// Who last changed a line, as one unit that never wraps: a card in its
+// project's colour, you, Tiller's own curator, or the file's history.
+function Who({
+  provenance,
+  projects,
+}: {
+  provenance: MemoryProvenance;
+  projects: { id: string }[];
+}) {
+  let mark: ReactNode;
+  let name: string;
+  if (provenance.card) {
+    const project = provenance.card.replace(/-\d+$/, "");
+    mark = (
+      <span className="m2av card" style={{ "--pc": colorOf(projects, project) } as CSSProperties} />
+    );
+    name = provenance.card;
+  } else if (provenance.note === "you") {
+    mark = <span className="m2av you">Y</span>;
+    name = "you";
+  } else if (provenance.note === "carried over") {
+    mark = (
+      <span className="m2av">
+        <ClockIcon />
+      </span>
+    );
+    name = "carried over";
+  } else if (provenance.note === "outside Tiller") {
+    mark = (
+      <span className="m2av">
+        <EditIcon />
+      </span>
+    );
+    name = "outside Tiller";
+  } else {
+    mark = (
+      <span className="m2av bot">
+        <SparkIcon />
+      </span>
+    );
+    name = provenance.note ?? "unknown";
+  }
+  return (
+    <span className="who" title={name}>
+      {mark}
+      <span className="nm">{name}</span>
+    </span>
+  );
 }
 
-// The quiet hint after a line: its card (or who wrote it) and the day. It
-// opens the revision that wrote the line.
-function Provenance({ line, onSource }: { line: MemoryLine; onSource: (id: string) => void }) {
-  const provenance = line.provenance;
-  if (!provenance) return null;
-  const who = provenance.card ?? provenance.note;
+// Puts focus back on `ref` when the editor it opened closes and took focus
+// with it, so a keyboard user carries on from the same place.
+function useFocusBack(open: boolean, ref: RefObject<HTMLElement | null>) {
+  const was = useRef(open);
+  useEffect(() => {
+    const lost = document.activeElement === null || document.activeElement === document.body;
+    if (was.current && !open && lost) ref.current?.focus({ preventScroll: true });
+    was.current = open;
+  }, [open, ref]);
+}
+
+// The editor a line opens in place, and Add a line opens at the end of its
+// section. Enter saves and Esc cancels; a blank line is never saved.
+function LineEditor({
+  initial,
+  label,
+  meta,
+  save,
+  locked,
+  onSave,
+  onCancel,
+  onRemove,
+}: {
+  initial: string;
+  label: string;
+  meta: ReactNode;
+  save: string;
+  locked: boolean;
+  onSave: (text: string) => void;
+  onCancel: () => void;
+  onRemove?: () => void;
+}) {
+  const [text, setText] = useState(initial);
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.focus({ preventScroll: true });
+    el.setSelectionRange(el.value.length, el.value.length);
+  }, []);
+  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    // An input method's Enter picks a candidate; it does not save.
+    if (event.nativeEvent.isComposing) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onCancel();
+    } else if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      if (!locked) onSave(text);
+    }
+  };
   return (
-    <span className="de-p">
-      <button
-        className="pcard"
-        type="button"
-        title="Open the source file, its approval and the sessions that loaded it"
-        onClick={() => onSource(provenance.revision_id)}
-      >
-        {who ? `${who}, ${day(provenance.at)}` : day(provenance.at)}
-      </button>
-    </span>
+    <div className="ed">
+      <textarea
+        ref={ref}
+        rows={1}
+        placeholder="Write a line..."
+        aria-label={label}
+        spellCheck={false}
+        value={text}
+        onChange={(event) => setText(event.target.value)}
+        onKeyDown={onKeyDown}
+      />
+      <div className="ed-f">
+        <span className="ed-meta">{meta}</span>
+        <span className="ed-keys" aria-hidden="true">
+          <kbd>↵</kbd>save
+          <span className="gap" />
+          <kbd>Esc</kbd>cancel
+        </span>
+        <span className="ed-b">
+          {onRemove ? (
+            <button type="button" className="btn ghost ed-rm" disabled={locked} onClick={onRemove}>
+              <TrashIcon />
+              Remove
+            </button>
+          ) : null}
+          <button type="button" className="btn ghost grow" onClick={onCancel}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="btn primary"
+            disabled={locked}
+            onClick={() => onSave(text)}
+          >
+            {save}
+          </button>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// The editor's quiet footer for a line: who wrote it, when, and its source,
+// the file at that revision with its approval and the sessions that loaded it.
+function SourceMeta({ line, projects }: { line: MemoryLine; projects: { id: string }[] }) {
+  const [open, setOpen] = useState(false);
+  const button = useRef<HTMLButtonElement>(null);
+  const provenance = line.provenance;
+  if (!provenance) return <span>Not yet recorded</span>;
+  return (
+    <>
+      <Who provenance={provenance} projects={projects} />
+      <span className="mk-sep">·</span>
+      <span>{day(provenance.at)}</span>
+      {provenance.revision_id ? (
+        <>
+          <span className="mk-sep">·</span>
+          <button
+            ref={button}
+            type="button"
+            className="ed-src"
+            title="The file at this revision, its approval and the sessions that loaded it"
+            onClick={() => setOpen(true)}
+          >
+            Source
+          </button>
+        </>
+      ) : null}
+      {open ? (
+        <SourceDialog
+          id={provenance.revision_id}
+          onClose={() => {
+            setOpen(false);
+            requestAnimationFrame(() => button.current?.focus());
+          }}
+        />
+      ) : null}
+    </>
+  );
+}
+
+// The line's buttons act on their own; a click anywhere else on the line edits it.
+const act = (run: () => void) => (event: MouseEvent) => {
+  event.stopPropagation();
+  run();
+};
+
+function LineRow({
+  line,
+  projects,
+  editing,
+  locked,
+  onEdit,
+  onRemove,
+}: {
+  line: MemoryLine;
+  projects: { id: string }[];
+  editing: boolean;
+  locked: boolean;
+  onEdit: () => void;
+  onRemove: () => void;
+}) {
+  const edit = useRef<HTMLButtonElement>(null);
+  useFocusBack(editing, edit);
+  const provenance = line.provenance;
+  const who = provenance ? (
+    <Who provenance={provenance} projects={projects} />
+  ) : (
+    <span className="who" />
+  );
+  const changed = provenance ? day(provenance.at) : "";
+  return (
+    <div
+      className="a-ln"
+      hidden={editing}
+      data-locked={locked || undefined}
+      onClick={locked ? undefined : onEdit}
+    >
+      <span className="bul" />
+      <div className="tx">{line.text}</div>
+      {who}
+      <span className="day">{changed}</span>
+      <div className="meta-m">
+        {who}
+        {changed ? (
+          <>
+            <span className="mk-sep">·</span>
+            <span className="day">{changed}</span>
+          </>
+        ) : null}
+      </div>
+      <div className="acts">
+        <button
+          ref={edit}
+          type="button"
+          className="ib"
+          title="Edit this line"
+          aria-label="Edit this line"
+          disabled={locked}
+          onClick={act(onEdit)}
+        >
+          <EditIcon />
+        </button>
+        <button
+          type="button"
+          className="ib danger"
+          title="Remove this line"
+          aria-label="Remove this line"
+          disabled={locked}
+          onClick={act(onRemove)}
+        >
+          <TrashIcon />
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -146,102 +413,112 @@ function budgetText(budget: Record<string, number> | null): string {
   const roles = Object.entries(budget).filter(([, tokens]) => typeof tokens === "number");
   if (roles.length === 0) return "";
   const parts = roles.map(([role, tokens]) => `${role} ${tokens.toLocaleString("en-GB")}`);
-  return ` Startup prompt after: ${parts.join(", ")} tokens.`;
+  return `Startup prompt after: ${parts.join(", ")} tokens.`;
 }
 
-function Why({ suggestion }: { suggestion: MemorySuggestion }) {
-  const from = suggestion.card ? ` from ${suggestion.card}` : "";
-  const what = suggestion.op === "retire" ? "Removal suggested" : "Suggested";
-  return (
-    <div className="de-why">
-      {what} by {suggestion.by}
-      {from}, {when(suggestion.at)}.{suggestion.why ? ` ${suggestion.why}` : ""}
-      <span className="de-budget">{budgetText(suggestion.token_budget_after)}</span>
-    </div>
-  );
-}
-
-function SuggestionRow({
+// A suggestion sits right where it would land: a rewrite or a removal under
+// the line it changes, a new line at the end of its section.
+function SuggestionCard({
   suggestion,
   line,
-  active,
+  section,
   locked,
   onDecide,
 }: {
   suggestion: MemorySuggestion;
   line: MemoryLine | null;
-  active: boolean;
+  section: string;
   locked: boolean;
   onDecide: (suggestion: MemorySuggestion, decision: "keep" | "discard") => void;
 }) {
-  let body: ReactNode;
-  let kind: string;
-  // The line it names: the row it sits on, or the text the view sends when it
-  // is listed apart from that row.
+  // The line it names: the row it sits under, or the text the view sends when
+  // it is listed apart from that row.
   const current = line?.text ?? suggestion.target;
+  const where = line ? "of the line above" : "of a line in this section";
   const { gate } = suggestion;
   const gateId = `gate-${suggestion.proposal_id}`;
+  let kind: string;
+  let head: string;
+  let body: ReactNode;
   if (suggestion.op === "add") {
-    kind = "add";
-    body = <span className="de-t sg">{suggestion.text}</span>;
-  } else if (current === null) {
-    kind = suggestion.op === "rewrite" ? "edit" : "retire";
-    body = (
-      <span className="de-t">
-        {suggestion.op === "rewrite" ? (
-          <ins>{suggestion.text}</ins>
-        ) : (
-          "The line it removes is no longer in the file."
-        )}
-      </span>
-    );
+    [kind, head] = ["Suggested line", `for ${section}`];
+    body = <ins className="ins">{suggestion.text}</ins>;
   } else if (suggestion.op === "rewrite") {
-    kind = "edit";
-    body = (
-      <span className="de-t">
-        {inlineDiff(current, suggestion.text ?? current).map((part, i) => {
+    [kind, head] = ["Suggested rewrite", where];
+    body =
+      current === null ? (
+        <ins className="ins">{suggestion.text}</ins>
+      ) : (
+        inlineDiff(current, suggestion.text ?? current).map((part, i) => {
           const gap = i > 0 ? " " : "";
-          if (part.kind === "del") return [gap, <del key={i}>{part.text}</del>];
-          if (part.kind === "ins") return [gap, <ins key={i}>{part.text}</ins>];
+          if (part.kind === "del")
+            return [
+              gap,
+              <del key={i} className="del">
+                {part.text}
+              </del>,
+            ];
+          if (part.kind === "ins")
+            return [
+              gap,
+              <ins key={i} className="ins">
+                {part.text}
+              </ins>,
+            ];
           return `${gap}${part.text}`;
-        })}
-      </span>
-    );
+        })
+      );
   } else {
-    kind = "retire";
-    body = (
-      <span className="de-t">
-        <del>{current}</del>
-      </span>
-    );
+    [kind, head] = ["Suggested removal", where];
+    body =
+      current === null ? (
+        "The line it removes is no longer in the file."
+      ) : (
+        <del className="del">{current}</del>
+      );
   }
+  const from = suggestion.card ? ` from ${suggestion.card}` : "";
+  const budget = budgetText(suggestion.token_budget_after);
   return (
     <div
-      className={`de sug ${kind}`}
-      tabIndex={0}
-      data-active={active}
-      data-proposal={suggestion.proposal_id}
+      className="a-sug"
+      id={`sug-${suggestion.proposal_id}`}
+      tabIndex={-1}
+      role="group"
+      aria-label={`Suggestion from ${suggestion.by}`}
+      data-op={suggestion.op}
     >
-      <span className="de-bu">{kind === "add" ? <PlusIcon /> : null}</span>
-      <div className="de-body">
-        {body}
-        <Why suggestion={suggestion} />
-        {gate.ok ? null : (
-          <div className="de-gate" id={gateId}>
+      <div className="a-sug-k">
+        <b>
+          <SparkIcon />
+          {kind}
+        </b>
+        {head}
+      </div>
+      <div className="tx">{body}</div>
+      <div className="why">
+        Suggested by {suggestion.by}
+        {from}, {when(suggestion.at)}.{suggestion.why ? ` ${suggestion.why}` : ""}
+        {budget ? <span className="bud"> {budget}</span> : null}
+      </div>
+      {gate.ok ? null : (
+        <div className="gate" id={gateId}>
+          <WarnIcon />
+          <span>
             Keep waits for the holdout gate: {gate.reason}.
             {gate.hint ? (
-              <>
+              <span className="gate-run">
                 {" "}
-                Next: <span className="de-hint">{gate.hint}</span>
-              </>
+                Next: <code>{gate.hint}</code>
+              </span>
             ) : null}
-          </div>
-        )}
-      </div>
-      <div className="sugbar" role="group" aria-label={`Suggestion from ${suggestion.by}`}>
+          </span>
+        </div>
+      )}
+      <div className="sug-f">
         <button
-          className="sb keep"
           type="button"
+          className="btn primary"
           disabled={locked || !gate.ok}
           aria-describedby={gate.ok ? undefined : gateId}
           onClick={() => onDecide(suggestion, "keep")}
@@ -250,206 +527,204 @@ function SuggestionRow({
           Keep
         </button>
         <button
-          className="sb"
           type="button"
+          className="btn ghost"
           disabled={locked}
           onClick={() => onDecide(suggestion, "discard")}
         >
           Discard
         </button>
+        {gate.ok ? <span className="note">Nothing changes until you keep it.</span> : null}
       </div>
     </div>
   );
 }
 
-// One line of prose, edited in place: Enter keeps the edit, Esc puts the text
-// back. A blank line is not saved; the bin removes it.
-function LineRow({
-  line,
-  locked,
-  onSource,
-  onRewrite,
-  onRemove,
-}: {
-  line: MemoryLine;
-  locked: boolean;
-  onSource: (id: string) => void;
-  onRewrite: (line: MemoryLine, text: string) => Promise<boolean>;
-  onRemove: (line: MemoryLine) => void;
-}) {
-  const ref = useRef<HTMLSpanElement>(null);
-  const commit = () => {
-    const el = ref.current;
-    if (!el) return;
-    const text = oneLine(el.textContent);
-    if (text === oneLine(line.text)) return;
-    if (!text) {
-      el.textContent = line.text;
-      return;
-    }
-    void onRewrite(line, text).then((landed) => {
-      if (!landed && ref.current) ref.current.textContent = line.text;
-    });
-  };
-  const onKeyDown = (event: KeyboardEvent<HTMLSpanElement>) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      event.currentTarget.blur();
-    } else if (event.key === "Escape") {
-      event.currentTarget.textContent = line.text;
-      event.currentTarget.blur();
-    }
-  };
-  return (
-    <div className="de">
-      <span className="de-bu" />
-      <div className="de-body">
-        <span
-          ref={ref}
-          className="de-t"
-          contentEditable={locked ? undefined : "plaintext-only"}
-          suppressContentEditableWarning
-          spellCheck={false}
-          role="textbox"
-          aria-label="Edit this line"
-          aria-readonly={locked || undefined}
-          data-ph="Write a line..."
-          onBlur={commit}
-          onKeyDown={onKeyDown}
-        >
-          {line.text}
-        </span>
-        <Provenance line={line} onSource={onSource} />
-      </div>
-      <button
-        className="de-x"
-        type="button"
-        title="Remove this line"
-        aria-label="Remove this line"
-        disabled={locked}
-        onClick={() => onRemove(line)}
-      >
-        <TrashIcon />
-      </button>
-    </div>
-  );
-}
+// Which editor is open: a line's, by its text and which copy of that text it
+// is in the section (an index shifts when a line above changes), or the
+// section's new line (`text` null).
+type Open = { section: string; text: string | null; nth: number };
 
-function NewLine({ onDone }: { onDone: (text: string) => void }) {
-  const ref = useRef<HTMLSpanElement>(null);
-  useEffect(() => ref.current?.focus(), []);
-  return (
-    <div className="de">
-      <span className="de-bu" />
-      <div className="de-body">
-        <span
-          ref={ref}
-          className="de-t"
-          contentEditable="plaintext-only"
-          suppressContentEditableWarning
-          spellCheck={false}
-          role="textbox"
-          aria-label="New line"
-          data-ph="Write a line..."
-          onBlur={(event) => onDone(oneLine(event.currentTarget.textContent))}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              event.currentTarget.blur();
-            } else if (event.key === "Escape") {
-              event.currentTarget.textContent = "";
-              event.currentTarget.blur();
-            }
-          }}
-        />
-      </div>
-    </div>
+const sameOpen = (a: Open | null, b: Open) =>
+  a !== null && a.section === b.section && a.text === b.text && a.nth === b.nth;
+
+// Each line with which copy of its text it is, counted from the top.
+const numbered = (lines: MemoryLine[]) => {
+  const seen = new Map<string, number>();
+  return lines.map((line) => {
+    const nth = seen.get(line.text) ?? 0;
+    seen.set(line.text, nth + 1);
+    return { line, nth };
+  });
+};
+
+// Whether the line `open` names is still in `doc`.
+const stillThere = (doc: MemoryDocument, open: Open) =>
+  doc.sections.some(
+    (section) =>
+      section.title === open.section &&
+      numbered(section.lines).some(({ line, nth }) =>
+        sameOpen(open, { section: section.title, text: line.text, nth }),
+      ),
   );
-}
 
 function DocSection({
   doc,
   section,
-  firstSuggestion,
+  projects,
+  open,
   locked,
   write,
-  onSource,
+  onOpen,
   onDecide,
 }: {
   doc: MemoryDocument;
   section: MemorySection;
-  firstSuggestion: string | null;
+  projects: { id: string }[];
+  open: Open | null;
   locked: boolean;
   write: Write;
-  onSource: (id: string) => void;
+  onOpen: Dispatch<SetStateAction<Open | null>>;
   onDecide: (suggestion: MemorySuggestion, decision: "keep" | "discard") => void;
 }) {
-  const [adding, setAdding] = useState(false);
-  const edit = (body: Record<string, unknown>) =>
-    write("/api/v1/memory/edits", {
-      project: doc.project_id,
-      section: section.title,
-      base_blob: doc.blob,
-      ...body,
-    });
+  const addButton = useRef<HTMLButtonElement>(null);
+  const fresh: Open = { section: section.title, text: null, nth: 0 };
+  const adding = sameOpen(open, fresh);
+  useFocusBack(adding, addButton);
+  const edit = (body: Record<string, unknown>, note: string) =>
+    write(
+      "/api/v1/memory/edits",
+      { project: doc.project_id, section: section.title, base_blob: doc.blob, ...body },
+      note,
+    );
+  const close = () => onOpen(null);
+  // A landed change closes its own editor and leaves any other open. A
+  // refused one leaves its editor open with the text, to fix or retry.
+  const settle = (target: Open, landed: Promise<boolean>) =>
+    void landed.then((ok) => ok && onOpen((now) => (sameOpen(now, target) ? null : now)));
+  const remove = (line: MemoryLine, at: Open) =>
+    settle(at, edit({ op: "remove", index: line.index }, "Removed. Undo it from Recent changes."));
   const empty = section.lines.length === 0 && section.suggestions.length === 0;
+
   return (
-    <section className="doc-sec" aria-label={section.title}>
-      <h2>{section.title}</h2>
-      {section.lines.map((line) =>
-        line.suggestion ? (
-          <SuggestionRow
-            key={`${line.index}:${line.suggestion.proposal_id}`}
-            suggestion={line.suggestion}
-            line={line}
-            active={line.suggestion.proposal_id === firstSuggestion}
-            locked={locked}
-            onDecide={onDecide}
-          />
-        ) : (
-          // Keyed by its text, so a landed edit or a refetch starts the line
-          // afresh instead of keeping what the browser typed into it.
-          <LineRow
-            key={`${line.index}:${line.text}`}
-            line={line}
-            locked={locked}
-            onSource={onSource}
-            onRewrite={(target, text) => edit({ op: "rewrite", index: target.index, text })}
-            onRemove={(target) => void edit({ op: "remove", index: target.index })}
-          />
-        ),
-      )}
+    <section className="a-sec" aria-label={section.title}>
+      <div className="a-sec-h">
+        <h2>
+          {section.title}
+          <span>{plural(section.lines.length, "line")}</span>
+        </h2>
+        <span className="col" aria-hidden="true">
+          From
+        </span>
+        <span className="col r" aria-hidden="true">
+          Changed
+        </span>
+      </div>
+      {numbered(section.lines).map(({ line, nth }) => {
+        const at: Open = { section: section.title, text: line.text, nth };
+        const editing = sameOpen(open, at);
+        return (
+          // Keyed by its text, so a landed edit starts the line afresh, and a
+          // change above it keeps an open editor's draft.
+          <div className="a-item" key={`${nth}:${line.text}`}>
+            <LineRow
+              line={line}
+              projects={projects}
+              editing={editing}
+              locked={locked}
+              onEdit={() => onOpen(at)}
+              onRemove={() => remove(line, at)}
+            />
+            {editing ? (
+              <div className="a-edrow">
+                <LineEditor
+                  initial={line.text}
+                  label="Edit this line"
+                  meta={<SourceMeta line={line} projects={projects} />}
+                  save="Save"
+                  locked={locked}
+                  onCancel={close}
+                  onRemove={() => remove(line, at)}
+                  onSave={(text) => {
+                    const value = oneLine(text);
+                    if (!value || value === oneLine(line.text)) return close();
+                    settle(
+                      at,
+                      edit(
+                        { op: "rewrite", index: line.index, text: value },
+                        "Saved. Agents load it from their next session.",
+                      ),
+                    );
+                  }}
+                />
+              </div>
+            ) : null}
+            {line.suggestion ? (
+              <SuggestionCard
+                suggestion={line.suggestion}
+                line={line}
+                section={section.title}
+                locked={locked}
+                onDecide={onDecide}
+              />
+            ) : null}
+          </div>
+        );
+      })}
       {section.suggestions.map((suggestion) => (
-        <SuggestionRow
+        <SuggestionCard
           key={suggestion.proposal_id}
           suggestion={suggestion}
           line={null}
-          active={suggestion.proposal_id === firstSuggestion}
+          section={section.title}
           locked={locked}
           onDecide={onDecide}
         />
       ))}
       {empty && !adding ? (
-        <p className="de-empty">
+        <p className="a-empty">
           Nothing here yet. Agents suggest lines as they learn, or add your own.
         </p>
       ) : null}
       {adding ? (
-        <NewLine
-          onDone={(text) => {
-            if (!text) {
-              setAdding(false);
-              return;
+        <div className="a-edrow">
+          <LineEditor
+            initial=""
+            label="New line"
+            meta={
+              <>
+                <span>Adds to {section.title} as</span>
+                <span className="who">
+                  <span className="m2av you">Y</span>
+                  <span className="nm">you</span>
+                </span>
+              </>
             }
-            // A refused line stays open with its text, to fix or retry.
-            void edit({ op: "add", text }).then((landed) => landed && setAdding(false));
-          }}
-        />
-      ) : null}
-      <button className="add-line" type="button" disabled={locked} onClick={() => setAdding(true)}>
-        <PlusIcon />
-        Add a line
-      </button>
+            save="Add line"
+            locked={locked}
+            onCancel={close}
+            onSave={(text) => {
+              const value = oneLine(text);
+              if (!value) return close();
+              settle(
+                fresh,
+                edit({ op: "add", text: value }, "Added. Agents load it from their next session."),
+              );
+            }}
+          />
+        </div>
+      ) : (
+        <button
+          ref={addButton}
+          className="a-add"
+          type="button"
+          disabled={locked}
+          onClick={() => onOpen(fresh)}
+        >
+          <PlusIcon />
+          Add a line
+        </button>
+      )}
     </section>
   );
 }
@@ -462,14 +737,15 @@ const CHANGE_LABEL: Record<MemoryChange["kind"], string> = {
   remove: "Removed a line",
 };
 
-const CHANGE_ICON: Record<MemoryChange["kind"], () => ReactNode> = {
-  kept: PlusIcon,
-  added: PlusIcon,
-  edit: EditIcon,
-  discard: CrossIcon,
-  remove: TrashIcon,
-};
+// The button's name, read as one sentence: what an undo reverts, then who and when.
+const undoLabel = (change: MemoryChange) =>
+  [
+    `Undo ${CHANGE_LABEL[change.kind].toLowerCase()}${change.text ? `: ${change.text.replace(/[.\s]+$/, "")}` : ""}`,
+    change.from === "you" ? "you" : `from ${change.from}`,
+    when(change.at),
+  ].join(", ");
 
+// Each entry is one button: a click undoes that change and does nothing else.
 function RecentChanges({
   changes,
   locked,
@@ -480,42 +756,44 @@ function RecentChanges({
   onUndo: (change: MemoryChange) => void;
 }) {
   return (
-    <>
-      <div className="rail-h">Recent changes</div>
-      {changes.length === 0 ? (
-        <p className="chg-none">
-          Nothing has changed yet. Edits and kept suggestions show up here, each with an Undo.
-        </p>
-      ) : (
-        changes.map((change) => {
-          const Icon = CHANGE_ICON[change.kind];
-          return (
-            <div className="chg" key={change.proposal_id} data-proposal={change.proposal_id}>
-              <span className={`chg-i ${change.kind}`}>
-                <Icon />
-              </span>
-              <div className="chg-b">
-                <div className="chg-t">{CHANGE_LABEL[change.kind]}</div>
-                {change.text ? <div className="chg-q">{change.text}</div> : null}
-                <div className="chg-m">
-                  {change.from === "you" ? "By you" : `From ${change.from}`}, {when(change.at)}
-                </div>
-              </div>
-              <button
-                className="undo"
-                type="button"
-                title="Undo this change"
-                disabled={locked}
-                onClick={() => onUndo(change)}
-              >
+    <aside className="rc-rail" aria-label="Recent changes">
+      <div className="rc-h">
+        <b>Recent changes</b>
+        {changes.length > 0 ? <span>Click one to undo it</span> : null}
+      </div>
+      <div className="rc-list">
+        {changes.length === 0 ? (
+          <p className="rc-empty">Nothing to undo. Edits and kept suggestions show up here.</p>
+        ) : (
+          changes.map((change) => (
+            <button
+              key={change.proposal_id}
+              type="button"
+              className="rc"
+              title="Undo this change"
+              aria-label={undoLabel(change)}
+              data-proposal={change.proposal_id}
+              disabled={locked}
+              onClick={() => onUndo(change)}
+            >
+              <span className="rc-u">
                 <RevertIcon />
                 Undo
-              </button>
-            </div>
-          );
-        })
-      )}
-    </>
+              </span>
+              <span className="rc-t">{CHANGE_LABEL[change.kind]}</span>
+              {change.text ? (
+                <span className={change.kind === "remove" ? "rc-q gone" : "rc-q"}>
+                  {change.text}
+                </span>
+              ) : null}
+              <span className="rc-m">
+                {change.from === "you" ? "you" : `from ${change.from}`} · {when(change.at)}
+              </span>
+            </button>
+          ))
+        )}
+      </div>
+    </aside>
   );
 }
 
@@ -569,9 +847,9 @@ function RevisionDetail({ id }: { id: string }) {
             : "None"}
         </dd>
       </dl>
-      <div className="rail-h">Loaded by</div>
+      <h4 className="rev-h">Loaded by</h4>
       {revision.sessions.length === 0 ? (
-        <p className="chg-none">No session has loaded this revision yet.</p>
+        <p className="rev-none">No session has loaded this revision yet.</p>
       ) : (
         <ul className="rev-loads">
           {revision.sessions.map((load) => (
@@ -585,9 +863,9 @@ function RevisionDetail({ id }: { id: string }) {
           ))}
         </ul>
       )}
-      <div className="rail-h">File at this revision</div>
+      <h4 className="rev-h">File at this revision</h4>
       {revision.text === null ? (
-        <p className="chg-none">This revision is no longer in git.</p>
+        <p className="rev-none">This revision is no longer in git.</p>
       ) : (
         <pre className="rev-text">{revision.text.trimEnd()}</pre>
       )}
@@ -595,44 +873,31 @@ function RevisionDetail({ id }: { id: string }) {
   );
 }
 
-function Rail({
-  doc,
-  revision,
-  locked,
-  onBack,
-  onUndo,
-}: {
-  doc: MemoryDocument;
-  revision: string | null;
-  locked: boolean;
-  onBack: () => void;
-  onUndo: (change: MemoryChange) => void;
-}) {
-  const ref = useRef<HTMLElement>(null);
-  useEffect(() => {
-    // On a phone the rail sits below the document: bring the source into view.
-    if (revision) ref.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
-  }, [revision]);
+// A line's source opens over the page, so Recent changes never changes under
+// a click.
+function SourceDialog({ id, onClose }: { id: string; onClose: () => void }) {
+  const close = useRef<HTMLButtonElement>(null);
   return (
-    <aside
-      ref={ref}
-      className="doc-rail"
-      aria-label={revision ? "Source of this line" : "Recent changes"}
+    <ProjectDialog
+      name="source"
+      className="rev-dialog"
+      pending={false}
+      onClose={onClose}
+      initial={close}
     >
-      {revision ? (
-        <>
-          <button className="rev-back" type="button" onClick={onBack}>
-            <BackIcon />
-            Recent changes
-          </button>
-          <Section label="This revision">
-            <RevisionDetail id={revision} />
-          </Section>
-        </>
-      ) : (
-        <RecentChanges changes={doc.changes} locked={locked} onUndo={onUndo} />
-      )}
-    </aside>
+      <h2 id="source-dialog-title">Source of this line</h2>
+      <p id="source-dialog-body">
+        The file at the revision that wrote it, its approval and the sessions that loaded it.
+      </p>
+      <Section label="This revision">
+        <RevisionDetail id={id} />
+      </Section>
+      <div className="dialog-actions">
+        <button ref={close} type="button" className="btn" onClick={onClose}>
+          Close
+        </button>
+      </div>
+    </ProjectDialog>
   );
 }
 
@@ -641,7 +906,10 @@ function DocView({ scope }: { scope: string }) {
   const { data: projects } = useSuspenseQuery(projectsQuery());
   const doc = data.doc;
   const { write, pending, error } = useMemoryWrite();
-  const [revision, setRevision] = useState<string | null>(null);
+  const [open, setOpen] = useState<Open | null>(null);
+  // A line that changed under its open editor (a kept suggestion, an undo)
+  // takes the editor with it.
+  if (open !== null && open.text !== null && !stillThere(doc, open)) setOpen(null);
   const locked = doc.dirty || pending;
   const local = projects.projects.filter((project) => !isPeerRow(project));
 
@@ -649,101 +917,119 @@ function DocView({ scope }: { scope: string }) {
     ...section.lines.flatMap((line) => (line.suggestion ? [line.suggestion] : [])),
     ...section.suggestions,
   ]);
+  const lines = doc.sections.reduce((sum, section) => sum + section.lines.length, 0);
+  const last = [
+    ...doc.changes.map((change) => change.at),
+    ...doc.sections.flatMap((section) =>
+      section.lines.flatMap((line) => (line.provenance ? [line.provenance.at] : [])),
+    ),
+  ].reduce<string | null>((newest, at) => (newest === null || at > newest ? at : newest), null);
+
   const onDecide = (suggestion: MemorySuggestion, decision: "keep" | "discard") =>
-    void write("/api/v1/memory/proposals/decide", {
-      decisions: [{ proposal: suggestion.proposal_id, decision, base_blob: doc.blob }],
-    });
+    void write(
+      "/api/v1/memory/proposals/decide",
+      { decisions: [{ proposal: suggestion.proposal_id, decision, base_blob: doc.blob }] },
+      decision === "keep" ? "Kept. Undo it from Recent changes." : "Discarded.",
+    );
   const onUndo = (change: MemoryChange) =>
-    void write(`/api/v1/memory/changes/${change.proposal_id}/undo`, { base_blob: doc.blob });
+    void write(
+      `/api/v1/memory/changes/${change.proposal_id}/undo`,
+      { base_blob: doc.blob },
+      `Undone: ${CHANGE_LABEL[change.kind].toLowerCase()}.`,
+    );
+  const toFirst = () => {
+    const first = all[0];
+    if (!first) return;
+    const card = document.getElementById(`sug-${first.proposal_id}`);
+    card?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    card?.focus({ preventScroll: true });
+  };
 
   const shared = doc.project_id === FLEET;
   return (
-    <>
-      <div className="doc-main">
-        <article className="doc" aria-busy={pending || undefined}>
-          <header className="doc-h">
-            <div className="doc-ti">
-              {shared ? (
-                <LayersIcon />
-              ) : (
-                <span
-                  className="pdot"
-                  style={{ "--pc": colorOf(local, doc.project_id) } as CSSProperties}
-                />
-              )}
-              <h1>{doc.name}</h1>
-            </div>
-            <p className="doc-sub">
-              {shared
-                ? "What my agents know in every project."
-                : `What my agents know about ${doc.name}.`}{" "}
-              {doc.dirty ? null : <b>Click any line to change it.</b>}
-            </p>
-            {doc.dirty ? (
-              <p className="refusal doc-dirty" role="status">
-                <code>{doc.path}</code> has changes that are not committed, so edits here are
-                refused until it is committed or reset.
-              </p>
-            ) : null}
-            <div className="doc-legend">
+    <div className="m2-wrap">
+      <article className="m2-doc" aria-busy={pending || undefined}>
+        <header className="m2-head">
+          <div className="m2-ti">
+            {shared ? (
+              <LayersIcon />
+            ) : (
+              <span
+                className="pdot"
+                style={{ "--pc": colorOf(local, doc.project_id) } as CSSProperties}
+              />
+            )}
+            <h1>{doc.name}</h1>
+          </div>
+          <p className="m2-sub">
+            {shared
+              ? "What my agents know in every project."
+              : `What my agents know about ${doc.name}.`}
+            {doc.dirty ? null : " Click any line to change it."}
+          </p>
+          <div className="m2-stats">
+            <span>
+              <LinesIcon />
+              {plural(lines, "line")}
+            </span>
+            <span>
+              <SparkIcon />
               {all.length > 0 ? (
-                <>
-                  <span className="lg-s">
-                    <ins>Tinted text</ins>
-                  </span>
-                  <span>
-                    {plural(all.length, "suggestion")} from agents. Keep or discard each one right
-                    where it appears; nothing changes until you do.
-                  </span>
-                </>
+                <button type="button" className="m2-jump" onClick={toFirst}>
+                  {plural(all.length, "suggestion")} to review
+                </button>
               ) : (
-                <span>
-                  No suggestions right now. When an agent learns something, it appears here in
-                  tinted text for you to keep or discard.
-                </span>
+                "No suggestions to review"
               )}
-            </div>
-            {error ? (
-              <p className="refusal" role="alert">
-                {error.message}
-              </p>
+            </span>
+            {last ? (
+              <span>
+                <ClockIcon />
+                Last change {when(last)}
+              </span>
             ) : null}
-          </header>
-          {doc.sections.map((section) => (
-            <DocSection
-              key={section.title}
-              doc={doc}
-              section={section}
-              firstSuggestion={all[0]?.proposal_id ?? null}
-              locked={locked}
-              write={write}
-              onSource={setRevision}
-              onDecide={onDecide}
-            />
-          ))}
-        </article>
-      </div>
-      <Rail
-        doc={doc}
-        revision={revision}
-        locked={locked}
-        onBack={() => setRevision(null)}
-        onUndo={onUndo}
-      />
-    </>
+          </div>
+          {doc.dirty ? (
+            <p className="refusal doc-dirty" role="status">
+              <code>{doc.path}</code> has changes that are not committed, so edits here are refused
+              until it is committed or reset.
+            </p>
+          ) : null}
+          {error ? (
+            <p className="refusal" role="alert">
+              {error.message}
+            </p>
+          ) : null}
+        </header>
+        {doc.sections.map((section) => (
+          <DocSection
+            key={section.title}
+            doc={doc}
+            section={section}
+            projects={local}
+            open={open}
+            locked={locked}
+            write={write}
+            onOpen={setOpen}
+            onDecide={onDecide}
+          />
+        ))}
+      </article>
+      <RecentChanges changes={doc.changes} locked={locked} onUndo={onUndo} />
+    </div>
   );
 }
 
 // The Memory page (memory.md section 7): one document per project, the shared
-// one first, read and changed in place.
+// one first, each on its own tab, read and changed in place.
 export function MemoryPage({ scope }: { scope: string }) {
   return (
     <div className="docs">
-      <Section label="Memory pages">
-        <DocList current={scope} />
+      <Section label="Memory documents">
+        <DocTabs current={scope} />
       </Section>
       <Section label="This memory document">
-        {/* Keyed, so another document starts with no open source or refusal. */}
+        {/* Keyed, so another document starts with no open editor or refusal. */}
         <DocView key={scope} scope={scope} />
       </Section>
     </div>

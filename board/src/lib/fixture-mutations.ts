@@ -276,7 +276,8 @@ function projectGone(kind: string, txn: string, id: string): FollowUp {
 // `project.add`: an archived project keeps its id taken, a deleted one frees it.
 function addProject(body: Record<string, unknown>): MutationResult {
   const id = typeof body.id === "string" ? body.id : "";
-  const name = typeof body.name === "string" ? body.name.trim() : "";
+  // An absent or empty name is the id, as the daemon reads it.
+  const name = (typeof body.name === "string" ? body.name.trim() : "") || id;
   if (!/^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$/.test(id) || id.length < 2) {
     return refusal(
       400,
@@ -284,7 +285,6 @@ function addProject(body: Record<string, unknown>): MutationResult {
       `project id "${id}" must be words of lowercase letters and digits`,
     );
   }
-  if (!name) return refusal(400, "usage", "project name is required");
   if (id === "fleet" || added.has(id) || (currentProject(id) && !deleted.has(id))) {
     return refusal(422, "refused", `project ${id}: project id is taken`);
   }

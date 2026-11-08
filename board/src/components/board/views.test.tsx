@@ -1047,26 +1047,119 @@ test("adding a project closes the dialog, or keeps it open to show the add's war
   });
   await renderApp();
 
-  const add = async (id: string) => {
+  // delta's checkout is set later; alpha uses the checkout already there.
+  const add = async (id: string, mode: "Later" | "Existing folder") => {
     fireEvent.click(screen.getByRole("button", { name: "Add project" }));
     const dialog = screen.getByRole("dialog", { name: "Add project" });
+    expect(within(dialog).queryByLabelText("Name")).toBeNull();
+    expect(dialog.textContent).not.toContain("config set checkouts.<id> before");
     fireEvent.change(within(dialog).getByLabelText("Id"), { target: { value: id } });
-    fireEvent.change(within(dialog).getByLabelText("Name"), { target: { value: id } });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Add project" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: mode }));
+    const submit = within(dialog).getByRole("button", { name: "Add project" });
+    await waitFor(() => expect((submit as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(submit);
     await waitFor(() => expect(posted.at(-1)?.body.id).toBe(id));
   };
 
-  await add("delta");
+  await add("delta", "Later");
   expect(posted.at(-1)?.path).toBe("/api/v1/projects");
+  expect(posted.at(-1)?.body).not.toHaveProperty("name");
+  expect(posted.at(-1)?.body.checkout).toBeNull();
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 
-  await add("alpha");
+  await add("alpha", "Existing folder");
+  expect(posted.at(-1)?.body.checkout).toEqual({ path: "", clone: false });
   const added = await screen.findByRole("dialog", { name: "Project added" });
   expect(within(added).getByRole("status").textContent).toBe(warning);
   const done = within(added).getByRole("button", { name: "Done" });
   await waitFor(() => expect(document.activeElement).toBe(done));
   fireEvent.click(done);
   expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+test("Add project checks the local checkout on the daemon and says what it will do", async () => {
+  const posted = stubApi("default");
+  await renderApp();
+
+  fireEvent.click(screen.getByRole("button", { name: "Add project" }));
+  const dialog = screen.getByRole("dialog", { name: "Add project" });
+  const submit = within(dialog).getByRole("button", { name: "Add project" }) as HTMLButtonElement;
+  const folder = within(dialog).getByLabelText("Local checkout");
+  const verdict = () => document.getElementById(folder.getAttribute("aria-describedby") ?? "");
+  fireEvent.change(within(dialog).getByLabelText("Id"), { target: { value: "delta" } });
+
+  // No checkout at the default folder yet: the daemon says to clone.
+  await waitFor(() =>
+    expect(verdict()?.textContent).toBe(
+      "nothing is at /home/user/src/delta; choose Clone to make it",
+    ),
+  );
+  expect(verdict()?.dataset.problem).toBe("true");
+  expect(submit.disabled).toBe(true);
+
+  // A clone needs the repo, and a folder under the checkouts root.
+  fireEvent.click(within(dialog).getByRole("button", { name: "Clone" }));
+  await waitFor(() =>
+    expect(verdict()?.textContent).toBe(
+      "a clone needs the project's repo; fill in Repo as owner/name",
+    ),
+  );
+  fireEvent.change(within(dialog).getByLabelText(/^Repo/), { target: { value: "example/delta" } });
+  fireEvent.change(folder, { target: { value: "/srv/delta" } });
+  await waitFor(() => expect(verdict()?.textContent).toMatch(/^\/srv\/delta is not under/));
+  expect(submit.disabled).toBe(true);
+  expect(folder.getAttribute("aria-invalid")).toBe("true");
+
+  fireEvent.change(folder, { target: { value: "/home/user/src/delta" } });
+  await waitFor(() =>
+    expect(verdict()?.textContent).toBe(
+      "Clones https://github.com/example/delta.git into /home/user/src/delta.",
+    ),
+  );
+  expect(verdict()?.dataset.problem).toBeUndefined();
+  await waitFor(() => expect(submit.disabled).toBe(false));
+  fireEvent.click(submit);
+  await waitFor(() => expect(posted.at(-1)?.path).toBe("/api/v1/projects"));
+  expect(posted.at(-1)?.body).toMatchObject({
+    id: "delta",
+    repo: "example/delta",
+    checkout: { path: "/home/user/src/delta", clone: true },
+  });
+});
+
+test("Add project locks the Local checkout choice while the add is sent", async () => {
+  const posted = stubApi("default");
+  const fixtures = globalThis.fetch;
+  let answer: (() => void) | undefined;
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) === "/api/v1/projects" && init?.method === "POST") {
+      await new Promise<void>((resolve) => {
+        answer = resolve;
+      });
+    }
+    return fixtures(input, init);
+  });
+  await renderApp();
+
+  fireEvent.click(screen.getByRole("button", { name: "Add project" }));
+  const dialog = screen.getByRole("dialog", { name: "Add project" });
+  fireEvent.change(within(dialog).getByLabelText("Id"), { target: { value: "delta" } });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Later" }));
+  const submit = within(dialog).getByRole("button", { name: "Add project" }) as HTMLButtonElement;
+  await waitFor(() => expect(submit.disabled).toBe(false));
+  fireEvent.click(submit);
+
+  const modes = within(within(dialog).getByRole("group", { name: "Where the checkout comes from" }))
+    .getAllByRole("button")
+    .map((button) => button as HTMLButtonElement);
+  await waitFor(() => expect(modes.map((button) => button.disabled)).toEqual([true, true, true]));
+  fireEvent.click(within(dialog).getByRole("button", { name: "Clone" }));
+  expect(within(dialog).getByRole("button", { name: "Later" }).getAttribute("aria-pressed")).toBe(
+    "true",
+  );
+  answer?.();
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(posted.at(-1)?.body.checkout).toBeNull();
 });
 
 // ---- Project archive ----

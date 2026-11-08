@@ -116,7 +116,7 @@ At install, every mapped file's current content is recorded as a `baseline` revi
 
 Line identity across edits: a change applied by Tiller knows which memory it touched, so the mapping is exact. For an external revision, reconcile diffs the parent blob against the new one: unchanged lines keep their memory, a line replaced inside a hunk keeps its memory with `review_status = unreviewed`, a new line gets a new memory with `provenance = external`, and a removed line's memory is marked `retired` with `retire_reason = external edit`.
 
-The memory view's provenance hint on each line (card id and date) reads from this row; clicking it opens the canonical file at the revision, the approval and the sessions that loaded it (section 7).
+The memory view's From and Changed columns on each line (card id, or who wrote it, and the date) read from this row. They are plain text; the Source link in the line's editor opens the canonical file at the revision, the approval and the sessions that loaded it (section 7).
 
 ## 6. Evidence and proposals
 

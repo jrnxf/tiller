@@ -940,7 +940,9 @@ pub struct AddProject {
     #[serde(default)]
     pub host: Option<String>,
     pub id: String,
-    pub name: String,
+    /// Absent or empty: the id. The board's Add project asks for no name.
+    #[serde(default)]
+    pub name: Option<String>,
     /// The GitHub repo, `owner/name`; absent for a project with none.
     #[serde(default)]
     pub repo: Option<String>,
@@ -950,6 +952,41 @@ pub struct AddProject {
     /// How many builders may run at once; absent takes the default.
     #[serde(default)]
     pub capacity: Option<i64>,
+    /// The local checkout to set as `checkouts.<id>`, as `tiller config set`
+    /// does; absent leaves the key as it is.
+    #[serde(default)]
+    pub checkout: Option<NewCheckout>,
+}
+
+/// Add project's Local checkout: a folder that is a checkout of the project
+/// already, or one to clone the project into before it is added.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NewCheckout {
+    /// An absolute path, or one that starts with `~/`. Empty:
+    /// `<spawn.checkouts_root>/<id>`.
+    #[serde(default)]
+    pub path: String,
+    /// Clone the repo into the folder, which must be missing or empty.
+    /// `false`: the folder must be a checkout of the repo already.
+    #[serde(default)]
+    pub clone: bool,
+}
+
+/// `GET /api/v1/projects/checkout`: what Add project would do with a Local
+/// checkout folder, checked as it is typed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct CheckoutCheck {
+    /// The folder `checkouts.<id>` would name; absent when the path itself
+    /// is refused.
+    pub path: Option<String>,
+    /// `use` (a checkout of the repo is there) or `clone`; absent when the
+    /// folder is refused.
+    pub plan: Option<String>,
+    /// The remote a clone would fetch.
+    pub remote: Option<String>,
+    /// Why the folder does not suit; absent when it does.
+    pub problem: Option<String>,
 }
 
 /// `POST /api/v1/peers`: Add a host in Settings pairs this host with another

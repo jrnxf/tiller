@@ -428,8 +428,6 @@ export interface ProjectDeletePreview {
   open_prs: ProjectOpenPr[];
 }
 
-// `GET /api/v1/projects/{id}/retire`: whether an archive applies now, and the
-// running agents it can stop first.
 // GET /api/v1/projects/{id}/setup: what `tiller doctor`'s merge_gates line and
 // `tiller config get checkouts.<id>` show for one of this host's projects.
 export interface ProjectSetup {
@@ -442,6 +440,19 @@ export interface ProjectSetup {
   config_error: string | null;
 }
 
+// `GET /api/v1/projects/checkout`: what Add project would do with a local
+// checkout. Either `problem` is set and the rest is null, or the reverse.
+export interface CheckoutCheck {
+  // The full folder, with `~` expanded and an empty path read as the default.
+  path: string | null;
+  plan: "use" | "clone" | null;
+  // The URL a clone takes.
+  remote: string | null;
+  problem: string | null;
+}
+
+// `GET /api/v1/projects/{id}/retire`: whether an archive applies now, and the
+// running agents it can stop first.
 export interface ProjectRetirePreview {
   project: string;
   refused: string | null;

@@ -1101,8 +1101,13 @@ kbd {
   white-space: nowrap;
 }
 
-.seg button:hover {
+.seg button:hover:not([disabled]) {
   color: var(--fg-1);
+}
+
+.seg button[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .seg button[aria-pressed="true"] {
