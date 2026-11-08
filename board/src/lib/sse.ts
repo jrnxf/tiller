@@ -279,6 +279,10 @@ function onPeerProjectGone(queryClient: QueryClient, host: string, projectId: st
       : old,
   );
   void queryClient.invalidateQueries({ queryKey: API_KEY_PREFIX, refetchType: "active" });
+  void queryClient.invalidateQueries({
+    queryKey: queryKeyFor(projectSetupPath(projectId)),
+    refetchType: "active",
+  });
 }
 
 // `event: peer`. The daemon tagged the change as the peer's, so the entity
@@ -292,6 +296,9 @@ function applyPeerChange(queryClient: QueryClient, event: PeerEvent): void {
     onPeerProjectGone(queryClient, event.host, change.entity_id);
     return;
   }
+  // Quota windows and outbox receipts are not tagged by owner: a peer's would
+  // replace this host's window of the same label, or a receipt of this board.
+  if (change.entity === "quota" || change.entity === "outbox") return;
   if (change.entity === "host") {
     // The daemon sends the peer's Machines row with no state: read it again.
     void queryClient.invalidateQueries({
@@ -313,14 +320,16 @@ function replaceHost<T extends { host?: string; link?: Machine["link"] }>(
   host: string,
   incoming: unknown,
 ): T[] {
-  const next = Array.isArray(incoming) ? (incoming as T[]) : [];
+  // A path the peer did not send leaves its rows as they are.
+  if (!Array.isArray(incoming)) return rows;
+  const next = incoming as T[];
   return [...rows.filter((row) => !ofHost<T>(host)(row)), ...next];
 }
 
 // `event: peer_reset`: the peer's rows replace what the board holds for it.
 function applyPeerReset(queryClient: QueryClient, event: PeerResetEvent): void {
   const { host, queries } = event;
-  const at = (path: string) => (queries[path] ?? {}) as Record<string, unknown>;
+  const at = (path: string) => (queries?.[path] ?? {}) as Record<string, unknown>;
 
   queryClient.setQueryData<BoardResponse | undefined>(
     queryKeyFor("/api/v1/board?filter=all"),

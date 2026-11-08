@@ -650,3 +650,73 @@ test("a peer project that is deleted leaves only that host's list", () => {
   expect(projects().some((p) => p.host === "host-d" && p.id === peer.id)).toBe(false);
   stop();
 });
+
+test("a peer quota event leaves this host's quota window alone", () => {
+  const { queryClient, stop, source } = federatedStream();
+  const key = queryKeyFor(quotaPath);
+  const before = queryClient.getQueryData<QuotaResponse>(key);
+  const window = before?.windows[0];
+  if (!window) throw new Error("fixture has no quota window");
+
+  source.emit("peer", {
+    host: "host-d",
+    host_id: "01JPEERD0000000000000000D",
+    as_of: null,
+    change: event({
+      entity: "quota",
+      entity_state: { ...window, dot: "red", rev: (window as { rev?: number }).rev ?? 0 + 1 },
+    }),
+  });
+
+  expect(queryClient.getQueryData<QuotaResponse>(key)).toEqual(before);
+  stop();
+});
+
+test("a peer host event marks the machines read stale", () => {
+  const { queryClient, stop, source } = federatedStream();
+  source.emit("peer", {
+    host: "host-d",
+    host_id: "01JPEERD0000000000000000D",
+    as_of: null,
+    change: event({ entity: "host", entity_id: "01JPEERD0000000000000000D" }),
+  });
+  expect(queryClient.getQueryState(queryKeyFor(machinesPath))?.isInvalidated).toBe(true);
+  stop();
+});
+
+test("peer_reset replaces the peer's attention, agents and projects, and a missing path keeps rows", () => {
+  const { queryClient, stop, source } = federatedStream();
+  const projects = () =>
+    queryClient.getQueryData<ProjectsResponse>(queryKeyFor(projectsPath))?.projects ?? [];
+  const peerProject = projects().find((project) => project.host === "host-d");
+  if (!peerProject) throw new Error("fixture has no host-d project");
+  const attention = () =>
+    queryClient.getQueryData<AttentionResponse>(queryKeyFor(attentionPath))?.items ?? [];
+  const hostDItems = attention().filter((item) => item.host === "host-d").length;
+  expect(hostDItems).toBeGreaterThan(0);
+
+  source.emit("peer_reset", {
+    host: "host-d",
+    host_id: "01JPEERD0000000000000000D",
+    link: "live",
+    as_of: null,
+    queries: {},
+  });
+  expect(attention().filter((item) => item.host === "host-d")).toHaveLength(hostDItems);
+  expect(projects().some((project) => project.host === "host-d")).toBe(true);
+
+  source.emit("peer_reset", {
+    host: "host-d",
+    host_id: "01JPEERD0000000000000000D",
+    link: "live",
+    as_of: null,
+    queries: {
+      "/api/v1/attention?state=open": { items: [], permission_prompts: [] },
+      "/api/v1/projects": { projects: [] },
+    },
+  });
+  expect(attention().filter((item) => item.host === "host-d")).toHaveLength(0);
+  expect(projects().some((project) => project.host === "host-d")).toBe(false);
+  expect(projects().some((project) => project.host === undefined)).toBe(true);
+  stop();
+});
