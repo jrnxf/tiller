@@ -36,6 +36,7 @@ import { ClockIcon, EditIcon, LinesIcon, PlusIcon, SparkIcon, TrashIcon } from "
 import { inlineDiff } from "./inline-diff";
 import "../shell/project-stage.css";
 import "./memory.css";
+import { useNamedProjects } from "../board/peer-state";
 
 const FLEET = "fleet";
 
@@ -101,7 +102,7 @@ function colorOf(projects: { id: string }[], id: string): string {
 // suggestions waiting on it, or its line count when there are none.
 function DocTabs({ current }: { current: string }) {
   const { data } = useSuspenseQuery(memoryQuery(current === FLEET ? undefined : current));
-  const { data: projects } = useSuspenseQuery(projectsQuery());
+  const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data);
   const prefs = useStore(prefsStore);
   const local = projects.projects.filter((project) => !isPeerRow(project));
   const shown = new Set(visibleProjects(prefs, local).map((project) => project.id));
@@ -826,7 +827,7 @@ function SourceDialog({ id, onClose }: { id: string; onClose: () => void }) {
 
 function DocView({ scope }: { scope: string }) {
   const { data } = useSuspenseQuery(memoryQuery(scope === FLEET ? undefined : scope));
-  const { data: projects } = useSuspenseQuery(projectsQuery());
+  const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data);
   const doc = data.doc;
   const { write, pending, error } = useMemoryWrite();
   const [open, setOpen] = useState<Open | null>(null);

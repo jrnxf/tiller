@@ -13,6 +13,7 @@ import { SendIcon } from "../attention/icons";
 import { ReconnectingBanner } from "../states/reconnecting-banner";
 import { Section } from "../states/section";
 import { ChevronIcon, CloseIcon, LayersIcon, MenuIcon, ServerIcon } from "./icons";
+import { useNamedProjects } from "../board/peer-state";
 
 const TITLES: Record<string, string> = {
   "/": "Board",
@@ -35,7 +36,7 @@ const nothing = () => null;
 
 // "All projects 4" or "2 of 4 projects", or the focused project's name.
 function ScopeCrumb({ activeHost }: { activeHost: string | undefined }) {
-  const { data: projects } = useSuspenseQuery(projectsQuery());
+  const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data);
   const { data: board } = useSuspenseQuery(boardQuery());
   const prefs = useStore(prefsStore);
   const shown = scopedProjects(prefs, projects.projects, board.rows, activeHost);
@@ -66,7 +67,7 @@ export function Header({ activeHost, menuOpen, onOpenMenu, onOpenAsk }: HeaderPr
   // The header only decorates with these, so a failed read leaves it working:
   // the machine chip still clears and the view can still be reset.
   const machines = useQuery(machinesQuery()).data?.machines ?? [];
-  const projects = useQuery(projectsQuery()).data?.projects;
+  const projects = useNamedProjects(useQuery(projectsQuery()).data)?.projects;
   const prefs = useStore(prefsStore);
   const host = machines.find((machine) => machine.id === activeHost);
   // Without the project list, any hidden project may still narrow the view.

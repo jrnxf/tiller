@@ -22,6 +22,7 @@ import {
   ServerIcon,
   SettingsIcon,
 } from "./icons";
+import { useNamedProjects } from "../board/peer-state";
 
 interface PaletteProps {
   open: boolean;
@@ -64,7 +65,7 @@ function useCommands(activeHost: string | undefined, close: () => void): Command
   const navigate = useNavigate();
   // A read that failed only drops its own commands; going to a screen and
   // changing the look always work.
-  const projects = useQuery(projectsQuery()).data;
+  const projects = useNamedProjects(useQuery(projectsQuery()).data);
   const machines = useQuery(machinesQuery()).data;
   const prefs = useStore(prefsStore);
 

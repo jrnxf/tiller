@@ -8,7 +8,7 @@ import { agentsQuery, machinesQuery, projectsQuery } from "../../lib/queries";
 import { focusOutcome, focusPath, remoteLabel } from "../board/herdr";
 import type { FocusData } from "../board/herdr";
 import { PeerNote } from "../board/host-chip";
-import { useHostLabel, useMachineRows, useStanding } from "../board/peer-state";
+import { useHostLabel, useMachineRows, useStanding, useNamedProjects } from "../board/peer-state";
 import { ActionFailure } from "./action-failure";
 import { sendMutation } from "./api";
 import { PRIORITIES } from "./format";
@@ -143,7 +143,7 @@ function AddCardControl({
   extra: ReactNode;
   off: string | null;
 }) {
-  const { data: projects } = useSuspenseQuery(projectsQuery());
+  const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data);
   const machines = useMachineRows();
   const localLabel = useHostLabel({});
   const groups = projectGroups(projects.projects, machines, localLabel);

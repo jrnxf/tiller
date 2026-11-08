@@ -1,9 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 
-import type { Machine } from "../../lib/api-types";
+import type { Machine, ProjectsResponse } from "../../lib/api-types";
 import { boardQuery, machinesQuery } from "../../lib/queries";
-import { ambiguousIds, isFederated, standingOf } from "../../lib/peers";
+import { ambiguousIds, displayProjects, isFederated, standingOf } from "../../lib/peers";
 import type { Owned, Standing } from "../../lib/peers";
 
 const NONE: Machine[] = [];
@@ -19,6 +19,18 @@ export function useMachineRows(): Machine[] {
 // True once any peer is paired; only then do rows carry a host chip.
 export function useFederated(): boolean {
   return isFederated(useMachineRows());
+}
+
+// The projects read with each host's `fleet` project shown as "Host · <machine>".
+export function useNamedProjects(data: ProjectsResponse): ProjectsResponse;
+export function useNamedProjects(data: ProjectsResponse | undefined): ProjectsResponse | undefined;
+export function useNamedProjects(data: ProjectsResponse | undefined) {
+  const machines = useMachineRows();
+  const local = machines.find((machine) => machine.kind === "local")?.label ?? null;
+  return useMemo(
+    () => (data ? { ...data, projects: displayProjects(data.projects, local) } : data),
+    [data, local],
+  );
 }
 
 // The label of the host that owns a row: the one it names, else this host's.

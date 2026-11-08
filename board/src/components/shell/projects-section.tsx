@@ -16,6 +16,7 @@ import { CheckIcon, ChevronIcon, EyeIcon, EyeOffIcon, FocusIcon, LayersIcon } fr
 import { AddProject } from "./project-add";
 import { ArchivedProjects } from "./projects-archived";
 import { ProjectDetail, StageChip } from "./project-stage";
+import { useNamedProjects } from "../board/peer-state";
 
 const VIEWS: SegmentedOption<ViewKnob>[] = [
   { value: "all", label: "All projects", icon: <LayersIcon /> },
@@ -27,13 +28,15 @@ const VIEWS: SegmentedOption<ViewKnob>[] = [
 const OVERDUE_POLL_MS = 10 * 60_000;
 
 export function ProjectsSection({ activeHost }: { activeHost: string | undefined }) {
-  const { data: projects } = useSuspenseQuery({
-    ...projectsQuery(),
-    refetchInterval: (query) =>
-      query.state.data?.projects.some((project) => project.stage === "pre-launch")
-        ? OVERDUE_POLL_MS
-        : false,
-  });
+  const projects = useNamedProjects(
+    useSuspenseQuery({
+      ...projectsQuery(),
+      refetchInterval: (query) =>
+        query.state.data?.projects.some((project) => project.stage === "pre-launch")
+          ? OVERDUE_POLL_MS
+          : false,
+    }).data,
+  );
   const { data: board } = useSuspenseQuery(boardQuery());
   // Attention only marks the projects that need you; the Inbox says when it
   // failed.

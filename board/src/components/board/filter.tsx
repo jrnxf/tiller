@@ -9,6 +9,7 @@ import { scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
 import { countsByFilter, onHost, parseFilter, tilesOf } from "./model";
 import "./board.css";
+import { useNamedProjects } from "./peer-state";
 
 // Only rendered on the board route, where its search is always present.
 const boardRoute = getRouteApi("/");
@@ -26,7 +27,7 @@ function useBoardFilter() {
   const search = boardRoute.useSearch();
   const navigate = useNavigate();
   const { data: board } = useSuspenseQuery(boardQuery());
-  const { data: projects } = useSuspenseQuery(projectsQuery());
+  const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data);
   const prefs = useStore(prefsStore);
 
   const filter = parseFilter(search.filter);
