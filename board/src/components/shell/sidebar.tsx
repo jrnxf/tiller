@@ -22,6 +22,7 @@ import { Logo } from "./logo";
 import { MachinesSection } from "./machines-section";
 import { ProjectsSection } from "./projects-section";
 import { QuotaFooter, QuotaUnavailable } from "./quota-footer";
+import { useNamedProjects } from "../board/peer-state";
 
 const NAV: {
   to: "/" | "/agents" | "/contributions" | "/inbox" | "/memory" | "/health" | "/settings";
@@ -40,7 +41,7 @@ const NAV: {
 // The ids of the projects the current view and machine filter show.
 function useShownIds(activeHost: string | undefined): Set<string> {
   const { data: board } = useSuspenseQuery(boardQuery());
-  const { data: projects } = useSuspenseQuery(projectsQuery());
+  const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data);
   const prefs = useStore(prefsStore);
   return new Set(
     scopedProjects(prefs, projects.projects, board.rows, activeHost).map((project) =>

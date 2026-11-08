@@ -30,7 +30,7 @@ import { ChevronLeftIcon, InfoIcon, LockIcon, PaneIcon } from "./icons";
 import { LiveTerminal, usePhone } from "./live-terminal";
 import type { SwitchKey, TerminalControl } from "./live-terminal";
 import { AsOf, HostChip, PeerNote } from "./host-chip";
-import { useAmbiguousIds, useStanding } from "./peer-state";
+import { useAmbiguousIds, useStanding, useNamedProjects } from "./peer-state";
 import { ModelChip, ownerSearch } from "./tile";
 import { BoardIcon, CloseIcon, ServerIcon } from "../shell/icons";
 import "./board.css";
@@ -667,7 +667,7 @@ export function AgentsView({
 }) {
   const { data: roster } = useSuspenseQuery(agentsQuery());
   const { data: board } = useSuspenseQuery(boardQuery());
-  const { data: projects } = useSuspenseQuery(projectsQuery());
+  const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data);
   const { data: machines } = useSuspenseQuery(machinesQuery());
   // What a waiting agent asks, when the attention read has it; the rail does
   // not wait for it.

@@ -142,7 +142,7 @@ function seed(now: number): State {
   });
   const fleet: Doc = {
     project_id: FLEET,
-    name: "All projects (shared)",
+    name: "Fleet",
     path: "fleet.md",
     blob: "",
     dirty: false,

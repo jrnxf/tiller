@@ -12,7 +12,7 @@ import type {
   TimelineEntry,
   TimelineResponse,
 } from "../../lib/api-types";
-import { focusReason, ownerOf, shownId } from "../../lib/peers";
+import { HOST_PROJECT, focusReason, ownerOf, shownId } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import {
   cardQuery,
@@ -27,9 +27,10 @@ import { Ago } from "./ago";
 import { badgeText, statusMark } from "./badge";
 import { HostChip, PeerNote } from "./host-chip";
 import { ApproveActions } from "../attention/approve";
+import { AnswerForm } from "../attention/answer";
 import { CommentControl } from "../attention/card-actions";
 import "../attention/inbox.css";
-import { useAmbiguousIds, useStanding } from "./peer-state";
+import { useAmbiguousIds, useStanding, useNamedProjects } from "./peer-state";
 import { approvalFor, approvalStanding, mergeTimeline } from "./card-model";
 import { durationSeconds, formatAge, formatLisbonMoment, secondsSince, shortSha } from "./format";
 import { focusTooltip, useHerdrFocus, useOpenKey } from "./herdr";
@@ -351,6 +352,31 @@ function PullRequest({
   );
 }
 
+// What the host asks of you now, each answered in place.
+function Alerts({ alerts }: { alerts: AttentionItem[] }) {
+  return (
+    <div className="sect">
+      <div className="sect-h">
+        Open alerts<span className="c">{alerts.length} waiting</span>
+      </div>
+      {alerts.length > 0 ? (
+        alerts.map((item) => (
+          <div key={item.id} className="run">
+            <p style={{ margin: 0 }}>
+              <b>{item.question}</b>
+            </p>
+            <AnswerForm item={item} />
+          </div>
+        ))
+      ) : (
+        <div className="run">
+          <p style={{ margin: 0 }}>No open alerts.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Pages, screenshots and reports made for the card, so each stays findable
 // after the conversation that made it is gone.
 function Pages({ artifacts }: { artifacts: CardArtifact[] }) {
@@ -396,7 +422,7 @@ export function CardPage({
   variant?: "page" | "drawer";
 }) {
   const { data: detail } = useSuspenseQuery(cardQuery(cardId, owner));
-  const { data: projects } = useSuspenseQuery(projectsQuery());
+  const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data);
   const { card, column } = detail;
   const standing = useStanding(column);
   const id = shownId(column.host ? { ...card, host: column.host } : card, useAmbiguousIds());
@@ -428,6 +454,13 @@ export function CardPage({
       break;
     }
   }
+
+  // The standing Host health card: no orchestrator reads its comments and no
+  // run, PR or page ever lands on it, so it shows its open alerts instead.
+  const hostHealth = card.project_id === HOST_PROJECT && card.kind === "ops";
+  const alerts = detail.attention.filter(
+    (item) => item.still_current && item.answered_at === null && item.withdrawn_at === null,
+  );
 
   const hold = detail.holds[0];
   const openDeps = detail.deps.filter((dep) => dep.released_at === null);
@@ -541,53 +574,63 @@ export function CardPage({
         ) : null}
       </dl>
 
+      {hostHealth ? <Alerts alerts={alerts} /> : null}
+
       <Timeline
         cardId={cardId}
         owner={owner}
-        composer={<CommentControl card={column} off={standing.canAct ? null : standing.reason} />}
+        composer={
+          hostHealth ? null : (
+            <CommentControl card={column} off={standing.canAct ? null : standing.reason} />
+          )
+        }
       />
 
-      <div className="sect">
-        <div className="sect-h">
-          Runs
-          <span className="c">
-            {detail.runs.length} attempt{detail.runs.length === 1 ? "" : "s"}
-          </span>
-        </div>
-        {detail.runs.length > 0 ? (
-          detail.runs.map((run) => <RunCard key={run.id} run={run} owner={ownerOf(column)} />)
-        ) : (
-          <div className="run">
-            <p style={{ margin: 0 }}>
-              No runs yet. The orchestrator starts one when the card leaves{" "}
-              {hold ? "its hold" : "the queue"}.
-            </p>
+      {hostHealth ? null : (
+        <>
+          <div className="sect">
+            <div className="sect-h">
+              Runs
+              <span className="c">
+                {detail.runs.length} attempt{detail.runs.length === 1 ? "" : "s"}
+              </span>
+            </div>
+            {detail.runs.length > 0 ? (
+              detail.runs.map((run) => <RunCard key={run.id} run={run} owner={ownerOf(column)} />)
+            ) : (
+              <div className="run">
+                <p style={{ margin: 0 }}>
+                  No runs yet. The orchestrator starts one when the card leaves{" "}
+                  {hold ? "its hold" : "the queue"}.
+                </p>
+              </div>
+            )}
           </div>
-        )}
-      </div>
 
-      {detail.prs.length > 0 ? (
-        detail.prs.map((pr) => (
-          <PullRequest
-            key={pr.id}
-            pr={pr}
-            approvals={detail.approvals}
-            attention={detail.attention}
-          />
-        ))
-      ) : (
-        <div className="sect">
-          <div className="sect-h">Pull request</div>
-          <div className="run">
-            <p style={{ margin: 0 }}>
-              No PR yet. An approval is requested once one is open, and it is bound to the head
-              commit at that moment.
-            </p>
-          </div>
-        </div>
+          {detail.prs.length > 0 ? (
+            detail.prs.map((pr) => (
+              <PullRequest
+                key={pr.id}
+                pr={pr}
+                approvals={detail.approvals}
+                attention={detail.attention}
+              />
+            ))
+          ) : (
+            <div className="sect">
+              <div className="sect-h">Pull request</div>
+              <div className="run">
+                <p style={{ margin: 0 }}>
+                  No PR yet. An approval is requested once one is open, and it is bound to the head
+                  commit at that moment.
+                </p>
+              </div>
+            </div>
+          )}
+
+          <Pages artifacts={detail.artifacts} />
+        </>
       )}
-
-      <Pages artifacts={detail.artifacts} />
 
       <div className="sect">
         <div className="sect-h">
@@ -611,29 +654,32 @@ export function CardPage({
         )}
       </div>
 
-      <div className="sect">
-        <div className="sect-h">
-          Observation freshness<span className="c">how recent each signal is</span>
-        </div>
-        <div className="fresh">
-          {detail.freshness.map((item) => {
-            const age = secondsSince(item.observed_at);
-            const kind = age === null ? "idle" : age < 30 ? "live" : age >= 300 ? "stale" : "idle";
-            return (
-              <div key={item.source} className="fr">
-                <i className={`ld ${kind}`} />
-                <div>
-                  <b>{item.source}</b>
-                  <small>{item.detail}</small>
+      {hostHealth ? null : (
+        <div className="sect">
+          <div className="sect-h">
+            Observation freshness<span className="c">how recent each signal is</span>
+          </div>
+          <div className="fresh">
+            {detail.freshness.map((item) => {
+              const age = secondsSince(item.observed_at);
+              const kind =
+                age === null ? "idle" : age < 30 ? "live" : age >= 300 ? "stale" : "idle";
+              return (
+                <div key={item.source} className="fr">
+                  <i className={`ld ${kind}`} />
+                  <div>
+                    <b>{item.source}</b>
+                    <small>{item.detail}</small>
+                  </div>
+                  <span className={`t${age !== null && age >= 300 ? " old" : ""}`}>
+                    {age === null ? "n/a" : <Ago at={item.observed_at} prefix="observed" />}
+                  </span>
                 </div>
-                <span className={`t${age !== null && age >= 300 ? " old" : ""}`}>
-                  {age === null ? "n/a" : <Ago at={item.observed_at} prefix="observed" />}
-                </span>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

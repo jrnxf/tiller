@@ -288,7 +288,7 @@ test("a peer's project is asked through the board host with its host label", asy
   const { onClose, queryClient } = renderDialog();
   await waitFor(() => expect(prose()).toBeTruthy());
   write(chip("alpha"), " ", chip("fleet", "host-d/fleet"), " go");
-  expect(row("fleet").textContent).toContain("on host-d");
+  expect(row("host / host-d").textContent).toContain("on host-d");
   fireEvent.click(sendButton());
   await waitFor(() => expect(onClose).toHaveBeenCalled());
   expect(asksTo("alpha")[0]?.body).not.toHaveProperty("host");
@@ -337,7 +337,7 @@ test("a failed project keeps the dialog open and a retry sends only that one", a
   write(chip("alpha"), " ", chip("fleet", "host-d/fleet"), " go");
   fireEvent.click(sendButton());
 
-  await waitFor(() => expect(row("fleet").textContent).toContain("Could not send"));
+  await waitFor(() => expect(row("host / host-d").textContent).toContain("Could not send"));
   expect(row("alpha").textContent).toContain("Sent");
   expect(screen.getByRole("alert").textContent).toBe("host-d did not answer.");
   expect(onClose).not.toHaveBeenCalled();

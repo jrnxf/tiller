@@ -23,6 +23,7 @@ import type { ColumnId, Tile } from "./model";
 import { LayersIcon, CloseIcon } from "../shell/icons";
 import { CardPage } from "./card-page";
 import "./board.css";
+import { useNamedProjects } from "./peer-state";
 
 const FILTER_NAME: Record<BoardFilter, string | null> = {
   all: null,
@@ -160,7 +161,7 @@ export function BoardView({
 function Board({ host, filter }: { host: string | undefined; filter: BoardFilter }) {
   const { data: live } = useSuspenseQuery(boardQuery());
   const board = useMovingBoard(live);
-  const { data: projects } = useSuspenseQuery(projectsQuery());
+  const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data);
   // Agents only add each lane's orchestrator and its health: when they cannot
   // be read the cards still show, with a note, and the read retries.
   const agentsRead = useQuery({

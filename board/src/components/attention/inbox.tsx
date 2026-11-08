@@ -13,7 +13,7 @@ import { scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
 import { CheckIcon } from "../shell/icons";
 import { HostChip } from "../board/host-chip";
-import { useAmbiguousIds, useStanding } from "../board/peer-state";
+import { useAmbiguousIds, useStanding, useNamedProjects } from "../board/peer-state";
 import { answeredStore, withdrawnStore } from "./answered";
 import type { Withdrawn } from "./answered";
 import { AnswerForm } from "./answer";
@@ -461,7 +461,7 @@ export function Inbox({
 }) {
   const { data: attention } = useSuspenseQuery(attentionQuery());
   const { data: board } = useSuspenseQuery(boardQuery());
-  const { data: projects } = useSuspenseQuery(projectsQuery());
+  const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data);
   const prefs = useStore(prefsStore);
   const answered = useStore(answeredStore);
   const withdrawn = useStore(withdrawnStore);

@@ -5,6 +5,7 @@ import { fixtureSnapshot } from "./fixtures";
 import {
   ambiguousIds,
   asOfText,
+  displayProjects,
   focusReason,
   hostField,
   isFederated,
@@ -151,4 +152,19 @@ test("the picker groups projects by host, this host first, and turns off a group
   ]);
   expect(groups[2]?.standing.reason).toContain("host-e is unreachable");
   expect(groups[3]?.standing.reason).toBe("view only pairing");
+});
+
+test("each host's fleet project shows as host / <machine>, named for its machine", () => {
+  const link = { state: "connected" } as unknown as Machine["link"];
+  const projects = [
+    { id: "fleet", name: "Fleet" },
+    { id: "fleet", name: "Fleet", host: "host-b", link },
+    { id: "alpha", name: "Alpha" },
+  ];
+  expect(displayProjects(projects, "host-a").map((p) => p.name)).toEqual([
+    "host / host-a",
+    "host / host-b",
+    "Alpha",
+  ]);
+  expect(displayProjects(projects, null)[0]?.name).toBe("host");
 });

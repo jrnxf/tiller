@@ -8,6 +8,7 @@ import { contributionsQuery, projectsQuery } from "../../lib/queries";
 import { formatLisbonMoment } from "./format";
 import { PrIcon } from "./icons";
 import "./board.css";
+import { useNamedProjects } from "./peer-state";
 
 const STATE_TONE: Record<string, string> = { open: "ok", merged: "acc", closed: "" };
 
@@ -39,7 +40,7 @@ function Row({ pr, color, name }: { pr: Contribution; color: string; name: strin
 // the URL so a project's contributions can be linked.
 export function ContributionsView({ project }: { project: string | undefined }) {
   const { data } = useSuspenseQuery(contributionsQuery(project));
-  const { data: projects } = useSuspenseQuery(projectsQuery());
+  const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data);
   const navigate = useNavigate();
   const local = projects.projects.filter((candidate) => !candidate.host);
   const select = (value: string | undefined) =>

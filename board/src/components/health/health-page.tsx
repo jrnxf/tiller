@@ -24,6 +24,7 @@ import { accepted, projectRows, quotaBlockOf, sampleLines, signalsOf } from "./m
 import type { QuotaBlock, Signal } from "./model";
 import "../board/board.css";
 import "./health.css";
+import { useNamedProjects } from "../board/peer-state";
 
 const STATE_LABEL = { good: "Good", watch: "Watch" } as const;
 
@@ -264,7 +265,7 @@ const whole = (value: number) => String(Math.round(value));
 const tenth = (value: number) => Number(value.toFixed(1)).toString();
 
 function Numbers({ data, shown }: { data: SignalsResponse; shown: Set<string> }) {
-  const projects = useSuspenseQuery(projectsQuery()).data.projects;
+  const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data).projects;
   const weeks = data.weeks.map((week) => ({
     label: lisbonWeekLabel(week.start),
     start: lisbonShortDay(week.start),
@@ -421,7 +422,7 @@ function Numbers({ data, shown }: { data: SignalsResponse; shown: Set<string> })
 export function HealthPage() {
   const data = useSuspenseQuery(signalsQuery()).data;
   const quota = useSuspenseQuery(quotaQuery()).data;
-  const projects = useSuspenseQuery(projectsQuery()).data.projects;
+  const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data).projects;
   const prefs = useStore(prefsStore);
   const [open, setOpen] = useState(false);
   const now = serverNow();

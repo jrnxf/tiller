@@ -18,6 +18,7 @@ import type { MentionOption } from "./ask-editor";
 import { useAskSends } from "./ask-send";
 import type { AskTarget, Outcome } from "./ask-send";
 import "./ask-dialog.css";
+import { useNamedProjects } from "../board/peer-state";
 
 const ASK_MAX_CHARS = 8000;
 
@@ -324,7 +325,7 @@ function AskBody({ projects, onClose }: { projects: Project[]; onClose: () => vo
 
 // Mounted only while open, so each opening starts with nothing picked.
 export function AskDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const projects = useQuery(projectsQuery()).data?.projects;
+  const projects = useNamedProjects(useQuery(projectsQuery()).data)?.projects;
   if (!open || !projects) return null;
   return <AskBody projects={projects} onClose={onClose} />;
 }

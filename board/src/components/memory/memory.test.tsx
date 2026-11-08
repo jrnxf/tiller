@@ -108,9 +108,9 @@ test("each document is a tab, with the suggestions waiting on it or its line cou
   await renderMemory();
 
   const tabs = within(screen.getByRole("navigation", { name: "Memory documents" }));
-  const fleet = tabs.getByRole("link", { name: /^All projects \(shared\)/ });
+  const fleet = tabs.getByRole("link", { name: /^host \/ host-a/ });
   expect(fleet.getAttribute("aria-current")).toBe("page");
-  expect(fleet.textContent).toBe("All projects (shared)2");
+  expect(fleet.textContent).toBe("host / host-a2");
   expect(tabs.getByRole("link", { name: /^alpha/ }).getAttribute("aria-current")).toBeNull();
 });
 
@@ -142,7 +142,7 @@ test("each line shows who wrote it and the day in their own columns, as plain te
 test("suggestions show inline as tinted text, a rewrite as a word diff, until kept or discarded", async () => {
   await renderMemory();
 
-  expect(screen.getByRole("heading", { level: 1, name: "All projects (shared)" })).toBeTruthy();
+  expect(screen.getByRole("heading", { level: 1, name: "host / host-a" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "2 suggestions to review" })).toBeTruthy();
   const row = rewrite();
   // A rewrite sits right under the line it changes.

@@ -19,7 +19,7 @@ import type {
   MemorySection,
   MemorySuggestion,
 } from "../../lib/api-types";
-import { isPeerRow } from "../../lib/peers";
+import { hostName, isPeerRow } from "../../lib/peers";
 import { prefsStore, visibleProjects } from "../../lib/prefs";
 import { projectColor } from "../../lib/project-color";
 import { API_KEY_PREFIX, memoryQuery, projectsQuery, revisionQuery } from "../../lib/queries";
@@ -36,8 +36,16 @@ import { ClockIcon, EditIcon, LinesIcon, PlusIcon, SparkIcon, TrashIcon } from "
 import { inlineDiff } from "./inline-diff";
 import "../shell/project-stage.css";
 import "./memory.css";
+import { useMachineRows, useNamedProjects } from "../board/peer-state";
 
 const FLEET = "fleet";
+
+// The shared document lives on the `fleet` project, named for this host as
+// the board names that project everywhere ("host / personal-mac").
+function useDocName(): (doc: { project_id: string; name: string }) => string {
+  const local = useMachineRows().find((machine) => machine.kind === "local")?.label ?? null;
+  return (doc) => (doc.project_id === FLEET ? hostName(local) : doc.name);
+}
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
@@ -100,8 +108,9 @@ function colorOf(projects: { id: string }[], id: string): string {
 // One tab per memory document, the shared one first. A tab shows the
 // suggestions waiting on it, or its line count when there are none.
 function DocTabs({ current }: { current: string }) {
+  const docName = useDocName();
   const { data } = useSuspenseQuery(memoryQuery(current === FLEET ? undefined : current));
-  const { data: projects } = useSuspenseQuery(projectsQuery());
+  const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data);
   const prefs = useStore(prefsStore);
   const local = projects.projects.filter((project) => !isPeerRow(project));
   const shown = new Set(visibleProjects(prefs, local).map((project) => project.id));
@@ -123,7 +132,7 @@ function DocTabs({ current }: { current: string }) {
           style={{ "--pc": colorOf(local, doc.project_id) } as CSSProperties}
         >
           {doc.project_id === FLEET ? <LayersIcon /> : <span className="pdot" />}
-          {doc.name}
+          {docName(doc)}
           {doc.suggestions > 0 ? (
             <span className="s" title={`${plural(doc.suggestions, "suggestion")} waiting`}>
               {doc.suggestions}
@@ -825,8 +834,9 @@ function SourceDialog({ id, onClose }: { id: string; onClose: () => void }) {
 }
 
 function DocView({ scope }: { scope: string }) {
+  const docName = useDocName();
   const { data } = useSuspenseQuery(memoryQuery(scope === FLEET ? undefined : scope));
-  const { data: projects } = useSuspenseQuery(projectsQuery());
+  const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data);
   const doc = data.doc;
   const { write, pending, error } = useMemoryWrite();
   const [open, setOpen] = useState<Open | null>(null);
@@ -876,7 +886,7 @@ function DocView({ scope }: { scope: string }) {
                 style={{ "--pc": colorOf(local, doc.project_id) } as CSSProperties}
               />
             )}
-            <h1>{doc.name}</h1>
+            <h1>{docName(doc)}</h1>
           </div>
           <p className="m2-sub">
             {shared
