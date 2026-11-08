@@ -31,12 +31,6 @@ export const PlusIcon = () => (
   </Glyph>
 );
 
-export const RevertIcon = () => (
-  <Glyph>
-    <path d="M5.5 4 2.5 7l3 3M3 7h6.5a3.5 3.5 0 0 1 0 7H7" {...stroke} />
-  </Glyph>
-);
-
 export const EditIcon = () => (
   <Glyph>
     <path d="M10.8 2.7a1.4 1.4 0 0 1 2 2L6.5 11l-2.7 .7.7-2.7z" {...stroke} />

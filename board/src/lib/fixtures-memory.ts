@@ -1,6 +1,6 @@
 // The memory view for the dev and preview servers and for tests: one
 // document per project plus the shared one, kept in memory so Keep, Discard,
-// an edit and Undo change what the next read answers (memory.md section 7,
+// and an edit change what the next read answers (memory.md section 7,
 // protocol.md sections 7.3 and 7.4). Names and lines are placeholders.
 import type {
   MemoryChange,
@@ -39,12 +39,10 @@ interface Doc {
   sections: Section[];
 }
 
-// One landed change, with the sections it replaced for Undo.
+// One landed change.
 interface Landed {
   project_id: string;
   change: MemoryChange;
-  before: Section[];
-  undone: boolean;
 }
 
 interface State {
@@ -360,8 +358,6 @@ function seed(now: number): State {
         from: "alpha-43",
         at: keptAt,
       },
-      before: [],
-      undone: false,
     });
   }
   s.landed.push({
@@ -373,8 +369,6 @@ function seed(now: number): State {
       from: "beta-27",
       at: minutes(now, -60 * 30),
     },
-    before: [],
-    undone: false,
   });
   return s;
 }
@@ -443,8 +437,6 @@ function record(
   return id;
 }
 
-const clone = (sections: Section[]): Section[] => structuredClone(sections);
-
 function summary(doc: Doc): MemoryDocSummary {
   return {
     project_id: doc.project_id,
@@ -478,9 +470,7 @@ function view(doc: Doc, landed: Landed[]): MemoryDocument {
       suggestions: section.suggestions,
     })),
     changes: newestFirst(
-      landed
-        .filter((entry) => entry.project_id === doc.project_id && !entry.undone)
-        .map((entry) => entry.change),
+      landed.filter((entry) => entry.project_id === doc.project_id).map((entry) => entry.change),
       (change) => change.at,
     ).slice(0, 5),
   };
@@ -532,7 +522,6 @@ function writable(doc: Doc | undefined, base: unknown): MemoryReply | Doc {
 function land(
   s: State,
   doc: Doc,
-  before: Section[],
   change: Omit<MemoryChange, "at">,
   card: string | null,
 ): MemoryReply {
@@ -544,7 +533,7 @@ function land(
         each.provenance.revision_id = revision;
       }
   }
-  s.landed.push({ project_id: doc.project_id, change: { ...change, at }, before, undone: false });
+  s.landed.push({ project_id: doc.project_id, change: { ...change, at } });
   const approvalId = next(s, "01JAPPR");
   const landed: MemoryLanded = {
     proposal_id: change.proposal_id,
@@ -562,7 +551,6 @@ function edit(s: State, body: Record<string, unknown>): MemoryReply {
   if (!("sections" in doc)) return doc;
   const section = doc.sections.find((each) => each.title === body.section);
   if (!section) return refuse(`no section ${String(body.section)} in ${doc.path}`);
-  const before = clone(doc.sections);
   const text = typeof body.text === "string" ? body.text.replace(/\s+/g, " ").trim() : "";
   const index = typeof body.index === "number" ? body.index : -1;
   const proposalId = next(s, "01JPROP");
@@ -575,26 +563,14 @@ function edit(s: State, body: Record<string, unknown>): MemoryReply {
         provenance: you(new Date().toISOString()),
         suggestion: null,
       });
-      return land(
-        s,
-        doc,
-        before,
-        { proposal_id: proposalId, kind: "added", text, from: "you" },
-        null,
-      );
+      return land(s, doc, { proposal_id: proposalId, kind: "added", text, from: "you" }, null);
     case "rewrite": {
       const target = section.lines[index];
       if (!target) return refuse(`no line ${index} in ${section.title}`);
       if (!text) return refuse("a line needs text; remove it instead");
       target.text = text;
       target.provenance = you(new Date().toISOString());
-      return land(
-        s,
-        doc,
-        before,
-        { proposal_id: proposalId, kind: "edit", text, from: "you" },
-        null,
-      );
+      return land(s, doc, { proposal_id: proposalId, kind: "edit", text, from: "you" }, null);
     }
     case "remove": {
       const target = section.lines[index];
@@ -603,7 +579,6 @@ function edit(s: State, body: Record<string, unknown>): MemoryReply {
       return land(
         s,
         doc,
-        before,
         { proposal_id: proposalId, kind: "remove", text: target.text, from: "you" },
         null,
       );
@@ -631,7 +606,6 @@ function decideOne(s: State, decision: Record<string, unknown>): MemoryReply {
   if (!found) return refuse(`proposal ${proposalId} is not open`);
   const doc = writable(found.doc, decision.base_blob);
   if (!("sections" in doc)) return doc;
-  const before = clone(doc.sections);
   const { section, added, line } = found;
   const sug = line?.suggestion ?? section.suggestions[added];
   if (!sug) return refuse(`proposal ${proposalId} is not open`);
@@ -648,8 +622,6 @@ function decideOne(s: State, decision: Record<string, unknown>): MemoryReply {
         from,
         at: new Date().toISOString(),
       },
-      before,
-      undone: false,
     });
     return {
       ok: true,
@@ -675,35 +647,17 @@ function decideOne(s: State, decision: Record<string, unknown>): MemoryReply {
       provenance,
       suggestion: null,
     });
-    return land(
-      s,
-      doc,
-      before,
-      { proposal_id: proposalId, kind: "kept", text: sug.text, from },
-      sug.card,
-    );
+    return land(s, doc, { proposal_id: proposalId, kind: "kept", text: sug.text, from }, sug.card);
   }
   if (!line) return refuse(`the line proposal ${proposalId} changes is gone`);
   if (sug.op === "rewrite") {
     line.text = sug.text ?? line.text;
     line.provenance = provenance;
     line.suggestion = null;
-    return land(
-      s,
-      doc,
-      before,
-      { proposal_id: proposalId, kind: "edit", text: line.text, from },
-      sug.card,
-    );
+    return land(s, doc, { proposal_id: proposalId, kind: "edit", text: line.text, from }, sug.card);
   }
   section.lines.splice(section.lines.indexOf(line), 1);
-  return land(
-    s,
-    doc,
-    before,
-    { proposal_id: proposalId, kind: "remove", text: line.text, from },
-    sug.card,
-  );
+  return land(s, doc, { proposal_id: proposalId, kind: "remove", text: line.text, from }, sug.card);
 }
 
 function decide(s: State, body: Record<string, unknown>): MemoryReply {
@@ -722,56 +676,6 @@ function decide(s: State, body: Record<string, unknown>): MemoryReply {
   return { ok: true, data: { decisions: out }, approvalId };
 }
 
-function undo(s: State, proposalId: string, body: Record<string, unknown>): MemoryReply {
-  const entry = s.landed.find((each) => each.change.proposal_id === proposalId);
-  if (!entry) return refuse(`proposal ${proposalId} is not a change in the memory view`);
-  if (entry.undone) return refuse("it was already undone");
-  const doc = writable(
-    s.docs.find((each) => each.project_id === entry.project_id),
-    body.base_blob,
-  );
-  if (!("sections" in doc)) return doc;
-  // Only the newest change reverts cleanly here; an older one overlaps a later
-  // edit as far as this stand-in knows.
-  const newest = newestFirst(
-    s.landed.filter((each) => each.project_id === doc.project_id && !each.undone),
-    (each) => each.change.at,
-  )[0];
-  if (newest !== entry || entry.before.length === 0) {
-    return refuse(
-      "undoing it conflicts with a later edit to the same lines; change the line by hand",
-    );
-  }
-  doc.sections = clone(entry.before);
-  entry.undone = true;
-  const undoId = next(s, "01JPROP");
-  // A discarded suggestion is proposed again as it was; a kept one is not:
-  // only its text is reverted, as the daemon does.
-  if (entry.change.kind !== "discard") {
-    for (const section of doc.sections) {
-      section.suggestions = section.suggestions.filter((each) => each.proposal_id !== proposalId);
-      for (const line of section.lines) {
-        if (line.suggestion?.proposal_id === proposalId) line.suggestion = null;
-      }
-    }
-  }
-  if (entry.change.kind === "discard") {
-    return {
-      ok: true,
-      data: { proposal_id: undoId, approval_id: null, blob: doc.blob },
-      approvalId: null,
-    };
-  }
-  const at = new Date().toISOString();
-  record(s, doc, "tiller", at, undoId, null);
-  const approvalId = next(s, "01JAPPR");
-  return {
-    ok: true,
-    data: { proposal_id: undoId, approval_id: approvalId, blob: doc.blob },
-    approvalId,
-  };
-}
-
 // A memory mutation, or `null` when `path` is not one.
 export function memoryMutation(
   method: string,
@@ -782,7 +686,5 @@ export function memoryMutation(
   const s = current();
   if (path === "/api/v1/memory/edits") return edit(s, body);
   if (path === "/api/v1/memory/proposals/decide") return decide(s, body);
-  const change = /^\/api\/v1\/memory\/changes\/([^/]+)\/undo$/.exec(path);
-  if (change?.[1]) return undo(s, change[1], body);
   return null;
 }
