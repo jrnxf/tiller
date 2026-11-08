@@ -1,13 +1,15 @@
-import { useQueryClient } from "@tanstack/react-query";
-import { useCallback, useId, useRef, useState } from "react";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 
 import type { MutationResponse, Project } from "../../lib/api-types";
-import { projectsQuery } from "../../lib/queries";
+import { projectCheckoutQuery, projectsQuery } from "../../lib/queries";
 import { sendMutation } from "../attention/api";
 import { useAction } from "../attention/use-action";
-import { PlusIcon } from "./icons";
+import { MinusIcon, PlusIcon } from "./icons";
+import { Segmented } from "../ui/segmented";
 import { Select } from "../ui/select";
-import { ProjectDialog } from "./project-dialog";
+import { ProjectDialog, readFailure } from "./project-dialog";
 
 // `tiller project add`'s delivery modes, the one CP5 uses first.
 const DELIVERIES = [
@@ -21,34 +23,82 @@ const DELIVERIES = [
 // The daemon's own slot count when none is given.
 const DEFAULT_CAPACITY = 2;
 
-// The fields `tiller project add` takes that the board asks for. The rest
+// How long the checkout check waits for typing to stop.
+const CHECK_DELAY_MS = 300;
+
+// What happens to the project's local checkout: an existing folder, a clone
+// into a new one, or nothing yet (`tiller config set checkouts.<id>` later).
+type CheckoutMode = "use" | "clone" | "later";
+
+const CHECKOUT_MODES: { value: CheckoutMode; label: string }[] = [
+  { value: "use", label: "Existing folder" },
+  { value: "clone", label: "Clone" },
+  { value: "later", label: "Later" },
+];
+
+// `value`, once it has stayed the same for `ms`.
+function useSettled(value: string, ms: number): string {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(value), ms);
+    return () => clearTimeout(timer);
+  }, [value, ms]);
+  return settled;
+}
+
+// The fields `tiller project add` takes that the board asks for, and the
+// local checkout `tiller config set checkouts.<id>` would set. The rest
 // (checks, remote, default branch, deploy) stay on the command line.
 function AddDialog({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient();
   const [id, setId] = useState("");
-  const [name, setName] = useState("");
   const [repo, setRepo] = useState("");
+  const [mode, setMode] = useState<CheckoutMode>("use");
+  const [path, setPath] = useState("");
   const [delivery, setDelivery] = useState<string>(DELIVERIES[0]);
-  const [capacity, setCapacity] = useState(String(DEFAULT_CAPACITY));
+  const [capacity, setCapacity] = useState(DEFAULT_CAPACITY);
   const fields = useId();
   const first = useRef<HTMLInputElement>(null);
-  // Why a re-added project's cards do not start at 1: the dialog stays open
-  // to say so.
+  // Why a re-added project's cards do not start at 1, or why the checkout
+  // was not set: the dialog stays open to say so.
   const [added, setAdded] = useState<string | null>(null);
   const done = useRef<HTMLButtonElement>(null);
 
-  const slots = Number(capacity);
+  // The daemon checks the folder as the owner types, by the same rules the
+  // add applies, so a refusal shows before Add project is pressed.
+  const wanted = {
+    project: id.trim(),
+    repo: repo.trim(),
+    path: path.trim(),
+    clone: mode === "clone",
+  };
+  // Settled as a string: a new object each render would never settle.
+  const wantedKey = JSON.stringify(wanted);
+  const settledKey = useSettled(wantedKey, CHECK_DELAY_MS);
+  const settled = useMemo(() => JSON.parse(settledKey) as typeof wanted, [settledKey]);
+  const check = useQuery({
+    ...projectCheckoutQuery(settled),
+    enabled: mode !== "later",
+    placeholderData: keepPreviousData,
+  });
+  const current = settledKey === wantedKey && !check.isPlaceholderData && !check.isFetching;
+  const verdict = check.data;
+  const checkFailed = readFailure(check.error, "The folder could not be checked.");
+  // Nothing typed yet: the default folder needs an id, which is no problem yet.
+  const untouched = wanted.project === "" && wanted.path === "";
+  const problem = untouched ? null : (checkFailed ?? verdict?.problem ?? null);
+
   const send = useCallback(
     (idempotency_key: string) =>
       sendMutation<Project>("POST", "/api/v1/projects", {
         id: id.trim(),
-        name: name.trim(),
         repo: repo.trim() || null,
         delivery,
-        capacity: Number(capacity),
+        capacity,
+        checkout: mode === "later" ? null : { path: path.trim(), clone: mode === "clone" },
         idempotency_key,
       }),
-    [capacity, delivery, id, name, repo],
+    [capacity, delivery, id, mode, path, repo],
   );
   const recorded = useCallback(
     (response: MutationResponse<Project>) => {
@@ -61,16 +111,13 @@ function AddDialog({ onClose }: { onClose: () => void }) {
   // Each set of values is its own click: a refused id fixed and sent again
   // is a new add, while a retry of the same values reuses its key.
   const action = useAction({
-    binding: `project-add:${id}:${name}:${repo}:${delivery}:${capacity}`,
+    binding: `project-add:${id}:${repo}:${mode}:${path}:${delivery}:${capacity}`,
     send,
     onRecorded: recorded,
   });
-  const armed =
-    id.trim() !== "" &&
-    name.trim() !== "" &&
-    Number.isInteger(slots) &&
-    slots > 0 &&
-    !action.pending;
+  const checkoutReady =
+    mode === "later" || (current && checkFailed === null && verdict?.problem === null);
+  const armed = id.trim() !== "" && checkoutReady && !action.pending;
   const submit = () => {
     if (armed) action.trigger();
   };
@@ -92,11 +139,16 @@ function AddDialog({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <ProjectDialog name="add" pending={action.pending} onClose={onClose} initial={first}>
+    <ProjectDialog
+      name="add"
+      className="pa-dialog"
+      pending={action.pending}
+      onClose={onClose}
+      initial={first}
+    >
       <h2 id="add-dialog-title">Add project</h2>
       <p id="add-dialog-body">
-        Registers a project on this host, as <code>tiller project add</code> does. Point it at a
-        checkout with <code>tiller config set checkouts.&lt;id&gt;</code> before its first builder.
+        Registers a project on this host, as <code>tiller project add</code> does.
       </p>
       <form
         onSubmit={(event) => {
@@ -104,63 +156,131 @@ function AddDialog({ onClose }: { onClose: () => void }) {
           submit();
         }}
       >
-        <div className="form-fields">
-          <label htmlFor={`${fields}-id`}>Id</label>
-          <input
-            ref={first}
-            id={`${fields}-id`}
-            className="note-in mono"
-            autoComplete="off"
-            autoCapitalize="off"
-            spellCheck={false}
-            placeholder="my-app"
-            value={id}
-            disabled={action.pending}
-            onChange={(event) => setId(event.target.value)}
-          />
-          <label htmlFor={`${fields}-name`}>Name</label>
-          <input
-            id={`${fields}-name`}
-            className="note-in"
-            autoComplete="off"
-            placeholder="My app"
-            value={name}
-            disabled={action.pending}
-            onChange={(event) => setName(event.target.value)}
-          />
-          <label htmlFor={`${fields}-repo`}>Repo</label>
-          <input
-            id={`${fields}-repo`}
-            className="note-in mono"
-            autoComplete="off"
-            autoCapitalize="off"
-            spellCheck={false}
-            placeholder="owner/name, optional"
-            value={repo}
-            disabled={action.pending}
-            onChange={(event) => setRepo(event.target.value)}
-          />
-          <label htmlFor={`${fields}-delivery`}>Delivery</label>
-          <Select
-            id={`${fields}-delivery`}
-            className="form-select"
-            value={delivery}
-            disabled={action.pending}
-            onValueChange={setDelivery}
-            options={DELIVERIES.map((mode) => ({ value: mode, label: mode }))}
-          />
-          <label htmlFor={`${fields}-capacity`}>Builder slots</label>
-          <input
-            id={`${fields}-capacity`}
-            className="note-in form-slots"
-            type="number"
-            inputMode="numeric"
-            min={1}
-            step={1}
-            value={capacity}
-            disabled={action.pending}
-            onChange={(event) => setCapacity(event.target.value)}
-          />
+        <div className="pa-fields">
+          <div className="pa-f">
+            <label className="pa-l" htmlFor={`${fields}-id`}>
+              Id
+            </label>
+            <input
+              ref={first}
+              id={`${fields}-id`}
+              className="note-in mono"
+              autoComplete="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              placeholder="my-app"
+              aria-describedby={`${fields}-id-help`}
+              value={id}
+              disabled={action.pending}
+              onChange={(event) => setId(event.target.value)}
+            />
+            <p className="pa-help" id={`${fields}-id-help`}>
+              Also its name. Lowercase words and hyphens.
+            </p>
+          </div>
+          <div className="pa-f">
+            <label className="pa-l" htmlFor={`${fields}-repo`}>
+              Repo <span className="pa-opt">Optional</span>
+            </label>
+            <input
+              id={`${fields}-repo`}
+              className="note-in mono"
+              autoComplete="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              placeholder="owner/name"
+              value={repo}
+              disabled={action.pending}
+              onChange={(event) => setRepo(event.target.value)}
+            />
+          </div>
+          <div className="pa-f">
+            <div className="pa-l-row">
+              <label className="pa-l" htmlFor={mode === "later" ? undefined : `${fields}-path`}>
+                Local checkout
+              </label>
+              <Segmented
+                className="pa-seg"
+                label="Where the checkout comes from"
+                options={CHECKOUT_MODES}
+                value={mode}
+                disabled={action.pending}
+                onChange={setMode}
+              />
+            </div>
+            {mode === "later" ? (
+              <p className="pa-help">
+                Set it before the first builder with{" "}
+                <code>tiller config set checkouts.{id.trim() || "<id>"}</code>.
+              </p>
+            ) : (
+              <>
+                <input
+                  id={`${fields}-path`}
+                  className="note-in mono"
+                  autoComplete="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                  placeholder={
+                    path.trim() === "" && verdict?.path ? verdict.path : "/home/user/src/my-app"
+                  }
+                  aria-describedby={`${fields}-path-help`}
+                  aria-invalid={current && problem !== null ? true : undefined}
+                  value={path}
+                  disabled={action.pending}
+                  onChange={(event) => setPath(event.target.value)}
+                />
+                <CheckoutVerdict
+                  id={`${fields}-path-help`}
+                  mode={mode}
+                  problem={problem}
+                  path={verdict?.path ?? null}
+                  remote={verdict?.remote ?? null}
+                  plan={verdict?.plan ?? null}
+                  stale={!current}
+                />
+              </>
+            )}
+          </div>
+          <div className="pa-row">
+            <div className="pa-f">
+              <label className="pa-l" htmlFor={`${fields}-delivery`}>
+                Delivery
+              </label>
+              <Select
+                id={`${fields}-delivery`}
+                className="form-select"
+                value={delivery}
+                disabled={action.pending}
+                onValueChange={setDelivery}
+                options={DELIVERIES.map((value) => ({ value, label: value }))}
+              />
+            </div>
+            <div className="pa-f">
+              <span className="pa-l" id={`${fields}-slots`}>
+                Builder slots
+              </span>
+              <div className="pa-num" role="group" aria-labelledby={`${fields}-slots`}>
+                <button
+                  type="button"
+                  aria-label="One slot fewer"
+                  disabled={action.pending || capacity <= 1}
+                  onClick={() => setCapacity((slots) => Math.max(1, slots - 1))}
+                >
+                  <MinusIcon />
+                </button>
+                <output aria-live="polite">{capacity}</output>
+                <button
+                  type="button"
+                  aria-label="One slot more"
+                  disabled={action.pending}
+                  onClick={() => setCapacity((slots) => slots + 1)}
+                >
+                  <PlusIcon />
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
         {action.error ? (
           <p className="refusal" role="alert">
@@ -172,11 +292,63 @@ function AddDialog({ onClose }: { onClose: () => void }) {
             Cancel
           </button>
           <button type="submit" className="btn primary" disabled={!armed}>
-            {action.pending ? "Adding..." : "Add project"}
+            {action.pending ? (mode === "clone" ? "Cloning..." : "Adding...") : "Add project"}
           </button>
         </div>
       </form>
     </ProjectDialog>
+  );
+}
+
+// The line under the checkout's folder: what the add will do with it, or why
+// the daemon would refuse it.
+function CheckoutVerdict({
+  id,
+  mode,
+  problem,
+  path,
+  remote,
+  plan,
+  stale,
+}: {
+  id: string;
+  mode: CheckoutMode;
+  problem: string | null;
+  path: string | null;
+  remote: string | null;
+  plan: "use" | "clone" | null;
+  stale: boolean;
+}) {
+  let text: ReactNode;
+  if (problem !== null) text = problem;
+  else if (plan === "clone" && path) {
+    text = (
+      <>
+        Clones <code>{remote}</code> into <code>{path}</code>.
+      </>
+    );
+  } else if (plan === "use" && path) {
+    text = (
+      <>
+        Uses the checkout at <code>{path}</code>.
+      </>
+    );
+  } else {
+    text =
+      mode === "clone"
+        ? "A new or empty folder. Empty means the default."
+        : "A git checkout of the repo. Empty means the default.";
+  }
+  return (
+    <p
+      className="pa-help"
+      id={id}
+      data-problem={problem !== null ? "true" : undefined}
+      data-stale={stale ? "true" : undefined}
+      aria-live="polite"
+    >
+      {text}
+    </p>
   );
 }
 

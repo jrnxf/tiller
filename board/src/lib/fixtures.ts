@@ -11,6 +11,7 @@ import type {
   BoardRow,
   CardDetail,
   CardPr,
+  CheckoutCheck,
   DaemonHealth,
   ContributionsResponse,
   EventLine,
@@ -1312,6 +1313,60 @@ function retirePreviewFor(
   };
 }
 
+// The stand-in host's `spawn.checkouts_root` and home, where the fixture's
+// own projects are checked out as `example/<id>`.
+const CHECKOUTS_ROOT = "/home/user/src";
+const FIXTURE_HOME = "/home/user";
+const FIXTURE_CHECKOUTS = new Set(["alpha", "beta", "gamma"]);
+
+const problem = (text: string): CheckoutCheck => ({
+  path: null,
+  plan: null,
+  remote: null,
+  problem: text,
+});
+
+// `GET /api/v1/projects/checkout`, by the daemon's rules for the folder.
+function checkoutFor(url: URL): CheckoutCheck {
+  const project = url.searchParams.get("project") ?? "";
+  const repo = url.searchParams.get("repo") ?? "";
+  const given = url.searchParams.get("path") ?? "";
+  const clone = url.searchParams.get("clone") === "true";
+  if (!given && !/^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$/.test(project)) {
+    return problem("fill in the id first: the folder is named after it");
+  }
+  const path = !given
+    ? `${CHECKOUTS_ROOT}/${project}`
+    : given.startsWith("~/")
+      ? `${FIXTURE_HOME}/${given.slice(2)}`
+      : given.replace(/\/+$/, "");
+  if (!path.startsWith("/")) return problem(`${given} is not a full path; start it with / or ~/`);
+  if (path.split("/").includes("..")) {
+    return problem(`${given} has a \`..\` in it; give the folder without one`);
+  }
+  if (!path.startsWith(`${CHECKOUTS_ROOT}/`)) {
+    return problem(
+      `${path} is not under spawn.checkouts_root (${CHECKOUTS_ROOT}), where the orchestrator looks for checkouts`,
+    );
+  }
+  const name = path.slice(CHECKOUTS_ROOT.length + 1);
+  const existing = FIXTURE_CHECKOUTS.has(name) ? `example/${name}` : null;
+  if (!clone) {
+    if (!existing) return problem(`nothing is at ${path}; choose Clone to make it`);
+    if (repo && repo.toLowerCase() !== existing) {
+      return problem(`${path} is a checkout of ${existing}, not ${repo}`);
+    }
+    return { path, plan: "use", remote: null, problem: null };
+  }
+  if (!repo) return problem("a clone needs the project's repo; fill in Repo as owner/name");
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+    return problem(`repo ${repo} is not owner/name, like acme/web`);
+  }
+  if (existing === repo.toLowerCase()) return { path, plan: "use", remote: null, problem: null };
+  if (existing) return problem(`${path} is not empty; give a new or empty folder to clone into`);
+  return { path, plan: "clone", remote: `https://github.com/${repo}.git`, problem: null };
+}
+
 // Anything the stand-in server can answer: the board's lists, a card, its
 // timeline, a run. `undefined` means no such resource (a 404).
 function healthFor(now: number): DaemonHealth {
@@ -1355,6 +1410,7 @@ export function fixtureResource(
   const run = /^\/api\/v1\/runs\/([^/]+)$/.exec(url.pathname);
   if (run?.[1]) return runDetailFor(run[1], now);
   if (url.pathname === "/api/v1/health") return healthFor(now);
+  if (url.pathname === "/api/v1/projects/checkout") return checkoutFor(url);
   if (url.pathname.startsWith("/api/v1/memory")) return memoryResource(url);
   // No project starts archived; the stand-in server adds the ones archived since.
   if (url.pathname === projectsPath && url.searchParams.has("retired")) return { projects: [] };

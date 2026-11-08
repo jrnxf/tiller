@@ -2,6 +2,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
+import type { DaemonHealth } from "../../lib/api-types";
 import { fixtureResource } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
 import { createQueryClient } from "../../lib/query-client";
@@ -56,7 +57,7 @@ test("a signed-in browser has Sign out at the right of its row, and it ends the 
   const fetch = serve(true);
   renderSettings();
   const panel = await screen.findByRole("region", { name: "This browser" });
-  const row = within(panel).getByText("Signed in as the owner").closest(".set-row");
+  const row = (await within(panel).findByText("Signed in as the owner")).closest(".set-row");
   const button = within(panel).getByRole("button", { name: "Sign out" });
   expect(row?.lastElementChild).toBe(button);
 
@@ -89,35 +90,90 @@ test("on loopback, a browser that is not signed in has nothing to sign out", asy
   serve(false, undefined, false);
   renderSettings();
   const panel = await screen.findByRole("region", { name: "This browser" });
-  expect(within(panel).getByText("Not signed in")).toBeTruthy();
-  expect(within(panel).queryByRole("button")).toBeNull();
+  expect(await within(panel).findByText("Not signed in")).toBeTruthy();
+  expect(within(panel).queryByRole("button", { name: "Sign out" })).toBeNull();
 });
 
-test("Settings lists each other host's version and marks the ones that differ from this host", async () => {
+test("Settings lists every host in one table, this one a row like the others", async () => {
   serve(true);
   renderSettings();
-  const panel = await screen.findByRole("region", { name: "Other hosts" });
-  const row = (label: string) => within(panel).getByText(label).closest(".set-row") as HTMLElement;
+  const panel = await screen.findByRole("region", { name: "Hosts" });
+  const row = (label: string) => within(panel).getByTestId(`host-${label}`);
+  const cell = (label: string, column: string) =>
+    row(label).querySelector(`[data-label="${column}"]`) as HTMLElement;
+
+  // No card of its own: the host serving the board is a row, sorted by label.
+  expect(screen.queryByTestId("host-facts")).toBeNull();
+  expect(screen.queryByText("This host")).toBeNull();
+  const labels = [...panel.querySelectorAll("tbody th")].map((th) => th.textContent);
+  const sorted = [...labels];
+  sorted.sort((a, b) => (a ?? "").localeCompare(b ?? ""));
+  expect(labels).toEqual(sorted);
+  expect([...panel.querySelectorAll("thead th")].map((th) => th.textContent)).toEqual([
+    "Host",
+    "Version",
+    "Started",
+    "Process",
+    "Status",
+  ]);
+
+  // Its row has the start and the process; a peer reports neither yet.
+  expect(within(row("host-a")).getByText("0.1.0-pre.17")).toBeTruthy();
+  expect(cell("host-a", "Process").textContent).toBe("4242");
+  expect(cell("host-a", "Started").textContent).toMatch(/^\w{3} \d{1,2} \w{3}, \d{2}:\d{2}up 3 h/);
+  expect(within(row("host-a")).getByText("Serves this board")).toBeTruthy();
+  expect(cell("host-a", "Version").querySelector("small")?.textContent).toMatch(/^Schema \d+$/);
+  expect(cell("host-d", "Version").querySelector("small")).toBeNull();
+  expect(cell("host-d", "Process").textContent).toBe("-");
+  expect(cell("host-d", "Started").dataset.empty).toBe("true");
 
   // Same version: no mark.
   expect(within(row("host-d")).getByText("0.1.0-pre.17")).toBeTruthy();
-  expect(within(row("host-d")).getByText("Same as this host")).toBeTruthy();
+  expect(within(row("host-d")).getByText("Same as host-a")).toBeTruthy();
   expect(row("host-d").querySelector(".set-status")).toBeNull();
 
-  // Older and newer, in plain words, beside the version.
+  // Older and newer, in plain words, against the serving host by its label.
   expect(within(row("host-e")).getByText("0.1.0-pre.15")).toBeTruthy();
-  expect(within(row("host-e")).getByText("Older than this host (0.1.0-pre.17)")).toBeTruthy();
   expect(within(row("host-e")).getByText("older")).toBeTruthy();
-  expect(within(row("host-f")).getByText("Newer than this host (0.1.0-pre.17)")).toBeTruthy();
+  expect(within(row("host-f")).getByText("Newer than host-a (0.1.0-pre.17)")).toBeTruthy();
 
   // No report: no version and no guess.
   expect(within(row("host-g")).getByText("Not reported")).toBeTruthy();
-  expect(within(row("host-g")).getByText("Paired peer, has not reported a version")).toBeTruthy();
   expect(within(row("host-b")).getByText("herdr machine, no version to read")).toBeTruthy();
+});
 
-  // This host keeps its own facts card with the same version.
-  const facts = screen.getByTestId("host-facts");
-  expect(within(facts).getByText("0.1.0-pre.17")).toBeTruthy();
+test("without the hosts list, the host serving this board still has its row", async () => {
+  serve(true);
+  const served = globalThis.fetch;
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) =>
+    String(input) === "/api/v1/machines"
+      ? new Response("{}", { status: 500 })
+      : served(input, init),
+  );
+  renderSettings();
+  const panel = await screen.findByRole("region", { name: "Hosts" });
+  const row = await within(panel).findByTestId("host-This host");
+  const health = fixtureResource("/api/v1/health", "federated") as DaemonHealth;
+  expect(panel.querySelectorAll("tbody tr")).toHaveLength(1);
+  expect(within(row).getByText(health.version)).toBeTruthy();
+  expect(within(row).getByText(`Schema ${health.schema}`)).toBeTruthy();
+  expect(within(row).getByText(String(health.pid))).toBeTruthy();
+  expect(within(row).getByText("Serves this board")).toBeTruthy();
+  // Whether another host is paired is not known yet.
+  expect(within(panel).queryByTestId("no-hosts")).toBeNull();
+});
+
+test("a merge App that is not ready is a warning above the hosts, named by its host", async () => {
+  serve(true);
+  renderSettings();
+  const warning = await screen.findByTestId("merge-app");
+  expect(warning.getAttribute("role")).toBe("status");
+  await waitFor(() =>
+    expect(within(warning).getByText("Merge App not set up on host-a")).toBeTruthy(),
+  );
+  expect(within(warning).getByText("No merge App is set up")).toBeTruthy();
+  const page = screen.getByTestId("settings");
+  expect(page.firstElementChild).toBe(warning);
 });
 
 interface MachineRow {
@@ -159,27 +215,28 @@ const PAIRED = {
 };
 
 async function openForm() {
-  const panel = await screen.findByRole("region", { name: "Other hosts" });
+  const panel = await screen.findByRole("region", { name: "Hosts" });
   fireEvent.click(within(panel).getByRole("button", { name: "Add a host" }));
   const form = within(panel).getByRole("form", { name: "Add a host" });
   const field = (name: string) => within(form).getByLabelText<HTMLInputElement>(name);
   return { panel, form, field };
 }
 
-test("with no other host, Settings says none is paired and offers Add a host", async () => {
+test("with no other host, Hosts lists this one, says none is paired and offers Add a host", async () => {
   serveUnpaired(async () => [200, PAIRED]);
   renderSettings();
-  const panel = await screen.findByRole("region", { name: "Other hosts" });
+  const panel = await screen.findByRole("region", { name: "Hosts" });
   expect(within(panel).getByText("No other host is paired")).toBeTruthy();
-  const row = within(panel).getByTestId("add-host");
-  expect(row.lastElementChild).toBe(within(row).getByRole("button", { name: "Add a host" }));
+  expect(within(panel).getByTestId("host-host-a")).toBeTruthy();
+  const head = panel.querySelector(".set-sec-h") as HTMLElement;
+  expect(head.lastElementChild).toBe(within(head).getByRole("button", { name: "Add a host" }));
   expect(within(panel).queryByText("host-d")).toBeNull();
 });
 
 test("a browser not signed in as the owner is told to sign in, with no Add a host", async () => {
   serveUnpaired(async () => [200, PAIRED], false);
   renderSettings();
-  const panel = await screen.findByRole("region", { name: "Other hosts" });
+  const panel = await screen.findByRole("region", { name: "Hosts" });
   await within(panel).findByText("Sign this browser in as the owner to add one");
   expect(within(panel).getByText("No other host is paired")).toBeTruthy();
   expect(within(panel).queryByRole("button", { name: "Add a host" })).toBeNull();

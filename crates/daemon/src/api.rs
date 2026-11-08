@@ -700,6 +700,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/quota", get(quota))
         .route("/api/v1/health", get(health))
         .route("/api/v1/projects", get(projects).post(add_project))
+        .route("/api/v1/projects/checkout", get(project_checkout))
         .route("/api/v1/peers", post(add_peer))
         .route("/api/v1/contributions", get(contributions))
         .route("/api/v1/projects/{id}/stage", post(stage_project))
@@ -2116,8 +2117,8 @@ async fn delete_project(
 #[utoipa::path(post, path = "/api/v1/projects", tag = "mutations", request_body = AddProject,
     responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody),
               (status = 403, body = ErrorBody),
-              (status = 422, body = ErrorBody, description = "`refused`: the id is taken by a different project"),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+              (status = 422, body = ErrorBody, description = "`refused`: the id is taken by a different project; `unsuitable_checkout`: the Local checkout folder does not suit"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded; `clone_failed`: the clone into the Local checkout folder failed")))]
 async fn add_project(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2127,9 +2128,16 @@ async fn add_project(
     let request: AddProject = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "a project add").await?;
     let delivery: Delivery = request.delivery.parse()?;
+    let key = key(&request.idempotency_key)?;
+    let name = request
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map_or_else(|| request.id.clone(), str::to_owned);
     let new = tiller_core::state::projects::NewProject {
         id: request.id,
-        name: request.name,
+        name,
         repo: request.repo,
         remote: None,
         default_branch: None,
@@ -2140,27 +2148,267 @@ async fn add_project(
         deploy_environment: None,
         deploy_timeout_minutes: None,
     };
+    let Some(checkout) = request.checkout else {
+        return add_numbered(&state, key, new, None).await;
+    };
+    // The default folder is named after the id, so it is checked first.
+    ids::validate_project_id(&new.id)?;
+    if let Some(reason) = state.0.damage.reason() {
+        return Err(read_only(&reason));
+    }
+    // Its own task: a browser that goes away mid-clone does not leave a
+    // clone with no project, or a project with no checkout.
+    let task = tokio::spawn(add_with_checkout(state, key, new, checkout));
+    match task.await {
+        Ok(result) => result,
+        Err(error) => Err(Error::Internal(error.to_string()).into()),
+    }
+}
+
+/// Add project with a Local checkout: the folder checked, the clone it
+/// asks for run, then `project.add` and `checkouts.<id>`. A clone is taken
+/// back when the add is refused.
+async fn add_with_checkout(
+    state: AppState,
+    key: String,
+    new: tiller_core::state::projects::NewProject,
+    checkout: NewCheckout,
+) -> ApiResult<MutationResponse> {
     let home = state.0.home.clone();
-    let (new, numbering, note) = read(&state, move |store| {
-        // A config.toml that does not parse only hides the checkout: the
-        // remote is still looked at.
-        let checkout = checkout_of(&home, &new.id).ok().flatten();
-        let (numbering, note) = tiller_agents::numbering::numbering(
-            store,
-            &new,
-            checkout.as_deref().map(std::path::Path::new),
-        )?;
-        Ok((new, numbering, note))
+    let plan = {
+        let (id, repo) = (new.id.clone(), new.repo.clone());
+        read(&state, move |store| {
+            Ok(checkout_plan(store, &home, &id, repo.as_deref(), &checkout))
+        })
+        .await??
+    };
+    let undo = {
+        let plan = plan.clone();
+        tokio::task::spawn_blocking(move || {
+            tiller_agents::checkout::clone(&plan, tiller_agents::checkout::CLONE_LIMIT)
+        })
+        .await
+        .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
+        .map_err(checkout_refused)?
+    };
+    let done = add_numbered(&state, key, new, Some(plan.path().to_path_buf())).await;
+    if done.is_err()
+        && let Some(undo) = undo
+    {
+        undo.run();
+    }
+    done
+}
+
+/// What a Local checkout folder would do for project `id`, refused as the
+/// error the board shows. Reads `config.toml` for `spawn.checkouts_root`.
+fn checkout_plan(
+    store: &Store,
+    home: &std::path::Path,
+    id: &str,
+    repo: Option<&str>,
+    checkout: &NewCheckout,
+) -> Result<tiller_agents::checkout::Plan, ApiError> {
+    let config = config_toml::load(&home.join("config.toml")).map_err(|error| {
+        ApiError::from(Error::Unavailable(format!(
+            "{error}; fix it before setting a checkout"
+        )))
+    })?;
+    let root = checkouts_root(&config);
+    let user_home = std::env::var_os("HOME").map(PathBuf::from);
+    let plan = tiller_agents::checkout::plan(&tiller_agents::checkout::Request {
+        project: id,
+        repo,
+        path: &checkout.path,
+        clone: checkout.clone,
+        root: root.as_deref(),
+        home: user_home.as_deref(),
     })
-    .await?;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| {
-            Ok(Done::of(store.project_add_numbered(ctx, new, numbering)?)?.with_warning(note))
-        },
-    )
+    .map_err(checkout_refused)?;
+    // A clone for an id that is taken would be taken back at once.
+    if matches!(plan, tiller_agents::checkout::Plan::Clone { .. }) {
+        match store.project(id) {
+            Ok(_) => {
+                return Err(Error::Refused {
+                    entity: "project",
+                    id: id.to_owned(),
+                    fact: "project id is taken".into(),
+                }
+                .into());
+            }
+            Err(Error::NotFound { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(plan)
+}
+
+/// `spawn.checkouts_root` from a parsed `config.toml`.
+fn checkouts_root(config: &toml::Table) -> Option<PathBuf> {
+    config_toml::get(config, "spawn.checkouts_root")
+        .and_then(toml::Value::as_str)
+        .map(PathBuf::from)
+}
+
+/// A 422 `unsuitable_checkout`, or a 502 `clone_failed`.
+fn checkout_refused(error: tiller_agents::checkout::CheckoutError) -> ApiError {
+    use tiller_agents::checkout::CheckoutError;
+    match error {
+        CheckoutError::Unsuitable(why) => {
+            ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "unsuitable_checkout", why)
+        }
+        CheckoutError::Clone(why) => ApiError::new(StatusCode::BAD_GATEWAY, "clone_failed", why)
+            .hint("git clone must work in a terminal on this host with no password or question"),
+    }
+}
+
+/// `project.add`, then `checkouts.<id>` when a checkout is given. The key
+/// is written after the add, so a refused add leaves `config.toml` as it
+/// was; a key that cannot be written is a warning on the added project.
+async fn add_numbered(
+    state: &AppState,
+    key: String,
+    new: tiller_core::state::projects::NewProject,
+    checkout: Option<PathBuf>,
+) -> ApiResult<MutationResponse> {
+    let home = state.0.home.clone();
+    let (new, numbering, note) = {
+        let (home, checkout) = (home.clone(), checkout.clone());
+        read(state, move |store| {
+            // A config.toml that does not parse only hides the checkout: the
+            // remote is still looked at.
+            let checkout = checkout.or_else(|| {
+                checkout_of(&home, &new.id)
+                    .ok()
+                    .flatten()
+                    .map(PathBuf::from)
+            });
+            let (numbering, note) =
+                tiller_agents::numbering::numbering(store, &new, checkout.as_deref())?;
+            Ok((new, numbering, note))
+        })
+        .await?
+    };
+    mutate(state, key, move |store, ctx, _| {
+        let id = new.id.clone();
+        let mut done = Done::of(store.project_add_numbered(ctx, new, numbering)?)?;
+        let mut notes: Vec<String> = note.into_iter().collect();
+        if let Some(path) = checkout {
+            let path = path.to_string_lossy().into_owned();
+            let config_key = format!("checkouts.{id}");
+            match write_checkout(&home, &config_key, &path) {
+                Ok(false) => {}
+                Ok(true) => match store.config_changed(
+                    &Ctx {
+                        key: None,
+                        ..ctx.clone()
+                    },
+                    &config_key,
+                    json!(path),
+                ) {
+                    Ok(applied) => done.events.extend(applied.events),
+                    Err(error) => {
+                        tracing::warn!(%error, "recording the project's checkout failed");
+                        notes.push(format!(
+                            "{config_key} is in config.toml, but its config.changed event was not recorded: {error}"
+                        ));
+                    }
+                },
+                Err(error) => notes.push(format!(
+                    "the project is added, but {config_key} could not be written ({error}); run tiller config set {config_key} {path}"
+                )),
+            }
+        }
+        Ok(done.with_warning((!notes.is_empty()).then(|| notes.join("; "))))
+    })
     .await
+}
+
+/// Sets `key` in `<home>/config.toml` to `path`; `false` when it already was.
+fn write_checkout(
+    home: &std::path::Path,
+    key: &str,
+    path: &str,
+) -> Result<bool, tiller_core::config_file::ConfigError> {
+    let file = home.join("config.toml");
+    let mut config = config_toml::load(&file)?;
+    if config_toml::get(&config, key).and_then(toml::Value::as_str) == Some(path) {
+        return Ok(false);
+    }
+    config_toml::set(&mut config, key, toml::Value::String(path.to_owned()))?;
+    config_toml::store(&file, &config)?;
+    Ok(true)
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct CheckoutQuery {
+    /// The project id; an empty Local checkout folder is named after it.
+    /// Absent is the same as empty: the board drops empty parameters.
+    #[serde(default)]
+    pub project: String,
+    /// The GitHub repo, `owner/name`.
+    pub repo: Option<String>,
+    /// The folder as typed; absent or empty is `<spawn.checkouts_root>/<id>`.
+    pub path: Option<String>,
+    /// `true` checks the folder as one to clone into.
+    pub clone: Option<bool>,
+}
+
+#[utoipa::path(get, path = "/api/v1/projects/checkout", tag = "reads", params(CheckoutQuery),
+    responses((status = 200, body = CheckoutCheck), (status = 503, body = ErrorBody)))]
+async fn project_checkout(
+    State(state): State<AppState>,
+    Query(query): Query<CheckoutQuery>,
+) -> ApiResult<CheckoutCheck> {
+    let home = state.0.home.clone();
+    read(&state, move |store| {
+        let checkout = NewCheckout {
+            path: query.path.unwrap_or_default(),
+            clone: query.clone.unwrap_or(false),
+        };
+        let repo = query
+            .repo
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty());
+        let id = query.project.trim();
+        if checkout.path.trim().is_empty() && ids::validate_project_id(id).is_err() {
+            return Ok(Ok(CheckoutCheck {
+                path: None,
+                plan: None,
+                remote: None,
+                problem: Some("fill in the id first: the folder is named after it".into()),
+            }));
+        }
+        Ok(match checkout_plan(store, &home, id, repo, &checkout) {
+            Ok(plan) => {
+                let path = Some(plan.path().to_string_lossy().into_owned());
+                Ok(match plan {
+                    tiller_agents::checkout::Plan::Use { .. } => CheckoutCheck {
+                        path,
+                        plan: Some("use".into()),
+                        remote: None,
+                        problem: None,
+                    },
+                    tiller_agents::checkout::Plan::Clone { remote, .. } => CheckoutCheck {
+                        path,
+                        plan: Some("clone".into()),
+                        remote: Some(remote),
+                        problem: None,
+                    },
+                })
+            }
+            Err(error) if error.status == StatusCode::SERVICE_UNAVAILABLE => Err(error),
+            Err(error) => Ok(CheckoutCheck {
+                path: None,
+                plan: None,
+                remote: None,
+                problem: Some(error.body.error.message.clone()),
+            }),
+        })
+    })
+    .await?
+    .map(Json)
 }
 
 /// What Add a host reads before it reaches the new host.
@@ -3496,7 +3744,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, stage_project, ask_note, start_orchestrator, add_project, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
+        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, stage_project, ask_note, start_orchestrator, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
         relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, session, login_code, logout
     ),
@@ -5061,6 +5309,221 @@ pub(crate) mod tests {
         assert!(taken.body.contains("project id is taken"), "{}", taken.body);
         let projects = get(&app, "/api/v1/projects").await;
         assert!(projects.body.contains("\"gamma\""), "{}", projects.body);
+    }
+
+    /// A git checkout at `path` whose origin is `example/<repo>` on GitHub.
+    fn git_checkout(path: &std::path::Path, repo: &str) {
+        std::fs::create_dir_all(path).unwrap();
+        for args in [
+            vec!["init", "--quiet", "-b", "main"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                &format!("https://github.com/example/{repo}.git"),
+            ],
+        ] {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}: {out:?}");
+        }
+    }
+
+    /// Add project's Local checkout: an existing checkout of the repo is
+    /// set as `checkouts.<id>` with a `config.changed` event, the name
+    /// defaults to the id, and a folder that does not suit is refused with
+    /// why, before anything is added or written.
+    #[tokio::test]
+    async fn board_project_add_sets_the_local_checkout() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let app = app(home, Assets::of::<Fixture>());
+        let cookie = owner_cookie(home);
+        let code = tempfile::tempdir().unwrap();
+        let root = code.path().join("code");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = home.join("config.toml");
+        std::fs::write(
+            &config,
+            format!("[spawn]\ncheckouts_root = \"{}\"\n", root.display()),
+        )
+        .unwrap();
+        let add = |key: &str, id: &str, checkout: Value| {
+            mutation(
+                "POST",
+                "/api/v1/projects",
+                json!({"idempotency_key": key, "id": id, "repo": format!("example/{id}"),
+                    "delivery": "direct-pr", "checkout": checkout}),
+                &[("cookie", cookie.as_str())],
+            )
+        };
+        let refusal = |answer: &Answer| -> (StatusCode, String, String) {
+            let body: Value = serde_json::from_str(&answer.body).unwrap();
+            (
+                answer.status,
+                body["error"]["code"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+        };
+
+        // Not a checkout, a checkout of another repo, outside the root and
+        // a non-empty folder to clone into: each refused, nothing added.
+        let plain = root.join("plain");
+        std::fs::create_dir_all(plain.join("src")).unwrap();
+        let other = root.join("other");
+        git_checkout(&other, "other");
+        for (key, checkout, why) in [
+            (
+                "k-co-1",
+                json!({"path": plain.display().to_string(), "clone": false}),
+                format!("{} is not a git checkout", plain.display()),
+            ),
+            (
+                "k-co-2",
+                json!({"path": other.display().to_string(), "clone": false}),
+                format!(
+                    "{} is a checkout of example/other, not example/gamma",
+                    other.display()
+                ),
+            ),
+            (
+                "k-co-3",
+                json!({"path": "/srv/gamma", "clone": true}),
+                format!(
+                    "/srv/gamma is not under spawn.checkouts_root ({}), where the orchestrator looks for checkouts",
+                    root.display()
+                ),
+            ),
+            (
+                "k-co-4",
+                json!({"path": plain.display().to_string(), "clone": true}),
+                format!(
+                    "{} is not empty; give a new or empty folder to clone into",
+                    plain.display()
+                ),
+            ),
+        ] {
+            let answer = send(&app, add(key, "gamma", checkout)).await;
+            assert_eq!(
+                refusal(&answer),
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "unsuitable_checkout".to_owned(),
+                    why
+                ),
+                "{key}"
+            );
+        }
+        let projects = get(&app, "/api/v1/projects").await;
+        assert!(!projects.body.contains("\"gamma\""), "{}", projects.body);
+
+        // An empty path is `<root>/<id>`: there, a checkout of the repo.
+        let gamma = root.join("gamma");
+        git_checkout(&gamma, "gamma");
+        let added = send(&app, add("k-co-5", "gamma", json!({"path": ""}))).await;
+        assert_eq!(added.status, StatusCode::OK, "{}", added.body);
+        let body: Value = serde_json::from_str(&added.body).unwrap();
+        assert_eq!(body["data"]["name"], "gamma", "{body}");
+        assert_eq!(body["events"].as_array().map(Vec::len), Some(2), "{body}");
+        let table = config_toml::load(&config).unwrap();
+        assert_eq!(
+            config_toml::get(&table, "checkouts.gamma").and_then(toml::Value::as_str),
+            Some(gamma.to_str().unwrap())
+        );
+        let replay = send(&app, add("k-co-5", "gamma", json!({"path": ""}))).await;
+        let body: Value = serde_json::from_str(&replay.body).unwrap();
+        assert_eq!(body["replayed"], true, "{body}");
+
+        // A clone for an id that is taken is refused before it runs.
+        let taken = send(
+            &app,
+            add(
+                "k-co-6",
+                "gamma",
+                json!({"path": root.join("new").display().to_string(), "clone": true}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            refusal(&taken),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "refused".to_owned(),
+                "project gamma: project id is taken".to_owned()
+            )
+        );
+        assert!(!root.join("new").exists());
+    }
+
+    /// The Local checkout check Add project asks as the folder is typed.
+    #[tokio::test]
+    async fn the_checkout_check_says_what_add_project_would_do() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let app = app(home, Assets::of::<Fixture>());
+        let code = tempfile::tempdir().unwrap();
+        let root = code.path().join("code");
+        std::fs::write(
+            home.join("config.toml"),
+            format!("[spawn]\ncheckouts_root = \"{}\"\n", root.display()),
+        )
+        .unwrap();
+        let check = |query: &str| {
+            let app = app.clone();
+            let path = format!("/api/v1/projects/checkout?{query}");
+            async move {
+                let answer = get(&app, &path).await;
+                assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+                serde_json::from_str::<Value>(&answer.body).unwrap()
+            }
+        };
+
+        let fresh = check("project=delta&repo=example/delta&clone=true").await;
+        assert_eq!(
+            fresh,
+            json!({"path": root.join("delta").display().to_string(), "plan": "clone",
+                "remote": "https://github.com/example/delta.git", "problem": null})
+        );
+        let delta = root.join("delta");
+        git_checkout(&delta, "delta");
+        let there = check("project=delta&repo=example/delta").await;
+        assert_eq!(there["plan"], "use", "{there}");
+        let cloned = check("project=delta&repo=example/delta&clone=true").await;
+        assert_eq!(cloned["plan"], "use", "{cloned}");
+
+        let missing = check("project=delta&repo=example/delta&path=%2Fsrv%2Fdelta").await;
+        assert_eq!(missing["plan"], Value::Null, "{missing}");
+        assert!(
+            missing["problem"]
+                .as_str()
+                .unwrap()
+                .contains("is not under spawn.checkouts_root"),
+            "{missing}"
+        );
+        let no_id = check("project=&repo=example/delta").await;
+        assert_eq!(
+            no_id["problem"], "fill in the id first: the folder is named after it",
+            "{no_id}"
+        );
+        // The board sends no `project` at all while the id is empty.
+        let absent = check("repo=example/delta").await;
+        assert_eq!(absent, no_id, "{absent}");
+        // An id that is taken has no folder to clone into.
+        let alpha = check("project=alpha&repo=example/alpha&clone=true").await;
+        assert_eq!(
+            alpha["problem"], "project alpha: project id is taken",
+            "{alpha}"
+        );
     }
 
     /// A fake `ssh` for Add a host: it records its arguments and what the

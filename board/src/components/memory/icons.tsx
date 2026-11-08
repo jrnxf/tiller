@@ -49,14 +49,24 @@ export const TrashIcon = () => (
   </Glyph>
 );
 
-export const CrossIcon = () => (
+export const LinesIcon = () => (
   <Glyph>
-    <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" {...stroke} strokeWidth={1.4} />
+    <path d="M3 4.5h10M3 8h10M3 11.5h6" {...stroke} />
   </Glyph>
 );
 
-export const BackIcon = () => (
+export const SparkIcon = () => (
   <Glyph>
-    <path d="M9.5 4 5.5 8l4 4" {...stroke} strokeWidth={1.4} />
+    <path
+      d="M8 2v3M8 11v3M2 8h3M11 8h3M4 4l2 2M10 10l2 2M12 4l-2 2M6 10l-2 2"
+      {...stroke}
+      strokeWidth={1.2}
+    />
+  </Glyph>
+);
+
+export const ClockIcon = () => (
+  <Glyph>
+    <path d="M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11zM8 5v3l2 1.5" {...stroke} />
   </Glyph>
 );

@@ -6,6 +6,7 @@ import type {
   BoardFilter,
   BoardResponse,
   CardDetail,
+  CheckoutCheck,
   ContributionsResponse,
   DaemonHealth,
   MachinesResponse,
@@ -165,6 +166,25 @@ export const projectRetireQuery = (projectId: string) =>
     ...readQuery<ProjectRetirePreview>(`/api/v1/projects/${projectId}/retire`),
     staleTime: 0,
     gcTime: 0,
+  });
+
+// What Add project would do with a local checkout, asked as the owner types.
+export const projectCheckoutQuery = (params: {
+  project: string;
+  repo: string;
+  path: string;
+  clone: boolean;
+}) =>
+  queryOptions({
+    ...readQuery<CheckoutCheck>(
+      withParams("/api/v1/projects/checkout", {
+        project: params.project,
+        repo: params.repo,
+        path: params.path,
+        clone: params.clone ? "true" : undefined,
+      }),
+    ),
+    staleTime: 0,
   });
 
 // The project detail's merge gate and checkout. A project event refreshes it,

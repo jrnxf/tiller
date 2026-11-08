@@ -46,12 +46,14 @@ export function readFailure(error: Error | null, fallback: string): string | nul
 // controls. `initial` takes focus when it opens.
 export function ProjectDialog({
   name,
+  className,
   pending,
   onClose,
   initial,
   children,
 }: {
   name: string;
+  className?: string;
   pending: boolean;
   onClose: () => void;
   initial: RefObject<HTMLElement | null>;
@@ -71,7 +73,7 @@ export function ProjectDialog({
     >
       <div
         ref={dialog}
-        className="dialog"
+        className={className ? `dialog ${className}` : "dialog"}
         role="dialog"
         aria-modal="true"
         aria-labelledby={`${name}-dialog-title`}

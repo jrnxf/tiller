@@ -522,3 +522,164 @@
     padding-top: 0;
   }
 }
+
+/* Add project: stacked fields, each with a short line of help. */
+.dialog.pa-dialog {
+  width: min(500px, 100%);
+  padding: 20px;
+}
+
+.pa-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 18px;
+}
+
+.pa-f {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.pa-l {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: var(--fs-small);
+  font-weight: var(--w-medium);
+  color: var(--fg-1);
+}
+
+.pa-opt {
+  font-size: var(--fs-mini);
+  font-weight: var(--w-normal);
+  color: var(--fg-4);
+}
+
+.pa-l-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.pa-l-row .pa-l {
+  margin-bottom: 0;
+}
+
+.pa-f .note-in {
+  margin-top: 0;
+  height: 32px;
+}
+
+.pa-f .note-in.mono {
+  font-family: var(--mono);
+  font-size: var(--fs-mini);
+}
+
+.pa-f .note-in[aria-invalid="true"] {
+  border-color: var(--red);
+}
+
+.dialog p.pa-help {
+  margin-top: 6px;
+  font-size: var(--fs-mini);
+  line-height: 1.5;
+  color: var(--fg-3);
+  overflow-wrap: anywhere;
+  transition: opacity var(--fast) var(--ease);
+}
+
+.dialog p.pa-help[data-problem="true"] {
+  color: var(--red-text);
+}
+
+.dialog p.pa-help[data-stale="true"] {
+  opacity: 0.6;
+}
+
+.dialog p.pa-help code {
+  font-size: 0.95em;
+  color: var(--fg-2);
+}
+
+.dialog p.pa-help[data-problem="true"] code {
+  color: inherit;
+}
+
+.pa-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px;
+  gap: 12px;
+}
+
+.pa-row .form-select {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  font-size: var(--fs-small);
+}
+
+.pa-num {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r8);
+  background: var(--bg-card);
+  overflow: hidden;
+}
+
+.pa-num output {
+  flex: 1;
+  text-align: center;
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-1);
+}
+
+.pa-num button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--fg-3);
+}
+
+.pa-num button:hover:not([disabled]) {
+  background: var(--bg-hover);
+  color: var(--fg-1);
+}
+
+.pa-num button[disabled] {
+  opacity: 0.4;
+}
+
+.pa-num button:first-child {
+  border-right: 1px solid var(--line-1);
+}
+
+.pa-num button:last-child {
+  border-left: 1px solid var(--line-1);
+}
+
+@media (max-width: 480px) {
+  .dialog.pa-dialog {
+    padding: 16px;
+  }
+
+  .pa-l-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  .pa-row {
+    grid-template-columns: minmax(0, 1fr) 112px;
+  }
+}

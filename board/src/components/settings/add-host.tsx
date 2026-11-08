@@ -18,7 +18,7 @@ const ACCESS: { value: Scope; label: string }[] = [
 
 // What `POST /api/v1/peers` answers: the paired host row, its alias and the
 // public key's fingerprint, never the key.
-interface Paired {
+export interface Paired {
   label: string;
   fingerprint: string | null;
 }
@@ -31,7 +31,7 @@ function sentence(text: string) {
 // `tiller peer add <label> --ssh <alias> [--read-only]` from the board: this
 // host's daemon runs the new host's unattended accept over ssh (`protocol.md`
 // 10.1), so the owner pairs without a terminal.
-function AddHostForm({
+export function AddHostForm({
   onClose,
   onPaired,
 }: {
@@ -156,62 +156,5 @@ function AddHostForm({
         </button>
       </div>
     </form>
-  );
-}
-
-// The last row of Other hosts: Add a host, or its form while open. Pairing
-// needs the owner cookie, so a browser not signed in is told how to get it.
-export function AddHost({ empty, owner }: { empty: boolean; owner: boolean }) {
-  const [open, setOpen] = useState(false);
-  const [paired, setPaired] = useState<Paired | null>(null);
-  const opener = useRef<HTMLButtonElement>(null);
-  const close = useCallback(() => {
-    setOpen(false);
-    // The opener renders again on the next commit.
-    requestAnimationFrame(() => opener.current?.focus());
-  }, []);
-  const done = useCallback((host: Paired) => {
-    setPaired(host);
-    setOpen(false);
-  }, []);
-
-  if (!owner) {
-    return empty ? (
-      <div className="set-row" data-testid="add-host">
-        <div className="set-text">
-          <h2>No other host is paired</h2>
-          <p>Sign this browser in as the owner to add one</p>
-        </div>
-      </div>
-    ) : null;
-  }
-  if (open) return <AddHostForm onClose={close} onPaired={done} />;
-
-  let title = empty ? "No other host is paired" : "Add a host";
-  let hint = "Pair a machine this host reaches through ssh, as tiller peer add does.";
-  if (paired) {
-    title = `Paired ${paired.label}`;
-    hint = paired.fingerprint
-      ? `Its link opens within a few seconds. Key ${paired.fingerprint}`
-      : "Its link opens within a few seconds.";
-  }
-  return (
-    <div className="set-row set-action" data-testid="add-host">
-      <div className="set-text">
-        <h2>{title}</h2>
-        <p role={paired ? "status" : undefined}>{hint}</p>
-      </div>
-      <button
-        ref={opener}
-        type="button"
-        className="btn"
-        onClick={() => {
-          setPaired(null);
-          setOpen(true);
-        }}
-      >
-        Add a host
-      </button>
-    </div>
   );
 }
