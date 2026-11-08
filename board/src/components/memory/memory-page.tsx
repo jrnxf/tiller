@@ -40,6 +40,11 @@ import { useNamedProjects } from "../board/peer-state";
 
 const FLEET = "fleet";
 
+// The shared document lives on the `fleet` project, which the board calls
+// "Host" elsewhere; here it holds what every project shares.
+const docName = (doc: { project_id: string; name: string }) =>
+  doc.project_id === FLEET ? "All projects" : doc.name;
+
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 // "Wed 4 Nov" and "Wed 4 Nov, 17:48", in Lisbon time.
@@ -124,7 +129,7 @@ function DocTabs({ current }: { current: string }) {
           style={{ "--pc": colorOf(local, doc.project_id) } as CSSProperties}
         >
           {doc.project_id === FLEET ? <LayersIcon /> : <span className="pdot" />}
-          {doc.name}
+          {docName(doc)}
           {doc.suggestions > 0 ? (
             <span className="s" title={`${plural(doc.suggestions, "suggestion")} waiting`}>
               {doc.suggestions}
@@ -877,7 +882,7 @@ function DocView({ scope }: { scope: string }) {
                 style={{ "--pc": colorOf(local, doc.project_id) } as CSSProperties}
               />
             )}
-            <h1>{doc.name}</h1>
+            <h1>{docName(doc)}</h1>
           </div>
           <p className="m2-sub">
             {shared
