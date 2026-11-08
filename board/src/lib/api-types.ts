@@ -514,6 +514,33 @@ export interface ChangeEvent {
   card?: BoardRow;
 }
 
+// `event: peer`: a paired peer's change, tagged as that peer's. It has no SSE
+// `id`, since a peer's `seq` is not this host's (protocol.md section 7.5).
+export interface PeerEvent {
+  host: string;
+  host_id: string;
+  as_of: string | null;
+  change: ChangeEvent;
+}
+
+// `event: link`: a peer link changed state.
+export interface LinkEvent {
+  host: string;
+  link: LinkState;
+  as_of: string | null;
+  stale_reason: StaleReason | null;
+}
+
+// `event: peer_reset`: the peer's rows by snapshot path, which replace what the
+// board holds for that host.
+export interface PeerResetEvent {
+  host: string;
+  host_id: string;
+  link: LinkState;
+  as_of: string | null;
+  queries: Record<string, unknown>;
+}
+
 // The receipt every mutation returns (protocol.md section 7.2). Recorded is
 // this response; delivered and done follow over SSE from the outbox row or the
 // approval it names.

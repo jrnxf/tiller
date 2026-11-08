@@ -526,3 +526,197 @@ test("a card event marks the card's page stale when the page reads it by its dis
   expect(queryClient.getQueryState(timeline)?.isInvalidated).toBe(true);
   expect(queryClient.getQueryState(other)?.isInvalidated).toBe(false);
 });
+
+function federatedStream() {
+  const queryClient = new QueryClient();
+  hydrateFromSnapshot(queryClient, fixtureSnapshot("federated", NOW));
+  const stop = connect(queryClient, 4181, fixtureSnapshot("federated", NOW));
+  const source = FakeSource.all[0] as FakeSource;
+  const board = () => queryClient.getQueryData<BoardResponse>(queryKeyFor(boardPath()));
+  const peerRow = board()?.rows.find((row) => row.host === "host-d");
+  if (!peerRow) throw new Error("fixture has no host-d card");
+  return { queryClient, stop, source, board, peerRow };
+}
+
+test("a peer event moves the peer's card live, keeps the local resume point and refetches nothing", () => {
+  const { queryClient, stop, source, board, peerRow } = federatedStream();
+  const rowsBefore = board()?.rows.length ?? 0;
+  const moved = { ...peerRow, column: "done" as const, badge: "merged" };
+
+  source.emit("peer", {
+    host: "host-d",
+    host_id: "01JPEERD0000000000000000D",
+    as_of: "2026-11-02T12:00:01.000Z",
+    change: event({ seq: 9000, entity: "card", card_id: peerRow.id, card: moved }),
+  });
+
+  expect(board()?.rows.find((row) => row.id === peerRow.id)?.column).toBe("done");
+  expect(board()?.rows).toHaveLength(rowsBefore);
+  expect(queryClient.isFetching()).toBe(0);
+
+  // The peer's seq is not this host's: a local event still applies after it.
+  source.emit("change", event({ seq: 4182, entity: "card", card_id: "x", card: moved }));
+  expect(board()?.rows.find((row) => row.id === peerRow.id)?.badge).toBe("merged");
+  stop();
+});
+
+test("a peer event does not touch a local card or project of the same id", () => {
+  const { queryClient, stop, source } = federatedStream();
+  const projects = () =>
+    queryClient.getQueryData<ProjectsResponse>(queryKeyFor(projectsPath))?.projects ?? [];
+  const local = projects().find((project) => !project.link && project.id === "alpha");
+  if (!local) throw new Error("fixture has no local alpha");
+
+  source.emit("peer", {
+    host: "host-d",
+    host_id: "01JPEERD0000000000000000D",
+    as_of: null,
+    change: event({
+      kind: "project.changed",
+      entity: "project",
+      entity_id: "alpha",
+      entity_state: { ...local, name: "Peer alpha", host: "host-d", link: "live" },
+    }),
+  });
+
+  expect(projects().find((project) => !project.link && project.id === "alpha")).toEqual(local);
+  expect(
+    projects().find((project) => project.host === "host-d" && project.id === "alpha")?.name,
+  ).toBe("Peer alpha");
+  stop();
+});
+
+test("peer_reset replaces that host's rows and no one else's", () => {
+  const { stop, source, board, peerRow } = federatedStream();
+  const others = board()?.rows.filter((row) => row.host !== "host-d") ?? [];
+  const replaced = { ...peerRow, id: "peer-new", display_id: "d-99" };
+
+  source.emit("peer_reset", {
+    host: "host-d",
+    host_id: "01JPEERD0000000000000000D",
+    link: "live",
+    as_of: "2026-11-02T12:00:02.000Z",
+    queries: { "/api/v1/board?filter=all": { rows: [replaced], asked: [] } },
+  });
+
+  const rows = board()?.rows ?? [];
+  expect(rows.filter((row) => row.host === "host-d")).toEqual([replaced]);
+  expect(rows.filter((row) => row.host !== "host-d")).toEqual(others);
+  stop();
+});
+
+test("a link event updates that machine's link state and no other", () => {
+  const { queryClient, stop, source } = federatedStream();
+  const machine = (label: string) =>
+    queryClient
+      .getQueryData<MachinesResponse>(queryKeyFor(machinesPath))
+      ?.machines.find((m) => m.label === label);
+
+  source.emit("link", {
+    host: "host-d",
+    link: "down",
+    as_of: "2026-11-02T11:58:00.000Z",
+    stale_reason: "peer_link_down",
+  });
+
+  expect(machine("host-d")?.link).toBe("down");
+  expect(machine("host-d")?.stale_reason).toBe("peer_link_down");
+  expect(machine("host-d")?.last_seen_at).toBe("2026-11-02T11:58:00.000Z");
+  expect(machine("host-f")?.link).toBe("live");
+  expect(queryClient.isFetching()).toBe(0);
+
+  source.emit("link", { host: "host-d", link: "live", as_of: null, stale_reason: null });
+  expect(machine("host-d")?.link).toBe("live");
+  expect(machine("host-d")?.link_reason).toBeNull();
+  stop();
+});
+
+test("a peer project that is deleted leaves only that host's list", () => {
+  const { queryClient, stop, source } = federatedStream();
+  const projects = () =>
+    queryClient.getQueryData<ProjectsResponse>(queryKeyFor(projectsPath))?.projects ?? [];
+  const peer = projects().find((project) => project.host === "host-d");
+  if (!peer) throw new Error("fixture has no host-d project");
+  const before = projects().length;
+
+  source.emit("peer", {
+    host: "host-d",
+    host_id: "01JPEERD0000000000000000D",
+    as_of: null,
+    change: event({ kind: "project.deleted", entity: "project", entity_id: peer.id }),
+  });
+
+  expect(projects()).toHaveLength(before - 1);
+  expect(projects().some((p) => p.host === "host-d" && p.id === peer.id)).toBe(false);
+  stop();
+});
+
+test("a peer quota event leaves this host's quota window alone", () => {
+  const { queryClient, stop, source } = federatedStream();
+  const key = queryKeyFor(quotaPath);
+  const before = queryClient.getQueryData<QuotaResponse>(key);
+  const window = before?.windows[0];
+  if (!window) throw new Error("fixture has no quota window");
+
+  source.emit("peer", {
+    host: "host-d",
+    host_id: "01JPEERD0000000000000000D",
+    as_of: null,
+    change: event({
+      entity: "quota",
+      entity_state: { ...window, dot: "red", rev: (window as { rev?: number }).rev ?? 0 + 1 },
+    }),
+  });
+
+  expect(queryClient.getQueryData<QuotaResponse>(key)).toEqual(before);
+  stop();
+});
+
+test("a peer host event marks the machines read stale", () => {
+  const { queryClient, stop, source } = federatedStream();
+  source.emit("peer", {
+    host: "host-d",
+    host_id: "01JPEERD0000000000000000D",
+    as_of: null,
+    change: event({ entity: "host", entity_id: "01JPEERD0000000000000000D" }),
+  });
+  expect(queryClient.getQueryState(queryKeyFor(machinesPath))?.isInvalidated).toBe(true);
+  stop();
+});
+
+test("peer_reset replaces the peer's attention, agents and projects, and a missing path keeps rows", () => {
+  const { queryClient, stop, source } = federatedStream();
+  const projects = () =>
+    queryClient.getQueryData<ProjectsResponse>(queryKeyFor(projectsPath))?.projects ?? [];
+  const peerProject = projects().find((project) => project.host === "host-d");
+  if (!peerProject) throw new Error("fixture has no host-d project");
+  const attention = () =>
+    queryClient.getQueryData<AttentionResponse>(queryKeyFor(attentionPath))?.items ?? [];
+  const hostDItems = attention().filter((item) => item.host === "host-d").length;
+  expect(hostDItems).toBeGreaterThan(0);
+
+  source.emit("peer_reset", {
+    host: "host-d",
+    host_id: "01JPEERD0000000000000000D",
+    link: "live",
+    as_of: null,
+    queries: {},
+  });
+  expect(attention().filter((item) => item.host === "host-d")).toHaveLength(hostDItems);
+  expect(projects().some((project) => project.host === "host-d")).toBe(true);
+
+  source.emit("peer_reset", {
+    host: "host-d",
+    host_id: "01JPEERD0000000000000000D",
+    link: "live",
+    as_of: null,
+    queries: {
+      "/api/v1/attention?state=open": { items: [], permission_prompts: [] },
+      "/api/v1/projects": { projects: [] },
+    },
+  });
+  expect(attention().filter((item) => item.host === "host-d")).toHaveLength(0);
+  expect(projects().some((project) => project.host === "host-d")).toBe(false);
+  expect(projects().some((project) => project.host === undefined)).toBe(true);
+  stop();
+});

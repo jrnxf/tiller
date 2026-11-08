@@ -1,14 +1,18 @@
 import type { QueryClient } from "@tanstack/react-query";
 
 import type {
+  AgentsResponse,
   AttentionItem,
   AttentionResponse,
   BoardResponse,
   BoardRow,
   CardDetail,
   ChangeEvent,
+  LinkEvent,
   Machine,
   MachinesResponse,
+  PeerEvent,
+  PeerResetEvent,
   Project,
   ProjectsResponse,
   QuotaResponse,
@@ -16,12 +20,13 @@ import type {
   Snapshot,
 } from "./api-types";
 import { connectionStore } from "./connection";
-import { isPeerRow } from "./peers";
+import { isPeerRow, ownerKey, ownerOf } from "./peers";
 import { SNAPSHOT_PATH, hydrateFromSnapshot } from "./boot";
 import { recordProgress } from "./receipts";
 import { isSignedOut, signedOutStore } from "./session";
 import {
   API_KEY_PREFIX,
+  agentsPath,
   attentionPath,
   fetchJson,
   machinesPath,
@@ -70,7 +75,9 @@ function upsertBoardRow(
   row: BoardRow,
 ): BoardResponse | undefined {
   if (!response) return response;
-  const index = response.rows.findIndex((existing) => existing.id === row.id);
+  const index = response.rows.findIndex(
+    (existing) => existing.id === row.id && ownerOf(existing) === ownerOf(row),
+  );
   const rows =
     index === -1
       ? [...response.rows, row]
@@ -96,12 +103,17 @@ function writeBoard(queryClient: QueryClient, row: BoardRow) {
   });
 }
 
+// An id is unique per host, so a peer's item is another item than this host's.
+function sameAttention(a: AttentionItem, b: AttentionItem): boolean {
+  return a.id === b.id && ownerOf(a) === ownerOf(b);
+}
+
 function writeAttention(queryClient: QueryClient, item: AttentionItem) {
   queryClient.setQueryData<AttentionResponse | undefined>(attentionKey, (old) => {
     if (!old) return old;
     const closed = item.answered_at !== null || item.withdrawn_at !== null;
-    if (closed) return { ...old, items: old.items.filter((other) => other.id !== item.id) };
-    return { ...old, items: upsert(old.items, item, (other) => other.id === item.id) };
+    if (closed) return { ...old, items: old.items.filter((other) => !sameAttention(other, item)) };
+    return { ...old, items: upsert(old.items, item, (other) => sameAttention(other, item)) };
   });
 }
 
@@ -126,7 +138,7 @@ function writeProject(queryClient: QueryClient, project: Project) {
           projects: upsert(
             old.projects,
             project,
-            (other) => other.id === project.id && !isPeerRow(other),
+            (other) => ownerKey(other.id, other) === ownerKey(project.id, project),
           ),
         }
       : old,
@@ -254,6 +266,140 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
   }
 }
 
+// A peer's project is gone: only its row leaves, a project of the same id on
+// this host or another stays. What it owned is read again.
+function onPeerProjectGone(queryClient: QueryClient, host: string, projectId: string) {
+  queryClient.setQueryData<ProjectsResponse | undefined>(queryKeyFor(projectsPath), (old) =>
+    old
+      ? {
+          projects: old.projects.filter(
+            (other) => other.id !== projectId || ownerOf(other) !== host,
+          ),
+        }
+      : old,
+  );
+  void queryClient.invalidateQueries({ queryKey: API_KEY_PREFIX, refetchType: "active" });
+  void queryClient.invalidateQueries({
+    queryKey: queryKeyFor(projectSetupPath(projectId)),
+    refetchType: "active",
+  });
+}
+
+// `event: peer`. The daemon tagged the change as the peer's, so the entity
+// writers key a row by its owner as well as its id.
+function applyPeerChange(queryClient: QueryClient, event: PeerEvent): void {
+  const { change } = event;
+  if (
+    change.entity === "project" &&
+    (change.kind === "project.deleted" || change.kind === "project.retired")
+  ) {
+    onPeerProjectGone(queryClient, event.host, change.entity_id);
+    return;
+  }
+  // Quota windows and outbox receipts are not tagged by owner: a peer's would
+  // replace this host's window of the same label, or a receipt of this board.
+  if (change.entity === "quota" || change.entity === "outbox") return;
+  if (change.entity === "host") {
+    // The daemon sends the peer's Machines row with no state: read it again.
+    void queryClient.invalidateQueries({
+      queryKey: queryKeyFor(machinesPath),
+      refetchType: "active",
+    });
+    return;
+  }
+  applyChange(queryClient, change);
+}
+
+function ofHost<T extends { host?: string; link?: Machine["link"] }>(host: string) {
+  return (row: T) => isPeerRow(row) && row.host === host;
+}
+
+// This host's rows and other peers' stay; the peer's rows become `incoming`.
+function replaceHost<T extends { host?: string; link?: Machine["link"] }>(
+  rows: T[],
+  host: string,
+  incoming: unknown,
+): T[] {
+  // A path the peer did not send leaves its rows as they are.
+  if (!Array.isArray(incoming)) return rows;
+  const next = incoming as T[];
+  return [...rows.filter((row) => !ofHost<T>(host)(row)), ...next];
+}
+
+// `event: peer_reset`: the peer's rows replace what the board holds for it.
+function applyPeerReset(queryClient: QueryClient, event: PeerResetEvent): void {
+  const { host, queries } = event;
+  const at = (path: string) => (queries?.[path] ?? {}) as Record<string, unknown>;
+
+  queryClient.setQueryData<BoardResponse | undefined>(
+    queryKeyFor("/api/v1/board?filter=all"),
+    (old) => {
+      if (!old) return old;
+      return {
+        ...old,
+        rows: replaceHost(old.rows, host, at("/api/v1/board?filter=all").rows),
+      };
+    },
+  );
+  queryClient.setQueryData<AttentionResponse | undefined>(attentionKey, (old) =>
+    old
+      ? { ...old, items: replaceHost(old.items, host, at("/api/v1/attention?state=open").items) }
+      : old,
+  );
+  queryClient.setQueryData<AgentsResponse | undefined>(queryKeyFor(agentsPath()), (old) =>
+    old
+      ? {
+          ...old,
+          orchestrators: replaceHost(old.orchestrators, host, at("/api/v1/agents").orchestrators),
+        }
+      : old,
+  );
+  queryClient.setQueryData<ProjectsResponse | undefined>(queryKeyFor(projectsPath), (old) =>
+    old ? { projects: replaceHost(old.projects, host, at("/api/v1/projects").projects) } : old,
+  );
+  // A filtered board list may need a card to enter or leave.
+  queryClient.invalidateQueries({
+    queryKey: API_KEY_PREFIX,
+    predicate: (query) => {
+      const path = String(query.queryKey[1] ?? "");
+      return path.startsWith("/api/v1/board") && path !== "/api/v1/board?filter=all";
+    },
+    refetchType: "active",
+  });
+  applyLink(queryClient, {
+    host,
+    link: event.link,
+    as_of: event.as_of,
+    stale_reason: event.link === "live" ? null : undefined,
+  });
+}
+
+// `event: link`: the Machines row of that peer moves, and with it the standing
+// of every row it owns (`standingOf`).
+function applyLink(
+  queryClient: QueryClient,
+  event: Omit<LinkEvent, "stale_reason"> & { stale_reason?: LinkEvent["stale_reason"] },
+): void {
+  queryClient.setQueryData<MachinesResponse | undefined>(queryKeyFor(machinesPath), (old) =>
+    old
+      ? {
+          machines: old.machines.map((machine) =>
+            machine.label === event.host && machine.link !== undefined && machine.link !== null
+              ? {
+                  ...machine,
+                  link: event.link,
+                  last_seen_at: event.as_of ?? machine.last_seen_at,
+                  stale_reason:
+                    event.stale_reason === undefined ? machine.stale_reason : event.stale_reason,
+                  link_reason: event.link === "live" ? null : machine.link_reason,
+                }
+              : machine,
+          ),
+        }
+      : old,
+  );
+}
+
 // The card a card read names: `<name>` in `/api/v1/cards/<name>`, with or
 // without a sub-path or query.
 function cardName(path: string): string | null {
@@ -342,6 +488,17 @@ export function connectEvents(options: EventsOptions): () => void {
       if (lastSeq !== null && event.seq <= lastSeq) return;
       lastSeq = event.seq;
       applyChange(queryClient, event);
+    });
+    // A peer's messages carry no `id`: its `seq` is not this host's, so they
+    // never touch `lastSeq` and are not replayed. A reconnect sends `peer_reset`.
+    next.addEventListener("peer", (message) => {
+      applyPeerChange(queryClient, JSON.parse(message.data) as PeerEvent);
+    });
+    next.addEventListener("peer_reset", (message) => {
+      applyPeerReset(queryClient, JSON.parse(message.data) as PeerResetEvent);
+    });
+    next.addEventListener("link", (message) => {
+      applyLink(queryClient, JSON.parse(message.data) as LinkEvent);
     });
     next.addEventListener("reset", (message) => {
       // Follow the daemon's newest seq at once, so a change that arrives
