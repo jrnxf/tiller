@@ -330,7 +330,7 @@ Reads have no side effects and are all trivially idempotent; they are listed aft
 
 | Command | Mutation | Caller | Retry |
 |---|---|---|---|
-| `tiller card create <project> --kind K --title T [...] [--ask <ask>]` | `card.create`; without `--ask` the card has no `created_by_ask_id` and no `ask_cards` row | orchestrator, owner | keyed |
+| `tiller card create <project> --kind K --title T [...] [--ask <ask>]` | `card.create`; without `--ask` the card has no `created_by_ask_id` and no `ask_cards` row. When the creator is not that project's own orchestrator, `outbox.enqueue` (`note`, `new card <id>: <title>`, on the card) to the project's live orchestrator in the same transaction, so a card filed into another project does not wait for a `card list`. With no live orchestrator nothing is enqueued, and `session.start` sends the note for each open card filed since the last orchestrator ended (or ever) that no note covers. A card made through an ask has its own wake and sends no second note | orchestrator, owner | keyed |
 | `tiller card edit <card> --rev <n> [--key <k>] [--title] [--priority] [--body] [--size] [--acceptance] [--category] [--dispatch <model>:<effort> \| --no-dispatch]` | `card.edit`; `--dispatch` and `--no-dispatch` set or clear `cards.dispatch_override` and are owner only | orchestrator, owner | natural at the current rev (the same values are a no-op), or keyed with `--key`; a stale rev is exit 4 unless the key replays |
 | `tiller card hold <card> --until <date> --reason <t>` | `card.hold` | orchestrator, owner | natural (same `until` and reason) |
 | `tiller card unhold <card>` | `hold.release` (`removed`) | orchestrator, owner | natural |

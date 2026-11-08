@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use super::approvals::active_away;
 use super::attention::withdraw_attention;
-use super::cards::landed_evidence;
+use super::cards::{landed_evidence, new_card_note};
 use super::outbox::{NewMessage, enqueue, live_orchestrator};
 use super::projects::{local_host_id, require_daemon};
 use super::publishes::published_head;
@@ -1394,6 +1394,20 @@ impl Store {
             if let Some(claude_id) = &new.claude_session_id {
                 take_claude_id(tx, claude_id, &id)?;
             }
+            // Open cards filed since the last orchestrator ended (or ever),
+            // by a principal that was not an ask, which nobody was told of.
+            let gap_start: Option<String> = tx.conn().query_row(
+                "SELECT max(ended_at) FROM sessions WHERE project_id = ?1 AND role = 'orchestrator'",
+                [&project.id],
+                |row| row.get(0),
+            )?;
+            let unannounced: Vec<Card> = list(
+                tx.conn(),
+                "project_id = ?1 AND state = 'open' AND created_by_ask_id IS NULL AND created_at > coalesce(?2, '')
+                 AND NOT EXISTS (SELECT 1 FROM outbox WHERE outbox.card_id = cards.id AND outbox.kind = 'note' AND outbox.body LIKE 'new card %')
+                 ORDER BY created_at, id",
+                &[&project.id, &gap_start],
+            )?;
             let host = local_host_id(tx.conn())?;
             tx.conn().execute(
                 "INSERT INTO sessions (id, claude_session_id, role, project_id, host_id, pane_id, transcript_path,
@@ -1431,6 +1445,18 @@ impl Store {
                         body: format!("unresolved ask {}: {}", ids::short(&ask.id), ask.text),
                         card_id: None,
                         reply_to: Some(ask.id),
+                    },
+                )?);
+            }
+            for card in unannounced {
+                notes.push(enqueue(
+                    tx,
+                    &NewMessage {
+                        target_session_id: id.clone(),
+                        kind: OutboxKind::Note,
+                        body: new_card_note(&card),
+                        card_id: Some(card.id.clone()),
+                        reply_to: None,
                     },
                 )?);
             }

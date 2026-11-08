@@ -986,7 +986,7 @@ fn a_remote_lane_is_left_to_its_own_tiller() {
         .fleet
         .store
         .card_create(
-            &owner(),
+            &Ctx::new(Actor::Session(w.fleet.orchestrator_session.clone())),
             None,
             NewCard {
                 project_id: "alpha".into(),

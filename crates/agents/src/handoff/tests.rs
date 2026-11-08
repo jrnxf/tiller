@@ -97,7 +97,7 @@ impl World {
     fn card(&mut self, project: &str, title: &str) -> Card {
         self.store
             .card_create(
-                &Ctx::new(Actor::Owner),
+                &self.as_orchestrator(),
                 None,
                 NewCard {
                     project_id: project.into(),

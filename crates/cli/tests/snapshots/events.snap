@@ -9,10 +9,29 @@ exit: 0
         "actor": "owner",
         "at": "<time>",
         "card_id": "<id11>",
+        "entity": "outbox",
+        "entity_id": "<id31>",
+        "id": "<id67>",
+        "idempotency_key": "shell:<id29>",
+        "kind": "outbox.enqueued",
+        "payload": {
+          "kind": "answer",
+          "reply_to": "<id27>",
+          "target_session_id": "<id9>"
+        },
+        "rev_after": 1,
+        "seq": "<seq>",
+        "short": "<id67.short>",
+        "txn": "attention.answer"
+      },
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "card_id": "<id11>",
         "entity": "attention",
         "entity_id": "<id33>",
-        "id": "<id67>",
-        "idempotency_key": "shell:<id69>",
+        "id": "<id69>",
+        "idempotency_key": "shell:<id71>",
         "kind": "attention.opened",
         "payload": {
           "kind": "report",
@@ -21,7 +40,7 @@ exit: 0
         },
         "rev_after": 1,
         "seq": "<seq>",
-        "short": "<id67.short>",
+        "short": "<id69.short>",
         "txn": "attention.open"
       },
       {
@@ -30,7 +49,7 @@ exit: 0
         "card_id": "<id11>",
         "entity": "attention",
         "entity_id": "<id33>",
-        "id": "<id71>",
+        "id": "<id73>",
         "idempotency_key": null,
         "kind": "attention.withdrawn",
         "payload": {
@@ -38,7 +57,7 @@ exit: 0
         },
         "rev_after": 2,
         "seq": "<seq>",
-        "short": "<id71.short>",
+        "short": "<id73.short>",
         "txn": "attention.withdraw"
       },
       {
@@ -46,8 +65,8 @@ exit: 0
         "at": "<time>",
         "card_id": "<id11>",
         "entity": "reservation",
-        "entity_id": "<id73>",
-        "id": "<id75>",
+        "entity_id": "<id75>",
+        "id": "<id77>",
         "idempotency_key": null,
         "kind": "reservation.reserved",
         "payload": {
@@ -57,7 +76,7 @@ exit: 0
         },
         "rev_after": null,
         "seq": "<seq>",
-        "short": "<id75.short>",
+        "short": "<id77.short>",
         "txn": "run.start"
       },
       {
@@ -96,24 +115,6 @@ exit: 0
         "rev_after": 1,
         "seq": "<seq>",
         "short": "<id49.short>",
-        "txn": "run.start"
-      },
-      {
-        "actor": "owner",
-        "at": "<time>",
-        "card_id": "<id11>",
-        "entity": "session",
-        "entity_id": "<id39>",
-        "id": "<id77>",
-        "idempotency_key": null,
-        "kind": "session.started",
-        "payload": {
-          "role": "builder",
-          "run_id": "<id35>"
-        },
-        "rev_after": 1,
-        "seq": "<seq>",
-        "short": "<id77.short>",
         "txn": "run.start"
       }
     ],

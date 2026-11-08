@@ -27,6 +27,7 @@ exit: 0
     "title": "Rotate the deploy token"
   },
   "events": [
+    "<seq>",
     "<seq>"
   ],
   "help": [
