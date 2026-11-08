@@ -523,3 +523,52 @@ test("a retry during a failed read leaves one reader, not two", async () => {
   expect(request).toHaveBeenCalledTimes(4);
   reader.stop();
 });
+
+test("a peer's pane is asked for by its host, with no Fit", async () => {
+  const { request } = opens(
+    ndjson([{ type: "size", cols: 100, rows: 30 }, frame(1, true, "peer screen")]),
+  );
+  const { events, statuses, screen, onStatus } = recorder();
+  const stream = new TerminalStream("s1", screen, onStatus, () => {}, null, "mac");
+  stream.start();
+  await settle();
+  const init = request.mock.calls[0]?.[1];
+  expect(JSON.parse(String(init?.body))).toEqual({ host: "mac" });
+  expect(events).toEqual(["reset 100x30", "peer screen"]);
+  expect(statuses.at(-1)).toBe("live");
+  stream.stop();
+});
+
+test("a peer that cannot be reached says so and keeps trying", async () => {
+  const { request } = opens(
+    refusal(503, "peer_unreachable", "mac is unreachable; nothing was sent or queued"),
+  );
+  let last: MirrorStatus | null = null;
+  const { screen } = recorder();
+  const stream = new TerminalStream(
+    "s1",
+    screen,
+    (status) => {
+      last = status;
+    },
+    () => {},
+    null,
+    "mac",
+  );
+  stream.start();
+  await settle();
+  expect(last).toMatchObject({ kind: "unreachable", title: "Can't reach mac" });
+  expect(request).toHaveBeenCalledTimes(1);
+  stream.stop();
+});
+
+test("a peer's scrollback is asked for by its host", async () => {
+  const request = vi.fn(
+    async () => new Response(JSON.stringify({ session_id: "s1", text: "old\n" }), { status: 200 }),
+  );
+  vi.stubGlobal("fetch", request);
+  const read = await readHistory("s1", undefined, "mac");
+  expect(read).toEqual({ ok: true, text: "old\n" });
+  const init = (request.mock.calls[0] as unknown as [string, RequestInit])[1];
+  expect(JSON.parse(String(init.body))).toEqual({ host: "mac" });
+});

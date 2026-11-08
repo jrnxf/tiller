@@ -400,6 +400,7 @@ function mountTerminal(
   },
   fitting: Fitting,
   tail: boolean,
+  peer: string | undefined,
 ): { input: TerminalInput | null; stream: Mirror; dispose: () => void } {
   const screen: Screen = {
     reset(cols, rows) {
@@ -414,6 +415,21 @@ function mountTerminal(
   // click never focuses xterm's input, so the board's keys keep working.
   if (tail) {
     const stream = new TerminalTail(sessionId, screen, report.status, report.size);
+    host.addEventListener("focusin", refuseFocus);
+    return {
+      input: null,
+      stream,
+      dispose() {
+        stream.stop();
+        host.removeEventListener("focusin", refuseFocus);
+        term.dispose();
+      },
+    };
+  }
+  // A peer's pane is read only too: the board host relays its stream, and
+  // there is no path back into the pane (protocol.md 10.7).
+  if (peer !== undefined) {
+    const stream = new TerminalStream(sessionId, screen, report.status, report.size, null, peer);
     host.addEventListener("focusin", refuseFocus);
     return {
       input: null,
@@ -485,6 +501,7 @@ export function LiveTerminal({
   onTyping,
   onSwitch,
   machine,
+  peer,
   strip,
 }: {
   sessionId: string;
@@ -505,11 +522,16 @@ export function LiveTerminal({
   // The saved machine the agent runs on. herdr streams only its own panes,
   // so this one is read as a tail every few seconds, read only.
   machine?: string;
+  // The paired peer host the agent runs on. Its board host relays the
+  // stream, read only: no keys, no Fit.
+  peer?: string;
   // What the stage shows between the screen and its footer: the answer buttons.
   strip?: ReactNode;
 }) {
   const phone = usePhone();
   const tail = machine !== undefined;
+  // A tail or a peer's pane: nothing here types into it.
+  const watch = tail || peer !== undefined;
   const stage = variant === "stage";
   const [host] = useState(() => {
     const element = document.createElement("div");
@@ -601,6 +623,7 @@ export function LiveTerminal({
             },
           },
           tail,
+          peer,
         );
         termRef.current = term;
         inputRef.current = mounted.input;
@@ -630,19 +653,19 @@ export function LiveTerminal({
       setUnfit(false);
       closeHistory();
     };
-  }, [sessionId, host, closeHistory, tail]);
+  }, [sessionId, host, closeHistory, tail, peer]);
 
   const live = status.kind === "live";
   useEffect(() => {
     const term = termRef.current;
     if (!term) return;
-    term.options.disableStdin = !live;
+    term.options.disableStdin = !live || peer !== undefined;
     if (!live) term.blur();
     else if (typeWhenLive.current && term.element) {
       typeWhenLive.current = false;
       term.focus();
     }
-  }, [live]);
+  }, [live, peer]);
 
   useEffect(() => {
     onTyping?.(typing);
@@ -750,7 +773,7 @@ export function LiveTerminal({
     if (!term.element) {
       term.open(host);
       openRenderer(term, webglRef.current);
-      term.textarea?.setAttribute("aria-label", tail ? `Tail of ${label}` : `Type to ${label}`);
+      term.textarea?.setAttribute("aria-label", watch ? `Tail of ${label}` : `Type to ${label}`);
       // Sized first, so a Fit's first open already knows the stage's room.
       layout();
       streamRef.current?.start();
@@ -763,7 +786,7 @@ export function LiveTerminal({
       typeWhenLive.current = false;
       term.focus();
     }
-  }, [box, ready, host, label, layout, tail]);
+  }, [box, ready, host, label, layout, watch]);
 
   // The pane changes size, or the room for it does: fit it again.
   useEffect(() => {
@@ -805,7 +828,7 @@ export function LiveTerminal({
     const ask = new AbortController();
     historyAsk.current = ask;
     setHistory("reading");
-    void readHistory(sessionId, ask.signal).then((read) => {
+    void readHistory(sessionId, ask.signal, peer).then((read) => {
       if (ask.signal.aborted) return;
       historyAsk.current = null;
       if (read.ok) {
@@ -815,7 +838,7 @@ export function LiveTerminal({
         showToast("bad", "The scrollback did not load", read.detail);
       }
     });
-  }, [sessionId]);
+  }, [sessionId, peer]);
 
   const retry = useCallback(() => streamRef.current?.retry(), []);
   const done = useCallback(() => termRef.current?.blur(), []);
@@ -844,7 +867,7 @@ export function LiveTerminal({
     () => ({
       type() {
         const term = termRef.current;
-        if (tail) return;
+        if (watch) return;
         if (phone) {
           focusNext.current = true;
           expand();
@@ -852,7 +875,7 @@ export function LiveTerminal({
         else typeWhenLive.current = true;
       },
     }),
-    [phone, expand, tail],
+    [phone, expand, watch],
   );
 
   const ended = status.kind === "ended";
@@ -903,6 +926,11 @@ export function LiveTerminal({
       <span className="tx">The pane closed {endedAt}. This is its last screen.</span>
     ) : where === "inline" && view !== "inline" ? (
       <span className="tx">The terminal is open in the expanded view.</span>
+    ) : peer !== undefined ? (
+      <span className="tx">
+        <GlobeIcon />
+        <span>{phone ? `Read only, on ${peer}` : `Read only: the agent runs on ${peer}`}</span>
+      </span>
     ) : status.kind === "tail" ? (
       <span className="tx">
         <GlobeIcon />
@@ -932,7 +960,7 @@ export function LiveTerminal({
       </button>
     ) : null;
   const fitButton =
-    stage && !phone && !tail && screenShown && !ended && view === "inline" ? (
+    stage && !phone && !watch && screenShown && !ended && view === "inline" ? (
       <button
         type="button"
         className="btn sm mir-tog"
@@ -972,7 +1000,7 @@ export function LiveTerminal({
   // the stage is often wider and taller than the pane it shows.
   const typeFromScreen = (event: ReactMouseEvent<HTMLDivElement>) => {
     const term = termRef.current;
-    if (tail || phone || typing || historyOpen) return;
+    if (watch || phone || typing || historyOpen) return;
     if (!term?.element || term.options.disableStdin || !pressTypes(event, term.element)) return;
     // Else the press moves focus to the body right after the screen takes it.
     event.preventDefault();
@@ -996,7 +1024,7 @@ export function LiveTerminal({
     <div
       className="mir-s"
       role="group"
-      aria-label={`${tail ? "Tail" : "Live terminal"} for ${label}`}
+      aria-label={`${watch ? "Tail" : "Live terminal"} for ${label}`}
       onMouseDown={typeFromScreen}
       // Scrolling up on the stage reads back, as it would in the terminal.
       onWheel={(event) => {
@@ -1130,7 +1158,7 @@ export function LiveTerminal({
                 <div
                   className={`mir-s ${scale}`}
                   role="group"
-                  aria-label={`${tail ? "Tail" : "Live terminal"} for ${label}`}
+                  aria-label={`${watch ? "Tail" : "Live terminal"} for ${label}`}
                   hidden={!screenShown}
                   onMouseDown={typeFromScreen}
                 >
@@ -1164,7 +1192,7 @@ export function LiveTerminal({
                 className={`mir-sheet-b ${scale}`}
                 ref={setBigBox}
                 role="group"
-                aria-label={`${tail ? "Tail" : "Live terminal"} for ${label}`}
+                aria-label={`${watch ? "Tail" : "Live terminal"} for ${label}`}
                 hidden={!screenShown}
               />
               <div className="mir-sheet-f">
@@ -1180,7 +1208,7 @@ export function LiveTerminal({
                   footer("big")
                 )}
               </div>
-              {tail ? null : (
+              {watch ? null : (
                 <div className="mir-keys" role="group" aria-label="Keys a phone lacks">
                   {(
                     [

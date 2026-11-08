@@ -27,7 +27,7 @@ tiller-delivery.workspace = true
 tiller-herdr.workspace = true
 tiller-observe.workspace = true
 tiller-reconcile.workspace = true
-tokio = { workspace = true, features = ["io-util", "process"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "process"] }
 tracing.workspace = true
 utoipa.workspace = true
 

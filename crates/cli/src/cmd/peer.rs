@@ -75,6 +75,13 @@ pub enum PeerCmd {
         #[arg(long)]
         from: String,
     },
+    /// Serve one pane read only to a paired board host over stdin and
+    /// stdout; the board host's daemon runs it over ssh for each watch
+    Pane {
+        /// The board host's label
+        #[arg(long)]
+        from: String,
+    },
 }
 
 pub fn run(app: &App, cmd: PeerCmd) -> Done {
@@ -116,10 +123,10 @@ pub fn run(app: &App, cmd: PeerCmd) -> Done {
             let applied = store.peer_revoke(&app.ctx(), &viewer)?;
             Ok(Outcome::applied_as(applied, key_json))
         }
-        PeerCmd::Serve { .. } => Err(Failure::new(
+        PeerCmd::Serve { .. } | PeerCmd::Pane { .. } => Err(Failure::new(
             "internal",
             1,
-            "peer serve is run before dispatch",
+            "peer serve and peer pane are run before dispatch",
         )),
     }
 }
@@ -153,6 +160,31 @@ pub fn serve(app: &App, from: String) -> Result<ExitCode, Failure> {
         }
         Err(error) => {
             eprintln!("tiller peer serve: {error}");
+            Ok(ExitCode::from(1))
+        }
+    }
+}
+
+/// `tiller peer pane --from <label>` (`protocol.md` 10.7): one signed
+/// request, then the pane's mirror lines on stdout until stdin closes. It
+/// has no path into the pane's input.
+pub fn pane(app: &App, from: String) -> Result<ExitCode, Failure> {
+    require_sshd_owner("tiller peer pane")?;
+    let config = ServeConfig {
+        home: app.home.clone(),
+        from,
+        timing: Timing::default(),
+        herdr: Some(super::spawn::configured_herdr(app)?),
+        orchestrators: None,
+    };
+    match tiller_daemon::peer::pane::serve_stdio(&config) {
+        Ok(()) => Ok(ExitCode::SUCCESS),
+        Err(error @ ServeError::Refused { .. }) => {
+            eprintln!("tiller peer pane: {error}");
+            Ok(ExitCode::from(6))
+        }
+        Err(error) => {
+            eprintln!("tiller peer pane: {error}");
             Ok(ExitCode::from(1))
         }
     }

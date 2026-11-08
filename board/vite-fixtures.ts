@@ -97,7 +97,8 @@ function paneOf(session: string): FixturePane {
 
 // `?term=<mode>` on the page URL picks how the mirror's pane behaves: live (the
 // default), ended, reconnect, unreachable, forbidden, or unfit (herdr refuses
-// a Fit).
+// a Fit). `peer-down` refuses a peer host's pane as an unreachable link; a pane
+// here still streams.
 function terminalMode(referer: string | undefined): string {
   if (!referer) return "live";
   return new URL(referer, "http://localhost").searchParams.get("term") ?? "live";
@@ -133,6 +134,17 @@ function terminalStream(
     return sendJson(res, {
       ok: false,
       error: { code: "unavailable", message: "herdr is unreachable: no socket" },
+    });
+  }
+  if (mode === "peer-down" && typeof body.host === "string") {
+    res.statusCode = 503;
+    return sendJson(res, {
+      ok: false,
+      error: {
+        code: "peer_unreachable",
+        message: `${body.host} is unreachable; nothing was sent or queued`,
+        host: body.host,
+      },
     });
   }
   if (mode !== "reconnect") dropped.delete(session);

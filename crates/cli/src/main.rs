@@ -290,6 +290,17 @@ fn main() -> ExitCode {
             }
         };
     }
+    if let Command::Peer(peer::PeerCmd::Pane { from }) = &cli.command {
+        let app = App::from_env(cli.db.clone());
+        return match peer::pane(&app, from.clone()) {
+            Ok(code) => code,
+            Err(failure) => {
+                let exit = failure.exit;
+                emit(failure.into_response(), cli.json);
+                ExitCode::from(exit)
+            }
+        };
+    }
     if let Command::Daemon(args) = &cli.command {
         return match daemon::run(args) {
             Ok(code) => code,

@@ -50,8 +50,9 @@ use crate::assets::{self, Assets};
 use crate::dto::*;
 use crate::mirror::{self, MAX_VIEWERS, Mirrors};
 use crate::peer::forward::{Op, Order};
-use crate::peer::link::{Forwarded, Peers};
+use crate::peer::link::{Forwarded, PaneStream, Paned, Peers};
 use crate::peer::pair::{self, Accept, Cause, NoAnswer, NotAccepted};
+use crate::peer::pane::PaneKind;
 use crate::peer::{Federation, PeerView};
 use crate::readonly::Damage;
 use crate::views::{self, Filter, LocalHealth, PaneTarget};
@@ -170,7 +171,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    fn new(status: StatusCode, code: &str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(status: StatusCode, code: &str, message: impl Into<String>) -> Self {
         Self {
             status,
             body: Box::new(ErrorBody {
@@ -1736,6 +1737,12 @@ enum Addressed {
     Unlinked(String),
 }
 
+impl Addressed {
+    fn is_peer(&self) -> bool {
+        !matches!(self, Self::Here)
+    }
+}
+
 async fn addressed(state: &AppState, host: Option<&str>) -> Result<Addressed, ApiError> {
     let Some(host) = host else {
         return Ok(Addressed::Here);
@@ -1813,6 +1820,44 @@ async fn forward(
             Ok(Json(response))
         }
         Forwarded::Answered(status, body) => Err(ApiError::from((status, body)).host(host)),
+    }
+}
+
+/// What a pane link answered with.
+enum Opened {
+    Stream(String, Box<PaneStream>),
+    Answer(Value),
+}
+
+/// Opens a pane link when `host` is a paired peer (`protocol.md` 10.7);
+/// `None` when the pane is here. A peer whose link is not live is 503 at
+/// once. The link is read only: nothing here types into the pane.
+async fn peer_pane(
+    state: &AppState,
+    host: Option<&str>,
+    session: &str,
+    kind: PaneKind,
+    lines: Option<u16>,
+) -> Result<Option<Opened>, ApiError> {
+    let view = match addressed(state, host).await? {
+        Addressed::Here => return Ok(None),
+        Addressed::Peer(view) => view,
+        Addressed::Unlinked(label) => return Err(ApiError::unreachable(&label)),
+    };
+    let label = view.label.as_str();
+    if view.link != LinkState::Live {
+        return Err(ApiError::unreachable(label));
+    }
+    match state
+        .0
+        .peers
+        .open_pane(&view.host_id, session, kind, lines)
+        .await
+    {
+        Paned::Unreachable => Err(ApiError::unreachable(label)),
+        Paned::Answered(200, body) => Ok(Some(Opened::Answer(body))),
+        Paned::Answered(status, body) => Err(ApiError::from((status, body)).host(label)),
+        Paned::Stream(stream) => Ok(Some(Opened::Stream(view.label.clone(), stream))),
     }
 }
 
@@ -3013,13 +3058,18 @@ async fn pane_of(
     state: &AppState,
     session: String,
 ) -> Result<(String, String, Option<String>), ApiError> {
-    read(state, move |store| {
-        let id = resolve_id(store.conn(), "sessions", "session", &session)?;
-        let session: Session = get_row(store.conn(), "session", &id)?;
-        let (pane, machine) = tiller_core::state::runs::focus_target(store.conn(), &session)?;
-        Ok((session.id, pane, machine))
-    })
-    .await
+    read(state, move |store| pane_target(store, &session)).await
+}
+
+/// [`pane_of`] on an open store, for `peer pane` too.
+pub(crate) fn pane_target(
+    store: &Store,
+    session: &str,
+) -> tiller_core::Result<(String, String, Option<String>)> {
+    let id = resolve_id(store.conn(), "sessions", "session", session)?;
+    let session: Session = get_row(store.conn(), "session", &id)?;
+    let (pane, machine) = tiller_core::state::runs::focus_target(store.conn(), &session)?;
+    Ok((session.id, pane, machine))
 }
 
 /// An agent's pane on this machine, for the terminal mirror; an agent on a
@@ -3027,18 +3077,24 @@ async fn pane_of(
 async fn local_pane(state: &AppState, session: String) -> Result<(String, String), ApiError> {
     let (session_id, pane, machine) = pane_of(state, session).await?;
     if let Some(machine) = machine {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "refused",
-            format!("the agent runs on the saved machine {machine}; the terminal mirror shows panes on this machine only"),
-        )
-        .hint("open it in herdr instead"));
+        return Err(saved_machine(&machine));
     }
     Ok((session_id, pane))
 }
 
+/// The refusal for an agent on a saved machine, on the stream and the
+/// history of this host's own panes and of a peer's alike.
+pub(crate) fn saved_machine(machine: &str) -> ApiError {
+    ApiError::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "refused",
+        format!("the agent runs on the saved machine {machine}; the terminal mirror shows panes on this machine only"),
+    )
+    .hint("open it in herdr instead")
+}
+
 /// herdr's answer to a pane call, as the board API's error.
-fn pane_error(pane: &str, error: &HerdrError) -> ApiError {
+pub(crate) fn pane_error(pane: &str, error: &HerdrError) -> ApiError {
     match error {
         HerdrError::Api { code, .. } if code == "pane_not_found" => pane_gone(pane),
         HerdrError::NotFound { .. } => pane_gone(pane),
@@ -3053,7 +3109,7 @@ fn pane_error(pane: &str, error: &HerdrError) -> ApiError {
     }
 }
 
-fn pane_gone(pane: &str) -> ApiError {
+pub(crate) fn pane_gone(pane: &str) -> ApiError {
     let mut error = ApiError::new(
         StatusCode::NOT_FOUND,
         "not_found",
@@ -3089,15 +3145,58 @@ async fn terminal(
         .map(|fit| mirror::check_fit(fit.cols, fit.rows))
         .transpose()
         .map_err(ApiError::usage)?;
-    not_forwarded(&state, request.host.as_deref(), "the terminal mirror").await?;
-    let (_, pane) = local_pane(&state, session).await?;
-    let viewer = state.0.mirrors.viewer().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "unavailable",
-            format!("{MAX_VIEWERS} terminal views are open; close one first"),
+    let viewer = || {
+        state.0.mirrors.viewer().ok_or_else(|| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "unavailable",
+                format!("{MAX_VIEWERS} terminal views are open; close one first"),
+            )
+        })
+    };
+    let for_peer = addressed(&state, request.host.as_deref()).await?.is_peer();
+    if for_peer && fit.is_some() {
+        return Err(ApiError::peer_refused(
+            "not_allowlisted",
+            "the terminal Fit (a peer pane is watch only)",
+        ));
+    }
+    let held = if for_peer { Some(viewer()?) } else { None };
+    if let Some(opened) = peer_pane(
+        &state,
+        request.host.as_deref(),
+        &session,
+        PaneKind::Stream,
+        None,
+    )
+    .await?
+    {
+        let Opened::Stream(label, stream) = opened else {
+            return Err(ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "internal",
+                "the peer answered a mirror request without a stream",
+            ));
+        };
+        let Some(held) = held else {
+            return Err(ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "internal",
+                "a peer's pane was opened without a view",
+            ));
+        };
+        let relayed = stream.relay(label, stop_or_signed_out(&state, &headers), held);
+        return Ok((
+            [
+                (header::CONTENT_TYPE, "application/x-ndjson"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            relayed,
         )
-    })?;
+            .into_response());
+    }
+    let (_, pane) = local_pane(&state, session).await?;
+    let viewer = viewer()?;
     let herdr = state.0.herdr.clone();
     let asked = pane.clone();
     let terminal = tokio::task::spawn_blocking(move || herdr.terminal(&asked))
@@ -3143,7 +3242,12 @@ async fn terminal_input(
 ) -> ApiResult<MutationResponse> {
     guard(&state, &headers)?;
     let request: TerminalInput = body(&bytes)?;
-    not_forwarded(&state, request.host.as_deref(), "terminal input").await?;
+    not_forwarded(
+        &state,
+        request.host.as_deref(),
+        "terminal input (a peer pane is watch only)",
+    )
+    .await?;
     let input = match (request.keys, request.text) {
         (Some(keys), None) => mirror::check_keys(&keys).map(|()| Ok(keys)),
         (None, Some(text)) => mirror::check_text(&text).map(|()| Err(text)),
@@ -3247,7 +3351,12 @@ async fn prompt_read(
 ) -> ApiResult<PromptRead> {
     guard(&state, &headers)?;
     let request: PromptAsk = body(&bytes)?;
-    not_forwarded(&state, request.host.as_deref(), "a prompt read").await?;
+    not_forwarded(
+        &state,
+        request.host.as_deref(),
+        "a prompt read (a peer pane is watch only)",
+    )
+    .await?;
     let (session_id, pane) = local_pane(&state, session).await?;
     let (prompt, reason) = match waiting_tool(&state, session_id.clone()).await? {
         None => (None, Some(NoPrompt::NotWaiting)),
@@ -3287,7 +3396,12 @@ async fn prompt_answer(
 ) -> ApiResult<MutationResponse> {
     guard(&state, &headers)?;
     let request: PromptAnswer = body(&bytes)?;
-    not_forwarded(&state, request.host.as_deref(), "a prompt answer").await?;
+    not_forwarded(
+        &state,
+        request.host.as_deref(),
+        "a prompt answer (a peer pane is watch only)",
+    )
+    .await?;
     let (session_id, pane) = local_pane(&state, session).await?;
     spend_input(&state)?;
     let changed = || {
@@ -3350,7 +3464,12 @@ async fn terminal_fit(
     guard(&state, &headers)?;
     let request: TerminalRefit = body(&bytes)?;
     let (cols, rows) = mirror::check_fit(request.cols, request.rows).map_err(ApiError::usage)?;
-    not_forwarded(&state, request.host.as_deref(), "the terminal Fit").await?;
+    not_forwarded(
+        &state,
+        request.host.as_deref(),
+        "the terminal Fit (a peer pane is watch only)",
+    )
+    .await?;
     let (session_id, pane) = local_pane(&state, session).await?;
     if !state.0.mirrors.fits().refit(&pane, (cols, rows)) {
         return Err(ApiError::new(
@@ -3400,7 +3519,31 @@ async fn terminal_history(
             mirror::MAX_HISTORY
         )));
     }
-    not_forwarded(&state, request.host.as_deref(), "the terminal history").await?;
+    if let Some(opened) = peer_pane(
+        &state,
+        request.host.as_deref(),
+        &session,
+        PaneKind::History,
+        Some(lines),
+    )
+    .await?
+    {
+        let Opened::Answer(history) = opened else {
+            return Err(ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "internal",
+                "the peer answered a history request with a stream",
+            ));
+        };
+        let history: TerminalHistory = serde_json::from_value(history).map_err(|error| {
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "internal",
+                format!("the peer answered a malformed history: {error}"),
+            )
+        })?;
+        return Ok(Json(history));
+    }
     let (session_id, pane) = local_pane(&state, session).await?;
     let herdr = state.0.herdr.clone();
     let target = pane.clone();
@@ -3434,7 +3577,12 @@ async fn terminal_tail(
 ) -> ApiResult<TerminalTail> {
     guard(&state, &headers)?;
     let request: TerminalTailAsk = body(&bytes)?;
-    not_forwarded(&state, request.host.as_deref(), "the terminal tail").await?;
+    not_forwarded(
+        &state,
+        request.host.as_deref(),
+        "the terminal tail (a peer pane is watch only)",
+    )
+    .await?;
     let (session_id, pane, machine) = pane_of(&state, session).await?;
     let read = TAIL_READS.try_acquire().map_err(|_| {
         ApiError::new(
@@ -6513,7 +6661,7 @@ esac"#,
     /// frame is full unless `{dir}/full` says `false`. Its control logs what
     /// it reads and answers a resize with a full frame, and a read gives two
     /// rows of scrollback.
-    fn mirror_herdr(dir: &std::path::Path) -> Cli {
+    pub(crate) fn mirror_herdr(dir: &std::path::Path) -> Cli {
         let script = format!(
             r#"echo "$*" >> '{dir}/calls'
 case "$*" in
@@ -6589,7 +6737,7 @@ esac"#,
     }
 
     /// The next NDJSON line of a streaming body.
-    async fn next_line(
+    pub(crate) async fn next_line(
         body: &mut (impl futures_util::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Unpin),
         pending: &mut String,
     ) -> Value {

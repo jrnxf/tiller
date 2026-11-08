@@ -11,6 +11,7 @@
 pub mod forward;
 pub mod link;
 pub mod pair;
+pub mod pane;
 pub mod serve;
 
 use std::path::Path;
@@ -64,6 +65,8 @@ pub enum Frame {
     },
     /// A forwarded mutation, signed by the board host (10.3).
     Mutate(Box<forward::Mutate>),
+    /// The one request on a pane link, signed by the board host (10.7).
+    PaneOpen(Box<pane::PaneOpen>),
     Result {
         id: String,
         http_status: u16,

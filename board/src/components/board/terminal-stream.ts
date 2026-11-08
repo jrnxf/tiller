@@ -120,8 +120,16 @@ export async function readPane<T>(
   }
 }
 
-export async function readHistory(sessionId: string, signal?: AbortSignal): Promise<History> {
-  const read = await readPane<{ text: string }>(terminalHistoryPath(sessionId), signal);
+export async function readHistory(
+  sessionId: string,
+  signal?: AbortSignal,
+  peer?: string,
+): Promise<History> {
+  const read = await readPane<{ text: string }>(
+    terminalHistoryPath(sessionId),
+    signal,
+    peer ? { host: peer } : {},
+  );
   return read.ok ? { ok: true, text: read.body.text } : { ok: false, detail: read.detail };
 }
 
@@ -145,6 +153,8 @@ export class TerminalStream implements Mirror {
   private readonly onStatus: (status: MirrorStatus) => void;
   private readonly onSize: (size: TerminalSize) => void;
   private readonly fitting: Fitting | null;
+  // The paired peer the pane runs on: the board host relays its stream.
+  private readonly peer: string | undefined;
   // The Fit the open stream holds.
   private fitted: TerminalSize | null = null;
   private abort: AbortController | null = null;
@@ -160,7 +170,9 @@ export class TerminalStream implements Mirror {
     onStatus: (status: MirrorStatus) => void,
     onSize: (size: TerminalSize) => void,
     fitting: Fitting | null = null,
+    peer?: string,
   ) {
+    this.peer = peer;
     this.path = terminalPath(sessionId);
     this.fitPath = terminalFitPath(sessionId);
     this.screen = screen;
@@ -277,7 +289,7 @@ export class TerminalStream implements Mirror {
     const response = await fetch(this.path, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/x-ndjson" },
-      body: fit ? JSON.stringify({ fit }) : "{}",
+      body: JSON.stringify({ ...(fit ? { fit } : {}), ...(this.peer ? { host: this.peer } : {}) }),
       signal,
     });
     if (!response.ok) return this.refused(response);
@@ -335,6 +347,13 @@ export class TerminalStream implements Mirror {
     }
     if (response.status === 404) {
       return { next: "stop", status: { kind: "ended", at: new Date() } };
+    }
+    if (response.status === 503 && error.code === "peer_unreachable") {
+      return {
+        next: "retry",
+        title: `Can't reach ${this.peer ?? "the peer host"}`,
+        detail: "The agent may still be running. Tiller tries again on its own, or now.",
+      };
     }
     if (response.status === 503) {
       return error.message.startsWith("herdr is unreachable")
