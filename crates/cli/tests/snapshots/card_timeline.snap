@@ -30,7 +30,7 @@ exit: 0
         "at": "<time>",
         "card_id": "<id11>",
         "entity": "reservation",
-        "entity_id": "<id73>",
+        "entity_id": "<id75>",
         "id": "<id91>",
         "idempotency_key": null,
         "kind": "reservation.released",

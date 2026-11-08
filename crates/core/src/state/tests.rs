@@ -1460,6 +1460,127 @@ fn orchestrator_notes(store: &Store, session: &str) -> Vec<String> {
         .unwrap()
 }
 
+fn add_project(store: &mut Store, id: &str) {
+    store
+        .project_add(&owner(), project_input(id, None, Delivery::LocalOnly))
+        .unwrap();
+}
+
+/// A card another principal files into a project notes that project's live
+/// orchestrator in the same transaction; its own orchestrator's card does not.
+#[test]
+fn a_card_filed_by_another_principal_notes_the_orchestrator() {
+    let (mut store, alpha) = memory_store();
+    add_project(&mut store, "beta");
+    let beta = store
+        .session_start(
+            &owner(),
+            NewOrchestrator {
+                project_id: "beta".into(),
+                ..NewOrchestrator::default()
+            },
+        )
+        .unwrap()
+        .value
+        .session
+        .id;
+
+    // alpha's orchestrator files into beta: beta is told, alpha is not.
+    let filed = store
+        .card_create(
+            &Ctx::new(Actor::Session(alpha.clone())),
+            None,
+            NewCard {
+                project_id: "beta".into(),
+                ..card(CardKind::Ship, "cross")
+            },
+            None,
+        )
+        .unwrap()
+        .value;
+    assert_eq!(
+        orchestrator_notes(&store, &beta),
+        vec![format!("new card {}: cross", filed.display_id)]
+    );
+    assert!(orchestrator_notes(&store, &alpha).is_empty());
+
+    // The owner files into alpha: alpha is told.
+    let owned = store
+        .card_create(&owner(), None, card(CardKind::Ship, "from owner"), None)
+        .unwrap()
+        .value;
+    assert_eq!(
+        orchestrator_notes(&store, &alpha),
+        vec![format!("new card {}: from owner", owned.display_id)]
+    );
+
+    // Its own orchestrator filing into alpha tells nobody.
+    store
+        .card_create(
+            &Ctx::new(Actor::Session(alpha.clone())),
+            None,
+            card(CardKind::Ship, "own"),
+            None,
+        )
+        .unwrap();
+    assert_eq!(orchestrator_notes(&store, &alpha).len(), 1);
+    assert_eq!(orchestrator_notes(&store, &beta).len(), 1);
+}
+
+/// With no live orchestrator the create enqueues nothing and the next
+/// orchestrator is told of the card once, at start.
+#[test]
+fn a_card_filed_with_no_orchestrator_is_told_at_start() {
+    let (mut store, _alpha) = memory_store();
+    add_project(&mut store, "beta");
+    let early = store
+        .card_create(
+            &owner(),
+            None,
+            NewCard {
+                project_id: "beta".into(),
+                ..card(CardKind::Ship, "waiting")
+            },
+            None,
+        )
+        .unwrap()
+        .value;
+    let outbox: i64 = store
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM outbox WHERE card_id = ?1",
+            [&early.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(outbox, 0);
+
+    let start = |store: &mut Store| {
+        store
+            .session_start(
+                &owner(),
+                NewOrchestrator {
+                    project_id: "beta".into(),
+                    ..NewOrchestrator::default()
+                },
+            )
+            .unwrap()
+            .value
+    };
+    let first = start(&mut store);
+    assert_eq!(
+        orchestrator_notes(&store, &first.session.id),
+        vec![format!("new card {}: waiting", early.display_id)]
+    );
+
+    // A restart does not tell it again.
+    store
+        .session_end(&Ctx::new(Actor::Daemon), &first.session.id, "test")
+        .unwrap();
+    let second = start(&mut store);
+    assert!(orchestrator_notes(&store, &second.session.id).is_empty());
+}
+
 /// A raised capacity and a run ending each note the live orchestrator, so it
 /// retries a spawn that was refused as full.
 #[test]

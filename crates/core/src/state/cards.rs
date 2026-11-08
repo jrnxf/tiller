@@ -158,6 +158,43 @@ pub(crate) fn create_card(tx: &mut Tx<'_>, new: &NewCard, ask_id: Option<&str>) 
     get(tx.conn(), "card", &id)
 }
 
+/// The note that tells a project's orchestrator about a card somebody else
+/// filed. Also the text `session.start` sends for such a card.
+pub(crate) fn new_card_note(card: &Card) -> String {
+    format!("new card {}: {}", card.display_id, card.title)
+}
+
+/// A card created by a principal other than its project's own orchestrator
+/// notes the project's live orchestrator, in the transaction of the create
+/// (`protocol.md`, section 2.2). With no live orchestrator nothing is
+/// enqueued; `session.start` tells the next one.
+fn announce_card(tx: &mut Tx<'_>, card: &Card) -> Result<()> {
+    if let Some(session) = tx.actor().session_id() {
+        let own: bool = tx.conn().query_row(
+            "SELECT EXISTS (SELECT 1 FROM sessions WHERE id = ?1 AND role = 'orchestrator' AND project_id = ?2)",
+            params![session, card.project_id],
+            |row| row.get(0),
+        )?;
+        if own {
+            return Ok(());
+        }
+    }
+    let Some(orchestrator) = live_orchestrator(tx.conn(), &card.project_id)? else {
+        return Ok(());
+    };
+    enqueue(
+        tx,
+        &NewMessage {
+            target_session_id: orchestrator.id,
+            kind: OutboxKind::Note,
+            body: new_card_note(card),
+            card_id: Some(card.id.clone()),
+            reply_to: None,
+        },
+    )?;
+    Ok(())
+}
+
 /// Writes one `ask_cards` row and its `card.linked` event.
 pub(crate) fn link_ask(
     tx: &mut Tx<'_>,
@@ -423,7 +460,9 @@ impl Store {
                 }
                 None => None,
             };
-            create_card(tx, &new, ask_id.as_deref())
+            let card = create_card(tx, &new, ask_id.as_deref())?;
+            announce_card(tx, &card)?;
+            Ok(card)
         })
     }
 

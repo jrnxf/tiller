@@ -121,7 +121,7 @@ impl Fleet {
         let card = self
             .store
             .card_create(
-                &owner(),
+                &Ctx::new(Actor::Session(self.orchestrator_session.clone())),
                 None,
                 NewCard {
                     project_id: "alpha".into(),

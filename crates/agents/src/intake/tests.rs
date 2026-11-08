@@ -187,10 +187,19 @@ impl World {
     }
 }
 
+/// Filed as alpha's own orchestrator, so no note reaches the outbox.
 fn new_card(store: &mut Store, title: &str) -> Card {
+    let orchestrator: String = store
+        .conn()
+        .query_row(
+            "SELECT id FROM sessions WHERE role = 'orchestrator' AND project_id = 'alpha' AND ended_at IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     store
         .card_create(
-            &Ctx::new(Actor::Owner),
+            &Ctx::new(Actor::Session(orchestrator)),
             None,
             NewCard {
                 project_id: "alpha".into(),
