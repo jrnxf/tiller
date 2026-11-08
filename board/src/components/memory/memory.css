@@ -68,12 +68,9 @@
   margin: 0 2px;
 }
 
-.docs .m2-tab .n {
-  font-size: 12px;
-  font-weight: var(--w-normal);
-  color: var(--fg-4);
-}
-
+/* Every count is a pill: suggestions waiting in the accent, a line count
+   in a quiet tone. */
+.docs .m2-tab .n,
 .docs .m2-tab .s {
   min-width: 18px;
   height: 17px;
@@ -85,6 +82,11 @@
   font-weight: var(--w-semibold);
   color: var(--accent-fg);
   background: var(--accent);
+}
+
+.docs .m2-tab .n {
+  color: var(--fg-2);
+  background: var(--bg-hover);
 }
 
 /* The page */

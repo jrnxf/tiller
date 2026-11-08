@@ -259,6 +259,7 @@
   color: var(--fg-3);
 }
 
+.set-hosts td.set-ver,
 .set-hosts td.set-start,
 .set-hosts td.set-pid {
   font-variant-numeric: tabular-nums;

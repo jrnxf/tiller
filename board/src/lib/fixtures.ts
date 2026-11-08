@@ -1377,7 +1377,12 @@ function healthFor(now: number): DaemonHealth {
     schema: 12,
     pid: 4242,
     started_at: minutes(now, -3 * 60),
-    merge_app: { status: "missing", app_id: null, detail: "No merge App is set up" },
+    merge_app: {
+      status: "missing",
+      app_id: null,
+      detail:
+        "Create the merge App and put its app-id and private-key.pem in /home/user/.tiller/forge-app (docs/plan/merge-app-setup.md). Until then every project runs as detect.",
+    },
   };
 }
 

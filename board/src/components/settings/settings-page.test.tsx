@@ -171,7 +171,7 @@ test("a merge App that is not ready is a warning above the hosts, named by its h
   await waitFor(() =>
     expect(within(warning).getByText("Merge App not set up on host-a")).toBeTruthy(),
   );
-  expect(within(warning).getByText("No merge App is set up")).toBeTruthy();
+  expect(within(warning).getByText(/^Create the merge App and put its app-id/)).toBeTruthy();
   const page = screen.getByTestId("settings");
   expect(page.firstElementChild).toBe(warning);
 });

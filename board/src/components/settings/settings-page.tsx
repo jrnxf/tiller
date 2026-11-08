@@ -160,7 +160,7 @@ function HostRow({
       <td className="set-ver" data-label="Version">
         {version ? (
           <>
-            <code>{version}</code>
+            <span>{version}</span>
             {view.versionMark ? <span className="set-status warn">{view.versionMark}</span> : null}
             {local ? <small>Schema {health.schema}</small> : null}
           </>

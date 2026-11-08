@@ -23,7 +23,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tiller_agents::land::app::{APP_DIR, AppKey, KEY_FILE, KeyError};
+use tiller_agents::land::app::{APP_DIR, APP_ID_FILE, AppKey, KEY_FILE, KeyError};
 use tiller_agents::spawn::config::SpawnConfig;
 use tiller_agents::spawn::orchestrator::Orchestrator;
 use tiller_core::config_file as config_toml;
@@ -1209,8 +1209,8 @@ fn merge_app_health(home: &std::path::Path) -> MergeAppHealth {
             status: "missing".into(),
             app_id: None,
             detail: format!(
-                "no merge App key at {}, so every project runs as detect",
-                dir.join(KEY_FILE).display()
+                "Create the merge App and put its {APP_ID_FILE} and {KEY_FILE} in {} (docs/plan/merge-app-setup.md). Until then every project runs as detect.",
+                dir.display()
             ),
         },
         Err(error) => MergeAppHealth {
