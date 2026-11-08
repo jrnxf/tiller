@@ -10,6 +10,7 @@ use super::attention::{NewAttention, open_attention, withdraw_attention};
 use super::outbox::{NewMessage, enqueue, live_orchestrator};
 use super::runs::{EndRun, end_run};
 use super::{check_rev, find, get, list, refuse, required, resolve_card};
+use crate::authority::{CardAction, require_card_scope};
 use crate::domain::lifecycle::{allowed_outcomes, outcome_satisfies_dependants};
 use crate::domain::*;
 use crate::error::{Error, Result};
@@ -408,6 +409,14 @@ impl Store {
         ask: Option<&str>,
     ) -> Result<Applied<Card>> {
         self.write(ctx, "card.create", key, |tx| {
+            // Citing an ask links it, which only its own project may do:
+            // the cross-project create allows no citation.
+            let action = if ask.is_some() {
+                CardAction::ResolveAsk
+            } else {
+                CardAction::Create
+            };
+            require_card_scope(tx.conn(), tx.actor(), &new.project_id, action)?;
             let ask_id = match ask {
                 Some(reference) => {
                     let id = super::resolve_id(tx.conn(), "asks", "ask", reference)?;
@@ -453,6 +462,7 @@ impl Store {
         }
         self.write(ctx, "card.edit", key, |tx| {
             let card = resolve_card(tx.conn(), card)?;
+            require_card_scope(tx.conn(), tx.actor(), &card.project_id, CardAction::Edit)?;
             let dispatch = match &edit.dispatch_override {
                 Some(value) => Some(value.as_ref().map(serde_json::to_value).transpose()?),
                 None => None,
@@ -533,6 +543,7 @@ impl Store {
         required("reason", reason)?;
         self.write(ctx, "card.hold", None, |tx| {
             let card = resolve_card(tx.conn(), card)?;
+            require_card_scope(tx.conn(), tx.actor(), &card.project_id, CardAction::Hold)?;
             if let Some(hold) = find::<Hold>(tx.conn(), "card_id = ?1 AND released_at IS NULL", &[&card.id])? {
                 if hold.until_at == until && hold.reason == reason {
                     return Ok(hold);
@@ -572,6 +583,12 @@ impl Store {
     ) -> Result<Applied<Option<Hold>>> {
         self.write(ctx, "hold.release", None, |tx| {
             let card = resolve_card(tx.conn(), card)?;
+            let action = if reason == HoldReleaseReason::Due {
+                CardAction::ReleaseDueHold
+            } else {
+                CardAction::Hold
+            };
+            require_card_scope(tx.conn(), tx.actor(), &card.project_id, action)?;
             let Some(hold) = find::<Hold>(
                 tx.conn(),
                 "card_id = ?1 AND released_at IS NULL",
@@ -609,6 +626,7 @@ impl Store {
     pub fn dep_add(&mut self, ctx: &Ctx, card: &str, depends_on: &str) -> Result<Applied<CardDep>> {
         self.write(ctx, "dep.add", None, |tx| {
             let card = resolve_card(tx.conn(), card)?;
+            require_card_scope(tx.conn(), tx.actor(), &card.project_id, CardAction::Depend)?;
             let target = resolve_card(tx.conn(), depends_on)?;
             let existing: Option<CardDep> = find(
                 tx.conn(),
@@ -677,6 +695,7 @@ impl Store {
     ) -> Result<Applied<Option<CardDep>>> {
         self.write(ctx, "dep.release", None, |tx| {
             let card = resolve_card(tx.conn(), card)?;
+            require_card_scope(tx.conn(), tx.actor(), &card.project_id, CardAction::Depend)?;
             let target = resolve_card(tx.conn(), depends_on)?;
             let Some(dep) = find::<CardDep>(
                 tx.conn(),
@@ -710,6 +729,7 @@ impl Store {
     ) -> Result<Applied<Closed>> {
         self.write(ctx, "card.close", None, |tx| {
             let card = resolve_card(tx.conn(), card)?;
+            require_card_scope(tx.conn(), tx.actor(), &card.project_id, CardAction::Close(outcome))?;
             if card.outcome == Some(outcome) {
                 return Ok(Closed {
                     card,
@@ -763,6 +783,12 @@ impl Store {
         required("reason", reason)?;
         self.write(ctx, "card.cancel", None, |tx| {
             let card = resolve_card(tx.conn(), card)?;
+            require_card_scope(
+                tx.conn(),
+                tx.actor(),
+                &card.project_id,
+                CardAction::Close(CardOutcome::Cancelled),
+            )?;
             if card.outcome == Some(CardOutcome::Cancelled) {
                 return Ok(Cancelled {
                     closed: Closed {
@@ -809,6 +835,7 @@ impl Store {
         required("reason", reason)?;
         self.write(ctx, "card.reopen", None, |tx| {
             let card = resolve_card(tx.conn(), card)?;
+            require_card_scope(tx.conn(), tx.actor(), &card.project_id, CardAction::Edit)?;
             let status = CardStatus::from_columns(card.state, card.outcome).map_err(refuse("card", &card.display_id))?;
             if status == CardStatus::Open {
                 return Ok(card);

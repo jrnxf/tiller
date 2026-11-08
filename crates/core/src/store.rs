@@ -264,6 +264,19 @@ impl Store {
         Ok(Self { conn })
     }
 
+    /// An in-memory copy of this database, for tests that run many cases
+    /// against one fixture.
+    #[cfg(test)]
+    pub(crate) fn copy_in_memory(&self) -> Result<Self> {
+        let mut conn = Connection::open_in_memory()?;
+        let step = rusqlite::backup::Backup::new(&self.conn, &mut conn)?.step(-1)?;
+        if step != rusqlite::backup::StepResult::Done {
+            return Err(Error::Internal(format!("the copy stopped: {step:?}")));
+        }
+        configure(&conn)?;
+        Ok(Self { conn })
+    }
+
     /// The connection, for reads. Writes go through [`Store::write`].
     pub fn conn(&self) -> &Connection {
         &self.conn

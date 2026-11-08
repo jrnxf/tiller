@@ -8,6 +8,7 @@ use serde_json::json;
 use super::cards::{NewCard, create_card, link_ask};
 use super::outbox::{NewMessage, enqueue, live_orchestrator};
 use super::{find, get, refuse, required, resolve_card, resolve_id};
+use crate::authority::{CardAction, require_card_scope};
 use crate::domain::*;
 use crate::error::{Error, Result};
 use crate::ids;
@@ -122,6 +123,8 @@ fn resolve(
 
 fn followup_card(tx: &Tx<'_>, reference: &str) -> Result<Card> {
     let card = resolve_card(tx.conn(), reference)?;
+    // A follow-up adds to the card, so it is an edit in the card's project.
+    require_card_scope(tx.conn(), tx.actor(), &card.project_id, CardAction::Edit)?;
     if card.state != CardState::Open {
         return Err(Error::refused(
             "card",
@@ -304,6 +307,7 @@ impl Store {
         self.write(ctx, "ask.resolve", None, |tx| {
             let id = resolve_id(tx.conn(), "asks", "ask", ask)?;
             let ask: Ask = get(tx.conn(), "ask", &id)?;
+            require_card_scope(tx.conn(), tx.actor(), &ask.project_id, CardAction::ResolveAsk)?;
             if ask.disposition != Disposition::Unresolved {
                 let same = ask.disposition == resolution.disposition();
                 let card = match (&resolution, ask.disposition) {
@@ -356,6 +360,12 @@ impl Store {
         self.write(ctx, "ask.link", key, |tx| {
             let id = resolve_id(tx.conn(), "asks", "ask", ask)?;
             let ask: Ask = get(tx.conn(), "ask", &id)?;
+            require_card_scope(
+                tx.conn(),
+                tx.actor(),
+                &ask.project_id,
+                CardAction::ResolveAsk,
+            )?;
             if !matches!(ask.disposition, Disposition::New | Disposition::Followup) {
                 return Err(Error::refused(
                     "ask",
@@ -404,6 +414,7 @@ impl Store {
         new: NewCard,
     ) -> Result<Applied<BoardAdded>> {
         self.write_as(ctx, "ask.record", "board.add", key, |tx| {
+            require_card_scope(tx.conn(), tx.actor(), &new.project_id, CardAction::Create)?;
             let text = match &new.body {
                 Some(body) => format!("{}\n\n{body}", new.title),
                 None => new.title.clone(),

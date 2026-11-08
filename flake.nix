@@ -117,6 +117,8 @@
               ./roles
               # Embedded by crates/replay with include_str!.
               ./crates/replay/prompts
+              # The role matrix core::authority::matrix_matches_spec reads with include_str!.
+              ./docs/spec/authority.md
             ];
           };
           # The version the binary reports. Cargo.toml keeps the base version; the
