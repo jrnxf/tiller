@@ -1108,6 +1108,7 @@ fn breached_floor_for_30_minutes_opens_recovery_item() {
                 lane_capacity: None,
                 ram_floor_mb: None,
                 disk_floor_mb: Some(Some(40_000)),
+                bug_project_id: None,
             },
         )
         .unwrap();

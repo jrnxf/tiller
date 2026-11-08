@@ -4,6 +4,7 @@ source: crates/cli/tests/common/mod.rs
 exit: 0
 {
   "data": {
+    "bug_project_id": null,
     "disk_floor_mb": null,
     "herdr_machine": null,
     "id": "<id1>",

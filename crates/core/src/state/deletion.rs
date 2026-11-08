@@ -26,7 +26,7 @@ use super::projects::{local_host_id, require_owner};
 use crate::domain::{Attention, Project};
 use crate::error::{Error, Result};
 use crate::ids::FLEET_PROJECT;
-use crate::store::{Actor, Applied, Ctx, NewEvent, Store};
+use crate::store::{Actor, Applied, Ctx, NewEvent, Store, Tx};
 
 /// Nullable foreign keys that still mean "belongs to": an observation of a
 /// removed session or run, and a worktree cached for the project.
@@ -57,6 +57,7 @@ pub(crate) const UNLINKED: &[(&str, &str)] = &[
     ("evidence", "session_id"),
     ("evidence", "run_id"),
     ("evidence", "card_id"),
+    ("hosts", "bug_project_id"),
     ("memories", "retired_revision_id"),
     ("memories", "authored_by_session_id"),
     ("memory_revisions", "approval_id"),
@@ -322,6 +323,7 @@ impl Store {
                 withdraw_attention(tx, &item, &reason)?;
                 deletion.withdrawn_attention += 1;
             }
+            clear_bug_project(tx, &project.id)?;
             apply(tx.conn(), &fks)?;
             tx.event(
                 NewEvent::new("project", &project.id, "project.deleted")
@@ -339,6 +341,33 @@ impl Store {
             Ok(deletion)
         })
     }
+}
+
+/// A host whose bug project is the one deleted takes Tiller bugs in `fleet`
+/// again, through the same `rev` and `host.edited` event as `host.edit`, so
+/// the board's Machines row follows.
+fn clear_bug_project(tx: &mut Tx<'_>, project_id: &str) -> Result<()> {
+    let hosts = {
+        let mut stmt = tx
+            .conn()
+            .prepare("SELECT id, rev FROM hosts WHERE bug_project_id = ?1")?;
+        stmt.query_map(params![project_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (id, rev) in hosts {
+        tx.conn().execute(
+            "UPDATE hosts SET bug_project_id = NULL, rev = rev + 1 WHERE id = ?1",
+            params![id],
+        )?;
+        tx.event(
+            NewEvent::new("host", &id, "host.edited")
+                .rev(rev + 1)
+                .payload(json!({"changed": {"bug_project_id": null}, "reason": format!("project {project_id} was deleted")})),
+        )?;
+    }
+    Ok(())
 }
 
 /// The open attention items, on cards that stay, about the project or one of

@@ -225,6 +225,8 @@ function machinesFor(scenario: Scenario, now: number): MachinesResponse {
     last_seen_at: minutes(now, 0),
     stale_reason: null,
     version: FIXTURE_VERSION,
+    // In the federated scenario this host's `tiller` project takes Tiller bugs.
+    ...(scenario === "federated" ? { bug_project: "tiller" } : {}),
     rev: 4,
   };
   const hostB: Machine = {
@@ -325,7 +327,14 @@ const DEGRADED_PROJECTS: ProjectsResponse = {
 
 function projectsFor(scenario: Scenario, now: number = Date.now()): ProjectsResponse {
   if (scenario === "federated") {
-    return { projects: [...DEFAULT_PROJECTS.projects, ...peerProjects(now)] };
+    return {
+      projects: [
+        ...DEFAULT_PROJECTS.projects,
+        launched("tiller", "direct-pr", 2, 1),
+        launched("fleet", "direct-pr", 1, 1),
+        ...peerProjects(now),
+      ],
+    };
   }
   if (scenario === "degraded") return DEGRADED_PROJECTS;
   return scenario === "busy" ? BUSY_PROJECTS : DEFAULT_PROJECTS;
@@ -597,11 +606,43 @@ function busyRows(now: number): BoardRow[] {
   return rows;
 }
 
+// The federated scenario's Tiller bugs on this host: tiller-7 was routed to
+// the bug project, and fleet-2 was filed before that project took them, so it
+// still waits in `fleet` beside Host health.
+function bugRows(now: number): BoardRow[] {
+  return [
+    {
+      ...card(1, "fleet", "queued", "filed", "Host health", { kind: "ops" }, now),
+      id: "01JCARDBUG0000000000000001",
+    },
+    {
+      ...card(2, "fleet", "queued", "filed", "tiller card close drops the reason", {}, now),
+      id: "01JCARDBUG0000000000000002",
+      category: "tiller-bug",
+      filed_from: "beta",
+    },
+    {
+      ...card(7, "tiller", "queued", "filed", "tiller agent stop leaves the pane open", {}, now),
+      id: "01JCARDBUG0000000000000007",
+      category: "tiller-bug",
+      filed_from: "alpha",
+    },
+  ];
+}
+
+// What a Tiller bug's filer wrote, for the fixture bugs that have one.
+const BUG_BODIES: Record<string, string> = {
+  "tiller pr describe misreads TMPDIR in the builder sandbox":
+    "The builder on gamma-14 ran `tiller pr describe` and got an empty body. The sandbox sets TMPDIR to /home/user/.cache/tmp, and the command still reads /tmp.\n\nExpected: the PR body from the card. Seen twice today.",
+  "tiller card close drops the reason":
+    "`tiller card close beta-8 --outcome cancelled --reason ...` closed the card, and the timeline shows no reason.",
+};
+
 function boardFor(scenario: Scenario, now: number): BoardResponse {
   if (scenario === "empty") return { rows: [], asked: [] };
   if (scenario === "degraded") return { rows: degradedRows(now), asked: [] };
   if (scenario === "federated") {
-    return { rows: [...defaultRows(now), ...peerRows(now)], asked: [] };
+    return { rows: [...defaultRows(now), ...bugRows(now), ...peerRows(now)], asked: [] };
   }
   if (scenario === "busy") {
     return {
@@ -1049,7 +1090,9 @@ function cardDetailFor(
       project_id: row.project_id,
       kind: row.kind,
       title: row.title,
-      body: "A placeholder description for this fixture card. It says what the card is for in a sentence or two.",
+      body:
+        BUG_BODIES[row.title] ??
+        "A placeholder description for this fixture card. It says what the card is for in a sentence or two.",
       priority: row.priority,
       slug: `${row.display_id}-${row.title.toLowerCase().replace(/\W+/g, "-").slice(0, 28)}`,
       state: done ? "closed" : "open",
@@ -1121,6 +1164,22 @@ function timelineFor(
 ): TimelineResponse | null {
   const row = board.rows.find((candidate) => candidate.id === cardId);
   if (!row) return null;
+  if (row.category === "tiller-bug") {
+    const into =
+      row.project_id === "fleet" ? "fleet: this host has no bug project" : row.project_id;
+    const from = row.filed_from ? ` from ${row.filed_from}` : "";
+    return {
+      entries: [
+        {
+          seq: 4100,
+          at: minutes(now, -40),
+          actor: "system",
+          text: `filed as a Tiller bug${from} into ${into}`,
+        },
+      ],
+      next_before: null,
+    };
+  }
   const newer: TimelineResponse["entries"] = [
     {
       seq: 4180,

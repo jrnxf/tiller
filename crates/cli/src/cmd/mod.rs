@@ -8,6 +8,7 @@ pub mod approval;
 pub mod ask;
 pub mod attention;
 pub mod backup;
+pub mod bug;
 pub mod card;
 pub mod control;
 pub mod doctor;

@@ -201,6 +201,13 @@ export const ArrowIcon = ({ to }: { to: keyof typeof ARROW }) => (
   </Glyph>
 );
 
+// A straight arrow: where a Tiller bug was routed from or is moved to.
+export const RouteIcon = () => (
+  <Glyph>
+    <path d="M3 8h9M9 4.5 12.5 8 9 11.5" {...stroke} strokeWidth={1.5} {...round} />
+  </Glyph>
+);
+
 export const EnterIcon = () => (
   <Glyph>
     <path

@@ -646,18 +646,21 @@ kbd {
 
 .mh1 {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 3px 8px;
   color: var(--fg-1);
   font-size: var(--fs-small);
 }
 
 .mh1 b {
   font-weight: var(--w-medium);
+  white-space: nowrap;
 }
 
 .mtag {
   font-style: normal;
+  white-space: nowrap;
   font-size: 10.5px;
   line-height: 14px;
   font-weight: var(--w-normal);

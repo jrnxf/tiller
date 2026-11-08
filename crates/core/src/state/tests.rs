@@ -9,7 +9,7 @@ use serde_json::json;
 use super::approvals::{Decision, Execution, NewApproval, NewPr, PrFetch};
 use super::asks::{NewAsk, Resolution};
 use super::attention::NewAttention;
-use super::cards::{CardEdit, MARK_LANDED, NewCard};
+use super::cards::{BugRoute, CardEdit, MARK_LANDED, NewBug, NewCard, TILLER_BUG};
 use super::projects::{HostEdit, Init, NewProject, ProjectEdit};
 use super::runs::{Bind, NewObservation, NewOrchestrator, NewRun, Relaunch, SpawnChecks};
 use crate::domain::*;
@@ -1986,4 +1986,245 @@ fn project_checks_take_two_shapes_and_refuse_the_rest() {
         .unwrap_err();
     assert!(matches!(error, Error::Usage(_)), "{error}");
     assert_eq!(store.project("zeta").unwrap().checks, json!(["cargo test"]));
+}
+
+fn bug(title: &str) -> NewBug {
+    NewBug {
+        title: title.into(),
+        body: "what happened".into(),
+        evidence: None,
+    }
+}
+
+fn set_bug_project(store: &mut Store, project: Option<&str>) -> Result<Host, Error> {
+    let host = store.hosts().unwrap().remove(0);
+    let edit = HostEdit {
+        bug_project_id: Some(project.map(Into::into)),
+        ..HostEdit::default()
+    };
+    store
+        .host_edit(&owner(), &host.id, host.rev, edit)
+        .map(|applied| applied.value)
+}
+
+fn routed_payload(store: &Store, card_id: &str) -> serde_json::Value {
+    let payload: String = store
+        .conn()
+        .query_row(
+            "SELECT payload FROM events WHERE kind = 'card.routed' AND card_id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&payload).unwrap()
+}
+
+/// `bug.file` routes to the host's bug project while it is open, else to
+/// `fleet`, never to `fleet-1`, and records who filed it from where.
+#[test]
+fn a_tiller_bug_routes_to_the_bug_project_or_waits_in_fleet() {
+    let (mut store, alpha) = memory_store();
+    add_project(&mut store, "beta");
+    let filer = Ctx::new(Actor::Session(alpha.clone()));
+
+    // No bug project: fleet, with the filer recorded.
+    let filed = store.bug_file(&filer, None, bug("no home")).unwrap().value;
+    assert_eq!(filed.route, BugRoute::NoBugProject);
+    assert_eq!(filed.card.project_id, crate::ids::FLEET_PROJECT);
+    assert_ne!(filed.card.id, crate::ids::HOST_HEALTH_CARD);
+    assert_eq!(filed.card.category.as_deref(), Some(TILLER_BUG));
+    assert_eq!(filed.card.kind, CardKind::Ship);
+    assert_eq!(
+        routed_payload(&store, &filed.card.id),
+        json!({
+            "project_id": "fleet",
+            "route": "no_bug_project",
+            "bug_project_id": null,
+            "filed_by_session_id": alpha,
+            "filed_from_project_id": "alpha",
+            "evidence": null,
+        })
+    );
+
+    // A bug project: it goes there, and its orchestrator would be told.
+    set_bug_project(&mut store, Some("beta")).unwrap();
+    let evidence = json!({"exit": 3, "command": "tiller card list"});
+    let filed = store
+        .bug_file(
+            &filer,
+            Some("bug-a"),
+            NewBug {
+                evidence: Some(evidence.clone()),
+                ..bug("routed")
+            },
+        )
+        .unwrap();
+    assert_eq!(filed.value.route, BugRoute::BugProject);
+    assert_eq!(filed.value.card.project_id, "beta");
+    assert_eq!(filed.value.bug_project_id.as_deref(), Some("beta"));
+    let body = filed.value.card.body.clone().unwrap();
+    assert!(
+        body.starts_with("what happened\n\nEvidence:\n\n```json\n"),
+        "{body}"
+    );
+    assert!(body.contains("\"exit\": 3"), "{body}");
+    assert_eq!(
+        routed_payload(&store, &filed.value.card.id)["evidence"],
+        evidence
+    );
+
+    // A retry under the same key replays the same card.
+    let replay = store
+        .bug_file(
+            &filer,
+            Some("bug-a"),
+            NewBug {
+                evidence: Some(evidence),
+                ..bug("routed")
+            },
+        )
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.value.card.id, filed.value.card.id);
+
+    // The owner files with no session: nobody is recorded as the filer.
+    let owned = store
+        .bug_file(&owner(), None, bug("by hand"))
+        .unwrap()
+        .value;
+    let payload = routed_payload(&store, &owned.card.id);
+    assert_eq!(payload["filed_by_session_id"], json!(null));
+    assert_eq!(payload["filed_from_project_id"], json!(null));
+
+    // A bug project retired after it was picked sends bugs back to fleet.
+    add_project(&mut store, "gamma");
+    set_bug_project(&mut store, Some("gamma")).unwrap();
+    store.project_retire(&owner(), "gamma").unwrap();
+    let filed = store.bug_file(&filer, None, bug("retired")).unwrap().value;
+    assert_eq!(filed.route, BugRoute::BugProjectRetired);
+    assert_eq!(filed.card.project_id, crate::ids::FLEET_PROJECT);
+    assert_eq!(filed.bug_project_id.as_deref(), Some("gamma"));
+}
+
+/// A worker reports a Tiller bug through its orchestrator; `bug.file` keeps
+/// the card-create scope, and an empty title or body is a usage error.
+#[test]
+fn a_tiller_bug_needs_a_filer_that_may_create_cards() {
+    let (mut store, alpha) = memory_store();
+    let card = store
+        .card_create(&owner(), None, card(CardKind::Ship, "work"), None)
+        .unwrap()
+        .value;
+    let worker = store
+        .run_start(
+            &Ctx::new(Actor::Session(alpha)),
+            None,
+            builder_run(&card.id),
+        )
+        .unwrap()
+        .value
+        .session
+        .id;
+    let before = snapshot(store.conn(), &[]);
+    let error = store
+        .bug_file(
+            &Ctx::new(Actor::Session(worker)),
+            None,
+            bug("from a worker"),
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "forbidden", "{error}");
+    let error = store
+        .bug_file(
+            &owner(),
+            None,
+            NewBug {
+                body: " ".into(),
+                ..bug("x")
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "usage", "{error}");
+    assert_eq!(snapshot(store.conn(), &[]), before);
+}
+
+/// The bug project is an open project this host owns, never `fleet`; it
+/// clears, and deleting the project clears it with a host edit.
+#[test]
+fn the_bug_project_is_an_open_project_this_host_owns() {
+    let (mut store, _) = memory_store();
+    add_project(&mut store, "beta");
+    add_project(&mut store, "gamma");
+    add_project(&mut store, "delta");
+    store.project_retire(&owner(), "gamma").unwrap();
+    store
+        .conn()
+        .execute_batch(
+            "INSERT INTO hosts (id, label, kind) VALUES ('01JC0000000000000000REM0TE', 'host-b', 'remote');
+             UPDATE projects SET owner_host_id = '01JC0000000000000000REM0TE' WHERE id = 'delta';",
+        )
+        .unwrap();
+
+    let before = snapshot(store.conn(), &[]);
+    for (project, reason) in [
+        ("fleet", "fleet cannot be the bug project"),
+        ("gamma", "gamma is retired"),
+        ("delta", "delta belongs to another host"),
+    ] {
+        let error = set_bug_project(&mut store, Some(project)).unwrap_err();
+        assert_eq!(error.code(), "refused", "{error}");
+        assert!(error.to_string().contains(reason), "{error}");
+    }
+    let error = set_bug_project(&mut store, Some("nope")).unwrap_err();
+    assert_eq!(error.code(), "not_found", "{error}");
+    let remote = store
+        .hosts()
+        .unwrap()
+        .into_iter()
+        .find(|host| host.kind == HostKind::Remote)
+        .unwrap();
+    let error = store
+        .host_edit(
+            &owner(),
+            &remote.id,
+            remote.rev,
+            HostEdit {
+                bug_project_id: Some(Some("beta".into())),
+                ..HostEdit::default()
+            },
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("picks its bug project on that host"),
+        "{error}"
+    );
+    assert_eq!(snapshot(store.conn(), &[]), before);
+
+    let host = set_bug_project(&mut store, Some("beta")).unwrap();
+    assert_eq!(host.bug_project_id.as_deref(), Some("beta"));
+    let host = set_bug_project(&mut store, None).unwrap();
+    assert_eq!(host.bug_project_id, None);
+
+    let picked = set_bug_project(&mut store, Some("beta")).unwrap();
+    store.project_delete(&owner(), "beta").unwrap();
+    let host = store
+        .hosts()
+        .unwrap()
+        .into_iter()
+        .find(|host| host.id == picked.id)
+        .unwrap();
+    assert_eq!(host.bug_project_id, None);
+    // The clear is a host edit the board's Machines row follows.
+    assert_eq!(host.rev, picked.rev + 1);
+    let payload: String = store
+        .conn()
+        .query_row(
+            "SELECT payload FROM events WHERE kind = 'host.edited' AND entity_id = ?1 ORDER BY seq DESC LIMIT 1",
+            [&picked.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(payload.contains("project beta was deleted"), "{payload}");
 }

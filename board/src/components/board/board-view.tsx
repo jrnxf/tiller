@@ -17,6 +17,7 @@ import { ChevronLeftIcon, Status } from "./icons";
 import { laneHealth } from "../states/degraded";
 import { SECTION_RETRY_MS, SectionNote, failureReason } from "../states/section";
 import { useMovingBoard } from "./glide";
+import { bugProjectOf, machineOf } from "./bugs";
 import { Lane } from "./lane";
 import { COLUMNS, onHost, passesFilter, tilesOf } from "./model";
 import type { ColumnId, Tile } from "./model";
@@ -292,6 +293,7 @@ function Board({ host, filter }: { host: string | undefined; filter: BoardFilter
           const hostOfOrchestrator = machines.machines.find(
             (machine) => machine.id === orchestrator?.host_id,
           );
+          const owner = machineOf(project, machines.machines);
           return (
             <Lane
               key={key}
@@ -310,6 +312,8 @@ function Board({ host, filter }: { host: string | undefined; filter: BoardFilter
               }
               standing={standingOf(project, machines.machines)}
               hostLabel={hostOfOrchestrator?.label ?? "unknown"}
+              owner={owner}
+              bugProject={bugProjectOf(owner, projects.projects)}
               doneFolded={look.doneFolded}
               filterName={FILTER_NAME[filter]}
             />

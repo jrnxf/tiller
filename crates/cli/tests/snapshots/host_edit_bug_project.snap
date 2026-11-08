@@ -1,0 +1,27 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "bug_project_id": "alpha",
+    "disk_floor_mb": null,
+    "herdr_machine": null,
+    "id": "<id3>",
+    "kind": "local",
+    "label": "host-a",
+    "lane_capacity": 2,
+    "last_seen_at": null,
+    "peer_host_id": null,
+    "peer_scope": null,
+    "ram_floor_mb": null,
+    "rev": 2,
+    "short": "<id3.short>",
+    "stale_reason": null
+  },
+  "events": [
+    "<seq>"
+  ],
+  "ok": true,
+  "replayed": false
+}

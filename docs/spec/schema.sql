@@ -63,6 +63,8 @@ CREATE TABLE hosts (
   peer_scope     TEXT CHECK (peer_scope IN ('read', 'act')),
   peer_host_id   TEXT,                     -- the peer's meta.host_id, checked on every hello
   rev            INTEGER NOT NULL DEFAULT 1,
+  -- local only: the open project `tiller bug file` routes Tiller bugs to; null routes them to fleet
+  bug_project_id TEXT REFERENCES projects(id),
   CHECK (kind <> 'local' OR lane_capacity IS NOT NULL),
   CHECK (kind = 'remote' OR peer_scope IS NULL),
   CHECK ((peer_scope IS NULL) = (peer_host_id IS NULL))

@@ -56,7 +56,7 @@ Workers report by status line, each delivered once. Read `tiller card show <card
 
 - `needs-decision`: file it with `tiller attention open <card> --kind decision --question <t> --evidence <json> --recommendation <t> --consequence <t>`. One item per question. A scout whose report ends in choices gets a `decision` item, never a silent close (P33).
 - An answer needing an owner-only change carries it on its option. Capacity: `{"label": "Raise to 2", "action": {"kind": "project_capacity", "project": "<id>", "from": <now, per tiller project list>, "to": 2}}` in `--options`. Only the owner's board or terminal pick applies it, not chat; act on the `applied:` line. Other owner-only changes: name the board action and value (R17).
-- `blocked` by the environment (missing credential, refused permission, tool mismatch): open a `credential` or `decision` item carrying exactly one runnable command for the owner. That command is never an owner-only `tiller` command; name the board action instead (P37, R17). A Tiller bug becomes a `fleet` card.
+- `blocked` by the environment (missing credential, refused permission, tool mismatch): open a `credential` or `decision` item carrying exactly one runnable command for the owner. That command is never an owner-only `tiller` command; name the board action instead (P37, R17). A Tiller bug: `tiller bug file --title <t> --body <t>`.
 - A review-page answer reaches its worker; for an ended run it wakes you: relaunch with a note (P47).
 - `paused ... until <date>`: nothing to do; alarms are silenced until then.
 - Silent worker (the daemon's note): `tiller agent interrupt <run>`, `tiller agent relaunch <run> --note <t>`, or `tiller run pause <run> --until <date> --reason <t>` for a real wait (R12). Never kill a process.
@@ -65,6 +65,10 @@ Workers report by status line, each delivered once. Read `tiller card show <card
 - Worker crashed: read the worktree state, `tiller done <run> --outcome failed`, then relaunch with a note or start a new attempt (`--new-attempt --brief-file`). Unlanded work stays (G18, G19).
 
 Report each stage change under the card's tag (P40).
+
+## Triage
+
+Each new `tiller-bug` card gets one evidence line per step: dedupe (cards, `git log`: close the newer `superseded`, naming the survivor or commit), classify (not a Tiller bug: refile it in its project, close `superseded`), priority with a reason, scout, build. `cancelled` only on a scout's no-repro at a named commit, never for age. A `decision` item first for contract, role or G-rule changes, or won't-fix on an owner ask. Host moves and the bug project are owner-only.
 
 ## Landing (P12)
 

@@ -2,7 +2,9 @@
 // peers are paired to it (protocol.md sections 9 and 10.5). Names are
 // placeholders, as everywhere in the fixtures.
 //
-//   host-d  live, `act`      its `gamma-12` shares a display id with this host's
+//   host-d  live, `act`      its `gamma-12` shares a display id with this host's;
+//                            no project takes Tiller bugs, so `fleet-5` is
+//                            an untriaged Tiller bug
 //   host-e  down, `act`      rows are dimmed and say "as of" the last frame
 //   host-f  live, `read`     rows show live and the controls stay off
 //   host-g  refused          the pairing's key was revoked; no rows
@@ -165,7 +167,14 @@ function peerCard(
   column: BoardRow["column"],
   badge: string,
   title: string,
-  extras: { kind?: string; model?: string; pr?: number; observedMinutes?: number } = {},
+  extras: {
+    kind?: string;
+    model?: string;
+    pr?: number;
+    observedMinutes?: number;
+    category?: string;
+    filedFrom?: string;
+  } = {},
   now: number = Date.now(),
 ): BoardRow {
   return {
@@ -188,6 +197,8 @@ function peerCard(
     model: extras.model ?? null,
     pr_number: extras.pr ?? null,
     observed_at: extras.observedMinutes === undefined ? null : at(now, extras.observedMinutes),
+    ...(extras.category ? { category: extras.category } : {}),
+    ...(extras.filedFrom ? { filed_from: extras.filedFrom } : {}),
     ...tag(host, now),
   };
 }
@@ -244,6 +255,16 @@ export function peerRows(now: number): BoardRow[] {
       {
         kind: "scout",
       },
+      now,
+    ),
+    peerCard(
+      "host-d",
+      5,
+      "fleet",
+      "queued",
+      "filed",
+      "tiller pr describe misreads TMPDIR in the builder sandbox",
+      { category: "tiller-bug", filedFrom: "gamma" },
       now,
     ),
     peerCard(

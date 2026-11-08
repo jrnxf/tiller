@@ -1,7 +1,7 @@
 // Stands in for the daemon's mutations (protocol.md section 7.4) on the dev and
 // preview servers until T2.8 lands: a keyed replay table, the stale-head
 // refusal, and the later receipt stages as change events.
-import type { ChangeEvent, Project, PromptDialog } from "./api-types.ts";
+import type { BoardRow, ChangeEvent, Machine, Project, PromptDialog } from "./api-types.ts";
 import type {
   AgentsResponse,
   AttentionResponse,
@@ -20,7 +20,7 @@ import {
 } from "./fixtures.ts";
 import type { Scenario } from "./fixtures.ts";
 import { relabelFixture } from "./fixtures-signals.ts";
-import { agentsPath, attentionPath, projectsPath } from "./queries.ts";
+import { agentsPath, attentionPath, boardPath, machinesPath, projectsPath } from "./queries.ts";
 
 interface Reply {
   status: number;
@@ -145,8 +145,10 @@ const added = new Map<string, Project>();
 // A read the stand-in server answers, without the deleted projects' rows; a
 // deleted or archived project's own previews are gone (a 404).
 export function withoutDeleted(path: string, body: unknown, scenario: Scenario): unknown {
-  if (deleted.size + retired.size + added.size === 0 || body === undefined) return body;
   const pathname = new URL(path, "http://localhost").pathname;
+  const triaged = withTriage(pathname, body);
+  if (triaged !== body) return triaged;
+  if (deleted.size + retired.size + added.size === 0 || body === undefined) return body;
   const preview = /^\/api\/v1\/projects\/([^/]+)\/(delete|retire)$/.exec(pathname);
   if (preview?.[1] && (preview[2] === "delete" ? deleted.has(preview[1]) : gone(preview[1]))) {
     return undefined;
@@ -336,7 +338,7 @@ function forwarded(
   const host = body.host;
   if (typeof host !== "string") return null;
   if (
-    /\/(stage|asks|focus|label|delete|retire|orchestrator)$/.test(path) ||
+    /\/(stage|asks|focus|label|delete|retire|orchestrator|bug-project)$/.test(path) ||
     path === projectsPath ||
     /\/memory\//.test(path)
   ) {
@@ -357,6 +359,231 @@ function forwarded(
   return null;
 }
 
+// Tiller bug triage on the stand-in server: the cards a Move made, the cards
+// it or "Close as not a bug" closed, and this host's bug project once the
+// owner picks one. Every card the fixtures know is in the federated scenario.
+const madeCards = new Map<string, BoardRow>();
+const madeBodies = new Map<string, string>();
+const closedCards = new Map<string, BoardRow>();
+let pickedBugProject: { project: string | null; rev: number } | null = null;
+// The first Move that closes a host-d card is sent and never confirmed, so the
+// board shows the partial state; the retry, with the same key, closes it.
+const unsureCloses = new Set<string>();
+let cardNumber = 20;
+
+function knownCard(id: string): BoardRow | undefined {
+  const board = fixtureResponses("federated")[boardPath()] as BoardResponse;
+  return madeCards.get(id) ?? board.rows.find((row) => row.id === id);
+}
+
+function localMachine(scenario: Scenario): Machine | undefined {
+  const { machines } = fixtureResponses(scenario)[machinesPath] as { machines: Machine[] };
+  const local = machines.find((machine) => machine.kind === "local");
+  if (!local || !pickedBugProject) return local;
+  const { project, rev } = pickedBugProject;
+  return { ...local, rev, ...(project ? { bug_project: project } : { bug_project: null }) };
+}
+
+function cardEvent(kind: string, txn: string, row: BoardRow): FollowUp {
+  return {
+    delayMs: 100,
+    event: {
+      kind,
+      txn,
+      entity: "card",
+      entity_id: row.id,
+      rev_after: row.rev,
+      card_id: row.id,
+      entity_state: null,
+      card: row,
+    },
+  };
+}
+
+// The reads a triage changed: the board gains the moved cards and shows the
+// closed ones in Done, a card read follows its row, and the local Machines
+// row carries the bug project the owner picked.
+function withTriage(pathname: string, body: unknown): unknown {
+  if (pathname === boardPath().split("?")[0] && body && madeCards.size + closedCards.size > 0) {
+    const board = body as BoardResponse;
+    const rows = board.rows.map((row) => closedCards.get(row.id) ?? row);
+    const fresh = [...madeCards.values()].filter((row) => !rows.some((r) => r.id === row.id));
+    return { ...board, rows: [...rows, ...fresh.map((row) => closedCards.get(row.id) ?? row)] };
+  }
+  if (pathname === machinesPath && body && pickedBugProject) {
+    const { machines } = body as { machines: Machine[] };
+    return {
+      machines: machines.map((machine) =>
+        machine.kind === "local" ? (localMachine("federated") ?? machine) : machine,
+      ),
+    };
+  }
+  const timeline = /^\/api\/v1\/cards\/([^/]+)\/timeline$/.exec(pathname);
+  const moved = timeline?.[1] ? madeCards.get(timeline[1]) : undefined;
+  if (body === undefined && moved) {
+    return {
+      entries: [
+        {
+          seq: 4200,
+          at: new Date().toISOString(),
+          actor: "you",
+          text: `filed as a Tiller bug into ${moved.project_id}`,
+        },
+      ],
+      next_before: null,
+    };
+  }
+  const detail = /^\/api\/v1\/cards\/([^/]+)$/.exec(pathname);
+  const id = detail?.[1];
+  if (!id) return body;
+  const made = madeCards.get(id);
+  if (body === undefined && made) {
+    const template = fixtureResource(`/api/v1/cards/${knownTemplate()}`, "federated") as {
+      card: Record<string, unknown>;
+    };
+    return {
+      ...template,
+      card: {
+        ...template.card,
+        ...made,
+        body: madeBodies.get(id) ?? null,
+        state: "open",
+        outcome: null,
+      },
+      column: closedCards.get(id) ?? made,
+      runs: [],
+      prs: [],
+      approvals: [],
+      artifacts: [],
+      attention: [],
+    };
+  }
+  const closed = closedCards.get(id);
+  if (!closed || !body) return body;
+  const read = body as { card: Record<string, unknown> };
+  return {
+    ...read,
+    card: { ...read.card, state: "closed", outcome: closed.badge, rev: closed.rev },
+    column: closed,
+  };
+}
+
+// A queued card whose read the fixtures answer, to give a moved card the
+// fields no Move sets.
+function knownTemplate(): string {
+  const board = fixtureResponses("federated")[boardPath()] as BoardResponse;
+  return board.rows.find((row) => row.category === "tiller-bug")?.id ?? "";
+}
+
+// `POST /api/v1/cards` for a Move: the card lands on the board as a Tiller bug.
+function createBug(body: Record<string, unknown>): MutationResult {
+  cardNumber += 1;
+  const project = String(body.project);
+  const host = typeof body.host === "string" ? body.host : undefined;
+  const id = `01JCARDMOVE${String(cardNumber).padStart(15, "0")}`;
+  const row: BoardRow = {
+    id,
+    display_id: `${project}-${cardNumber}`,
+    project_id: project,
+    host_id: null,
+    kind: String(body.kind ?? "ship"),
+    title: String(body.title ?? ""),
+    priority: typeof body.priority === "number" ? body.priority : 2,
+    column: "queued",
+    badge: "filed",
+    needs_you: false,
+    parked_until: null,
+    parked_reason: null,
+    blocked_by: null,
+    closed_at: null,
+    rev: 1,
+    category: "tiller-bug",
+    ...(host ? { host, as_of: new Date().toISOString(), link: "live" as const } : {}),
+  };
+  madeCards.set(id, row);
+  if (typeof body.body === "string") madeBodies.set(id, body.body);
+  const outbox = fakeId("01JOUTB");
+  return {
+    reply: recorded({ card: row, message: { id: outbox } }, outbox, null),
+    followUps: [cardEvent("card.created", "card.create", row), ...outboxStages(outbox)],
+  };
+}
+
+// `POST /api/v1/cards/{id}/close`: the card moves to Done with its outcome.
+function closeCard(id: string, body: Record<string, unknown>): MutationResult {
+  const row = closedCards.get(id) ?? knownCard(id);
+  if (!row) return refusal(404, "not_found", `no card ${id}`);
+  if (row.host === "host-d" && body.outcome === "superseded" && !unsureCloses.has(row.id)) {
+    unsureCloses.add(row.id);
+    return refusal(504, "forward_uncertain", "host-d did not confirm in time");
+  }
+  const outcome = typeof body.outcome === "string" ? body.outcome : "done";
+  const closed: BoardRow = {
+    ...row,
+    column: "done",
+    badge: outcome,
+    needs_you: false,
+    closed_at: new Date().toISOString(),
+    rev: row.rev + 1,
+  };
+  closedCards.set(id, closed);
+  return {
+    reply: recorded({ card: closed }, null, null),
+    followUps: [cardEvent("card.closed", "card.close", closed)],
+  };
+}
+
+// `POST /api/v1/bug-project`: this host's pick, checked against its `rev`.
+function pickBugProject(body: Record<string, unknown>, scenario: Scenario): MutationResult {
+  const machine = localMachine(scenario);
+  if (!machine) return refusal(400, "usage", "state.db is not initialized; run tiller init");
+  if (body.rev !== machine.rev) {
+    return {
+      reply: refused(
+        409,
+        "stale",
+        `host ${machine.label} is at rev ${machine.rev}, you changed rev ${String(body.rev)}`,
+        { rev: machine.rev },
+      ),
+      followUps: [],
+    };
+  }
+  const project = typeof body.project === "string" ? body.project : null;
+  if (project === "fleet") {
+    return refusal(422, "refused", "fleet cannot take Tiller bugs: pick another project");
+  }
+  const projects = (fixtureResponses(scenario)[projectsPath] as ProjectsResponse).projects;
+  if (project && !projects.some((p) => p.id === project && !p.host && !gone(p.id))) {
+    return refusal(404, "not_found", `no project ${project}`);
+  }
+  pickedBugProject = { project, rev: machine.rev + 1 };
+  const next = localMachine(scenario);
+  // Like the daemon, the reply is the host record, not its Machines row.
+  const host = {
+    id: machine.id,
+    label: machine.label,
+    bug_project_id: project,
+    rev: machine.rev + 1,
+  };
+  return {
+    reply: recorded(host, null, null),
+    followUps: [
+      {
+        delayMs: 100,
+        event: {
+          kind: "host.edited",
+          txn: "host.edit",
+          entity: "host",
+          entity_id: machine.id,
+          rev_after: next?.rev ?? null,
+          card_id: null,
+          entity_state: next,
+        },
+      },
+    ],
+  };
+}
+
 function handle(
   method: string,
   path: string,
@@ -365,6 +592,12 @@ function handle(
 ): MutationResult {
   const peer = forwarded(method, path, body);
   if (peer) return peer;
+  if (method === "POST" && path === "/api/v1/bug-project") return pickBugProject(body, scenario);
+  if (method === "POST" && path === "/api/v1/cards" && body.category === "tiller-bug") {
+    return createBug(body);
+  }
+  const close = /^\/api\/v1\/cards\/([^/]+)\/close$/.exec(path);
+  if (method === "POST" && close?.[1]) return closeCard(close[1], body);
   const answer = /^\/api\/v1\/attention\/([^/]+)\/answer$/.exec(path);
   if (method === "POST" && answer) {
     const outbox = fakeId("01JOUTB");
@@ -678,7 +911,8 @@ export function fixtureMutation(
     return { reply: replayed, followUps: [] };
   }
   const result = handle(method, path, body, scenario);
-  // A 504 was never confirmed, so the retry with the same key must run again.
-  if (key && result.reply.status !== 504) replies.set(key, result);
+  // As on the daemon, only an applied mutation keeps its key: a refusal rolled
+  // back, and a 504 was never confirmed, so the retry with the same key runs again.
+  if (key && result.reply.status === 200) replies.set(key, result);
   return result;
 }

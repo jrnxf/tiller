@@ -1,0 +1,42 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "bug_project_id": null,
+    "card": {
+      "acceptance": null,
+      "body": "it printed nothing",
+      "category": "tiller-bug",
+      "closed_at": null,
+      "closed_by": null,
+      "created_at": "<time>",
+      "created_by_ask_id": null,
+      "dispatch_override": null,
+      "display_id": "fleet-2",
+      "fixes_card_id": null,
+      "id": "<id1>",
+      "kind": "ship",
+      "legacy_id": null,
+      "outcome": null,
+      "priority": 2,
+      "project_id": "fleet",
+      "rev": 1,
+      "short": "<id1.short>",
+      "size": null,
+      "state": "open",
+      "title": "card list exits 3"
+    },
+    "route": "no_bug_project"
+  },
+  "events": [
+    "<seq>",
+    "<seq>"
+  ],
+  "help": [
+    "filed as [fleet-2] in fleet: this host has no bug project, so it waits for the owner"
+  ],
+  "ok": true,
+  "replayed": false
+}

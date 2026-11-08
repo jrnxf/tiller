@@ -12,7 +12,7 @@ import type {
   TimelineEntry,
   TimelineResponse,
 } from "../../lib/api-types";
-import { HOST_PROJECT, focusReason, ownerOf, shownId } from "../../lib/peers";
+import { HOST_PROJECT, focusReason, hostName, ownerOf, shownId } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import {
   cardQuery,
@@ -25,12 +25,19 @@ import {
 import { agentActivity } from "./activity";
 import { Ago } from "./ago";
 import { badgeText, statusMark } from "./badge";
+import { bugProjectOf, isTillerBug, isUntriaged, machineOf } from "./bugs";
 import { HostChip, PeerNote } from "./host-chip";
 import { ApproveActions } from "../attention/approve";
 import { AnswerForm } from "../attention/answer";
 import { CommentControl } from "../attention/card-actions";
 import "../attention/inbox.css";
-import { useAmbiguousIds, useStanding, useNamedProjects } from "./peer-state";
+import {
+  useAmbiguousIds,
+  useHostLabel,
+  useMachineRows,
+  useNamedProjects,
+  useStanding,
+} from "./peer-state";
 import { approvalFor, approvalStanding, mergeTimeline } from "./card-model";
 import { durationSeconds, formatAge, formatLisbonMoment, secondsSince, shortSha } from "./format";
 import { focusTooltip, useHerdrFocus, useOpenKey } from "./herdr";
@@ -44,12 +51,14 @@ import {
   PRIORITY_NAMES,
   PrIcon,
   Priority,
+  RouteIcon,
   SendIcon,
   Status,
   UserIcon,
   WarnIcon,
 } from "./icons";
 import { KindLabel, ModelChip } from "./tile";
+import { BugTriage } from "./triage";
 import { CheckIcon, CloseIcon } from "../shell/icons";
 import "./board.css";
 
@@ -462,6 +471,19 @@ export function CardPage({
     (item) => item.still_current && item.answered_at === null && item.withdrawn_at === null,
   );
 
+  const machines = useMachineRows();
+  const hostLabel = useHostLabel(column);
+  const bug = isTillerBug(column);
+  const untriaged = isUntriaged(column);
+  // A project id on this card's host, as the board names it.
+  const projectName = (projectId: string) =>
+    projectId === HOST_PROJECT
+      ? hostName(hostLabel)
+      : (projects.projects.find(
+          (p) => p.id === projectId && (p.host ?? null) === (ownerOf(column) ?? null),
+        )?.name ?? projectId);
+  const bugProject = bugProjectOf(machineOf(column, machines), projects.projects);
+
   const hold = detail.holds[0];
   const openDeps = detail.deps.filter((dep) => dep.released_at === null);
 
@@ -523,11 +545,20 @@ export function CardPage({
 
       <h4>{card.title}</h4>
       {card.body ? <p className="desc">{card.body}</p> : null}
+      {untriaged ? (
+        <BugTriage
+          row={column}
+          body={card.body ?? null}
+          projects={projects.projects}
+          standing={standing}
+        />
+      ) : null}
       <dl className="props">
         <dt>Status</dt>
         <dd>
           <Status mark={statusMark(column)} />
           {badgeText(column)}
+          {untriaged ? <span className="lab sm yel">Untriaged</span> : null}
           {hold?.until_at ? (
             <span className="meta">until {formatLisbonMoment(hold.until_at)}</span>
           ) : null}
@@ -547,7 +578,33 @@ export function CardPage({
         <dt>Kind</dt>
         <dd>
           <KindLabel kind={card.kind} />
+          {bug ? <span className="lab sm bad">Bug</span> : null}
         </dd>
+        {bug ? (
+          <>
+            {column.filed_from ? (
+              <>
+                <dt>Filed from</dt>
+                <dd>{projectName(column.filed_from)}</dd>
+              </>
+            ) : null}
+            <dt>Route</dt>
+            <dd>
+              <span className="mono">tiller bug</span>
+              <span className="route-arrow">
+                <RouteIcon />
+              </span>
+              {projectName(card.project_id)}
+              {card.project_id === HOST_PROJECT ? (
+                <span className="meta">
+                  {bugProject
+                    ? `filed before ${bugProject.name} took Tiller bugs`
+                    : "no bug project here"}
+                </span>
+              ) : null}
+            </dd>
+          </>
+        ) : null}
         <dt>Model</dt>
         <dd>
           {card.model ? <ModelChip model={card.model} /> : <span className="muted">none yet</span>}

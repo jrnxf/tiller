@@ -1157,6 +1157,78 @@ fn orchestrator_start_needs_the_project_checkout_configured() {
     assert_eq!((out.code, out.error_code()), (3, "not_found"));
 }
 
+/// `tiller bug file` waits in fleet until the owner picks a bug project with
+/// `tiller host edit --bug-project`, then routes there; it never names a
+/// project itself, and bad evidence writes nothing.
+#[test]
+fn tiller_bugs_route_to_the_bug_project_or_wait_in_fleet() {
+    let world = World::initialized();
+    let orchestrator = world.orchestrator();
+    let out = step_as(
+        &world,
+        &orchestrator,
+        "bug_file_fleet",
+        &[
+            "bug",
+            "file",
+            "--title",
+            "card list exits 3",
+            "--body",
+            "it printed nothing",
+            "--key",
+            "bug-1",
+        ],
+    );
+    assert_eq!(out.data()["card"]["display_id"], "fleet-2");
+    fails(
+        &world,
+        5,
+        "host_edit_bug_project_fleet",
+        &["host", "edit", "--rev", "1", "--bug-project", "fleet"],
+    );
+    step(
+        &world,
+        "host_edit_bug_project",
+        &["host", "edit", "--rev", "1", "--bug-project", "alpha"],
+    );
+    let seq = world.store().last_seq().unwrap();
+    let out = world.run_as(
+        &orchestrator,
+        &[
+            "bug",
+            "file",
+            "--title",
+            "x",
+            "--body",
+            "y",
+            "--evidence",
+            "{nope",
+        ],
+    );
+    assert_eq!((out.code, out.error_code()), (2, "usage"));
+    assert_eq!(world.store().last_seq().unwrap(), seq, "nothing is written");
+    step_as(
+        &world,
+        &orchestrator,
+        "bug_file",
+        &[
+            "bug",
+            "file",
+            "--title",
+            "board misses a peer",
+            "--body",
+            "the lane stayed empty",
+            "--evidence",
+            r#"{"command": "tiller board", "exit": 0}"#,
+            "--key",
+            "bug-2",
+        ],
+    );
+    let out = world.run(&["host", "edit", "--rev", "2", "--no-bug-project"]);
+    assert_eq!(out.code, 0, "{}", out.json);
+    assert_eq!(out.data()["bug_project_id"], serde_json::Value::Null);
+}
+
 #[test]
 fn bad_arguments_print_an_error_response_and_exit_2() {
     let world = World::new();
