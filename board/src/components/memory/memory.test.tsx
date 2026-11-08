@@ -57,7 +57,7 @@ async function renderMemory(path = "/memory") {
 
 const flush = () => act(async () => {});
 
-// The document itself; the rail repeats changed lines.
+// The document itself.
 const page = () => within(screen.getByRole("article"));
 
 const settle = async () => {
@@ -94,8 +94,6 @@ const card = (op: "add" | "rewrite" | "retire") => {
   return found;
 };
 const rewrite = () => card("rewrite");
-
-const rail = () => screen.getByRole("complementary", { name: "Recent changes" });
 
 // The line row that shows `text`.
 const lineOf = (text: string | RegExp) => {
@@ -188,9 +186,8 @@ test("Keep sends one decision against the blob shown and the line takes the new 
   ]);
   expect(document.querySelector('.a-sug[data-op="rewrite"]')).toBeNull();
   expect(page().getByText(/^Stop starting new small-model workers at 3%/)).toBeTruthy();
-  expect(within(rail()).getByText("Edited a line")).toBeTruthy();
   expect(screen.getByRole("button", { name: "1 suggestion to review" })).toBeTruthy();
-  expect(screen.getByTestId("toast").textContent).toBe("Kept. Undo it from Recent changes.");
+  expect(screen.getByTestId("toast").textContent).toBe("Kept.");
 });
 
 test("Discard drops the suggestion and leaves the line as it was", async () => {
@@ -208,7 +205,6 @@ test("Discard drops the suggestion and leaves the line as it was", async () => {
   ).toBeTruthy();
   // A discard records the decision only; the file is not written.
   expect(view().doc.blob).toBe(blob);
-  expect(within(rail()).getAllByText("Discarded a suggestion")).toHaveLength(2);
 });
 
 test("a click on a line opens its editor in place; Esc closes it, Enter sends a rewrite", async () => {
@@ -300,7 +296,7 @@ test("Remove in the editor removes that line", async () => {
 
   expect(calls[0]?.body).toMatchObject({ op: "remove", index: 0, section: "How we work here" });
   expect(page().queryByText(/^Before asking me to merge a sizeable PR/)).toBeNull();
-  expect(within(rail()).getByText("Removed a line")).toBeTruthy();
+  expect(screen.getByTestId("toast").textContent).toBe("Removed.");
 });
 
 test("a write against a text that moved on is refused, shown, and the current text is read again", async () => {
@@ -345,73 +341,11 @@ test("a document with uncommitted changes cannot be edited from the page", async
   }
 });
 
-test("each Recent changes entry is one Undo button, and a click anywhere on it only undoes", async () => {
+test("the page has no Recent changes rail and no Undo", async () => {
   await renderMemory();
 
-  const entries = rail().querySelectorAll(".rc");
-  expect(entries.length).toBeGreaterThan(0);
-  // Nothing in the rail acts but the entries, and nothing inside an entry acts
-  // on its own.
-  const controls = rail().querySelectorAll("button, a, input, textarea, [tabindex]");
-  expect([...controls]).toEqual([...entries]);
-  for (const entry of entries) {
-    expect(entry.tagName).toBe("BUTTON");
-    expect(entry.getAttribute("title")).toBe("Undo this change");
-    expect(entry.querySelector("button, a, [tabindex], [role='button']")).toBeNull();
-  }
-  const first = entries[0] as HTMLElement;
-  expect(within(rail()).getAllByRole("button", { name: /^Undo / })[0]).toBe(first);
-
-  // A click on the label of a fresh change undoes it, the same as a click on Undo.
-  fireEvent.click(within(rewrite()).getByRole("button", { name: "Keep" }));
-  await settle();
-  const kept = rail().querySelector<HTMLElement>(".rc");
-  if (!kept) throw new Error("expected the kept change");
-  const before = view().doc.blob;
-  const proposal = kept.dataset.proposal;
-  fireEvent.click(kept.querySelector(".rc-t") as HTMLElement);
-  await settle();
-  expect(calls.slice(1)).toEqual([
-    {
-      path: `/api/v1/memory/changes/${proposal}/undo`,
-      body: { idempotency_key: expect.any(String), base_blob: before },
-    },
-  ]);
-  // The entry is gone, the rail is still Recent changes and no other view opened.
-  expect(rail().querySelector(`[data-proposal="${proposal}"]`)).toBeNull();
-  expect(screen.queryByRole("dialog")).toBeNull();
-});
-
-test("Undo reverts the newest change; an older one that overlaps is refused with the reason", async () => {
-  await renderMemory();
-
-  fireEvent.click(within(rewrite()).getByRole("button", { name: "Keep" }));
-  await settle();
-
-  const [newest] = within(rail()).getAllByRole("button", { name: /^Undo / });
-  if (!newest) throw new Error("expected the kept change");
-  expect(newest.getAttribute("aria-label")).toMatch(
-    /^Undo edited a line: Stop starting .* at 8%, from the curator, [A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2}, \d{2}:\d{2}$/,
-  );
-  const kept = view().doc.blob;
-  fireEvent.click(newest);
-  await settle();
-
-  expect(calls[1]?.path).toMatch(/^\/api\/v1\/memory\/changes\/[^/]+\/undo$/);
-  expect(calls[1]?.body.base_blob).toBe(kept);
-  expect(
-    page().getByText("Stop new worker dispatch when the weekly quota reaches 3%."),
-  ).toBeTruthy();
-  expect(within(rail()).queryByText("Edited a line")).toBeNull();
-  expect(screen.getByTestId("toast").textContent).toBe("Undone: edited a line.");
-
-  const [seeded] = within(rail()).getAllByRole("button", { name: /^Undo / });
-  if (!seeded) throw new Error("expected the seeded change");
-  fireEvent.click(seeded);
-  await settle();
-  expect(screen.getByRole("alert").textContent).toBe(
-    "undoing it conflicts with a later edit to the same lines; change the line by hand",
-  );
+  expect(screen.queryByRole("complementary", { name: "Recent changes" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^Undo/ })).toBeNull();
 });
 
 test("the Source link in a line's editor opens its revision over the page", async () => {
@@ -426,8 +360,6 @@ test("the Source link in a line's editor opens its revision over the page", asyn
   expect(dialog.getByText("Carried over")).toBeTruthy();
   expect(dialog.getByText("Loaded by")).toBeTruthy();
   expect(dialog.getByText(/^## How we work here/)).toBeTruthy();
-  // Recent changes stays as it was behind it.
-  expect(rail()).toBeTruthy();
 
   fireEvent.click(dialog.getByRole("button", { name: "Close" }));
   await settle();

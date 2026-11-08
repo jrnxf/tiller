@@ -12,7 +12,6 @@ import type {
 } from "react";
 
 import type {
-  MemoryChange,
   MemoryDocument,
   MemoryLine,
   MemoryProvenance,
@@ -33,15 +32,7 @@ import { lisbonDay, lisbonShortDay } from "../health/lisbon";
 import { CheckIcon, LayersIcon } from "../shell/icons";
 import { ProjectDialog } from "../shell/project-dialog";
 import { Section } from "../states/section";
-import {
-  ClockIcon,
-  EditIcon,
-  LinesIcon,
-  PlusIcon,
-  RevertIcon,
-  SparkIcon,
-  TrashIcon,
-} from "./icons";
+import { ClockIcon, EditIcon, LinesIcon, PlusIcon, SparkIcon, TrashIcon } from "./icons";
 import { inlineDiff } from "./inline-diff";
 import "../shell/project-stage.css";
 import "./memory.css";
@@ -603,7 +594,7 @@ function DocSection({
   const settle = (target: Open, landed: Promise<boolean>) =>
     void landed.then((ok) => ok && onOpen((now) => (sameOpen(now, target) ? null : now)));
   const remove = (line: MemoryLine, at: Open) =>
-    settle(at, edit({ op: "remove", index: line.index }, "Removed. Undo it from Recent changes."));
+    settle(at, edit({ op: "remove", index: line.index }, "Removed."));
   const empty = section.lines.length === 0 && section.suggestions.length === 0;
 
   return (
@@ -729,74 +720,6 @@ function DocSection({
   );
 }
 
-const CHANGE_LABEL: Record<MemoryChange["kind"], string> = {
-  kept: "Added a line",
-  added: "Added a line",
-  edit: "Edited a line",
-  discard: "Discarded a suggestion",
-  remove: "Removed a line",
-};
-
-// The button's name, read as one sentence: what an undo reverts, then who and when.
-const undoLabel = (change: MemoryChange) =>
-  [
-    `Undo ${CHANGE_LABEL[change.kind].toLowerCase()}${change.text ? `: ${change.text.replace(/[.\s]+$/, "")}` : ""}`,
-    change.from === "you" ? "you" : `from ${change.from}`,
-    when(change.at),
-  ].join(", ");
-
-// Each entry is one button: a click undoes that change and does nothing else.
-function RecentChanges({
-  changes,
-  locked,
-  onUndo,
-}: {
-  changes: MemoryChange[];
-  locked: boolean;
-  onUndo: (change: MemoryChange) => void;
-}) {
-  return (
-    <aside className="rc-rail" aria-label="Recent changes">
-      <div className="rc-h">
-        <b>Recent changes</b>
-        {changes.length > 0 ? <span>Click one to undo it</span> : null}
-      </div>
-      <div className="rc-list">
-        {changes.length === 0 ? (
-          <p className="rc-empty">Nothing to undo. Edits and kept suggestions show up here.</p>
-        ) : (
-          changes.map((change) => (
-            <button
-              key={change.proposal_id}
-              type="button"
-              className="rc"
-              title="Undo this change"
-              aria-label={undoLabel(change)}
-              data-proposal={change.proposal_id}
-              disabled={locked}
-              onClick={() => onUndo(change)}
-            >
-              <span className="rc-u">
-                <RevertIcon />
-                Undo
-              </span>
-              <span className="rc-t">{CHANGE_LABEL[change.kind]}</span>
-              {change.text ? (
-                <span className={change.kind === "remove" ? "rc-q gone" : "rc-q"}>
-                  {change.text}
-                </span>
-              ) : null}
-              <span className="rc-m">
-                {change.from === "you" ? "you" : `from ${change.from}`} · {when(change.at)}
-              </span>
-            </button>
-          ))
-        )}
-      </div>
-    </aside>
-  );
-}
-
 const PROVENANCE: Record<string, string> = {
   tiller: "Written through Tiller",
   external: "Edited outside Tiller",
@@ -873,8 +796,8 @@ function RevisionDetail({ id }: { id: string }) {
   );
 }
 
-// A line's source opens over the page, so Recent changes never changes under
-// a click.
+// A line's source opens over the page, so the document never moves under a
+// click.
 function SourceDialog({ id, onClose }: { id: string; onClose: () => void }) {
   const close = useRef<HTMLButtonElement>(null);
   return (
@@ -907,7 +830,7 @@ function DocView({ scope }: { scope: string }) {
   const doc = data.doc;
   const { write, pending, error } = useMemoryWrite();
   const [open, setOpen] = useState<Open | null>(null);
-  // A line that changed under its open editor (a kept suggestion, an undo)
+  // A line that changed under its open editor (a kept suggestion)
   // takes the editor with it.
   if (open !== null && open.text !== null && !stillThere(doc, open)) setOpen(null);
   const locked = doc.dirty || pending;
@@ -929,13 +852,7 @@ function DocView({ scope }: { scope: string }) {
     void write(
       "/api/v1/memory/proposals/decide",
       { decisions: [{ proposal: suggestion.proposal_id, decision, base_blob: doc.blob }] },
-      decision === "keep" ? "Kept. Undo it from Recent changes." : "Discarded.",
-    );
-  const onUndo = (change: MemoryChange) =>
-    void write(
-      `/api/v1/memory/changes/${change.proposal_id}/undo`,
-      { base_blob: doc.blob },
-      `Undone: ${CHANGE_LABEL[change.kind].toLowerCase()}.`,
+      decision === "keep" ? "Kept." : "Discarded.",
     );
   const toFirst = () => {
     const first = all[0];
@@ -1015,7 +932,6 @@ function DocView({ scope }: { scope: string }) {
           />
         ))}
       </article>
-      <RecentChanges changes={doc.changes} locked={locked} onUndo={onUndo} />
     </div>
   );
 }
