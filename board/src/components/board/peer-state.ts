@@ -21,7 +21,7 @@ export function useFederated(): boolean {
   return isFederated(useMachineRows());
 }
 
-// The projects read with each host's `fleet` project shown as "Host · <machine>".
+// The projects read with each host's `fleet` project shown as "host / <machine>".
 export function useNamedProjects(data: ProjectsResponse): ProjectsResponse;
 export function useNamedProjects(data: ProjectsResponse | undefined): ProjectsResponse | undefined;
 export function useNamedProjects(data: ProjectsResponse | undefined) {

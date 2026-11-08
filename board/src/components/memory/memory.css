@@ -31,16 +31,6 @@
   scrollbar-width: none;
 }
 
-/* Centered on the document column. Auto margins, not justify-content, so a
-   row wider than the screen still scrolls from its first tab. */
-.docs .m2-tab:first-child {
-  margin-left: auto;
-}
-
-.docs .m2-tab:last-child {
-  margin-right: auto;
-}
-
 .docs .m2-tab {
   display: inline-flex;
   align-items: center;

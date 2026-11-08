@@ -154,7 +154,7 @@ test("the picker groups projects by host, this host first, and turns off a group
   expect(groups[3]?.standing.reason).toBe("view only pairing");
 });
 
-test("each host's fleet project shows as Host, named for its machine", () => {
+test("each host's fleet project shows as host / <machine>, named for its machine", () => {
   const link = { state: "connected" } as unknown as Machine["link"];
   const projects = [
     { id: "fleet", name: "Fleet" },
@@ -162,9 +162,9 @@ test("each host's fleet project shows as Host, named for its machine", () => {
     { id: "alpha", name: "Alpha" },
   ];
   expect(displayProjects(projects, "host-a").map((p) => p.name)).toEqual([
-    "Host · host-a",
-    "Host · host-b",
+    "host / host-a",
+    "host / host-b",
     "Alpha",
   ]);
-  expect(displayProjects(projects, null)[0]?.name).toBe("Host");
+  expect(displayProjects(projects, null)[0]?.name).toBe("host");
 });

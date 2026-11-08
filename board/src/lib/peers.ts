@@ -36,10 +36,14 @@ export function ownerKey(projectId: string, owner: Owned): string {
   return isPeerRow(owner) && owner.host ? `${owner.host}/${projectId}` : projectId;
 }
 
-// The board calls each host's built-in `fleet` project "Host", named for its
-// machine ("Host · personal-mac"), so two hosts' rows read apart. The id,
+// The board calls each host's built-in `fleet` project for its machine
+// ("host / personal-mac"), so two hosts' rows read apart. The id,
 // cards and CLI keep `fleet`; only the shown name changes.
 export const HOST_PROJECT = "fleet";
+
+export function hostName(label: string | null): string {
+  return label ? `host / ${label}` : "host";
+}
 
 export function displayProjects<T extends Owned & { id: string; name: string }>(
   projects: T[],
@@ -48,7 +52,7 @@ export function displayProjects<T extends Owned & { id: string; name: string }>(
   return projects.map((project) => {
     if (project.id !== HOST_PROJECT) return project;
     const label = isPeerRow(project) && project.host ? project.host : localLabel;
-    return { ...project, name: label ? `Host · ${label}` : "Host" };
+    return { ...project, name: hostName(label) };
   });
 }
 
