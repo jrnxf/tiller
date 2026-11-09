@@ -12,6 +12,7 @@ import { useStore } from "../../lib/store";
 import { SendIcon } from "../attention/icons";
 import { StaleBanner } from "../board/stale-sessions";
 import { ReconnectingBanner } from "../states/reconnecting-banner";
+import { ReloadBanner } from "../states/reload-banner";
 import { Section } from "../states/section";
 import { ChevronIcon, CloseIcon, LayersIcon, MenuIcon, ServerIcon } from "./icons";
 import { useNamedProjects } from "../board/peer-state";
@@ -134,6 +135,7 @@ export function Header({ activeHost, menuOpen, onOpenMenu, onOpenAsk }: HeaderPr
         </button>
       </header>
       <ReconnectingBanner />
+      <ReloadBanner />
       <StaleBanner />
       {pathname === "/" ? (
         <Section label="Board filter" fallback={nothing}>
