@@ -446,11 +446,11 @@ function peerSession(key: string): string {
   return `01JSESS${key.replace(/\W/g, "").padEnd(19, "0").slice(0, 19).toUpperCase()}`;
 }
 
-// One orchestrator per peer project, with a worker for each card in flight.
 // Which of a peer's first orchestrators run an older tiller, and since when:
 // host-d's started on its previous release, host-f's left no record.
 const PEER_STALE_SINCE: Record<string, string> = { "host-d": "0.1.0-pre.16", "host-f": "unknown" };
 
+// One orchestrator per peer project, with a worker for each card in flight.
 export function peerAgents(
   now: number,
   rows: BoardRow[],

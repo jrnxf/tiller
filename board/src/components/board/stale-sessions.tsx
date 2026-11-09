@@ -1,7 +1,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useRef, useState } from "react";
 
-import type { AgentRow, Machine, RestartStaleResponse } from "../../lib/api-types";
+import type {
+  AgentRow,
+  Machine,
+  MutationResponse,
+  RestartStaleResponse,
+} from "../../lib/api-types";
 import { VIEW_ONLY_REASON, isPeerRow, peerMachines, standingOf } from "../../lib/peers";
 import { agentsQuery } from "../../lib/queries";
 import { sendMutation } from "../attention/api";
@@ -88,21 +93,36 @@ function RestartDialog({ sessions, onClose }: { sessions: StaleSession[]; onClos
     async (idempotency_key: string) => {
       // One restart per host: this host's own, then each peer's, relayed to it.
       const hosts = [...new Set(sessions.map(({ host }) => host))];
-      const answers = [];
+      const answers: MutationResponse<RestartStaleResponse>[] = [];
+      const failed: { session_id: string; outcome: "failed"; error: string }[] = [];
+      let refusal: unknown = null;
       for (const host of hosts) {
-        answers.push(
-          await sendMutation<RestartStaleResponse>("POST", "/api/v1/agents/restart-stale", {
-            sessions: sessions
-              .filter((entry) => entry.host === host)
-              .map(({ agent }) => agent.session_id),
-            idempotency_key: host ? `${idempotency_key}:${host}` : idempotency_key,
-            ...(host ? { host } : {}),
-          }),
-        );
+        const asked = sessions
+          .filter((entry) => entry.host === host)
+          .map(({ agent }) => agent.session_id);
+        try {
+          answers.push(
+            await sendMutation<RestartStaleResponse>("POST", "/api/v1/agents/restart-stale", {
+              sessions: asked,
+              idempotency_key: host ? `${idempotency_key}:${host}` : idempotency_key,
+              ...(host ? { host } : {}),
+            }),
+          );
+        } catch (caught) {
+          // A host that did not answer leaves the others' restarts standing.
+          refusal ??= caught;
+          const error = caught instanceof Error ? caught.message : "could not restart";
+          failed.push(
+            ...asked.map((session_id) => ({ session_id, outcome: "failed" as const, error })),
+          );
+        }
       }
       const [first] = answers;
-      if (!first) throw new Error("nothing to restart");
-      return { ...first, data: { sessions: answers.flatMap((answer) => answer.data.sessions) } };
+      if (!first) throw refusal;
+      return {
+        ...first,
+        data: { sessions: [...answers.flatMap((answer) => answer.data.sessions), ...failed] },
+      };
     },
     // The sessions at the click are what is asked: the list below may move after.
     // eslint-disable-next-line react-hooks/exhaustive-deps
