@@ -12,7 +12,7 @@ import { COLUMNS, openCount } from "./model";
 import type { ColumnId, Tile } from "./model";
 import { PeerNote } from "./host-chip";
 import { MiniTile, TileView } from "./tile";
-import { HOST_PROJECT, focusReason, isPeerRow, ownerOf, projectKey } from "../../lib/peers";
+import { HOST_PROJECT, focusReason, hostField, ownerOf, projectKey } from "../../lib/peers";
 import type { Standing } from "../../lib/peers";
 import { useHerdrFocus } from "./herdr";
 import { NewCardDialog } from "./new-card";
@@ -182,8 +182,8 @@ export function Lane({
   }, []);
   const key = projectKey(project);
   const off = focusReason(ownerOf(project));
-  // Only this host's own projects start here: a peer's start is not forwarded.
-  const startable = !orchestrator && orchestratorsKnown && !isPeerRow(project);
+  // A peer's project starts on its host, through the forwarded start.
+  const startable = !orchestrator && orchestratorsKnown;
   const counts = COLUMNS.map((column) => ({
     column,
     count: tiles.filter((tile) => tile.column === column.id).length,
@@ -329,7 +329,12 @@ export function Lane({
         {orchestrator ? (
           <OrchestratorMini orchestrator={orchestrator} health={health} />
         ) : startable ? (
-          <StartOrchestratorButton projectId={project.id} projectName={project.name} />
+          <StartOrchestratorButton
+            projectId={project.id}
+            projectName={project.name}
+            {...hostField(project)}
+            off={standing.canAct ? null : standing.reason}
+          />
         ) : null}
       </div>
       {filing ? <NewCardDialog project={project} onClose={closeFiling} /> : null}

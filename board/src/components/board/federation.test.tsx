@@ -9,7 +9,7 @@ import { fixtureMutation } from "../../lib/fixture-mutations";
 import { fixtureResource, fixtureSnapshot } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
 import type { AgentsResponse } from "../../lib/api-types";
-import { agentsPath } from "../../lib/queries";
+import { agentsPath, queryKeyFor } from "../../lib/queries";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
 import { createQueryClient } from "../../lib/query-client";
 import { receiptsStore } from "../../lib/receipts";
@@ -156,6 +156,76 @@ test("a live peer's lane has no note, and a read pairing's says it is view only"
   expect(within(screen.getByTestId("lane-host-d/gamma")).queryByTestId("peer-note")).toBeNull();
   const note = within(screen.getByTestId("lane-host-f/atlas")).getByTestId("peer-note");
   expect(note.textContent).toBe("view only pairing.");
+});
+
+// The Start orchestrator in a lane's header.
+const startIn = (lane: string) =>
+  within(screen.getByTestId(lane).querySelector(".lane-h") as HTMLElement).getByRole("button", {
+    name: "Start orchestrator",
+  }) as HTMLButtonElement;
+
+// The federated board with no peer orchestrator running, so each peer lane
+// offers Start orchestrator.
+async function renderWithoutPeerOrchestrators() {
+  const agents = fixtureSnapshot("federated").queries[agentsPath()] as AgentsResponse;
+  const { queryClient } = await renderApp("federated");
+  queryClient.setQueryData(queryKeyFor(agentsPath()), {
+    ...agents,
+    orchestrators: agents.orchestrators.filter((agent) => !agent.host),
+  });
+  await waitFor(() => expect(startIn("lane-host-d/gamma")).toBeDefined());
+}
+
+test("a peer lane with no orchestrator starts one on its host, and is off where the pairing cannot act", async () => {
+  const posted = stubApi("federated");
+  await renderWithoutPeerOrchestrators();
+
+  // host-f only reads, and host-e is down: each says why it is off.
+  expect(startIn("lane-host-f/atlas").disabled).toBe(true);
+  expect(startIn("lane-host-f/atlas").title).toBe("view only pairing");
+  expect(startIn("lane-host-e/ledger").disabled).toBe(true);
+  expect(startIn("lane-host-e/ledger").title).toContain("host-e is unreachable since");
+
+  fireEvent.click(startIn("lane-host-d/gamma"));
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]).toMatchObject({
+    method: "POST",
+    path: "/api/v1/projects/gamma/orchestrator",
+    body: { host: "host-d" },
+  });
+  expect(typeof posted[0]?.body.idempotency_key).toBe("string");
+  await waitFor(() =>
+    expect(screen.getByTestId("toast").textContent).toContain(
+      "Started the gamma orchestrator on host-d",
+    ),
+  );
+});
+
+test("a peer start refused by this host's cookie asks for a login, and the peer's own refusal is its words", async () => {
+  stubApi("federated");
+  const served = globalThis.fetch;
+  let error: Record<string, unknown> = {
+    code: "forbidden",
+    message: "the board is not signed in as the owner",
+  };
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) =>
+    String(input) === "/api/v1/projects/gamma/orchestrator"
+      ? Promise.resolve(new Response(JSON.stringify({ ok: false, error }), { status: 403 }))
+      : served(input, init),
+  );
+  await renderWithoutPeerOrchestrators();
+
+  fireEvent.click(startIn("lane-host-d/gamma"));
+  await waitFor(() =>
+    expect(screen.getByTestId("toast").textContent).toContain("Run `tiller board --login`"),
+  );
+
+  error = { code: "forbidden", message: "host-d refuses this start", host: "host-d" };
+  await waitFor(() => expect(startIn("lane-host-d/gamma").disabled).toBe(false));
+  fireEvent.click(startIn("lane-host-d/gamma"));
+  await waitFor(() =>
+    expect(screen.getByTestId("toast").textContent).toContain("host-d refuses this start"),
+  );
 });
 
 // ---- The Machines section ----

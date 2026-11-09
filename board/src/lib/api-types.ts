@@ -606,6 +606,8 @@ export interface ApiErrorBody {
     id?: string;
     current?: Record<string, unknown>;
     hint?: string;
+    // The peer that answered or refused a forwarded mutation (protocol.md 10.3).
+    host?: string;
   };
 }
 

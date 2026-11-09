@@ -298,7 +298,8 @@ impl World {
 /// What the board host's daemon runs as `ssh`: it drops the options, takes
 /// the alias and runs the real `tiller peer serve` (or Add a host's `tiller
 /// peer accept --unattended`) for the peer's home, the way sshd would on the
-/// other machine.
+/// other machine. Its herdr is [`peer_herdr`], which a test writes only when
+/// the peer must start an orchestrator.
 fn write_shim(dir: &Path, peer_home: &Path, serve_pid: &Path) -> PathBuf {
     let shim = dir.join("ssh-shim");
     let script = format!(
@@ -316,18 +317,24 @@ shift
 [ "$1" = tiller ] || exit 127
 shift
 echo $$ > "{pid}"
-export TILLER_HOME="{home}" TILLER_HERDR=/nonexistent/herdr
+export HOME="{home}" TILLER_HOME="{home}" TILLER_HERDR="{herdr}"
 export SSH_CONNECTION="192.0.2.1 50000 192.0.2.2 22"
 exec "{tiller}" "$@"
 "#,
         pid = serve_pid.display(),
         home = peer_home.display(),
+        herdr = peer_herdr(peer_home).display(),
         tiller = tiller().display(),
     );
     std::fs::write(&shim, script).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
     shim
+}
+
+/// The herdr the peer's `peer serve` drives; missing unless a test writes it.
+fn peer_herdr(peer_home: &Path) -> PathBuf {
+    peer_home.join("bin/herdr")
 }
 
 // -- http -------------------------------------------------------------------
@@ -788,4 +795,130 @@ fn board_restarts_a_peers_older_sessions() {
             .filter(|row| row["stale"]["restart_queued"] == true)
             .map(|_| ())
     });
+}
+
+/// The ask box aimed at a peer's project with no live orchestrator, as the
+/// owner sends it from the board host: Start orchestrator first, then the
+/// ask, both forwarded. The peer starts its own orchestrator through the
+/// real start, as `board@<label>`, and the ask waits in that orchestrator's
+/// outbox. The board host starts and records nothing.
+#[test]
+fn board_starts_a_peers_orchestrator_and_asks_it() {
+    let world = World::start();
+    let old = world.peer.orchestrator_session.clone();
+    world.peer.open().session_end(&owner(), &old, "x").unwrap();
+
+    // The peer's start needs its roots and a herdr that opens a workspace.
+    let lab = world.peer.dir.path().join("lab");
+    let checkout = lab.join("checkouts/alpha");
+    for dir in [&checkout, &lab.join("pool"), &lab.join("scratch")] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(
+        world.peer.dir.path().join("config.toml"),
+        format!(
+            "[spawn]\npool_root = {:?}\nscratch_root = {:?}\norchestrator_home = {:?}\ncheckouts_root = {:?}\n\n[checkouts]\nalpha = {:?}\n",
+            lab.join("pool").to_str().unwrap(),
+            lab.join("scratch").to_str().unwrap(),
+            lab.join("orchestrators").to_str().unwrap(),
+            lab.join("checkouts").to_str().unwrap(),
+            checkout.to_str().unwrap(),
+        ),
+    )
+    .unwrap();
+    let calls = lab.join("herdr.log");
+    let herdr = peer_herdr(world.peer.dir.path());
+    std::fs::create_dir_all(herdr.parent().unwrap()).unwrap();
+    std::fs::write(
+        &herdr,
+        format!(
+            r#"#!/bin/sh
+echo "$*" >> '{calls}'
+case "$1 $2" in
+"workspace create") echo '{{"result":{{"workspace":{{"workspace_id":"w9"}},"root_pane":{{"pane_id":"w9:p1"}}}}}}' ;;
+"api snapshot") echo '{{"result":{{"snapshot":{{"version":"0.9.5","workspaces":[{{"workspace_id":"w9","label":"alpha","number":1}}],"panes":[{{"pane_id":"w9:p1","workspace_id":"w9","agent_status":"unknown"}}]}}}}}}' ;;
+*) echo '{{"result":{{}}}}' ;;
+esac
+"#,
+            calls = calls.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&herdr, std::fs::Permissions::from_mode(0o755)).unwrap();
+    world.live();
+
+    let board_sessions = count(&world.board, "SELECT count(*) FROM sessions");
+    let (status, started) = world.post(
+        "/api/v1/projects/alpha/orchestrator",
+        &json!({"idempotency_key": "start-1", "host": LABEL}),
+    );
+    assert_eq!(status, 200, "{started}");
+    assert_eq!(started["host"], LABEL);
+    let session = started["data"]["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(session, old);
+    let live: String = world
+        .peer
+        .open()
+        .conn()
+        .query_row(
+            "SELECT id FROM sessions WHERE role = 'orchestrator' AND project_id = 'alpha'
+                    AND ended_at IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(live, session);
+    let actor: String = world
+        .peer
+        .open()
+        .conn()
+        .query_row(
+            "SELECT actor FROM events WHERE kind = 'session.started' AND entity_id = ?1",
+            [&session],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(actor, "board@test-host");
+    let log = std::fs::read_to_string(&calls).unwrap();
+    assert!(log.contains("workspace create"), "{log}");
+    assert!(log.contains("pane send-text w9:p1"), "{log}");
+
+    // The same key again is the start that landed, not a second one.
+    let (status, again) = world.post(
+        "/api/v1/projects/alpha/orchestrator",
+        &json!({"idempotency_key": "start-1", "host": LABEL}),
+    );
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["data"]["session"]["id"], session.as_str());
+
+    let (status, asked) = world.post(
+        "/api/v1/projects/alpha/asks",
+        &json!({
+            "idempotency_key": "ask-1",
+            "host": LABEL,
+            "text": "write a haiku and put it in a new haiku.txt file",
+        }),
+    );
+    assert_eq!(status, 200, "{asked}");
+    assert_eq!(asked["host"], LABEL);
+    let target: String = world
+        .peer
+        .open()
+        .conn()
+        .query_row(
+            "SELECT target_session_id FROM outbox WHERE body LIKE '%haiku.txt%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(target, session);
+    assert_eq!(
+        count(&world.board, "SELECT count(*) FROM sessions"),
+        board_sessions
+    );
+    assert_eq!(count(&world.board, "SELECT count(*) FROM asks"), 0);
 }

@@ -9,6 +9,8 @@ export class ActionError extends Error {
   readonly code: string;
   readonly current: Record<string, unknown> | null;
   readonly hint: string | null;
+  // The peer that answered or refused a forwarded mutation; null for this host.
+  readonly host: string | null;
 
   constructor(
     status: number,
@@ -16,6 +18,7 @@ export class ActionError extends Error {
     message: string,
     current?: Record<string, unknown>,
     hint?: string,
+    host?: string,
   ) {
     super(message);
     this.name = "ActionError";
@@ -23,6 +26,7 @@ export class ActionError extends Error {
     this.code = code;
     this.current = current ?? null;
     this.hint = hint ?? null;
+    this.host = host ?? null;
   }
 }
 
@@ -62,10 +66,10 @@ export async function sendMutation<T>(
     return parsed as MutationResponse<T>;
   }
   if (isErrorBody(parsed)) {
-    const { code, message, current, hint } = parsed.error;
+    const { code, message, current, hint, host } = parsed.error;
     // At an `--allow-host` name the cookie was revoked or ran out.
     if (response.status === 403 && code === "signed_out") signedOutStore.set(true);
-    throw new ActionError(response.status, code, message, current, hint);
+    throw new ActionError(response.status, code, message, current, hint, host);
   }
   if (response.status === 503 || response.status === 0) {
     throw new ActionError(response.status, "unavailable", UNREACHABLE);

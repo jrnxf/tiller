@@ -183,7 +183,10 @@ struct SyncLink {
 
 impl SyncLink {
     fn open(home: &Path) -> Self {
-        let socket = serve_on_socket(home, "test-host");
+        Self::on(serve_on_socket(home, "test-host"))
+    }
+
+    fn on(socket: UnixStream) -> Self {
         socket.set_read_timeout(Some(ms(5000))).unwrap();
         Self {
             reader: BufReader::new(socket.try_clone().unwrap()),
@@ -790,7 +793,10 @@ fn comment(pair: &Pair, card: &str, key: &str) -> Mutate {
 
 /// A link to the peer's `peer serve`, past `welcome` and the snapshot.
 fn linked(pair: &Pair) -> SyncLink {
-    let mut link = SyncLink::open(pair.peer.dir.path());
+    welcomed(pair, SyncLink::open(pair.peer.dir.path()))
+}
+
+fn welcomed(pair: &Pair, mut link: SyncLink) -> SyncLink {
     link.send(&hello(pair, None));
     assert!(matches!(link.next(), Frame::Welcome(_)));
     assert!(matches!(link.next(), Frame::Snapshot(_)));
@@ -1634,6 +1640,39 @@ fn forwarded_orchestrator_start_without_a_starter_is_unavailable() {
     let frame = Mutate::signed(&signer(&pair), &pair.peer.host, order, Timestamp::now());
     let (status, body) = link.mutate(frame);
     assert_eq!(status, 503, "{body}");
+}
+
+/// G42 on the peer: a `read` key sends no ask and starts no orchestrator.
+#[test]
+fn read_scope_cannot_ask_or_start() {
+    let pair = pair();
+    pair.peer
+        .open()
+        .conn()
+        .execute("UPDATE peer_keys SET scope = 'read'", [])
+        .unwrap();
+    let starter = Arc::new(RecordingStarter::default());
+    let socket = serve_with_starter(pair.peer.dir.path(), "test-host", Some(starter.clone()));
+    let mut link = welcomed(&pair, SyncLink::on(socket));
+    let before = last_seq(&pair.peer);
+    for (op, body) in [
+        (
+            Op::AskNote,
+            json!({"idempotency_key": "k-1", "text": "optimize fonts"}),
+        ),
+        (Op::StartOrchestrator, json!({"idempotency_key": "k-1"})),
+    ] {
+        let order = Order {
+            op,
+            target: Some("alpha".to_owned()),
+            body,
+            idempotency_key: "k-1".to_owned(),
+        };
+        let frame = Mutate::signed(&signer(&pair), &pair.peer.host, order, Timestamp::now());
+        assert_refused(&pair, link.mutate(frame), "read_scope", before);
+    }
+    assert_eq!(ask_count(&pair.peer, "optimize fonts"), 0);
+    assert!(starter.seen.lock().unwrap().is_empty(), "the starter ran");
 }
 
 /// G25 on the peer: an ask or a start for a project another host owns is

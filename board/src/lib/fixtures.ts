@@ -885,9 +885,12 @@ const UNSTARTED = new Set(["kiln"]);
 const startedOrchestrators = new Set<string>();
 
 // Starts the project's orchestrator, and says whether one was already live.
-export function startOrchestratorFixture(projectId: string): { live: boolean } {
-  const live = !UNSTARTED.has(projectId) || startedOrchestrators.has(projectId);
-  startedOrchestrators.add(projectId);
+// A peer's project is its own: this host's `gamma` running says nothing of
+// host-d's, so a forwarded start is live only once it was started here.
+export function startOrchestratorFixture(projectId: string, host?: string): { live: boolean } {
+  const key = host ? `${host}/${projectId}` : projectId;
+  const live = (!host && !UNSTARTED.has(projectId)) || startedOrchestrators.has(key);
+  startedOrchestrators.add(key);
   return { live };
 }
 

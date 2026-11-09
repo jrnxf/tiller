@@ -1715,6 +1715,53 @@ fn start_orchestrator(
     orchestrator::start(&mut rig.fleet.store, ctx, &world, homes, "alpha", None)
 }
 
+/// A verified peer board is the owner on this host (`authority.md` G41): its
+/// forwarded Start orchestrator launches one, recorded as `board@<label>`.
+/// A fleet session, a hook, an import or the curator never starts one.
+#[test]
+fn orchestrator_start_takes_a_peer_board_and_refuses_the_fleet() {
+    let (mut rig, homes) = orchestrator_rig();
+    let workspaces = rig.workspace_ids();
+    for actor in [
+        Actor::Session(rig.fleet.orchestrator_session.clone()),
+        Actor::Hook,
+        Actor::Import,
+        Actor::Curator("01JPRETRO0000000000000000A".into()),
+    ] {
+        let error = start_orchestrator(&mut rig, &homes, &Ctx::new(actor.clone()))
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("may not start"),
+            "{actor}: {error}"
+        );
+    }
+    assert_eq!(
+        rig.workspace_ids(),
+        workspaces,
+        "a refused start reached herdr"
+    );
+
+    let started = start_orchestrator(
+        &mut rig,
+        &homes,
+        &Ctx::new(Actor::Peer("board-host".into())),
+    )
+    .unwrap();
+    assert!(!started.replayed);
+    let actor: String = rig
+        .fleet
+        .store
+        .conn()
+        .query_row(
+            "SELECT actor FROM events WHERE kind = 'session.started' AND entity_id = ?1",
+            [&started.value.session.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(actor, "board@board-host");
+}
+
 #[test]
 fn orchestrator_restart_replaces_the_live_one_with_fresh_launch_files() {
     let (mut rig, homes) = orchestrator_rig();
