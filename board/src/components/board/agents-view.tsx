@@ -543,7 +543,9 @@ function Stage({
       autoType={carry}
       onTyping={onTyping}
       onSwitch={onSwitch}
-      machine={remote ? host.label : undefined}
+      // A paired peer is a remote host too, but its pane streams through the
+      // peer link; only a saved machine's is read as a tail.
+      machine={remote && !peerHost ? host.label : undefined}
       peer={peerHost}
       strip={
         remote || peerHost ? null : (
