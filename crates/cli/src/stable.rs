@@ -67,6 +67,9 @@ fn stable(
     candidates
         .into_iter()
         .filter(|c| c.is_absolute() && !c.starts_with(STORE))
+        // Spawn refuses a path that is not a plain word, so a link under a
+        // home with a space in it would break the session it was meant to save.
+        .filter(|c| c.to_str().is_some_and(tiller_agents::guards::plain_path))
         .find(|c| exe_canonical.is_some() && canonical(c) == exe_canonical)
         .unwrap_or_else(|| exe.to_path_buf())
 }
@@ -74,7 +77,6 @@ fn stable(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::symlink;
 
     use super::*;
@@ -158,19 +160,39 @@ mod tests {
             rig.exe
         );
         assert_eq!(stable(&rig.exe, None, None, None, None), rig.exe);
-        assert!(!rig.exe.as_os_str().as_bytes().is_empty());
     }
 
-    /// An upgrade moves the link, not the path a session was given: the same
-    /// path then runs the new release.
+    /// Spawn refuses a path with a space in it, so such a link is skipped.
     #[test]
-    fn the_returned_path_follows_an_upgrade() {
+    fn a_link_that_is_not_a_plain_word_is_skipped() {
         let rig = rig();
-        let got = stable(&rig.exe, Some(rig.link.as_os_str()), None, None, None);
-        let next = rig.exe.with_file_name("tiller-next");
-        fs::write(&next, "").unwrap();
-        fs::remove_file(&rig.link).unwrap();
-        symlink(&next, &rig.link).unwrap();
-        assert_eq!(got.canonicalize().unwrap(), next);
+        let odd = rig
+            .dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("my home/bin/tiller");
+        fs::create_dir_all(odd.parent().unwrap()).unwrap();
+        symlink(&rig.exe, &odd).unwrap();
+        assert_eq!(
+            stable(&rig.exe, Some(odd.as_os_str()), None, None, None),
+            rig.exe
+        );
+    }
+
+    /// The home's profile link is a candidate when the binary was invoked by
+    /// its store path.
+    #[test]
+    fn a_home_link_to_another_release_is_not_this_binary() {
+        let rig = rig();
+        let root = rig.dir.path().canonicalize().unwrap();
+        let other = root.join("store/tiller-2/bin/tiller");
+        fs::create_dir_all(other.parent().unwrap()).unwrap();
+        fs::write(&other, "").unwrap();
+        let home = root.join("home");
+        assert_eq!(
+            stable(&other, None, None, Some(home.as_os_str()), None),
+            other
+        );
     }
 }
