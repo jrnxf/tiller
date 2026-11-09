@@ -85,6 +85,19 @@ Modes, from the host config value `stop_hook_mode`:
 
 **The switching rule.** Observe mode measures what blocking would have done. A `would_block` stop is a *false block* when, within 2 minutes and without another owner prompt, the same session resolves every listed ask and every unknown tag turns out to be a card created in that window. `tiller intake stats` reports the stop count, the would-block count and the false-block rate over a window. The owner may switch to `block-once` only when the last 7 days hold at least 200 orchestrator stops and the false-block rate is under 2% (numbers accepted at CP2, C14). The switch is a config change the owner makes (`tiller config set stop_hook_mode block-once`), never automatic, and it is recorded as an event (`config.changed`). `config set` refuses the switch to `block-once` (exit 5, with the current stats) while the rule is not met. Switching back to `observe` is always allowed.
 
+**The owner guard.** In an orchestrator session the Stop hook also asks whether the last message solicits a reply from the owner. If it does and the session opened no attention item since the turn began (its last prompt or wake-up line), the hook blocks the stop once with `{"decision":"block","reason":...}`. The reason tells the orchestrator to open an item with `tiller attention open <card> --kind decision ...`, or, if it was not asking the owner, to end the turn again. When `stop_hook_active` is true the hook never blocks, so one turn is blocked at most once, and an intake block (above) comes first. Workers are never checked, and `stop_hook_mode = off` turns the guard off with the rest. The Stop observation's payload gains `asks_owner` and `opened_attention`. It never holds the message text.
+
+The check is a keyword rule over the message (code blocks, URLs and markup removed first). When the rule says no and a decision key is set, `owner_guard.decider_key` or the `PERPLEXITY_API_KEY` environment variable, a decision model gets a second look: the hook sends one POST to `https://api.perplexity.ai/v1/decisions` (model `pplx-decider-flash-v1.2`, question "does the message solicit a current response or decision from the human owner?") with a 2 s timeout. A probability at or above `owner_guard.threshold` (default 0.3) counts as yes. An error, a timeout, a bad answer or no key keeps the rule's answer.
+
+**Privacy.** With no key, nothing leaves the host. When the owner sets a key, the orchestrator's last message of each turn whose rule answer was no is sent to Perplexity. The key is never logged or printed: `tiller config get` and the `config.changed` event show `<set>`, and the Stop observation never holds the message.
+
+| Host config value | Default | Meaning |
+|---|---|---|
+| `owner_guard.enabled` | `true` | `false` turns the owner guard off |
+| `owner_guard.decider_key` | none | The decision model's API key. Without it the guard is rule-only |
+| `owner_guard.threshold` | `0.3` | A probability at or above this counts as yes (0 to 1) |
+| `owner_guard.endpoint` | the URL above | Another decision endpoint, https only (plain http only for loopback) |
+
 The turn-end guard Firstmate keeps (P26, never go idle with work in flight) is not a block here: the daemon delivers pending outbox messages to an idle orchestrator (section 3), which wakes it.
 
 ## 3. Wake-up lines and the inbox
@@ -627,6 +640,8 @@ The daemon renders `index.html` with the snapshot inlined:
 - **Dispatch.** `tiller quota [--size S|M|L]` (default `M`) adds `dispatch` to each fresh weekly window: `decision` (`go` or `hold`) and `note` (one line, or null). It holds only when `percent_remaining` is under 10, or when `projected_exhaustion_at` comes before now plus the size's work estimate (S 2 h, M 6 h, L 12 h wall-clock; no per-run cost record exists, so the card size stands in). A window ahead of pace that would last through the work is `go` with a note saying so, which the orchestrator carries in its note to the owner. The rule is `tiller_core::quota_rule`; the spawn floor below is a separate, lower check and away mode's `quota_floor_percent` is unchanged.
 
 - **Use.** The sidebar footer and Health read it; `tiller spawn` checks it live (P04, T4.2) and fails closed when it is stale (point 35). The per-account floor and the share per host are config owned by T4.2; the feed carries no account id, so the share is configured per host.
+
+- **A refused start reaches the inbox.** When the quota floor refuses a `tiller spawn` or `--promote`, the card is held until the latest reset among the weekly windows that are under the floor (`hold.set`, reason "the weekly quota is under the floor"), and one `decision` attention item opens with the options "Start now anyway" and "Wait for the reset". A second refusal for the same card opens no second item. "Wait for the reset" keeps the hold. When the hold's date passes, the dated-hold release asks again, and it withdraws the old item first, so one item stays open. "Start now anyway" is applied when the owner or the board answers: it releases the hold, and the owner may then run `tiller spawn <card> --past-quota-floor`, which starts that one run past the floor and records the answered item in the `run.started` payload (`checks.quota_override`). One answer starts one run. The orchestrator cannot answer the item. Only the floor is skipped: capacity, the model rules and the RAM and disk floors still apply.
 
 ## 9. Machine summary
 

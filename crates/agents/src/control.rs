@@ -516,6 +516,7 @@ pub fn relaunch(
         disk_free_mb: world.disk_free_mb,
         quota_floor_percent: quota_floor(world.config, run.role),
         quota_max_age_minutes: world.config.quota.max_age_minutes,
+        past_quota_floor: false,
         dispatch: model.as_ref().map_or(Value::Null, |m| m.dispatch.clone()),
     });
     // Every refusal the record would give comes before the stop, so none

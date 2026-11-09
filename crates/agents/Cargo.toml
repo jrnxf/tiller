@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 base64.workspace = true
+regex.workspace = true
 ring.workspace = true
 rusqlite.workspace = true
 rustix = { workspace = true, features = ["process"] }

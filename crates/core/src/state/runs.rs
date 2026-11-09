@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::approvals::active_away;
-use super::attention::withdraw_attention;
+use super::attention::{quota_start_decision, withdraw_attention};
 use super::cards::{landed_evidence, new_card_note};
 use super::outbox::{NewMessage, enqueue, live_orchestrator};
 use super::projects::{local_host_id, require_daemon};
@@ -29,6 +29,11 @@ pub struct SpawnChecks {
     pub quota_floor_percent: Option<f64>,
     /// How old a quota reading may be before the check fails closed.
     pub quota_max_age_minutes: i64,
+    /// Start past the quota floor on the owner's answered decision. The
+    /// decision is looked up and used inside the `run.start` transaction, so
+    /// one answer starts one run; the quota check is skipped and the item is
+    /// recorded in the `run.started` payload.
+    pub past_quota_floor: bool,
     /// The dispatch rule that resolved the model and effort (T4.2).
     pub dispatch: Value,
 }
@@ -578,7 +583,14 @@ fn relaunch_in(tx: &mut Tx<'_>, run: &str, relaunch: &Relaunch) -> Result<Relaun
         }
         let host: Host = get(tx.conn(), "host", &run.host_id)?;
         let checks = match &relaunch.checks {
-            Some(checks) => Some(check_spawn(tx.conn(), &host, &project, checks, tx.now())?),
+            Some(checks) => Some(check_spawn(
+                tx.conn(),
+                &host,
+                &project,
+                checks,
+                None,
+                tx.now(),
+            )?),
             None => {
                 check_capacity(tx.conn(), &host, &project)?;
                 check_spawn_rate(tx.conn(), &host, &project, tx.now())?;
@@ -651,6 +663,17 @@ fn relaunch_in(tx: &mut Tx<'_>, run: &str, relaunch: &Relaunch) -> Result<Relaun
         session,
         ended_session,
     })
+}
+
+/// The refusal text of a weekly window at or under the quota floor.
+fn quota_floor_fact(left: Option<f64>, floor: f64) -> String {
+    format!("{left:?} percent left is at or under the {floor} percent floor")
+}
+
+/// Whether `error` is the quota floor refusing a start, as opposed to a
+/// missing or stale reading, which fails closed and has no reset to wait for.
+pub fn is_quota_floor_refusal(error: &Error) -> bool {
+    matches!(error, Error::Refused { entity: "quota", fact, .. } if fact.ends_with("percent floor"))
 }
 
 /// Why a RAM or disk reading fails its floor, if it does. An unknown
@@ -727,6 +750,7 @@ fn check_spawn(
     host: &Host,
     project: &Project,
     checks: &SpawnChecks,
+    quota_override: Option<&str>,
     now: Timestamp,
 ) -> Result<Value> {
     let (host_reserved, project_reserved) = check_capacity(conn, host, project)?;
@@ -771,6 +795,9 @@ fn check_spawn(
     }
 
     let mut quota = Vec::new();
+    if quota_override.is_some() {
+        quota_floor = None;
+    }
     if let Some(floor) = quota_floor {
         let windows: Vec<QuotaWindow> = list(conn, "kind = 'weekly' ORDER BY label", &[])?;
         if windows.is_empty() {
@@ -798,7 +825,7 @@ fn check_spawn(
                     return Err(Error::refused(
                         "quota",
                         &window.label,
-                        format!("{left:?} percent left is at or under the {floor} percent floor"),
+                        quota_floor_fact(left, floor),
                     ));
                 }
             }
@@ -819,6 +846,9 @@ fn check_spawn(
         "quota_floor_percent": quota_floor,
         "quota": quota,
     });
+    if let Some(item) = quota_override {
+        seen["quota_override"] = json!(item);
+    }
     if !away_spend.is_null() {
         seen["away"] = away_spend;
     }
@@ -899,7 +929,29 @@ impl Store {
                 None => local_host_id(tx.conn())?,
             };
             let host: Host = get(tx.conn(), "host", &host_id)?;
-            let seen = check_spawn(tx.conn(), &host, &project, &new.checks, tx.now())?;
+            let quota_override = if new.checks.past_quota_floor {
+                let item = quota_start_decision(tx.conn(), &card.id, new.role)?.ok_or_else(|| {
+                    Error::refused(
+                        "card",
+                        &card.display_id,
+                        format!(
+                            "no unused owner decision to start a {} run past the quota floor",
+                            new.role
+                        ),
+                    )
+                })?;
+                Some(item.id)
+            } else {
+                None
+            };
+            let seen = check_spawn(
+                tx.conn(),
+                &host,
+                &project,
+                &new.checks,
+                quota_override.as_deref(),
+                tx.now(),
+            )?;
 
             let id = ids::new_ulid();
             let attempt = next_attempt(tx.conn(), &card.id, new.role)?;
@@ -1057,7 +1109,7 @@ impl Store {
             if host.id != local_host_id(tx.conn())? {
                 return Err(Error::refused("host", &host.label, "promote on the host that holds the worktree"));
             }
-            let seen = check_spawn(tx.conn(), &host, &project, &promote.checks, tx.now())?;
+            let seen = check_spawn(tx.conn(), &host, &project, &promote.checks, None, tx.now())?;
             for item in &open {
                 withdraw_attention(tx, item, "the scout was promoted to a ship run")?;
             }

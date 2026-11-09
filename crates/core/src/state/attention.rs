@@ -5,10 +5,10 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::cards::close_card;
+use super::cards::{close_card, insert_hold, release_hold};
 use super::outbox::{NewMessage, enqueue, live_orchestrator};
 use super::projects::{ProjectEdit, edit_project, positive};
-use super::{get, refuse, required, resolve_card, resolve_id};
+use super::{find, get, list, refuse, required, resolve_card, resolve_id};
 use crate::domain::*;
 use crate::error::{Error, Result};
 use crate::ids;
@@ -75,6 +75,9 @@ pub enum OwnerAction {
     /// `project.edit` of one project's capacity, bound to the capacity the
     /// question saw.
     ProjectCapacity { project: String, from: i64, to: i64 },
+    /// Start a `role` run on the card past the quota floor, and release the
+    /// card's hold so the orchestrator may spawn it.
+    QuotaStart { role: RunRole },
 }
 
 impl OwnerAction {
@@ -84,6 +87,7 @@ impl OwnerAction {
             Self::ProjectCapacity { project, from, to } => {
                 format!("project {project} capacity {from} to {to}")
             }
+            Self::QuotaStart { role } => format!("start the {role} run past the quota floor"),
         }
     }
 
@@ -129,6 +133,12 @@ impl OwnerAction {
                 }
                 Ok(found)
             }
+            Self::QuotaStart { .. } => {
+                if card.state != CardState::Open {
+                    return Err(Error::refused("card", &card.display_id, "card is closed"));
+                }
+                get(conn, "project", &card.project_id)
+            }
         }
     }
 
@@ -141,6 +151,15 @@ impl OwnerAction {
                     ..ProjectEdit::default()
                 };
                 edit_project(tx, &project.id, project.rev, &edit)?;
+            }
+            Self::QuotaStart { .. } => {
+                if let Some(hold) = find::<Hold>(
+                    tx.conn(),
+                    "card_id = ?1 AND released_at IS NULL",
+                    &[&card.id],
+                )? {
+                    release_hold(tx, &hold, HoldReleaseReason::Removed)?;
+                }
             }
         }
         Ok(())
@@ -217,6 +236,158 @@ fn picked_action(item: &Attention, answer: &str) -> Option<Option<OwnerAction>> 
             .find(|(label, _)| picks(answer, label))
             .and_then(|(_, action)| action),
     )
+}
+
+/// The label that starts the run past the quota floor.
+pub const QUOTA_START_LABEL: &str = "Start now anyway";
+/// The label that keeps the hold until the reset.
+pub const QUOTA_WAIT_LABEL: &str = "Wait for the reset";
+
+/// The two options of a quota hold's decision.
+fn quota_options(role: RunRole) -> Value {
+    json!([
+        {
+            "label": QUOTA_START_LABEL,
+            "consequence": "The run starts now, below the quota floor, and the hold ends.",
+            "action": OwnerAction::QuotaStart { role },
+        },
+        {
+            "label": QUOTA_WAIT_LABEL,
+            "consequence": "The card stays held and comes back for a decision after the reset.",
+            "recommended": true,
+        },
+    ])
+}
+
+/// The card's open items that carry a quota start option.
+fn open_quota_items(conn: &rusqlite::Connection, card_id: &str) -> Result<Vec<Attention>> {
+    let open: Vec<Attention> = list(
+        conn,
+        "card_id = ?1 AND answered_at IS NULL AND withdrawn_at IS NULL ORDER BY opened_at, id",
+        &[&card_id],
+    )?;
+    Ok(open
+        .into_iter()
+        .filter(|item| quota_role(item, None).is_some())
+        .collect())
+}
+
+/// The role a quota start option of `item` names. With `answer`, only when
+/// that answer picks the option.
+fn quota_role(item: &Attention, answer: Option<&str>) -> Option<RunRole> {
+    let Some(Value::Array(options)) = item.options.as_ref() else {
+        return None;
+    };
+    options.iter().find_map(|option| {
+        let Some(OwnerAction::QuotaStart { role }) = OwnerAction::of_option(option) else {
+            return None;
+        };
+        answer
+            .is_none_or(|answer| picks(answer, option_label(option)))
+            .then_some(role)
+    })
+}
+
+/// Withdraws the card's open quota items.
+pub(crate) fn withdraw_quota_items(tx: &mut Tx<'_>, card_id: &str, reason: &str) -> Result<()> {
+    for item in open_quota_items(tx.conn(), card_id)? {
+        withdraw_attention(tx, &item, reason)?;
+    }
+    Ok(())
+}
+
+/// The owner's answered decision to start a `role` run on the card past the
+/// quota floor, until a run has started on it. Only the owner
+/// applies that option, so an answered item is the owner's decision.
+pub fn quota_start_decision(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+    role: RunRole,
+) -> Result<Option<Attention>> {
+    let answered: Vec<Attention> = list(
+        conn,
+        "card_id = ?1 AND answered_at IS NOT NULL AND withdrawn_at IS NULL ORDER BY answered_at DESC, id",
+        &[&card_id],
+    )?;
+    for item in answered {
+        let Some(answer) = item.answer.as_deref() else {
+            continue;
+        };
+        if quota_role(&item, Some(answer)) != Some(role) {
+            continue;
+        }
+        let used: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM events WHERE kind = 'run.started'
+                            AND json_extract(payload, '$.checks.quota_override') = ?1)",
+            [&item.id],
+            |row| row.get(0),
+        )?;
+        return Ok((!used).then_some(item));
+    }
+    Ok(None)
+}
+
+impl Store {
+    /// A start refused by the quota floor: holds the card until `until` (the
+    /// quota reset) and opens one decision on it, "Start now anyway" or
+    /// "Wait for the reset". Natural: a card that already has an open quota
+    /// decision gets no second one.
+    pub fn quota_hold(
+        &mut self,
+        ctx: &Ctx,
+        card: &str,
+        role: RunRole,
+        until: Timestamp,
+        why: &str,
+    ) -> Result<Applied<Attention>> {
+        self.write(ctx, "quota.hold", None, |tx| {
+            let card = resolve_card(tx.conn(), card)?;
+            match tx.actor() {
+                Actor::Owner | Actor::Board => {}
+                Actor::Session(id)
+                    if live_orchestrator(tx.conn(), &card.project_id)?
+                        .is_some_and(|live| live.id == *id) => {}
+                other => {
+                    return Err(Error::Forbidden(format!(
+                        "{other} may not hold {} for the quota",
+                        card.display_id
+                    )));
+                }
+            }
+            if let Some(item) = open_quota_items(tx.conn(), &card.id)?.into_iter().next() {
+                return Ok(item);
+            }
+            let held = find::<Hold>(
+                tx.conn(),
+                "card_id = ?1 AND released_at IS NULL",
+                &[&card.id],
+            )?;
+            if held.is_none() {
+                if until <= tx.now() {
+                    return Err(Error::refused(
+                        "card",
+                        &card.display_id,
+                        format!("{until} is not in the future"),
+                    ));
+                }
+                insert_hold(tx, &card, until, "the weekly quota is under the floor")?;
+            }
+            open_attention(
+                tx,
+                &NewAttention {
+                    card: card.id.clone(),
+                    question: format!(
+                        "The weekly quota is under the floor, so the {role} run for {} did not start. Start it now anyway, or wait for the reset?",
+                        card.display_id
+                    ),
+                    evidence: Some(why.to_owned()),
+                    recommendation: Some(QUOTA_WAIT_LABEL.to_owned()),
+                    options: Some(quota_options(role)),
+                    ..NewAttention::default()
+                },
+            )
+        })
+    }
 }
 
 /// `attention.open` inside a mutation.

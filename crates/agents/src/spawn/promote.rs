@@ -16,8 +16,8 @@ use tiller_core::state::{find, get, resolve_card};
 use tiller_core::{Applied, Ctx, Store};
 
 use super::{
-    Made, Outcome, Result, SpawnError, Spawned, World, card_brief, dispatch, fail, launch_in,
-    quota_floor, replay, role_of, scan_and_record,
+    Made, Outcome, Result, SpawnError, Spawned, World, card_brief, dispatch, fail, hold_for_quota,
+    launch_in, quota_floor, replay, role_of, scan_and_record,
 };
 
 /// What a promotion is asked for.
@@ -101,10 +101,14 @@ pub fn promote(
                 disk_free_mb: world.disk_free_mb,
                 quota_floor_percent: quota_floor(world.config, RunRole::Builder),
                 quota_max_age_minutes: world.config.quota.max_age_minutes,
+                past_quota_floor: false,
                 dispatch: resolved.payload.clone(),
             },
         },
-    )?;
+    );
+    let started = started.map_err(|error| {
+        hold_for_quota(store, ctx, world, &card, RunRole::Builder, error.into())
+    })?;
     if started.replayed {
         return replay(store, started);
     }

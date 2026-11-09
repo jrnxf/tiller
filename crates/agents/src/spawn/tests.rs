@@ -7,11 +7,13 @@ use std::process::Command;
 use std::sync::{Arc, Barrier, Mutex};
 
 use tempfile::TempDir;
-use tiller_core::domain::{Artifact, ArtifactKind, CardKind, Pr, PrState, Size};
+use tiller_core::domain::{
+    AnsweredVia, Artifact, ArtifactKind, Attention, CardKind, Hold, Pr, PrState, Size,
+};
 use tiller_core::state::caches::QuotaReading;
 use tiller_core::state::cards::NewCard;
 use tiller_core::state::records::NewArtifact;
-use tiller_core::{Actor, Ctx};
+use tiller_core::{Actor, Ctx, Timestamp};
 use tiller_herdr::fake::{FakeHerdr, Screen};
 use tiller_herdr::testing::{Fleet, owner};
 use tiller_reconcile::git::GitScanner;
@@ -322,6 +324,7 @@ impl Rig {
             asked: None,
             brief: Some(format!("Do the work on {}.", card.display_id)),
             harness: "claude".into(),
+            past_quota_floor: false,
         }
     }
 
@@ -397,6 +400,10 @@ impl Rig {
     }
 
     fn quota(&mut self, percent: f64) {
+        self.quota_resetting(percent, None);
+    }
+
+    fn quota_resetting(&mut self, percent: f64, resets_at: Option<Timestamp>) {
         self.fleet
             .store
             .cache_quota(
@@ -404,7 +411,7 @@ impl Rig {
                 vec![QuotaReading {
                     label: "claude-weekly".into(),
                     percent_remaining: Some(percent),
-                    resets_at: None,
+                    resets_at,
                     pace: None,
                     reserve: None,
                     burn_multiple: None,
@@ -899,6 +906,150 @@ fn spawn_refuses_below_quota_floor() {
     rig.quota(90.0);
     rig.try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
         .unwrap();
+}
+
+#[test]
+fn a_start_the_quota_floor_refuses_is_held_with_one_open_decision() {
+    let mut rig = Rig::with_config("account_floor_percent = 3.0\nhost_share_percent = 50.0\n");
+    rig.config.quota.enabled = true;
+    let ctx = rig.orchestrator();
+    let card = rig.card(CardKind::Ship, None);
+    let reset = Timestamp::now().plus_minutes(3 * 24 * 60);
+    rig.quota_resetting(9.0, Some(reset));
+
+    for _ in 0..2 {
+        let error = rig
+            .try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
+            .unwrap_err();
+        assert!(refusal(&error).contains("held until"), "{error}");
+    }
+    assert!(rig.pool.taken().is_empty());
+
+    let holds: Vec<Hold> = list(
+        rig.fleet.store.conn(),
+        "card_id = ?1 AND released_at IS NULL",
+        &[&card.id],
+    )
+    .unwrap();
+    assert_eq!(holds.len(), 1);
+    assert_eq!(holds[0].until_at, reset);
+    let open: Vec<Attention> = list(
+        rig.fleet.store.conn(),
+        "card_id = ?1 AND answered_at IS NULL AND withdrawn_at IS NULL",
+        &[&card.id],
+    )
+    .unwrap();
+    assert_eq!(open.len(), 1);
+    let labels: Vec<_> = open[0]
+        .options
+        .as_ref()
+        .and_then(Value::as_array)
+        .unwrap()
+        .iter()
+        .map(|option| option["label"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(labels, ["Start now anyway", "Wait for the reset"]);
+
+    // Past the floor needs the owner's answer first.
+    let mut request = Rig::request(&card, RunRole::Builder);
+    request.past_quota_floor = true;
+    let error = rig.try_spawn(&ctx, request.clone()).unwrap_err();
+    assert!(
+        refusal(&error).contains("no unused owner decision"),
+        "{error}"
+    );
+
+    // The orchestrator may not pick the owner's option.
+    let picked = rig.fleet.store.attention_answer(
+        &ctx,
+        None,
+        &open[0].id,
+        "Start now anyway",
+        AnsweredVia::Cli,
+    );
+    assert!(picked.is_err());
+    rig.fleet
+        .store
+        .attention_answer(
+            &owner(),
+            None,
+            &open[0].id,
+            "Start now anyway",
+            AnsweredVia::Board,
+        )
+        .unwrap();
+    let holds: Vec<Hold> = list(
+        rig.fleet.store.conn(),
+        "card_id = ?1 AND released_at IS NULL",
+        &[&card.id],
+    )
+    .unwrap();
+    assert!(holds.is_empty());
+    let world = world!(rig);
+    let first = spawn(
+        &mut rig.fleet.store,
+        &ctx,
+        Some("past-1"),
+        &world,
+        request.clone(),
+    )
+    .unwrap();
+    let Outcome::Spawned(spawned) = first.value else {
+        panic!("expected a spawn");
+    };
+    assert_eq!(spawned.run.role, RunRole::Builder);
+    // A retry with the same key replays the run instead of being refused.
+    let again = spawn(
+        &mut rig.fleet.store,
+        &ctx,
+        Some("past-1"),
+        &world,
+        request.clone(),
+    )
+    .unwrap();
+    assert!(again.replayed);
+    // One answer starts one run.
+    rig.done(&spawned.run.id, RunOutcome::Failed).unwrap();
+    let error = rig.try_spawn(&ctx, request).unwrap_err();
+    assert!(
+        refusal(&error).contains("no unused owner decision"),
+        "{error}"
+    );
+}
+
+#[test]
+fn waiting_for_the_reset_keeps_the_hold() {
+    let mut rig = Rig::with_config("account_floor_percent = 3.0\nhost_share_percent = 50.0\n");
+    rig.config.quota.enabled = true;
+    let ctx = rig.orchestrator();
+    let card = rig.card(CardKind::Ship, None);
+    rig.quota_resetting(9.0, Some(Timestamp::now().plus_minutes(60)));
+    rig.try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
+        .unwrap_err();
+    let item: Attention = find(
+        rig.fleet.store.conn(),
+        "card_id = ?1 AND answered_at IS NULL",
+        &[&card.id],
+    )
+    .unwrap()
+    .unwrap();
+    rig.fleet
+        .store
+        .attention_answer(
+            &owner(),
+            None,
+            &item.id,
+            "Wait for the reset",
+            AnsweredVia::Board,
+        )
+        .unwrap();
+    let holds: Vec<Hold> = list(
+        rig.fleet.store.conn(),
+        "card_id = ?1 AND released_at IS NULL",
+        &[&card.id],
+    )
+    .unwrap();
+    assert_eq!(holds.len(), 1);
 }
 
 #[test]

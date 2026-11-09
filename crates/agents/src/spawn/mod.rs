@@ -45,14 +45,15 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::Value;
 use tiller_core::domain::{
-    Artifact, Card, CardKind, CheckPlan, Delivery, Effort, Pr, Project, Reservation, Run,
-    RunOutcome, RunRole, Session, Worktree,
+    Artifact, Card, CardKind, CheckPlan, Delivery, Effort, Pr, Project, QuotaWindow, Reservation,
+    Run, RunOutcome, RunRole, Session, Worktree,
 };
 use tiller_core::state::caches::{WorktreeReading, landed_heads};
 use tiller_core::state::projects::meta;
 use tiller_core::state::publishes::published_head;
 use tiller_core::state::runs::{
-    EndRun, NewRun, Placement, SpawnChecks, Started, holder, lease_holder, live_session,
+    EndRun, NewRun, Placement, SpawnChecks, Started, holder, is_quota_floor_refusal, lease_holder,
+    live_session,
 };
 use tiller_core::state::{find, get, list, resolve_card};
 use tiller_core::{Applied, Ctx, Store};
@@ -117,6 +118,9 @@ pub struct Request {
     /// The harness to launch the role on (`claude` unless asked); G35 refuses
     /// one that cannot carry the guards.
     pub harness: String,
+    /// Start past the quota floor on the owner's answered "Start now anyway"
+    /// decision for this card.
+    pub past_quota_floor: bool,
 }
 
 /// The brief a spawn without `--brief-file` gives: the card.
@@ -281,6 +285,46 @@ pub(crate) fn local_host(store: &Store) -> Result<String> {
         .ok_or_else(|| SpawnError::Usage("this host is not initialized; run tiller init".into()))
 }
 
+/// A start the quota floor refused: holds the card until the weekly reset
+/// and opens one decision for the owner, then returns the refusal with that
+/// said. Any other error, and a refusal with no reset to wait for, come back
+/// as they are.
+pub(crate) fn hold_for_quota(
+    store: &mut Store,
+    ctx: &Ctx,
+    world: &World<'_>,
+    card: &Card,
+    role: RunRole,
+    error: SpawnError,
+) -> SpawnError {
+    let SpawnError::State(state) = &error else {
+        return error;
+    };
+    if !is_quota_floor_refusal(state) {
+        return error;
+    }
+    let Some(floor) = quota_floor(world.config, role) else {
+        return error;
+    };
+    let windows: Vec<QuotaWindow> =
+        list(store.conn(), "kind = 'weekly' ORDER BY label", &[]).unwrap_or_default();
+    let until = windows
+        .iter()
+        .filter(|window| window.percent_remaining.is_none_or(|left| left <= floor))
+        .filter_map(|window| window.resets_at)
+        .max();
+    let Some(until) = until else {
+        return error;
+    };
+    match store.quota_hold(ctx, &card.id, role, until, &state.to_string()) {
+        Ok(_) => SpawnError::Refused(format!(
+            "{}; the card is held until {until} and the owner has a decision to make",
+            state
+        )),
+        Err(_) => error,
+    }
+}
+
 /// Spawns one worker run. `key` is the spawn's idempotency key.
 pub fn spawn(
     store: &mut Store,
@@ -324,10 +368,13 @@ pub fn spawn(
                 disk_free_mb: world.disk_free_mb,
                 quota_floor_percent: quota_floor(world.config, request.role),
                 quota_max_age_minutes: world.config.quota.max_age_minutes,
+                past_quota_floor: request.past_quota_floor,
                 dispatch: resolved.payload.clone(),
             },
         },
-    )?;
+    );
+    let started = started
+        .map_err(|error| hold_for_quota(store, ctx, world, &card, request.role, error.into()))?;
     if started.replayed {
         return replay(store, started);
     }

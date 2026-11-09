@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::approvals::mark_stale;
-use super::attention::{NewAttention, open_attention, withdraw_attention};
+use super::attention::{NewAttention, open_attention, withdraw_attention, withdraw_quota_items};
 use super::outbox::{NewMessage, enqueue, live_orchestrator};
 use super::projects::local_host;
 use super::runs::{EndRun, end_run};
@@ -425,6 +425,26 @@ fn merge(mut base: Value, extra: Value) -> Value {
     base
 }
 
+/// Writes a hold on `card` and its `hold.set` event.
+pub(crate) fn insert_hold(
+    tx: &mut Tx<'_>,
+    card: &Card,
+    until: Timestamp,
+    reason: &str,
+) -> Result<Hold> {
+    let id = ids::new_ulid();
+    tx.conn().execute(
+        "INSERT INTO holds (id, card_id, until_at, reason, set_at, set_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, card.id, until, reason, tx.now(), tx.actor().to_string()],
+    )?;
+    tx.event(
+        NewEvent::new("hold", &id, "hold.set")
+            .card(&card.id)
+            .payload(json!({"until_at": until, "reason": reason})),
+    )?;
+    get(tx.conn(), "hold", &id)
+}
+
 pub(crate) fn release_hold(tx: &mut Tx<'_>, hold: &Hold, reason: HoldReleaseReason) -> Result<()> {
     tx.conn().execute(
         "UPDATE holds SET released_at = ?2, release_reason = ?3 WHERE id = ?1",
@@ -694,7 +714,11 @@ impl Store {
         self.write(ctx, "card.hold", None, |tx| {
             let card = resolve_card(tx.conn(), card)?;
             require_card_scope(tx.conn(), tx.actor(), &card.project_id, CardAction::Hold)?;
-            if let Some(hold) = find::<Hold>(tx.conn(), "card_id = ?1 AND released_at IS NULL", &[&card.id])? {
+            if let Some(hold) = find::<Hold>(
+                tx.conn(),
+                "card_id = ?1 AND released_at IS NULL",
+                &[&card.id],
+            )? {
                 if hold.until_at == until && hold.reason == reason {
                     return Ok(hold);
                 }
@@ -706,19 +730,13 @@ impl Store {
             }
             require_open(&card)?;
             if until <= tx.now() {
-                return Err(Error::refused("card", &card.display_id, format!("{until} is not in the future")));
+                return Err(Error::refused(
+                    "card",
+                    &card.display_id,
+                    format!("{until} is not in the future"),
+                ));
             }
-            let id = ids::new_ulid();
-            tx.conn().execute(
-                "INSERT INTO holds (id, card_id, until_at, reason, set_at, set_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![id, card.id, until, reason, tx.now(), tx.actor().to_string()],
-            )?;
-            tx.event(
-                NewEvent::new("hold", &id, "hold.set")
-                    .card(&card.id)
-                    .payload(json!({"until_at": until, "reason": reason})),
-            )?;
-            get(tx.conn(), "hold", &id)
+            insert_hold(tx, &card, until, reason)
         })
     }
 
@@ -755,6 +773,11 @@ impl Store {
                 ));
             }
             release_hold(tx, &hold, reason)?;
+            if reason == HoldReleaseReason::Due {
+                // The reset passed, so the quota question is moot; the
+                // re-ask below is the card's one open item.
+                withdraw_quota_items(tx, &card.id, "the hold's date passed")?;
+            }
             if reason == HoldReleaseReason::Due && card.state == CardState::Open {
                 open_attention(
                     tx,

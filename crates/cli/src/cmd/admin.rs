@@ -566,6 +566,38 @@ fn parse_value(raw: &str) -> toml::Value {
         .unwrap_or_else(|| toml::Value::String(raw.to_owned()))
 }
 
+/// A config key whose value is a credential: events and `config get` show
+/// `<set>` instead of it.
+fn is_secret_key(key: &str) -> bool {
+    key.ends_with("decider_key")
+}
+
+/// `value`, found at config key `path`, with every credential inside it
+/// replaced by `<set>`.
+fn shown_value(mut value: Value, path: &str) -> Value {
+    fn hide(value: &mut Value, path: &str) {
+        if is_secret_key(path) {
+            *value = json!("<set>");
+        } else if let Value::Object(map) = value {
+            for (key, child) in map.iter_mut() {
+                let path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                hide(child, &path);
+            }
+        }
+    }
+    hide(&mut value, path);
+    value
+}
+
+/// `config_json` with every credential replaced by `<set>`.
+fn shown_config_json(table: &toml::Table) -> Value {
+    shown_value(config_json(table), "")
+}
+
 fn config_json(table: &toml::Table) -> Value {
     serde_json::to_value(table).unwrap_or(Value::Null)
 }
@@ -593,7 +625,7 @@ pub(crate) fn set_config(
     }
     config_toml::set(&mut table, key, value.clone()).map_err(config_failure)?;
     config_toml::store(&config_file(app), &table).map_err(config_failure)?;
-    let recorded = serde_json::to_value(&value).unwrap_or(Value::Null);
+    let recorded = shown_value(serde_json::to_value(&value).unwrap_or(Value::Null), key);
     Ok(store.config_changed(&app.ctx(), key, recorded)?)
 }
 
@@ -630,7 +662,7 @@ pub fn config(app: &App, cmd: ConfigCmd) -> Done {
             forbid_fleet(app)?;
             let table = load_config(app)?;
             let data = match key {
-                None => json!({"config": config_json(&table)}),
+                None => json!({"config": shown_config_json(&table)}),
                 Some(key) => {
                     let value = get_path(&table, &key).ok_or_else(|| {
                         Failure::from(tiller_core::Error::NotFound {
@@ -639,7 +671,9 @@ pub fn config(app: &App, cmd: ConfigCmd) -> Done {
                             candidates: Vec::new(),
                         })
                     })?;
-                    json!({"key": key, "value": serde_json::to_value(value).unwrap_or(Value::Null)})
+                    let shown =
+                        shown_value(serde_json::to_value(value).unwrap_or(Value::Null), &key);
+                    json!({"key": key, "value": shown})
                 }
             };
             Ok(Outcome::read(data))
@@ -700,7 +734,10 @@ fn diff(app: &App, peer: &str) -> Done {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let ours = config_json(&table).as_object().cloned().unwrap_or_default();
+    let ours = shown_config_json(&table)
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
     let mut differences = Vec::new();
     flatten_diff("", &ours, &theirs, &mut differences);
     Ok(Outcome::read(json!({
@@ -765,5 +802,28 @@ pub fn owner(app: &App, cmd: OwnerCmd) -> Done {
                 replayed: false,
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_decider_key_is_hidden_alone_or_inside_its_table() {
+        let table: toml::Table = "[owner_guard]\ndecider_key = \"test-key\"\nthreshold = 0.5\n"
+            .parse()
+            .unwrap();
+        let whole = shown_config_json(&table).to_string();
+        assert!(
+            !whole.contains("test-key") && whole.contains("<set>"),
+            "{whole}"
+        );
+        let parent = get_path(&table, "owner_guard").unwrap();
+        let shown = shown_value(serde_json::to_value(parent).unwrap(), "owner_guard");
+        assert_eq!(shown["decider_key"], "<set>");
+        assert_eq!(shown["threshold"], 0.5);
+        let one = shown_value(json!("test-key"), "owner_guard.decider_key");
+        assert_eq!(one, "<set>");
     }
 }
