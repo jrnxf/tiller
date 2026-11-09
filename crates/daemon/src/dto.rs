@@ -1163,6 +1163,69 @@ pub struct ProjectRetirePreview {
     pub agents: Vec<ProjectAgent>,
 }
 
+/// One setting an orchestrator start would refuse (`protocol.md` 6.4).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SettingProblem {
+    /// The `config.toml` key: `checkouts.<id>`, `spawn.pool_root` or
+    /// `spawn.checkouts_root` (or the home or scratch key, which the board
+    /// does not set).
+    pub key: String,
+    /// `missing` (not in `config.toml`) or `invalid` (set, and refused).
+    pub kind: String,
+    /// What a start would say about it.
+    pub problem: String,
+}
+
+impl From<tiller_agents::spawn::settings::Problem> for SettingProblem {
+    fn from(problem: tiller_agents::spawn::settings::Problem) -> Self {
+        Self {
+            key: problem.key,
+            kind: match problem.kind {
+                tiller_agents::spawn::settings::Kind::Missing => "missing",
+                tiller_agents::spawn::settings::Kind::Invalid => "invalid",
+            }
+            .to_owned(),
+            problem: problem.problem,
+        }
+    }
+}
+
+/// `GET /api/v1/start-settings`: the host-level settings an orchestrator
+/// start reads, as this host's `config.toml` has them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct StartSettings {
+    /// `spawn.pool_root`; absent when unset.
+    pub pool_root: Option<String>,
+    /// `spawn.checkouts_root`; absent when unset.
+    pub checkouts_root: Option<String>,
+    /// Where each project's orchestrator home sits (`spawn.orchestrator_home`
+    /// or its default). Derived: the board shows it, and does not set it.
+    pub orchestrator_home: Option<String>,
+    /// The run scratch root (`spawn.scratch_root` or its default). Derived.
+    pub scratch_root: Option<String>,
+    /// What a start would refuse about the host-level settings. A project's
+    /// checkout is judged with the project.
+    pub problems: Vec<SettingProblem>,
+    /// Why `config.toml` could not be read; the rest is then absent.
+    pub config_error: Option<String>,
+}
+
+/// `POST /api/v1/config`: `tiller config set` for the settings an
+/// orchestrator start needs, and no other key.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetConfig {
+    pub idempotency_key: String,
+    /// Always refused with a peer label: a setting is written on the host
+    /// that owns it (`protocol.md` 7.4).
+    #[serde(default)]
+    pub host: Option<String>,
+    /// `checkouts.<project>`, `spawn.pool_root` or `spawn.checkouts_root`.
+    pub key: String,
+    /// A full path.
+    pub value: String,
+}
+
 /// `GET /api/v1/projects/{id}/setup`: what `tiller doctor`'s `merge_gates`
 /// line and `tiller config get checkouts.<id>` show for one of this host's
 /// projects.

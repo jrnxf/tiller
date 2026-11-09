@@ -1537,6 +1537,7 @@ impl OrchestratorStart for RecordingStarter {
             code: "stub_refused",
             message: "the stub starter refuses".into(),
             hint: None,
+            current: None,
         })
     }
 }

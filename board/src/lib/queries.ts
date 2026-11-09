@@ -20,6 +20,7 @@ import type {
   RunDetail,
   SessionView,
   SignalsResponse,
+  StartSettings,
   TimelineResponse,
 } from "./api-types.ts";
 
@@ -186,6 +187,12 @@ export const projectCheckoutQuery = (params: {
     ),
     staleTime: 0,
   });
+
+// The host-level settings an orchestrator start reads. A config change
+// refreshes it (lib/sse.ts).
+const startSettingsPath: QueryPath = "/api/v1/start-settings";
+export const startSettingsQuery = () =>
+  queryOptions({ ...readQuery<StartSettings>(startSettingsPath), staleTime: 0 });
 
 // The project detail's merge gate and checkout. A project event refreshes it,
 // since the hourly ruleset check moves the gate (lib/sse.ts).

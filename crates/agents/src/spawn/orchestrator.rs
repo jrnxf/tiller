@@ -28,7 +28,7 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use tiller_core::domain::{Effort, OutboxMessage, Project, Session};
@@ -40,6 +40,7 @@ use tiller_herdr::client::Herdr;
 use tiller_herdr::layout;
 
 use super::launch::{self, LaunchSpec, Roots};
+use super::settings;
 use super::{Result, SpawnError, World, local_host, relayout};
 use crate::control::{self, Waits};
 use crate::roles::Role;
@@ -399,70 +400,27 @@ fn existing(herdr: &dyn Herdr, live: Session, label: String) -> Applied<Orchestr
 /// home and the scratch root outside both roots, since the fragment's deny
 /// rules on them would win over its allow rules on the home and scratch.
 fn places(world: &World<'_>, home_root: &Path, project: &str) -> Result<Places> {
-    let config = world.config;
-    let named = |key: &str, path: Option<&Path>| -> Result<PathBuf> {
-        let path = path.ok_or_else(|| {
-            SpawnError::Config(format!(
-                "{key} is not set; tiller orchestrator start needs it"
-            ))
-        })?;
-        if !path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
-            return Err(SpawnError::Config(format!(
-                "{key} must be an absolute path without `..`, not {}",
-                path.display()
-            )));
-        }
-        // No `.` parts or trailing slash, so `starts_with` compares what the
-        // fragment will name.
-        Ok(path.components().collect())
-    };
-    let checkout = named(
-        &format!("checkouts.{project}"),
-        config.checkouts.get(project).map(PathBuf::as_path),
-    )?;
-    let pool = named("spawn.pool_root", config.spawn.pool_root.as_deref())?;
-    let checkouts = named(
-        "spawn.checkouts_root",
-        config.spawn.checkouts_root.as_deref(),
-    )?;
-    let home = named("spawn.orchestrator_home", Some(home_root))?.join(project);
-    let scratch = named("spawn.scratch_root", Some(world.scratch_root))?;
-    if !checkout.starts_with(&checkouts) {
-        return Err(SpawnError::Config(format!(
-            "checkouts.{project} ({}) is not under spawn.checkouts_root ({})",
-            checkout.display(),
-            checkouts.display()
-        )));
+    let (resolved, problems) =
+        settings::resolve(world.config, home_root, world.scratch_root, Some(project));
+    if let Some(first) = problems.into_iter().next() {
+        return Err(SpawnError::Config(first.problem));
     }
-    for (what, path) in [
-        ("the orchestrator home", &home),
-        ("spawn.scratch_root", &scratch),
-    ] {
-        for (key, root) in [
-            ("spawn.pool_root", &pool),
-            ("spawn.checkouts_root", &checkouts),
-        ] {
-            if path.starts_with(root) || root.starts_with(path) {
-                return Err(SpawnError::Config(format!(
-                    "{what} {} overlaps {key} ({})",
-                    path.display(),
-                    root.display()
-                )));
-            }
-        }
+    match resolved {
+        settings::Resolved {
+            checkout: Some(checkout),
+            home: Some(home),
+            pool: Some(pool),
+            checkouts: Some(checkouts),
+        } => Ok(Places {
+            checkout,
+            home,
+            pool,
+            checkouts,
+        }),
+        _ => Err(SpawnError::Config(
+            "the start settings did not resolve".into(),
+        )),
     }
-    if !checkout.is_dir() {
-        return Err(SpawnError::Config(format!(
-            "checkouts.{project} ({}) is not a directory",
-            checkout.display()
-        )));
-    }
-    Ok(Places {
-        checkout,
-        home,
-        pool,
-        checkouts,
-    })
 }
 
 impl Opened<'_> {

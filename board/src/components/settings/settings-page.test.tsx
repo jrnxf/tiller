@@ -336,3 +336,79 @@ test.each([
     );
   },
 );
+
+// The start settings of this host, served beside the rest.
+function serveSettings(owner: boolean) {
+  let pool: string | null = null;
+  const posts: Record<string, unknown>[] = [];
+  const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (path === "/api/v1/session") return new Response(JSON.stringify({ owner }));
+    if (path === "/api/v1/start-settings") {
+      return new Response(
+        JSON.stringify({
+          pool_root: pool,
+          checkouts_root: "/home/user/src",
+          orchestrator_home: "/home/user/.tiller/orchestrators",
+          scratch_root: "/home/user/.tiller/scratch",
+          problems: pool
+            ? []
+            : [{ key: "spawn.pool_root", kind: "missing", problem: "spawn.pool_root is not set" }],
+          config_error: null,
+        }),
+      );
+    }
+    if (path === "/api/v1/config" && init?.method === "POST") {
+      const body = JSON.parse(String(init.body));
+      posts.push(body);
+      if (body.value === "relative") {
+        const error = { code: "usage", message: "spawn.pool_root must be absolute, not relative" };
+        return new Response(JSON.stringify({ ok: false, error }), { status: 400 });
+      }
+      pool = body.value;
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          replayed: false,
+          events: [],
+          receipt: { recorded_at: "2026-11-05T12:00:00Z", outbox_id: null, approval_id: null },
+          data: { key: body.key, value: body.value, changed: true },
+        }),
+      );
+    }
+    if (path === "/api/v1/health" || path === "/api/v1/machines") {
+      return new Response(JSON.stringify(fixtureResource(path, "federated")));
+    }
+    return new Response("{}", { status: 404 });
+  });
+  vi.stubGlobal("fetch", fetch);
+  return posts;
+}
+
+test("the owner sets a start folder from Settings and a refusal says why", async () => {
+  const posts = serveSettings(true);
+  renderSettings();
+  const section = within(await screen.findByRole("region", { name: "Starting agents" }));
+  const pool = within(section.getByTestId("setting-spawn.pool_root"));
+  expect(pool.getByText("spawn.pool_root is not set")).toBeTruthy();
+  // The roots follow from these two, so they are shown and cannot be edited.
+  expect(section.getByText("/home/user/.tiller/scratch")).toBeTruthy();
+
+  fireEvent.change(pool.getByRole("textbox"), { target: { value: "relative" } });
+  fireEvent.click(pool.getByRole("button", { name: "Save" }));
+  expect((await pool.findByRole("alert")).textContent).toContain("must be absolute");
+
+  fireEvent.change(pool.getByRole("textbox"), { target: { value: "/home/user/pool" } });
+  fireEvent.click(pool.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(pool.queryByText("spawn.pool_root is not set")).toBeNull());
+  expect(posts.map((post) => post.value)).toEqual(["relative", "/home/user/pool"]);
+});
+
+test("a browser that is not the owner reads the start folders and cannot change them", async () => {
+  serveSettings(false);
+  renderSettings();
+  const section = within(await screen.findByRole("region", { name: "Starting agents" }));
+  expect(section.getByText("/home/user/src")).toBeTruthy();
+  expect(section.getByText("Not set")).toBeTruthy();
+  expect(section.queryAllByRole("textbox")).toHaveLength(0);
+});

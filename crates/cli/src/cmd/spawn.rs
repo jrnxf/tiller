@@ -404,8 +404,77 @@ impl tiller_daemon::api::OrchestratorStart for BoardStart {
                         notes,
                     })),
                 },
+                // A start returns the first setting it finds wrong; the board
+                // shows every one.
+                error @ SpawnError::Config(_) => {
+                    let mut refusal = refused(failure(error));
+                    let problems = tiller_agents::spawn::settings::problems(
+                        &tools.config,
+                        &homes,
+                        tools.scratch_root(),
+                        Some(project),
+                    );
+                    // Only a refusal that names one of the listed settings is
+                    // about them; any other config error stays as it is.
+                    if let StartError::Refused {
+                        current, message, ..
+                    } = &mut refusal
+                        && problems
+                            .iter()
+                            .any(|problem| message.contains(&problem.key))
+                    {
+                        *current = Some(json!({ "settings": problems }));
+                    }
+                    refusal
+                }
                 error => refused(failure(error)),
             },
+        )
+    }
+
+    fn settings(&self) -> tiller_daemon::dto::StartSettings {
+        let mut settings = tiller_daemon::dto::StartSettings {
+            pool_root: None,
+            checkouts_root: None,
+            orchestrator_home: None,
+            scratch_root: None,
+            problems: Vec::new(),
+            config_error: None,
+        };
+        match Tools::load(&self.app).and_then(|tools| {
+            let homes = orchestrator_homes(&tools)?;
+            Ok((tools, homes))
+        }) {
+            Ok((tools, homes)) => {
+                let shown = |path: &Path| path.display().to_string();
+                settings.pool_root = tools.config.spawn.pool_root.as_deref().map(shown);
+                settings.checkouts_root = tools.config.spawn.checkouts_root.as_deref().map(shown);
+                settings.orchestrator_home = Some(shown(&homes));
+                settings.scratch_root = Some(shown(tools.scratch_root()));
+                settings.problems = tiller_agents::spawn::settings::problems(
+                    &tools.config,
+                    &homes,
+                    tools.scratch_root(),
+                    None,
+                )
+                .into_iter()
+                .map(Into::into)
+                .collect();
+            }
+            Err(failure) => settings.config_error = Some(failure.message.clone()),
+        }
+        settings
+    }
+
+    fn check_setting(&self, key: &str, value: &str) -> Result<Vec<String>, String> {
+        let tools = Tools::load(&self.app).map_err(|failure| failure.message.clone())?;
+        let homes = orchestrator_homes(&tools).map_err(|failure| failure.message.clone())?;
+        tiller_agents::spawn::settings::check(
+            &tools.config,
+            &homes,
+            tools.scratch_root(),
+            key,
+            value,
         )
     }
 
@@ -441,6 +510,7 @@ fn refused(failure: Failure) -> StartError {
         code: failure.code,
         message: failure.message.clone(),
         hint: failure.hint.clone(),
+        current: None,
     }
 }
 

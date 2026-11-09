@@ -481,6 +481,29 @@ export interface CheckoutCheck {
   problem: string | null;
 }
 
+// One setting an orchestrator start would refuse (protocol.md section 6.4).
+export interface SettingProblem {
+  // `checkouts.<id>`, `spawn.pool_root` or `spawn.checkouts_root`.
+  key: string;
+  // `missing`: not in config.toml. `invalid`: set, and refused.
+  kind: "missing" | "invalid";
+  // What a start would say about it.
+  problem: string;
+}
+
+// `GET /api/v1/start-settings`: the host-level settings a start reads.
+export interface StartSettings {
+  pool_root: string | null;
+  checkouts_root: string | null;
+  // Derived from the two roots and read-only: the orchestrator home and the
+  // scratch folder.
+  orchestrator_home: string | null;
+  scratch_root: string | null;
+  problems: SettingProblem[];
+  // Set when config.toml cannot be read at all.
+  config_error: string | null;
+}
+
 // `GET /api/v1/projects/{id}/retire`: whether an archive applies now, and the
 // running agents it can stop first.
 export interface ProjectRetirePreview {

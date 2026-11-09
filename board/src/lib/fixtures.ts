@@ -66,7 +66,8 @@ export type Scenario =
   | "health-bad"
   | "live"
   | "federated"
-  | "stale-sessions";
+  | "stale-sessions"
+  | "setup-needed";
 
 // The scenarios with paired peers. `stale-sessions` has them so a peer's older
 // sessions show on this host's board.
@@ -88,6 +89,7 @@ export const SCENARIOS: readonly Scenario[] = [
   "live",
   "federated",
   "stale-sessions",
+  "setup-needed",
 ];
 
 const WEEKLY_FLOOR_PERCENT = 3;
@@ -347,6 +349,9 @@ function projectsFor(scenario: Scenario, now: number = Date.now()): ProjectsResp
     };
   }
   if (scenario === "degraded") return DEGRADED_PROJECTS;
+  if (scenario === "setup-needed") {
+    return { projects: [...DEFAULT_PROJECTS.projects, launched("kiln", "direct-push", 0, 0)] };
+  }
   return scenario === "busy" ? BUSY_PROJECTS : DEFAULT_PROJECTS;
 }
 
@@ -883,6 +888,11 @@ function workerFor(row: BoardRow, now: number, index: number): AgentRow {
 // read.
 const UNSTARTED = new Set(["kiln"]);
 const startedOrchestrators = new Set<string>();
+
+// Whether this host's project has an orchestrator running now.
+export function orchestratorLive(projectId: string): boolean {
+  return !UNSTARTED.has(projectId) || startedOrchestrators.has(projectId);
+}
 
 // Starts the project's orchestrator, and says whether one was already live.
 // A peer's project is its own: this host's `gamma` running says nothing of
