@@ -41,6 +41,10 @@ pub struct Spawn {
     /// The harness to launch on; G35 refuses one without the guards
     #[arg(long, default_value = "claude")]
     pub harness: String,
+    /// Start below the quota floor, on the owner's answered "Start now
+    /// anyway" decision for the card
+    #[arg(long)]
+    pub past_quota_floor: bool,
     #[command(flatten)]
     pub key: KeyArg,
 }
@@ -251,6 +255,7 @@ pub fn spawn(app: &App, args: Spawn) -> Done {
         "brief": brief,
         "promote": args.promote,
         "harness": args.harness,
+        "past_quota_floor": args.past_quota_floor,
     });
     let keyed = app.key(&store, "run.start", &normalized, &args.key.key)?;
     let asked = args.model.zip(args.effort);
@@ -265,6 +270,7 @@ pub fn spawn(app: &App, args: Spawn) -> Done {
                 asked,
                 brief,
                 harness: args.harness,
+                past_quota_floor: args.past_quota_floor,
             },
         )
     } else {
@@ -279,6 +285,7 @@ pub fn spawn(app: &App, args: Spawn) -> Done {
                 asked,
                 brief,
                 harness: args.harness,
+                past_quota_floor: args.past_quota_floor,
             },
         )
     }

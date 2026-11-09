@@ -337,12 +337,15 @@ pub fn attention_item(store: &Store, item: &Attention) -> Result<AttentionItem> 
     })
 }
 
-impl From<CoreOwnerAction> for OwnerAction {
-    fn from(action: CoreOwnerAction) -> Self {
+impl OwnerAction {
+    /// The action as the board shows it. A quota start is applied when the
+    /// owner answers; the board shows it as a plain option.
+    fn shown(action: CoreOwnerAction) -> Option<Self> {
         match action {
             CoreOwnerAction::ProjectCapacity { project, from, to } => {
-                Self::ProjectCapacity { project, from, to }
+                Some(Self::ProjectCapacity { project, from, to })
             }
+            CoreOwnerAction::QuotaStart { .. } => None,
         }
     }
 }
@@ -371,7 +374,7 @@ fn attention_option(option: &Value) -> AttentionOption {
                 .get("recommended")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
-            action: CoreOwnerAction::of_option(other).map(OwnerAction::from),
+            action: CoreOwnerAction::of_option(other).and_then(OwnerAction::shown),
         },
     }
 }

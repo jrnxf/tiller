@@ -8,6 +8,7 @@ use tiller_core::domain::{
     OutboxMessage, OutboxState, RunRole,
 };
 use tiller_core::state::asks::{NewAsk, Resolution};
+use tiller_core::state::attention::NewAttention;
 use tiller_core::state::cards::NewCard;
 use tiller_core::state::projects::{Init, NewProject};
 use tiller_core::state::runs::{NewOrchestrator, NewRun, SpawnChecks};
@@ -730,6 +731,7 @@ fn host_config_reads_config_toml_and_defaults_safely() {
         HostConfig {
             stop_hook_mode: StopHookMode::BlockOnce,
             intake_source: IntakeSource::Transcript,
+            ..HostConfig::default()
         }
     );
     std::fs::write(home.path().join("config.toml"), "stop_hook_mode = [").unwrap();
@@ -740,4 +742,175 @@ fn host_config_reads_config_toml_and_defaults_safely() {
 fn line_tags_take_only_card_tags_that_start_a_line() {
     let reply = "[alpha-1] one\n  [beta-22] two\n[chat] three\n[alpha-01] padded\n[Alpha-3] upper\nsee [alpha-4]\n[a-5] short\n- [alpha-6] bullet\n```\n[alpha-999] an example\n```\n[alpha-7]";
     assert_eq!(line_tags(reply), ["alpha-1", "beta-22", "alpha-7"]);
+}
+
+const ASKING: &str = "The login page is built. Do you want me to start the release now?";
+
+fn guard_hooks(endpoint: Option<String>, key: Option<&str>) -> Hooks {
+    Hooks {
+        config: HostConfig {
+            owner_guard: OwnerGuardConfig {
+                decider_key: key.map(str::to_owned),
+                endpoint,
+                ..OwnerGuardConfig::default()
+            },
+            ..HostConfig::default()
+        },
+    }
+}
+
+fn open_decision(world: &mut World) {
+    world
+        .store
+        .attention_open(
+            &Ctx::new(Actor::Session(world.orchestrator.clone())),
+            None,
+            NewAttention {
+                card: "alpha-1".into(),
+                question: "Start the release now?".into(),
+                ..NewAttention::default()
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_turn_that_asks_the_owner_without_an_item_is_blocked_once() {
+    let mut world = World::new();
+    let hooks = Hooks::default();
+    world.prompt("p1", "how is the login page?");
+
+    let (payload, output) = world.stop(&hooks, ASKING, false);
+    assert_eq!(payload["asks_owner"], true);
+    assert_eq!(payload["opened_attention"], false);
+    let output = output.unwrap();
+    assert_eq!(output["decision"], "block");
+    let reason = output["reason"].as_str().unwrap();
+    assert!(reason.contains("tiller attention open"), "{reason}");
+    assert!(reason.contains("end the turn again"), "{reason}");
+
+    let (_, output) = world.stop(&hooks, ASKING, true);
+    assert_eq!(
+        output, None,
+        "a turn already blocked once is never blocked again"
+    );
+
+    let (payload, output) = world.stop(&hooks, "The login page is built.", false);
+    assert_eq!(payload["asks_owner"], false);
+    assert_eq!(output, None);
+
+    open_decision(&mut world);
+    let (payload, output) = world.stop(&hooks, ASKING, false);
+    assert_eq!(payload["opened_attention"], true);
+    assert_eq!(output, None, "an item opened this turn satisfies the guard");
+
+    world.prompt("p2", "and the signup page?");
+    let (_, output) = world.stop(&hooks, ASKING, false);
+    assert!(output.is_some(), "an item from an earlier turn does not");
+}
+
+#[test]
+fn the_owner_guard_can_be_turned_off_and_skips_workers() {
+    let world = World::new();
+    world.prompt("p1", "how is the login page?");
+    let disabled = Hooks {
+        config: HostConfig {
+            owner_guard: OwnerGuardConfig {
+                enabled: false,
+                ..OwnerGuardConfig::default()
+            },
+            ..HostConfig::default()
+        },
+    };
+    assert_eq!(world.stop(&disabled, ASKING, false).1, None);
+    let off = Hooks {
+        config: HostConfig {
+            stop_hook_mode: StopHookMode::Off,
+            ..HostConfig::default()
+        },
+    };
+    assert_eq!(world.stop(&off, ASKING, false).1, None);
+    let (_, output) = world.hook_in(
+        Some(world.worker.as_str()),
+        &Hooks::default(),
+        "Stop",
+        json!({"session_id": "claude-worker", "last_assistant_message": ASKING, "stop_hook_active": false}),
+    );
+    assert_eq!(output, None);
+}
+
+/// Serves one canned decision reply on loopback; returns the endpoint.
+fn decider_endpoint(probability: f64) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buffer = [0u8; 8192];
+            let _ = stream.read(&mut buffer);
+            let body = json!({"answers": {"needs_owner": {"type": "noul", "noul": probability}}})
+                .to_string();
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    format!("http://127.0.0.1:{port}/v1/decisions")
+}
+
+#[test]
+fn the_decision_model_catches_a_soft_offer_the_rule_misses() {
+    let world = World::new();
+    world.prompt("p1", "how is the login page?");
+    let soft = "The login page is built. The release can go out any time.";
+
+    let rule_only = guard_hooks(None, None);
+    assert_eq!(world.stop(&rule_only, soft, false).1, None);
+
+    let yes = guard_hooks(Some(decider_endpoint(0.4)), Some("test-key"));
+    let output = world.stop(&yes, soft, false).1.unwrap();
+    assert_eq!(output["decision"], "block");
+
+    let no = guard_hooks(Some(decider_endpoint(0.1)), Some("test-key"));
+    assert_eq!(world.stop(&no, soft, false).1, None);
+
+    let down = guard_hooks(
+        Some("http://127.0.0.1:1/v1/decisions".into()),
+        Some("test-key"),
+    );
+    assert_eq!(
+        world.stop(&down, soft, false).1,
+        None,
+        "a model error keeps the rule's answer"
+    );
+    assert!(world.stop(&down, ASKING, false).1.is_some());
+}
+
+#[test]
+fn the_owner_guard_reads_its_settings_and_hides_the_key() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[owner_guard]\nenabled = false\ndecider_key = \"test-key\"\nthreshold = 0.5\nendpoint = \"http://127.0.0.1:9/x\"\n",
+    )
+    .unwrap();
+    let guard = HostConfig::load(home.path()).owner_guard;
+    assert!(!guard.enabled);
+    assert_eq!(guard.decider_key.as_deref(), Some("test-key"));
+    assert_eq!(guard.threshold, 0.5);
+    assert_eq!(guard.endpoint.as_deref(), Some("http://127.0.0.1:9/x"));
+    assert!(!format!("{guard:?}").contains("test-key"));
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[owner_guard]\nthreshold = 7\n",
+    )
+    .unwrap();
+    assert_eq!(
+        HostConfig::load(home.path()).owner_guard.threshold,
+        owner_guard::DEFAULT_THRESHOLD
+    );
 }

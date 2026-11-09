@@ -505,6 +505,7 @@ impl<'a> Replay<'a> {
                     asked,
                     brief: None,
                     harness: "claude".into(),
+                    past_quota_floor: false,
                 };
                 let spawned = spawn::spawn(store, ctx, None, &world, request)?;
                 let run = match spawned.value {

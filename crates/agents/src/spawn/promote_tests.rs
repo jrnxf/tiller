@@ -1,5 +1,6 @@
 //! P07: a scout is promoted to a ship run in its own worktree.
 
+use tiller_core::Timestamp;
 use tiller_core::domain::{AttentionKind, CardKind};
 use tiller_core::state::attention::NewAttention;
 use tiller_herdr::testing::owner;
@@ -10,6 +11,10 @@ use super::*;
 
 impl Rig {
     fn try_promote(&mut self, card: &Card) -> Result<Outcome> {
+        self.try_promote_past(card, false)
+    }
+
+    fn try_promote_past(&mut self, card: &Card, past_quota_floor: bool) -> Result<Outcome> {
         let ctx = self.orchestrator();
         let world = world!(self);
         promote::promote(
@@ -22,6 +27,7 @@ impl Rig {
                 asked: None,
                 brief: None,
                 harness: "claude".into(),
+                past_quota_floor,
             },
         )
         .map(|applied| applied.value)
@@ -169,4 +175,27 @@ fn promote_refuses_a_worktree_already_returned() {
     let error = rig.try_promote(&card).unwrap_err();
     assert!(refusal(&error).contains("already returned"), "{error}");
     assert_eq!(rig.card_row(&card).kind, CardKind::Scout);
+}
+
+#[test]
+fn promote_starts_past_the_quota_floor_on_the_owners_answer() {
+    let mut rig = Rig::with_config("account_floor_percent = 3.0\nhost_share_percent = 50.0\n");
+    let (card, scout) = reported_scout(&mut rig);
+    rig.config.quota.enabled = true;
+    rig.quota_resetting(9.0, Some(Timestamp::now().plus_minutes(60)));
+
+    let error = rig.try_promote(&card).unwrap_err();
+    assert!(refusal(&error).contains("held until"), "{error}");
+    let error = rig.try_promote_past(&card, true).unwrap_err();
+    assert!(
+        refusal(&error).contains("answer it before promoting"),
+        "{error}"
+    );
+
+    rig.owner_answers(&card, "Start now anyway");
+    let Outcome::Spawned(builder) = rig.try_promote_past(&card, true).unwrap() else {
+        panic!("expected a new run");
+    };
+    assert_eq!(builder.run.role, RunRole::Builder);
+    assert_eq!(builder.worktree, scout.worktree);
 }

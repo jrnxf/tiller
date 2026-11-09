@@ -18,6 +18,9 @@ use tiller_core::state::{find, get, list};
 use tiller_core::{Actor, Ctx, Store, ids};
 use tiller_observe::hooks::{HookInput, Intake, Reply};
 
+pub mod owner_guard;
+use owner_guard::Decider;
+
 /// The host config value `stop_hook_mode` (`protocol.md` 2.5).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StopHookMode {
@@ -40,11 +43,59 @@ pub enum IntakeSource {
     Transcript,
 }
 
-/// The two host config values intake reads from `config.toml`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// The `owner_guard.*` host config values (`protocol.md` 2.5).
+#[derive(Clone, PartialEq)]
+pub struct OwnerGuardConfig {
+    /// `owner_guard.enabled`: whether an orchestrator stop that asks the owner
+    /// without an attention item is blocked once. On by default.
+    pub enabled: bool,
+    /// `owner_guard.decider_key`, or `PERPLEXITY_API_KEY` when unset. With no
+    /// key the guard is rule-only and nothing leaves this host.
+    pub decider_key: Option<String>,
+    /// `owner_guard.threshold`: the probability at or above which the model's
+    /// answer counts as yes.
+    pub threshold: f64,
+    /// `owner_guard.endpoint`: another decision endpoint (https, or loopback
+    /// http), for a proxy or a test.
+    pub endpoint: Option<String>,
+}
+
+impl Default for OwnerGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            decider_key: None,
+            threshold: owner_guard::DEFAULT_THRESHOLD,
+            endpoint: None,
+        }
+    }
+}
+
+// The key must never reach a log line or a panic message.
+impl std::fmt::Debug for OwnerGuardConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnerGuardConfig")
+            .field("enabled", &self.enabled)
+            .field("decider_key", &self.decider_key.as_ref().map(|_| "<set>"))
+            .field("threshold", &self.threshold)
+            .field("endpoint", &self.endpoint)
+            .finish()
+    }
+}
+
+impl OwnerGuardConfig {
+    /// The model call, or `None` when there is no usable key or endpoint.
+    fn decider(&self) -> Option<Decider> {
+        Decider::new(self.endpoint.as_deref(), self.decider_key.as_deref()?)
+    }
+}
+
+/// The host config values intake reads from `config.toml`.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct HostConfig {
     pub stop_hook_mode: StopHookMode,
     pub intake_source: IntakeSource,
+    pub owner_guard: OwnerGuardConfig,
 }
 
 impl HostConfig {
@@ -57,7 +108,31 @@ impl HostConfig {
             .and_then(|text| text.parse::<toml::Table>().ok())
             .unwrap_or_default();
         let value = |key: &str| table.get(key).and_then(toml::Value::as_str);
+        let guard = table.get("owner_guard").and_then(toml::Value::as_table);
+        let guard_value = |key: &str| guard.and_then(|guard| guard.get(key));
+        let env_key = std::env::var("PERPLEXITY_API_KEY").ok();
         Self {
+            owner_guard: OwnerGuardConfig {
+                enabled: guard_value("enabled")
+                    .and_then(toml::Value::as_bool)
+                    .unwrap_or(true),
+                decider_key: guard_value("decider_key")
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_owned)
+                    .or(env_key)
+                    .filter(|key| !key.trim().is_empty()),
+                threshold: guard_value("threshold")
+                    .and_then(|value| {
+                        value
+                            .as_float()
+                            .or_else(|| value.as_integer().map(|n| n as f64))
+                    })
+                    .filter(|t| (0.0..=1.0).contains(t))
+                    .unwrap_or(owner_guard::DEFAULT_THRESHOLD),
+                endpoint: guard_value("endpoint")
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_owned),
+            },
             stop_hook_mode: match value("stop_hook_mode") {
                 Some("block-once") => StopHookMode::BlockOnce,
                 Some("off") => StopHookMode::Off,
@@ -72,7 +147,7 @@ impl HostConfig {
 }
 
 /// Intake as `tiller hook` runs it.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Hooks {
     pub config: HostConfig,
 }
@@ -165,15 +240,57 @@ impl Intake for Hooks {
             .unwrap_or("");
         let check = stop_check(store, session, reply)?;
         let active = input.extra.get("stop_hook_active").and_then(Value::as_bool) == Some(true);
-        let output = (self.config.stop_hook_mode == StopHookMode::BlockOnce
+        let mut payload = check.payload();
+        let mut output = (self.config.stop_hook_mode == StopHookMode::BlockOnce
             && check.would_block()
             && !active)
             .then(|| json!({"decision": "block", "reason": check.reason()}));
-        Ok(Reply {
-            payload: check.payload(),
-            output,
-        })
+        // The owner guard blocks a turn at most once, and never one the
+        // intake check already blocked.
+        let guard = &self.config.owner_guard;
+        if guard.enabled && !active {
+            let opened = opened_attention_this_turn(store, session)?;
+            let asks = !opened
+                && owner_guard::asks_owner(reply, guard.decider().as_ref(), guard.threshold);
+            payload.insert("asks_owner".into(), json!(asks));
+            payload.insert("opened_attention".into(), json!(opened));
+            if asks && output.is_none() {
+                output = Some(json!({"decision": "block", "reason": OWNER_GUARD_REASON}));
+            }
+        }
+        Ok(Reply { payload, output })
     }
+}
+
+/// What an orchestrator reads when its last message asks the owner but it
+/// opened no attention item.
+const OWNER_GUARD_REASON: &str = "tiller: your last message seems to ask the owner for something, but you opened no attention item this turn. If it does, open one now: tiller attention open <card> --kind decision --question \"...\" --options '[...]'. If it does not ask the owner, end the turn again.";
+
+/// How far back an attention item counts when no prompt marks the turn.
+const UNKNOWN_TURN_MINUTES: i64 = 10;
+
+/// Whether this session opened an attention item since the turn began: the
+/// last prompt or wake-up line this session saw.
+fn opened_attention_this_turn(store: &Store, session: &Session) -> tiller_core::Result<bool> {
+    let turn_start: Option<String> = store.conn().query_row(
+        "SELECT MAX(observed_at) FROM observations WHERE session_id = ?1 AND event IN ('UserPromptSubmit', 'wake')",
+        [&session.id],
+        |row| row.get(0),
+    )?;
+    // With no prompt on record the turn's start is unknown: look back a
+    // bounded time, so an old item never silences the guard for good.
+    let since = match turn_start {
+        Some(at) => at,
+        None => tiller_core::Timestamp::now()
+            .plus_minutes(-UNKNOWN_TURN_MINUTES)
+            .to_string(),
+    };
+    let opened: i64 = store.conn().query_row(
+        "SELECT COUNT(*) FROM attention WHERE opened_by_session_id = ?1 AND opened_at >= ?2",
+        rusqlite::params![&session.id, since],
+        |row| row.get(0),
+    )?;
+    Ok(opened > 0)
 }
 
 /// The idempotency key of a typed prompt (`protocol.md` 2.2): the hook's

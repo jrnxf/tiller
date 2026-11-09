@@ -45,14 +45,16 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::Value;
 use tiller_core::domain::{
-    Artifact, Card, CardKind, CheckPlan, Delivery, Effort, Pr, Project, Reservation, Run,
+    Artifact, Card, CardKind, CheckPlan, Delivery, Effort, Hold, Pr, Project, Reservation, Run,
     RunOutcome, RunRole, Session, Worktree,
 };
+use tiller_core::state::attention::QUOTA_HOLD_REASON;
 use tiller_core::state::caches::{WorktreeReading, landed_heads};
 use tiller_core::state::projects::meta;
 use tiller_core::state::publishes::published_head;
 use tiller_core::state::runs::{
-    EndRun, NewRun, Placement, SpawnChecks, Started, holder, lease_holder, live_session,
+    EndRun, NewRun, Placement, SpawnChecks, Started, holder, is_quota_floor_refusal, lease_holder,
+    live_session, quota_floor_reset,
 };
 use tiller_core::state::{find, get, list, resolve_card};
 use tiller_core::{Applied, Ctx, Store};
@@ -117,6 +119,9 @@ pub struct Request {
     /// The harness to launch the role on (`claude` unless asked); G35 refuses
     /// one that cannot carry the guards.
     pub harness: String,
+    /// Start past the quota floor on the owner's answered "Start now anyway"
+    /// decision for this card.
+    pub past_quota_floor: bool,
 }
 
 /// The brief a spawn without `--brief-file` gives: the card.
@@ -281,6 +286,56 @@ pub(crate) fn local_host(store: &Store) -> Result<String> {
         .ok_or_else(|| SpawnError::Usage("this host is not initialized; run tiller init".into()))
 }
 
+/// A start the quota floor refused: holds the card until the weekly reset
+/// and opens one decision for the owner, then returns the refusal with that
+/// said. Any other error, and a refusal with no reset to wait for, come back
+/// as they are, and so does a refusal no owner answer could lift. The reset is
+/// the one the standing floor `checks` were held to; the text names the hold
+/// the card has.
+pub(crate) fn hold_for_quota(
+    store: &mut Store,
+    ctx: &Ctx,
+    card: &Card,
+    role: RunRole,
+    checks: &SpawnChecks,
+    error: SpawnError,
+) -> SpawnError {
+    let SpawnError::State(state) = &error else {
+        return error;
+    };
+    if !is_quota_floor_refusal(state) {
+        return error;
+    }
+    let Ok(Some(until)) = quota_floor_reset(store.conn(), checks, ctx.now) else {
+        return error;
+    };
+    let Ok(item) = store.quota_hold(ctx, &card.id, role, until, &state.to_string()) else {
+        return error;
+    };
+    let hold: Option<Hold> = find(
+        store.conn(),
+        "card_id = ?1 AND released_at IS NULL",
+        &[&card.id],
+    )
+    .unwrap_or_default();
+    let held = match hold {
+        Some(hold) if hold.reason == QUOTA_HOLD_REASON => {
+            format!("the card is held until {}", hold.until_at)
+        }
+        Some(hold) => format!(
+            "the card already has another hold, until {} ({})",
+            hold.until_at, hold.reason
+        ),
+        None => "the card is not held".to_owned(),
+    };
+    let owner = if item.value.answered_at.is_some() {
+        "the owner chose to wait for the reset"
+    } else {
+        "the owner has a decision to make"
+    };
+    SpawnError::Refused(format!("{state}; {held} and {owner}"))
+}
+
 /// Spawns one worker run. `key` is the spawn's idempotency key.
 pub fn spawn(
     store: &mut Store,
@@ -305,6 +360,14 @@ pub fn spawn(
     let asked = request.asked.as_ref().map(|(m, e)| (m.as_str(), *e));
     let resolved = dispatch::resolve(&world.config.dispatch, &card, asked, ctx.actor.is_owner())?;
 
+    let checks = SpawnChecks {
+        ram_free_mb: world.ram_free_mb,
+        disk_free_mb: world.disk_free_mb,
+        quota_floor_percent: quota_floor(world.config, request.role),
+        quota_max_age_minutes: world.config.quota.max_age_minutes,
+        past_quota_floor: request.past_quota_floor,
+        dispatch: resolved.payload.clone(),
+    };
     let started = store.run_start(
         ctx,
         key,
@@ -319,15 +382,11 @@ pub fn spawn(
             base_branch: None,
             base_sha: None,
             config_hash: None,
-            checks: SpawnChecks {
-                ram_free_mb: world.ram_free_mb,
-                disk_free_mb: world.disk_free_mb,
-                quota_floor_percent: quota_floor(world.config, request.role),
-                quota_max_age_minutes: world.config.quota.max_age_minutes,
-                dispatch: resolved.payload.clone(),
-            },
+            checks: checks.clone(),
         },
-    )?;
+    );
+    let started = started
+        .map_err(|error| hold_for_quota(store, ctx, &card, request.role, &checks, error.into()))?;
     if started.replayed {
         return replay(store, started);
     }

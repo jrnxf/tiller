@@ -5,8 +5,8 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::approvals::active_away;
-use super::attention::withdraw_attention;
+use super::approvals::{AwayContract, active_away};
+use super::attention::{quota_start_decision, withdraw_attention};
 use super::cards::{landed_evidence, new_card_note};
 use super::outbox::{NewMessage, enqueue, live_orchestrator};
 use super::projects::{local_host_id, require_daemon};
@@ -29,8 +29,21 @@ pub struct SpawnChecks {
     pub quota_floor_percent: Option<f64>,
     /// How old a quota reading may be before the check fails closed.
     pub quota_max_age_minutes: i64,
+    /// Start past the quota floor on the owner's answered decision. The
+    /// decision is looked up and used inside the `run.start` transaction, so
+    /// one answer starts one run; the standing floor is skipped (an away
+    /// contract's still binds) and the item is recorded in the `run.started`
+    /// payload.
+    pub past_quota_floor: bool,
     /// The dispatch rule that resolved the model and effort (T4.2).
     pub dispatch: Value,
+}
+
+impl SpawnChecks {
+    /// The standing quota floor, skipped past the owner's decision.
+    fn standing_floor(&self) -> Option<f64> {
+        self.quota_floor_percent.filter(|_| !self.past_quota_floor)
+    }
 }
 
 /// A run to start.
@@ -578,7 +591,14 @@ fn relaunch_in(tx: &mut Tx<'_>, run: &str, relaunch: &Relaunch) -> Result<Relaun
         }
         let host: Host = get(tx.conn(), "host", &run.host_id)?;
         let checks = match &relaunch.checks {
-            Some(checks) => Some(check_spawn(tx.conn(), &host, &project, checks, tx.now())?),
+            Some(checks) => Some(check_spawn(
+                tx.conn(),
+                &host,
+                &project,
+                checks,
+                None,
+                tx.now(),
+            )?),
             None => {
                 check_capacity(tx.conn(), &host, &project)?;
                 check_spawn_rate(tx.conn(), &host, &project, tx.now())?;
@@ -651,6 +671,78 @@ fn relaunch_in(tx: &mut Tx<'_>, run: &str, relaunch: &Relaunch) -> Result<Relaun
         session,
         ended_session,
     })
+}
+
+/// The refusal text of a weekly window at or under the quota floor.
+fn quota_floor_fact(left: Option<f64>, floor: f64) -> String {
+    let left = left.map_or_else(|| "unknown".to_owned(), |left| left.to_string());
+    format!("{left} percent left is at or under the {floor} percent floor")
+}
+
+/// The quota floor a start is held to: the standing floor, unless the
+/// owner's decision skips it, and an away contract's floor when stricter.
+fn effective_quota_floor(standing: Option<f64>, away: Option<&AwayContract>) -> Option<f64> {
+    match away.and_then(|away| away.quota_floor_percent) {
+        Some(floor) => Some(standing.map_or(floor, |standing| standing.max(floor))),
+        None => standing,
+    }
+}
+
+/// Whether a weekly window is at or under `floor`; an unknown reading is.
+fn at_or_under(window: &QuotaWindow, floor: f64) -> bool {
+    window.percent_remaining.is_none_or(|left| left <= floor)
+}
+
+/// The latest reset among the weekly windows at or under the standing floor
+/// `checks` are held to: the reset a refused start waits for. `None` when the
+/// standing floor refuses nothing, and when an away contract's floor would
+/// refuse the start past it too, since no owner answer lifts that floor.
+pub fn quota_floor_reset(
+    conn: &Connection,
+    checks: &SpawnChecks,
+    now: Timestamp,
+) -> Result<Option<Timestamp>> {
+    let Some(floor) = checks.standing_floor() else {
+        return Ok(None);
+    };
+    let windows: Vec<QuotaWindow> = list(conn, "kind = 'weekly' ORDER BY label", &[])?;
+    if let Some(away) = active_away(conn, now)?.and_then(|away| away.quota_floor_percent)
+        && windows.iter().any(|window| at_or_under(window, away))
+    {
+        return Ok(None);
+    }
+    Ok(windows
+        .iter()
+        .filter(|window| at_or_under(window, floor))
+        .filter_map(|window| window.resets_at)
+        .max())
+}
+
+/// The owner's unused "Start now anyway" decision a start past the quota
+/// floor rests on, when `checks` ask for one. Refuses when there is none.
+fn quota_override(
+    conn: &Connection,
+    card: &Card,
+    role: RunRole,
+    checks: &SpawnChecks,
+) -> Result<Option<String>> {
+    if !checks.past_quota_floor {
+        return Ok(None);
+    }
+    let item = quota_start_decision(conn, &card.id, role)?.ok_or_else(|| {
+        Error::refused(
+            "card",
+            &card.display_id,
+            format!("no unused owner decision to start a {role} run past the quota floor"),
+        )
+    })?;
+    Ok(Some(item.id))
+}
+
+/// Whether `error` is the quota floor refusing a start, as opposed to a
+/// missing or stale reading, which fails closed and has no reset to wait for.
+pub fn is_quota_floor_refusal(error: &Error) -> bool {
+    matches!(error, Error::Refused { entity: "quota", fact, .. } if fact.ends_with("percent floor"))
 }
 
 /// Why a RAM or disk reading fails its floor, if it does. An unknown
@@ -727,6 +819,7 @@ fn check_spawn(
     host: &Host,
     project: &Project,
     checks: &SpawnChecks,
+    quota_override: Option<&str>,
     now: Timestamp,
 ) -> Result<Value> {
     let (host_reserved, project_reserved) = check_capacity(conn, host, project)?;
@@ -745,7 +838,6 @@ fn check_spawn(
     // quota floor when it is stricter.
     let away = active_away(conn, now)?;
     let mut away_spend = Value::Null;
-    let mut quota_floor = checks.quota_floor_percent;
     if let Some(away) = &away {
         let started = away.new_runs(conn)?;
         if let Some(cap) = away.max_new_runs
@@ -759,9 +851,6 @@ fn check_spawn(
                 ),
             ));
         }
-        if let Some(floor) = away.quota_floor_percent {
-            quota_floor = Some(quota_floor.map_or(floor, |standing| standing.max(floor)));
-        }
         away_spend = json!({
             "approval_id": away.approval_id,
             "max_new_runs": away.max_new_runs,
@@ -770,6 +859,7 @@ fn check_spawn(
         });
     }
 
+    let quota_floor = effective_quota_floor(checks.standing_floor(), away.as_ref());
     let mut quota = Vec::new();
     if let Some(floor) = quota_floor {
         let windows: Vec<QuotaWindow> = list(conn, "kind = 'weekly' ORDER BY label", &[])?;
@@ -798,7 +888,7 @@ fn check_spawn(
                     return Err(Error::refused(
                         "quota",
                         &window.label,
-                        format!("{left:?} percent left is at or under the {floor} percent floor"),
+                        quota_floor_fact(left, floor),
                     ));
                 }
             }
@@ -819,6 +909,9 @@ fn check_spawn(
         "quota_floor_percent": quota_floor,
         "quota": quota,
     });
+    if let Some(item) = quota_override {
+        seen["quota_override"] = json!(item);
+    }
     if !away_spend.is_null() {
         seen["away"] = away_spend;
     }
@@ -899,7 +992,15 @@ impl Store {
                 None => local_host_id(tx.conn())?,
             };
             let host: Host = get(tx.conn(), "host", &host_id)?;
-            let seen = check_spawn(tx.conn(), &host, &project, &new.checks, tx.now())?;
+            let quota_override = quota_override(tx.conn(), &card, new.role, &new.checks)?;
+            let seen = check_spawn(
+                tx.conn(),
+                &host,
+                &project,
+                &new.checks,
+                quota_override.as_deref(),
+                tx.now(),
+            )?;
 
             let id = ids::new_ulid();
             let attempt = next_attempt(tx.conn(), &card.id, new.role)?;
@@ -1057,7 +1158,16 @@ impl Store {
             if host.id != local_host_id(tx.conn())? {
                 return Err(Error::refused("host", &host.label, "promote on the host that holds the worktree"));
             }
-            let seen = check_spawn(tx.conn(), &host, &project, &promote.checks, tx.now())?;
+            let quota_override =
+                quota_override(tx.conn(), &card, RunRole::Builder, &promote.checks)?;
+            let seen = check_spawn(
+                tx.conn(),
+                &host,
+                &project,
+                &promote.checks,
+                quota_override.as_deref(),
+                tx.now(),
+            )?;
             for item in &open {
                 withdraw_attention(tx, item, "the scout was promoted to a ship run")?;
             }
