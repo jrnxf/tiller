@@ -8,7 +8,8 @@ use std::sync::{Arc, Barrier, Mutex};
 
 use tempfile::TempDir;
 use tiller_core::domain::{
-    AnsweredVia, Artifact, ArtifactKind, Attention, CardKind, Hold, Pr, PrState, Size,
+    AnsweredVia, Artifact, ArtifactKind, Attention, CardKind, Hold, HoldReleaseReason, Pr,
+    PrState, Size,
 };
 use tiller_core::state::caches::QuotaReading;
 use tiller_core::state::cards::NewCard;
@@ -1085,6 +1086,38 @@ fn waiting_for_the_reset_keeps_the_hold() {
         .unwrap_err();
     assert!(refusal(&error).contains("chose to wait"), "{error}");
     assert!(rig.open_items(&card).is_empty());
+    assert_eq!(rig.open_holds(&card).len(), 1);
+}
+
+#[test]
+fn a_refusal_after_the_due_re_ask_replaces_it_with_one_decision() {
+    let mut rig = Rig::with_config("account_floor_percent = 3.0\nhost_share_percent = 50.0\n");
+    rig.config.quota.enabled = true;
+    let ctx = rig.orchestrator();
+    let card = rig.card(CardKind::Ship, None);
+    rig.quota_resetting(2.0, Some(Timestamp::now().plus_minutes(60)));
+    let error = rig
+        .try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
+        .unwrap_err();
+    assert!(refusal(&error).contains(" 2 percent left"), "{error}");
+
+    // The hold's date passes: the daemon releases it and re-asks.
+    rig.sql("UPDATE holds SET until_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 minutes')");
+    rig.fleet
+        .store
+        .hold_release(&Ctx::new(Actor::Daemon), &card.id, HoldReleaseReason::Due)
+        .unwrap();
+    let open = rig.open_items(&card);
+    assert_eq!(open.len(), 1);
+    assert!(open[0].options.is_none());
+
+    // The reset moved, so a retry is refused again: one item stays open.
+    rig.quota_resetting(2.0, Some(Timestamp::now().plus_minutes(120)));
+    rig.try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
+        .unwrap_err();
+    let open = rig.open_items(&card);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert!(open[0].options.is_some());
     assert_eq!(rig.open_holds(&card).len(), 1);
 }
 

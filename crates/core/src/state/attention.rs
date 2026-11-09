@@ -402,6 +402,16 @@ impl Store {
                 }
                 insert_hold(tx, &card, until, QUOTA_HOLD_REASON)?;
             }
+            // A due quota hold's re-ask is the same question; this decision
+            // replaces it, so the card keeps one open item.
+            let reasks: Vec<Attention> = list(
+                tx.conn(),
+                "card_id = ?1 AND answered_at IS NULL AND withdrawn_at IS NULL AND options IS NULL AND question = ?2",
+                &[&card.id, &QUOTA_HOLD_REASON],
+            )?;
+            for item in reasks {
+                withdraw_attention(tx, &item, "the quota floor refused the run again")?;
+            }
             open_attention(
                 tx,
                 &NewAttention {

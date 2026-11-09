@@ -675,7 +675,8 @@ fn relaunch_in(tx: &mut Tx<'_>, run: &str, relaunch: &Relaunch) -> Result<Relaun
 
 /// The refusal text of a weekly window at or under the quota floor.
 fn quota_floor_fact(left: Option<f64>, floor: f64) -> String {
-    format!("{left:?} percent left is at or under the {floor} percent floor")
+    let left = left.map_or_else(|| "unknown".to_owned(), |left| left.to_string());
+    format!("{left} percent left is at or under the {floor} percent floor")
 }
 
 /// The quota floor a start is held to: the standing floor, unless the
