@@ -1920,6 +1920,83 @@
         }
       }
     },
+    "/api/v1/config": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "set_config",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetConfig"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the key and the value; `warning` says what else the change leaves wrong",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`usage`: not a setting the board sets, or a value a start would refuse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/contributions": {
       "get": {
         "tags": [
@@ -3371,6 +3448,34 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Snapshot"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/start-settings": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "start_settings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartSettings"
                 }
               }
             }
@@ -7186,6 +7291,59 @@
           }
         }
       },
+      "SetConfig": {
+        "type": "object",
+        "description": "`POST /api/v1/config`: `tiller config set` for the settings an\norchestrator start needs, and no other key.",
+        "required": [
+          "idempotency_key",
+          "key",
+          "value"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Always refused with a peer label: a setting is written on the host\nthat owns it (`protocol.md` 7.4)."
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string",
+            "description": "`checkouts.<project>`, `spawn.pool_root` or `spawn.checkouts_root`."
+          },
+          "value": {
+            "type": "string",
+            "description": "A full path."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SettingProblem": {
+        "type": "object",
+        "description": "One setting an orchestrator start would refuse (`protocol.md` 6.4).",
+        "required": [
+          "key",
+          "kind",
+          "problem"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "The `config.toml` key: `checkouts.<id>`, `spawn.pool_root` or\n`spawn.checkouts_root` (or the home or scratch key, which the board\ndoes not set)."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`missing` (not in `config.toml`) or `invalid` (set, and refused)."
+          },
+          "problem": {
+            "type": "string",
+            "description": "What a start would say about it."
+          }
+        }
+      },
       "SignalsIntervention": {
         "type": "object",
         "description": "One time the developer was needed, with the label it counts under.",
@@ -7620,6 +7778,57 @@
           }
         },
         "additionalProperties": false
+      },
+      "StartSettings": {
+        "type": "object",
+        "description": "`GET /api/v1/start-settings`: the host-level settings an orchestrator\nstart reads, as this host's `config.toml` has them.",
+        "required": [
+          "problems"
+        ],
+        "properties": {
+          "checkouts_root": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`spawn.checkouts_root`; absent when unset."
+          },
+          "config_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why `config.toml` could not be read; the rest is then absent."
+          },
+          "orchestrator_home": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where each project's orchestrator home sits (`spawn.orchestrator_home`\nor its default). Derived: the board shows it, and does not set it."
+          },
+          "pool_root": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`spawn.pool_root`; absent when unset."
+          },
+          "problems": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SettingProblem"
+            },
+            "description": "What a start would refuse about the host-level settings. A project's\ncheckout is judged with the project."
+          },
+          "scratch_root": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The run scratch root (`spawn.scratch_root` or its default). Derived."
+          }
+        }
       },
       "TerminalFit": {
         "type": "object",

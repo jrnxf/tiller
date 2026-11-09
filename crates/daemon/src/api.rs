@@ -114,6 +114,26 @@ pub trait OrchestratorStart: Send + Sync {
         project: &str,
     ) -> Result<Applied<Orchestrator>, StartError>;
 
+    /// The host-level settings a start reads, and what it would refuse
+    /// about them.
+    fn settings(&self) -> StartSettings {
+        StartSettings {
+            pool_root: None,
+            checkouts_root: None,
+            orchestrator_home: None,
+            scratch_root: None,
+            problems: Vec::new(),
+            config_error: Some("this host cannot report its start settings".to_owned()),
+        }
+    }
+
+    /// Checks `value` for `key` by the rules a start applies, before it is
+    /// written. Returns what else the change leaves wrong, or the refusal
+    /// in plain words.
+    fn check_setting(&self, _key: &str, _value: &str) -> Result<Vec<String>, String> {
+        Err("this host cannot check its start settings".to_owned())
+    }
+
     /// Restarts a live session on this binary: the orchestrator start with
     /// `--restart`, or a relaunch of the worker's run. The error is what the
     /// command would say.
@@ -137,6 +157,9 @@ pub enum StartError {
         code: &'static str,
         message: String,
         hint: Option<String>,
+        /// The facts of the refusal: a start with settings missing lists
+        /// every one (`settings`).
+        current: Option<Value>,
     },
 }
 
@@ -709,6 +732,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/health", get(health))
         .route("/api/v1/projects", get(projects).post(add_project))
         .route("/api/v1/projects/checkout", get(project_checkout))
+        .route("/api/v1/start-settings", get(start_settings))
+        .route("/api/v1/config", post(set_config))
         .route("/api/v1/peers", post(add_peer))
         .route("/api/v1/bug-project", post(pick_bug_project))
         .route("/api/v1/contributions", get(contributions))
@@ -1695,9 +1720,11 @@ fn start_here(
                 code,
                 message,
                 hint,
+                current,
             } => {
                 let mut api = ApiError::new(status_of_exit(exit), code, message);
                 api.body.error.hint = hint;
+                api.body.error.current = current;
                 api
             }
         })
@@ -2922,6 +2949,81 @@ async fn project_setup(
     .map(Json)
 }
 
+#[utoipa::path(get, path = "/api/v1/start-settings", tag = "reads",
+    responses((status = 200, body = StartSettings), (status = 503, body = ErrorBody)))]
+async fn start_settings(State(state): State<AppState>) -> ApiResult<StartSettings> {
+    let Some(starter) = state.0.orchestrators.clone() else {
+        return Err(Error::Unavailable("this daemon cannot start orchestrators".into()).into());
+    };
+    match tokio::task::spawn_blocking(move || starter.settings()).await {
+        Ok(settings) => Ok(Json(settings)),
+        Err(error) => Err(Error::Internal(error.to_string()).into()),
+    }
+}
+
+#[utoipa::path(post, path = "/api/v1/config", tag = "mutations", request_body = SetConfig,
+    responses((status = 200, body = MutationResponse, description = "`data` is the key and the value; `warning` says what else the change leaves wrong"),
+              (status = 400, body = ErrorBody, description = "`usage`: not a setting the board sets, or a value a start would refuse"),
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
+              (status = 503, body = ErrorBody)))]
+async fn set_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers)?;
+    let request: SetConfig = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "a config change").await?;
+    let Some(starter) = state.0.orchestrators.clone() else {
+        return Err(Error::Unavailable("this daemon cannot check start settings".into()).into());
+    };
+    let home = state.0.home.clone();
+    let SetConfig {
+        key: setting,
+        value,
+        ..
+    } = request.clone();
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| {
+            if !tiller_agents::spawn::settings::settable(&setting) {
+                return Err(Error::Usage(format!(
+                    "{setting} is not a setting the board can change"
+                )));
+            }
+            if let Some(project) = setting.strip_prefix("checkouts.") {
+                store.project(project)?;
+            }
+            let warnings = starter
+                .check_setting(&setting, &value)
+                .map_err(Error::Usage)?;
+            let changed = write_checkout(&home, &setting, &value)
+                .map_err(|error| Error::Unavailable(error.to_string()))?;
+            // As `tiller config set`: a key already at that value records
+            // nothing.
+            let applied = if changed {
+                store.config_changed(ctx, &setting, json!(value))?
+            } else {
+                Applied {
+                    value: 0,
+                    events: Vec::new(),
+                    replayed: true,
+                }
+            };
+            let mut done = Done::of(Applied {
+                value: json!({"key": setting, "value": value, "changed": changed}),
+                events: applied.events,
+                replayed: applied.replayed,
+            })?;
+            done.warning = (!warnings.is_empty()).then(|| warnings.join("; "));
+            Ok(done)
+        },
+    )
+    .await
+}
+
 /// `checkouts.<project>` from `<home>/config.toml`, as `tiller config get`
 /// reads it; a missing file or key is `None`.
 fn checkout_of(home: &std::path::Path, project: &str) -> Result<Option<String>, String> {
@@ -4007,7 +4109,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
+        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, start_settings, set_config,
         pick_bug_project, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, session, login_code, logout
     ),
@@ -7187,6 +7289,165 @@ esac"#,
             sessions: auth::Sessions::default(),
             ssh: vec!["ssh".into()],
         }))
+    }
+
+    /// A starter that accepts a path only when it is absolute, and reports
+    /// two missing settings.
+    struct FakeSettings;
+
+    impl OrchestratorStart for FakeSettings {
+        fn start(
+            &self,
+            _store: &mut Store,
+            _ctx: &Ctx,
+            _project: &str,
+        ) -> Result<Applied<Orchestrator>, StartError> {
+            Err(StartError::Refused {
+                exit: 2,
+                code: "config",
+                message: "spawn.pool_root is not set".into(),
+                hint: None,
+                current: Some(json!({"settings": [{"key": "spawn.pool_root"}]})),
+            })
+        }
+
+        fn settings(&self) -> StartSettings {
+            StartSettings {
+                pool_root: None,
+                checkouts_root: None,
+                orchestrator_home: None,
+                scratch_root: None,
+                problems: vec![SettingProblem {
+                    key: "spawn.pool_root".into(),
+                    kind: "missing".into(),
+                    problem: "spawn.pool_root is not set".into(),
+                }],
+                config_error: None,
+            }
+        }
+
+        fn check_setting(&self, _key: &str, value: &str) -> Result<Vec<String>, String> {
+            if value.starts_with('/') {
+                Ok(vec!["a warning".into()])
+            } else {
+                Err(format!("{value} is not an absolute path"))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_board_reads_start_settings_and_sets_one_as_the_owner() {
+        let fleet = Fleet::new();
+        let app = app_restarting(fleet.dir.path(), Arc::new(FakeSettings));
+
+        let read: Value =
+            serde_json::from_str(&get(&app, "/api/v1/start-settings").await.body).unwrap();
+        assert_eq!(read["problems"][0]["key"], "spawn.pool_root", "{read}");
+
+        let cookie = owner_cookie(fleet.dir.path());
+        let owner = [("cookie", cookie.as_str())];
+        let set = |key: &str, setting: &str, value: &str| {
+            mutation(
+                "POST",
+                "/api/v1/config",
+                json!({"idempotency_key": key, "key": setting, "value": value}),
+                &owner,
+            )
+        };
+
+        // Not the owner: refused, nothing written.
+        let anon = mutation(
+            "POST",
+            "/api/v1/config",
+            json!({"idempotency_key": "c-0", "key": "spawn.pool_root", "value": "/pool"}),
+            &[],
+        );
+        let refused = send(&app, anon).await;
+        assert!(
+            refused.status == StatusCode::UNAUTHORIZED || refused.status == StatusCode::FORBIDDEN,
+            "{} {}",
+            refused.status,
+            refused.body
+        );
+        assert!(!fleet.dir.path().join("config.toml").exists());
+
+        // A key outside the settable set, an unknown project and a refused
+        // value change nothing.
+        for (key, setting, value, status) in [
+            ("c-1", "owner.guard", "/x", StatusCode::BAD_REQUEST),
+            ("c-2", "checkouts.nope", "/x", StatusCode::NOT_FOUND),
+            (
+                "c-3",
+                "spawn.pool_root",
+                "relative",
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let answer = send(&app, set(key, setting, value)).await;
+            assert_eq!(answer.status, status, "{setting}: {}", answer.body);
+        }
+        assert!(!fleet.dir.path().join("config.toml").exists());
+
+        // A good value is written and recorded, with the warning handed on.
+        let sent = send(&app, set("c-4", "spawn.pool_root", "/pool")).await;
+        assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
+        let sent: Value = serde_json::from_str(&sent.body).unwrap();
+        assert_eq!(sent["data"]["changed"], true, "{sent}");
+        assert_eq!(sent["warning"], "a warning", "{sent}");
+        let text = std::fs::read_to_string(fleet.dir.path().join("config.toml")).unwrap();
+        assert!(text.contains("/pool"), "{text}");
+        let events: i64 = fleet
+            .open()
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind = 'config.changed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 1);
+
+        // The same value again records nothing.
+        let again = send(&app, set("c-5", "spawn.pool_root", "/pool")).await;
+        let again: Value = serde_json::from_str(&again.body).unwrap();
+        assert_eq!(again["data"]["changed"], false, "{again}");
+
+        // A project's checkout is set where the project is edited.
+        let checkout = send(&app, set("c-6", "checkouts.alpha", "/pool/alpha")).await;
+        assert_eq!(checkout.status, StatusCode::OK, "{}", checkout.body);
+
+        // A peer's settings are written on that peer, not forwarded.
+        let remote = mutation(
+            "POST",
+            "/api/v1/config",
+            json!({"idempotency_key": "c-7", "host": "elsewhere", "key": "spawn.pool_root", "value": "/pool"}),
+            &owner,
+        );
+        let remote = send(&app, remote).await;
+        assert_ne!(remote.status, StatusCode::OK, "{}", remote.body);
+    }
+
+    #[tokio::test]
+    async fn a_refused_start_hands_on_the_settings_it_lists() {
+        let fleet = Fleet::new();
+        let app = app_restarting(fleet.dir.path(), Arc::new(FakeSettings));
+        let cookie = owner_cookie(fleet.dir.path());
+        let started = send(
+            &app,
+            mutation(
+                "POST",
+                "/api/v1/projects/alpha/orchestrator",
+                json!({"idempotency_key": "s-1"}),
+                &[("cookie", cookie.as_str())],
+            ),
+        )
+        .await;
+        assert_eq!(started.status, StatusCode::BAD_REQUEST, "{}", started.body);
+        let body: Value = serde_json::from_str(&started.body).unwrap();
+        assert_eq!(
+            body["error"]["current"]["settings"][0]["key"], "spawn.pool_root",
+            "{body}"
+        );
     }
 
     fn stale_of(read: &Value, session: &str) -> Value {

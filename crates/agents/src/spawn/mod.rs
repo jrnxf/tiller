@@ -33,6 +33,7 @@ pub mod orchestrator;
 pub mod pool;
 pub mod promote;
 pub mod readings;
+pub mod settings;
 pub mod trust;
 
 #[cfg(test)]

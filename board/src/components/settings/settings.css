@@ -449,3 +449,51 @@
     animation: none;
   }
 }
+
+/* One start setting: its name and what it is for, then the path and Save. */
+
+.setting-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr);
+  align-items: start;
+  gap: 6px 16px;
+  padding: 14px 16px;
+}
+
+.set-panel > .setting-field + .setting-field,
+.set-panel > .set-row + .setting-field,
+.set-panel > .setting-field + .set-row {
+  border-top: 1px solid var(--line-1);
+}
+
+.setting-field .set-text h2 label {
+  cursor: pointer;
+}
+
+.setting-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.setting-control .note-in {
+  flex: 1;
+  min-width: 0;
+}
+
+.setting-control .btn {
+  flex: none;
+}
+
+.setting-refusal {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--red-text);
+  font-size: var(--fs-mini);
+}
+
+@media (max-width: 820px) {
+  .setting-field {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

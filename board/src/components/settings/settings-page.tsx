@@ -2,12 +2,12 @@ import { useCallback, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
-import type { DaemonHealth, Machine, MergeAppHealth } from "../../lib/api-types";
+import type { DaemonHealth, Machine, MergeAppHealth, StartSettings } from "../../lib/api-types";
 import { machineRowView } from "../../lib/machines";
 import type { MachineRowView, VersionMark } from "../../lib/machines";
 import { prefsStore, updatePrefs } from "../../lib/prefs";
 import type { Density, ThemePreference } from "../../lib/prefs";
-import { healthQuery, machinesQuery, sessionQuery } from "../../lib/queries";
+import { healthQuery, machinesQuery, sessionQuery, startSettingsQuery } from "../../lib/queries";
 import { signOut } from "../../lib/session";
 import { useStore } from "../../lib/store";
 import { formatAge, secondsSince } from "../board/format";
@@ -16,6 +16,7 @@ import { WarnIcon } from "../board/icons";
 import { PlusIcon } from "../shell/icons";
 import { AddHostForm } from "./add-host";
 import type { Paired } from "./add-host";
+import { SettingField } from "./setting-field";
 import "./settings.css";
 
 const THEMES: { value: ThemePreference; label: string }[] = [
@@ -316,6 +317,97 @@ function Hosts({
   );
 }
 
+const problemOf = (settings: StartSettings, key: string) =>
+  settings.problems.find((problem) => problem.key === key)?.problem ?? null;
+
+// The two folders every orchestrator start reads from this host's config.toml,
+// set here as `tiller config set` does. The project's checkout is set where
+// the project is edited.
+function StartSettingsSection({
+  settings,
+  owner,
+  host,
+}: {
+  settings: StartSettings;
+  owner: boolean;
+  host: string | null;
+}) {
+  const on = host ? ` on ${host}` : "";
+  const rows = [
+    {
+      key: "spawn.pool_root",
+      label: "Worktree pool",
+      value: settings.pool_root,
+      hint: "Where the worktrees agents work in are kept",
+      placeholder: "/home/user/pool",
+    },
+    {
+      key: "spawn.checkouts_root",
+      label: "Checkouts folder",
+      value: settings.checkouts_root,
+      hint: "Where each project's checkout lives, as <folder>/<project>",
+      placeholder: "/home/user/checkouts",
+    },
+  ];
+  return (
+    <section className="set-sec" aria-label="Starting agents" data-testid="start-settings">
+      <div className="set-sec-h">
+        <div>
+          <h2>Starting agents</h2>
+          <p>
+            What a project's orchestrator needs before it can start{on}. Another host keeps its own,
+            set on that host.
+          </p>
+        </div>
+      </div>
+      <div className="set-panel">
+        {settings.config_error ? (
+          <Fact label="config.toml" hint="Fix the file, then reload this page">
+            <span className="set-status fail">{settings.config_error.replaceAll("`", "")}</span>
+          </Fact>
+        ) : (
+          rows.map((row) =>
+            owner ? (
+              <SettingField
+                key={row.key}
+                settingKey={row.key}
+                label={row.label}
+                hint={row.hint}
+                value={row.value}
+                problem={problemOf(settings, row.key)}
+                placeholder={row.placeholder}
+              />
+            ) : (
+              <Fact key={row.key} label={row.label} hint={row.hint}>
+                {row.value ? (
+                  <code>{row.value}</code>
+                ) : (
+                  <span className="set-status missing">Not set</span>
+                )}
+              </Fact>
+            ),
+          )
+        )}
+        {settings.orchestrator_home ? (
+          <Fact label="Orchestrator homes" hint="Follows from the folders above">
+            <code>{settings.orchestrator_home}</code>
+          </Fact>
+        ) : null}
+        {settings.scratch_root ? (
+          <Fact label="Run scratch" hint="Follows from the folders above">
+            <code>{settings.scratch_root}</code>
+          </Fact>
+        ) : null}
+        {owner ? null : (
+          <Fact label="Change these" hint="Sign this browser in as the owner">
+            <span className="set-status missing">Not signed in</span>
+          </Fact>
+        )}
+      </div>
+    </section>
+  );
+}
+
 // Signing out ends this browser's owner cookie on the daemon, not the other
 // devices signed in with their own codes.
 function BrowserSession({ owner }: { owner: boolean }) {
@@ -367,12 +459,20 @@ export function SettingsPage() {
   const health = useQuery(healthQuery()).data;
   const session = useQuery(sessionQuery()).data;
   const machines = useQuery(machinesQuery()).data?.machines;
+  const startSettings = useQuery(startSettingsQuery()).data;
   const host = machines?.find((machine) => machine.kind === "local")?.label ?? null;
   return (
     <div className="settings-page" data-testid="settings">
       {health ? <MergeApp app={health.merge_app} host={host} /> : null}
       {health ? (
         <Hosts machines={machines} health={health} owner={session?.owner ?? false} />
+      ) : null}
+      {startSettings ? (
+        <StartSettingsSection
+          settings={startSettings}
+          owner={session?.owner ?? false}
+          host={host}
+        />
       ) : null}
       <section className="set-sec" aria-label="This browser">
         <div className="set-sec-h">

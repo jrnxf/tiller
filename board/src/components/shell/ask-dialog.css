@@ -281,3 +281,27 @@
     display: none;
   }
 }
+
+/* A send that failed on settings: each one to set, under the project's row. */
+
+.ask-fix {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--line-1);
+}
+
+.ask-fix-title,
+.ask-fix-done {
+  margin: 0;
+  font-size: var(--fs-mini);
+  font-weight: var(--w-medium);
+  color: var(--fg-2);
+}
+
+.ask-fix .setting-field {
+  grid-template-columns: minmax(0, 1fr);
+  padding: 6px 0;
+}

@@ -4,18 +4,26 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { createPortal } from "react-dom";
 
-import type { Project } from "../../lib/api-types";
+import type { Project, SettingProblem } from "../../lib/api-types";
 import { askFor, mentionedKeys, messageFor } from "../../lib/ask-plan";
 import type { AskPiece } from "../../lib/ask-plan";
 import { isFederated, ownerOf, projectKey, standingOf } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
-import { agentsQuery, machinesQuery, projectsQuery } from "../../lib/queries";
+import {
+  agentsQuery,
+  machinesQuery,
+  projectsQuery,
+  sessionQuery,
+  startSettingsQuery,
+} from "../../lib/queries";
 import { ActionFailure } from "../attention/action-failure";
+import type { ActionError } from "../attention/api";
 import { SendIcon } from "../attention/icons";
 import { showToast } from "../board/toast";
 import { AskEditor, removeMention } from "./ask-editor";
 import type { MentionOption } from "./ask-editor";
 import { useAskSends } from "./ask-send";
+import { settingsOf, StartSettingsFix } from "./start-settings-fix";
 import type { AskTarget, Outcome } from "./ask-send";
 import "./ask-dialog.css";
 import { useNamedProjects } from "../board/peer-state";
@@ -63,6 +71,38 @@ function statusOf(
     : { text: "will start orchestrator", tone: "warn" };
 }
 
+// Why one project's send failed. A start refused for its settings lists them
+// all; the owner sets them here, and a peer's are named for that host.
+function SendFailure({ project, error }: { project: Project; error: ActionError }) {
+  const problems = settingsOf(error);
+  if (problems.length === 0) return <ActionFailure error={error} host={ownerOf(project)} />;
+  return <SettingsFailure project={project} error={error} problems={problems} />;
+}
+
+function SettingsFailure({
+  project,
+  error,
+  problems,
+}: {
+  project: Project;
+  error: ActionError;
+  problems: SettingProblem[];
+}) {
+  const owner = useQuery(sessionQuery()).data?.owner ?? false;
+  const roots = useQuery({ ...startSettingsQuery(), enabled: owner }).data;
+  const host = error.host ?? ownerOf(project);
+  // Settings are set here by the owner, or named for the peer that owns them.
+  if (!owner && host === undefined) return <ActionFailure error={error} host={host} />;
+  return (
+    <StartSettingsFix
+      problems={problems}
+      project={project.id}
+      host={host}
+      checkoutsRoot={roots?.checkouts_root ?? null}
+    />
+  );
+}
+
 // One project the ask goes to, with the state of its orchestrator and, once
 // the send has begun, how it went.
 function SendRow({
@@ -103,7 +143,7 @@ function SendRow({
       ) : null}
       {outcome?.status === "failed" ? (
         <div className="ask-row-note">
-          <ActionFailure error={outcome.error} host={ownerOf(project)} />
+          <SendFailure project={project} error={outcome.error} />
         </div>
       ) : null}
     </li>

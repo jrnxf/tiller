@@ -17,10 +17,17 @@ import {
   fixtureResource,
   restartStaleFixture,
   fixtureResponses,
+  orchestratorLive,
   startOrchestratorFixture,
 } from "./fixtures.ts";
 import type { Scenario } from "./fixtures.ts";
 import { relabelFixture } from "./fixtures-signals.ts";
+import {
+  projectSetupFor,
+  setConfigFixture,
+  startProblems,
+  startSettingsFor,
+} from "./fixture-settings.ts";
 import { agentsPath, attentionPath, boardPath, machinesPath, projectsPath } from "./queries.ts";
 
 interface Reply {
@@ -149,6 +156,10 @@ export function withoutDeleted(path: string, body: unknown, scenario: Scenario):
   const pathname = new URL(path, "http://localhost").pathname;
   const triaged = withTriage(pathname, body);
   if (triaged !== body) return triaged;
+  if (pathname === "/api/v1/start-settings") return startSettingsFor(scenario);
+  const setup = /^\/api\/v1\/projects\/([^/]+)\/setup$/.exec(pathname);
+  if (setup?.[1] && (body !== undefined || !gone(setup[1])))
+    return projectSetupFor(setup[1], scenario);
   if (deleted.size + retired.size + added.size === 0 || body === undefined) return body;
   const preview = /^\/api\/v1\/projects\/([^/]+)\/(delete|retire)$/.exec(pathname);
   if (preview?.[1] && (preview[2] === "delete" ? deleted.has(preview[1]) : gone(preview[1]))) {
@@ -824,9 +835,22 @@ function handle(
       ],
     };
   }
+  if (method === "POST" && path === "/api/v1/config") {
+    const saved = setConfigFixture(body, scenario);
+    if (!saved.ok) return { reply: refused(400, "usage", saved.message), followUps: [] };
+    return { reply: recorded(saved.data, null, null), followUps: [] };
+  }
   const orchestrator = /^\/api\/v1\/projects\/([^/]+)\/orchestrator$/.exec(path);
   if (method === "POST" && orchestrator?.[1]) {
     const project = orchestrator[1];
+    const problems = typeof body.host === "string" ? [] : startProblems(project, scenario);
+    const [first] = problems;
+    if (first && !orchestratorLive(project)) {
+      return {
+        reply: refused(400, "usage", `config.toml: ${first.problem}`, { settings: problems }),
+        followUps: [],
+      };
+    }
     const { live } = startOrchestratorFixture(
       project,
       typeof body.host === "string" ? body.host : undefined,

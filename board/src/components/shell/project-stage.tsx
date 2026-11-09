@@ -5,11 +5,18 @@ import { createPortal } from "react-dom";
 
 import type { Project } from "../../lib/api-types";
 import { ownerOf } from "../../lib/peers";
-import { projectSetupQuery, projectsPath, queryKeyFor } from "../../lib/queries";
+import {
+  projectSetupQuery,
+  projectsPath,
+  queryKeyFor,
+  sessionQuery,
+  startSettingsQuery,
+} from "../../lib/queries";
 import { sendMutation } from "../attention/api";
 import { InlineReceipt } from "../attention/receipt";
 import { useAction } from "../attention/use-action";
 import { lisbonDay, lisbonShortDay } from "../health/lisbon";
+import { SettingField } from "../settings/setting-field";
 import { ArchiveProject } from "./project-archive";
 import { DeleteProject } from "./project-delete";
 import { FLEET_PROJECT } from "./project-dialog";
@@ -122,6 +129,9 @@ function WrappingPath({ path }: { path: string }) {
 // `tiller doctor` and `tiller config get checkouts.<id>` show them.
 function SetupFacts({ project }: { project: Project }) {
   const setup = useQuery(projectSetupQuery(project.id)).data;
+  const owner = useQuery(sessionQuery()).data?.owner ?? false;
+  const [editing, setEditing] = useState(false);
+  const roots = useQuery({ ...startSettingsQuery(), enabled: owner && editing }).data;
   if (!setup) return null;
   const changed = formatStageTime(setup.merge_gate_changed_at);
   return (
@@ -147,6 +157,8 @@ function SetupFacts({ project }: { project: Project }) {
           </code>
         ) : setup.config_error ? (
           <span className="stage-when">{setup.config_error}</span>
+        ) : owner ? (
+          <span className="stage-flag">not set</span>
         ) : (
           <>
             not set
@@ -155,7 +167,33 @@ function SetupFacts({ project }: { project: Project }) {
             </code>
           </>
         )}
+        {owner && !setup.config_error && !editing ? (
+          <button type="button" className="btn sm" onClick={() => setEditing(true)}>
+            {setup.checkout ? "Change" : "Set"}
+          </button>
+        ) : null}
       </Fact>
+      {editing ? (
+        <div className="stage-setting">
+          <SettingField
+            settingKey={`checkouts.${project.id}`}
+            label="Checkout folder"
+            hint="The project's clone on this host"
+            value={setup.checkout}
+            suggestion={
+              setup.checkout || !roots?.checkouts_root
+                ? undefined
+                : `${roots.checkouts_root}/${project.id}`
+            }
+            problem={null}
+            placeholder="/home/user/checkouts/project"
+            onSaved={() => setEditing(false)}
+          />
+          <button type="button" className="btn sm ghost" onClick={() => setEditing(false)}>
+            Cancel
+          </button>
+        </div>
+      ) : null}
     </>
   );
 }
