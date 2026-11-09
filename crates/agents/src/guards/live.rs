@@ -58,8 +58,8 @@ impl Lab {
     fn new(role: Role) -> Self {
         let bin =
             std::env::var("TILLER_LIVE_BIN").expect("set TILLER_LIVE_BIN to a built tiller binary");
-        // The path spawn renders and the backstop rewrites to is the binary's
-        // own `current_exe`, which is canonical.
+        // The path spawn renders and the backstop rewrites to is the path the
+        // binary was invoked through, which is canonical here.
         let bin = fs::canonicalize(bin).unwrap().display().to_string();
         // Under `target/`, not the system temp dir: the sandbox may allow
         // writes to `/tmp`, and `outside` must be outside the write set.

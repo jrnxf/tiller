@@ -174,7 +174,7 @@ impl Tools {
                 lavish_program(&config.spawn),
                 config.spawn.review_allowed_hosts.clone(),
             ),
-            tiller: std::env::current_exe()?,
+            tiller: crate::stable::tiller_path()?,
             tiller_home: absolute_home(&app.home)?,
             scratch,
             claude: ClaudeConfig::from_env(),
