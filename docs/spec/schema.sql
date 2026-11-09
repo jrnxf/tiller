@@ -161,6 +161,9 @@ CREATE TABLE sessions (
   transcript_path       TEXT,
   harness               TEXT NOT NULL DEFAULT 'claude',  -- protocol.md section 10
   config_hash           TEXT,
+  tiller_version        TEXT,                -- state.md, session stamp
+  launch_hash           TEXT,
+  restart_queued_at     TEXT,
   started_at            TEXT NOT NULL,
   ended_at              TEXT,
   end_reason            TEXT,

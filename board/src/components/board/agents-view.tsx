@@ -31,6 +31,7 @@ import { LiveTerminal, usePhone } from "./live-terminal";
 import type { SwitchKey, TerminalControl } from "./live-terminal";
 import { AsOf, HostChip, PeerNote } from "./host-chip";
 import { useAmbiguousIds, useStanding, useNamedProjects } from "./peer-state";
+import { StaleChip } from "./stale-sessions";
 import { ModelChip, ownerSearch } from "./tile";
 import { BoardIcon, CloseIcon, ServerIcon } from "../shell/icons";
 import "./board.css";
@@ -576,6 +577,7 @@ function Stage({
             <span className="nm">{line.name}</span>
             <RoleLabel role={agent.role} />
             <ModelChip model={agent.model} />
+            <StaleChip agent={agent} />
             <HostChip entity={agent} />
             {card ? (
               <span className="ttl">

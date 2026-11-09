@@ -174,10 +174,31 @@ export interface AgentRow extends Federated {
   // When the agent last produced output: a tool call, a subagent or the end
   // of a turn (protocol.md section 7.3).
   last_output_at?: string | null;
+  // Set when the session runs an older tiller than the daemon: the version it
+  // started on ("unknown" with no record), whether its role prompt changed,
+  // and whether a restart waits for it to go idle.
+  stale?: SessionStale | null;
+}
+
+export interface SessionStale {
+  since: string;
+  prompt_changed: boolean;
+  restart_queued: boolean;
 }
 
 export interface AgentsResponse {
   orchestrators: AgentRow[];
+  // The version the running daemon would launch a session on.
+  tiller_version?: string;
+}
+
+// `POST /api/v1/agents/restart-stale`: what happened to each session asked.
+export interface RestartStaleResponse {
+  sessions: {
+    session_id: string;
+    outcome: "restarted" | "queued" | "failed";
+    error?: string | null;
+  }[];
 }
 
 // `GET /api/v1/runs/{id}`: run detail with recent events and a pane tail.

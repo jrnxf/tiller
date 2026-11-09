@@ -2606,3 +2606,219 @@ fn a_direct_push_brief_lists_the_checks_and_the_lighter_set() {
     let line = delivery_line(&delivery_project("direct-pr", "launched"));
     assert!(!line.contains("watches the deploy"), "{line}");
 }
+
+// -- stale sessions ------------------------------------------------------------
+
+fn quick_waits() -> crate::control::Waits {
+    crate::control::Waits {
+        interrupt: std::time::Duration::from_secs(2),
+        exit: std::time::Duration::from_secs(2),
+        bind: std::time::Duration::from_secs(2),
+        poll: std::time::Duration::from_millis(10),
+        pacing: tiller_herdr::submit::Pacing::INSTANT,
+    }
+}
+
+/// Starts the orchestrator, then makes it look launched by an older tiller
+/// that is `activity` now.
+fn stale_orchestrator(rig: &mut Rig, homes: &Path, activity: &str) -> String {
+    let started = start_orchestrator(rig, homes, &owner()).unwrap().value;
+    let pane = started.pane_id.clone().unwrap();
+    rig.herdr.set_screen(&pane, Screen::Idle);
+    rig.fleet.bind(&started.session.id, &pane);
+    rig.fleet
+        .store
+        .conn()
+        .execute(
+            "UPDATE sessions SET tiller_version = '0.0.1', activity = ?2,
+                    activity_observed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+            rusqlite::params![started.session.id, activity],
+        )
+        .unwrap();
+    started.session.id
+}
+
+#[test]
+fn a_launch_records_the_version_and_hash_it_wrote() {
+    let (mut rig, homes) = orchestrator_rig();
+    let started = start_orchestrator(&mut rig, &homes, &owner())
+        .unwrap()
+        .value;
+    let session: Session = get(rig.fleet.store.conn(), "session", &started.session.id).unwrap();
+    let now = crate::stale::current(crate::roles::Role::Orchestrator);
+    assert_eq!(session.tiller_version.as_deref(), Some(now.tiller_version));
+    assert_eq!(
+        session.launch_hash.as_deref(),
+        Some(now.launch_hash.as_str())
+    );
+    assert_eq!(crate::stale::staleness(&session), None);
+}
+
+#[test]
+fn a_session_is_stale_when_its_version_or_hash_differs_or_it_has_no_record() {
+    let (mut rig, homes) = orchestrator_rig();
+    let id = start_orchestrator(&mut rig, &homes, &owner())
+        .unwrap()
+        .value
+        .session
+        .id;
+    let stale = |rig: &Rig| {
+        let session: Session = get(rig.fleet.store.conn(), "session", &id).unwrap();
+        crate::stale::staleness(&session)
+    };
+    let set = |rig: &Rig, sql: &str| rig.fleet.store.conn().execute(sql, []).unwrap();
+
+    set(&rig, "UPDATE sessions SET tiller_version = '0.0.1'");
+    let old = stale(&rig).unwrap();
+    assert_eq!((old.since.as_str(), old.prompt_changed), ("0.0.1", false));
+
+    // The same version with another role prompt or hook settings.
+    let current = crate::stale::current_version();
+    set(
+        &rig,
+        &format!("UPDATE sessions SET tiller_version = '{current}', launch_hash = 'old'"),
+    );
+    let changed = stale(&rig).unwrap();
+    assert_eq!(
+        (changed.since.as_str(), changed.prompt_changed),
+        (current, true)
+    );
+
+    // A launch from before the record existed.
+    set(
+        &rig,
+        "UPDATE sessions SET tiller_version = NULL, launch_hash = NULL",
+    );
+    let unknown = stale(&rig).unwrap();
+    assert_eq!(unknown.since, crate::stale::UNKNOWN);
+}
+
+#[test]
+fn an_idle_stale_orchestrator_restarts_now_on_the_current_launch() {
+    let (mut rig, homes) = orchestrator_rig();
+    let old = stale_orchestrator(&mut rig, &homes, "idle");
+
+    let listed = crate::stale::stale_sessions(&rig.fleet.store).unwrap();
+    let item = listed.iter().find(|item| item.session.id == old).unwrap();
+    assert!(item.idle);
+
+    let waits = quick_waits();
+    let world = world!(rig);
+    let reports = crate::stale::restart_stale(
+        &mut rig.fleet.store,
+        &Ctx::new(Actor::Board),
+        Some(std::slice::from_ref(&old)),
+        &mut |store, session| {
+            orchestrator::start(
+                store,
+                &owner(),
+                &world,
+                &homes,
+                &session.project_id,
+                Some(&waits),
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        },
+    )
+    .unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].outcome, crate::stale::Outcome::Restarted);
+
+    let old: Session = get(rig.fleet.store.conn(), "session", &old).unwrap();
+    assert_eq!(old.end_reason.as_deref(), Some(orchestrator::RESTARTED));
+    let live = crate::stale::stale_sessions(&rig.fleet.store).unwrap();
+    assert!(
+        live.iter()
+            .all(|item| item.session.role != tiller_core::domain::Role::Orchestrator),
+        "the new orchestrator is on the current version"
+    );
+}
+
+#[test]
+fn a_working_stale_orchestrator_is_queued_and_restarts_once_idle() {
+    let (mut rig, homes) = orchestrator_rig();
+    let id = stale_orchestrator(&mut rig, &homes, "working");
+    let waits = quick_waits();
+    let ctx = Ctx::new(Actor::Board);
+
+    let world = world!(rig);
+    let restarts = std::cell::Cell::new(0);
+    let mut restart = |store: &mut Store, session: &Session| {
+        restarts.set(restarts.get() + 1);
+        orchestrator::start(
+            store,
+            &owner(),
+            &world,
+            &homes,
+            &session.project_id,
+            Some(&waits),
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    };
+
+    let reports =
+        crate::stale::restart_stale(&mut rig.fleet.store, &ctx, None, &mut restart).unwrap();
+    let report = reports
+        .iter()
+        .find(|report| report.session.id == id)
+        .unwrap();
+    assert_eq!(report.outcome, crate::stale::Outcome::Queued);
+    assert_eq!(restarts.get(), 0, "a working session is not restarted");
+
+    // The queue is in state.db: a reopened store still holds it.
+    let reopened = Store::open_current(&rig.fleet.db).unwrap();
+    let queued = reopened.restart_queued().unwrap();
+    assert!(queued.iter().any(|session| session.id == id));
+    drop(reopened);
+
+    // Still working: a pass restarts nothing.
+    assert!(
+        crate::stale::drain_queue(&mut rig.fleet.store, &ctx, &mut restart)
+            .unwrap()
+            .is_empty()
+    );
+
+    rig.fleet
+        .store
+        .conn()
+        .execute(
+            "UPDATE sessions SET activity = 'idle' WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .unwrap();
+    let drained = crate::stale::drain_queue(&mut rig.fleet.store, &ctx, &mut restart).unwrap();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].outcome, crate::stale::Outcome::Restarted);
+    assert_eq!(restarts.get(), 1);
+    assert!(rig.fleet.store.restart_queued().unwrap().is_empty());
+}
+
+#[test]
+fn a_queued_restart_that_fails_is_dropped_and_shows_as_stale_again() {
+    let (mut rig, homes) = orchestrator_rig();
+    let id = stale_orchestrator(&mut rig, &homes, "working");
+    let ctx = Ctx::new(Actor::Board);
+    let mut fail = |_: &mut Store, _: &Session| Err("herdr is not running".to_owned());
+
+    crate::stale::restart_stale(&mut rig.fleet.store, &ctx, None, &mut fail).unwrap();
+    rig.fleet
+        .store
+        .conn()
+        .execute(
+            "UPDATE sessions SET activity = 'idle' WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .unwrap();
+    let drained = crate::stale::drain_queue(&mut rig.fleet.store, &ctx, &mut fail).unwrap();
+    assert_eq!(
+        drained[0].outcome,
+        crate::stale::Outcome::Failed("herdr is not running".to_owned())
+    );
+    assert!(rig.fleet.store.restart_queued().unwrap().is_empty());
+    let session: Session = get(rig.fleet.store.conn(), "session", &id).unwrap();
+    assert!(session.restart_queued_at.is_none());
+    assert!(crate::stale::staleness(&session).is_some());
+}

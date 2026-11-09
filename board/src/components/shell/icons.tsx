@@ -264,3 +264,16 @@ export const RefreshIcon = () => (
     />
   </svg>
 );
+
+export const WarnIcon = () => (
+  <svg className="icon bic" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+    <path
+      d="M8 2.2 14.2 13H1.8L8 2.2ZM8 6.4v3M8 11.3v.1"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.4}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);

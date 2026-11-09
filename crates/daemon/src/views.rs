@@ -519,6 +519,11 @@ fn agent_row(store: &Store, session: &Session) -> Result<AgentRow> {
         host: None,
         as_of: None,
         link: None,
+        stale: tiller_agents::stale::staleness(session).map(|stale| StaleInfo {
+            since: stale.since,
+            prompt_changed: stale.prompt_changed,
+            restart_queued: session.restart_queued_at.is_some(),
+        }),
     })
 }
 
@@ -581,7 +586,10 @@ pub fn agents(store: &Store, host: Option<&str>) -> Result<AgentsResponse> {
             orchestrators.push(agent_row(store, worker)?);
         }
     }
-    Ok(AgentsResponse { orchestrators })
+    Ok(AgentsResponse {
+        orchestrators,
+        tiller_version: env!("CARGO_PKG_VERSION").to_owned(),
+    })
 }
 
 // -- machines -----------------------------------------------------------------
@@ -1690,6 +1698,7 @@ fn peer_agents(view: &PeerView) -> AgentsResponse {
     let mut response = view.queries.as_ref().map_or_else(
         || AgentsResponse {
             orchestrators: Vec::new(),
+            tiller_version: String::new(),
         },
         |queries| queries.agents.clone(),
     );

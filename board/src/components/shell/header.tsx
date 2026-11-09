@@ -10,6 +10,7 @@ import { prefsStore, updatePrefs } from "../../lib/prefs";
 import { scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
 import { SendIcon } from "../attention/icons";
+import { StaleBanner } from "../board/stale-sessions";
 import { ReconnectingBanner } from "../states/reconnecting-banner";
 import { Section } from "../states/section";
 import { ChevronIcon, CloseIcon, LayersIcon, MenuIcon, ServerIcon } from "./icons";
@@ -133,6 +134,7 @@ export function Header({ activeHost, menuOpen, onOpenMenu, onOpenAsk }: HeaderPr
         </button>
       </header>
       <ReconnectingBanner />
+      <StaleBanner />
       {pathname === "/" ? (
         <Section label="Board filter" fallback={nothing}>
           <BoardFilterTabs />

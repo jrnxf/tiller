@@ -23,6 +23,7 @@ pub mod records;
 pub mod review;
 pub mod run;
 pub mod spawn;
+pub mod stale;
 
 use clap::Args;
 use serde_json::Value;

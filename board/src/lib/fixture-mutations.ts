@@ -15,6 +15,7 @@ import { memoryMutation } from "./fixtures-memory.ts";
 import {
   FIXTURE_HEAD_SHA,
   fixtureResource,
+  restartStaleFixture,
   fixtureResponses,
   startOrchestratorFixture,
 } from "./fixtures.ts";
@@ -735,6 +736,26 @@ function handle(
     };
   }
   if (method === "POST" && path === projectsPath) return addProject(body);
+  if (method === "POST" && path === "/api/v1/agents/restart-stale") {
+    const ids = Array.isArray(body.sessions) ? body.sessions.map(String) : [];
+    return {
+      reply: recorded(restartStaleFixture(ids), null, null),
+      followUps: [
+        {
+          delayMs: 100,
+          event: {
+            kind: "session.restart",
+            txn: "session.restart",
+            entity: "session",
+            entity_id: ids[0] ?? "",
+            rev_after: null,
+            card_id: null,
+            entity_state: null,
+          },
+        },
+      ],
+    };
+  }
   const retire = /^\/api\/v1\/projects\/([^/]+)\/retire$/.exec(path);
   if (method === "POST" && retire?.[1]) {
     const id = retire[1];

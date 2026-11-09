@@ -246,6 +246,22 @@ pub struct AgentRow {
     /// A peer row's link state; absent on this host's rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<LinkState>,
+    /// Present when the session runs an older tiller than its host does now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale: Option<StaleInfo>,
+}
+
+/// How a session's launch differs from what its host's tiller would write
+/// now, so the board can offer a restart.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct StaleInfo {
+    /// The tiller version it started on, or `unknown` when its launch left
+    /// no record.
+    pub since: String,
+    /// Whether the role prompt or hook settings differ, not just the version.
+    pub prompt_changed: bool,
+    /// A restart waits for the session to go idle.
+    pub restart_queued: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -253,6 +269,9 @@ pub struct AgentsResponse {
     /// Orchestrators with their workers; workers whose orchestrator has ended
     /// are listed at the top level.
     pub orchestrators: Vec<AgentRow>,
+    /// The tiller version of the host that answered.
+    #[serde(default)]
+    pub tiller_version: String,
 }
 
 /// One line of an event list, as the detail pages show it.
@@ -1333,6 +1352,34 @@ pub struct StartOrchestrator {
     /// (`protocol.md` 7.4).
     #[serde(default)]
     pub host: Option<String>,
+}
+
+/// `POST /api/v1/agents/restart-stale`: restarts the sessions that run an
+/// older tiller. An idle one restarts now; a working one is queued and
+/// restarts when it next goes idle.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RestartStale {
+    pub idempotency_key: String,
+    /// Only these sessions, the ones the person saw; all stale sessions when
+    /// absent.
+    #[serde(default)]
+    pub sessions: Option<Vec<String>>,
+}
+
+/// What a restart did to each session it covered.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct RestartStaleResponse {
+    pub sessions: Vec<RestartResult>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct RestartResult {
+    pub session_id: String,
+    /// `restarted`, `queued` (it restarts when it next goes idle) or
+    /// `failed`.
+    pub outcome: String,
+    pub error: Option<String>,
 }
 
 /// `POST /api/v1/agents/{session}/terminal`: opens the terminal mirror.

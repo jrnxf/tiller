@@ -28,6 +28,7 @@ pub mod records;
 pub mod review;
 pub mod runs;
 pub mod signals;
+pub mod stamps;
 
 #[cfg(test)]
 pub(crate) mod testing;

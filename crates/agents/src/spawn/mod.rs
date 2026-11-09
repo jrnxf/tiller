@@ -505,6 +505,9 @@ fn launch_in(
         },
     )?;
     made.events.extend(placed.events);
+    // What the session was launched with, for the stale-session check.
+    made.events
+        .extend(crate::stale::record(store, ctx, &session.id, role)?.events);
 
     let label = layout::worker_label(&card.display_id, run.role, true);
     let created = world.herdr.create_workspace(&label, Some(worktree))?;

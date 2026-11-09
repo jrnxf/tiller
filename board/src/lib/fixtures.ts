@@ -5,6 +5,8 @@
 import type {
   AgentRow,
   AgentsResponse,
+  RestartStaleResponse,
+  SessionStale,
   AttentionItem,
   AttentionResponse,
   BoardResponse,
@@ -63,7 +65,8 @@ export type Scenario =
   | "busy"
   | "health-bad"
   | "live"
-  | "federated";
+  | "federated"
+  | "stale-sessions";
 
 export const SCENARIOS: readonly Scenario[] = [
   "default",
@@ -78,6 +81,7 @@ export const SCENARIOS: readonly Scenario[] = [
   "health-bad",
   "live",
   "federated",
+  "stale-sessions",
 ];
 
 const WEEKLY_FLOOR_PERCENT = 3;
@@ -881,6 +885,33 @@ export function startOrchestratorFixture(projectId: string): { live: boolean } {
   return { live };
 }
 
+const FIXTURE_TILLER_VERSION = "0.1.0-pre.21";
+
+// What `restart-stale` did to a fixture session: restarted ones are current
+// again, queued ones wait for idle.
+const staleRestarts = new Map<string, "restarted" | "queued">();
+
+// Asks the fixture to restart these sessions: an idle one restarts now, a
+// working one is queued.
+export function restartStaleFixture(ids: string[]): RestartStaleResponse {
+  return {
+    sessions: ids.map((id) => {
+      const idle = id === sessionId("Oalpha");
+      staleRestarts.set(id, idle ? "restarted" : "queued");
+      return { session_id: id, outcome: idle ? "restarted" : "queued" };
+    }),
+  };
+}
+
+function staleOf(key: string): { stale?: SessionStale } {
+  const id = sessionId(key);
+  const done = staleRestarts.get(id);
+  if (done === "restarted") return {};
+  return {
+    stale: { since: "0.1.0-pre.20", prompt_changed: true, restart_queued: done === "queued" },
+  };
+}
+
 function agentsFor(
   board: BoardResponse,
   projects: ProjectsResponse,
@@ -888,6 +919,7 @@ function agentsFor(
   scenario: Scenario,
 ): AgentsResponse {
   if (board.rows.length === 0) return { orchestrators: [] };
+  const staleTiller = scenario === "stale-sessions";
   const peerProjectRows = projects.projects.filter(isPeerRow);
   const localOrchestrators = projects.projects
     .filter((p) => !isPeerRow(p) && (!UNSTARTED.has(p.id) || startedOrchestrators.has(p.id)))
@@ -905,7 +937,7 @@ function agentsFor(
         session_id: sessionId(`O${project.id}`),
         role: "orchestrator",
         model: "opus",
-        activity: "working",
+        activity: staleTiller && projectIndex === 0 ? "idle" : "working",
         activity_observed_at: minutes(now, quiet ? -41 : -(0.2 + projectIndex)),
         last_status_line: `Waiting on ${live[0]?.display_id ?? "the next ask"}`,
         herdr_name: `${project.id}-orch`,
@@ -918,10 +950,12 @@ function agentsFor(
         workspace_label: project.id,
         state_since: minutes(now, -(40 + projectIndex * 9)),
         last_output_at: minutes(now, quiet ? -41 : -(0.2 + projectIndex)),
+        ...(staleTiller && projectIndex < 2 ? staleOf(`O${project.id}`) : {}),
       };
     });
   return {
     orchestrators: [...localOrchestrators, ...peerAgents(now, board.rows, peerProjectRows)],
+    tiller_version: FIXTURE_TILLER_VERSION,
   };
 }
 
