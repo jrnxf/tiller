@@ -17,6 +17,8 @@
 .prow .pacts {
   display: flex;
   align-items: center;
+  align-self: flex-start;
+  height: var(--nav-h);
   gap: 0;
   flex: none;
 }

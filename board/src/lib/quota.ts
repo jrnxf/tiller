@@ -27,16 +27,6 @@ function until(iso: string | null, now: number): number | null {
   return Number.isNaN(at) ? null : at - now;
 }
 
-// One bar of the card. The fill is what is left, the tick is where an even
-// spend would stand by now: the share of the window that is still to come.
-interface QuotaBarView {
-  key: string;
-  name: string;
-  percentLeft: number | null;
-  paceMarker: number | null;
-  toReset: string | null;
-}
-
 export interface QuotaFooterView {
   dot: QuotaDot;
   percentLeft: number | null;
@@ -47,11 +37,9 @@ export interface QuotaFooterView {
   runway: string | null;
   // Why the dot has its colour.
   reason: string;
-  rows: QuotaBarView[];
-}
-
-function provider(window: QuotaWindow): string {
-  return window.label.split(":")[0] ?? "";
+  // What the card says beside the percent: the runway, else "out of date" for a
+  // stale reading, else the reset.
+  note: string;
 }
 
 function paceMarker(window: QuotaWindow): number | null {
@@ -65,11 +53,6 @@ function runwayOf(window: QuotaWindow, now: number): string | null {
   const reset = until(window.resets_at, now);
   if (reset !== null && left >= reset) return null;
   return `empty in ${formatSpan(left)}`;
-}
-
-function barName(window: QuotaWindow): string {
-  if (window.kind === "weekly") return "week";
-  return window.title.replace(/\s+week$/i, "");
 }
 
 function reasonOf(window: QuotaWindow, runway: string | null): string {
@@ -95,22 +78,7 @@ export function quotaFooterView(quota: QuotaResponse, now = serverNow()): QuotaF
   const rounded = percent === null ? null : Math.round(percent);
   const resets = formatLisbonRounded(window.resets_at);
   const runway = runwayOf(window, now);
-  const rows = quota.windows
-    .filter(
-      (other) =>
-        provider(other) === provider(window) && (other.kind === "weekly" || other.kind === "model"),
-    )
-    .map((other) => {
-      const toReset = until(other.resets_at, now);
-      return {
-        key: other.label,
-        name: barName(other),
-        percentLeft:
-          other.percent_remaining === null ? null : clampPercent(other.percent_remaining),
-        paceMarker: paceMarker(other),
-        toReset: toReset === null || toReset <= 0 ? null : formatSpan(toReset),
-      };
-    });
+  const reason = reasonOf(window, runway);
   return {
     dot: window.dot,
     percentLeft: percent === null ? null : clampPercent(percent),
@@ -118,8 +86,8 @@ export function quotaFooterView(quota: QuotaResponse, now = serverNow()): QuotaF
     label: rounded === null ? "week unknown" : `${rounded}% week left`,
     resets: resets ? `resets ${resets}` : null,
     runway,
-    reason: reasonOf(window, runway),
-    rows: rows.length > 1 ? rows : [],
+    reason,
+    note: runway ?? (window.dot === "grey" ? "out of date" : resets ? `resets ${resets}` : ""),
   };
 }
 
