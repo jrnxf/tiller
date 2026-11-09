@@ -7,6 +7,7 @@ import { hostField, projectKey } from "../../lib/peers";
 import { API_KEY_PREFIX } from "../../lib/queries";
 import { ActionError, sendMutation } from "../attention/api";
 import { ulid } from "../attention/ulid";
+import { startPath } from "../board/orchestrator-start";
 
 const BOARD_PATH = "/api/v1/board";
 
@@ -74,7 +75,7 @@ export function useAskSends() {
       const host = hostField(project);
       try {
         if (!target.running) {
-          await sendMutation("POST", `/api/v1/projects/${project.id}/orchestrator`, {
+          await sendMutation("POST", startPath(project.id), {
             idempotency_key: keyFor(target, "start"),
             ...host,
           });

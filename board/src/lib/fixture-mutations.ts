@@ -339,7 +339,7 @@ function forwarded(
   const host = body.host;
   if (typeof host !== "string") return null;
   if (
-    /\/(stage|asks|focus|label|delete|retire|orchestrator|bug-project)$/.test(path) ||
+    /\/(stage|focus|label|delete|retire|bug-project)$/.test(path) ||
     path === projectsPath ||
     /\/memory\//.test(path)
   ) {
@@ -827,7 +827,10 @@ function handle(
   const orchestrator = /^\/api\/v1\/projects\/([^/]+)\/orchestrator$/.exec(path);
   if (method === "POST" && orchestrator?.[1]) {
     const project = orchestrator[1];
-    const { live } = startOrchestratorFixture(project);
+    const { live } = startOrchestratorFixture(
+      project,
+      typeof body.host === "string" ? body.host : undefined,
+    );
     const session = fakeId("01JSESS");
     const data = {
       session: { id: session, project_id: project, role: "orchestrator" },
