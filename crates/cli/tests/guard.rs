@@ -151,6 +151,47 @@ fn bare_tiller_is_rewritten_to_the_running_binary() {
     );
 }
 
+/// A session outlives releases, so the rewrite names the link the hook ran
+/// through, not the store file behind it: after an upgrade the same path
+/// runs the new release, and the exclusion still names the path it rewrites to.
+#[test]
+fn rewrite_names_the_link_the_guard_ran_through() {
+    let home = tempfile::tempdir().unwrap();
+    let link = home.path().join("profile-tiller");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_tiller"), &link).unwrap();
+    let mut child = Command::new(&link)
+        .args(["guard", "pretool", "--role", "builder"])
+        .env("TILLER_HOME", home.path())
+        .env("HOME", "/home/user")
+        .env_remove("TILLER_SESSION_ID")
+        .env_remove("TILLER_RUN_ID")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let payload = json!({
+        "session_id": "claude-1",
+        "cwd": "/home/user/work",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "tiller handoff show"},
+    });
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let answer: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        answer["hookSpecificOutput"]["updatedInput"]["command"],
+        format!("{} 'handoff' 'show'", link.display())
+    );
+}
+
 /// Exit 2 would deny every tool call of the session, so a command line the
 /// guard cannot parse allows, silently, like an unknown role.
 #[test]

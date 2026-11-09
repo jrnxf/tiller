@@ -54,7 +54,7 @@ pub fn run(cmd: &Cmd) -> ExitCode {
         user_home,
         tiller_session_id: set("TILLER_SESSION_ID"),
         tiller_run_id: set("TILLER_RUN_ID"),
-        packaged_tiller: std::env::current_exe().ok(),
+        packaged_tiller: crate::stable::tiller_path().ok(),
         protected_roots: args.checkouts.iter().chain(&args.pool).cloned().collect(),
     };
     if let Some(denial) = guards::pretool(role, &input, &env) {

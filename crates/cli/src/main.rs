@@ -4,6 +4,7 @@ mod daemon;
 mod guard;
 mod hook;
 mod lisbon;
+mod stable;
 mod toon;
 
 use std::path::PathBuf;

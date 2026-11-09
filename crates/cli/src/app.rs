@@ -313,7 +313,7 @@ impl App {
             // it (`authority.md` section 7, "Routes and their controls"). The
             // packaged path is the form that works with or without hooks.
             if matches!(self.actor, Actor::Session(_) | Actor::Curator(_)) {
-                let packaged = std::env::current_exe()
+                let packaged = crate::stable::tiller_path()
                     .map_or_else(|_| "tiller".into(), |exe| exe.display().to_string());
                 return Err(Failure::from(Error::Refused {
                     entity: "host",
