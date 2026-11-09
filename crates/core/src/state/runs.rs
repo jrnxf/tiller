@@ -687,21 +687,32 @@ fn effective_quota_floor(standing: Option<f64>, away: Option<&AwayContract>) -> 
     }
 }
 
-/// The latest reset among the weekly windows at or under the floor `checks`
-/// are held to, as `run.start` checks it: the reset a refused start waits for.
+/// Whether a weekly window is at or under `floor`; an unknown reading is.
+fn at_or_under(window: &QuotaWindow, floor: f64) -> bool {
+    window.percent_remaining.is_none_or(|left| left <= floor)
+}
+
+/// The latest reset among the weekly windows at or under the standing floor
+/// `checks` are held to: the reset a refused start waits for. `None` when the
+/// standing floor refuses nothing, and when an away contract's floor would
+/// refuse the start past it too, since no owner answer lifts that floor.
 pub fn quota_floor_reset(
     conn: &Connection,
     checks: &SpawnChecks,
     now: Timestamp,
 ) -> Result<Option<Timestamp>> {
-    let away = active_away(conn, now)?;
-    let Some(floor) = effective_quota_floor(checks.standing_floor(), away.as_ref()) else {
+    let Some(floor) = checks.standing_floor() else {
         return Ok(None);
     };
     let windows: Vec<QuotaWindow> = list(conn, "kind = 'weekly' ORDER BY label", &[])?;
+    if let Some(away) = active_away(conn, now)?.and_then(|away| away.quota_floor_percent)
+        && windows.iter().any(|window| at_or_under(window, away))
+    {
+        return Ok(None);
+    }
     Ok(windows
         .iter()
-        .filter(|window| window.percent_remaining.is_none_or(|left| left <= floor))
+        .filter(|window| at_or_under(window, floor))
         .filter_map(|window| window.resets_at)
         .max())
 }

@@ -1161,7 +1161,12 @@ fn a_quota_refusal_keeps_an_unrelated_hold() {
     let error = rig
         .try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
         .unwrap_err();
-    assert!(refusal(&error).contains("held until"), "{error}");
+    assert!(
+        refusal(&error).contains(&format!(
+            "the card already has another hold, until {vendor} (the vendor ships on Friday)"
+        )),
+        "{error}"
+    );
     assert_eq!(rig.open_items(&card).len(), 1);
 
     rig.owner_answers(&card, "Start now anyway");
@@ -1177,7 +1182,7 @@ fn a_quota_refusal_keeps_an_unrelated_hold() {
 }
 
 #[test]
-fn the_away_floor_holds_the_card_and_binds_past_the_standing_floor() {
+fn an_away_floor_refusal_is_plain_and_binds_past_the_standing_floor() {
     let mut rig = Rig::with_config("account_floor_percent = 3.0\nhost_share_percent = 50.0\n");
     rig.config.quota.enabled = true;
     let ctx = rig.orchestrator();
@@ -1193,21 +1198,47 @@ fn the_away_floor_holds_the_card_and_binds_past_the_standing_floor() {
             }),
         )
         .unwrap();
-    // Over the standing floor, under the away floor.
+    // Over the standing floor, under the away floor: no answer lifts it.
     let reset = Timestamp::now().plus_minutes(60);
     rig.quota_resetting(70.0, Some(reset));
-
     let error = rig
         .try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
         .unwrap_err();
-    assert!(refusal(&error).contains("held until"), "{error}");
-    let holds = rig.open_holds(&card);
-    assert_eq!(holds.len(), 1);
-    assert_eq!(holds[0].until_at, reset);
+    assert!(refusal(&error).contains("90 percent floor"), "{error}");
+    assert!(!refusal(&error).contains("held"), "{error}");
+    assert!(rig.open_holds(&card).is_empty());
+    assert!(rig.open_items(&card).is_empty());
 
+    // Under both floors: the away floor would still refuse past the
+    // standing one, so nothing is held or asked either.
+    rig.quota_resetting(9.0, Some(reset));
+    let error = rig
+        .try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
+        .unwrap_err();
+    assert!(!refusal(&error).contains("held"), "{error}");
+    assert!(rig.open_holds(&card).is_empty());
+    assert!(rig.open_items(&card).is_empty());
+
+    // An answer from before the away contract still cannot pass its floor.
+    rig.fleet.store.away_end(&owner(), "back").unwrap();
+    rig.try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
+        .unwrap_err();
     rig.owner_answers(&card, "Start now anyway");
+    rig.fleet
+        .store
+        .away_start(
+            &owner(),
+            serde_json::json!({
+                "until_at": Timestamp::now().plus_minutes(24 * 60),
+                "projects": ["alpha"],
+                "spend": {"quota_floor_percent": 90.0},
+            }),
+        )
+        .unwrap();
+    rig.quota_resetting(70.0, Some(reset));
     let error = rig.try_spawn(&ctx, past_floor(&card)).unwrap_err();
     assert!(refusal(&error).contains("90 percent floor"), "{error}");
+    assert!(rig.open_items(&card).is_empty());
     assert!(rig.pool.taken().is_empty());
 }
 

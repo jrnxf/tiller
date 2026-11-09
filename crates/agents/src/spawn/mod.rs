@@ -45,9 +45,10 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::Value;
 use tiller_core::domain::{
-    Artifact, Card, CardKind, CheckPlan, Delivery, Effort, Pr, Project, Reservation, Run,
+    Artifact, Card, CardKind, CheckPlan, Delivery, Effort, Hold, Pr, Project, Reservation, Run,
     RunOutcome, RunRole, Session, Worktree,
 };
+use tiller_core::state::attention::QUOTA_HOLD_REASON;
 use tiller_core::state::caches::{WorktreeReading, landed_heads};
 use tiller_core::state::projects::meta;
 use tiller_core::state::publishes::published_head;
@@ -288,7 +289,9 @@ pub(crate) fn local_host(store: &Store) -> Result<String> {
 /// A start the quota floor refused: holds the card until the weekly reset
 /// and opens one decision for the owner, then returns the refusal with that
 /// said. Any other error, and a refusal with no reset to wait for, come back
-/// as they are. The reset is the one the floor `checks` were held to.
+/// as they are, and so does a refusal no owner answer could lift. The reset is
+/// the one the standing floor `checks` were held to; the text names the hold
+/// the card has.
 pub(crate) fn hold_for_quota(
     store: &mut Store,
     ctx: &Ctx,
@@ -306,15 +309,31 @@ pub(crate) fn hold_for_quota(
     let Ok(Some(until)) = quota_floor_reset(store.conn(), checks, ctx.now) else {
         return error;
     };
-    match store.quota_hold(ctx, &card.id, role, until, &state.to_string()) {
-        Ok(held) if held.value.answered_at.is_some() => SpawnError::Refused(format!(
-            "{state}; the card is held for the quota and the owner chose to wait for the reset"
-        )),
-        Ok(_) => SpawnError::Refused(format!(
-            "{state}; the card is held until {until} and the owner has a decision to make"
-        )),
-        Err(_) => error,
-    }
+    let Ok(item) = store.quota_hold(ctx, &card.id, role, until, &state.to_string()) else {
+        return error;
+    };
+    let hold: Option<Hold> = find(
+        store.conn(),
+        "card_id = ?1 AND released_at IS NULL",
+        &[&card.id],
+    )
+    .unwrap_or_default();
+    let held = match hold {
+        Some(hold) if hold.reason == QUOTA_HOLD_REASON => {
+            format!("the card is held until {}", hold.until_at)
+        }
+        Some(hold) => format!(
+            "the card already has another hold, until {} ({})",
+            hold.until_at, hold.reason
+        ),
+        None => "the card is not held".to_owned(),
+    };
+    let owner = if item.value.answered_at.is_some() {
+        "the owner chose to wait for the reset"
+    } else {
+        "the owner has a decision to make"
+    };
+    SpawnError::Refused(format!("{state}; {held} and {owner}"))
 }
 
 /// Spawns one worker run. `key` is the spawn's idempotency key.
