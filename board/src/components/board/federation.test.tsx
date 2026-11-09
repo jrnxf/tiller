@@ -1,6 +1,6 @@
 import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { hydrateFromSnapshot } from "../../lib/boot";
@@ -358,6 +358,30 @@ test("the Agents screen shows the host of every agent, and a peer's pane is watc
   const open = (await screen.findByRole("button", { name: /Open in herdr/ })) as HTMLButtonElement;
   expect(open.disabled).toBe(true);
   expect(open.title).toBe("host-d owns this pane: open it from that host");
+});
+
+test("a peer's pane streams through its board host, and is never read as a saved machine's tail", async () => {
+  stubApi("federated");
+  const api = globalThis.fetch;
+  const asked: { path: string; body: Record<string, unknown> }[] = [];
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (!/\/terminal(\/tail)?$/.test(path)) return api(input, init);
+    asked.push({ path, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+    return new Promise<Response>(() => {});
+  });
+  const agents = (fixtureSnapshot("federated").queries[agentsPath()] as AgentsResponse)
+    .orchestrators;
+  // The peer is a remote host in the Machines read, as a saved machine is;
+  // only its link tells the two apart.
+  const worker = agents.flatMap((a) => a.workers).find((w) => w.host === "host-d");
+  if (!worker) throw new Error("no host-d worker in the fixture");
+  await renderApp("federated", `/agents?agent=${worker.session_id}`);
+  await waitFor(() => expect(asked).not.toHaveLength(0));
+  await flush();
+  expect(asked).toEqual([
+    { path: `/api/v1/agents/${worker.session_id}/terminal`, body: { host: "host-d" } },
+  ]);
 });
 
 test("a link to another screen leaves the card page's owner behind", async () => {
