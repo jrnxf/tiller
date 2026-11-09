@@ -1378,6 +1378,7 @@ enum Parsed {
     Decide(DecideBody, bool),
     AskNote(AskNote),
     StartOrchestrator,
+    RestartStale(Option<Vec<String>>),
 }
 
 impl Mutation {
@@ -1487,6 +1488,14 @@ impl Mutation {
                     request.idempotency_key,
                     request.host,
                     Parsed::StartOrchestrator,
+                )
+            }
+            Op::RestartStale => {
+                let request: RestartStale = body(bytes)?;
+                (
+                    request.idempotency_key,
+                    request.host,
+                    Parsed::RestartStale(request.sessions),
                 )
             }
         };
@@ -1615,8 +1624,8 @@ impl Mutation {
                 Ok(done)
             }
             // Needs the daemon's starter, so it never reaches the store alone.
-            Parsed::StartOrchestrator => Err(Error::Internal(
-                "an orchestrator start runs through its starter".into(),
+            Parsed::StartOrchestrator | Parsed::RestartStale(_) => Err(Error::Internal(
+                "a start or restart runs through its starter".into(),
             )),
         }
     }
@@ -1635,6 +1644,12 @@ impl Mutation {
             let project = target.as_deref().unwrap_or_default();
             let applied = start_here(starter, store, ctx, project, |_| {})?;
             return Ok(Done::of(applied)?.response());
+        }
+        if let Parsed::RestartStale(sessions) = &self.parsed {
+            let starter = starter
+                .ok_or_else(|| Error::Unavailable("this daemon cannot restart sessions".into()))?;
+            let restarted = crate::stale::restart_stale(store, starter, sessions.as_deref())?;
+            return Ok(restart_done(&restarted)?.response());
         }
         match self.apply(store, ctx) {
             Ok(done) => Ok(done.response()),
@@ -2071,8 +2086,13 @@ async fn restart_stale(
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
     guard(&state, &headers)?;
-    let request: RestartStale = body(&bytes)?;
-    key(&request.idempotency_key)?;
+    let mutation = Mutation::parse(Op::RestartStale, None, &bytes)?;
+    if let Some(view) = peer_for(&state, mutation.host()).await? {
+        return forward(&state, &view, mutation, &bytes).await;
+    }
+    let Parsed::RestartStale(sessions) = mutation.parsed else {
+        return Err(Error::Internal("a restart parses as a restart".into()).into());
+    };
     if let Some(reason) = state.0.damage.reason() {
         return Err(read_only(&reason));
     }
@@ -2086,7 +2106,7 @@ async fn restart_stale(
             return Err(uninitialized());
         }
         let done = Store::open_current(&db).and_then(|mut store| {
-            crate::stale::restart_stale(&mut store, starter.as_ref(), request.sessions.as_deref())
+            crate::stale::restart_stale(&mut store, starter.as_ref(), sessions.as_deref())
         });
         if let Err(error) = &done {
             damage.suspect(&db, error);
@@ -2098,20 +2118,25 @@ async fn restart_stale(
         Ok(result) => result?,
         Err(error) => return Err(Error::Internal(error.to_string()).into()),
     };
+    Ok(Json(restart_done(&restarted)?.response()))
+}
+
+/// What a restart pass answers with: the outcome of each session, and a
+/// warning when some did not restart.
+fn restart_done(restarted: &RestartStaleResponse) -> Result<Done, Error> {
     let failed = restarted
         .sessions
         .iter()
         .filter(|row| row.outcome == "failed")
         .count();
-    let done = Done {
-        data: serde_json::to_value(&restarted).map_err(Error::from)?,
+    Ok(Done {
+        data: serde_json::to_value(restarted)?,
         events: Vec::new(),
         replayed: false,
         outbox_id: None,
         approval_id: None,
         warning: (failed > 0).then(|| format!("{failed} session(s) did not restart")),
-    };
-    Ok(Json(done.response()))
+    })
 }
 
 /// The longest ask the board's box records: it is noted whole to the

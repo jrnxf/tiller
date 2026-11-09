@@ -707,3 +707,85 @@ fn board_pairing_brings_the_link_up() {
     assert_eq!(again["error"]["code"], "label_taken", "{again}");
     assert_eq!(count(&world.peer, "SELECT count(*) FROM peer_keys"), 1);
 }
+
+/// The peer's session that runs an older tiller shows on the board host's
+/// roster, judged against the peer's own tiller, and the owner restarts it
+/// from there: the board host relays `restart-stale` to the peer, which
+/// queues the working session. The peer restarts only what it was asked to.
+#[test]
+fn board_restarts_a_peers_older_sessions() {
+    let world = World::start();
+    world.live();
+
+    // The peer's orchestrator has no launch stamp, so it is stale there; it
+    // is working, so a restart queues it.
+    world
+        .peer
+        .open()
+        .conn()
+        .execute(
+            "UPDATE sessions SET activity = 'working',
+                    activity_observed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+            [&world.peer.orchestrator_session],
+        )
+        .unwrap();
+    let session = world.peer.orchestrator_session.clone();
+
+    let row = until("the peer's older session on the board host", || {
+        let (status, roster) = world.get("/api/v1/agents");
+        assert_eq!(status, 200, "{roster}");
+        roster["orchestrators"]
+            .as_array()?
+            .iter()
+            .find(|row| row["session_id"] == session.as_str() && row["host"] == LABEL)
+            .cloned()
+    });
+    assert_eq!(row["stale"]["since"], "unknown", "{row}");
+    assert_eq!(row["stale"]["restart_queued"], false);
+    assert_eq!(row["link"], "live");
+    let (_, machines) = world.get("/api/v1/machines");
+    let peer = machines["machines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|machine| machine["label"] == LABEL)
+        .unwrap();
+    assert_eq!(peer["peer_scope"], "act", "{machines}");
+    assert!(peer["version"].is_string(), "{machines}");
+
+    let (status, restarted) = world.post(
+        "/api/v1/agents/restart-stale",
+        &json!({"idempotency_key": "restart-1", "host": LABEL, "sessions": [&session]}),
+    );
+    assert_eq!(status, 200, "{restarted}");
+    assert_eq!(restarted["host"], LABEL);
+    assert_eq!(
+        restarted["data"]["sessions"][0]["session_id"],
+        session.as_str()
+    );
+    assert_eq!(restarted["data"]["sessions"][0]["outcome"], "queued");
+
+    // The peer holds the queued restart, and its row says so on the board
+    // host once the link carries it.
+    let queued: i64 = world
+        .peer
+        .open()
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM sessions WHERE id = ?1 AND restart_queued_at IS NOT NULL",
+            [&session],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(queued, 1);
+    until("the queued restart on the board host", || {
+        let (_, roster) = world.get("/api/v1/agents");
+        roster["orchestrators"]
+            .as_array()?
+            .iter()
+            .find(|row| row["session_id"] == session.as_str() && row["host"] == LABEL)
+            .filter(|row| row["stale"]["restart_queued"] == true)
+            .map(|_| ())
+    });
+}

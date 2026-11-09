@@ -1,41 +1,58 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useRef, useState } from "react";
 
-import type { AgentRow, RestartStaleResponse } from "../../lib/api-types";
+import type { AgentRow, Machine, RestartStaleResponse } from "../../lib/api-types";
+import { VIEW_ONLY_REASON, isPeerRow, peerMachines, standingOf } from "../../lib/peers";
 import { agentsQuery } from "../../lib/queries";
 import { sendMutation } from "../attention/api";
 import { useAction } from "../attention/use-action";
 import { ProjectDialog } from "../shell/project-dialog";
 import { WarnIcon } from "../shell/icons";
+import { useMachineRows } from "./peer-state";
 
 // A session started on an older tiller keeps that release's role prompt and
-// hooks until it restarts. Only this host's sessions count: a peer's rows
-// carry that peer's own staleness and restart there.
+// hooks until it restarts. A peer's rows carry that peer's own staleness,
+// judged against the peer's tiller, so they count here too. The restart runs
+// on the peer when the pairing allows it, and otherwise has to be done there.
 interface StaleSession {
   agent: AgentRow;
   name: string;
   idle: boolean;
+  // The peer's label; null for this host's own session.
+  host: string | null;
+  // Whether this board can restart it: this host's own, or a live `act` peer.
+  canAct: boolean;
+  // Why it cannot, as the banner says it.
+  reason: string | null;
 }
 
 function sessionName(agent: AgentRow, project: string | undefined): string {
-  if (agent.role === "orchestrator") return `${project ?? "project"} orchestrator`;
-  return `${agent.card_id ?? agent.session_id} ${agent.role}`;
+  const host = isPeerRow(agent) && agent.host ? ` on ${agent.host}` : "";
+  if (agent.role === "orchestrator") return `${project ?? "project"} orchestrator${host}`;
+  return `${agent.card_id ?? agent.session_id} ${agent.role}${host}`;
 }
 
-function staleSessions(orchestrators: AgentRow[]): StaleSession[] {
+function staleSessions(orchestrators: AgentRow[], machines: Machine[]): StaleSession[] {
   const out: StaleSession[] = [];
   for (const orchestrator of orchestrators) {
     for (const agent of [orchestrator, ...orchestrator.workers]) {
-      if (!agent.stale || agent.link) continue;
+      if (!agent.stale) continue;
+      const standing = standingOf(agent, machines);
       out.push({
         agent,
         name: sessionName(agent, orchestrator.project_id),
         idle: agent.activity === "idle",
+        host: standing.peer ? standing.host : null,
+        canAct: standing.canAct,
+        reason: standing.reason,
       });
     }
   }
   return out;
 }
+
+const versionOf = (machines: Machine[], host: string) =>
+  peerMachines(machines).find((machine) => machine.label === host)?.version;
 
 // "0.1.0-pre.20" reads "pre.20" in a chip.
 function shortVersion(version: string): string {
@@ -44,9 +61,12 @@ function shortVersion(version: string): string {
 }
 
 export function StaleChip({ agent }: { agent: AgentRow }) {
-  const current = useQuery(agentsQuery()).data?.tiller_version;
+  const machines = useMachineRows();
+  const local = useQuery(agentsQuery()).data?.tiller_version;
   const stale = agent.stale;
-  if (!stale || agent.link) return null;
+  if (!stale) return null;
+  // A peer's session is judged against that peer's tiller.
+  const current = isPeerRow(agent) && agent.host ? versionOf(machines, agent.host) : local;
   const started = `Started on ${stale.since === "unknown" ? "an unknown version" : stale.since}.`;
   const tip = stale.restart_queued
     ? `${started} Restarts when it next goes idle.`
@@ -65,12 +85,26 @@ function RestartDialog({ sessions, onClose }: { sessions: StaleSession[]; onClos
   const [result, setResult] = useState<RestartStaleResponse | null>(null);
   const ids = sessions.map(({ agent }) => agent.session_id);
   const send = useCallback(
-    (idempotency_key: string) =>
-      sendMutation<RestartStaleResponse>("POST", "/api/v1/agents/restart-stale", {
-        sessions: ids,
-        idempotency_key,
-      }),
-    // The ids at the click are what is asked: the list below may move after.
+    async (idempotency_key: string) => {
+      // One restart per host: this host's own, then each peer's, relayed to it.
+      const hosts = [...new Set(sessions.map(({ host }) => host))];
+      const answers = [];
+      for (const host of hosts) {
+        answers.push(
+          await sendMutation<RestartStaleResponse>("POST", "/api/v1/agents/restart-stale", {
+            sessions: sessions
+              .filter((entry) => entry.host === host)
+              .map(({ agent }) => agent.session_id),
+            idempotency_key: host ? `${idempotency_key}:${host}` : idempotency_key,
+            ...(host ? { host } : {}),
+          }),
+        );
+      }
+      const [first] = answers;
+      if (!first) throw new Error("nothing to restart");
+      return { ...first, data: { sessions: answers.flatMap((answer) => answer.data.sessions) } };
+    },
+    // The sessions at the click are what is asked: the list below may move after.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [ids.join(",")],
   );
@@ -162,20 +196,50 @@ function RestartDialog({ sessions, onClose }: { sessions: StaleSession[]; onClos
   );
 }
 
+// "1 on host-a, 2 on host-b": where the peers' older sessions are.
+function onHosts(sessions: StaleSession[]): string {
+  const counts = new Map<string, number>();
+  for (const { host } of sessions) if (host) counts.set(host, (counts.get(host) ?? 0) + 1);
+  return [...counts].map(([host, count]) => `${count} on ${host}`).join(", ");
+}
+
+// What a session this board cannot restart says: the restart has to happen on
+// its own host.
+function elsewhere(sessions: StaleSession[]): string[] {
+  const hosts = new Map<string, string | null>();
+  for (const { host, reason } of sessions) if (host) hosts.set(host, reason);
+  return [...hosts].map(([host, reason]) =>
+    reason === VIEW_ONLY_REASON
+      ? `${host} is paired view only, so restart its sessions on ${host}.`
+      : `${reason ?? `${host} is not reachable`}, so its sessions wait there.`,
+  );
+}
+
 // Above the board: how many sessions run an older tiller, and the review that
 // restarts them. Once every one is restarted or queued it says what waits.
 export function StaleBanner() {
   const roster = useQuery(agentsQuery()).data;
+  const machines = useMachineRows();
   const [open, setOpen] = useState(false);
   const opener = useRef<HTMLButtonElement>(null);
-  const all = staleSessions(roster?.orchestrators ?? []);
+  const all = staleSessions(roster?.orchestrators ?? [], machines);
   const unqueued = all.filter(({ agent }) => !agent.stale?.restart_queued);
   const queued = all.filter(({ agent }) => agent.stale?.restart_queued);
+  const actionable = unqueued.filter(({ canAct }) => canAct);
+  const stuck = unqueued.filter(({ canAct }) => !canAct);
   const close = useCallback(() => {
     setOpen(false);
     opener.current?.focus();
   }, []);
   if (all.length === 0) return null;
+  const peers = onHosts(unqueued);
+  const local = unqueued.some(({ host }) => !host);
+  const peerVersions = [...new Set(unqueued.flatMap(({ host }) => (host ? [host] : [])))].flatMap(
+    (host) => {
+      const version = versionOf(machines, host);
+      return version ? [`${host} runs ${version}.`] : [];
+    },
+  );
   return (
     <div className="banner warn" role="status" aria-live="polite" data-testid="stale-banner">
       <WarnIcon />
@@ -184,11 +248,17 @@ export function StaleBanner() {
           <>
             <b>
               {unqueued.length === 1
-                ? "1 session runs an older tiller."
-                : `${unqueued.length} sessions run an older tiller.`}
+                ? "1 session runs an older tiller"
+                : `${unqueued.length} sessions run an older tiller`}
+              {peers ? ` (${peers})` : ""}.
             </b>{" "}
-            Tiller is now {roster?.tiller_version ?? "newer"}. Restarting them picks up the new
-            hooks and role prompt.
+            {local ? `Tiller is now ${roster?.tiller_version ?? "newer"}. ` : ""}
+            {peerVersions.join(" ")}
+            {peerVersions.length > 0 ? " " : ""}
+            {actionable.length > 0
+              ? "Restarting them picks up the new hooks and role prompt."
+              : "Restarting them picks up the new hooks and role prompt, on their own host."}
+            {stuck.length > 0 ? ` ${elsewhere(stuck).join(" ")}` : ""}
           </>
         ) : (
           <>
@@ -202,12 +272,12 @@ export function StaleBanner() {
           </>
         )}
       </div>
-      {unqueued.length > 0 ? (
+      {actionable.length > 0 ? (
         <button ref={opener} type="button" className="btn" onClick={() => setOpen(true)}>
           Review and restart
         </button>
       ) : null}
-      {open ? <RestartDialog sessions={unqueued} onClose={close} /> : null}
+      {open ? <RestartDialog sessions={actionable} onClose={close} /> : null}
     </div>
   );
 }

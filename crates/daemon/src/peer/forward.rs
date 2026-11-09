@@ -40,10 +40,11 @@ pub enum Op {
     Decide,
     AskNote,
     StartOrchestrator,
+    RestartStale,
 }
 
 impl Op {
-    pub const ALL: [Op; 12] = [
+    pub const ALL: [Op; 13] = [
         Op::CreateCard,
         Op::EditCard,
         Op::Comment,
@@ -56,6 +57,7 @@ impl Op {
         Op::Decide,
         Op::AskNote,
         Op::StartOrchestrator,
+        Op::RestartStale,
     ];
 
     /// The 7.4 endpoint, as a `mutate` frame's `op` names it.
@@ -73,6 +75,7 @@ impl Op {
             Op::Decide => "POST /api/v1/approvals/{id}/decide",
             Op::AskNote => "POST /api/v1/projects/{id}/asks",
             Op::StartOrchestrator => "POST /api/v1/projects/{id}/orchestrator",
+            Op::RestartStale => "POST /api/v1/agents/restart-stale",
         }
     }
 
@@ -286,6 +289,8 @@ fn target_project(store: &Store, op: Op, frame: &Mutate) -> tiller_core::Result<
         },
         // The path names the project by its id, as the core calls read it.
         Op::AskNote | Op::StartOrchestrator => Some(target.to_owned()),
+        // Every stale session on this host: no project to own.
+        Op::RestartStale => None,
         Op::EditCard
         | Op::Comment
         | Op::Hold
