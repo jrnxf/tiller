@@ -8,8 +8,8 @@ use std::sync::{Arc, Barrier, Mutex};
 
 use tempfile::TempDir;
 use tiller_core::domain::{
-    AnsweredVia, Artifact, ArtifactKind, Attention, CardKind, Hold, HoldReleaseReason, Pr,
-    PrState, Size,
+    AnsweredVia, Artifact, ArtifactKind, Attention, CardKind, Hold, HoldReleaseReason, Pr, PrState,
+    Size,
 };
 use tiller_core::state::caches::QuotaReading;
 use tiller_core::state::cards::NewCard;
