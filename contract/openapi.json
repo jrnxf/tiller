@@ -7054,6 +7054,13 @@
           "idempotency_key"
         ],
         "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label: the peer restarts its own sessions\n(`protocol.md` 7.4)."
+          },
           "idempotency_key": {
             "type": "string"
           },

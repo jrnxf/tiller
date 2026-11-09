@@ -1365,6 +1365,10 @@ pub struct RestartStale {
     /// absent.
     #[serde(default)]
     pub sessions: Option<Vec<String>>,
+    /// A paired peer's label: the peer restarts its own sessions
+    /// (`protocol.md` 7.4).
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 /// What a restart did to each session it covered.

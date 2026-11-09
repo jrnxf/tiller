@@ -17,6 +17,7 @@ import type {
   Machine,
   PeerScope,
   Project,
+  SessionStale,
   SnapshotPeer,
 } from "./api-types.ts";
 
@@ -445,8 +446,18 @@ function peerSession(key: string): string {
   return `01JSESS${key.replace(/\W/g, "").padEnd(19, "0").slice(0, 19).toUpperCase()}`;
 }
 
+// Which of a peer's first orchestrators run an older tiller, and since when:
+// host-d's started on its previous release, host-f's left no record.
+const PEER_STALE_SINCE: Record<string, string> = { "host-d": "0.1.0-pre.16", "host-f": "unknown" };
+
 // One orchestrator per peer project, with a worker for each card in flight.
-export function peerAgents(now: number, rows: BoardRow[], projects: Project[]): AgentRow[] {
+export function peerAgents(
+  now: number,
+  rows: BoardRow[],
+  projects: Project[],
+  staleOf?: (id: string, since: string) => { stale?: SessionStale },
+): AgentRow[] {
+  const staleHosts = new Set<string>();
   return projects.map((project, index) => {
     const host = project.host ?? "";
     const live = rows.filter(
@@ -459,8 +470,13 @@ export function peerAgents(now: number, rows: BoardRow[], projects: Project[]): 
       host_id: spec(host).host_id,
       ...tag(host, now),
     };
+    const since = PEER_STALE_SINCE[host];
+    const first = !staleHosts.has(host);
+    staleHosts.add(host);
+    const orchestrator = peerSession(`PO${host}${project.id}`);
     return {
-      session_id: peerSession(`PO${host}${project.id}`),
+      session_id: orchestrator,
+      ...(staleOf && since && first ? staleOf(orchestrator, since) : {}),
       role: "orchestrator",
       model: "opus",
       activity: "working",

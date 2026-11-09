@@ -53,8 +53,15 @@ test("older sessions get a banner, chips and a restart dialog that queues the wo
   );
 
   const banner = await screen.findByTestId("stale-banner");
-  expect(banner.textContent).toContain("2 sessions run an older tiller.");
+  // Two here, one on a live `act` peer and one on a view-only peer.
+  expect(banner.textContent).toContain(
+    "4 sessions run an older tiller (1 on host-d, 1 on host-f).",
+  );
   expect(banner.textContent).toContain("Tiller is now 0.1.0-pre.21.");
+  expect(banner.textContent).toContain("host-d runs 0.1.0-pre.17.");
+  expect(banner.textContent).toContain(
+    "host-f is paired view only, so restart its sessions on host-f.",
+  );
 
   const chips = screen.getAllByText("older tiller · pre.20");
   expect(chips.length).toBeGreaterThanOrEqual(2);
@@ -64,20 +71,24 @@ test("older sessions get a banner, chips and a restart dialog that queues the wo
 
   fireEvent.click(within(banner).getByRole("button", { name: "Review and restart" }));
   const dialog = await screen.findByRole("dialog");
-  expect(within(dialog).getByRole("heading").textContent).toBe("Restart 2 older sessions");
+  // The view-only peer's session is not offered: it restarts on that host.
+  expect(within(dialog).getByRole("heading").textContent).toBe("Restart 3 older sessions");
+  expect(within(dialog).getByText(/orchestrator on host-d/)).toBeTruthy();
+  expect(within(dialog).queryByText(/on host-f/)).toBeNull();
   expect(within(dialog).getByText("idle · restarts now")).toBeTruthy();
-  expect(within(dialog).getByText("working · restarts when idle")).toBeTruthy();
+  expect(within(dialog).getAllByText("working · restarts when idle")).toHaveLength(2);
 
   fireEvent.click(within(dialog).getByRole("button", { name: "Restart" }));
   expect(await within(dialog).findByText("restarted ✓")).toBeTruthy();
-  expect(within(dialog).getByText("queued · restarts when idle")).toBeTruthy();
+  expect(within(dialog).getAllByText("queued · restarts when idle")).toHaveLength(2);
 
   fireEvent.click(within(dialog).getByRole("button", { name: "Done" }));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   await waitFor(() =>
     expect(screen.getByTestId("stale-banner").textContent).toContain(
-      "1 session will restart when it goes idle.",
+      "1 session runs an older tiller (1 on host-f).",
     ),
   );
+  // Only the view-only peer's session is left, and it has no button that cannot work.
   expect(within(screen.getByTestId("stale-banner")).queryByRole("button")).toBeNull();
 });

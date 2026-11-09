@@ -68,6 +68,12 @@ export type Scenario =
   | "federated"
   | "stale-sessions";
 
+// The scenarios with paired peers. `stale-sessions` has them so a peer's older
+// sessions show on this host's board.
+function hasPeers(scenario: Scenario): boolean {
+  return scenario === "federated" || scenario === "stale-sessions";
+}
+
 export const SCENARIOS: readonly Scenario[] = [
   "default",
   "quota-amber",
@@ -230,7 +236,7 @@ function machinesFor(scenario: Scenario, now: number): MachinesResponse {
     stale_reason: null,
     version: FIXTURE_VERSION,
     // In the federated scenario this host's `tiller` project takes Tiller bugs.
-    ...(scenario === "federated" ? { bug_project: "tiller" } : {}),
+    ...(hasPeers(scenario) ? { bug_project: "tiller" } : {}),
     rev: 4,
   };
   const hostB: Machine = {
@@ -261,7 +267,7 @@ function machinesFor(scenario: Scenario, now: number): MachinesResponse {
     rev: 2,
   };
   const machines = [hostA, hostB, hostC];
-  return { machines: scenario === "federated" ? [...machines, ...peerMachines(now)] : machines };
+  return { machines: hasPeers(scenario) ? [...machines, ...peerMachines(now)] : machines };
 }
 
 const HOST_A = "01JHOSTA00000000000000000A";
@@ -330,7 +336,7 @@ const DEGRADED_PROJECTS: ProjectsResponse = {
 };
 
 function projectsFor(scenario: Scenario, now: number = Date.now()): ProjectsResponse {
-  if (scenario === "federated") {
+  if (hasPeers(scenario)) {
     return {
       projects: [
         ...DEFAULT_PROJECTS.projects,
@@ -645,7 +651,7 @@ const BUG_BODIES: Record<string, string> = {
 function boardFor(scenario: Scenario, now: number): BoardResponse {
   if (scenario === "empty") return { rows: [], asked: [] };
   if (scenario === "degraded") return { rows: degradedRows(now), asked: [] };
-  if (scenario === "federated") {
+  if (hasPeers(scenario)) {
     return { rows: [...defaultRows(now), ...bugRows(now), ...peerRows(now)], asked: [] };
   }
   if (scenario === "busy") {
@@ -827,7 +833,7 @@ function attentionFor(
       },
     ],
   };
-  if (scenario !== "federated") return local;
+  if (!hasPeers(scenario)) return local;
   const peer = peerAttention(now, board.rows);
   return {
     items: [...local.items, ...peer.items],
@@ -903,13 +909,10 @@ export function restartStaleFixture(ids: string[]): RestartStaleResponse {
   };
 }
 
-function staleOf(key: string): { stale?: SessionStale } {
-  const id = sessionId(key);
+function staleOf(id: string, since = "0.1.0-pre.20"): { stale?: SessionStale } {
   const done = staleRestarts.get(id);
   if (done === "restarted") return {};
-  return {
-    stale: { since: "0.1.0-pre.20", prompt_changed: true, restart_queued: done === "queued" },
-  };
+  return { stale: { since, prompt_changed: true, restart_queued: done === "queued" } };
 }
 
 function agentsFor(
@@ -950,11 +953,14 @@ function agentsFor(
         workspace_label: project.id,
         state_since: minutes(now, -(40 + projectIndex * 9)),
         last_output_at: minutes(now, quiet ? -41 : -(0.2 + projectIndex)),
-        ...(staleTiller && projectIndex < 2 ? staleOf(`O${project.id}`) : {}),
+        ...(staleTiller && projectIndex < 2 ? staleOf(sessionId(`O${project.id}`)) : {}),
       };
     });
   return {
-    orchestrators: [...localOrchestrators, ...peerAgents(now, board.rows, peerProjectRows)],
+    orchestrators: [
+      ...localOrchestrators,
+      ...peerAgents(now, board.rows, peerProjectRows, staleTiller ? staleOf : undefined),
+    ],
     tiller_version: FIXTURE_TILLER_VERSION,
   };
 }
@@ -1525,7 +1531,7 @@ export function fixtureSnapshot(
     last_event_seq: 4181,
     thresholds: { orchestrator_stale_minutes: 30, worker_stale_minutes: 15 },
     queries: fixtureResponses(scenario, now),
-    ...(scenario === "federated" ? { peers: peerSnapshot(now) } : {}),
+    ...(hasPeers(scenario) ? { peers: peerSnapshot(now) } : {}),
   };
 }
 
