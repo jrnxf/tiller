@@ -356,7 +356,8 @@ mod tests {
             |key: &str, value: &str| check(&base, Path::new(HOMES), Path::new(SCRATCH), key, value);
         assert!(run(POOL_ROOT, "/srv/pool").is_ok());
         assert!(run(POOL_ROOT, "pool").unwrap_err().contains("absolute"));
-        assert!(run(POOL_ROOT, "~/pool").unwrap_err().contains("full path"));
+        let tilde = format!("{}/pool", '~');
+        assert!(run(POOL_ROOT, &tilde).unwrap_err().contains("full path"));
         assert!(run(POOL_ROOT, "").unwrap_err().contains("needs a folder"));
         assert!(
             run(POOL_ROOT, "/home/user/state/runs/pool")
