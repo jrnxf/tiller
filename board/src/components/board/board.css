@@ -1527,13 +1527,10 @@ a.card:hover {
   text-overflow: ellipsis;
   flex: none;
 }
-/* On a project row the name keeps its room; the chip gives way first. */
+/* On a project row the chips sit under the name; a long host name gives way. */
 .prow .hchip {
   flex: 0 1 auto;
   min-width: 24px;
-}
-.prow .nm {
-  min-width: 4ch;
 }
 .hchip .icon {
   width: 11px;

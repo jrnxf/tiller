@@ -73,7 +73,7 @@ test.each([
   const footer = screen.getByTestId("quota-footer");
   expect(footer.querySelector("[data-dot]")?.getAttribute("data-dot")).toBe(dot);
   expect(footer.textContent).toContain(label);
-  expect(footer.textContent).toContain("resets Tue 14:00");
+  expect(footer.textContent).toContain(dot === "grey" ? "out of date" : "resets Tue 14:00");
 });
 
 test("nothing on screen is an email or account id", async () => {
@@ -246,15 +246,18 @@ test("the top bar no longer carries the theme and density controls", async () =>
   expect(screen.queryByRole("group", { name: "Density" })).toBeNull();
 });
 
-test("the quota card shows the runway reason and a row per model", async () => {
+test("the quota card is the week only: percent left and when it resets", async () => {
   await renderApp("quota-amber");
   const footer = screen.getByTestId("quota-footer");
-  expect(footer.textContent).toContain("Spending ahead of pace");
-  expect(
-    within(footer)
-      .getAllByTestId("quota-row")
-      .map((row) => row.textContent),
-  ).toEqual([expect.stringContaining("week"), expect.stringContaining("Fable")]);
+  expect(footer.textContent).toMatch(/% week left/);
+  expect(footer.textContent).toMatch(/resets /);
+  expect(footer.textContent).not.toContain("Fable");
+  expect(within(footer).queryByTestId("quota-row")).toBeNull();
+});
+
+test("the project list has no note while every project shows", async () => {
+  await renderApp();
+  expect(screen.queryByText(/projects at once/)).toBeNull();
 });
 
 test("Settings is a screen item right under Health and opens the page", async () => {

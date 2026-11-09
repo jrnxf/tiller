@@ -58,15 +58,14 @@ export function ProjectsSection({ activeHost }: { activeHost: string | undefined
     if (project) needsYou.add(project);
   }
 
+  // Showing every project needs no note.
   const note = focusing
     ? focused
       ? `Focused on ${focused.name}. Other projects are hidden from every screen.`
       : "No projects yet."
     : subset
       ? `Showing ${shown.length} of ${projects.projects.length} projects. Hidden ones keep running.`
-      : projects.projects.length === 1
-        ? "Showing the one project."
-        : `Showing all ${projects.projects.length} projects at once.`;
+      : null;
 
   return (
     <>
@@ -119,11 +118,13 @@ export function ProjectsSection({ activeHost }: { activeHost: string | undefined
                 >
                   <span className="pdot" />
                   <span className="nm">{project.name}</span>
-                  {isPeerRow(project) ? <HostChip entity={project} /> : null}
-                  <StageChip project={project} />
                   <span className="pct">
                     {needsYou.has(key) ? <i /> : null}
                     {open}
+                  </span>
+                  <span className="pchips">
+                    {isPeerRow(project) ? <HostChip entity={project} /> : null}
+                    <StageChip project={project} />
                   </span>
                 </button>
                 <span className="pacts">
@@ -167,7 +168,7 @@ export function ProjectsSection({ activeHost }: { activeHost: string | undefined
           );
         })}
       </section>
-      <div className="knob-note">{note}</div>
+      {note ? <div className="knob-note">{note}</div> : null}
       <ArchivedProjects />
     </>
   );

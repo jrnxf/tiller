@@ -66,20 +66,17 @@ test("the live claude week: 81% left, 87% of the week to come, empty in 3d 7h, f
   expect(view?.runway).toBe("empty in 3d 7h");
   expect(view?.reason).toBe("Spending ahead of pace, empty in 3d 7h");
   expect(view?.resets).toBe("resets Tue 14:00");
-  expect(view?.rows.map((row) => [row.name, row.percentLeft, row.toReset])).toEqual([
-    ["week", 81, "6d 2h"],
-    ["Fable", 94, "6d 2h"],
-  ]);
+  expect(view?.note).toBe("empty in 3d 7h");
 });
 
-test("no runway when the pace lasts to the reset, and no model rows without models", () => {
+test("no runway when the pace lasts to the reset: the card says when it resets", () => {
   const view = quotaFooterView(
     { windows: quotaFor("default").windows.filter((window) => window.kind === "weekly") },
     NOW,
   );
   expect(view?.runway).toBeNull();
   expect(view?.reason).toBe("On pace");
-  expect(view?.rows).toEqual([]);
+  expect(view?.note).toBe(view?.resets);
 });
 
 test("the dot colour is explained on the card", () => {
