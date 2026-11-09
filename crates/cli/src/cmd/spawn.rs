@@ -43,7 +43,7 @@ pub struct Spawn {
     pub harness: String,
     /// Start below the quota floor, on the owner's answered "Start now
     /// anyway" decision for the card
-    #[arg(long, conflicts_with = "promote")]
+    #[arg(long)]
     pub past_quota_floor: bool,
     #[command(flatten)]
     pub key: KeyArg,
@@ -270,6 +270,7 @@ pub fn spawn(app: &App, args: Spawn) -> Done {
                 asked,
                 brief,
                 harness: args.harness,
+                past_quota_floor: args.past_quota_floor,
             },
         )
     } else {

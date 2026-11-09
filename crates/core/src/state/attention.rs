@@ -76,7 +76,7 @@ pub enum OwnerAction {
     /// question saw.
     ProjectCapacity { project: String, from: i64, to: i64 },
     /// Start a `role` run on the card past the quota floor, and release the
-    /// card's hold so the orchestrator may spawn it.
+    /// card's quota hold so the orchestrator may spawn it.
     QuotaStart { role: RunRole },
 }
 
@@ -155,8 +155,8 @@ impl OwnerAction {
             Self::QuotaStart { .. } => {
                 if let Some(hold) = find::<Hold>(
                     tx.conn(),
-                    "card_id = ?1 AND released_at IS NULL",
-                    &[&card.id],
+                    "card_id = ?1 AND released_at IS NULL AND reason = ?2",
+                    &[&card.id, &QUOTA_HOLD_REASON],
                 )? {
                     release_hold(tx, &hold, HoldReleaseReason::Removed)?;
                 }
@@ -243,6 +243,9 @@ pub const QUOTA_START_LABEL: &str = "Start now anyway";
 /// The label that keeps the hold until the reset.
 pub const QUOTA_WAIT_LABEL: &str = "Wait for the reset";
 
+/// The reason of the hold a quota refusal sets.
+pub const QUOTA_HOLD_REASON: &str = "the weekly quota is under the floor";
+
 /// The two options of a quota hold's decision.
 fn quota_options(role: RunRole) -> Value {
     json!([
@@ -296,42 +299,62 @@ pub(crate) fn withdraw_quota_items(tx: &mut Tx<'_>, card_id: &str, reason: &str)
     Ok(())
 }
 
-/// The owner's answered decision to start a `role` run on the card past the
-/// quota floor, until a run has started on it. Only the owner
-/// applies that option, so an answered item is the owner's decision.
-pub fn quota_start_decision(
+/// The card's newest answered quota item for a `role` run.
+fn newest_quota_answer(
     conn: &rusqlite::Connection,
     card_id: &str,
     role: RunRole,
 ) -> Result<Option<Attention>> {
     let answered: Vec<Attention> = list(
         conn,
-        "card_id = ?1 AND answered_at IS NOT NULL AND withdrawn_at IS NULL ORDER BY answered_at DESC, id",
+        "card_id = ?1 AND answered_at IS NOT NULL AND withdrawn_at IS NULL ORDER BY answered_at DESC, id DESC",
         &[&card_id],
     )?;
-    for item in answered {
-        let Some(answer) = item.answer.as_deref() else {
-            continue;
-        };
-        if quota_role(&item, Some(answer)) != Some(role) {
-            continue;
-        }
-        let used: bool = conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM events WHERE kind = 'run.started'
-                            AND json_extract(payload, '$.checks.quota_override') = ?1)",
-            [&item.id],
-            |row| row.get(0),
-        )?;
-        return Ok((!used).then_some(item));
+    Ok(answered
+        .into_iter()
+        .find(|item| quota_role(item, None) == Some(role)))
+}
+
+/// Whether the newest quota answer picks "Start now anyway".
+fn starts(item: &Attention, role: RunRole) -> bool {
+    item.answer
+        .as_deref()
+        .is_some_and(|answer| quota_role(item, Some(answer)) == Some(role))
+}
+
+/// The owner's answered decision to start a `role` run on the card past the
+/// quota floor: the newest quota answer for that role, when it is "Start now
+/// anyway" and no `role` run has started on the card since. Only the owner
+/// applies that option, so an answered item is the owner's decision.
+pub fn quota_start_decision(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+    role: RunRole,
+) -> Result<Option<Attention>> {
+    let Some(item) = newest_quota_answer(conn, card_id, role)? else {
+        return Ok(None);
+    };
+    if !starts(&item, role) {
+        return Ok(None);
     }
-    Ok(None)
+    let used: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM events WHERE kind = 'run.started' AND card_id = ?1
+                        AND json_extract(payload, '$.role') = ?2
+                        AND seq > (SELECT MAX(seq) FROM events WHERE entity = 'attention'
+                                   AND entity_id = ?3 AND kind = 'attention.answered'))",
+        params![card_id, role, item.id],
+        |row| row.get(0),
+    )?;
+    Ok((!used).then_some(item))
 }
 
 impl Store {
     /// A start refused by the quota floor: holds the card until `until` (the
     /// quota reset) and opens one decision on it, "Start now anyway" or
     /// "Wait for the reset". Natural: a card that already has an open quota
-    /// decision gets no second one.
+    /// decision gets no second one, and while the quota hold the owner chose
+    /// to wait on is active, the newest answer stands and none opens. A card
+    /// held for another reason keeps that hold and still gets the decision.
     pub fn quota_hold(
         &mut self,
         ctx: &Ctx,
@@ -362,6 +385,13 @@ impl Store {
                 "card_id = ?1 AND released_at IS NULL",
                 &[&card.id],
             )?;
+            if let Some(hold) = held.as_ref().filter(|hold| hold.reason == QUOTA_HOLD_REASON)
+                && let Some(item) = newest_quota_answer(tx.conn(), &card.id, role)?
+                && item.answered_at.is_some_and(|at| at >= hold.set_at)
+                && !starts(&item, role)
+            {
+                return Ok(item);
+            }
             if held.is_none() {
                 if until <= tx.now() {
                     return Err(Error::refused(
@@ -370,7 +400,7 @@ impl Store {
                         format!("{until} is not in the future"),
                     ));
                 }
-                insert_hold(tx, &card, until, "the weekly quota is under the floor")?;
+                insert_hold(tx, &card, until, QUOTA_HOLD_REASON)?;
             }
             open_attention(
                 tx,

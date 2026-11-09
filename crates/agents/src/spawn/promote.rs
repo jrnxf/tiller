@@ -31,6 +31,9 @@ pub struct Request {
     pub brief: Option<String>,
     /// The harness to launch the builder on; G35 refuses one without the guards.
     pub harness: String,
+    /// Promote past the quota floor on the owner's answered "Start now
+    /// anyway" decision for this card.
+    pub past_quota_floor: bool,
 }
 
 /// The brief a promotion without `--brief-file` gives: the card, and where
@@ -89,6 +92,14 @@ pub fn promote(
         ctx.actor.is_owner(),
     )?;
 
+    let checks = SpawnChecks {
+        ram_free_mb: world.ram_free_mb,
+        disk_free_mb: world.disk_free_mb,
+        quota_floor_percent: quota_floor(world.config, RunRole::Builder),
+        quota_max_age_minutes: world.config.quota.max_age_minutes,
+        past_quota_floor: request.past_quota_floor,
+        dispatch: resolved.payload.clone(),
+    };
     let started = store.run_promote(
         ctx,
         key,
@@ -96,18 +107,11 @@ pub fn promote(
             scout_run: scout.id.clone(),
             model: resolved.model.clone(),
             effort: resolved.effort,
-            checks: SpawnChecks {
-                ram_free_mb: world.ram_free_mb,
-                disk_free_mb: world.disk_free_mb,
-                quota_floor_percent: quota_floor(world.config, RunRole::Builder),
-                quota_max_age_minutes: world.config.quota.max_age_minutes,
-                past_quota_floor: false,
-                dispatch: resolved.payload.clone(),
-            },
+            checks: checks.clone(),
         },
     );
     let started = started.map_err(|error| {
-        hold_for_quota(store, ctx, world, &card, RunRole::Builder, error.into())
+        hold_for_quota(store, ctx, &card, RunRole::Builder, &checks, error.into())
     })?;
     if started.replayed {
         return replay(store, started);
