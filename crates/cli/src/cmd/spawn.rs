@@ -338,7 +338,7 @@ pub fn orchestrator_start(app: &App, project: &str, restart: bool) -> Done {
 }
 
 /// Where orchestrator homes live: `spawn.orchestrator_home`, or its default.
-fn orchestrator_homes(tools: &Tools) -> Result<PathBuf, Failure> {
+pub(super) fn orchestrator_homes(tools: &Tools) -> Result<PathBuf, Failure> {
     match &tools.config.spawn.orchestrator_home {
         Some(root) => Ok(root.clone()),
         None => Ok(state_dir("spawn.orchestrator_home")?.join("orchestrators")),
@@ -347,7 +347,7 @@ fn orchestrator_homes(tools: &Tools) -> Result<PathBuf, Failure> {
 
 /// The one orchestrator start: `tiller orchestrator start` and the board's
 /// Start orchestrator (through the daemon) both come here.
-fn start_orchestrator(
+pub(super) fn start_orchestrator(
     tools: &Tools,
     homes: &Path,
     store: &mut tiller_core::Store,
@@ -400,6 +400,30 @@ impl tiller_daemon::api::OrchestratorStart for BoardStart {
                 error => refused(failure(error)),
             },
         )
+    }
+
+    fn restart(
+        &self,
+        store: &mut tiller_core::Store,
+        ctx: &tiller_core::Ctx,
+        session: &tiller_core::domain::Session,
+    ) -> Result<(), String> {
+        self.restart_stale_session(store, ctx, session)
+    }
+}
+
+impl BoardStart {
+    /// The restart of a stale session, the one `tiller agent restart
+    /// --stale` makes.
+    fn restart_stale_session(
+        &self,
+        store: &mut tiller_core::Store,
+        ctx: &tiller_core::Ctx,
+        session: &tiller_core::domain::Session,
+    ) -> Result<(), String> {
+        let tools = Tools::load(&self.app).map_err(|failure| failure.message.clone())?;
+        let homes = orchestrator_homes(&tools).map_err(|failure| failure.message.clone())?;
+        super::stale::restart_session(&tools, &homes, store, ctx, session)
     }
 }
 

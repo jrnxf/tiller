@@ -397,6 +397,17 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         ssh: config.ssh.clone(),
     });
 
+    // A session queued to restart when idle survives a daemon restart: the
+    // queue is in `state.db`, and this task picks it up.
+    if let Some(starter) = state.0.orchestrators.clone() {
+        tokio::spawn(crate::stale::drain_loop(
+            db.clone(),
+            starter,
+            damage.clone(),
+            stop.clone(),
+        ));
+    }
+
     // A daemon that stopped mid-Fit gives those panes back their size.
     {
         let fits = state.0.mirrors.fits();

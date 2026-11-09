@@ -271,6 +271,16 @@ pub fn start(
         }
     };
     events.extend(started.events);
+    // What the session was launched with, for the stale-session check. Its
+    // event is not the start's, so a keyed replay of the start stays equal to
+    // the first answer. A failed record leaves the session counted stale,
+    // which only offers a restart.
+    let stamped = match crate::stale::record(store, ctx, &session_id, role) {
+        Ok(_) => None,
+        Err(e) => Some(format!(
+            "recording the launch of session {session_id} failed: {e}"
+        )),
+    };
 
     let launch = || -> Result<Option<String>> {
         let bindings = layout::bindings(store.conn(), &host)?;
@@ -306,7 +316,7 @@ pub fn start(
             });
         }
     };
-    let warning = [warning, launched.mode_note, leftover]
+    let warning = [warning, launched.mode_note, leftover, stamped]
         .into_iter()
         .flatten()
         .reduce(|all, next| format!("{all}; {next}"));

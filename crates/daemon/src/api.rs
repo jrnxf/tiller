@@ -113,6 +113,13 @@ pub trait OrchestratorStart: Send + Sync {
         ctx: &Ctx,
         project: &str,
     ) -> Result<Applied<Orchestrator>, StartError>;
+
+    /// Restarts a live session on this binary: the orchestrator start with
+    /// `--restart`, or a relaunch of the worker's run. The error is what the
+    /// command would say.
+    fn restart(&self, _store: &mut Store, _ctx: &Ctx, _session: &Session) -> Result<(), String> {
+        Err("this host cannot restart sessions".to_owned())
+    }
 }
 
 /// A start that failed, as `tiller orchestrator start` reports it.
@@ -707,6 +714,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/contributions", get(contributions))
         .route("/api/v1/projects/{id}/stage", post(stage_project))
         .route("/api/v1/projects/{id}/asks", post(ask_note))
+        .route("/api/v1/agents/restart-stale", post(restart_stale))
         .route(
             "/api/v1/projects/{id}/orchestrator",
             post(start_orchestrator),
@@ -2052,6 +2060,58 @@ async fn start_orchestrator(
         Err(error) => return Err(Error::Internal(error.to_string()).into()),
     };
     Ok(Json(Done::of(applied)?.response()))
+}
+
+#[utoipa::path(post, path = "/api/v1/agents/restart-stale", tag = "mutations", request_body = RestartStale,
+    responses((status = 200, body = MutationResponse, description = "`data` is a `RestartStaleResponse`"),
+              (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 503, body = ErrorBody)))]
+async fn restart_stale(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers)?;
+    let request: RestartStale = body(&bytes)?;
+    key(&request.idempotency_key)?;
+    if let Some(reason) = state.0.damage.reason() {
+        return Err(read_only(&reason));
+    }
+    let Some(starter) = state.0.orchestrators.clone() else {
+        return Err(Error::Unavailable("this daemon cannot restart sessions".into()).into());
+    };
+    let db = state.db();
+    let damage = state.0.damage.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        if !db.exists() {
+            return Err(uninitialized());
+        }
+        let done = Store::open_current(&db).and_then(|mut store| {
+            crate::stale::restart_stale(&mut store, starter.as_ref(), request.sessions.as_deref())
+        });
+        if let Err(error) = &done {
+            damage.suspect(&db, error);
+        }
+        Ok(done?)
+    })
+    .await;
+    let restarted = match joined {
+        Ok(result) => result?,
+        Err(error) => return Err(Error::Internal(error.to_string()).into()),
+    };
+    let failed = restarted
+        .sessions
+        .iter()
+        .filter(|row| row.outcome == "failed")
+        .count();
+    let done = Done {
+        data: serde_json::to_value(&restarted).map_err(Error::from)?,
+        events: Vec::new(),
+        replayed: false,
+        outbox_id: None,
+        approval_id: None,
+        warning: (failed > 0).then(|| format!("{failed} session(s) did not restart")),
+    };
+    Ok(Json(done.response()))
 }
 
 /// The longest ask the board's box records: it is noted whole to the
@@ -3922,7 +3982,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, stage_project, ask_note, start_orchestrator, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
+        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup,
         pick_bug_project, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, session, login_code, logout
     ),
@@ -7054,6 +7114,165 @@ esac"#,
             .find(|worker| worker["session_id"] == quiet.as_str())
             .unwrap();
         assert_eq!(worker["last_output_at"], Value::Null);
+    }
+
+    /// A starter that restarts a session by stamping it as launched now, and
+    /// remembers which it restarted.
+    #[derive(Default)]
+    struct FakeRestarts(Mutex<Vec<String>>);
+
+    impl OrchestratorStart for FakeRestarts {
+        fn start(
+            &self,
+            _store: &mut Store,
+            _ctx: &Ctx,
+            _project: &str,
+        ) -> Result<Applied<Orchestrator>, StartError> {
+            unreachable!("the stale restart does not start an orchestrator")
+        }
+
+        fn restart(&self, store: &mut Store, _ctx: &Ctx, session: &Session) -> Result<(), String> {
+            let role = tiller_agents::roles::Role::parse(&session.role.to_string()).unwrap();
+            tiller_agents::stale::record(store, &Ctx::new(Actor::Daemon), &session.id, role)
+                .map_err(|error| error.to_string())?;
+            self.0.lock().unwrap().push(session.id.clone());
+            Ok(())
+        }
+    }
+
+    fn app_restarting(home: &std::path::Path, starter: Arc<dyn OrchestratorStart>) -> Router {
+        let (_newest_tx, newest) = watch::channel(0);
+        let (_stop_tx, stop) = watch::channel(false);
+        router(AppState::new(Inner {
+            home: home.to_owned(),
+            port: PORT,
+            allowed_hosts: vec!["board.example.com".into()],
+            assets: Assets::of::<Fixture>(),
+            newest,
+            stop,
+            pollers: Registry::new(),
+            peers: Peers::idle(),
+            herdr: Cli::local(),
+            terminal: None,
+            started_at: Timestamp::now(),
+            tools: Arc::new(Mutex::new(Value::Null)),
+            damage: Damage::default(),
+            orchestrators: Some(starter),
+            mirrors: Mirrors::new(home),
+            sessions: auth::Sessions::default(),
+            ssh: vec!["ssh".into()],
+        }))
+    }
+
+    fn stale_of(read: &Value, session: &str) -> Value {
+        let row = &read["orchestrators"][0];
+        if row["session_id"] == session {
+            return row["stale"].clone();
+        }
+        row["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|worker| worker["session_id"] == session)
+            .unwrap()["stale"]
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn stale_sessions_are_listed_restarted_when_idle_and_queued_when_working() {
+        let mut fleet = Fleet::new();
+        let worker = fleet.worker("w3:p1");
+        let orchestrator = fleet.orchestrator_session.clone();
+        let store = fleet.open();
+        // The fleet's sessions were launched before launches were recorded.
+        // The worker is idle and the orchestrator at work.
+        for (id, activity) in [(&worker, "idle"), (&orchestrator, "working")] {
+            store
+                .conn()
+                .execute(
+                    "UPDATE sessions SET activity = ?2,
+                            activity_observed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     WHERE id = ?1",
+                    rusqlite::params![id, activity],
+                )
+                .unwrap();
+        }
+        let starter = Arc::new(FakeRestarts::default());
+        let app = app_restarting(fleet.dir.path(), starter.clone());
+
+        let read: Value = serde_json::from_str(&get(&app, "/api/v1/agents").await.body).unwrap();
+        assert_eq!(read["tiller_version"], env!("CARGO_PKG_VERSION"));
+        for id in [&worker, &orchestrator] {
+            let stale = stale_of(&read, id);
+            assert_eq!(stale["since"], "unknown", "{read}");
+            assert_eq!(stale["restart_queued"], false);
+        }
+
+        // Restart: the idle worker restarts now, the working orchestrator is
+        // queued.
+        let cookie = owner_cookie(fleet.dir.path());
+        let restart = send(
+            &app,
+            mutation(
+                "POST",
+                "/api/v1/agents/restart-stale",
+                json!({"idempotency_key": "k-1", "sessions": [&worker, &orchestrator]}),
+                &[("cookie", cookie.as_str())],
+            ),
+        )
+        .await;
+        assert_eq!(restart.status, StatusCode::OK, "{}", restart.body);
+        let restart: Value = serde_json::from_str(&restart.body).unwrap();
+        let outcome = |id: &str| {
+            restart["data"]["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["session_id"] == id)
+                .unwrap()["outcome"]
+                .clone()
+        };
+        assert_eq!(outcome(&worker), "restarted");
+        assert_eq!(outcome(&orchestrator), "queued");
+        assert_eq!(*starter.0.lock().unwrap(), vec![worker.clone()]);
+
+        let read: Value = serde_json::from_str(&get(&app, "/api/v1/agents").await.body).unwrap();
+        assert_eq!(stale_of(&read, &worker), Value::Null);
+        assert_eq!(stale_of(&read, &orchestrator)["restart_queued"], true);
+
+        // The orchestrator goes idle: the daemon's pass restarts it.
+        let mut store = fleet.open();
+        store
+            .conn()
+            .execute(
+                "UPDATE sessions SET activity = 'idle' WHERE id = ?1",
+                [&orchestrator],
+            )
+            .unwrap();
+        assert_eq!(
+            crate::stale::drain(&mut store, starter.as_ref()).unwrap(),
+            1
+        );
+        assert_eq!(starter.0.lock().unwrap().len(), 2);
+        let read: Value = serde_json::from_str(&get(&app, "/api/v1/agents").await.body).unwrap();
+        assert_eq!(stale_of(&read, &orchestrator), Value::Null);
+    }
+
+    #[tokio::test]
+    async fn restarting_stale_sessions_needs_the_owner() {
+        let fleet = Fleet::new();
+        let app = app_restarting(fleet.dir.path(), Arc::new(FakeRestarts::default()));
+        let refused = send(
+            &app,
+            mutation(
+                "POST",
+                "/api/v1/agents/restart-stale",
+                json!({"idempotency_key": "k-1"}),
+                &[],
+            ),
+        )
+        .await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
     }
 
     #[tokio::test]

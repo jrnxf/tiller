@@ -1747,3 +1747,55 @@ a.card:hover {
     display: block;
   }
 }
+
+/* A session started on an older tiller: yellow, like the banner above it */
+.stale-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: var(--w-medium);
+  white-space: nowrap;
+  flex: none;
+  cursor: help;
+  color: var(--yellow-text, var(--yellow));
+  background: color-mix(in srgb, var(--yellow) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--yellow) 30%, transparent);
+}
+
+.stale-rows {
+  display: grid;
+  margin: 0;
+  padding: 4px 12px;
+  list-style: none;
+}
+
+.stale-rows li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 0;
+  font-size: var(--fs-small);
+  color: var(--fg-1);
+}
+
+.stale-rows li + li {
+  border-top: 1px solid var(--line-2);
+}
+
+.stale-rows .nm {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stale-rows small {
+  flex: none;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}

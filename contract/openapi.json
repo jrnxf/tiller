@@ -43,6 +43,63 @@
         }
       }
     },
+    "/api/v1/agents/restart-stale": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "restart_stale",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestartStale"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is a `RestartStaleResponse`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agents/{session}/focus": {
       "post": {
         "tags": [
@@ -3531,6 +3588,17 @@
           "session_id": {
             "type": "string"
           },
+          "stale": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StaleInfo",
+                "description": "Present when the session runs an older tiller than its host does now."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "state_since": {
             "type": [
               "string",
@@ -3564,6 +3632,10 @@
               "$ref": "#/components/schemas/AgentRow"
             },
             "description": "Orchestrators with their workers; workers whose orchestrator has ended\nare listed at the top level."
+          },
+          "tiller_version": {
+            "type": "string",
+            "description": "The tiller version of the host that answered."
           }
         }
       },
@@ -6975,6 +7047,29 @@
           }
         }
       },
+      "RestartStale": {
+        "type": "object",
+        "description": "`POST /api/v1/agents/restart-stale`: restarts the sessions that run an\nolder tiller. An idle one restarts now; a working one is queued and\nrestarts when it next goes idle.",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "idempotency_key": {
+            "type": "string"
+          },
+          "sessions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Only these sessions, the ones the person saw; all stale sessions when\nabsent."
+          }
+        },
+        "additionalProperties": false
+      },
       "RetireProject": {
         "type": "object",
         "description": "`POST /api/v1/projects/{id}/retire`: retire one project, off the board.\nLocal to the owning host; it is not forwarded to a peer.",
@@ -7448,6 +7543,29 @@
           }
         },
         "additionalProperties": false
+      },
+      "StaleInfo": {
+        "type": "object",
+        "description": "How a session's launch differs from what its host's tiller would write\nnow, so the board can offer a restart.",
+        "required": [
+          "since",
+          "prompt_changed",
+          "restart_queued"
+        ],
+        "properties": {
+          "prompt_changed": {
+            "type": "boolean",
+            "description": "Whether the role prompt or hook settings differ, not just the version."
+          },
+          "restart_queued": {
+            "type": "boolean",
+            "description": "A restart waits for the session to go idle."
+          },
+          "since": {
+            "type": "string",
+            "description": "The tiller version it started on, or `unknown` when its launch left\nno record."
+          }
+        }
       },
       "StaleItem": {
         "type": "object",

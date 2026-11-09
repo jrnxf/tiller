@@ -13,6 +13,7 @@ pub mod quota;
 pub mod readonly;
 pub mod server;
 pub mod sse;
+pub mod stale;
 pub mod views;
 pub mod workers;
 

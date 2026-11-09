@@ -35,6 +35,17 @@ pub enum AgentCmd {
     Stop { target: String },
     /// Focus the agent's pane in herdr
     Focus { target: String },
+    /// Restart the sessions that run an older tiller, so they pick up the
+    /// current role prompt and hooks. An idle session restarts now and a
+    /// working one when it next goes idle
+    Restart {
+        /// The sessions that run an older tiller
+        #[arg(long, required = true)]
+        stale: bool,
+        /// List them without restarting any
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 pub fn orchestrator(app: &App, cmd: OrchestratorCmd) -> Done {
@@ -49,5 +60,6 @@ pub fn agent(app: &App, cmd: AgentCmd) -> Done {
         AgentCmd::Interrupt { run } => super::control::interrupt(app, &run),
         AgentCmd::Stop { target } => super::control::stop(app, &target),
         AgentCmd::Focus { target } => super::spawn::focus(app, &target),
+        AgentCmd::Restart { stale: _, dry_run } => super::stale::restart(app, dry_run),
     }
 }

@@ -1235,6 +1235,8 @@ fn start_again(
         );
         launched.line
     };
+    // What the new session was launched with, for the stale-session check.
+    events.extend(crate::stale::record(store, ctx, &session.id, role)?.events);
     let pane_id = match old_pane {
         Some(pane) => pane,
         None => open_pane(world, card, run, worktree)?,

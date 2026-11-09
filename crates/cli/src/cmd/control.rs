@@ -36,7 +36,7 @@ pub struct Relaunch {
 }
 
 /// The run's worktree is the disk a launch fills.
-fn disk_free_mb(run: &Run) -> Option<i64> {
+pub(super) fn disk_free_mb(run: &Run) -> Option<i64> {
     run.worktree_path
         .as_deref()
         .and_then(|path| readings::disk_free_mb(std::path::Path::new(path)))

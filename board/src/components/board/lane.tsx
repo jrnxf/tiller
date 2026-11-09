@@ -19,6 +19,7 @@ import { NewCardDialog } from "./new-card";
 import { MoveBugsDialog } from "./triage";
 import { StartOrchestratorButton } from "./orchestrator-start";
 import { PlusIcon, ServerIcon } from "../shell/icons";
+import { StaleChip } from "./stale-sessions";
 import type { LaneHealth } from "../states/degraded";
 import { LaneNote } from "../states/lane-note";
 
@@ -63,6 +64,7 @@ function OrchestratorMini({
         {orchestrator.model ? `orchestrator ${orchestrator.model}` : "orchestrator"},{" "}
         {view.label.toLowerCase()}, <Ago at={orchestrator.activity_observed_at} prefix="observed" />
       </span>
+      <StaleChip agent={orchestrator} />
     </span>
   );
 }

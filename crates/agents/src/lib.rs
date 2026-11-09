@@ -16,3 +16,4 @@ pub mod numbering;
 pub mod review;
 pub mod roles;
 pub mod spawn;
+pub mod stale;

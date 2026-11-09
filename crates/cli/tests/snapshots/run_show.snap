@@ -160,13 +160,16 @@ exit: 0
       "harness": "claude",
       "host_id": "<id1>",
       "id": "<id39>",
+      "launch_hash": null,
       "pane_id": null,
       "project_id": "alpha",
+      "restart_queued_at": null,
       "rev": 1,
       "role": "builder",
       "run_id": "<id35>",
       "short": "<id39.short>",
       "started_at": "<time>",
+      "tiller_version": null,
       "transcript_path": null
     }
   },
