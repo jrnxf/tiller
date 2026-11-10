@@ -334,7 +334,7 @@ fn curator_world(body: &str) -> (World, std::path::PathBuf, String) {
         "spawn.scratch_root",
         scratch.to_str().unwrap(),
     ]);
-    let fake = world.dir.path().join("claude");
+    let fake = world.dir.path().join("fake-claude");
     std::fs::write(&fake, body).unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
     world.must(&["config", "set", "spawn.claude", fake.to_str().unwrap()]);
@@ -473,6 +473,97 @@ fn a_run_that_cannot_start_leaves_the_retro_ready_to_run_again() {
         "nothing",
         "{}",
         again.json
+    );
+}
+
+/// Whether `pid` has exited: no such process, or one only waiting to be
+/// reaped.
+fn gone(pid: &str) -> bool {
+    let out = Command::new("ps")
+        .args(["-o", "stat=", "-p", pid])
+        .output()
+        .unwrap();
+    let stat = String::from_utf8_lossy(&out.stdout);
+    stat.trim().is_empty() || stat.trim_start().starts_with('Z')
+}
+
+fn wait_for(what: impl Fn() -> bool) -> bool {
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(10) {
+        if what() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+#[test]
+fn an_interrupted_run_stops_the_curator_and_what_it_started() {
+    // A curator that starts a child of its own, as claude starts MCP
+    // servers, and then waits.
+    let (world, _fake, retro) = curator_world(
+        "#!/bin/sh\nsleep 300 &\necho $! > \"$(dirname \"$0\")/grandchild.pid\"\n\
+         echo $$ > \"$(dirname \"$0\")/curator.pid\"\nwait\n",
+    );
+    let tiller = Command::new(env!("CARGO_BIN_EXE_tiller"))
+        .env("TILLER_HOME", world.home())
+        // The environment `World` gives the owner, built here because the
+        // run must not block the test.
+        .env("CLAUDE_CONFIG_DIR", world.dir.path().join("claude"))
+        .env("TILLER_TEST_OWNER", "1")
+        .env_remove("TILLER_DB")
+        .env_remove("TILLER_SESSION_ID")
+        .env_remove("TILLER_RUN_ID")
+        .env_remove("TILLER_SSH")
+        .env_remove("TILLER_GH")
+        .env_remove("CLAUDECODE")
+        .env_remove("SSH_CONNECTION")
+        .args(["--json", "retro", "run", &retro])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid_file = |name: &str| world.dir.path().join(name);
+    assert!(
+        wait_for(|| pid_file("curator.pid").exists() && pid_file("grandchild.pid").exists()),
+        "the stand-in curator never started"
+    );
+    let read = |name: &str| {
+        std::fs::read_to_string(pid_file(name))
+            .unwrap()
+            .trim()
+            .to_owned()
+    };
+    let (curator, grandchild) = (read("curator.pid"), read("grandchild.pid"));
+    assert!(!gone(&curator) && !gone(&grandchild));
+
+    // Ctrl-C reaches tiller; only tiller is signalled here.
+    let status = Command::new("kill")
+        .args(["-INT", &tiller.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let stopped = wait_for(|| gone(&curator) && gone(&grandchild));
+    // Whatever happened, take every process this test started down with it.
+    for pid in [&curator, &grandchild] {
+        let _ = Command::new("kill").args(["-KILL", pid]).status();
+    }
+    let output = tiller.wait_with_output().unwrap();
+    assert!(
+        stopped,
+        "the curator or its child outlived the interrupt: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let out: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(out["data"]["retro"]["outcome"], "unfinished", "{out}");
+    assert!(
+        out["data"]["retro"]["learning"]
+            .as_str()
+            .unwrap()
+            .contains("interrupted"),
+        "{out}"
     );
 }
 

@@ -390,8 +390,11 @@ impl Cli {
     /// Runs one CLI call and returns its stdout.
     fn run(&self, args: &[&str]) -> Result<String> {
         let call = args.iter().take(2).copied().collect::<Vec<_>>().join(" ");
-        let mut child = self
-            .command(args)
+        let mut command = self.command(args);
+        // In a group of its own, so a call past its deadline is stopped with
+        // whatever it started.
+        crate::process::own_group(&mut command);
+        let mut child = command
             .spawn()
             .map_err(|e| HerdrError::Unreachable(format!("cannot run herdr: {e}")))?;
         let mut stdout = child.stdout.take();
@@ -415,21 +418,19 @@ impl Cli {
             let _ = err_tx.send(text);
         });
         let deadline = Instant::now() + self.timeout;
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if Instant::now() >= deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+        let status =
+            match crate::process::wait(&mut child, deadline, Duration::from_millis(10), None) {
+                crate::process::Ended::Exited(status) => status,
+                crate::process::Ended::TimedOut | crate::process::Ended::Interrupted => {
                     return Err(HerdrError::Unreachable(format!(
                         "{call} did not answer within {:?}",
                         self.timeout
                     )));
                 }
-                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-                Err(e) => return Err(HerdrError::Unreachable(format!("{call}: {e}"))),
-            }
-        };
+                crate::process::Ended::Failed(e) => {
+                    return Err(HerdrError::Unreachable(format!("{call}: {e}")));
+                }
+            };
         // A process the child left behind can hold the pipes open past its
         // exit, so the reads share the call's deadline too.
         let drained = |pipe: mpsc::Receiver<String>| {
@@ -902,6 +903,31 @@ mod tests {
         let error = cli.send_enter("w1:p1").unwrap_err();
         assert!(matches!(error, HerdrError::Unreachable(_)), "{error:?}");
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_call_past_its_timeout_is_stopped_with_what_it_started() {
+        use crate::process::tests_support::{eventually, gone, pid_in, reap};
+        // A call that hangs after starting a child of its own.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("grandchild.pid");
+        let cli = Cli::local()
+            .program(vec![
+                "sh".into(),
+                "-c".into(),
+                format!("sleep 300 & echo $! > '{}'; sleep 300", file.display()).into(),
+                "--".into(),
+            ])
+            .timeout(Duration::from_millis(300));
+        let error = cli.send_enter("w1:p1").unwrap_err();
+        let grandchild = pid_in(&file);
+        let stopped = eventually(|| gone(&grandchild));
+        reap(&grandchild);
+        assert!(
+            matches!(&error, HerdrError::Unreachable(m) if m.contains("did not answer")),
+            "{error:?}"
+        );
+        assert!(stopped, "the grandchild {grandchild} outlived the timeout");
     }
 
     #[test]

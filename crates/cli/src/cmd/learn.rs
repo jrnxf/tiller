@@ -18,6 +18,7 @@ use tiller_core::domain::{
 use tiller_core::state::learning::{self, EvalResult, Finish, Learning};
 use tiller_core::state::{find, get, list, resolve_id};
 use tiller_core::{Actor, Store};
+use tiller_herdr::process::{self, Ended, Interrupt};
 
 use super::KeyArg;
 use super::admin::load_config;
@@ -423,15 +424,22 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
     let after = learning::resolve_retro(store.conn(), &retro.id)?;
     let exit = ran.exit;
     let retro = if after.state == tiller_core::domain::RetroState::Pending {
-        let note = match (ran.cut, exit) {
-            (true, _) => format!(
+        let note = match (&ran.stopped, exit) {
+            (Some(Stopped::Cut), _) => format!(
                 "curator cut after {} minutes without finishing the retro",
                 config.curator_timeout_minutes
             ),
-            (false, Some(code)) => format!("curator exited {code} without finishing the retro"),
-            (false, None) => {
-                "curator was killed by a signal without finishing the retro".to_owned()
+            (Some(Stopped::Interrupted), _) => {
+                "curator stopped: tiller retro run was interrupted before the retro was finished"
+                    .to_owned()
             }
+            (Some(Stopped::Lost(error)), _) => {
+                format!(
+                    "curator stopped: waiting for it failed ({error}) before the retro was finished"
+                )
+            }
+            (None, Some(code)) => format!("curator exited {code} without finishing the retro"),
+            (None, None) => "curator was killed by a signal without finishing the retro".to_owned(),
         };
         unfinished(app, &mut store, &retro.id, &note)?
     } else {
@@ -470,16 +478,27 @@ fn unfinished(app: &App, store: &mut Store, retro: &str, note: &str) -> Result<R
 
 /// What a curator run came to.
 struct Ran {
-    /// The exit code; `None` when cut or killed by a signal.
+    /// The exit code; `None` when stopped or killed by a signal.
     exit: Option<i32>,
-    /// Whether the timeout cut it.
-    cut: bool,
+    /// Why tiller stopped it, when it did.
+    stopped: Option<Stopped>,
     stdout: String,
 }
 
-/// Runs the curator, cutting it at `timeout`. After a cut the stdout reader
-/// is not waited for: a grandchild holding the pipe would otherwise block
-/// past the timeout.
+/// Why tiller stopped a curator, with every process it started.
+#[derive(Debug, PartialEq, Eq)]
+enum Stopped {
+    /// The timeout passed.
+    Cut,
+    /// tiller got SIGINT, SIGTERM or SIGHUP (the owner's Ctrl-C).
+    Interrupted,
+    /// Waiting for it failed, with this error.
+    Lost(String),
+}
+
+/// Runs the curator in a process group of its own and stops the whole
+/// group at `timeout`, on an interrupt, or when waiting for it fails, so
+/// nothing it started outlives the run (`tiller_herdr::process`).
 fn run_with_timeout(
     argv: &[String],
     env: &[(String, String)],
@@ -489,46 +508,64 @@ fn run_with_timeout(
     let (program, rest) = argv
         .split_first()
         .ok_or_else(|| Failure::new("internal", 1, "empty curator command"))?;
-    let mut child = Command::new(program)
+    // In its own group the curator no longer gets the terminal's Ctrl-C,
+    // so tiller catches it and stops the group itself. Caught before the
+    // spawn, so no signal can end tiller and leave the curator running.
+    let interrupt = Interrupt::catch().map_err(|error| {
+        Failure::new(
+            "internal",
+            1,
+            format!("cannot watch for interrupts: {error}"),
+        )
+    })?;
+    let mut command = Command::new(program);
+    command
         .args(rest)
         .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            Failure::unavailable(format!("cannot start {program}: {error}"))
-                .hint("set spawn.claude in config.toml")
-        })?;
+        .stderr(Stdio::null());
+    process::own_group(&mut command);
+    let mut child = command.spawn().map_err(|error| {
+        Failure::unavailable(format!("cannot start {program}: {error}"))
+            .hint("set spawn.claude in config.toml")
+    })?;
     let mut stdout = child.stdout.take();
-    let reader = std::thread::spawn(move || {
+    let (sender, reader) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut text = String::new();
         if let Some(out) = stdout.as_mut() {
             let _ = std::io::Read::read_to_string(out, &mut text);
         }
-        text
+        let _ = sender.send(text);
     });
-    let started = Instant::now();
-    let (exit, cut) = loop {
-        match child.try_wait()? {
-            Some(status) => break (status.code(), false),
-            None if started.elapsed() < timeout => {
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            None => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break (None, true);
-            }
-        }
+    let deadline = Instant::now() + timeout;
+    let (exit, stopped) = match process::wait(
+        &mut child,
+        deadline,
+        Duration::from_millis(200),
+        Some(&interrupt),
+    ) {
+        Ended::Exited(status) => (status.code(), None),
+        Ended::TimedOut => (None, Some(Stopped::Cut)),
+        Ended::Interrupted => (None, Some(Stopped::Interrupted)),
+        Ended::Failed(error) => (None, Some(Stopped::Lost(error.to_string()))),
     };
-    let stdout = if cut {
-        String::new()
-    } else {
-        reader.join().unwrap_or_default()
+    // A process the curator left behind can hold stdout open past its
+    // exit, so the read shares the deadline; after a stop it is not waited
+    // for at all.
+    let stdout = match stopped {
+        None => reader
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or_default(),
+        Some(_) => String::new(),
     };
-    Ok(Ran { exit, cut, stdout })
+    Ok(Ran {
+        exit,
+        stopped,
+        stdout,
+    })
 }
 
 fn finish(app: &App, args: RetroFinish) -> Done {
@@ -901,4 +938,55 @@ fn eval(app: &App, args: LearnEval) -> Done {
     } else {
         "the holdout did not pass: write more tuning cases, then run it again".to_owned()
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Whether `pid` has exited: no such process, or one only waiting to be
+    /// reaped.
+    fn gone(pid: &str) -> bool {
+        let out = Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&out.stdout);
+        stat.trim().is_empty() || stat.trim_start().starts_with('Z')
+    }
+
+    #[test]
+    fn a_cut_stops_the_curator_and_what_it_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("grandchild.pid");
+        // A curator that starts a child of its own and then hangs.
+        let script = format!("sleep 300 & echo $! > '{}'; sleep 300", file.display());
+        let argv = ["sh".to_owned(), "-c".to_owned(), script];
+        let started = Instant::now();
+        let ran = run_with_timeout(&argv, &[], dir.path(), Duration::from_millis(500)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let grandchild = std::fs::read_to_string(&file).unwrap().trim().to_owned();
+        let mut stopped = gone(&grandchild);
+        let waited = Instant::now();
+        while !stopped && waited.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+            stopped = gone(&grandchild);
+        }
+        let _ = Command::new("kill").args(["-KILL", &grandchild]).status();
+        assert_eq!((ran.exit, ran.stopped), (None, Some(Stopped::Cut)));
+        assert!(stopped, "the grandchild {grandchild} outlived the cut");
+    }
+
+    #[test]
+    fn a_curator_that_exits_keeps_its_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv = [
+            "sh".to_owned(),
+            "-c".to_owned(),
+            "echo '{\"done\":true}'; exit 2".to_owned(),
+        ];
+        let ran = run_with_timeout(&argv, &[], dir.path(), Duration::from_secs(60)).unwrap();
+        assert_eq!((ran.exit, ran.stopped), (Some(2), None));
+        assert_eq!(ran.stdout.trim(), "{\"done\":true}");
+    }
 }
