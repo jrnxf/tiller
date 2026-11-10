@@ -41,7 +41,10 @@ CREATE TABLE idempotency_keys (
   entity     TEXT,
   entity_id  TEXT,
   response   TEXT NOT NULL,              -- JSON, returned verbatim on replay
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  actor      TEXT,                       -- who first used the key, as events.actor; null before schema 15
+  args_sha256 TEXT                       -- SHA-256 of the normalized arguments; null before schema 15
+                                         -- or when the caller sent none. A null side matches.
 ) STRICT;
 
 -- ---------------------------------------------------------------------------

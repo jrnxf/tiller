@@ -40,7 +40,7 @@ pub use nightly::{
     next_due, nightly,
 };
 pub use restore::{Restored, Skipped, restore};
-pub(crate) use schema::before_migration;
+pub(crate) use schema::migrate_on_open;
 pub use schema::{Migrated, migrate};
 
 /// Where one host's Tiller keeps its files.
@@ -91,6 +91,12 @@ impl Paths {
         self.db.with_file_name(name)
     }
 
+    /// The lock every migration of `state.db` holds, from its version check
+    /// to its commit ([`MigrationLock`]).
+    fn migration_lock(&self) -> PathBuf {
+        self.beside_db(".migrate.lock")
+    }
+
     /// `path` relative to the home, as a manifest stores it.
     fn relative(&self, path: &Path) -> Result<String> {
         path.strip_prefix(&self.home)
@@ -131,6 +137,36 @@ impl DaemonLock {
             Err(TryLockError::WouldBlock) => Err(daemon_running_error()),
             Err(TryLockError::Error(error)) => Err(io_error("lock", &paths.daemon_lock)(error)),
         }
+    }
+}
+
+/// The lock that makes a schema migration one process's work (`recovery.md`
+/// R11). `Store::open` and `tiller migrate` hold it from the moment they read
+/// the database's version, through the pre-migration copy, to the
+/// migration's commit. A process that waited for it reads the version again,
+/// so when the daemon and a CLI command open an old database at once, one
+/// migrates and the other finds nothing to do. The lock is the operating
+/// system's, so it ends with the process that held it, even on a crash.
+#[derive(Debug)]
+pub(crate) struct MigrationLock {
+    _file: File,
+}
+
+impl MigrationLock {
+    /// Waits for the lock. A migration and its copy are bounded by the size
+    /// of the database, so the wait is too.
+    pub(crate) fn acquire(paths: &Paths) -> Result<Self> {
+        let path = paths.migration_lock();
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(false).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&path).map_err(io_error("open", &path))?;
+        file.lock().map_err(io_error("lock", &path))?;
+        Ok(Self { _file: file })
     }
 }
 
@@ -179,12 +215,18 @@ struct Copied {
 
 /// Copies the database behind `src` to `dest` through the online backup API
 /// and verifies the copy: `integrity_check`, the page count against the
-/// source's, then its size and sha256. The copy is written to `dest` plus
-/// `.tmp` and renamed into place only once it verifies, so `dest` never holds
-/// a partial file.
+/// source's, then its size and sha256. The copy is written to a temporary
+/// file of its own ([`unique_tmp`]) and renamed into place only once it
+/// verifies, so `dest` never holds a partial file.
 fn copy_verified(src: &Connection, dest: &Path) -> Result<Copied> {
-    let tmp = with_suffix(dest, ".tmp");
-    remove_if_exists(&tmp)?;
+    let tmp = unique_tmp(dest);
+    #[cfg(test)]
+    if FAIL_COPIES.get() {
+        return Err(Error::Internal(format!(
+            "copy to {}: failure injected by the test",
+            tmp.display()
+        )));
+    }
     let result = copy_to(src, &tmp);
     match result {
         Ok(copied) => {
@@ -340,6 +382,14 @@ fn stamp(now: Timestamp) -> String {
     )
 }
 
+/// A temporary name beside `path` that no other writer uses,
+/// `<path>.<ulid>.tmp`: two processes that write the same file at once each
+/// write their own temporary file, so neither removes or overwrites the
+/// other's.
+fn unique_tmp(path: &Path) -> PathBuf {
+    with_suffix(path, &format!(".{}.tmp", crate::ids::new_ulid()))
+}
+
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(suffix);
@@ -354,15 +404,18 @@ fn remove_if_exists(path: &Path) -> Result<()> {
     }
 }
 
-/// Writes `bytes` to `path` atomically: a temporary file, synced, renamed,
-/// and the rename synced.
+/// Writes `bytes` to `path` atomically: a temporary file of its own
+/// ([`unique_tmp`]), synced, renamed, and the rename synced.
 fn write_synced(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = with_suffix(path, ".tmp");
-    let mut file = File::create(&tmp).map_err(io_error("create", &tmp))?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(io_error("write", &tmp))?;
-    fs::rename(&tmp, path).map_err(io_error("rename", &tmp))?;
+    let tmp = unique_tmp(path);
+    let written = File::create(&tmp)
+        .and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()))
+        .and_then(|()| fs::rename(&tmp, path))
+        .map_err(io_error("write", &tmp));
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written?;
     sync_dir(path)
 }
 
@@ -391,6 +444,13 @@ fn create_private_dir(dir: &Path) -> Result<()> {
 
 fn io_error<'a>(action: &'static str, path: &'a Path) -> impl FnOnce(io::Error) -> Error + 'a {
     move |error| Error::Internal(format!("{action} {}: {error}", path.display()))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// While set, every [`copy_verified`] on this thread fails, as a full
+    /// disk would. The temporary name is unique, so a test cannot block it.
+    static FAIL_COPIES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]

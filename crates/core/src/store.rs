@@ -15,6 +15,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 use crate::ids;
@@ -135,6 +136,29 @@ pub struct Ctx {
     /// sent it. Every event the mutation writes carries it as
     /// `payload.via_peer` (`authority.md` section 3).
     pub via_peer: Option<Value>,
+    /// The arguments of the request that carries a key, so a write under
+    /// that key stores them and a later request with other arguments under
+    /// the same key is refused, not replayed (`protocol.md` section 6.3).
+    pub args: Option<KeyArgs>,
+}
+
+/// A keyed request's arguments: the sha256 of their normalized JSON, bound
+/// to the one key the request carries. A write under any other key (a
+/// derived key of the same command, say) ignores them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyArgs {
+    key: String,
+    sha256: String,
+}
+
+impl KeyArgs {
+    pub fn new(key: impl Into<String>, normalized: &Value) -> Self {
+        let digest = Sha256::digest(normalized.to_string().as_bytes());
+        Self {
+            key: key.into(),
+            sha256: digest.iter().map(|byte| format!("{byte:02x}")).collect(),
+        }
+    }
 }
 
 impl Ctx {
@@ -148,11 +172,19 @@ impl Ctx {
             now,
             key: None,
             via_peer: None,
+            args: None,
         }
     }
 
     pub fn with_key(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());
+        self
+    }
+
+    /// Records the normalized arguments of the request that carries `key`
+    /// ([`KeyArgs`]).
+    pub fn with_args(mut self, key: impl Into<String>, normalized: &Value) -> Self {
+        self.args = Some(KeyArgs::new(key, normalized));
         self
     }
 
@@ -243,8 +275,7 @@ impl Store {
         let mut conn = Connection::open(&path)?;
         owner_only(path.as_ref())?;
         configure(&conn)?;
-        crate::backup::before_migration(&conn, path.as_ref())?;
-        migrate::up(&mut conn)?;
+        crate::backup::migrate_on_open(&mut conn, path.as_ref())?;
         Ok(Self { conn })
     }
 
@@ -289,22 +320,30 @@ impl Store {
         &self.conn
     }
 
-    /// Whether the caller's idempotency key is already recorded, so a write
-    /// with it would replay. Lets a mutation skip slow work it only needs
-    /// when it applies.
+    /// Whether the caller's idempotency key is already recorded and not
+    /// expired, so a write with it would replay, or be refused when it does
+    /// not match. Lets a mutation skip slow work it only needs when it
+    /// applies. A read: an expired key is forgotten only inside the write
+    /// that stores it again.
     pub fn key_recorded(&self, ctx: &Ctx) -> Result<bool> {
         match ctx.key.as_deref() {
-            Some(key) => Ok(lookup_key(&self.conn, key, ctx.now)?.is_some()),
+            Some(key) => Ok(matches!(
+                lookup_key(&self.conn, key, ctx.now)?,
+                Lookup::Live(_)
+            )),
             None => Ok(false),
         }
     }
 
     /// Runs one mutation named `txn` in one `BEGIN IMMEDIATE` transaction.
     ///
-    /// With `key`, a key already stored for the same mutation returns the
-    /// stored response and writes nothing; a key stored for another mutation
-    /// is refused. A mutation that writes nothing at all (a natural transition
-    /// already in its target state) returns `replayed: true`.
+    /// With `key`, a key already stored by the same actor for the same
+    /// mutation and arguments returns the stored response and writes
+    /// nothing. A key stored for another mutation, by another actor, or with
+    /// other arguments ([`Ctx::args`]) is refused. A key stored before
+    /// schema 15 has no actor or arguments, and those checks pass. A mutation
+    /// that writes nothing at all (a natural transition already in its
+    /// target state) returns `replayed: true`.
     pub fn write<T, F>(
         &mut self,
         ctx: &Ctx,
@@ -358,26 +397,34 @@ impl Store {
         F: FnOnce(&mut Tx<'_>) -> Result<T>,
     {
         let key = key.or(ctx.key.as_deref());
+        let actor = ctx.actor.to_string();
+        let args = ctx
+            .args
+            .as_ref()
+            .filter(|args| Some(args.key.as_str()) == key)
+            .map(|args| args.sha256.as_str());
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        if let Some(key) = key
-            && let Some(stored) = lookup_key(&tx, key, ctx.now)?
-        {
-            if stored.command != command {
-                return Err(Error::refused(
-                    "idempotency key",
-                    key,
-                    format!("key was used for {}, not {command}", stored.command),
-                ));
+        if let Some(key) = key {
+            match lookup_key(&tx, key, ctx.now)? {
+                Lookup::Live(stored) => {
+                    stored.matches(key, command, &actor, args)?;
+                    let response: StoredResponse<T> = serde_json::from_value(stored.response)?;
+                    return Ok(Applied {
+                        value: response.value,
+                        events: response.events,
+                        replayed: true,
+                    });
+                }
+                // Forgotten in this transaction, so the key is stored
+                // again only together with the mutation it now keys.
+                Lookup::Expired => {
+                    tx.execute("DELETE FROM idempotency_keys WHERE key = ?1", [key])?;
+                }
+                Lookup::Absent => {}
             }
-            let response: StoredResponse<T> = serde_json::from_value(stored.response)?;
-            return Ok(Applied {
-                value: response.value,
-                events: response.events,
-                replayed: true,
-            });
         }
 
         let before = total_changes(&tx)?;
@@ -418,9 +465,12 @@ impl Store {
             let response = serde_json::json!({ "value": &value, "events": &events }).to_string();
             let (entity, entity_id) = first_entity.unwrap_or_default();
             tx.execute(
-                "INSERT INTO idempotency_keys (key, command, entity, entity_id, response, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![key, command, entity, entity_id, response, ctx.now],
+                "INSERT INTO idempotency_keys
+                   (key, command, entity, entity_id, response, created_at, actor, args_sha256)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    key, command, entity, entity_id, response, ctx.now, actor, args
+                ],
             )?;
         }
 
@@ -527,35 +577,83 @@ struct StoredResponse<T> {
     events: Vec<i64>,
 }
 
+/// A row of `idempotency_keys`: what the key was first used for.
 struct StoredKey {
     command: String,
+    /// Null for a key stored before schema 15.
+    actor: Option<String>,
+    /// Null for a key stored before schema 15, or by a caller that sent no
+    /// [`Ctx::args`].
+    args: Option<String>,
     response: Value,
 }
 
-fn lookup_key(conn: &Connection, key: &str, now: Timestamp) -> Result<Option<StoredKey>> {
+impl StoredKey {
+    /// Refuses a request that reuses the key for something else: another
+    /// mutation, another actor, or other arguments. A side with no actor or
+    /// no arguments recorded matches, so keys stored before schema 15 replay
+    /// as they did until they expire.
+    fn matches(&self, key: &str, command: &str, actor: &str, args: Option<&str>) -> Result<()> {
+        let refuse = |fact: String| Err(Error::refused("idempotency key", key, fact));
+        if self.command != command {
+            return refuse(format!("key was used for {}, not {command}", self.command));
+        }
+        if let Some(first) = self.actor.as_deref()
+            && first != actor
+        {
+            return refuse(format!(
+                "key was used by {first}, not {actor}; use a new key"
+            ));
+        }
+        if let (Some(first), Some(now)) = (self.args.as_deref(), args)
+            && first != now
+        {
+            return refuse(format!(
+                "key was used for {command} with other arguments; use a new key"
+            ));
+        }
+        Ok(())
+    }
+}
+
+enum Lookup {
+    Absent,
+    /// Stored more than [`KEY_TTL_DAYS`] ago; the write that stores the key
+    /// again deletes it first.
+    Expired,
+    Live(StoredKey),
+}
+
+/// Reads the key's row. Never writes: an expired row is deleted only inside
+/// [`Store::write_as`]'s transaction. Keys are rebuildable bookkeeping
+/// (`state.md` section 10), so forgetting one writes no event.
+fn lookup_key(conn: &Connection, key: &str, now: Timestamp) -> Result<Lookup> {
     let row = conn
         .query_row(
-            "SELECT command, response, created_at FROM idempotency_keys WHERE key = ?1",
+            "SELECT command, actor, args_sha256, response, created_at
+               FROM idempotency_keys WHERE key = ?1",
             [key],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Timestamp>(2)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Timestamp>(4)?,
                 ))
             },
         )
         .optional()?;
-    let Some((command, response, created_at)) = row else {
-        return Ok(None);
+    let Some((command, actor, args, response, created_at)) = row else {
+        return Ok(Lookup::Absent);
     };
     if created_at.plus_minutes(KEY_TTL_DAYS * 24 * 60) < now {
-        // Expired: forget it so the key can be stored again.
-        conn.execute("DELETE FROM idempotency_keys WHERE key = ?1", [key])?;
-        return Ok(None);
+        return Ok(Lookup::Expired);
     }
-    Ok(Some(StoredKey {
+    Ok(Lookup::Live(StoredKey {
         command,
+        actor,
+        args,
         response: serde_json::from_str(&response)?,
     }))
 }
@@ -576,3 +674,6 @@ fn configure(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;")?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

@@ -407,14 +407,13 @@ fn failed_night_retries_after_an_hour_and_second_failed_night_alarms_once() {
     let night_one = at("2026-11-01T03:00:00Z");
     nightly(&mut store, paths, night_one).unwrap();
 
-    // Each attempt's temporary path is taken by a directory, so it fails.
-    let block = |now: Timestamp| {
-        fs::create_dir_all(paths.backups.join(format!("{}.db.tmp", stamp(now)))).unwrap();
-    };
+    // Each attempt's copy fails.
     let night_two = night_one.plus_minutes(24 * 60);
     let attempt = |store: &mut Store, now: Timestamp| {
-        block(now);
-        nightly(store, paths, now).unwrap()
+        FAIL_COPIES.set(true);
+        let result = nightly(store, paths, now);
+        FAIL_COPIES.set(false);
+        result.unwrap()
     };
     let first = attempt(&mut store, night_two);
     let Nightly::Failed { next, alarm, .. } = &first else {
@@ -831,4 +830,66 @@ fn a_restored_database_is_owner_only_whatever_the_backup_mode() {
     restore(paths, None, false, at("2026-11-01T16:00:00Z")).unwrap();
     let mode = fs::metadata(&paths.db).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
+}
+
+/// B14: the daemon starting and a CLI command right after an upgrade both
+/// open the old database at once. The migration lock lets one take the copy
+/// and migrate while the other waits, re-reads the version and finds nothing
+/// to do. Both opens succeed, the database ends at the latest schema with its
+/// rows, and the manifest lists the one copy, which verifies.
+#[test]
+fn concurrent_first_open_of_an_old_database_succeeds_in_both() {
+    const OLD: usize = 11;
+    let seed = host();
+    let mut store = Store::open(&seed.paths.db).unwrap();
+    setup(&mut store, "test-host", Boundary::Personal);
+    let card = store
+        .card_create(&owner(), None, new_card("survives"), None)
+        .unwrap()
+        .value;
+    drop(store);
+    migrate(&seed.paths, OLD, Timestamp::now()).unwrap();
+
+    for trial in 0..20 {
+        let host = host();
+        let paths = host.paths.clone();
+        fs::copy(&seed.paths.db, &paths.db).unwrap();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let opens: Vec<_> = (0..2)
+            .map(|_| {
+                let db = paths.db.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    Store::open(&db).map(drop)
+                })
+            })
+            .collect();
+        for open in opens {
+            let opened = open.join().unwrap();
+            assert!(opened.is_ok(), "trial {trial}: {opened:?}");
+        }
+
+        let store = Store::open_current(&paths.db).unwrap();
+        assert!(get::<Card>(store.conn(), "card", &card.id).is_ok());
+        let manifest = Manifest::load(&paths).unwrap();
+        let copies: Vec<_> = manifest
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::PreMigration)
+            .collect();
+        assert_eq!(copies.len(), 1, "trial {trial}: {copies:?}");
+        assert_eq!(
+            copies[0].file,
+            format!("state.db.pre-{OLD}-{}", crate::migrate::LATEST)
+        );
+        assert_eq!(copies[0].schema_version, OLD);
+        assert!(verify(&paths, copies[0]).is_ok());
+        let leftovers: Vec<String> = fs::read_dir(&paths.home)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert_eq!(leftovers, Vec::<String>::new(), "trial {trial}");
+    }
 }

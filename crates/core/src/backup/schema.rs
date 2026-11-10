@@ -9,7 +9,7 @@ use std::path::Path;
 use rusqlite::Connection;
 use serde::Serialize;
 
-use super::{DaemonLock, Entry, EntryKind, Manifest, Paths, copy_verified};
+use super::{DaemonLock, Entry, EntryKind, Manifest, MigrationLock, Paths, copy_verified};
 use crate::error::{Error, Result};
 use crate::migrate;
 use crate::store::BUSY_TIMEOUT;
@@ -39,21 +39,26 @@ pub fn migrate(paths: &Paths, target: usize, now: Timestamp) -> Result<Migrated>
     migrate_with(paths, target, now, migrate::to_version)
 }
 
-/// `Store::open`'s hook: before it migrates an existing database up, take
-/// the verified copy. An empty database (version 0) has nothing to keep.
-pub(crate) fn before_migration(conn: &Connection, db: &Path) -> Result<()> {
-    let from = migrate::current_version(conn)?;
-    if from == 0 || from == migrate::LATEST {
+/// `Store::open`'s migration: take the verified copy of an existing database,
+/// then migrate it up. An empty database (version 0) has nothing to keep.
+///
+/// The work runs under the [`MigrationLock`], and the version is read again
+/// once the lock is held: a process that waited while another migrated finds
+/// the database current and does nothing. A current database takes no lock.
+pub(crate) fn migrate_on_open(conn: &mut Connection, db: &Path) -> Result<()> {
+    if migrate::current_version(conn)? == migrate::LATEST {
         return Ok(());
     }
-    take_copy(
-        conn,
-        &Paths::for_db(db),
-        from,
-        migrate::LATEST,
-        Timestamp::now(),
-    )
-    .map(|_| ())
+    let paths = Paths::for_db(db);
+    let _lock = MigrationLock::acquire(&paths)?;
+    let from = migrate::current_version(conn)?;
+    if from == migrate::LATEST {
+        return Ok(());
+    }
+    if from != 0 {
+        take_copy(conn, &paths, from, migrate::LATEST, Timestamp::now())?;
+    }
+    migrate::up(conn)
 }
 
 pub(super) fn migrate_with(
@@ -64,6 +69,9 @@ pub(super) fn migrate_with(
 ) -> Result<Migrated> {
     let mut conn = Connection::open(&paths.db)?;
     conn.busy_timeout(BUSY_TIMEOUT)?;
+    // Held to the end, so a `Store::open` from the CLI cannot migrate up
+    // between the version read below and this migration's commit.
+    let _lock = MigrationLock::acquire(paths)?;
     let from = migrate::current_version(&conn)?;
     if target > migrate::LATEST {
         return Err(Error::Usage(format!(

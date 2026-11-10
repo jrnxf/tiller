@@ -319,7 +319,7 @@ These tables hold a copy of a fact another system owns. Each row carries `fetche
 ### Bookkeeping
 
 - `meta`: key-value: `schema_version`, `host_id`, `created_at`, `import_manifest_sha256`, `boundary` (`personal` or `work`; memory.md), `boot_id` (the boot the daemon last reconciled against; recovery.md).
-- `idempotency_keys`: `key`, `command`, `entity`, `entity_id`, `response` (JSON), `created_at`. A command that carries a key already present returns the stored response and performs nothing. Keys expire after 30 days.
+- `idempotency_keys`: `key`, `command`, `entity`, `entity_id`, `response` (JSON), `created_at`, `actor` (as `events.actor`), `args_sha256` (the SHA-256 of the request's normalized arguments, when the caller passes them). A command that carries a key already present, from the same actor with the same arguments, returns the stored response and performs nothing. The same key from another command, another actor or with other arguments is refused (exit 5, `refused`) and performs nothing: a reused key never returns another request's result. A null `actor` or `args_sha256` matches anything; rows stored before schema 15 have neither, so they replay on the command alone until they expire. Keys expire after 30 days. An expired key is deleted inside the transaction of the mutation that stores it again, so it is gone only if that mutation commits. Keys are bookkeeping, so the delete writes no event (section 10, invariant 3).
 - `memory_sources`, `memory_revisions`, `memories`, `evidence`, `memory_evidence`, `proposals`, `proposal_evidence`, `session_loads`: owned by `memory.md` (T1.5), which defines them in its section 11.
 
 ## 4. Relationships
@@ -573,7 +573,7 @@ Tests in T2.1 and T2.7 prove each one.
 7. An `accepted` approval whose PR head differs from `head_sha` is `stale` before any execution starts.
 8. An outbox message in `acked` has a `delivered_at` or a recorded poll pickup; a `failed` answer always has a `recovery` attention item.
 9. Display ids are unique per host. A display id is never reused across import, nor across a deleted project's id being added again while one of its run branches is left.
-10. A mutation carrying a known idempotency key returns the stored response and writes nothing.
+10. A mutation carrying a known idempotency key returns the stored response and writes nothing. A known key from another command, another actor or with other arguments is refused and writes nothing.
 11. No row in `state.db` belongs to a project another host owns: every `cards.project_id` names a project whose `owner_host_id = meta.host_id` (ADR 0003 keeps principle 1).
 12. Every event with `actor = board@<label>` carries `payload.via_peer.key_id`, which names an `act` row of `peer_keys` that was unrevoked when the event was written.
 

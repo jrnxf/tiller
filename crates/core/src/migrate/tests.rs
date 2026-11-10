@@ -148,6 +148,62 @@ fn migrations_run_both_ways_on_fixture() {
         .unwrap();
 }
 
+/// Migration 15: a key stored before it keeps its row with no actor and no
+/// arguments hash, a new row can carry both, and going back down keeps every
+/// key and its response.
+#[test]
+fn idempotency_keys_keep_their_rows_across_0015() {
+    let mut conn = connection();
+    to_version(&mut conn, 14).unwrap();
+    conn.execute_batch(&format!("BEGIN; {FIXTURE_V1} COMMIT;"))
+        .unwrap();
+    to_version(&mut conn, 15).unwrap();
+    let old: (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT actor, args_sha256 FROM idempotency_keys WHERE key = 'spawn-key-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(old, (None, None), "a key from before 15 has neither");
+    conn.execute(
+        "INSERT INTO idempotency_keys
+           (key, command, entity, entity_id, response, created_at, actor, args_sha256)
+         VALUES ('card-key-1', 'card.create', 'card', 'c1', '{\"value\":{},\"events\":[2]}',
+                 '2026-11-03T09:00:00.000Z', 'owner', 'abc123')",
+        [],
+    )
+    .unwrap();
+
+    to_version(&mut conn, 14).unwrap();
+    let keys: Vec<(String, String)> = conn
+        .prepare("SELECT key, response FROM idempotency_keys ORDER BY key")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        keys,
+        vec![
+            (
+                "card-key-1".to_owned(),
+                "{\"value\":{},\"events\":[2]}".to_owned()
+            ),
+            (
+                "spawn-key-1".to_owned(),
+                "{\"value\":{},\"events\":[1]}".to_owned()
+            ),
+        ]
+    );
+    assert!(
+        conn.prepare("SELECT actor FROM idempotency_keys").is_err(),
+        "down drops the columns"
+    );
+    to_version(&mut conn, 15).unwrap();
+    assert_eq!(current_version(&conn).unwrap(), 15);
+}
+
 /// Migration 2 lowers no project's rigor: every project that existed before
 /// it reads `launched`, with nothing reviewed yet.
 #[test]
