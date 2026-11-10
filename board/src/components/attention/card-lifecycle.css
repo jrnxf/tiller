@@ -1,0 +1,233 @@
+/* The card page header: priority on the left, the card's actions on the right,
+   the title, body and hold or closed note in the same card. */
+.ch-card {
+  background: var(--bg-card);
+  border: 1px solid var(--line-1);
+  border-radius: var(--r8);
+  box-shadow: var(--shadow-stack);
+  padding: 14px 16px 4px;
+  margin: 0 0 18px;
+}
+
+.ch-top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "meta acts" "title title";
+  align-items: center;
+  gap: 10px 16px;
+}
+
+.ch-top h4 {
+  grid-area: title;
+  min-width: 0;
+  margin: 2px 0 10px;
+  text-wrap: balance;
+}
+
+.ch-meta {
+  grid-area: meta;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ch-acts {
+  grid-area: acts;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.ch-card .props {
+  border-bottom: 0;
+  margin: 0;
+}
+
+.ch-card .desc {
+  margin-bottom: 12px;
+}
+
+.ch-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 0 10px;
+  padding: 9px 12px;
+  border-radius: var(--r8);
+  border: 1px solid color-mix(in srgb, var(--yellow-text) 35%, var(--line-2));
+  background: color-mix(in srgb, var(--yellow) 8%, transparent);
+  font-size: var(--fs-small);
+  color: var(--fg-2);
+}
+
+.ch-note .icon {
+  margin-top: 2px;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--yellow-text);
+}
+
+.ch-note b {
+  color: var(--fg-1);
+  font-weight: var(--w-semibold);
+}
+
+.ch-note .sub {
+  color: var(--fg-3);
+  font-size: var(--fs-mini);
+  margin-top: 2px;
+}
+
+.ch-note.closed {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line-2));
+  background: var(--accent-tint);
+}
+
+.ch-note.closed .icon {
+  color: var(--accent-text);
+}
+
+/* The "More" menu */
+.cm-popup {
+  min-width: 190px;
+  padding: 4px;
+  background: var(--bg-pop);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r8);
+  box-shadow: var(--shadow-high);
+  outline: 0;
+}
+
+.cm-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  border-radius: var(--r6);
+  font-size: var(--fs-small);
+  color: var(--fg-1);
+  text-align: left;
+  cursor: pointer;
+}
+
+.cm-item[data-highlighted] {
+  background: var(--bg-hover);
+}
+
+.cm-item:focus-visible {
+  outline: 0;
+}
+
+.cm-item .icon {
+  width: 14px;
+  height: 14px;
+  color: var(--fg-3);
+}
+
+.cm-item.bad,
+.cm-item.bad .icon {
+  color: var(--red-text);
+}
+
+.cm-sep {
+  height: 1px;
+  background: var(--line-1);
+  margin: 4px 2px;
+}
+
+.cm-dots {
+  width: 28px;
+  padding: 0;
+  justify-content: center;
+}
+
+/* An Inbox row with its menu: the menu sits on the right, outside the link */
+.irow-wrap {
+  position: relative;
+}
+
+.irow-wrap .irow {
+  padding-right: 52px;
+}
+
+.irow-menu {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+}
+
+/* Dialog fields */
+.dlg-f {
+  margin-top: 14px;
+}
+
+.dlg-l {
+  display: block;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+  font-weight: var(--w-medium);
+  margin: 0 0 6px;
+}
+
+.dlg-when {
+  display: flex;
+  gap: 8px;
+}
+
+.dlg-hint {
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+  margin-top: 6px;
+}
+
+.dialog .seg {
+  flex-wrap: wrap;
+}
+
+.dialog .note-in.area {
+  height: 72px;
+}
+
+/* Edit in place: the card's own fields, Cancel left and Save right */
+.edit-title {
+  font-size: 17px;
+  font-weight: var(--w-semibold);
+  height: 38px;
+}
+
+.edit-body {
+  height: 140px;
+}
+
+.edit-acts {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 0;
+}
+
+.btn.danger {
+  color: var(--red-text);
+}
+
+.btn.danger:hover {
+  color: var(--red-text);
+  border-color: color-mix(in srgb, var(--red) 45%, var(--line-2));
+  background: color-mix(in srgb, var(--red) 9%, transparent);
+}
+
+@media (max-width: 480px) {
+  .ch-card {
+    padding: 12px 12px 4px;
+  }
+
+  .dlg-when {
+    flex-direction: column;
+  }
+}

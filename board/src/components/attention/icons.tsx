@@ -144,3 +144,48 @@ export const SparkIcon = () => (
     />
   </Glyph>
 );
+
+export const DotsIcon = () => (
+  <Glyph>
+    <circle cx="3.6" cy="8" r="1.2" fill="currentColor" />
+    <circle cx="8" cy="8" r="1.2" fill="currentColor" />
+    <circle cx="12.4" cy="8" r="1.2" fill="currentColor" />
+  </Glyph>
+);
+
+export const PauseIcon = () => (
+  <Glyph>
+    <circle cx="8" cy="8" r="6.2" {...stroke} />
+    <path d="M6.5 5.8v4.4M9.5 5.8v4.4" strokeLinecap="round" {...stroke} />
+  </Glyph>
+);
+
+export const PlayIcon = () => (
+  <Glyph>
+    <path d="M5 3.5v9l7-4.5z" strokeLinejoin="round" {...stroke} />
+  </Glyph>
+);
+
+export const EditIcon = () => (
+  <Glyph>
+    <path d="M10.6 2.9 13 5.3 6 12.3l-3 .7.7-3z" strokeLinejoin="round" {...stroke} />
+  </Glyph>
+);
+
+export const CancelCardIcon = () => (
+  <Glyph>
+    <circle cx="8" cy="8" r="6.2" {...stroke} />
+    <path d="m5.8 5.8 4.4 4.4m0-4.4-4.4 4.4" strokeLinecap="round" {...stroke} />
+  </Glyph>
+);
+
+export const ReopenIcon = () => (
+  <Glyph>
+    <path
+      d="M3.2 8a4.8 4.8 0 1 0 1.4-3.4M3.2 3v2.6h2.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      {...stroke}
+    />
+  </Glyph>
+);

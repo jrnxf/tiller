@@ -19,6 +19,7 @@ import type { Withdrawn } from "./answered";
 import { AnswerForm } from "./answer";
 import { ApproveBlock } from "./approve";
 import { CardActions, OpenInHerdr } from "./card-actions";
+import { CardOverflow } from "./card-lifecycle";
 import { tidy } from "./ansi";
 import { RecapCard } from "./recap";
 import { KIND_LABELS, PRIORITIES, formatAge, formatWhen, parseEvidence, staleText } from "./format";
@@ -371,7 +372,7 @@ function Row({ entry, selected, ctx }: { entry: Entry; selected: boolean; ctx: C
     entry.type === "decision"
       ? entry.item.question
       : `${entry.prompt.tool}: ${entry.prompt.detail ?? "waiting for a keypress"}`;
-  return (
+  const link = (
     <Link
       to="/inbox"
       search={({ host }) => ({ host, item: entry.id })}
@@ -410,6 +411,15 @@ function Row({ entry, selected, ctx }: { entry: Entry; selected: boolean; ctx: C
         </span>
       </span>
     </Link>
+  );
+  if (!card || answered || withdrawn || gone) return link;
+  return (
+    <div className="irow-wrap">
+      {link}
+      <span className="irow-menu">
+        <CardOverflow card={card} off={standing.canAct ? null : standing.reason} />
+      </span>
+    </div>
   );
 }
 

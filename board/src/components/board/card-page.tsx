@@ -25,9 +25,11 @@ import {
 import { agentActivity } from "./activity";
 import { Ago } from "./ago";
 import { badgeText, statusMark } from "./badge";
+import { CardHeader } from "./card-header";
 import { bugProjectOf, isTillerBug, isUntriaged, machineOf } from "./bugs";
 import { HostChip, PeerNote } from "./host-chip";
 import { ApproveActions } from "../attention/approve";
+import { phaseOf } from "../attention/card-lifecycle";
 import { AnswerForm } from "../attention/answer";
 import { CommentControl } from "../attention/card-actions";
 import "../attention/inbox.css";
@@ -485,6 +487,7 @@ export function CardPage({
   const bugProject = bugProjectOf(machineOf(column, machines), projects.projects);
 
   const hold = detail.holds[0];
+  const phase = phaseOf(column);
   const openDeps = detail.deps.filter((dep) => dep.released_at === null);
 
   return (
@@ -543,93 +546,105 @@ export function CardPage({
         </div>
       ) : null}
 
-      <h4>{card.title}</h4>
-      {card.body ? <p className="desc">{card.body}</p> : null}
-      {untriaged ? (
-        <BugTriage
-          row={column}
-          body={card.body ?? null}
-          projects={projects.projects}
-          standing={standing}
-        />
-      ) : null}
-      <dl className="props">
-        <dt>Status</dt>
-        <dd>
-          <Status mark={statusMark(column)} />
-          {badgeText(column)}
-          {untriaged ? <span className="lab sm yel">Untriaged</span> : null}
-          {hold?.until_at ? (
-            <span className="meta">until {formatLisbonMoment(hold.until_at)}</span>
-          ) : null}
-          {openDeps.length > 0 ? (
-            <span className="meta">
-              blocked by {openDeps.map((dep) => dep.display_id).join(", ")}
-            </span>
-          ) : null}
-        </dd>
-        <dt>Priority</dt>
-        <dd>
-          <span className="pri">
-            <Priority level={card.priority} />
-          </span>
-          {PRIORITY_NAMES[card.priority] ?? "None"}
-        </dd>
-        <dt>Kind</dt>
-        <dd>
-          <KindLabel kind={card.kind} />
-          {bug ? <span className="lab sm bad">Bug</span> : null}
-        </dd>
-        {bug ? (
-          <>
-            {column.filed_from ? (
-              <>
-                <dt>Filed from</dt>
-                <dd>{projectName(column.filed_from)}</dd>
-              </>
+      <CardHeader
+        detail={detail}
+        off={standing.canAct ? null : standing.reason}
+        actions={!hostHealth}
+      >
+        {untriaged ? (
+          <BugTriage
+            row={column}
+            body={card.body ?? null}
+            projects={projects.projects}
+            standing={standing}
+          />
+        ) : null}
+        <dl className="props">
+          <dt>Status</dt>
+          <dd>
+            <Status mark={statusMark(column)} />
+            {badgeText(column)}
+            {untriaged ? <span className="lab sm yel">Untriaged</span> : null}
+            {hold?.until_at ? (
+              <span className="meta">until {formatLisbonMoment(hold.until_at)}</span>
             ) : null}
-            <dt>Route</dt>
-            <dd>
-              <span className="mono">tiller bug</span>
-              <span className="route-arrow">
-                <RouteIcon />
+            {openDeps.length > 0 ? (
+              <span className="meta">
+                blocked by {openDeps.map((dep) => dep.display_id).join(", ")}
               </span>
-              {projectName(card.project_id)}
-              {card.project_id === HOST_PROJECT ? (
-                <span className="meta">
-                  {bugProject
-                    ? `filed before ${bugProject.name} took Tiller bugs`
-                    : "no bug project here"}
+            ) : null}
+          </dd>
+          {hostHealth || phase === "closed" ? (
+            <>
+              <dt>Priority</dt>
+              <dd>
+                <span className="pri">
+                  <Priority level={card.priority} />
                 </span>
+                {PRIORITY_NAMES[card.priority] ?? "None"}
+              </dd>
+            </>
+          ) : null}
+          <dt>Kind</dt>
+          <dd>
+            <KindLabel kind={card.kind} />
+            {bug ? <span className="lab sm bad">Bug</span> : null}
+          </dd>
+          {bug ? (
+            <>
+              {column.filed_from ? (
+                <>
+                  <dt>Filed from</dt>
+                  <dd>{projectName(column.filed_from)}</dd>
+                </>
               ) : null}
-            </dd>
-          </>
-        ) : null}
-        <dt>Model</dt>
-        <dd>
-          {card.model ? <ModelChip model={card.model} /> : <span className="muted">none yet</span>}
-        </dd>
-        <dt>Slug</dt>
-        <dd>
-          <span className="mono">{card.slug}</span>
-        </dd>
-        {card.branch ? (
-          <>
-            <dt>Branch</dt>
-            <dd>
-              <span className="mono">{card.branch}</span>
-            </dd>
-          </>
-        ) : null}
-        {card.worktree ? (
-          <>
-            <dt>Worktree</dt>
-            <dd>
-              <span className="mono">{card.worktree}</span>
-            </dd>
-          </>
-        ) : null}
-      </dl>
+              <dt>Route</dt>
+              <dd>
+                <span className="mono">tiller bug</span>
+                <span className="route-arrow">
+                  <RouteIcon />
+                </span>
+                {projectName(card.project_id)}
+                {card.project_id === HOST_PROJECT ? (
+                  <span className="meta">
+                    {bugProject
+                      ? `filed before ${bugProject.name} took Tiller bugs`
+                      : "no bug project here"}
+                  </span>
+                ) : null}
+              </dd>
+            </>
+          ) : null}
+          <dt>Model</dt>
+          <dd>
+            {card.model ? (
+              <ModelChip model={card.model} />
+            ) : (
+              <span className="muted">none yet</span>
+            )}
+          </dd>
+          <dt>Slug</dt>
+          <dd>
+            <span className="mono">{card.slug}</span>
+          </dd>
+          {card.branch ? (
+            <>
+              <dt>Branch</dt>
+              <dd>
+                <span className="mono">{card.branch}</span>
+              </dd>
+            </>
+          ) : null}
+          {card.worktree ? (
+            <>
+              <dt>Worktree</dt>
+              <dd>
+                <span className="mono">{card.worktree}</span>
+              </dd>
+            </>
+          ) : null}
+        </dl>
+      </CardHeader>
 
       {hostHealth ? <Alerts alerts={alerts} /> : null}
 
