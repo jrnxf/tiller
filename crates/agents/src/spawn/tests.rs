@@ -1926,6 +1926,38 @@ fn spawn_that_fails_before_its_base_is_read_returns_the_worktree() {
 }
 
 #[test]
+fn spawn_whose_placement_fails_returns_the_unrecorded_worktree() {
+    let mut rig = Rig::new();
+    // `run.place` fails after the pool leased the worktree, so no record
+    // names the lease for cleanup to find.
+    rig.sql(
+        "CREATE TEMP TRIGGER refuse_placement BEFORE UPDATE OF worktree_path ON runs
+         WHEN NEW.worktree_path IS NOT NULL
+         BEGIN SELECT RAISE(ABORT, 'placement refused'); END",
+    );
+    let card = rig.card(CardKind::Ship, None);
+    let ctx = rig.orchestrator();
+    let error = rig
+        .try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
+        .unwrap_err();
+    assert!(error.to_string().contains("placement refused"), "{error}");
+    assert!(!matches!(error, SpawnError::Undone { .. }), "{error}");
+
+    let run: Run = find(rig.fleet.store.conn(), "card_id = ?1", &[&card.id])
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.outcome, Some(RunOutcome::Failed));
+    assert_eq!(run.worktree_path, None);
+    let taken = rig.pool.taken();
+    assert_eq!(taken.len(), 1);
+    assert_eq!(taken[0].3, format!("tiller:{}", run.id));
+    assert_eq!(
+        rig.pool.returned(),
+        vec![(taken[0].0.clone(), taken[0].3.clone())]
+    );
+}
+
+#[test]
 fn replaying_a_failed_spawn_refuses() {
     let mut rig = Rig::new();
     rig.herdr.refuse("create_workspace");
