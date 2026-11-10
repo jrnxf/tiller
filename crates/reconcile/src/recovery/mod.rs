@@ -24,6 +24,32 @@ use tiller_core::{NewEvent, Result, Timestamp};
 use crate::pass::{Reconciler, Report, minutes_since};
 
 impl Reconciler {
+    /// Whether the `kind` event of a record (`entity`, `entity_id`) is newer
+    /// than `since`, the `seq` of its card's last `card.reopened` from core's
+    /// [`reopened_seq`](tiller_core::state::cards::reopened_seq) (0 for a card
+    /// never reopened). A reopen starts the card over (`state.md` section 6),
+    /// so a merge, an approval, an answer or a review recorded before it is
+    /// not evidence for the work after it. On a card never reopened every
+    /// row counts, with or without an event (imported history), the same
+    /// rule as core's `landed_evidence`.
+    pub(crate) fn recorded_since(
+        &self,
+        entity: &str,
+        entity_id: &str,
+        kind: &str,
+        since: i64,
+    ) -> Result<bool> {
+        if since == 0 {
+            return Ok(true);
+        }
+        Ok(self.conn().query_row(
+            "SELECT EXISTS (SELECT 1 FROM events
+                            WHERE entity = ?1 AND entity_id = ?2 AND kind = ?3 AND seq > ?4)",
+            rusqlite::params![entity, entity_id, kind, since],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Step 1 (R01, R11, R20, and opening R04): the owner marker was read by
     /// the caller; the schema is this binary's (`Store::open` migrated it);
     /// the boot id decides whether a reboot restore opens; `fleet-1` must

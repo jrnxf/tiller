@@ -15,6 +15,7 @@ use tiller_core::domain::{
     CardState, Obligation, ObligationState, Pr, PrState, Review, Reviewer, TriggerKind, Verdict,
 };
 use tiller_core::state::attention::NewAttention;
+use tiller_core::state::cards::reopened_seq;
 use tiller_core::state::{get, list};
 use tiller_core::{NewEvent, Result, Timestamp};
 
@@ -42,6 +43,13 @@ impl Reconciler {
         for review in reviews {
             let card: tiller_core::domain::Card = get(self.conn(), "card", &review.card_id)?;
             if card.state != CardState::Open {
+                continue;
+            }
+            // A reopen starts the card over (`state.md` 6): a finding
+            // recorded before the card's last reopen gated the work before
+            // it, and is not raised on the work after it.
+            let since = reopened_seq(self.conn(), &card)?;
+            if !self.recorded_since("review", &review.id, "review.recorded", since)? {
                 continue;
             }
             let item = NewAttention {

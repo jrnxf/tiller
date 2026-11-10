@@ -11,12 +11,12 @@ use std::path::Path;
 use serde_json::{Value, json};
 use tiller_core::domain::lifecycle::Finish;
 use tiller_core::domain::{
-    Approval, ApprovalKind, Card, CardOutcome, CardState, Delivery, GrantKind, Pr, PrState,
-    Project, Run, RunOutcome,
+    Approval, ApprovalKind, ApprovalState, Card, CardOutcome, CardState, Delivery, GrantKind, Pr,
+    PrState, Project, Run, RunOutcome,
 };
 use tiller_core::state::approvals::{NewApproval, PrFetch};
 use tiller_core::state::attention::NewAttention;
-use tiller_core::state::cards::MARK_LANDED;
+use tiller_core::state::cards::{MARK_LANDED, reopened_seq};
 use tiller_core::state::runs::EndRun;
 use tiller_core::state::{find, get, list};
 use tiller_core::{Result, Timestamp};
@@ -670,15 +670,10 @@ impl Reconciler {
             {
                 continue;
             }
-            let covered: bool = self.conn().query_row(
-                "SELECT EXISTS (SELECT 1 FROM approvals WHERE card_id = ?1 AND kind = 'land_direct' AND state IN ('succeeded', 'executing', 'uncertain'))",
-                [&run.card_id],
-                |row| row.get(0),
-            )?;
-            if covered {
+            let card: Card = get(self.conn(), "card", &run.card_id)?;
+            if self.land_direct_covers(&card)? {
                 continue;
             }
-            let card: Card = get(self.conn(), "card", &run.card_id)?;
             let breach_key = format!("reconcile:G10:{}:{run_head}", run.id);
             if !self.key_used(&breach_key)? {
                 self.store.guard_breach(
@@ -718,6 +713,28 @@ impl Reconciler {
         Ok(())
     }
 
+    /// Whether a `land_direct` of Tiller's own covers a landing on the
+    /// card: one in flight (`executing`, or `uncertain` and still unsettled
+    /// by R08 above), or one that `succeeded` since the card was created or
+    /// last reopened. A push that landed the card before a reopen does not
+    /// cover the work after it (`state.md` 6).
+    fn land_direct_covers(&self, card: &Card) -> Result<bool> {
+        let approvals: Vec<Approval> = list(
+            self.conn(),
+            "card_id = ?1 AND kind = 'land_direct' AND state IN ('succeeded', 'executing', 'uncertain') ORDER BY id",
+            &[&card.id],
+        )?;
+        let since = reopened_seq(self.conn(), card)?;
+        for approval in approvals {
+            if approval.state != ApprovalState::Succeeded
+                || self.recorded_since("approval", &approval.id, "approval.finished", since)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// The owner's answers to R07: either landed answer ends the card's
     /// active runs `landed` and closes the card `landed` (`closed_by =
     /// daemon`, the answer as evidence); "not me" is also a breach and the
@@ -733,6 +750,13 @@ impl Reconciler {
         for item in answered {
             let card: Card = get(self.conn(), "card", &item.card_id)?;
             if card.state != CardState::Open {
+                continue;
+            }
+            // A reopen starts the card over (`state.md` 6): an answer given
+            // before the card's last reopen was about the work before it,
+            // and is never carried out on the runs after it.
+            let since = reopened_seq(self.conn(), &card)?;
+            if !self.recorded_since("attention", &item.id, "attention.answered", since)? {
                 continue;
             }
             let answer = item.answer.clone().unwrap_or_default();
@@ -774,13 +798,16 @@ impl Reconciler {
                 "card_id = ?1 AND ended_at IS NULL ORDER BY started_at",
                 &[&card.id],
             )?;
+            // A refused end is this card's error, not the pass's: the other
+            // cards' answers are still carried out.
+            let mut refused = false;
             for run in runs {
                 let run_outcome = if landed {
                     RunOutcome::Landed
                 } else {
                     RunOutcome::Abandoned
                 };
-                self.store.run_end(
+                if let Err(error) = self.store.run_end(
                     &self.ctx(now),
                     &run.id,
                     EndRun {
@@ -789,7 +816,14 @@ impl Reconciler {
                             "the owner answered \"{answer}\" to the outside-merge question"
                         )),
                     },
-                )?;
+                ) {
+                    report.error(&format!("end run {} on the R07 answer", run.id), &error);
+                    refused = true;
+                    break;
+                }
+            }
+            if refused {
+                continue;
             }
             // Other open items on the card hold the close; this one is answered.
             let closed = self.store.card_close(
