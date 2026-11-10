@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 
 import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import type { MemoryResponse } from "../../lib/api-types";
@@ -589,9 +589,8 @@ test("going to another document with a changed draft asks first", async () => {
   fireEvent.click(tabs.getByRole("link", { name: /^alpha/ }));
   await settle();
   fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
-  await settle();
-  expect(router.state.location.search).toEqual({ doc: "alpha" });
-  expect(screen.getByRole("heading", { level: 1, name: "alpha" })).toBeTruthy();
+  await waitFor(() => expect(router.state.location.search).toEqual({ doc: "alpha" }));
+  expect(await screen.findByRole("heading", { level: 1, name: "alpha" })).toBeTruthy();
 });
 
 test("a line changed elsewhere keeps the draft and offers Save over or Discard", async () => {

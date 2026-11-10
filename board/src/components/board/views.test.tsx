@@ -248,20 +248,23 @@ test("the All / Active / Needs you filter narrows the cards, lives in the URL an
 
   fireEvent.click(within(segment).getByRole("button", { name: /^Needs you/ }));
   await waitFor(() => expect(router.state.location.search).toEqual({ filter: "needs" }));
+  // The URL moves first and the lanes redraw a moment later, so wait for the redraw.
+  await waitFor(() =>
+    expect(screen.queryByText("Add the machines summary to the sidebar")).toBeNull(),
+  );
   expect(screen.getByText("Pick the retry policy for the export job")).toBeTruthy();
   expect(screen.getByText("Renew the deploy certificate")).toBeTruthy();
-  expect(screen.queryByText("Add the machines summary to the sidebar")).toBeNull();
   // A lane with nothing to show says why, instead of vanishing.
   expect(within(screen.getByTestId("lane-beta")).getByText("Nothing in this tab")).toBeTruthy();
 
   fireEvent.click(within(segment).getByRole("button", { name: /^Active/ }));
   await waitFor(() => expect(router.state.location.search).toEqual({ filter: "active" }));
+  expect(await screen.findByText("Add the machines summary to the sidebar")).toBeTruthy();
   expect(screen.queryByText("Pin the toolchain version")).toBeNull();
-  expect(screen.getByText("Add the machines summary to the sidebar")).toBeTruthy();
 
   fireEvent.click(within(segment).getByRole("button", { name: /^All/ }));
   await waitFor(() => expect(router.state.location.search).toEqual({}));
-  expect(screen.getByText("Pin the toolchain version")).toBeTruthy();
+  expect(await screen.findByText("Pin the toolchain version")).toBeTruthy();
 });
 
 test("a filter in the URL is applied on the first render", async () => {
@@ -799,8 +802,9 @@ test("moving between views keeps the screen you were on until the next one is re
   expect(screen.getByTestId("board")).toBeTruthy();
   expect(screen.queryByRole("progressbar")).toBeNull();
   await waitFor(() => expect(router.state.location.pathname).toBe("/agents"));
+  // The URL moves first. The board goes only when the Agents screen takes its place.
+  await waitFor(() => expect(agentList()).toBeTruthy());
   expect(screen.queryByTestId("board")).toBeNull();
-  expect(agentList()).toBeTruthy();
 });
 
 // ---- Card detail ----
@@ -826,7 +830,8 @@ test("the drawer expands to the full page, and Back returns to the board with th
   const drawer = await screen.findByTestId("card-drawer");
   fireEvent.click(within(drawer).getByRole("link", { name: "Open the full page" }));
   await waitFor(() => expect(router.state.location.pathname).toBe(`/cards/${CARD_43}`));
-  expect(screen.queryByTestId("card-drawer")).toBeNull();
+  // The URL moves first. The drawer stays up until the full page takes its place.
+  await waitFor(() => expect(screen.queryByTestId("card-drawer")).toBeNull());
   fireEvent.click(within(screen.getByTestId("card-page")).getByRole("link", { name: /Board/ }));
   await waitFor(() => expect(router.state.location.pathname).toBe("/"));
   expect(router.state.location.search).toEqual({ card: CARD_43 });
