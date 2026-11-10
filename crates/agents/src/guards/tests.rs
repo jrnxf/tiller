@@ -134,6 +134,36 @@ fn merge_commands_denied_for_every_fleet_role() {
     }
 }
 
+/// T6: `gh` reads short flags in clusters, so the guard does too.
+#[test]
+fn gh_short_flag_clusters_read_like_gh() {
+    const CASES: &[(&str, Option<Code>)] = &[
+        ("gh pr close 5 -d", Some(Code::Merge)),
+        ("gh pr close 5 -dc", Some(Code::Merge)),
+        ("gh pr close 5 -dc 'superseded'", Some(Code::Merge)),
+        ("gh pr close -d=true 5", Some(Code::Merge)),
+        ("gh pr close 5 --delete-branch=true", Some(Code::Merge)),
+        ("gh-axi pr close 5 -dc x", Some(Code::Merge)),
+        (
+            "gh repo edit --default-branch=release",
+            Some(Code::DefaultPush),
+        ),
+        // `-c` and `-R` take the rest of the cluster as their value.
+        ("gh pr close 5 -cd", None),
+        ("gh pr close 5 -c 'done' -R example/alpha", None),
+        ("gh pr close 5 -Rexample/dash-d", None),
+        ("gh pr close 5", None),
+    ];
+    for role in Role::ALL {
+        for (command, verdict) in CASES {
+            match verdict {
+                Some(code) => denied(role, command, *code),
+                None => allowed(role, command),
+            }
+        }
+    }
+}
+
 #[test]
 fn pr_approve_retarget_and_release_delete_denied() {
     for command in [

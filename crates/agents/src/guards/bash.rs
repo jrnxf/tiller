@@ -68,7 +68,32 @@ fn review_approves(args: &[Arg]) -> bool {
     false
 }
 
-/// The base `gh pr edit` sets: `--base <b>`, `--base=<b>`, `-B <b>` or
+/// Whether `gh` reads the flag `-<short>` or `--<long>`: alone, with
+/// `=value`, or inside a cluster of short flags such as `-dc`. A letter in
+/// `values` takes the rest of its cluster as its value, so the cluster ends
+/// there (`-cd` is a comment "d", not a delete).
+fn gh_flag(args: &[Arg], short: Option<char>, long: &str, values: &str) -> bool {
+    args.iter().any(|arg| {
+        let text = arg.text.as_str();
+        if let Some(name) = text.strip_prefix("--") {
+            return name == long || name.strip_prefix(long).is_some_and(|r| r.starts_with('='));
+        }
+        let (Some(short), Some(cluster)) = (short, text.strip_prefix('-')) else {
+            return false;
+        };
+        for letter in cluster.chars() {
+            if letter == short {
+                return true;
+            }
+            if letter == '=' || values.contains(letter) {
+                return false;
+            }
+        }
+        false
+    })
+}
+
+/// The base `gh pr edit` sets:`--base <b>`, `--base=<b>`, `-B <b>` or
 /// `-B<b>`. A flag with no value after it is a base the guard cannot read.
 fn pr_base(args: &[Arg]) -> Option<Arg> {
     let mut j = 0;
@@ -1809,10 +1834,6 @@ impl Walker<'_, '_> {
                 shown,
             );
         }
-        let has = |flag: &str| {
-            args.iter()
-                .any(|arg| arg.text == flag || arg.text.starts_with(&format!("{flag}=")))
-        };
         match top.text.as_str() {
             "api" => {
                 let start = args
@@ -1851,7 +1872,7 @@ impl Walker<'_, '_> {
                     shown,
                 );
             }
-            "pr" if sub == "close" && (has("-d") || has("--delete-branch")) => {
+            "pr" if sub == "close" && gh_flag(args, Some('d'), "delete-branch", "cR") => {
                 return self.deny(
                     Code::Merge,
                     "gh pr close --delete-branch deletes a branch",
@@ -1865,7 +1886,7 @@ impl Walker<'_, '_> {
                     shown,
                 );
             }
-            "repo" if sub == "edit" && has("--default-branch") => {
+            "repo" if sub == "edit" && gh_flag(args, None, "default-branch", "R") => {
                 return self.deny(
                     Code::DefaultPush,
                     "gh repo edit --default-branch moves the default branch",
