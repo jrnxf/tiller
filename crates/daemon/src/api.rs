@@ -1453,8 +1453,12 @@ impl Mutation {
             }
             Op::Close => {
                 let request: Transition = body(bytes)?;
-                let outcome: CardOutcome =
-                    request.outcome.as_deref().unwrap_or("completed").parse()?;
+                let outcome: CardOutcome = request
+                    .outcome
+                    .as_deref()
+                    .filter(|outcome| !outcome.trim().is_empty())
+                    .ok_or_else(|| ApiError::usage("outcome is required"))?
+                    .parse()?;
                 (
                     request.idempotency_key.clone(),
                     request.host.clone(),
@@ -1591,7 +1595,11 @@ impl Mutation {
                 Done::of(store.hold_release(ctx, id, HoldReleaseReason::Removed)?)
             }
             Parsed::Close(request, outcome) => {
-                Done::of(store.card_close(ctx, id, outcome, request.reason.as_deref(), None)?)
+                // A completed card's evidence is the reason the owner gave.
+                let evidence = (outcome == CardOutcome::Completed)
+                    .then_some(request.reason.as_deref())
+                    .flatten();
+                Done::of(store.card_close(ctx, id, outcome, request.reason.as_deref(), evidence)?)
             }
             Parsed::Cancel(reason) => Done::of(store.card_cancel(ctx, id, &reason)?),
             Parsed::Reopen(reason) => Done::of(store.card_reopen(ctx, id, &reason)?),
@@ -8334,6 +8342,155 @@ esac"#,
         )
         .await;
         assert_ne!(refused.status, StatusCode::OK, "{}", refused.body);
+    }
+
+    /// The card page's actions, one route each: edit, hold and release,
+    /// close with its outcome, cancel and reopen.
+    #[tokio::test]
+    async fn the_card_page_actions_each_reach_their_route() {
+        let mut fleet = Fleet::new();
+        let owner = Ctx::new(Actor::Owner);
+        let card = fleet
+            .store
+            .card_create(
+                &owner,
+                None,
+                tiller_core::state::cards::NewCard {
+                    project_id: "alpha".into(),
+                    kind: tiller_core::domain::CardKind::Ops,
+                    title: "Rotate the export key".into(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap()
+            .value;
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let cookie = owner_cookie(fleet.dir.path());
+        let headers = [("cookie", cookie.as_str())];
+        let path = |tail: &str| format!("/api/v1/cards/{}{tail}", card.id);
+        let post = |tail: &str, body: Value| mutation("POST", &path(tail), body, &headers);
+
+        // Edit: the title and priority change against the rev the board read.
+        let edited = send(
+            &app,
+            mutation(
+                "PATCH",
+                &path(""),
+                json!({"idempotency_key": "k-edit", "rev": card.rev, "title": "Rotate the key",
+                       "priority": 1}),
+                &headers,
+            ),
+        )
+        .await;
+        assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+
+        // Hold and release.
+        let held = send(
+            &app,
+            post(
+                "/hold",
+                json!({"idempotency_key": "k-hold", "until": "2031-01-01T00:00:00Z",
+                       "reason": "waiting on the vendor"}),
+            ),
+        )
+        .await;
+        assert_eq!(held.status, StatusCode::OK, "{}", held.body);
+        let released = send(
+            &app,
+            mutation(
+                "DELETE",
+                &path("/hold"),
+                json!({"idempotency_key": "k-release"}),
+                &headers,
+            ),
+        )
+        .await;
+        assert_eq!(released.status, StatusCode::OK, "{}", released.body);
+
+        // Close names its outcome. A body without one is a clear 400, not an
+        // evidence error from core (B7).
+        let missing = send(
+            &app,
+            post(
+                "/close",
+                json!({"idempotency_key": "k-none", "reason": "done"}),
+            ),
+        )
+        .await;
+        assert_eq!(missing.status, StatusCode::BAD_REQUEST, "{}", missing.body);
+        assert!(
+            missing.body.contains("outcome is required"),
+            "{}",
+            missing.body
+        );
+        let blank = send(
+            &app,
+            post(
+                "/close",
+                json!({"idempotency_key": "k-blank", "outcome": " ", "reason": "done"}),
+            ),
+        )
+        .await;
+        assert_eq!(blank.status, StatusCode::BAD_REQUEST, "{}", blank.body);
+        let unknown = send(
+            &app,
+            post(
+                "/close",
+                json!({"idempotency_key": "k-odd", "outcome": "finished", "reason": "done"}),
+            ),
+        )
+        .await;
+        assert!(unknown.status.is_client_error(), "{}", unknown.body);
+
+        // Cancel needs a reason; Reopen brings the card back.
+        let no_reason = send(&app, post("/cancel", json!({"idempotency_key": "k-nr"}))).await;
+        assert_eq!(
+            no_reason.status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            no_reason.body
+        );
+        let cancelled = send(
+            &app,
+            post(
+                "/cancel",
+                json!({"idempotency_key": "k-cancel", "reason": "the vendor dropped it"}),
+            ),
+        )
+        .await;
+        assert_eq!(cancelled.status, StatusCode::OK, "{}", cancelled.body);
+        let reopened = send(
+            &app,
+            post(
+                "/reopen",
+                json!({"idempotency_key": "k-reopen", "reason": "it came back"}),
+            ),
+        )
+        .await;
+        assert_eq!(reopened.status, StatusCode::OK, "{}", reopened.body);
+
+        // A completed close takes its evidence from the reason.
+        let closed = send(
+            &app,
+            post(
+                "/close",
+                json!({"idempotency_key": "k-close", "outcome": "completed",
+                       "reason": "key rotated, old one revoked"}),
+            ),
+        )
+        .await;
+        assert_eq!(closed.status, StatusCode::OK, "{}", closed.body);
+        let outcome: Option<String> = fleet
+            .open()
+            .conn()
+            .query_row(
+                "SELECT outcome FROM cards WHERE id = ?1",
+                [&card.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(outcome.as_deref(), Some("completed"));
     }
 
     /// CI fails when `contract/openapi.json` is stale. Regenerate it with

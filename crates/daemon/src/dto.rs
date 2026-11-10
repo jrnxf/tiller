@@ -1379,7 +1379,8 @@ pub struct Transition {
     /// 7.4, 10.3). Absent means this host.
     #[serde(default)]
     pub host: Option<String>,
-    /// `close` only: the outcome, `completed` when omitted.
+    /// `close` only, and required there: the outcome, such as `completed`,
+    /// `abandoned` or `superseded`.
     #[serde(default)]
     pub outcome: Option<String>,
     /// Required by `cancel` and `reopen`.

@@ -8349,7 +8349,7 @@
               "string",
               "null"
             ],
-            "description": "`close` only: the outcome, `completed` when omitted."
+            "description": "`close` only, and required there: the outcome, such as `completed`,\n`abandoned` or `superseded`."
           },
           "reason": {
             "type": [
