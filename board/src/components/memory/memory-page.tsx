@@ -142,12 +142,18 @@ const scopeOf = (scope: string) => (scope === FLEET ? undefined : scope);
 
 const isMissing = (error: unknown) => error instanceof ReadError && error.status === 404;
 
+// A document that is not there will not be there on a second read, so the page
+// says so at once; any other failure is read once more.
+export const retryUnlessMissing = (failures: number, error: unknown) =>
+  !isMissing(error) && failures < 1;
+
 // One document's answer, or `null` when the daemon has no such document, which
 // the page says plainly instead of failing. Any other failure goes to the
 // section's note, with its retry. `undefined` means the read is still going.
 function useDocAnswer(scope: string): MemoryResponse | null | undefined {
   const query = useQuery({
     ...memoryQuery(scopeOf(scope)),
+    retry: retryUnlessMissing,
     throwOnError: (error) => !isMissing(error),
   });
   if (query.data) return query.data;

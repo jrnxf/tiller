@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
@@ -21,6 +24,8 @@ interface Call {
 }
 
 let calls: Call[] = [];
+// The reads the page made.
+let reads: string[] = [];
 
 // The stand-in daemon: reads and writes go to the same stateful fixture the
 // dev server uses, so a landed change shows on the next read.
@@ -28,6 +33,7 @@ function stubDaemon() {
   vi.stubGlobal("fetch", async (path: string, init?: RequestInit) => {
     const method = init?.method ?? "GET";
     if (method === "GET") {
+      reads.push(path);
       const data = fixtureResource(path, "default", NOW);
       if (data === undefined) return new Response("{}", { status: 404 });
       return new Response(JSON.stringify(data), { status: 200 });
@@ -70,6 +76,7 @@ beforeEach(() => {
   receiptsStore.set({ byKey: {}, progress: {} });
   resetMemoryFixture(NOW);
   calls = [];
+  reads = [];
   vi.stubGlobal("matchMedia", (query: string) => ({
     matches: false,
     media: query,
@@ -316,9 +323,12 @@ test("a write against a text that moved on is refused, shown, and the current te
   fireEvent.click(within(rewrite()).getByRole("button", { name: "Keep" }));
   await settle();
 
-  expect(screen.getByRole("alert").textContent).toBe(
+  // It shows in the card that was pressed, and is announced there.
+  const refusal = within(rewrite()).getByRole("alert");
+  expect(refusal.textContent).toBe(
     "fleet.md changed since you opened it; here is the current text",
   );
+  expect(screen.getAllByRole("alert")).toEqual([refusal]);
   expect(page().getByText("Added from another tab.")).toBeTruthy();
   // The suggestion is still waiting: the refused Keep changed nothing.
   expect(document.querySelector('.a-sug[data-op="rewrite"]')).toBeTruthy();
@@ -456,4 +466,365 @@ test("Keep waits for the holdout gate, with the reason and the command beside it
   expect(discard.disabled).toBe(false);
   // A suggestion that passes has no note.
   expect(within(rewrite()).queryByText(/Keep waits/)).toBeNull();
+});
+
+const editButton = (row: HTMLElement) =>
+  within(row).getByRole("button", { name: "Edit this line" });
+
+// Someone else lands a change after the page read the document.
+// The fixture remembers a key across tests, so each change has its own.
+let elsewhereCount = 0;
+const elsewhere = (body: Record<string, unknown>) => {
+  elsewhereCount += 1;
+  const result = fixtureMutation("POST", "/api/v1/memory/edits", {
+    idempotency_key: `elsewhere-change-${elsewhereCount}`,
+    project: "fleet",
+    base_blob: view().doc.blob,
+    ...body,
+  });
+  return result;
+};
+
+const rewriteElsewhere = (index: number, text: string) =>
+  elsewhere({ section: "How we work here", op: "rewrite", index, text });
+
+// The page reads the document again, and the cache has told the page by the
+// time this returns (it notifies on a timer, not at once).
+const readAgain = (queryClient: { invalidateQueries: () => Promise<void> }) =>
+  act(async () => {
+    await queryClient.invalidateQueries();
+    await new Promise((done) => setTimeout(done, 20));
+  });
+
+const FIRST = /^Before asking me to merge a sizeable PR/;
+const SECOND = /^Stop new worker dispatch/;
+const DRAFT = "My unsaved wording";
+
+const draftBox = () =>
+  screen.getByRole("textbox", { name: "Edit this line" }) as HTMLTextAreaElement;
+
+// U13: a draft is not lost without a prompt.
+
+test("opening another line while a draft is changed asks first, and Keep editing keeps the draft", async () => {
+  await renderMemory();
+
+  fireEvent.click(lineOf(FIRST));
+  type(draftBox(), DRAFT);
+  fireEvent.click(lineOf(SECOND));
+  await settle();
+
+  const dialog = within(screen.getByRole("dialog", { name: "Discard your changes?" }));
+  // The safe choice is first and has focus; the destructive one confirms.
+  expect(dialog.getAllByRole("button").map((button) => button.textContent)).toEqual([
+    "Keep editing",
+    "Discard changes",
+  ]);
+  expect(document.activeElement).toBe(dialog.getByRole("button", { name: "Keep editing" }));
+  fireEvent.click(dialog.getByRole("button", { name: "Keep editing" }));
+  await settle();
+
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(draftBox().value).toBe(DRAFT);
+  expect(calls).toEqual([]);
+});
+
+test("Discard changes drops the draft and opens the line that was asked for", async () => {
+  await renderMemory();
+
+  fireEvent.click(lineOf(FIRST));
+  type(draftBox(), DRAFT);
+  fireEvent.click(lineOf(SECOND));
+  fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+  await settle();
+
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(draftBox().value).toMatch(SECOND);
+  expect(lineOf(FIRST).hidden).toBe(false);
+  expect(calls).toEqual([]);
+});
+
+test("Add a line asks before it drops a changed draft", async () => {
+  await renderMemory();
+
+  fireEvent.click(lineOf(FIRST));
+  type(draftBox(), DRAFT);
+  const section = within(screen.getByRole("region", { name: "Watch out for" }));
+  fireEvent.click(section.getByRole("button", { name: "Add a line" }));
+  await settle();
+
+  expect(screen.getByRole("dialog", { name: "Discard your changes?" })).toBeTruthy();
+  expect(draftBox().value).toBe(DRAFT);
+  fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+  await settle();
+  expect(section.getByRole("textbox", { name: "New line" })).toBeTruthy();
+});
+
+test("an unchanged draft closes with no prompt", async () => {
+  await renderMemory();
+
+  fireEvent.click(lineOf(FIRST));
+  fireEvent.click(lineOf(SECOND));
+  await settle();
+
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(draftBox().value).toMatch(SECOND);
+});
+
+test("going to another document with a changed draft asks first", async () => {
+  const { router } = await renderMemory();
+
+  fireEvent.click(lineOf(FIRST));
+  type(draftBox(), DRAFT);
+  const tabs = within(screen.getByRole("navigation", { name: "Memory documents" }));
+  fireEvent.click(tabs.getByRole("link", { name: /^alpha/ }));
+  await settle();
+
+  expect(screen.getByRole("dialog", { name: "Discard your changes?" })).toBeTruthy();
+  expect(router.state.location.search).toEqual({});
+  fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+  await settle();
+  expect(router.state.location.search).toEqual({});
+  expect(draftBox().value).toBe(DRAFT);
+
+  fireEvent.click(tabs.getByRole("link", { name: /^alpha/ }));
+  await settle();
+  fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+  await settle();
+  expect(router.state.location.search).toEqual({ doc: "alpha" });
+  expect(screen.getByRole("heading", { level: 1, name: "alpha" })).toBeTruthy();
+});
+
+test("a line changed elsewhere keeps the draft and offers Save over or Discard", async () => {
+  const { queryClient } = await renderMemory();
+
+  fireEvent.click(lineOf(FIRST));
+  type(draftBox(), DRAFT);
+  rewriteElsewhere(0, "Rewritten from another tab.");
+  await readAgain(queryClient);
+  await settle();
+
+  // The editor stays, with the draft, and says what happened.
+  const box = draftBox();
+  expect(box.value).toBe(DRAFT);
+  const notice = screen.getByRole("alert");
+  expect(notice.textContent).toMatch(/This line changed while you were editing/);
+  expect(notice.textContent).toMatch(/Rewritten from another tab\./);
+  // Enter does not save over someone's change.
+  fireEvent.keyDown(box, { key: "Enter" });
+  await settle();
+  expect(calls).toEqual([]);
+
+  fireEvent.click(screen.getByRole("button", { name: "Save over" }));
+  await settle();
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.body).toMatchObject({
+    op: "rewrite",
+    index: 0,
+    section: "How we work here",
+    text: DRAFT,
+  });
+  expect(screen.queryByRole("textbox")).toBeNull();
+  expect(page().getByText(DRAFT)).toBeTruthy();
+});
+
+test("Discard on a line changed elsewhere keeps the other text", async () => {
+  const { queryClient } = await renderMemory();
+
+  fireEvent.click(lineOf(FIRST));
+  type(draftBox(), DRAFT);
+  rewriteElsewhere(0, "Rewritten from another tab.");
+  await readAgain(queryClient);
+  await settle();
+  const editor = within(draftBox().closest(".ed") as HTMLElement);
+  expect(editor.queryByRole("button", { name: "Remove" })).toBeNull();
+  fireEvent.click(editor.getByRole("button", { name: "Discard" }));
+  await settle();
+
+  expect(screen.queryByRole("textbox")).toBeNull();
+  expect(page().getByText("Rewritten from another tab.")).toBeTruthy();
+  expect(calls).toEqual([]);
+});
+
+test("a line removed elsewhere keeps the draft and offers it as a new line", async () => {
+  const { queryClient } = await renderMemory();
+
+  fireEvent.click(lineOf(FIRST));
+  type(draftBox(), DRAFT);
+  elsewhere({ section: "How we work here", op: "remove", index: 0 });
+  await readAgain(queryClient);
+  await settle();
+
+  expect(screen.getByRole("alert").textContent).toMatch(
+    /This line was removed while you were editing/,
+  );
+  const box = screen.getByRole("textbox", { name: "New line" }) as HTMLTextAreaElement;
+  expect(box.value).toBe(DRAFT);
+  fireEvent.click(screen.getByRole("button", { name: "Add as new line" }));
+  await settle();
+  expect(calls[0]?.body).toMatchObject({ op: "add", section: "How we work here", text: DRAFT });
+});
+
+test("an unchanged draft follows a line changed elsewhere, with no notice", async () => {
+  const { queryClient } = await renderMemory();
+
+  fireEvent.click(lineOf(FIRST));
+  rewriteElsewhere(0, "Rewritten from another tab.");
+  await readAgain(queryClient);
+  await settle();
+
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(draftBox().value).toBe("Rewritten from another tab.");
+});
+
+// U16: focus.
+
+test("after Save, focus is on the saved row's edit control", async () => {
+  await renderMemory();
+
+  fireEvent.click(lineOf(SECOND));
+  type(draftBox(), "Stop new dispatch at 3% of the week.");
+  fireEvent.keyDown(draftBox(), { key: "Enter" });
+  await settle();
+
+  expect(document.activeElement).toBe(editButton(lineOf("Stop new dispatch at 3% of the week.")));
+});
+
+test("after Remove in the editor, focus is on the next row", async () => {
+  await renderMemory();
+
+  fireEvent.click(lineOf(FIRST));
+  fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+  await settle();
+
+  // The second line moved up into the removed line's place.
+  expect(document.activeElement).toBe(editButton(lineOf(SECOND)));
+});
+
+test("after Remove, focus is on the next row, else the previous one, else Add a line", async () => {
+  await renderMemory();
+  const section = within(screen.getByRole("region", { name: "How we work here" }));
+
+  // The first of two: the next row.
+  fireEvent.click(within(lineOf(FIRST)).getByRole("button", { name: "Remove this line" }));
+  await settle();
+  expect(document.activeElement).toBe(editButton(lineOf(SECOND)));
+
+  // The only row: Add a line.
+  fireEvent.click(section.getByRole("button", { name: "Remove this line" }));
+  await settle();
+  expect(document.activeElement).toBe(section.getByRole("button", { name: "Add a line" }));
+});
+
+test("after Remove of the last row, focus is on the previous row", async () => {
+  await renderMemory();
+
+  fireEvent.click(within(lineOf(SECOND)).getByRole("button", { name: "Remove this line" }));
+  await settle();
+
+  expect(document.activeElement).toBe(editButton(lineOf(FIRST)));
+});
+
+// U16: refusals.
+
+test("a refused Remove shows beside that row, and goes when another control is used", async () => {
+  await renderMemory();
+
+  elsewhere({ section: "Watch out for", op: "add", text: "Added from another tab." });
+  const row = lineOf(FIRST);
+  fireEvent.click(within(row).getByRole("button", { name: "Remove this line" }));
+  await settle();
+
+  const item = row.closest(".a-item") as HTMLElement;
+  expect(within(item).getByRole("alert").textContent).toMatch(/changed since you opened it/);
+  expect(screen.getAllByRole("alert")).toHaveLength(1);
+
+  fireEvent.click(lineOf(SECOND));
+  await settle();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+test("a refused Keep goes when the suggestion is discarded", async () => {
+  await renderMemory();
+
+  elsewhere({ section: "Watch out for", op: "add", text: "Added from another tab." });
+  fireEvent.click(within(rewrite()).getByRole("button", { name: "Keep" }));
+  await settle();
+  expect(within(rewrite()).getByRole("alert")).toBeTruthy();
+
+  fireEvent.click(within(rewrite()).getByRole("button", { name: "Discard" }));
+  await settle();
+  expect(document.querySelector('.a-sug[data-op="rewrite"]')).toBeNull();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+// U16: the card.
+
+test("a suggestion has Discard on the left and Keep, the primary action, rightmost", async () => {
+  await renderMemory();
+
+  for (const op of ["rewrite", "add"] as const) {
+    const buttons = within(card(op)).getAllByRole("button");
+    expect(buttons.map((button) => button.textContent)).toEqual(["Discard", "Keep"]);
+    expect(buttons[1]?.className).toContain("primary");
+  }
+});
+
+const why = (op: "add" | "rewrite") => card(op).querySelector(".why")?.textContent ?? "";
+
+test("the rationale reads as sentences, capitalised and ended with a stop", async () => {
+  const served = globalThis.fetch;
+  vi.stubGlobal("fetch", async (path: string, init?: RequestInit) => {
+    const reply = await served(path, init);
+    if (init?.method || !path.startsWith("/api/v1/memory")) return reply;
+    const data = (await reply.json()) as MemoryResponse;
+    for (const section of data.doc?.sections ?? []) {
+      for (const line of section.lines) if (line.suggestion) line.suggestion.why = "seen twice";
+      for (const each of section.suggestions) each.why = "  seen   in two runs  ";
+    }
+    return new Response(JSON.stringify(data), { status: reply.status });
+  });
+  await renderMemory();
+
+  expect(why("rewrite")).toMatch(/\d{2}:\d{2}\. Seen twice\./);
+  expect(why("add")).toMatch(/\d{2}:\d{2}\. Seen in two runs\./);
+  expect(why("rewrite")).not.toMatch(/\. seen/);
+});
+
+test("a long gate hint wraps in the card instead of widening the page", () => {
+  // jsdom lays nothing out, so this holds the rules that make it wrap.
+  const memoryCss = readFileSync(resolve(import.meta.dirname, "memory.css"), "utf8");
+  const rule = (selector: string) => {
+    const escaped = selector.replace(/[.>]/g, String.raw`\$&`);
+    return memoryCss.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
+  };
+  expect(rule(".docs .gate code")).toMatch(/overflow-wrap:\s*anywhere/);
+  expect(rule(".docs .gate code")).toMatch(/white-space:\s*normal/);
+  // The text column may shrink below its content, so the code can wrap.
+  expect(rule(".docs .gate > span")).toMatch(/min-width:\s*0/);
+});
+
+// U16: documents.
+
+test("an unknown document keeps the tab strip and says it was not found", async () => {
+  await renderMemory("/memory?doc=nope");
+
+  // The reads answer on timers, so wait for the page to say so.
+  expect(await screen.findByRole("heading", { level: 1, name: "Not found" })).toBeTruthy();
+  const tabs = within(await screen.findByRole("navigation", { name: "Memory documents" }));
+  expect(tabs.getAllByRole("link").length).toBeGreaterThan(1);
+  expect(screen.getByRole("status").textContent).toBe(
+    "There is no memory document called nope. Pick one of the tabs above.",
+  );
+  // A document that is not there is not a read failure, so there is no retry.
+  expect(screen.queryByRole("button", { name: /retry|try again/i })).toBeNull();
+});
+
+test("?doc=fleet reads the shared document once, as the page with no doc does", async () => {
+  await renderMemory("/memory?doc=fleet");
+  await settle();
+
+  expect(screen.getByRole("heading", { level: 1, name: "host / host-a" })).toBeTruthy();
+  const memory = reads.filter((path) => path.startsWith("/api/v1/memory"));
+  expect(memory.filter((path) => path.includes("scope=fleet"))).toEqual([]);
+  expect(memory.length).toBeLessThanOrEqual(1);
 });

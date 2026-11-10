@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 
-import { MemoryPage } from "../components/memory/memory-page";
+import { MemoryPage, retryUnlessMissing } from "../components/memory/memory-page";
 import { memoryQuery, projectsQuery } from "../lib/queries";
 
 interface MemorySearch {
@@ -20,7 +20,10 @@ export const Route = createFileRoute("/memory")({
   loaderDeps: ({ search }) => ({ doc: search.doc }),
   loader: ({ context, deps }) =>
     Promise.allSettled([
-      context.queryClient.ensureQueryData(memoryQuery(deps.doc)),
+      context.queryClient.ensureQueryData({
+        ...memoryQuery(deps.doc),
+        retry: retryUnlessMissing,
+      }),
       context.queryClient.ensureQueryData(projectsQuery()),
     ]),
   component: MemoryRoute,
