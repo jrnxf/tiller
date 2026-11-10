@@ -80,7 +80,11 @@ mod tests {
             Some(ObservationSource::Hook)
         );
 
-        // At 30 s the hook's working is no longer fresh: herdr's idle lands.
+        // A held reading is not remembered by the projection: herdr's idle
+        // lands only when it is recorded again. herdr still reads idle, and
+        // the poller sends the held reading again once the hold ends
+        // (`tiller_herdr::poller` test `a_held_herdr_idle_lands_once_the_hold_ends`).
+        // At 30 s the hook's working is no longer fresh: that idle lands.
         let landed = store
             .observation_record(
                 &ctx,

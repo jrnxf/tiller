@@ -18,7 +18,7 @@ use serde_json::json;
 use tiller_core::domain::{Activity, ObservationSource, Session};
 use tiller_core::state::caches::PaneReading;
 use tiller_core::state::get;
-use tiller_core::state::runs::NewObservation;
+use tiller_core::state::runs::{HOOK_WORKING_HOLD_MS, NewObservation};
 use tiller_core::{Actor, Ctx, Store, Timestamp};
 use tokio::sync::watch;
 
@@ -241,9 +241,13 @@ pub struct HerdrSource<H: Herdr> {
     store: Store,
     host_id: String,
     machine: Option<String>,
-    /// The status last recorded per pane, so an observation is written only
-    /// when herdr's reading changes.
+    /// The status last recorded per bound pane, so an observation is written
+    /// only when herdr's reading changes.
     statuses: HashMap<String, Option<String>>,
+    /// Bound panes whose last `herdr:idle` a fresh hook `working` held
+    /// (`protocol.md` 4.5), with when the hold ends: the reading is sent
+    /// again then, though it has not changed.
+    held: HashMap<String, Timestamp>,
     /// Bound panes already reported gone.
     gone: HashSet<String>,
     /// What the last layout pass could not do, said once: the pass runs on
@@ -274,6 +278,7 @@ impl<H: Herdr + Send + 'static> HerdrSource<H> {
             host_id,
             machine,
             statuses: HashMap::new(),
+            held: HashMap::new(),
             gone: HashSet::new(),
             layout_complaint: None,
         }
@@ -346,6 +351,13 @@ impl<H: Herdr + Send + 'static> HerdrSource<H> {
         snapshot: &Snapshot,
         bindings: &[Binding],
     ) -> Result<(), PollError> {
+        // Only bound panes are remembered: a pane whose session ended, or
+        // that another session took, starts afresh.
+        let bound: HashSet<&str> = bindings.iter().map(|b| b.pane_id.as_str()).collect();
+        self.statuses
+            .retain(|pane, _| bound.contains(pane.as_str()));
+        self.held.retain(|pane, _| bound.contains(pane.as_str()));
+        self.gone.retain(|pane| bound.contains(pane.as_str()));
         for binding in bindings {
             let pane = snapshot.pane(&binding.pane_id);
             // The caches move only once the observation is recorded, so a
@@ -359,11 +371,16 @@ impl<H: Herdr + Send + 'static> HerdrSource<H> {
                 }
                 Some(pane) => {
                     self.gone.remove(&binding.pane_id);
-                    if self.statuses.get(&binding.pane_id) == Some(&pane.agent_status) {
+                    let resend = self
+                        .held
+                        .get(&binding.pane_id)
+                        .is_some_and(|until| ctx.now >= *until);
+                    if self.statuses.get(&binding.pane_id) == Some(&pane.agent_status) && !resend {
                         continue;
                     }
                     let Some(status) = pane.agent_status.as_deref() else {
                         self.statuses.insert(binding.pane_id.clone(), None);
+                        self.held.remove(&binding.pane_id);
                         continue;
                     };
                     let session: Session = get(self.store.conn(), "session", &binding.session_id)?;
@@ -388,16 +405,43 @@ impl<H: Herdr + Send + 'static> HerdrSource<H> {
             )?;
             match pane {
                 None => {
+                    // A pane that comes back is read afresh.
                     self.gone.insert(binding.pane_id.clone());
+                    self.statuses.remove(&binding.pane_id);
+                    self.held.remove(&binding.pane_id);
                 }
                 Some(pane) => {
                     self.statuses
                         .insert(binding.pane_id.clone(), pane.agent_status.clone());
+                    let session: Session = get(self.store.conn(), "session", &binding.session_id)?;
+                    match held_until(&session, verdict, ctx.now) {
+                        Some(until) => self.held.insert(binding.pane_id.clone(), until),
+                        None => self.held.remove(&binding.pane_id),
+                    };
                 }
             }
         }
         Ok(())
     }
+}
+
+/// When the hold on a `herdr:idle` just recorded ends, if a fresh hook
+/// `working` held it (`protocol.md` 4.5): `session` is the row as the
+/// record left it. herdr keeps reading idle, so the poller sends the reading
+/// again then; without that the idle would never land.
+fn held_until(session: &Session, verdict: Option<Activity>, now: Timestamp) -> Option<Timestamp> {
+    if verdict != Some(Activity::Idle)
+        || session.activity != Activity::Working
+        || session.activity_source != Some(ObservationSource::Hook)
+    {
+        return None;
+    }
+    let until = session.activity_observed_at?.as_millis() + HOOK_WORKING_HOLD_MS;
+    // A hold that already ended means the reading was older than the
+    // hook's, not held: sending it again would change nothing.
+    (until > now.as_millis())
+        .then(|| Timestamp::from_millis(until))
+        .flatten()
 }
 
 impl<H: Herdr + Send + 'static> Source for HerdrSource<H> {
@@ -940,5 +984,236 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(events, ["herdr:working", "herdr:blocked", "pane_gone"]);
+    }
+
+    fn herdr_events(fleet: &Fleet, session: &str) -> Vec<String> {
+        fleet
+            .store
+            .conn()
+            .prepare(
+                "SELECT event FROM observations WHERE session_id = ?1 AND source = 'herdr'
+                 ORDER BY observed_at",
+            )
+            .unwrap()
+            .query_map([session], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// `protocol.md` 4.5: a `herdr:idle` is held while a hook `working` is
+    /// under 30 s old, and lands once it is older. herdr keeps reading idle,
+    /// so the poller sends the held reading again when the hold ends: a lost
+    /// Stop hook never leaves the session busy forever.
+    #[test]
+    fn a_held_herdr_idle_lands_once_the_hold_ends() {
+        let mut fleet = Fleet::new();
+        let worker = fleet.worker("w2:p1");
+        let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
+        fleet.place(&herdr);
+        let registry = Registry::new();
+        let mut poller = registry
+            .register(HerdrSource::local(herdr.clone(), fleet.open(), &fleet.host))
+            .unwrap();
+        let activity = |fleet: &Fleet| {
+            get::<Session>(fleet.store.conn(), "session", &worker)
+                .unwrap()
+                .activity
+        };
+        herdr.set_screen("w2:p1", Screen::Working);
+        poller.poll_once(at(0));
+        // The turn's hooks say working; its Stop hook is lost.
+        fleet
+            .store
+            .observation_record(
+                &Ctx::new(Actor::Hook),
+                NewObservation {
+                    session_id: Some(worker.clone()),
+                    run_id: None,
+                    source: ObservationSource::Hook,
+                    event: "PreToolUse".into(),
+                    verdict: Some(Activity::Working),
+                    observed_at: at(1),
+                    payload: json!({}),
+                },
+            )
+            .unwrap();
+        herdr.set_screen("w2:p1", Screen::Idle);
+        for n in [5, 10, 20, 30] {
+            poller.poll_once(at(n));
+            assert_eq!(activity(&fleet), Activity::Working, "held at {n} s");
+        }
+        poller.poll_once(at(32));
+        assert_eq!(activity(&fleet), Activity::Idle, "the hold ended at 31 s");
+        for n in [40, 120, 600] {
+            poller.poll_once(at(n));
+        }
+        assert_eq!(activity(&fleet), Activity::Idle);
+        assert_eq!(
+            herdr_events(&fleet, &worker),
+            ["herdr:working", "herdr:idle", "herdr:idle"],
+            "the held reading is sent again once, when the hold ends"
+        );
+    }
+
+    /// A hook `working` that keeps coming holds the idle again; once the
+    /// hooks go quiet for 30 s the idle lands. A reading that changes in
+    /// the meantime drops the resend.
+    #[test]
+    fn a_held_herdr_idle_waits_for_each_newer_hook_working() {
+        let mut fleet = Fleet::new();
+        let worker = fleet.worker("w2:p1");
+        let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
+        fleet.place(&herdr);
+        let registry = Registry::new();
+        let mut poller = registry
+            .register(HerdrSource::local(herdr.clone(), fleet.open(), &fleet.host))
+            .unwrap();
+        let hook = |fleet: &mut Fleet, seconds: i64| {
+            fleet
+                .store
+                .observation_record(
+                    &Ctx::new(Actor::Hook),
+                    NewObservation {
+                        session_id: Some(worker.clone()),
+                        run_id: None,
+                        source: ObservationSource::Hook,
+                        event: "PreToolUse".into(),
+                        verdict: Some(Activity::Working),
+                        observed_at: at(seconds),
+                        payload: json!({}),
+                    },
+                )
+                .unwrap();
+        };
+        let activity = |fleet: &Fleet| {
+            get::<Session>(fleet.store.conn(), "session", &worker)
+                .unwrap()
+                .activity
+        };
+        hook(&mut fleet, 0);
+        herdr.set_screen("w2:p1", Screen::Idle);
+        poller.poll_once(at(2));
+        hook(&mut fleet, 20);
+        poller.poll_once(at(31));
+        assert_eq!(
+            activity(&fleet),
+            Activity::Working,
+            "held by the hook at 20 s"
+        );
+        poller.poll_once(at(51));
+        assert_eq!(activity(&fleet), Activity::Idle);
+
+        // A new turn: held again, then herdr reads working before the
+        // hold ends, and nothing is resent.
+        hook(&mut fleet, 60);
+        herdr.set_screen("w2:p1", Screen::Working);
+        poller.poll_once(at(61));
+        hook(&mut fleet, 62);
+        herdr.set_screen("w2:p1", Screen::Idle);
+        poller.poll_once(at(63));
+        assert_eq!(
+            activity(&fleet),
+            Activity::Working,
+            "held by the hook at 62 s"
+        );
+        herdr.set_screen("w2:p1", Screen::Working);
+        poller.poll_once(at(64));
+        for n in [100, 200] {
+            poller.poll_once(at(n));
+        }
+        assert_eq!(activity(&fleet), Activity::Working);
+        assert_eq!(
+            herdr_events(&fleet, &worker),
+            [
+                "herdr:idle",
+                "herdr:idle",
+                "herdr:idle",
+                "herdr:working",
+                "herdr:idle",
+                "herdr:working"
+            ]
+        );
+    }
+
+    /// A pane that herdr reports gone and then again, with the status it
+    /// had, is observed again: the session does not stay `ended`.
+    #[test]
+    fn a_pane_that_returns_after_gone_is_observed_again() {
+        let mut fleet = Fleet::new();
+        let worker = fleet.worker("w2:p1");
+        let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
+        fleet.place(&herdr);
+        let registry = Registry::new();
+        let mut poller = registry
+            .register(HerdrSource::local(herdr.clone(), fleet.open(), &fleet.host))
+            .unwrap();
+        let activity = |fleet: &Fleet| {
+            get::<Session>(fleet.store.conn(), "session", &worker)
+                .unwrap()
+                .activity
+        };
+        poller.poll_once(at(0));
+        assert_eq!(activity(&fleet), Activity::Idle);
+        herdr.remove_pane("w2:p1");
+        poller.poll_once(at(2));
+        assert_eq!(activity(&fleet), Activity::Ended);
+        herdr.add_pane("w2", "w2:p1", Screen::Idle);
+        poller.poll_once(at(4));
+        assert_eq!(activity(&fleet), Activity::Idle, "the pane is back");
+        assert_eq!(
+            herdr_events(&fleet, &worker),
+            ["herdr:idle", "pane_gone", "herdr:idle"]
+        );
+    }
+
+    /// The per-pane memory covers only the panes bound now: a session that
+    /// ended leaves nothing behind.
+    #[test]
+    fn pane_memory_is_pruned_to_the_bound_panes() {
+        let mut fleet = Fleet::new();
+        let gone = fleet.worker("w2:p1");
+        let held = fleet.worker("w4:p1");
+        let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
+        fleet.place(&herdr);
+        let registry = Registry::new();
+        let mut poller = registry
+            .register(HerdrSource::local(herdr.clone(), fleet.open(), &fleet.host))
+            .unwrap();
+        fleet
+            .store
+            .observation_record(
+                &Ctx::new(Actor::Hook),
+                NewObservation {
+                    session_id: Some(held.clone()),
+                    run_id: None,
+                    source: ObservationSource::Hook,
+                    event: "PreToolUse".into(),
+                    verdict: Some(Activity::Working),
+                    observed_at: at(0),
+                    payload: json!({}),
+                },
+            )
+            .unwrap();
+        poller.poll_once(at(1));
+        herdr.remove_pane("w2:p1");
+        poller.poll_once(at(2));
+        let source = poller.source();
+        assert!(source.gone.contains("w2:p1"));
+        assert!(source.statuses.contains_key("w4:p1"));
+        assert!(source.held.contains_key("w4:p1"));
+
+        for session in [&gone, &held] {
+            fleet
+                .store
+                .session_end(&Ctx::new(Actor::Daemon), session, "test")
+                .unwrap();
+        }
+        poller.poll_once(at(3));
+        let source = poller.source();
+        assert!(!source.gone.contains("w2:p1"), "{:?}", source.gone);
+        assert!(!source.statuses.contains_key("w2:p1"));
+        assert!(!source.statuses.contains_key("w4:p1"));
+        assert!(source.held.is_empty(), "{:?}", source.held);
     }
 }

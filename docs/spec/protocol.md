@@ -262,6 +262,8 @@ This replaces plan v2's line that `permission_prompt`, `elicitation_*` and `agen
 
 Hook verdicts win over herdr's when both are newer than the projection: Firstmate measured herdr reading `idle` through a whole turn (`plan.md`, "How events reach the board with zero agent tokens"). The rule is the observation with the newest `observed_at`, except that a `herdr:idle` never replaces a hook `working` less than 30 s old. T2.6 pins this with `observe::merge::herdr_idle_does_not_override_fresh_hook_working`.
 
+The herdr poller records a pane's status only when it changes, with two exceptions. A `herdr:idle` (or `done`) that a fresh hook `working` held is sent again once the hold ends, while herdr still reads it; a newer hook `working` holds it again. So a lost Stop hook leaves the session `working` for about 30 s, not forever. A pane that was `pane_gone` and comes back is read afresh, so its session leaves `ended` even when its status is the one it had. The poller remembers only the panes bound now. Tests: `herdr::poller::a_held_herdr_idle_lands_once_the_hold_ends`, `herdr::poller::a_held_herdr_idle_waits_for_each_newer_hook_working`, `herdr::poller::a_pane_that_returns_after_gone_is_observed_again`, `herdr::poller::pane_memory_is_pruned_to_the_bound_panes`.
+
 ### 4.6 Forge sources: PRs and deploys
 
 The daemon's forge poller (T2.5) and the forge reconcile reads (R07, R08, R19) read GitHub through `gh api` as the owner's login, the same `gh` the land and publish paths use, never through a stand-in that answers nothing. They never write to the forge; the only forge writes are `tiller land`'s (`authority.md`, section 6).
