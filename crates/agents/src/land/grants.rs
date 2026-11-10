@@ -8,6 +8,7 @@ use tiller_core::domain::{
     Approval, ApprovalAction, Card, Checks, Grant, GrantKind, PipelineState, Pr, Review, Run,
     Verdict,
 };
+use tiller_core::state::approvals::active_away;
 use tiller_core::state::review::prelaunch;
 use tiller_core::state::{find, get, list};
 use tiller_core::{Result, Timestamp};
@@ -56,31 +57,47 @@ struct Conditions {
 /// Why a grant does not cover a PR, in the words the board shows.
 pub type Miss = String;
 
+/// Away mode with `merge: "none"` allows no merge, even under a standing
+/// grant (`authority.md`, Away mode).
+pub fn away_blocks(conn: &Connection, now: Timestamp) -> Result<Option<Miss>> {
+    Ok(active_away(conn, now)?
+        .is_some_and(|away| away.no_merges)
+        .then(|| "away mode allows no merges".into()))
+}
+
 /// A `land_direct` grant still covers a push: the right kind, readable,
-/// neither revoked nor expired. The branch and checks conditions are the
-/// land sequence's own checks (`authority.md` section 6).
-pub fn direct_holds(grant: &Grant, now: Timestamp) -> std::result::Result<(), Miss> {
+/// neither revoked nor expired, and no away contract forbids merges. The
+/// branch and checks conditions are the land sequence's own checks
+/// (`authority.md` section 6).
+pub fn direct_holds(
+    conn: &Connection,
+    grant: &Grant,
+    now: Timestamp,
+) -> Result<std::result::Result<(), Miss>> {
     if grant.kind != GrantKind::LandDirect {
-        return Err(format!("the grant is {}, not land_direct", grant.kind));
+        return Ok(Err(format!("the grant is {}, not land_direct", grant.kind)));
     }
     let Ok(conditions) = serde_json::from_value::<Conditions>(grant.conditions.clone()) else {
-        return Err("the grant's conditions cannot be read".into());
+        return Ok(Err("the grant's conditions cannot be read".into()));
     };
     if conditions.v != 1 {
-        return Err(format!(
+        return Ok(Err(format!(
             "grant conditions version {} is unknown",
             conditions.v
-        ));
+        )));
     }
     if grant.revoked_at.is_some() {
-        return Err("the grant is revoked".into());
+        return Ok(Err("the grant is revoked".into()));
     }
     if let Some(expires) = &conditions.expires_at
         && expires.parse::<Timestamp>().map_or(true, |at| at <= now)
     {
-        return Err(format!("the grant expired at {expires}"));
+        return Ok(Err(format!("the grant expired at {expires}")));
     }
-    Ok(())
+    if let Some(miss) = away_blocks(conn, now)? {
+        return Ok(Err(miss));
+    }
+    Ok(Ok(()))
 }
 
 /// Every condition of `grant` against one approval's PR as the forge reports
@@ -109,6 +126,9 @@ pub fn evaluate(
         && expires.parse::<Timestamp>().map_or(true, |at| at <= now)
     {
         return Ok(Err(format!("the grant expired at {expires}")));
+    }
+    if let Some(miss) = away_blocks(conn, now)? {
+        return Ok(Err(miss));
     }
     if grant.project_id != approval.project_id {
         return Ok(Err("the grant is for another project".into()));

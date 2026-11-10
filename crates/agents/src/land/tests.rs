@@ -1523,6 +1523,136 @@ fn expired_direct_grant_lands_nothing() {
     }
 }
 
+/// Away mode with `merge: "none"` stops grant merges (`authority.md`, Away
+/// mode): no match while away, and a grant's approval accepted before the
+/// owner left waits, then lands once away mode ends.
+#[test]
+fn away_merge_none_holds_grant_merges() {
+    let mut world = World::new(Delivery::DirectPr);
+    let lock = world.lock();
+    let forge = FakeForge::new();
+    grant(&mut world, standing());
+    let (card, _) = world.pr();
+    let lander = lander(&forge);
+    forge.set(|view| {
+        view.checks = Checks::Success;
+        view.head_ref = "fm/alpha-1".into();
+    });
+    review(&mut world, &card, Verdict::Pass, 0);
+    let away =
+        json!({"until_at": "2999-01-01T00:00:00.000Z", "projects": ["alpha"], "merge": "none"});
+
+    world.store.away_start(&owner(), away.clone()).unwrap();
+    assert!(
+        lander
+            .match_grants(&lock, &mut world.store)
+            .unwrap()
+            .approvals
+            .is_empty(),
+        "a grant matched while away allows no merges"
+    );
+    world.store.away_end(&owner(), "back").unwrap();
+
+    let matched = lander
+        .match_grants(&lock, &mut world.store)
+        .unwrap()
+        .approvals;
+    assert_eq!(matched.len(), 1);
+    world.store.away_start(&owner(), away).unwrap();
+    let landed = lander.land_ready(&lock, &mut world.store).unwrap();
+    assert!(
+        matches!(&landed[..], [Landed::Waiting { why, .. }] if why.contains("away")),
+        "{landed:?}"
+    );
+    assert!(forge.merges().is_empty());
+
+    world.store.away_end(&owner(), "back").unwrap();
+    let landed = lander.land_ready(&lock, &mut world.store).unwrap();
+    assert!(
+        matches!(landed[..], [Landed::Succeeded { .. }]),
+        "{landed:?}"
+    );
+    assert_eq!(forge.merges().len(), 1);
+}
+
+/// A `land_direct` grant pushes nothing while away mode allows no merges.
+#[test]
+fn away_merge_none_holds_direct_grant_pushes() {
+    let forge = FakeForge::new();
+    for delivery in [Delivery::DirectPush, Delivery::LocalOnly] {
+        let (target, work, head) = if delivery == Delivery::LocalOnly {
+            local_repos()
+        } else {
+            repos()
+        };
+        let mut world = World::new(delivery);
+        let lock = world.lock();
+        let grant_id = world
+            .store
+            .grant_create(
+                &owner(),
+                NewGrant {
+                    project_id: "alpha".into(),
+                    kind: GrantKind::LandDirect,
+                    conditions: json!({"v": 1, "actions": ["push"]}),
+                },
+            )
+            .unwrap()
+            .value
+            .id;
+        let card = world.card("push it");
+        let run = world.builder(&card, Some(work.path()), "fm/alpha-1");
+        let approval = world
+            .store
+            .approval_request(
+                &owner(),
+                NewApproval {
+                    kind: ApprovalKind::LandDirect,
+                    card: card.id.clone(),
+                    run_id: Some(run),
+                    pr_id: None,
+                    branch: Some("fm/alpha-1".into()),
+                    head_sha: head.clone(),
+                    action: ApprovalAction::Push,
+                    memory_paths: None,
+                    grant_id: Some(grant_id),
+                },
+            )
+            .unwrap()
+            .value;
+        assert_eq!(approval.state, ApprovalState::Accepted);
+        let before = git(target.path(), &["rev-parse", "refs/heads/main"]);
+        world
+            .store
+            .away_start(
+                &owner(),
+                json!({"until_at": "2999-01-01T00:00:00.000Z", "projects": ["alpha"], "merge": "none"}),
+            )
+            .unwrap();
+        let landed = lander(&forge)
+            .land(&lock, &mut world.store, &approval.id)
+            .unwrap();
+        assert!(
+            matches!(&landed, Landed::Waiting { why, .. } if why.contains("away")),
+            "{delivery:?}: {landed:?}"
+        );
+        assert_eq!(
+            git(target.path(), &["rev-parse", "refs/heads/main"]),
+            before
+        );
+
+        world.store.away_end(&owner(), "back").unwrap();
+        let landed = lander(&forge)
+            .land(&lock, &mut world.store, &approval.id)
+            .unwrap();
+        assert!(
+            matches!(landed, Landed::Succeeded { .. }),
+            "{delivery:?}: {landed:?}"
+        );
+        assert_eq!(git(target.path(), &["rev-parse", "refs/heads/main"]), head);
+    }
+}
+
 /// A `local-only` repository with `main` checked out and a linked worktree
 /// on `fm/alpha-1` one commit ahead. Returns the dirs and the branch head.
 fn local_repos() -> (tempfile::TempDir, tempfile::TempDir, String) {

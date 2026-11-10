@@ -209,6 +209,13 @@ impl Lander<'_> {
                 why: format!("it is {}, not accepted", approval.state),
             });
         }
+        // A grant's approval waits out an away contract that allows no
+        // merges, so it lands once the owner is back instead of going stale.
+        if approval.grant_id.is_some()
+            && let Some(why) = grants::away_blocks(store.conn(), Timestamp::now())?
+        {
+            return Ok(waiting(approval, why));
+        }
         match approval.kind {
             ApprovalKind::Merge => self.merge(lock, store, approval),
             ApprovalKind::LandDirect => self.direct(lock, store, approval),
@@ -421,7 +428,7 @@ impl Lander<'_> {
         }
         if let Some(grant_id) = &approval.grant_id {
             let grant: Grant = get(store.conn(), "grant", grant_id)?;
-            if let Err(miss) = grants::direct_holds(&grant, Timestamp::now()) {
+            if let Err(miss) = grants::direct_holds(store.conn(), &grant, Timestamp::now())? {
                 return self.stale(
                     lock,
                     store,
@@ -506,7 +513,7 @@ impl Lander<'_> {
         }
         if let Some(grant_id) = &approval.grant_id {
             let grant: Grant = get(store.conn(), "grant", grant_id)?;
-            if let Err(miss) = grants::direct_holds(&grant, Timestamp::now()) {
+            if let Err(miss) = grants::direct_holds(store.conn(), &grant, Timestamp::now())? {
                 return self.stale(
                     lock,
                     store,
