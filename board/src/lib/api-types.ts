@@ -738,6 +738,9 @@ export interface SignalsResponse {
   interventions: SignalsIntervention[];
   machines_live: number;
   machines_total: number;
+  // When the store's first event happened: the day Tiller started on this
+  // host. Null on a store with no events.
+  first_event_at: string | null;
 }
 
 // `GET /api/v1/session`: whether this browser holds a live owner cookie.

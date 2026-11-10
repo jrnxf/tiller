@@ -1636,6 +1636,10 @@ pub fn signals(store: &Store, now: Timestamp) -> Result<SignalsResponse> {
             .collect(),
         machines_live: signals.machines_live,
         machines_total: signals.machines_total,
+        // Events are stamped by the transaction that writes them, so the
+        // lowest `seq` is the earliest.
+        first_event_at: one::<Timestamp>(store, "SELECT at FROM events ORDER BY seq LIMIT 1", &[])?
+            .map(at),
     })
 }
 

@@ -56,6 +56,7 @@ function counts(
     interventions: [],
     machines_live: 2,
     machines_total: 2,
+    first_event_at: "2026-01-05T09:00:00.000Z",
   };
 }
 
@@ -91,30 +92,52 @@ test("shipping is on watch only after two weeks with nothing landed", () => {
   expect(quiet.state).toBe("watch");
 });
 
+// Every count of a week at zero.
+const NOTHING: Partial<SignalsWeek> = {
+  landed: 0,
+  reported: 0,
+  merged_prs: 0,
+  needed: 0,
+  answered: 0,
+  median_answer_minutes: null,
+  interventions: { correction: 0, unplanned_escalation: 0, rework: 0, planned: 0 },
+  rework: 0,
+};
+
 test("a new install says nothing has landed yet, not that two weeks went by", () => {
-  const nothing = {
-    landed: 0,
-    reported: 0,
-    merged_prs: 0,
-    needed: 0,
-    answered: 0,
-    median_answer_minutes: null,
-    interventions: { correction: 0, unplanned_escalation: 0, rework: 0, planned: 0 },
-    rework: 0,
-  };
-  // The week before the first event had nothing in it; the current one only
-  // has the first ask.
-  const fresh = signal(counts({ ...nothing, needed: 1 }, nothing), "shipping");
+  // Tiller started this week; the current week has only the first ask.
+  const response = counts({ ...NOTHING, needed: 1 }, NOTHING);
+  response.first_event_at = "2026-10-28T09:00:00.000Z";
+  const fresh = signal(response, "shipping");
   expect(fresh.read).toBe("Nothing has landed yet.");
   expect(fresh.state).toBe("good");
-  // Once any earlier week had activity, the same zeros are a real quiet spell.
-  const response = counts(nothing, nothing);
-  response.weeks.unshift(
-    week({ start: "2026-10-12T00:00:00.000Z", end: "2026-10-19T00:00:00.000Z" }),
-  );
+  // A store with no event at all is new too.
+  response.first_event_at = null;
+  expect(signal(response, "shipping").read).toBe("Nothing has landed yet.");
+});
+
+test("an install that started during last week, busy but with nothing landed, is new", () => {
+  const busy = { ...NOTHING, needed: 3, answered: 2, median_answer_minutes: 4 };
+  const response = counts(busy, {
+    ...busy,
+    interventions: { correction: 1, unplanned_escalation: 1, rework: 0, planned: 2 },
+  });
+  response.first_event_at = "2026-10-22T15:00:00.000Z";
+  const fresh = signal(response, "shipping");
+  expect(fresh.read).toBe("Nothing has landed yet.");
+  expect(fresh.state).toBe("good");
+});
+
+test("an old install with two empty weeks says nothing has landed for two weeks", () => {
+  // Every week shown is empty, but Tiller ran long before them: a real quiet
+  // spell, not a new install.
+  const response = counts(NOTHING, NOTHING);
   const quiet = signal(response, "shipping");
   expect(quiet.read).toBe("Nothing has landed for two weeks.");
   expect(quiet.state).toBe("watch");
+  // The same when Tiller started the moment last week began.
+  response.first_event_at = "2026-10-19T00:00:00.000Z";
+  expect(signal(response, "shipping").read).toBe("Nothing has landed for two weeks.");
 });
 
 test("your time reads the median answer time against the last one", () => {

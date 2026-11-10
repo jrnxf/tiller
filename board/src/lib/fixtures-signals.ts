@@ -176,7 +176,16 @@ function freshSignals(now: number): SignalsResponse {
       unauthorized: 0,
     };
   });
-  return { weeks, by_project: [], interventions: [], machines_live: 1, machines_total: 1 };
+  // Tiller started this week: an hour in, never later than now.
+  const started = Math.min(now, lisbonWeekStart(now) + 3_600_000);
+  return {
+    weeks,
+    by_project: [],
+    interventions: [],
+    machines_live: 1,
+    machines_total: 1,
+    first_event_at: new Date(started).toISOString(),
+  };
 }
 
 export function signalsFor(unsafe: boolean, now: number, fresh = false): SignalsResponse {
@@ -232,5 +241,13 @@ export function signalsFor(unsafe: boolean, now: number, fresh = false): Signals
     ).length,
     escaped: 0,
   }));
-  return { weeks, by_project, interventions, machines_live: unsafe ? 1 : 2, machines_total: 2 };
+  return {
+    weeks,
+    by_project,
+    interventions,
+    machines_live: unsafe ? 1 : 2,
+    machines_total: 2,
+    // Tiller has run since well before the oldest week shown.
+    first_event_at: new Date(first - 4 * WEEK_MS).toISOString(),
+  };
 }

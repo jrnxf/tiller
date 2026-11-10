@@ -5838,6 +5838,49 @@ pub(crate) mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_owned()
     }
 
+    /// The signals read names when the store's first event happened, so the
+    /// Health page can tell a new install from a quiet fortnight: null on an
+    /// empty store, then the first event's time, which later events keep.
+    #[tokio::test]
+    async fn signals_carry_the_time_of_the_first_event() {
+        let fleet = Fleet::new();
+        let store = fleet.open();
+        store.conn().execute_batch("DELETE FROM events").unwrap();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let cookie = owner_cookie(fleet.dir.path());
+        let first_event_at = |answer: Answer| {
+            assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+            let body: Value = serde_json::from_str(&answer.body).unwrap();
+            body["first_event_at"].clone()
+        };
+
+        assert_eq!(
+            first_event_at(get(&app, "/api/v1/signals").await),
+            Value::Null
+        );
+
+        let headers = [("cookie", cookie.as_str())];
+        let asked = send(&app, ask_request("k-1", "first", &headers)).await;
+        assert_eq!(asked.status, StatusCode::OK, "{}", asked.body);
+        let first: String = store
+            .conn()
+            .query_row("SELECT at FROM events ORDER BY seq LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            first_event_at(get(&app, "/api/v1/signals").await),
+            json!(first)
+        );
+
+        let again = send(&app, ask_request("k-2", "second", &headers)).await;
+        assert_eq!(again.status, StatusCode::OK, "{}", again.body);
+        assert_eq!(
+            first_event_at(get(&app, "/api/v1/signals").await),
+            json!(first)
+        );
+    }
+
     /// The Health page's relabel: an unplanned escalation relabeled `planned`
     /// moves the week's counts, the same label again changes nothing, and a
     /// label naming a peer is refused rather than forwarded.

@@ -63,34 +63,11 @@ function inProgress(week: SignalsWeek, now: number): boolean {
   return now < Date.parse(week.end);
 }
 
-// A week in which Tiller did anything the counts can see. The signals carry no
-// install date, so the first week with any count stands in for "the first
-// event": a week before it is a week that was not there to be quiet.
-function hadActivity(week: SignalsWeek): boolean {
-  const { interventions } = week;
-  return [
-    week.landed,
-    week.reported,
-    week.merged_prs,
-    week.needed,
-    week.answered,
-    interventions.correction,
-    interventions.unplanned_escalation,
-    interventions.rework,
-    interventions.planned,
-    week.reverts,
-    week.escaped,
-    week.rework,
-    week.lost_work,
-    week.duplicate_dispatches,
-    week.unauthorized,
-  ].some((value) => value > 0);
-}
-
-// True when no week up to and including `before` had any activity.
-function beforeFirstEvent(response: SignalsResponse, before: SignalsWeek): boolean {
-  const index = response.weeks.indexOf(before);
-  return !response.weeks.slice(0, index + 1).some(hadActivity);
+// True when Tiller was not running yet as `week` began: the week was not there
+// to be quiet. A store with no event at all is that too.
+function beforeFirstEvent(response: SignalsResponse, week: SignalsWeek): boolean {
+  const first = response.first_event_at;
+  return first === null || Date.parse(week.start) < Date.parse(first);
 }
 
 function shipping(response: SignalsResponse, now: number): Signal | null {

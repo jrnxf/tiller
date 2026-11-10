@@ -689,6 +689,9 @@ pub struct SignalsResponse {
     pub interventions: Vec<SignalsIntervention>,
     pub machines_live: i64,
     pub machines_total: i64,
+    /// When the store's first event happened: the day Tiller started on this
+    /// host. Null on a store with no events.
+    pub first_event_at: Option<String>,
 }
 
 /// One poller's record.
