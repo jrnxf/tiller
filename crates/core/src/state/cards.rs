@@ -498,7 +498,7 @@ pub const REOPEN_WORK: &str = "Reopen work";
 /// The `seq` of the card's last `card.reopened` event, or 0 for a card never
 /// reopened. A reopen starts the card over (`state.md` 6), so evidence for an
 /// outcome counts only when its event is newer than this.
-fn reopened_seq(conn: &rusqlite::Connection, card: &Card) -> Result<i64> {
+pub fn reopened_seq(conn: &rusqlite::Connection, card: &Card) -> Result<i64> {
     Ok(conn.query_row(
         "SELECT coalesce(max(seq), 0) FROM events
          WHERE entity = 'card' AND entity_id = ?1 AND kind = 'card.reopened'",
@@ -519,7 +519,7 @@ fn since_reopen(conn: &rusqlite::Connection, card: &Card) -> Result<&'static str
 
 /// Whether the card has the evidence a `landed` outcome needs, recorded
 /// since the card was created or last reopened.
-pub(crate) fn landed_evidence(conn: &rusqlite::Connection, card: &Card) -> Result<bool> {
+pub fn landed_evidence(conn: &rusqlite::Connection, card: &Card) -> Result<bool> {
     // An approval reached `succeeded`, or the owner confirmed an outside merge
     // by answering a `recovery` item on the card with "Mark landed", alone or
     // qualified ("Mark landed, not me"; `recovery.md` R07). Any other answer

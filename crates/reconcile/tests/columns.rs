@@ -5,15 +5,16 @@ mod common;
 
 use common::*;
 use tiller_core::domain::{
-    AnsweredVia, ApprovalAction, ApprovalKind, AttentionKind, CardKind, Checks, Column, Delivery,
-    Effort, PipelineState, RunOutcome, RunRole, StatusState,
+    AnsweredVia, ApprovalAction, ApprovalKind, AttentionKind, CardKind, CardState, Checks, Column,
+    Delivery, Effort, PipelineState, PrState, RunOutcome, RunRole, StatusState,
 };
-use tiller_core::state::approvals::{Decision, NewApproval};
+use tiller_core::state::approvals::{Decision, NewApproval, NewPr};
 use tiller_core::state::attention::NewAttention;
 use tiller_core::state::cards::NewCard;
 use tiller_core::state::projects::NewProject;
 use tiller_core::state::runs::{EndRun, NewOrchestrator, NewRun, SpawnChecks};
 use tiller_reconcile::columns;
+use tiller_reconcile::recovery::approvals::LANDED_BY_ME;
 use tiller_reconcile::thresholds::Thresholds;
 
 /// R13 (P08): a builder's word is never enough. "done" with no PR leaves
@@ -206,6 +207,118 @@ fn a_direct_pr_run_waiting_on_its_publish_gets_no_note() {
         "{:?}",
         w.notes()
     );
+}
+
+/// R13 after a reopen: the merge that closed the card the first time is not
+/// evidence for the run that reworks it. A "done" from the new run with no
+/// merge since the reopen gets the note, though the old PR is still
+/// recorded as merged and the old "Mark landed" answer still stands.
+#[test]
+fn a_done_report_after_a_reopen_needs_a_merge_since_the_reopen() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let run = w.run_of(&worker);
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let path = run.worktree_path.clone().unwrap();
+    w.scanner
+        .worktree(&path, "fm/work", "a1a1a1a1", false, Some(1));
+    let t0 = now();
+    w.forge.pr(REPO, 7, merged_pr("a1a1a1a1", "e1e1e1e1", t0));
+    w.pass(t0);
+    assert_eq!(w.pr(&pr).state, PrState::Merged);
+    let items = w.open_items(&run.card_id);
+    let recovery = items
+        .iter()
+        .find(|item| item.kind == AttentionKind::Recovery)
+        .expect("R07 asks about the merge");
+    w.store_mut()
+        .attention_answer(
+            &owner(),
+            None,
+            &recovery.id,
+            LANDED_BY_ME,
+            AnsweredVia::Board,
+        )
+        .unwrap();
+    w.pass(t0.plus_minutes(1));
+    assert_eq!(w.card(&run.card_id).state, CardState::Closed);
+
+    w.store_mut()
+        .card_reopen(&owner(), &run.card_id, "the fix regressed")
+        .unwrap();
+    let rework = w
+        .store_mut()
+        .run_start(
+            &owner(),
+            None,
+            NewRun {
+                card: run.card_id.clone(),
+                role: RunRole::Builder,
+                model: "test-model".into(),
+                effort: Effort::Medium,
+                host_id: None,
+                worktree_path: Some("/home/user/worktrees/rework".into()),
+                branch: None,
+                base_branch: None,
+                base_sha: None,
+                config_hash: None,
+                checks: SpawnChecks::default(),
+            },
+        )
+        .unwrap()
+        .value;
+    w.store_mut()
+        .run_status(
+            &session_ctx(&rework.session.id),
+            &rework.run.id,
+            StatusState::Done,
+            "fixed again",
+        )
+        .unwrap();
+    let report = w.pass(t0.plus_minutes(2));
+    assert!(report.did("R13"), "{report:?}");
+    assert!(
+        w.notes().iter().any(|n| n.body.contains(&rework.run.id)
+            && n.body.contains("since the card was last reopened")),
+        "{:?}",
+        w.notes()
+    );
+
+    // The rework's own PR merges: that is evidence, and a fresh "done"
+    // gets no note.
+    w.store_mut()
+        .pr_link(
+            &owner(),
+            NewPr {
+                card: run.card_id.clone(),
+                run_id: Some(rework.run.id.clone()),
+                number: 8,
+                url: format!("https://github.com/{REPO}/pull/8"),
+                head_sha: Some("b2b2b2b2".into()),
+                base_ref: Some("main".into()),
+            },
+        )
+        .unwrap();
+    w.forge.pr(REPO, 8, open_pr("b2b2b2b2"));
+    w.pass(t0.plus_minutes(3));
+    w.forge.pr(
+        REPO,
+        8,
+        merged_pr("b2b2b2b2", "f2f2f2f2", t0.plus_minutes(4)),
+    );
+    w.pass(t0.plus_minutes(4));
+    w.store_mut()
+        .run_status(
+            &session_ctx(&rework.session.id),
+            &rework.run.id,
+            StatusState::Done,
+            "merged, done",
+        )
+        .unwrap();
+    let report = w.pass(t0.plus_minutes(5));
+    assert!(w.run(&rework.run.id).ended_at.is_none());
+    assert!(!report.did("R13"), "{report:?}");
 }
 
 /// The board shape: every column present, cards in theirs, asks separate,

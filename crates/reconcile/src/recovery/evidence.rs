@@ -15,6 +15,7 @@ use tiller_core::domain::{
 };
 use tiller_core::state::attention::NewAttention;
 use tiller_core::state::caches::PaneReading;
+use tiller_core::state::cards::{landed_evidence, reopened_seq};
 use tiller_core::state::outbox::live_orchestrator;
 use tiller_core::state::publishes::{publish, published_head};
 use tiller_core::state::runs::{Bind, EndRun, lease_holder, live_session};
@@ -468,7 +469,12 @@ impl Reconciler {
                 continue;
             }
             // A new attempt works on in its predecessor's worktree: the
-            // newest run on the path is the one that returns it.
+            // newest run on the path is the one that returns it. `run.clean`
+            // refuses only an active successor, so this check is still
+            // needed: it keeps a predecessor from returning the worktree
+            // after its successor ended and, while the successor runs, from
+            // a `run.clean` refusal on every pass or a "still holds work"
+            // note about the successor's work.
             let succeeded: bool = self.conn().query_row(
                 "SELECT EXISTS (SELECT 1 FROM runs WHERE host_id = ?1 AND worktree_path = ?2
                                 AND id != ?3 AND (ended_at IS NULL OR started_at > ?4))",
@@ -635,13 +641,10 @@ impl Reconciler {
             if card.kind != tiller_core::domain::CardKind::Ship {
                 continue;
             }
-            let merged: bool = self.conn().query_row(
-                "SELECT EXISTS (SELECT 1 FROM approvals WHERE card_id = ?1 AND kind IN ('merge', 'land_direct') AND state = 'succeeded')
-                     OR EXISTS (SELECT 1 FROM prs WHERE card_id = ?1 AND state = 'merged')",
-                [&card.id],
-                |row| row.get(0),
-            )?;
-            if merged {
+            // A reopen starts the card over (`state.md` 6): only a merge
+            // recorded since then is evidence for this run.
+            let since = reopened_seq(self.conn(), &card)?;
+            if landed_evidence(self.conn(), &card)? || self.merged_since(&card, since)? {
                 continue;
             }
             let open_pr: Option<tiller_core::domain::Pr> =
@@ -654,6 +657,9 @@ impl Reconciler {
                     "PR #{} is open, not merged (checks {}, pipeline {})",
                     pr.number, pr.checks, pr.pipeline_state
                 ),
+                None if since > 0 => {
+                    "no PR is open or merged since the card was last reopened".to_owned()
+                }
                 None => "no PR is linked".to_owned(),
             };
             let stamp = run
@@ -675,6 +681,24 @@ impl Reconciler {
             }
         }
         Ok(())
+    }
+
+    /// Whether one of the card's PRs is merged, by a merge recorded after
+    /// the event `since` (the card's last reopen, 0 for none). The merge is
+    /// the `pr.changed` event that moved the PR to merged; a PR linked
+    /// already merged counts by its `pr.linked` event.
+    fn merged_since(&self, card: &Card, since: i64) -> Result<bool> {
+        Ok(self.conn().query_row(
+            "SELECT EXISTS (SELECT 1 FROM prs p
+                            WHERE p.card_id = ?1 AND p.state = 'merged'
+                              AND (?2 = 0 OR EXISTS (SELECT 1 FROM events e
+                                                     WHERE e.entity = 'pr' AND e.entity_id = p.id AND e.seq > ?2
+                                                       AND (e.kind = 'pr.linked'
+                                                            OR (e.kind = 'pr.changed'
+                                                                AND json_extract(e.payload, '$.state.to') = 'merged')))))",
+            rusqlite::params![card.id, since],
+            |row| row.get(0),
+        )?)
     }
 
     /// Whether the daemon still owes a direct-pr run its PR: the run's done
