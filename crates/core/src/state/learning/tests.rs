@@ -501,6 +501,137 @@ fn finish_rules_and_learning_becomes_evidence() {
 }
 
 #[test]
+fn an_unfinished_retro_starts_again() {
+    let (mut store, _session) = memory_store();
+    for n in [44, 45] {
+        closed(
+            &store,
+            n,
+            "'M', 'failed', '2026-11-01T09:00:00.000Z', '2026-11-01T11:00:00.000Z'",
+        );
+    }
+    store.learning_sweep(&owner(), &config(1_000_000)).unwrap();
+    let retro = retros_of(&store, "alpha-44").remove(0);
+    let other = retros_of(&store, "alpha-45").remove(0);
+    let unfinished = |note: &str| Finish {
+        outcome: RetroOutcome::Unfinished,
+        learning: Some(note.into()),
+        evidence: None,
+        proposal: None,
+    };
+
+    // The owner, the board and the daemon may each run it again once it
+    // ended unfinished; each run resets it to pending first.
+    for (round, actor) in [Actor::Owner, Actor::Board, Actor::Daemon]
+        .into_iter()
+        .enumerate()
+    {
+        let ctx = Ctx::new(actor);
+        let session = format!("session-{round}");
+        store
+            .retro_start(&ctx, &retro.id, Some(&session), 20)
+            .unwrap();
+        let done = store
+            .retro_finish(&ctx, None, &retro.id, unfinished("the curator exited 3"))
+            .unwrap();
+        assert_eq!(done.value.outcome, Some(RetroOutcome::Unfinished));
+        // A run that ended unfinished is over, so its start time does not
+        // hold the next one back.
+        let again = store
+            .retro_start(&ctx, &retro.id, Some(&format!("{session}-again")), 20)
+            .unwrap();
+        let started = &again.value;
+        assert_eq!(started.state, RetroState::Pending);
+        assert_eq!(
+            (
+                started.outcome,
+                started.learning.as_deref(),
+                started.finished_at,
+                started.finished_by.as_deref()
+            ),
+            (None, None, None, None)
+        );
+        assert_eq!(
+            started.curator_session.as_deref(),
+            Some(format!("{session}-again").as_str())
+        );
+        let events: Vec<(String, i64, Value)> = again
+            .events
+            .iter()
+            .map(|seq| {
+                store
+                    .conn()
+                    .query_row(
+                        "SELECT kind, rev_after, payload FROM events WHERE seq = ?1",
+                        [seq],
+                        |r| {
+                            let payload: String = r.get(2)?;
+                            Ok((
+                                r.get(0)?,
+                                r.get(1)?,
+                                serde_json::from_str(&payload).unwrap(),
+                            ))
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            events
+                .iter()
+                .map(|(kind, rev, _)| (kind.as_str(), *rev))
+                .collect::<Vec<_>>(),
+            [
+                ("retro.reset", done.value.rev + 1),
+                ("retro.started", done.value.rev + 2)
+            ]
+        );
+        assert_eq!(started.rev, done.value.rev + 2);
+        assert_eq!(events[0].2["outcome"], "unfinished");
+        assert_eq!(events[0].2["learning"], "the curator exited 3");
+        assert_eq!(events[0].2["curator_session"], session.as_str());
+        // The reset run is claimed: a second start while it runs is refused.
+        let error = store
+            .retro_start(&ctx, &retro.id, Some("late"), 20)
+            .unwrap_err();
+        assert!(matches!(error, Error::Refused { .. }), "{error}");
+        if round < 2 {
+            // Back to unfinished for the next actor's round.
+            store
+                .retro_finish(&ctx, None, &retro.id, unfinished("cut again"))
+                .unwrap();
+        }
+    }
+    let finished = store
+        .retro_finish(&owner(), None, &retro.id, nothing())
+        .unwrap();
+    assert_eq!(finished.value.outcome, Some(RetroOutcome::Nothing));
+    // Any other outcome is final.
+    let error = store
+        .retro_start(&owner(), &retro.id, Some("late"), 20)
+        .unwrap_err();
+    assert!(matches!(error, Error::Refused { .. }), "{error}");
+    assert!(error.to_string().contains("outcome nothing"), "{error}");
+
+    // A fleet session may not reset one.
+    store
+        .retro_start(&owner(), &other.id, Some("s"), 20)
+        .unwrap();
+    store
+        .retro_finish(&owner(), None, &other.id, unfinished("cut"))
+        .unwrap();
+    let error = store
+        .retro_start(
+            &Ctx::new(Actor::Curator(other.id.clone())),
+            &other.id,
+            Some("c"),
+            20,
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::Forbidden(_)), "{error}");
+}
+
+#[test]
 fn gate_rules() {
     let (mut store, _) = memory_store();
     proposal(&store, P1, "--- a\n+++ b\n@@ -0,0 +1 @@\n+one\n");

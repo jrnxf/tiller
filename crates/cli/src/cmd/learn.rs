@@ -17,7 +17,7 @@ use tiller_core::domain::{
 };
 use tiller_core::state::learning::{self, EvalResult, Finish, Learning};
 use tiller_core::state::{find, get, list, resolve_id};
-use tiller_core::{Actor, Store};
+use tiller_core::{Actor, Store, Timestamp};
 
 use super::KeyArg;
 use super::admin::load_config;
@@ -339,13 +339,10 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
     let tools = Tools::load(app)?;
     let mut store = app.write()?;
     let retro = learning::resolve_retro(store.conn(), &args.retro)?;
-    if retro.state != tiller_core::domain::RetroState::Pending {
-        return Err(Failure::refused(format!(
-            "retro {} is done ({})",
-            retro.id,
-            retro.outcome.map_or("", RetroOutcome::as_str)
-        )));
-    }
+    // A done retro runs again only when it ended unfinished; the start
+    // below resets it (learning-loop.md, section 4). The running-curator
+    // rule is the start's own.
+    learning::check_start(&retro, Timestamp::now(), 0)?;
     let brief = brief(&store, &retro)?;
     let brief_text = format!(
         "Retro `{}` of card {}.\n\n```json\n{}\n```\n",
@@ -432,7 +429,10 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
         "output": output_path,
     }))
     .with_warning((retro.outcome == Some(RetroOutcome::Unfinished)).then(|| {
-        "the curator did not finish; run it again by hand once the cause is fixed".to_owned()
+        format!(
+            "the curator did not finish; once the cause is fixed, run `tiller retro run {}` again",
+            retro.id
+        )
     })))
 }
 

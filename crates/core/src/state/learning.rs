@@ -741,7 +741,10 @@ impl Store {
 
     /// `retro.start`: records the curator session on a pending retro. A
     /// retro whose curator started less than `timeout_minutes` ago is still
-    /// running and is refused; an older start was a run that died.
+    /// running and is refused; an older start was a run that died. A retro
+    /// that ended `unfinished` is reset to `pending` first (a
+    /// `retro.reset` event), so the owner can run it again once the cause
+    /// is fixed (learning-loop.md, section 4).
     pub fn retro_start(
         &mut self,
         ctx: &Ctx,
@@ -751,20 +754,27 @@ impl Store {
     ) -> Result<Applied<Retro>> {
         self.write(ctx, "retro.start", None, |tx| {
             require_owner_or_daemon(tx.actor(), "tiller retro run")?;
-            let retro = resolve_retro(tx.conn(), retro)?;
-            if retro.state != RetroState::Pending {
-                return Err(Error::refused("retro", &retro.id, "retro is done"));
-            }
-            if let Some(started) = retro.curator_started_at
-                && started.plus_minutes(timeout_minutes) > tx.now()
-            {
-                return Err(Error::refused(
-                    "retro",
-                    &retro.id,
-                    format!(
-                        "a curator started at {started} is still running; it is cut after {timeout_minutes} minutes"
-                    ),
-                ));
+            let mut retro = resolve_retro(tx.conn(), retro)?;
+            if check_start(&retro, tx.now(), timeout_minutes)? {
+                tx.conn().execute(
+                    "UPDATE retros SET state = 'pending', outcome = NULL, learning = NULL, evidence_id = NULL,
+                            proposal_id = NULL, finished_at = NULL, finished_by = NULL, rev = rev + 1
+                     WHERE id = ?1",
+                    [&retro.id],
+                )?;
+                tx.event(
+                    NewEvent::new("retro", &retro.id, "retro.reset")
+                        .rev(retro.rev + 1)
+                        .card(&retro.card_id)
+                        .payload(json!({
+                            "outcome": retro.outcome,
+                            "learning": retro.learning,
+                            "curator_session": retro.curator_session,
+                            "finished_at": retro.finished_at,
+                            "finished_by": retro.finished_by,
+                        })),
+                )?;
+                retro = get(tx.conn(), "retro", &retro.id)?;
             }
             let now = tx.now();
             tx.conn().execute(
@@ -1145,6 +1155,40 @@ fn capture_learning(
 }
 
 /// A retro by id or short form, or the newest retro of a card reference.
+/// Whether a curator may start on `retro` now, the rule `retro.start`
+/// applies. Refuses a retro that is done with any outcome but `unfinished`,
+/// and a pending retro whose curator started less than `timeout_minutes`
+/// before `now` (it is still running). `Ok(true)` means the retro ended
+/// `unfinished` and is reset to `pending` before the start; that run is
+/// over, so its start time does not count.
+pub fn check_start(retro: &Retro, now: Timestamp, timeout_minutes: i64) -> Result<bool> {
+    if retro.state == RetroState::Done {
+        return match retro.outcome {
+            Some(RetroOutcome::Unfinished) => Ok(true),
+            outcome => Err(Error::refused(
+                "retro",
+                &retro.id,
+                format!(
+                    "retro is done with outcome {}; only an unfinished retro runs again",
+                    outcome.map_or("", RetroOutcome::as_str)
+                ),
+            )),
+        };
+    }
+    if let Some(started) = retro.curator_started_at
+        && started.plus_minutes(timeout_minutes) > now
+    {
+        return Err(Error::refused(
+            "retro",
+            &retro.id,
+            format!(
+                "a curator started at {started} is still running; it is cut after {timeout_minutes} minutes"
+            ),
+        ));
+    }
+    Ok(false)
+}
+
 pub fn resolve_retro(conn: &Connection, input: &str) -> Result<Retro> {
     if let Ok(id) = resolve_id(conn, "retros", "retro", input) {
         return get(conn, "retro", &id);

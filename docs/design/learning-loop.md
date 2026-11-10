@@ -65,7 +65,7 @@ The curator's job (`roles/curator.md`):
 
 The curator writes nothing else: its write set is its scratch directory, its tools are `Read`, `Grep`, `Glob` and Bash for `tiller retro`, `tiller mem`, `tiller card show`, `tiller run show` and `tiller events`, typed by the packaged path: the curator has no hooks, so nothing rewrites a bare `tiller` to the one path the sandbox exempts (`authority.md` section 7, "How roles reach the exempt binary"). The actor on everything it writes is `curator:<retro id>`, which `tiller` derives from `TILLER_RETRO_ID`; it is not an owner and not a session, so a proposal it files has no `authored_by_session_id` and `created_by = curator:<retro id>`.
 
-A curator run that exits without finishing leaves the retro `done` with outcome `unfinished` and the exit in `learning`; the sweep does not retry it. The owner runs `tiller retro run` again by hand when it was the environment.
+A curator run that exits without finishing leaves the retro `done` with outcome `unfinished` and the exit in `learning`; the sweep does not retry it. The owner runs `tiller retro run <retro>` again by hand when it was the environment. That start resets the retro to `pending` first: it clears `outcome`, `learning`, `finished_at` and `finished_by` and records them on a `retro.reset` event, then claims the retro as any start does. Only `unfinished` resets; a retro done with any other outcome is final and its start is refused.
 
 `retro.finish` is keyed. A `light` retro cannot be finished; a `done` retro finished again with the same outcome is a replay, with another outcome a refusal.
 
@@ -132,7 +132,7 @@ A model upgrade changes the `claude` part of every new hash; `tiller learn statu
 | Mutation | Caller | Preconditions | Writes | Events |
 |---|---|---|---|---|
 | `retro.schedule` | reconcile sweep, `tiller retro sweep` (owner, daemon) | card closed, not cancelled, not the host health card; no retro for this close (or this fix card) | `retros` | `retro.scheduled` |
-| `retro.start` | `tiller retro run` (owner, daemon) | retro `pending` | `retros.curator_session`, `curator_started_at` | `retro.started` |
+| `retro.start` | `tiller retro run` (owner, daemon) | retro `pending` and no curator started on it within `learning.curator_timeout_minutes`, or `done` with outcome `unfinished` | `retros.curator_session`, `curator_started_at`; for an `unfinished` retro first `state = pending` and `outcome`, `learning`, `finished_at`, `finished_by` cleared | `retro.reset` (an `unfinished` retro only), `retro.started` |
 | `retro.finish` | the curator, the owner | retro `full` and `pending` (a `done` retro replays the same outcome); `--learning` and `--proposed` need their argument | `retros` (state, outcome, learning), `evidence` (for `--learning`) | `retro.finished`, `evidence.captured` |
 | `change_set.create` | owner | each proposal exists, is `proposed` and in no set; name not used by an open set | `change_sets`, `change_set_members` | `change_set.created` |
 | `change_set.add` | owner | set `open`; proposal as above | `change_set_members` | `change_set.member_added` |

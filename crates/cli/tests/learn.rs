@@ -291,7 +291,7 @@ fn retro_run_launches_the_curator_headless() {
     let args = std::fs::read_to_string(world.dir.path().join("claude-args")).unwrap();
     assert!(args.contains("--permission-mode\ndontAsk"), "{args}");
     assert!(args.contains("--output-format\njson"), "{args}");
-    // A done retro is not run again.
+    // A retro that is done (and did not end unfinished) is not run again.
     let again = world.run(&["retro", "run", &retro]);
     assert_eq!((again.code, again.error_code()), (5, "refused"));
 
@@ -318,6 +318,94 @@ fn retro_run_launches_the_curator_headless() {
             .as_str()
             .unwrap()
             .contains("did not finish")
+    );
+}
+
+/// A world whose `spawn.claude` is the stand-in script `body`, with one
+/// closed, sampled card and its pending full retro. Returns the world, the
+/// script's path and the retro id.
+fn curator_world(body: &str) -> (World, std::path::PathBuf, String) {
+    let world = World::initialized();
+    world.must(&["config", "set", "learning.sample_every", "1"]);
+    let scratch = world.dir.path().join("scratch");
+    world.must(&[
+        "config",
+        "set",
+        "spawn.scratch_root",
+        scratch.to_str().unwrap(),
+    ]);
+    let fake = world.dir.path().join("claude");
+    std::fs::write(&fake, body).unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    world.must(&["config", "set", "spawn.claude", fake.to_str().unwrap()]);
+    let (id, tag) = card(&world, "a sampled card");
+    close(&world, &id, "landed");
+    world.must(&["retro", "sweep"]);
+    let retro = world.must(&["retro", "show", &tag]).data()["retro"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (world, fake, retro)
+}
+
+/// A stand-in curator that finishes its retro with `--nothing`.
+fn finishing_curator() -> String {
+    format!(
+        "#!/bin/sh\n\"{tiller}\" retro finish \"$TILLER_RETRO_ID\" --nothing >/dev/null\n",
+        tiller = env!("CARGO_BIN_EXE_tiller")
+    )
+}
+
+#[test]
+fn an_unfinished_retro_runs_again() {
+    let (world, fake, retro) = curator_world("#!/bin/sh\nexit 3\n");
+    let ran = world.must(&["retro", "run", &retro]);
+    assert_eq!(ran.data()["retro"]["outcome"], "unfinished", "{}", ran.json);
+    assert!(
+        ran.json["warning"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("tiller retro run {retro}")),
+        "{}",
+        ran.json
+    );
+
+    // Once the cause is fixed, the owner runs it again, as the warning says.
+    std::fs::write(&fake, finishing_curator()).unwrap();
+    let again = world.must(&["retro", "run", &retro]);
+    assert_eq!(again.data()["exit"], 0, "{}", again.json);
+    assert_eq!(again.data()["retro"]["state"], "done");
+    assert_eq!(again.data()["retro"]["outcome"], "nothing");
+    assert!(again.data()["retro"]["learning"].is_null());
+    let kinds: Vec<String> = {
+        let store = world.store();
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT kind FROM events WHERE entity_id = ?1 ORDER BY seq")
+            .unwrap();
+        stmt.query_map([&retro], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    assert_eq!(
+        kinds,
+        [
+            "retro.scheduled",
+            "retro.started",
+            "retro.finished",
+            "retro.reset",
+            "retro.started",
+            "retro.finished"
+        ]
+    );
+    // A retro that ended any other way is not run again.
+    let done = world.run(&["retro", "run", &retro]);
+    assert_eq!(
+        (done.code, done.error_code()),
+        (5, "refused"),
+        "{}",
+        done.json
     );
 }
 
