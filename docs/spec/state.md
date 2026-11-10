@@ -466,6 +466,7 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `card.reopen` | owner, orchestrator, board | card closed; reason | `cards.state = open`; `outcome`, `closed_at`, `closed_by` null; evidence for a later `landed` or `reported` close counts only when recorded after this event (section 7) | `card.reopened` |
 | `outbox.enqueue` | board, orchestrator, daemon, owner, and inside `ask.record`, `run.status` and `session.start` | target session exists; key new | `outbox` (`pending`) | `outbox.enqueued` |
 | `outbox.deliver` | daemon | `pending` or `delivered` (re-ring); pane hosts the target session | `outbox` (`delivered`, `attempts`) | `outbox.delivered` |
+| `outbox.defer` | daemon | `pending` or `delivered`; deferring to the same time changes nothing | `outbox.next_attempt_at` | `outbox.deferred` |
 | `outbox.ack` | `tiller inbox <id>` in the target session, or its `UserPromptSubmit` hook on the wake-up line | `delivered` (or `pending`, when the session found it by polling) | `outbox` (`acked`) | `outbox.acked` |
 | `outbox.fail` | daemon | attempts exhausted or target gone with no successor | `outbox` (`failed`) | `outbox.failed`; a `recovery` attention item when the message was an answer |
 | `notification.record` | daemon | attention item open; no `attention.notified` event for it yet | `events` | `attention.notified` |

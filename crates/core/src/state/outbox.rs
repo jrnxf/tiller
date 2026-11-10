@@ -183,7 +183,7 @@ impl Store {
         reason: &str,
     ) -> Result<Applied<OutboxMessage>> {
         require_daemon(&ctx.actor, "outbox.defer")?;
-        self.write(ctx, "outbox.deliver", None, |tx| {
+        self.write(ctx, "outbox.defer", None, |tx| {
             let message = load(tx, id)?;
             if message.next_attempt_at == Some(until) {
                 return Ok(message);

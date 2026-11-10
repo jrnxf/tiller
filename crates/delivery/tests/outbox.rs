@@ -338,6 +338,28 @@ fn one_line_per_batch_names_the_oldest() {
     }
 }
 
+/// A deferral is its own mutation: its events carry the `outbox.defer` label,
+/// not the delivery one.
+#[test]
+fn a_deferral_is_recorded_under_its_own_label() {
+    let mut w = World::new();
+    let message = w.send(None, OutboxKind::Steer, at(1));
+    w.herdr.set_screen("w2:p1", Screen::Working);
+    w.poll(at(2));
+    w.pass(at(3));
+    let txn: String = w
+        .fleet
+        .store
+        .conn()
+        .query_row(
+            "SELECT txn FROM events WHERE kind = 'outbox.deferred' AND entity_id = ?1",
+            [&message.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(txn, "outbox.defer");
+}
+
 /// One message of a batch that cannot be recorded after its line was typed
 /// must not leave the later ones pending: the next pass would type the line
 /// again for messages that were already rung.
