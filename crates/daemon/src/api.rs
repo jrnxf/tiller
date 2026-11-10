@@ -1524,6 +1524,12 @@ impl Mutation {
             Op::CreateCard => {
                 let request: CreateCard = body(bytes)?;
                 let kind: CardKind = request.kind.parse()?;
+                within("title", &request.title, TITLE_MAX_CHARS)?;
+                within(
+                    "body",
+                    request.body.as_deref().unwrap_or(""),
+                    BODY_MAX_CHARS,
+                )?;
                 (
                     request.idempotency_key.clone(),
                     request.host.clone(),
@@ -1532,6 +1538,16 @@ impl Mutation {
             }
             Op::EditCard => {
                 let request: EditCard = body(bytes)?;
+                within(
+                    "title",
+                    request.title.as_deref().unwrap_or(""),
+                    TITLE_MAX_CHARS,
+                )?;
+                within(
+                    "body",
+                    request.body.as_deref().unwrap_or(""),
+                    BODY_MAX_CHARS,
+                )?;
                 (
                     request.idempotency_key.clone(),
                     request.host.clone(),
@@ -1540,6 +1556,7 @@ impl Mutation {
             }
             Op::Comment => {
                 let request: Comment = body(bytes)?;
+                within("a comment", &request.text, COMMENT_MAX_CHARS)?;
                 (
                     request.idempotency_key.clone(),
                     request.host.clone(),
@@ -1585,6 +1602,7 @@ impl Mutation {
             }
             Op::Answer => {
                 let request: AnswerBody = body(bytes)?;
+                within("an answer", &request.answer, ANSWER_MAX_CHARS)?;
                 (
                     request.idempotency_key.clone(),
                     request.host.clone(),
@@ -2288,6 +2306,22 @@ fn restart_done(restarted: &RestartStaleResponse) -> Result<Done, Error> {
 /// The longest ask the board's box records: it is noted whole to the
 /// orchestrator, and again at every orchestrator start until it is resolved.
 const ASK_NOTE_MAX_CHARS: usize = 8000;
+/// The longest card title, card body, comment and answer the API takes
+/// (`protocol.md` 7.4), in characters.
+const TITLE_MAX_CHARS: usize = 1_000;
+const BODY_MAX_CHARS: usize = 100_000;
+const COMMENT_MAX_CHARS: usize = 20_000;
+const ANSWER_MAX_CHARS: usize = 20_000;
+
+/// 400 when `text` runs past `max` characters.
+fn within(what: &str, text: &str, max: usize) -> Result<(), ApiError> {
+    if text.chars().count() > max {
+        return Err(ApiError::usage(format!(
+            "{what} is at most {max} characters"
+        )));
+    }
+    Ok(())
+}
 
 #[utoipa::path(get, path = "/api/v1/projects/{id}/delete", tag = "reads",
     params(("id" = String, Path)),
@@ -4617,6 +4651,80 @@ pub(crate) mod tests {
         assert_eq!(twice.status, StatusCode::OK, "{}", twice.body);
         let body: Value = serde_json::from_str(&twice.body).unwrap();
         assert_eq!(body["replayed"], true, "{body}");
+    }
+
+    /// A card's title and body, a comment and an answer each have a length
+    /// cap: one character past it is a clear 400 that writes nothing, and
+    /// text at the cap is taken.
+    #[tokio::test]
+    async fn long_text_is_refused_at_its_cap() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let app = app(home, Assets::of::<Fixture>());
+        let cookie = owner_cookie(home);
+        let headers = [("cookie", cookie.as_str())];
+        let long = |n: usize| "é".repeat(n);
+        let before = cards(&fleet);
+        let card = |key: &str, title: String, body: Option<String>| {
+            mutation(
+                "POST",
+                "/api/v1/cards",
+                json!({"idempotency_key": key, "project": "alpha", "kind": "ship",
+                       "title": title, "body": body}),
+                &headers,
+            )
+        };
+        let refused = [
+            (
+                card("k-t", long(TITLE_MAX_CHARS + 1), None),
+                "title is at most 1000 characters",
+            ),
+            (
+                card("k-b", "Undo".into(), Some(long(BODY_MAX_CHARS + 1))),
+                "body is at most 100000 characters",
+            ),
+            (
+                mutation(
+                    "PATCH",
+                    "/api/v1/cards/01M73NREJWV5CC5Q0WKCG3DV54",
+                    json!({"idempotency_key": "k-e", "rev": 1, "title": long(TITLE_MAX_CHARS + 1)}),
+                    &headers,
+                ),
+                "title is at most 1000 characters",
+            ),
+            (
+                mutation(
+                    "POST",
+                    "/api/v1/cards/01M73NREJWV5CC5Q0WKCG3DV54/comment",
+                    json!({"idempotency_key": "k-c", "text": long(COMMENT_MAX_CHARS + 1)}),
+                    &headers,
+                ),
+                "a comment is at most 20000 characters",
+            ),
+            (
+                mutation(
+                    "POST",
+                    "/api/v1/attention/01M73NREJWV5CC5Q0WKCG3DV55/answer",
+                    json!({"idempotency_key": "k-a", "answer": long(ANSWER_MAX_CHARS + 1)}),
+                    &headers,
+                ),
+                "an answer is at most 20000 characters",
+            ),
+        ];
+        for (request, words) in refused {
+            let answer = send(&app, request).await;
+            assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{}", answer.body);
+            assert!(answer.body.contains(words), "{}", answer.body);
+        }
+        assert_eq!(cards(&fleet), before);
+
+        let taken = send(
+            &app,
+            card("k-ok", long(TITLE_MAX_CHARS), Some(long(BODY_MAX_CHARS))),
+        )
+        .await;
+        assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
+        assert_eq!(cards(&fleet), before + 1);
     }
 
     /// The owner check reads `board-owner` on the blocking pool: a slow

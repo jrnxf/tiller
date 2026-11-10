@@ -954,7 +954,11 @@ pub struct CreateCard {
     pub host: Option<String>,
     pub project: String,
     pub kind: String,
+    /// At most 1,000 characters (`protocol.md` 7.4).
+    #[schema(max_length = 1000)]
     pub title: String,
+    /// At most 100,000 characters (`protocol.md` 7.4).
+    #[schema(max_length = 100000)]
     #[serde(default)]
     pub body: Option<String>,
     #[serde(default)]
@@ -1066,10 +1070,14 @@ pub struct EditCard {
     #[serde(default)]
     pub host: Option<String>,
     pub rev: i64,
+    /// At most 1,000 characters (`protocol.md` 7.4).
+    #[schema(max_length = 1000)]
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
     pub priority: Option<i64>,
+    /// At most 100,000 characters (`protocol.md` 7.4).
+    #[schema(max_length = 100000)]
     #[serde(default)]
     pub body: Option<String>,
 }
@@ -1350,6 +1358,8 @@ pub struct Comment {
     /// 7.4, 10.3). Absent means this host.
     #[serde(default)]
     pub host: Option<String>,
+    /// At most 20,000 characters (`protocol.md` 7.4).
+    #[schema(max_length = 20000)]
     pub text: String,
 }
 
@@ -1399,7 +1409,9 @@ pub struct AnswerBody {
     /// 7.4, 10.3). Absent means this host.
     #[serde(default)]
     pub host: Option<String>,
-    /// The owner's exact words.
+    /// The owner's exact words, at most 20,000 characters (`protocol.md`
+    /// 7.4).
+    #[schema(max_length = 20000)]
     pub answer: String,
     #[serde(default)]
     pub rev: Option<i64>,

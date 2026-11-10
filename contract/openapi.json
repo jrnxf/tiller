@@ -3998,7 +3998,8 @@
         "properties": {
           "answer": {
             "type": "string",
-            "description": "The owner's exact words."
+            "description": "The owner's exact words, at most 20,000 characters (`protocol.md`\n7.4).",
+            "maxLength": 20000
           },
           "host": {
             "type": [
@@ -5100,7 +5101,9 @@
             "type": "string"
           },
           "text": {
-            "type": "string"
+            "type": "string",
+            "description": "At most 20,000 characters (`protocol.md` 7.4).",
+            "maxLength": 20000
           }
         },
         "additionalProperties": false
@@ -5190,7 +5193,9 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "At most 100,000 characters (`protocol.md` 7.4).",
+            "maxLength": 100000
           },
           "category": {
             "type": [
@@ -5223,7 +5228,9 @@
             "type": "string"
           },
           "title": {
-            "type": "string"
+            "type": "string",
+            "description": "At most 1,000 characters (`protocol.md` 7.4).",
+            "maxLength": 1000
           }
         },
         "additionalProperties": false
@@ -5339,7 +5346,9 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "At most 100,000 characters (`protocol.md` 7.4).",
+            "maxLength": 100000
           },
           "host": {
             "type": [
@@ -5366,7 +5375,9 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "At most 1,000 characters (`protocol.md` 7.4).",
+            "maxLength": 1000
           }
         },
         "additionalProperties": false

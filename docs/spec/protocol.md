@@ -522,6 +522,8 @@ A peer's own refusal (404, 409, 422 and their bodies) is passed through unchange
 
 Every mutation body carries `idempotency_key` (a ULID the board mints when the control renders and reuses on retry; a second click repeats nothing). A retry resends the same body. The same key with another body is 422 `refused` and writes nothing (section 6.3). Field edits also carry `rev`. Transitions (hold, close, cancel, reopen, answer, decide) do not: as `state.md` principle 5 says, they are guarded by the facts they need, so a stale click is refused by its precondition, and they carry the `rev` the board showed only so a conflict message can say what changed.
 
+**Length caps.** The API takes a card title of at most 1,000 characters, a card body of at most 100,000, a comment of at most 20,000, an answer of at most 20,000 and an ask of at most 8,000. The caps hold for a create, an edit and a forwarded mutation alike. Longer text is 400 `usage` ("title is at most 1000 characters") and writes nothing. The CLI has no such cap.
+
 | Endpoint | Mutation | Body |
 |---|---|---|
 | `POST /api/v1/cards` | `ask.record` + `ask.resolve new` + `card.create`, then `outbox.enqueue`. The board sends it from a lane header's New card and from an Inbox item's follow-up | `project`, `kind`, `title`, `body?`, `priority?`, `category?` |
