@@ -196,8 +196,9 @@ impl<'a> Context<'a> {
     }
 }
 
-/// The delegation stems (Firstmate's subagent-guard), matched against a tool
-/// name lowercased with every non-alphanumeric character removed.
+/// The delegation stems (the predecessor system's subagent guard), matched
+/// against a tool name lowercased with every non-alphanumeric character
+/// removed.
 const DELEGATION_STEMS: &[&str] = &[
     "agent",
     "subagent",

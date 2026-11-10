@@ -656,7 +656,7 @@ fn detached_script_cannot_act_as_owner() {
     fs::write(
         lab.path("work").join("run.sh"),
         format!(
-            "env -u TILLER_SESSION_ID -u CLAUDECODE {} owner set firstmate > out.txt 2>&1\n",
+            "env -u TILLER_SESSION_ID -u CLAUDECODE {} owner set tiller > out.txt 2>&1\n",
             lab.bin
         ),
     )

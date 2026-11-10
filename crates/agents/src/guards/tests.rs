@@ -845,7 +845,7 @@ fn owner_tiller_commands_denied() {
         "tiller import --from x",
         "echo '{\"session_id\":\"x\"}' | tiller hook UserPromptSubmit",
         "tiller guard pretool --role builder",
-        "tiller owner set firstmate",
+        "tiller owner set tiller",
         "tiller init",
         "tiller backup",
         "tiller export --to /tmp/x",
