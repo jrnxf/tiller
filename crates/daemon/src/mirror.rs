@@ -911,7 +911,11 @@ mod tests {
             if let Ok(bytes) = std::fs::read(&path) {
                 let parsed: Result<BTreeMap<String, (u16, u16)>, _> =
                     serde_json::from_slice(&bytes);
-                assert!(parsed.is_ok(), "a torn file: {:?}", String::from_utf8_lossy(&bytes));
+                assert!(
+                    parsed.is_ok(),
+                    "a torn file: {:?}",
+                    String::from_utf8_lossy(&bytes)
+                );
             }
         }
         for writer in writers {

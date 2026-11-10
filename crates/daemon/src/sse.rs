@@ -57,7 +57,10 @@ impl Streams {
     /// A place for one more stream of `session`, or `None` when it already
     /// holds [`STREAMS_PER_SESSION`].
     pub fn open(&self, session: &str) -> Option<Slot> {
-        let mut open = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut open = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let count = open.entry(session.to_owned()).or_default();
         if *count >= STREAMS_PER_SESSION {
             return None;
@@ -702,7 +705,9 @@ mod tests {
         .await
         .expect("the stream did not end")
         .unwrap();
-        let sent = String::from_utf8_lossy(&bytes).matches("event: change").count();
+        let sent = String::from_utf8_lossy(&bytes)
+            .matches("event: change")
+            .count();
         assert!(
             i64::try_from(sent).unwrap() < newest_seq,
             "the stream sent all {sent} rows after the stop"
