@@ -59,6 +59,18 @@ export function countsByFilter(tiles: Tile[]): Record<BoardFilter, number> {
   };
 }
 
+// The tiles the board shows for a scope: the lanes the view lets through
+// (`lanes` holds their project keys) and the machine filter. The header's
+// All, Active and Needs you counts and the sidebar's Board count all come
+// from this one list, so they cannot disagree.
+export function tilesInScope(
+  board: BoardResponse,
+  lanes: Set<string>,
+  host: string | undefined,
+): Tile[] {
+  return tilesOf(board).filter((tile) => lanes.has(tile.projectId) && onHost(tile, host));
+}
+
 // What a machine filter keeps: cards that run there. An ask has no machine, so
 // it stays out of a filtered view, like the lane-less cards.
 export function onHost(tile: Tile, host: string | undefined): boolean {

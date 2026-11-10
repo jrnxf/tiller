@@ -3,11 +3,12 @@ import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
 import { agentsQuery, attentionQuery, boardQuery, projectsQuery } from "../../lib/queries";
-import { ownerKey, projectKey } from "../../lib/peers";
+import { projectKey } from "../../lib/peers";
 import { prefsStore } from "../../lib/prefs";
 import { attentionCount, scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
 import { PrIcon } from "../board/icons";
+import { countsByFilter, tilesInScope } from "../board/model";
 import { Section } from "../states/section";
 import {
   AgentsIcon,
@@ -55,13 +56,9 @@ function useShownIds(activeHost: string | undefined): Set<string> {
 function OpenCount({ activeHost }: { activeHost: string | undefined }) {
   const { data: board } = useSuspenseQuery(boardQuery());
   const shownIds = useShownIds(activeHost);
-  const open = board.rows.filter(
-    (row) =>
-      shownIds.has(ownerKey(row.project_id, row)) &&
-      row.column !== "done" &&
-      (!activeHost || row.host_id === activeHost),
-  ).length;
-  return <span className="count">{open}</span>;
+  // The header's Active tab, from the same list.
+  const { active } = countsByFilter(tilesInScope(board, shownIds, activeHost));
+  return <span className="count">{active}</span>;
 }
 
 function RunningCount({ activeHost }: { activeHost: string | undefined }) {

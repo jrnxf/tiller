@@ -321,6 +321,31 @@ test("columns with cards share the board's width and an empty column folds to it
   expect(columnHead("Working").dataset.empty).toBeUndefined();
 });
 
+function sidebarCount() {
+  const nav = screen.getByRole("navigation", { name: "Screens" });
+  return within(nav).getByText("Board").parentElement?.querySelector(".count")?.textContent;
+}
+function activeTab() {
+  const [segment] = screen.getAllByRole("group", { name: "Cards shown" });
+  if (!segment) throw new Error("no filter");
+  return within(segment)
+    .getByRole("button", { name: /^Active/ })
+    .querySelector(".tc")?.textContent;
+}
+
+test("the sidebar's Board count is the header's Active count, with and without a machine filter", async () => {
+  stubApi("default");
+  const { router } = await renderApp();
+  // 8 open cards and 1 ask: the ask counts in both.
+  expect(activeTab()).toBe("9");
+  expect(sidebarCount()).toBe("9");
+
+  await act(async () => {
+    await router.navigate({ to: "/", search: { host: "01JHOSTA00000000000000000A" } });
+  });
+  await waitFor(() => expect(sidebarCount()).toBe(activeTab()));
+});
+
 test("an empty column's icon names the column and its count on hover and on focus", async () => {
   stubApi("default");
   await renderApp("default", "/?filter=needs");

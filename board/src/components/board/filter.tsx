@@ -7,7 +7,7 @@ import { boardQuery, projectsQuery } from "../../lib/queries";
 import { prefsStore } from "../../lib/prefs";
 import { scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
-import { countsByFilter, onHost, parseFilter, tilesOf } from "./model";
+import { countsByFilter, parseFilter, tilesInScope } from "./model";
 import "./board.css";
 import { useNamedProjects } from "./peer-state";
 
@@ -34,10 +34,7 @@ function useBoardFilter() {
   const lanes = new Set(
     scopedProjects(prefs, projects.projects, board.rows, search.host).map((p) => projectKey(p)),
   );
-  const tiles = tilesOf(board).filter(
-    (tile) => lanes.has(tile.projectId) && onHost(tile, search.host),
-  );
-  const counts = countsByFilter(tiles);
+  const counts = countsByFilter(tilesInScope(board, lanes, search.host));
 
   const select = (value: BoardFilter) =>
     void navigate({

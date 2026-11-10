@@ -2,7 +2,15 @@ import { expect, test } from "vitest";
 
 import type { BoardResponse, BoardRow } from "../../lib/api-types";
 import { badgeText, badgeTone, statusMark, stateText } from "./badge";
-import { countsByFilter, onHost, openCount, parseFilter, passesFilter, tilesOf } from "./model";
+import {
+  countsByFilter,
+  onHost,
+  openCount,
+  parseFilter,
+  passesFilter,
+  tilesInScope,
+  tilesOf,
+} from "./model";
 
 function row(
   id: string,
@@ -106,4 +114,17 @@ test("the mark and tone follow the column, with failures marked as such", () => 
   expect(badgeTone(row("x", "working", "between_runs"))).toBe("pend");
   expect(badgeTone(row("x", "working", "errored"))).toBe("bad");
   expect(badgeTone(row("x", "working", "stale"))).toBe("yel");
+});
+
+test("the sidebar's Board count and the header's Active count come from one list", () => {
+  // Three open cards, a done card and an ask: the old sidebar count left the
+  // ask out and read 3 where the header's Active tab read 4.
+  const scope = new Set(["alpha"]);
+  const counts = countsByFilter(tilesInScope(board, scope, undefined));
+  expect(counts).toEqual({ all: 5, active: 4, needs: 1 });
+  expect(board.rows.filter((r) => r.column !== "done")).toHaveLength(3);
+  // The machine filter keeps the cards that run there and drops the ask.
+  expect(countsByFilter(tilesInScope(board, scope, "h1")).active).toBe(2);
+  // A project the view hides counts for neither.
+  expect(countsByFilter(tilesInScope(board, new Set(["beta"]), undefined)).all).toBe(0);
 });
