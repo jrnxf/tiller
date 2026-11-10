@@ -6,7 +6,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { AgentRow, AskRecorded, BoardResponse } from "../../lib/api-types";
 import { hydrateFromSnapshot } from "../../lib/boot";
 import { fixtureSnapshot } from "../../lib/fixtures";
-import { boardPath, queryKeyFor } from "../../lib/queries";
+import { boardPath, projectsPath, queryKeyFor } from "../../lib/queries";
 import { createQueryClient } from "../../lib/query-client";
 import { AskDialog } from "./ask-dialog";
 
@@ -368,4 +368,44 @@ test("a project whose orchestrator started but whose ask failed retries without 
   // The start carries the same key, so the daemon replays it.
   const starts = calls.filter((call) => call.path.endsWith("/orchestrator"));
   expect(starts.every((call) => call.body.idempotency_key === start)).toBe(true);
+});
+
+test("with the projects not read, Ask still opens and says why Send waits", async () => {
+  // Every read fails, as with a daemon that cannot open its store.
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            ok: false,
+            error: { code: "unavailable", message: "unavailable: the store is locked" },
+          }),
+          { status: 503 },
+        ),
+    ),
+  );
+  const queryClient = createQueryClient();
+  queryClient.setDefaultOptions({
+    queries: { ...queryClient.getDefaultOptions().queries, retryDelay: 0 },
+  });
+  const snapshot = fixtureSnapshot("default");
+  const queries = { ...snapshot.queries };
+  delete queries[projectsPath];
+  hydrateFromSnapshot(queryClient, { ...snapshot, queries });
+  render(
+    <QueryClientProvider client={queryClient}>
+      <AskDialog open onClose={vi.fn()} />
+    </QueryClientProvider>,
+  );
+
+  const dialog = screen.getByRole("dialog", { name: "Ask orchestrators" });
+  expect(within(dialog).getByText(/Projects are still loading/)).toBeTruthy();
+  expect(sendButton().disabled).toBe(true);
+
+  const reason = await within(dialog).findByText(
+    "Projects could not be read: the store is locked. Send waits until they load.",
+  );
+  expect(reason.getAttribute("data-warn")).toBe("true");
+  expect(sendButton().disabled).toBe(true);
 });

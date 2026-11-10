@@ -185,18 +185,16 @@ export function ArchiveProject({
 }) {
   // The archive's confirm step, or the delete it offers in its place.
   const [confirming, setConfirming] = useState<"archive" | "delete" | null>(null);
-  const opener = useRef<HTMLButtonElement>(null);
   const off = owner ? `${owner} owns this project: archive it there` : undefined;
+  // The dialog gives focus back to the button that opened it.
   const close = useCallback(() => {
     setConfirming(null);
-    opener.current?.focus();
   }, []);
   const toDelete = useCallback(() => setConfirming("delete"), []);
   if (project.id === FLEET_PROJECT) return null;
   return (
     <>
       <button
-        ref={opener}
         type="button"
         className="btn"
         disabled={off !== undefined}

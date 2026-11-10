@@ -11,6 +11,7 @@ import { projectColor } from "../../lib/project-color";
 import { agentsQuery, boardQuery, machinesQuery, projectsQuery } from "../../lib/queries";
 import { prefsStore, updatePrefs } from "../../lib/prefs";
 import { scopedProjects } from "../../lib/scope";
+import { shortcutsBlocked } from "../../lib/shortcuts";
 import { useStore } from "../../lib/store";
 import { boardLookStore, toggleDoneFolded } from "./board-prefs";
 import { ChevronLeftIcon, Status } from "./icons";
@@ -112,15 +113,10 @@ function CardDrawer({ cardId, owner }: { cardId: string; owner: string | undefin
   const navigate = useNavigate();
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (event.key !== "Escape" || event.defaultPrevented || shortcutsBlocked(event)) return;
+      // A popover or a menu takes its own Escape.
       const target = event.target;
-      if (
-        target instanceof HTMLElement &&
-        (target.isContentEditable ||
-          target.closest("input, textarea, select, [role=dialog], [role=menu]"))
-      ) {
-        return;
-      }
+      if (target instanceof Element && target.closest("[role=dialog], [role=menu]")) return;
       void navigate({
         to: "/",
         search: (prev) => ({ ...prev, card: undefined, owner: undefined }),

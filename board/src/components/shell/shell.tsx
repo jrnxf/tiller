@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { applyAppearance, prefsStore } from "../../lib/prefs";
+import { shortcutsBlocked } from "../../lib/shortcuts";
 import { useStore } from "../../lib/store";
 import { ToastHost } from "../board/toast";
 import { AskDialog } from "./ask-dialog";
@@ -26,11 +27,6 @@ function isPlainKey(event: KeyboardEvent): boolean {
   return !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && !event.repeat;
 }
 
-function isTyping(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  return target.isContentEditable || /^(input|textarea|select)$/i.test(target.tagName);
-}
-
 export function Shell({
   activeHost,
   children,
@@ -52,11 +48,14 @@ export function Shell({
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        // It closes the palette too, but opens nothing over another dialog.
         event.preventDefault();
-        setPaletteOpen((open) => !open);
+        const blocked = shortcutsBlocked();
+        setPaletteOpen((open) => (open ? false : !blocked));
       } else if (event.key === "Escape") {
-        setMenuOpen(false);
-      } else if (event.key.toLowerCase() === "a" && isPlainKey(event) && !isTyping(event.target)) {
+        // An Escape a dialog took closes that dialog only.
+        if (!event.defaultPrevented && !shortcutsBlocked()) setMenuOpen(false);
+      } else if (event.key.toLowerCase() === "a" && isPlainKey(event) && !shortcutsBlocked(event)) {
         // The Ask button's shortcut, as long as nothing else is being typed into.
         event.preventDefault();
         setAskOpen(true);

@@ -224,17 +224,15 @@ export function ConfirmDelete({ project, onClose }: { project: Project; onClose:
 // 7.4). `fleet` is never deleted, so it has no control.
 export function DeleteProject({ project, owner }: { project: Project; owner: string | undefined }) {
   const [confirming, setConfirming] = useState(false);
-  const opener = useRef<HTMLButtonElement>(null);
   const off = owner ? `${owner} owns this project: delete it there` : undefined;
+  // The dialog gives focus back to the button that opened it.
   const close = useCallback(() => {
     setConfirming(false);
-    opener.current?.focus();
   }, []);
   if (project.id === FLEET_PROJECT) return null;
   return (
     <>
       <button
-        ref={opener}
         type="button"
         className="btn project-delete"
         disabled={off !== undefined}

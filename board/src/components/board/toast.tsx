@@ -39,6 +39,8 @@ export function ToastHost() {
       className="toast"
       data-testid="toast"
       aria-live="polite"
+      // An open dialog leaves it live, so a toast is still announced.
+      data-modal-exempt=""
       data-open={toast !== null}
       data-tone={toast?.tone}
     >

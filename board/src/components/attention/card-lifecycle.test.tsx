@@ -158,6 +158,23 @@ test("Cancel asks for a reason and confirms", async () => {
   expect(sent().body).toMatchObject({ reason: "wrong repo" });
 });
 
+test("a dialog opened from the More menu gives focus back to the More button", async () => {
+  stubApi();
+  const actions = await renderCard();
+  const more = within(actions).getByRole("button", { name: "More card actions" });
+  more.focus();
+  const menu = await openMenu(actions);
+  const item = within(menu).getByRole("menuitem", { name: "Cancel card..." });
+  item.focus();
+  fireEvent.click(item);
+  const dialog = await screen.findByRole("dialog");
+  await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+
+  fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(document.activeElement).toBe(more);
+});
+
 test("Hold sends a Lisbon time as an instant, with a reason", async () => {
   stubApi();
   const actions = await renderCard();

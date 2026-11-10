@@ -9,6 +9,7 @@ import { formatLisbon, formatLisbonDay, lisbonField16, serverNow } from "../../l
 import { ownerOf } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import { awayBriefPath, awayBriefQuery, projectsQuery, queryKeyFor } from "../../lib/queries";
+import { shortcutsBlocked } from "../../lib/shortcuts";
 import { sendMutation } from "../attention/api";
 import { useAction } from "../attention/use-action";
 import { useNamedProjects } from "../board/peer-state";
@@ -452,7 +453,7 @@ export function AwayControl() {
       if (!wrap.current?.contains(event.target as Node)) setOpen(false);
     };
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape" && !shortcutsBlocked()) setOpen(false);
     };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
+import { Fragment, useId, useMemo, useRef, useState } from "react";
 
 import { rankCommands } from "../../lib/commands";
 import { projectKey } from "../../lib/peers";
@@ -9,6 +9,7 @@ import type { Command } from "../../lib/commands";
 import { machinesQuery, projectsQuery } from "../../lib/queries";
 import { toggleProjectHidden, updatePrefs, prefsStore } from "../../lib/prefs";
 import { useStore } from "../../lib/store";
+import { Modal } from "../ui/modal";
 import {
   AgentsIcon,
   BoardIcon,
@@ -195,92 +196,71 @@ function PaletteBody({ onClose, activeHost }: Omit<PaletteProps, "open">) {
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
-  const opener = useRef<Element | null>(document.activeElement);
   const listId = useId();
 
   const results = useMemo(() => rankCommands(commands, query), [commands, query]);
 
-  // Focus goes to the input on open and back to whatever opened the palette
-  // on close, so a keyboard user keeps their place.
-  useEffect(() => {
-    inputRef.current?.focus();
-    const back = opener.current;
-    return () => {
-      // Only when focus fell to the page: a command may have moved it on purpose.
-      const active = document.activeElement;
-      const lost = !active || active === document.body;
-      if (lost && back instanceof HTMLElement && back.isConnected) back.focus();
-    };
-  }, []);
-
   const selected = Math.min(index, Math.max(0, results.length - 1));
 
   return (
-    <div className="palette-backdrop" onMouseDown={onClose}>
-      <div
-        className="palette"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Command palette"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <input
-          ref={inputRef}
-          className="palette-input"
-          role="combobox"
-          aria-expanded="true"
-          aria-controls={listId}
-          aria-activedescendant={
-            results[selected] ? `${listId}-${results[selected].id}` : undefined
+    // Focus goes to the input on open and back to whatever opened the palette
+    // on close, so a keyboard user keeps their place. The input is the only
+    // Tab stop: the arrow keys drive the list.
+    <Modal
+      backdrop="palette-backdrop"
+      className="palette"
+      label="Command palette"
+      onClose={onClose}
+      initialFocus={inputRef}
+    >
+      <input
+        ref={inputRef}
+        className="palette-input"
+        role="combobox"
+        aria-expanded="true"
+        aria-controls={listId}
+        aria-activedescendant={results[selected] ? `${listId}-${results[selected].id}` : undefined}
+        placeholder="Type a command, or search..."
+        value={query}
+        onChange={(event) => {
+          setQuery(event.target.value);
+          setIndex(0);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            setIndex(Math.min(selected + 1, results.length - 1));
+          } else if (event.key === "ArrowUp") {
+            event.preventDefault();
+            setIndex(Math.max(selected - 1, 0));
+          } else if (event.key === "Enter") {
+            event.preventDefault();
+            results[selected]?.run();
           }
-          placeholder="Type a command, or search..."
-          value={query}
-          onChange={(event) => {
-            setQuery(event.target.value);
-            setIndex(0);
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "ArrowDown") {
-              event.preventDefault();
-              setIndex(Math.min(selected + 1, results.length - 1));
-            } else if (event.key === "ArrowUp") {
-              event.preventDefault();
-              setIndex(Math.max(selected - 1, 0));
-            } else if (event.key === "Enter") {
-              event.preventDefault();
-              results[selected]?.run();
-            } else if (event.key === "Escape") {
-              event.preventDefault();
-              onClose();
-            } else if (event.key === "Tab") {
-              // The input is the only stop; the list is driven by the arrow keys.
-              event.preventDefault();
-            }
-          }}
-        />
-        <ul className="palette-list" id={listId} role="listbox">
-          {results.length === 0 ? <li className="palette-empty">No command matches</li> : null}
-          {results.map((command, position) => (
-            <Fragment key={command.id}>
-              {position === 0 || results[position - 1]?.group !== command.group ? (
-                <li className="palette-group" role="presentation">
-                  {command.group}
-                </li>
-              ) : null}
-              <li
-                id={`${listId}-${command.id}`}
-                role="option"
-                aria-selected={position === selected}
-                onMouseMove={() => setIndex(position)}
-                onClick={() => command.run()}
-              >
-                <span className="palette-icon">{iconFor(command)}</span>
-                <span>{command.label}</span>
+        }}
+      />
+      <ul className="palette-list" id={listId} role="listbox">
+        {results.length === 0 ? <li className="palette-empty">No command matches</li> : null}
+        {results.map((command, position) => (
+          <Fragment key={command.id}>
+            {position === 0 || results[position - 1]?.group !== command.group ? (
+              <li className="palette-group" role="presentation">
+                {command.group}
               </li>
-            </Fragment>
-          ))}
-        </ul>
-      </div>
-    </div>
+            ) : null}
+            <li
+              id={`${listId}-${command.id}`}
+              role="option"
+              aria-selected={position === selected}
+              onMouseMove={() => setIndex(position)}
+              onClick={() => command.run()}
+            >
+              <span className="palette-icon">{iconFor(command)}</span>
+              <span>{command.label}</span>
+            </li>
+          </Fragment>
+        ))}
+      </ul>
+    </Modal>
   );
 }

@@ -193,6 +193,16 @@ test("keys 1-3 answer, but not while typing in the note", async () => {
   expect(calls[0]?.body.answer).toBe("Fixed delay, five attempts");
 });
 
+test("keys 1-3 answer nothing while a dialog is open", async () => {
+  stubDaemon("default");
+  await renderInbox("default", RETRY);
+  fireEvent.click(screen.getByRole("button", { name: "Add project" }));
+  const dialog = screen.getByRole("dialog", { name: "Add project" });
+  fireEvent.keyDown(within(dialog).getByRole("button", { name: "Cancel" }), { key: "2" });
+  await flush();
+  expect(calls).toHaveLength(0);
+});
+
 function pickRecommended() {
   return screen.getByRole("button", { name: /Exponential backoff, three attempts/ });
 }

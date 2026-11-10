@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import type { BoardRow, MutationResponse } from "../../lib/api-types";
 import { focusReason, hostField, ownerKey, ownerOf, projectGroups } from "../../lib/peers";
 import { agentsQuery, machinesQuery, projectsQuery } from "../../lib/queries";
+import { shortcutsBlocked } from "../../lib/shortcuts";
 import { focusOutcome, focusPath, remoteLabel } from "../board/herdr";
 import type { FocusData } from "../board/herdr";
 import { PeerNote } from "../board/host-chip";
@@ -326,13 +327,7 @@ export function OpenInHerdr({
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "o" || event.repeat) return;
       if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-      const target = event.target;
-      if (
-        target instanceof Element &&
-        target.closest("input, textarea, select, [contenteditable]")
-      ) {
-        return;
-      }
+      if (shortcutsBlocked(event)) return;
       // On a narrow screen the detail is hidden behind the list; the key only
       // acts on a pane the owner can see.
       if (!button.current || !isShown(button.current)) return;

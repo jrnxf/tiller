@@ -1,8 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import type { Editor } from "@tiptap/core";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { createPortal } from "react-dom";
 
 import type { Project, SettingProblem } from "../../lib/api-types";
 import { askFor, mentionedKeys, messageFor } from "../../lib/ask-plan";
@@ -20,6 +19,7 @@ import { ActionFailure } from "../attention/action-failure";
 import type { ActionError } from "../attention/api";
 import { SendIcon } from "../attention/icons";
 import { showToast } from "../board/toast";
+import { Modal } from "../ui/modal";
 import { AskEditor, removeMention } from "./ask-editor";
 import type { MentionOption } from "./ask-editor";
 import { useAskSends } from "./ask-send";
@@ -27,6 +27,7 @@ import { settingsOf, StartSettingsFix } from "./start-settings-fix";
 import type { AskTarget, Outcome } from "./ask-send";
 import "./ask-dialog.css";
 import { useNamedProjects } from "../board/peer-state";
+import { readFailure } from "./project-dialog";
 
 const ASK_MAX_CHARS = 8000;
 
@@ -150,15 +151,23 @@ function SendRow({
   );
 }
 
-function AskBody({ projects, onClose }: { projects: Project[]; onClose: () => void }) {
-  const [opener] = useState(() => document.activeElement);
+// `unread` says why the projects are not here yet: still loading, or why
+// they could not be read. Until they are, nothing can be picked or sent.
+function AskBody({
+  projects,
+  unread,
+  onClose,
+}: {
+  projects: Project[];
+  unread: { error: string | null } | null;
+  onClose: () => void;
+}) {
   const orchestrators = useQuery(agentsQuery()).data?.orchestrators;
   const machines = useQuery(machinesQuery()).data?.machines;
   const [pieces, setPieces] = useState<AskPiece[]>([]);
   const { outcomes, send } = useAskSends();
   const titleId = useId();
   const labelId = useId();
-  const dialog = useRef<HTMLDivElement>(null);
   const editor = useRef<Editor | null>(null);
   // Escape closes an open list first and the dialog only when no list was open.
   const listOpen = useRef(false);
@@ -205,6 +214,7 @@ function AskBody({ projects, onClose }: { projects: Project[]; onClose: () => vo
   const tooLong = targets.some((target) => target.text.length > ASK_MAX_CHARS);
   const blocked = picked.some((entry) => entry.off !== null);
   const canSend =
+    !unread &&
     !sending &&
     (attempted ? failed.length > 0 : targets.length > 0 && message !== "" && !tooLong && !blocked);
 
@@ -221,12 +231,6 @@ function AskBody({ projects, onClose }: { projects: Project[]; onClose: () => vo
     }
   };
 
-  useEffect(() => {
-    return () => {
-      if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
-    };
-  }, [opener]);
-
   const sendLabel = sending
     ? "Sending..."
     : attempted
@@ -236,7 +240,13 @@ function AskBody({ projects, onClose }: { projects: Project[]; onClose: () => vo
         : "Send";
 
   let hint: string | null = null;
-  if (!attempted) {
+  let warn = message !== "" && targets.length === 0;
+  if (unread) {
+    hint = unread.error
+      ? `Projects could not be read: ${unread.error.replace(/[^.!?]$/, "$&.")} Send waits until they load.`
+      : "Projects are still loading. Send waits until they load.";
+    warn = unread.error !== null;
+  } else if (!attempted) {
     if (targets.length === 0) {
       hint =
         message === ""
@@ -249,123 +259,106 @@ function AskBody({ projects, onClose }: { projects: Project[]; onClose: () => vo
     }
   }
 
-  return createPortal(
-    <div className="dialog-backdrop" onMouseDown={() => !sending && onClose()}>
-      <div
-        ref={dialog}
-        className="dialog ask-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        onMouseDown={(event) => event.stopPropagation()}
-        onKeyDownCapture={(event) => {
-          if (event.key === "Escape") escapeClosesList.current = listOpen.current;
-        }}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.preventDefault();
-            event.stopPropagation();
-            if (!sending && !escapeClosesList.current) onClose();
-          } else if (event.key === "Tab") {
-            // Keep focus on the dialog's own controls that can take it.
-            const stops = [
-              ...(dialog.current?.querySelectorAll<HTMLElement>(
-                'button:not(:disabled):not([tabindex="-1"]), [contenteditable="true"]',
-              ) ?? []),
-            ];
-            const [first, last] = [stops[0], stops.at(-1)];
-            if (!first) {
-              event.preventDefault();
-            } else if (event.shiftKey && document.activeElement === first) {
-              event.preventDefault();
-              last?.focus();
-            } else if (!event.shiftKey && document.activeElement === last) {
-              event.preventDefault();
-              first.focus();
-            }
-          }
-        }}
-      >
-        <h2 id={titleId}>Ask orchestrators</h2>
-        <div className="ask-field">
-          <span className="ask-label" id={labelId}>
-            Ask
-          </span>
-          <AskEditor
-            options={options}
-            used={picked.map((entry) => projectKey(entry.project))}
-            locked={attempted}
-            placeholder="Type @ to pick projects, then say what they should do"
-            labelledBy={labelId}
-            editorRef={editor}
-            onChange={setPieces}
-            onSubmit={() => void submit()}
-            onListOpen={(open) => {
-              listOpen.current = open;
-            }}
-          />
-          <div className="ask-sends" role="status" aria-live="polite">
-            {targets.length > 0 ? (
-              <>
-                <div className="ask-sends-title">
-                  {attempted
-                    ? "Sends"
-                    : `Sends to ${targets.length} project${targets.length === 1 ? "" : "s"}`}
-                </div>
-                <ul>
-                  {picked.map(({ project, color, off }, index) => (
-                    <SendRow
-                      key={projectKey(project)}
-                      project={project}
-                      color={color}
-                      running={targets[index]?.running ?? false}
-                      where={federated ? `on ${ownerOf(project) ?? "this host"}` : null}
-                      outcome={outcomes[projectKey(project)]}
-                      off={off}
-                      onRemove={
-                        attempted
-                          ? null
-                          : () => {
-                              if (editor.current)
-                                removeMention(editor.current, projectKey(project));
-                            }
-                      }
-                    />
-                  ))}
-                </ul>
-              </>
-            ) : null}
-            {hint ? (
-              <p className="ask-hint-line" data-warn={message !== "" && targets.length === 0}>
-                {hint}
-              </p>
-            ) : null}
-          </div>
-        </div>
-        <div className="dialog-actions">
-          <span className="ask-hint">Enter sends, Shift+Enter adds a line</span>
-          <button type="button" className="btn" disabled={sending} onClick={onClose}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="btn primary"
-            disabled={!canSend}
-            onClick={() => void submit()}
-          >
-            <SendIcon />
-            {sendLabel}
-          </button>
+  return (
+    <Modal
+      className="dialog ask-dialog"
+      labelledBy={titleId}
+      dismissable={!sending}
+      onClose={onClose}
+      // The editor takes focus itself.
+      initialFocus="child"
+      onEscape={() => {
+        if (!escapeClosesList.current) onClose();
+      }}
+      onKeyDownCapture={(event) => {
+        if (event.key === "Escape") escapeClosesList.current = listOpen.current;
+      }}
+    >
+      <h2 id={titleId}>Ask orchestrators</h2>
+      <div className="ask-field">
+        <span className="ask-label" id={labelId}>
+          Ask
+        </span>
+        <AskEditor
+          options={options}
+          used={picked.map((entry) => projectKey(entry.project))}
+          locked={attempted}
+          placeholder="Type @ to pick projects, then say what they should do"
+          labelledBy={labelId}
+          editorRef={editor}
+          onChange={setPieces}
+          onSubmit={() => void submit()}
+          onListOpen={(open) => {
+            listOpen.current = open;
+          }}
+        />
+        <div className="ask-sends" role="status" aria-live="polite">
+          {targets.length > 0 ? (
+            <>
+              <div className="ask-sends-title">
+                {attempted
+                  ? "Sends"
+                  : `Sends to ${targets.length} project${targets.length === 1 ? "" : "s"}`}
+              </div>
+              <ul>
+                {picked.map(({ project, color, off }, index) => (
+                  <SendRow
+                    key={projectKey(project)}
+                    project={project}
+                    color={color}
+                    running={targets[index]?.running ?? false}
+                    where={federated ? `on ${ownerOf(project) ?? "this host"}` : null}
+                    outcome={outcomes[projectKey(project)]}
+                    off={off}
+                    onRemove={
+                      attempted
+                        ? null
+                        : () => {
+                            if (editor.current) removeMention(editor.current, projectKey(project));
+                          }
+                    }
+                  />
+                ))}
+              </ul>
+            </>
+          ) : null}
+          {hint ? (
+            <p className="ask-hint-line" data-warn={warn}>
+              {hint}
+            </p>
+          ) : null}
         </div>
       </div>
-    </div>,
-    document.body,
+      <div className="dialog-actions">
+        <span className="ask-hint">Enter sends, Shift+Enter adds a line</span>
+        <button type="button" className="btn" disabled={sending} onClick={onClose}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="btn primary"
+          disabled={!canSend}
+          onClick={() => void submit()}
+        >
+          <SendIcon />
+          {sendLabel}
+        </button>
+      </div>
+    </Modal>
   );
 }
 
 // Mounted only while open, so each opening starts with nothing picked.
+// Projects that are not read yet still open it, to say why nothing can be
+// sent.
 export function AskDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const projects = useNamedProjects(useQuery(projectsQuery()).data)?.projects;
-  if (!open || !projects) return null;
-  return <AskBody projects={projects} onClose={onClose} />;
+  const query = useQuery(projectsQuery());
+  const projects = useNamedProjects(query.data)?.projects;
+  if (!open) return null;
+  const unread = projects
+    ? null
+    : { error: readFailure(query.error, "The board could not reach the daemon.") };
+  return <AskBody projects={projects ?? NO_PROJECTS} unread={unread} onClose={onClose} />;
 }
+
+const NO_PROJECTS: Project[] = [];

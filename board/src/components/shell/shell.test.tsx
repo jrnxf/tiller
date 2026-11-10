@@ -317,3 +317,40 @@ test("the top-bar Ask button and the A key open the ask dialog with the text foc
   fireEvent.keyDown(document.body, { key: "a" });
   expect(screen.getByRole("dialog", { name: "Ask orchestrators" })).toBeTruthy();
 });
+
+test("no global shortcut fires while a dialog is open", async () => {
+  await renderApp();
+  fireEvent.click(screen.getByRole("button", { name: "Add project" }));
+  const dialog = screen.getByRole("dialog", { name: "Add project" });
+  const cancel = within(dialog).getByRole("button", { name: "Cancel" });
+  cancel.focus();
+
+  // A on a dialog's button, and Cmd+K, would each open a second dialog.
+  fireEvent.keyDown(cancel, { key: "a" });
+  fireEvent.keyDown(cancel, { key: "k", metaKey: true });
+  expect(screen.queryByRole("dialog", { name: "Ask orchestrators" })).toBeNull();
+  expect(screen.queryByRole("dialog", { name: "Command palette" })).toBeNull();
+  expect(screen.getAllByRole("dialog")).toEqual([dialog]);
+});
+
+test("Escape closes the palette with focus on the page body", async () => {
+  await renderApp();
+  fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+  expect(screen.getByRole("dialog", { name: "Command palette" })).toBeTruthy();
+  (document.activeElement as HTMLElement).blur();
+  expect(document.activeElement).toBe(document.body);
+
+  fireEvent.keyDown(document.body, { key: "Escape" });
+  expect(screen.queryByRole("dialog", { name: "Command palette" })).toBeNull();
+});
+
+test("the screen behind the palette is inert while it is open", async () => {
+  await renderApp();
+  const nav = screen.getByRole("navigation", { name: "Screens" });
+  fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+  expect(nav.closest("[inert]")).not.toBeNull();
+  expect(screen.getByRole("dialog", { name: "Command palette" }).closest("[inert]")).toBeNull();
+
+  fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" });
+  expect(nav.closest("[inert]")).toBeNull();
+});

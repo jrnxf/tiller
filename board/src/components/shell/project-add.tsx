@@ -355,15 +355,13 @@ function CheckoutVerdict({
 // The "+" in the sidebar's Projects header.
 export function AddProject() {
   const [open, setOpen] = useState(false);
-  const opener = useRef<HTMLButtonElement>(null);
+  // The dialog gives focus back to the button that opened it.
   const close = useCallback(() => {
     setOpen(false);
-    opener.current?.focus();
   }, []);
   return (
     <>
       <button
-        ref={opener}
         type="button"
         className="grp-add"
         title="Add project"

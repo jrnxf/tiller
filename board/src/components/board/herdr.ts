@@ -3,6 +3,7 @@ import { useCallback, useEffect, useEffectEvent } from "react";
 
 import type { AgentRow, Machine } from "../../lib/api-types";
 import { machinesQuery } from "../../lib/queries";
+import { shortcutsBlocked } from "../../lib/shortcuts";
 import { ActionError, sendMutation } from "../attention/api";
 import { ulid } from "../attention/ulid";
 import { showToast } from "./toast";
@@ -145,13 +146,8 @@ export function focusTooltip(host: { kind: "local" | "remote" } | undefined): st
   return host?.kind === "remote" ? FOCUS_TOOLTIP_REMOTE : FOCUS_TOOLTIP;
 }
 
-export function isTyping(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
-}
-
-// The O key opens the selected agent in herdr; a key typed into a field never
-// does. The listener stays put while `onOpen` changes from render to render.
+// The O key opens the selected agent in herdr; a key typed into a field, or
+// pressed while a dialog is open, never does. The listener stays put while `onOpen` changes from render to render.
 export function useOpenKey(onOpen: (() => void) | null) {
   const on = onOpen !== null;
   const open = useEffectEvent(() => onOpen?.());
@@ -160,7 +156,7 @@ export function useOpenKey(onOpen: (() => void) | null) {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key.toLowerCase() !== "o") return;
       if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-      if (isTyping(event.target)) return;
+      if (shortcutsBlocked(event)) return;
       event.preventDefault();
       open();
     };

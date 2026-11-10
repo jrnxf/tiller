@@ -1,7 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { createPortal } from "react-dom";
 
 import type { Project } from "../../lib/api-types";
 import { ownerOf } from "../../lib/peers";
@@ -17,6 +16,7 @@ import { InlineReceipt } from "../attention/receipt";
 import { useAction } from "../attention/use-action";
 import { lisbonDay, lisbonShortDay } from "../health/lisbon";
 import { SettingField } from "../settings/setting-field";
+import { Modal } from "../ui/modal";
 import { ArchiveProject } from "./project-archive";
 import { DeleteProject } from "./project-delete";
 import { FLEET_PROJECT } from "./project-dialog";
@@ -243,77 +243,47 @@ function ConfirmStage({
   }, [queryClient, stale]);
 
   const cancel = useRef<HTMLButtonElement>(null);
-  const confirm = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    cancel.current?.focus();
-  }, []);
 
   const heading = `Switch ${project.name} to ${target}?`;
-  return createPortal(
-    <div
-      className="dialog-backdrop"
-      onMouseDown={() => {
-        // Like Escape: a pending switch keeps its dialog, so a refusal shows.
-        if (!action.pending) onClose();
-      }}
+  return (
+    // Like Escape, the backdrop keeps a pending switch, so a refusal shows.
+    <Modal
+      className="dialog"
+      labelledBy="stage-dialog-title"
+      describedBy="stage-dialog-body"
+      dismissable={!action.pending}
+      onClose={onClose}
+      initialFocus={cancel}
     >
-      <div
-        className="dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="stage-dialog-title"
-        aria-describedby="stage-dialog-body"
-        onMouseDown={(event) => event.stopPropagation()}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.preventDefault();
-            event.stopPropagation();
-            if (!action.pending) onClose();
-          } else if (event.key === "Tab") {
-            // Two buttons are the only stops; keep focus between them.
-            const [first, last] = [cancel.current, confirm.current];
-            if (event.shiftKey && document.activeElement === first) {
-              event.preventDefault();
-              last?.focus();
-            } else if (!event.shiftKey && document.activeElement === last) {
-              event.preventDefault();
-              first?.focus();
-            }
-          }
-        }}
-      >
-        <h2 id="stage-dialog-title">{heading}</h2>
-        <p id="stage-dialog-body">{CONFIRM[target]}</p>
-        {error ? (
-          <p className="refusal" role="alert">
-            {stale
-              ? `${error.message} The project was read again, so confirm once more to switch it.`
-              : error.message}
-          </p>
-        ) : null}
-        <div className="dialog-actions">
-          <button
-            ref={cancel}
-            type="button"
-            className="btn"
-            disabled={action.pending}
-            onClick={onClose}
-          >
-            Cancel
-          </button>
-          <button
-            ref={confirm}
-            type="button"
-            className="btn primary"
-            disabled={action.pending}
-            onClick={action.trigger}
-          >
-            {action.pending ? "Switching..." : `Switch to ${target}`}
-          </button>
-        </div>
+      <h2 id="stage-dialog-title">{heading}</h2>
+      <p id="stage-dialog-body">{CONFIRM[target]}</p>
+      {error ? (
+        <p className="refusal" role="alert">
+          {stale
+            ? `${error.message} The project was read again, so confirm once more to switch it.`
+            : error.message}
+        </p>
+      ) : null}
+      <div className="dialog-actions">
+        <button
+          ref={cancel}
+          type="button"
+          className="btn"
+          disabled={action.pending}
+          onClick={onClose}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="btn primary"
+          disabled={action.pending}
+          onClick={action.trigger}
+        >
+          {action.pending ? "Switching..." : `Switch to ${target}`}
+        </button>
       </div>
-    </div>,
-    document.body,
+    </Modal>
   );
 }
 
@@ -322,15 +292,14 @@ function ConfirmStage({
 export function ProjectDetail({ project, id }: { project: Project; id: string }) {
   const [confirming, setConfirming] = useState(false);
   const [receipt, setReceipt] = useState<{ key: string; text: string } | null>(null);
-  const opener = useRef<HTMLButtonElement>(null);
   const target: Stage = project.stage === "pre-launch" ? "launched" : "pre-launch";
   // The board host does not forward a stage switch (protocol.md section 7.4).
   const owner = ownerOf(project);
   const off = owner ? `${owner} owns this project: switch its stage there` : undefined;
 
+  // The dialog gives focus back to the button that opened it.
   const close = useCallback(() => {
     setConfirming(false);
-    opener.current?.focus();
   }, []);
 
   const onRecorded = useCallback((key: string, text: string) => setReceipt({ key, text }), []);
@@ -340,7 +309,6 @@ export function ProjectDetail({ project, id }: { project: Project; id: string })
       <Facts project={project} />
       {project.id === FLEET_PROJECT ? null : (
         <button
-          ref={opener}
           type="button"
           className="btn stage-switch"
           disabled={off !== undefined}

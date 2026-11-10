@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AttentionItem, OwnerAction } from "../../lib/api-types";
 import { hostField, ownerOf } from "../../lib/peers";
+import { shortcutsBlocked } from "../../lib/shortcuts";
 import { useStore } from "../../lib/store";
 import { PeerNote } from "../board/host-chip";
 import { useStanding } from "../board/peer-state";
@@ -24,14 +25,6 @@ function answerText(option: string | null, note: string): string {
 // The owner-only change an option applies, in the owner's words.
 function applies(action: OwnerAction): string {
   return `${action.project} capacity from ${action.from} to ${action.to}`;
-}
-
-// Keys 1-3 answer, unless the owner is typing or holds a modifier.
-function typing(target: EventTarget | null): boolean {
-  return (
-    target instanceof Element &&
-    target.closest("input, textarea, select, [contenteditable]") !== null
-  );
 }
 
 export function AnswerForm({ item }: { item: AttentionItem }) {
@@ -92,9 +85,11 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
 
   useEffect(() => {
     if (locked || options.length === 0) return;
+    // Keys 1-9 answer, unless the owner is typing, holds a modifier or has a
+    // dialog open.
     const onKey = (event: KeyboardEvent) => {
       if (event.repeat || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-      if (typing(event.target)) return;
+      if (shortcutsBlocked(event)) return;
       const option = options[Number(event.key) - 1];
       if (option && !(host && option.action) && /^[1-9]$/.test(event.key)) choose(option.label);
     };

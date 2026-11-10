@@ -16,6 +16,7 @@ import {
 } from "../../lib/queries";
 import { prefsStore } from "../../lib/prefs";
 import { scopedProjects } from "../../lib/scope";
+import { shortcutsBlocked } from "../../lib/shortcuts";
 import { useStore } from "../../lib/store";
 import { hostAwareActivity } from "../states/degraded";
 import { quietFor } from "./activity";
@@ -25,7 +26,7 @@ import type { AgentGroup, AgentLine } from "./agents-model";
 import { AnswerStrip } from "./answer-strip";
 import { EmptyScope } from "./board-view";
 import { formatAge, formatLisbonMoment } from "./format";
-import { focusCommand, focusTooltip, isTyping, useHerdrFocus, useOpenKey } from "./herdr";
+import { focusCommand, focusTooltip, useHerdrFocus, useOpenKey } from "./herdr";
 import { ChevronLeftIcon, InfoIcon, PaneIcon } from "./icons";
 import { LiveTerminal, usePhone } from "./live-terminal";
 import type { SwitchKey, TerminalControl } from "./live-terminal";
@@ -750,7 +751,7 @@ export function AgentsView({
     onKey.current = (event) => {
       if (!current || event.defaultPrevented) return;
       if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-      if (isTyping(event.target) || document.querySelector('[aria-modal="true"]')) return;
+      if (shortcutsBlocked(event)) return;
       if (pane === "list") return;
       const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
       const onList = event.target === listRef.current;

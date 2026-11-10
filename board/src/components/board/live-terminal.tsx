@@ -11,10 +11,11 @@ import {
   useSyncExternalStore,
 } from "react";
 import type { MouseEvent as ReactMouseEvent, ReactNode, Ref } from "react";
-import { createPortal } from "react-dom";
 
+import { shortcutsBlocked } from "../../lib/shortcuts";
 import { createStore, useStore } from "../../lib/store";
 import { CloseIcon } from "../shell/icons";
+import { Modal } from "../ui/modal";
 import { Ago, useTick } from "./ago";
 import { formatLisbonMoment, secondsSince } from "./format";
 import {
@@ -574,6 +575,8 @@ export function LiveTerminal({
   }, []);
   // Focus the screen once the sheet holds it: a phone tap means "type".
   const focusNext = useRef(false);
+  // The sheet opened to type: the screen takes focus, not the sheet's Back.
+  const [sheetTypes, setSheetTypes] = useState(false);
   // Type once the pane is live: asked for before the stream had a screen.
   const typeWhenLive = useRef(autoType);
   const webglRef = useRef<typeof WebglAddon | null>(null);
@@ -848,6 +851,7 @@ export function LiveTerminal({
     // The scrollback is the inline screen's; the large view is live.
     closeHistory();
     if (phone) {
+      setSheetTypes(focusNext.current);
       setScale("one");
       setView("sheet");
       return;
@@ -1013,7 +1017,7 @@ export function LiveTerminal({
     if (!historyOpen) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
-      if (document.querySelector('[aria-modal="true"]')) return;
+      if (shortcutsBlocked()) return;
       event.preventDefault();
       closeHistory();
     };
@@ -1138,109 +1142,106 @@ export function LiveTerminal({
         </div>
       ) : null}
       {screenShown ? <div className="mir-f">{stage ? stageFooter : footer("inline")}</div> : null}
-      {view === "dialog"
-        ? createPortal(
-            <Expanded
-              onClose={collapse}
-              heading={heading}
-              actions={actions}
-              scale={scale}
-              onScale={setScale}
-              label={label}
-            >
-              <div className={`mir big${state}`}>
-                <div className="mir-h">
-                  <StatusMark status={status} />
-                  {typing ? <span className="lab sm acc">Typing</span> : null}
-                  {sizeText ? <span className="mir-sz">{sizeText}</span> : null}
-                </div>
-                {message}
-                <div
-                  className={`mir-s ${scale}`}
-                  role="group"
-                  aria-label={`${watch ? "Tail" : "Live terminal"} for ${label}`}
-                  hidden={!screenShown}
-                  onMouseDown={typeFromScreen}
-                >
-                  <div className="mir-slot" ref={setBigBox} />
-                  {veil}
-                </div>
-                <div className="mir-f">{footer("big")}</div>
-              </div>
-            </Expanded>,
-            document.body,
-          )
-        : null}
-      {view === "sheet"
-        ? createPortal(
+      {view === "dialog" ? (
+        <Expanded
+          onClose={collapse}
+          heading={heading}
+          actions={actions}
+          scale={scale}
+          onScale={setScale}
+          label={label}
+        >
+          <div className={`mir big${state}`}>
+            <div className="mir-h">
+              <StatusMark status={status} />
+              {typing ? <span className="lab sm acc">Typing</span> : null}
+              {sizeText ? <span className="mir-sz">{sizeText}</span> : null}
+            </div>
+            {message}
             <div
-              className={`mir-sheet${state}`}
-              role="dialog"
-              aria-modal="true"
-              aria-label={`Terminal for ${label}`}
+              className={`mir-s ${scale}`}
+              role="group"
+              aria-label={`${watch ? "Tail" : "Live terminal"} for ${label}`}
+              hidden={!screenShown}
+              onMouseDown={typeFromScreen}
             >
-              <div className="mir-sheet-h">
-                <button type="button" className="ib" aria-label="Back" onClick={collapse}>
-                  <ChevronLeftIcon />
+              <div className="mir-slot" ref={setBigBox} data-trap-skip="" />
+              {veil}
+            </div>
+            <div className="mir-f">{footer("big")}</div>
+          </div>
+        </Expanded>
+      ) : null}
+      {view === "sheet" ? (
+        // It fills the phone's screen, so it has no backdrop.
+        <Modal
+          backdrop={null}
+          className={`mir-sheet${state}`}
+          label={`Terminal for ${label}`}
+          onClose={collapse}
+          initialFocus={sheetTypes ? "child" : undefined}
+        >
+          <div className="mir-sheet-h">
+            <button type="button" className="ib" aria-label="Back" onClick={collapse}>
+              <ChevronLeftIcon />
+            </button>
+            <span className="mir-sheet-t">{heading}</span>
+            <span className="sp" />
+            <ScaleSwitch scale={scale} onScale={setScale} />
+          </div>
+          {message}
+          <div
+            className={`mir-sheet-b ${scale}`}
+            ref={setBigBox}
+            role="group"
+            aria-label={`${watch ? "Tail" : "Live terminal"} for ${label}`}
+            hidden={!screenShown}
+            data-trap-skip=""
+          />
+          <div className="mir-sheet-f">
+            {typing ? (
+              <>
+                <KeyboardIcon />
+                Typing goes to the agent
+                <button type="button" className="btn sm" onClick={done}>
+                  Done
                 </button>
-                <span className="mir-sheet-t">{heading}</span>
-                <span className="sp" />
-                <ScaleSwitch scale={scale} onScale={setScale} />
-              </div>
-              {message}
-              <div
-                className={`mir-sheet-b ${scale}`}
-                ref={setBigBox}
-                role="group"
-                aria-label={`${watch ? "Tail" : "Live terminal"} for ${label}`}
-                hidden={!screenShown}
-              />
-              <div className="mir-sheet-f">
-                {typing ? (
-                  <>
-                    <KeyboardIcon />
-                    Typing goes to the agent
-                    <button type="button" className="btn sm" onClick={done}>
-                      Done
-                    </button>
-                  </>
-                ) : (
-                  footer("big")
-                )}
-              </div>
-              {watch ? null : (
-                <div className="mir-keys" role="group" aria-label="Keys a phone lacks">
-                  {(
-                    [
-                      ["esc", "Esc", "Esc"],
-                      ["tab", "Tab", "Tab"],
-                      ["ctrl+c", "Ctrl-C", "Ctrl-C"],
-                      ["left", <ArrowIcon key="l" to="left" />, "Left"],
-                      ["up", <ArrowIcon key="u" to="up" />, "Up"],
-                      ["down", <ArrowIcon key="d" to="down" />, "Down"],
-                      ["right", <ArrowIcon key="r" to="right" />, "Right"],
-                      ["enter", <EnterIcon key="e" />, "Enter"],
-                    ] as const
-                  ).map(([key, face, name]) => (
-                    <button
-                      key={key}
-                      type="button"
-                      className={`mir-key${key === "ctrl+c" || key === "enter" ? " w" : ""}`}
-                      aria-label={name}
-                      disabled={!live}
-                      // Keep the screen focused, so the phone keyboard stays up.
-                      onPointerDown={(event) => event.preventDefault()}
-                      onClick={() => send(key)}
-                    >
-                      {face}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>,
-            document.body,
-          )
-        : null}
+              </>
+            ) : (
+              footer("big")
+            )}
+          </div>
+          {watch ? null : (
+            <div className="mir-keys" role="group" aria-label="Keys a phone lacks">
+              {(
+                [
+                  ["esc", "Esc", "Esc"],
+                  ["tab", "Tab", "Tab"],
+                  ["ctrl+c", "Ctrl-C", "Ctrl-C"],
+                  ["left", <ArrowIcon key="l" to="left" />, "Left"],
+                  ["up", <ArrowIcon key="u" to="up" />, "Up"],
+                  ["down", <ArrowIcon key="d" to="down" />, "Down"],
+                  ["right", <ArrowIcon key="r" to="right" />, "Right"],
+                  ["enter", <EnterIcon key="e" />, "Enter"],
+                ] as const
+              ).map(([key, face, name]) => (
+                <button
+                  key={key}
+                  type="button"
+                  className={`mir-key${key === "ctrl+c" || key === "enter" ? " w" : ""}`}
+                  aria-label={name}
+                  disabled={!live}
+                  // Keep the screen focused, so the phone keyboard stays up.
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={() => send(key)}
+                >
+                  {face}
+                </button>
+              ))}
+            </div>
+          )}
+        </Modal>
+      ) : null}
     </div>
   );
 }
@@ -1350,8 +1351,8 @@ function ScaleSwitch({ scale, onScale }: { scale: Scale; onScale: (scale: Scale)
 }
 
 // The large view: the same live terminal in a dialog. The backdrop and Escape
-// close it (Escape typed to the agent stays with the agent), and Tab stays on
-// the dialog's own controls.
+// close it (Escape typed to the agent stays with the agent), and Tab wraps
+// between the dialog's own controls, past the terminal.
 function Expanded({
   onClose,
   heading,
@@ -1369,57 +1370,31 @@ function Expanded({
   label: string;
   children: ReactNode;
 }) {
-  const dialog = useRef<HTMLDivElement>(null);
   const close = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    close.current?.focus();
-  }, []);
   return (
-    <div className="dialog-backdrop mir-backdrop" onMouseDown={onClose}>
-      <div
-        ref={dialog}
-        className="mir-dlg"
-        role="dialog"
-        aria-modal="true"
-        aria-label={`Terminal for ${label}`}
-        onMouseDown={(event) => event.stopPropagation()}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            event.preventDefault();
-            event.stopPropagation();
-            onClose();
-          } else if (event.key === "Tab") {
-            const stops = [
-              ...(dialog.current?.querySelectorAll<HTMLElement>("button, a[href]") ?? []),
-            ].filter((element) => !(element as HTMLButtonElement).disabled);
-            const [first, last] = [stops[0], stops.at(-1)];
-            if (event.shiftKey && document.activeElement === first) {
-              event.preventDefault();
-              last?.focus();
-            } else if (!event.shiftKey && document.activeElement === last) {
-              event.preventDefault();
-              first?.focus();
-            }
-          }
-        }}
-      >
-        <div className="mir-dlg-h">
-          {heading}
-          <span className="sp" />
-          <ScaleSwitch scale={scale} onScale={onScale} />
-          {actions}
-          <button
-            ref={close}
-            type="button"
-            className="ib"
-            aria-label="Close the expanded terminal"
-            onClick={onClose}
-          >
-            <CloseIcon />
-          </button>
-        </div>
-        <div className="mir-dlg-b">{children}</div>
+    <Modal
+      backdrop="dialog-backdrop mir-backdrop"
+      className="mir-dlg"
+      label={`Terminal for ${label}`}
+      onClose={onClose}
+      initialFocus={close}
+    >
+      <div className="mir-dlg-h">
+        {heading}
+        <span className="sp" />
+        <ScaleSwitch scale={scale} onScale={onScale} />
+        {actions}
+        <button
+          ref={close}
+          type="button"
+          className="ib"
+          aria-label="Close the expanded terminal"
+          onClick={onClose}
+        >
+          <CloseIcon />
+        </button>
       </div>
-    </div>
+      <div className="mir-dlg-b">{children}</div>
+    </Modal>
   );
 }
