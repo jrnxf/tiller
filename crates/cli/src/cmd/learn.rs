@@ -30,13 +30,18 @@ pub enum RetroCmd {
     Sweep,
     /// List retros
     List {
+        /// Only retros that still wait for a result
         #[arg(long)]
         pending: bool,
+        /// Only this project's retros (its id)
         #[arg(long)]
         project: Option<String>,
     },
     /// A retro with the record it was decided from: the curator's brief
-    Show { retro: String },
+    Show {
+        /// A retro id, or a card reference for its newest retro
+        retro: String,
+    },
     /// Launch the curator on a pending full retro
     Run(RetroRun),
     /// Finish a full retro: nothing, one learning, or a proposal
@@ -54,6 +59,7 @@ pub struct RetroRun {
 
 #[derive(Args, Debug)]
 pub struct RetroFinish {
+    /// A retro id, or a card reference for its newest retro
     pub retro: String,
     /// Nothing worth saving: the normal result
     #[arg(long, group = "verdict")]
@@ -75,24 +81,42 @@ pub struct RetroFinish {
 pub enum LearnCmd {
     /// Open a change set: one change, or a named bundle of proposals
     Bundle {
+        /// The change set's name
         name: String,
+        /// The memory proposals in the set, by id; one proposal makes a change of one
         proposals: Vec<String>,
         /// Cards the set is measured over; default `learning.window_cards`
         #[arg(long)]
         window: Option<i64>,
     },
     /// Add a proposal to an open change set
-    Add { set: String, proposal: String },
+    Add {
+        /// The change set, by name or id
+        set: String,
+        /// The memory proposal to add, by id
+        proposal: String,
+    },
     /// Close a change set without measuring it
-    Abandon { set: String },
+    Abandon {
+        /// The change set, by name or id
+        set: String,
+    },
     /// Run the holdout on a change set's candidate and record the result
     Eval(LearnEval),
     /// The gate's verdict on a proposal: what mem.decide checks
-    Gate { proposal: String },
+    Gate {
+        /// The memory proposal, by id
+        proposal: String,
+    },
     /// Retros, pending work, change sets and the measuring window
     Status,
     /// The manifest behind a config hash, or the parts in which two differ
-    Config { hash: String, other: Option<String> },
+    Config {
+        /// A config hash, as `tiller config hash` or a run's record shows it
+        hash: String,
+        /// A second hash; shows the parts in which the two differ
+        other: Option<String>,
+    },
 }
 
 #[derive(Args, Debug)]

@@ -26,7 +26,9 @@ pub enum Request {
 
 #[derive(Args, Debug)]
 pub struct RequestArgs {
+    /// The card: a display id like alpha-42, a ULID or its short form
     pub card: String,
+    /// merge or land_direct
     #[arg(long)]
     pub kind: ApprovalKind,
     /// The PR number, for a merge; the card's only open PR when omitted
@@ -39,6 +41,7 @@ pub struct RequestArgs {
 
 #[derive(Args, Debug)]
 pub struct Approve {
+    /// The approval: a ULID or its short form
     pub approval: String,
     /// Reject instead of accepting
     #[arg(long)]
@@ -71,7 +74,9 @@ pub enum Grant {
     Create(GrantCreate),
     /// End a grant
     Revoke {
+        /// The grant: a ULID or its short form
         grant: String,
+        /// Why the grant ends
         #[arg(long, default_value = "revoked by the owner")]
         reason: String,
     },
@@ -79,7 +84,9 @@ pub enum Grant {
 
 #[derive(Args, Debug)]
 pub struct GrantCreate {
+    /// The project's id (its slug, like alpha)
     pub project: String,
+    /// merge or land_direct
     #[arg(long)]
     pub kind: GrantKind,
     /// The grant's conditions as a JSON object (`authority.md`, section 6)
@@ -98,6 +105,7 @@ pub enum Away {
     Start(AwayStart),
     /// Turn away mode off, and print the return brief
     End {
+        /// Why away mode ends
         #[arg(long, default_value = "ended by the owner")]
         reason: String,
     },
@@ -110,6 +118,8 @@ pub enum Away {
 
 #[derive(Args, Debug)]
 pub struct AwayStart {
+    /// When away mode ends: 2026-11-07 (09:00 Lisbon), 2026-11-07T14:00 (Lisbon) or an RFC 3339
+    /// time with an offset
     #[arg(long)]
     pub until: String,
     /// The projects the away scope covers

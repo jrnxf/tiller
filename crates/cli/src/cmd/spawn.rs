@@ -24,11 +24,14 @@ use crate::app::{App, Done, Failure, Outcome};
 
 #[derive(Args, Debug)]
 pub struct Spawn {
+    /// The card: a display id like alpha-42, a ULID or its short form
     pub card: String,
     /// scout, builder, reviewer or verifier
     pub role: tiller_core::domain::RunRole,
+    /// The model to run, like opus; needs --effort. The dispatch rule picks one when left out
     #[arg(long, requires = "effort")]
     pub model: Option<String>,
+    /// low, medium, high, xhigh or max; needs --model
     #[arg(long, requires = "model")]
     pub effort: Option<tiller_core::domain::Effort>,
     /// The brief; without it the worker is briefed with the card

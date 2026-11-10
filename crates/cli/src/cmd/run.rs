@@ -22,6 +22,7 @@ use crate::lisbon;
 pub struct Status {
     /// working, needs-decision, blocked, paused, done or failed
     pub state: StatusState,
+    /// The status line, one short sentence
     pub text: String,
     /// With paused: silence this run's alarms until then
     #[arg(long)]
@@ -32,14 +33,21 @@ pub struct Status {
 pub enum RunCmd {
     /// Pause a run until a date
     Pause {
+        /// The run: a ULID or short form, `<display id> <role>`, or a herdr name like
+        /// alpha-42-build
         run: String,
+        /// When the pause ends: 2026-11-07 (09:00 Lisbon), 2026-11-07T14:00 (Lisbon) or an RFC
+        /// 3339 time with an offset
         #[arg(long)]
         until: String,
+        /// Why the run is paused
         #[arg(long)]
         reason: String,
     },
     /// Show a run
     Show {
+        /// The run: a ULID or short form, `<display id> <role>`, or a herdr name like
+        /// alpha-42-build
         run: String,
         /// Lines of the pane to include, at most 200
         #[arg(long)]
@@ -47,6 +55,7 @@ pub enum RunCmd {
     },
     /// List runs
     List {
+        /// Only this card's runs: a display id like alpha-42, a ULID or its short form
         #[arg(long)]
         card: Option<String>,
         /// Only runs that have not ended
@@ -54,13 +63,18 @@ pub enum RunCmd {
         active: bool,
     },
     /// Close a run's pane record and return its worktree record
-    Clean { run: String },
+    Clean {
+        /// The run: a ULID or short form, `<display id> <role>`, or a herdr name like
+        /// alpha-42-build
+        run: String,
+    },
 }
 
 #[derive(Args, Debug)]
 pub struct Done_ {
     /// Required outside a worker session
     pub run: Option<String>,
+    /// How the run ended: landed, reported, failed, abandoned, relaunched, cancelled or cut
     #[arg(long)]
     pub outcome: Option<RunOutcome>,
 }
@@ -69,15 +83,20 @@ pub struct Done_ {
 pub enum Pr_ {
     /// Link a PR to the run's card
     Link {
+        /// The pull request URL, like https://github.com/owner/name/pull/42
         url: String,
+        /// The card to link it to: a display id, a ULID or its short form. A worker session
+        /// defaults to its own card
         #[arg(long)]
         card: Option<String>,
     },
     /// Give the title and body the daemon opens the run's PR with
     /// (direct-pr delivery: the worker commits, the daemon pushes and opens)
     Describe {
+        /// The PR title
         #[arg(long)]
         title: String,
+        /// The PR body in markdown
         #[arg(long)]
         body: Option<String>,
         /// A file holding the body, or - for standard input
@@ -90,10 +109,13 @@ pub enum Pr_ {
 pub struct Send {
     /// A run or a session
     pub target: String,
+    /// steer or note
     #[arg(long)]
     pub kind: OutboxKind,
+    /// The message; or pass - instead to read it from standard input
     #[arg(long)]
     pub text: Option<String>,
+    /// Pass - to read the message from standard input
     #[arg(value_parser = ["-"])]
     pub stdin: Option<String>,
     #[command(flatten)]

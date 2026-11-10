@@ -15,6 +15,7 @@ pub enum Cmd {
 
 #[derive(Args, Debug)]
 pub struct File {
+    /// A short title for the bug
     #[arg(long)]
     pub title: String,
     /// What happened and what you expected; - reads standard input

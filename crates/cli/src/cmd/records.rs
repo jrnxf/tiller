@@ -20,7 +20,9 @@ pub enum ObligationCmd {
     Open(ObligationOpen),
     /// Cancel an obligation
     Cancel {
+        /// The obligation: a ULID or its short form
         obligation: String,
+        /// Why it is cancelled
         #[arg(long, default_value = "cancelled")]
         reason: String,
     },
@@ -28,7 +30,9 @@ pub enum ObligationCmd {
 
 #[derive(Args, Debug)]
 pub struct ObligationOpen {
+    /// The card: a display id like alpha-42, a ULID or its short form
     pub card: String,
+    /// The duty, in words
     #[arg(long)]
     pub what: String,
     /// Met once, when an event matches this JSON filter
@@ -52,9 +56,12 @@ pub enum ArtifactCmd {
 
 #[derive(Args, Debug)]
 pub struct ArtifactAdd {
+    /// The card: a display id like alpha-42, a ULID or its short form
     pub card: String,
+    /// page, screenshot, report, video or other
     #[arg(long)]
     pub kind: ArtifactKind,
+    /// A short title for the artifact
     #[arg(long)]
     pub title: String,
     /// Where the artifact is served; a review page gives its URL and its file.
@@ -70,19 +77,28 @@ pub struct ArtifactAdd {
 
 #[derive(Args, Debug)]
 pub struct ReviewRecord {
+    /// The run: a ULID or short form, `<display id> <role>`, or a herdr name like
+    /// alpha-42-build
     pub run: String,
+    /// Who reviewed: code-review, spec-review, no-mistakes or human
     #[arg(long)]
     pub reviewer: Reviewer,
+    /// What the review covered: diff, spec or full
     #[arg(long)]
     pub coverage: Coverage,
+    /// pass, fail or ask-user
     #[arg(long)]
     pub verdict: Verdict,
+    /// How many high-severity findings
     #[arg(long, default_value_t = 0)]
     pub high: i64,
+    /// How many medium-severity findings
     #[arg(long, default_value_t = 0)]
     pub medium: i64,
+    /// How many low-severity findings
     #[arg(long, default_value_t = 0)]
     pub low: i64,
+    /// Where the review is written up
     #[arg(long)]
     pub url: Option<String>,
     #[command(flatten)]
@@ -106,8 +122,10 @@ pub struct HandoffShow {
 
 #[derive(Args, Debug)]
 pub struct HandoffWrite {
+    /// What the orchestrator concluded; needs --next
     #[arg(long, requires = "next")]
     pub conclusions: Option<String>,
+    /// What to do next; needs --conclusions
     #[arg(long, requires = "conclusions")]
     pub next: Option<String>,
     /// Read {"conclusions": "...", "next": "..."} from standard input

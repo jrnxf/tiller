@@ -41,6 +41,7 @@ pub enum ReviewCmd {
 
 #[derive(Args, Debug)]
 pub struct ReviewProject {
+    /// The project's id (its slug, like alpha)
     pub project: String,
 }
 
@@ -64,6 +65,7 @@ pub struct ReviewBrief {
 
 #[derive(Args, Debug)]
 pub struct ReviewFinish {
+    /// The pass id, short form, or its card
     pub pass: String,
     /// The report page artifact; defaults to the newest page on the pass card
     #[arg(long)]
@@ -75,7 +77,9 @@ pub struct ReviewFinish {
 
 #[derive(Args, Debug)]
 pub struct ReviewAbandon {
+    /// The pass id, short form, or its card
     pub pass: String,
+    /// Why the pass is abandoned
     #[arg(long)]
     pub reason: String,
 }

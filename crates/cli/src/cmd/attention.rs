@@ -17,7 +17,9 @@ pub enum Cmd {
     Answer(Answer),
     /// Withdraw an item that no longer applies
     Withdraw {
+        /// The attention item: a ULID or its short form
         item: String,
+        /// Why the item no longer applies
         #[arg(long)]
         reason: String,
     },
@@ -31,15 +33,21 @@ pub enum Cmd {
 
 #[derive(Args, Debug)]
 pub struct Open {
+    /// The card: a display id like alpha-42, a ULID or its short form
     pub card: String,
+    /// decision, credential, merge, review, recovery or report
     #[arg(long)]
     pub kind: AttentionKind,
+    /// What the owner is asked
     #[arg(long)]
     pub question: String,
+    /// Text, or a JSON list of pointers: event ids, artifact ids, PR urls
     #[arg(long)]
     pub evidence: Option<String>,
+    /// What you recommend the owner does
     #[arg(long)]
     pub recommendation: Option<String>,
+    /// What happens after each answer
     #[arg(long)]
     pub consequence: Option<String>,
     /// A JSON array of the choices the owner has: labels, or objects with
@@ -54,9 +62,12 @@ pub struct Open {
 
 #[derive(Args, Debug)]
 pub struct Answer {
+    /// The attention item: a ULID or its short form
     pub item: String,
+    /// The owner's exact words; or pass - instead to read them from standard input
     #[arg(long, conflicts_with = "ask")]
     pub text: Option<String>,
+    /// Pass - to read the owner's words from standard input
     #[arg(value_parser = ["-"])]
     pub stdin: Option<String>,
     /// Cite the ask that carries the owner's words from the orchestrator chat

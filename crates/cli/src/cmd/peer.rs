@@ -29,6 +29,7 @@ use crate::app::{App, Done, Failure, Outcome};
 pub enum PeerCmd {
     /// Pair with another host running its own Tiller, over `ssh -t`
     Add {
+        /// A name for the peer, like host-b
         label: String,
         /// The ssh alias that reaches it
         #[arg(long)]
@@ -62,7 +63,10 @@ pub enum PeerCmd {
     /// The hosts this one is paired with, and the board hosts it accepted
     List,
     /// Unpair a host here and delete its key file
-    Remove { label: String },
+    Remove {
+        /// The peer's label, as `tiller peer list` shows it
+        label: String,
+    },
     /// Revoke a board host's key on this host
     Revoke {
         /// The board host's label, or the key id

@@ -33,8 +33,10 @@ pub struct InitArgs {
     /// How many runs may be active at once on this host
     #[arg(long)]
     pub lane_capacity: i64,
+    /// Free RAM floor in MB; `tiller spawn` refuses to start a run below it
     #[arg(long)]
     pub ram_floor_mb: Option<i64>,
+    /// Free disk floor in MB; `tiller spawn` refuses to start a run below it
     #[arg(long)]
     pub disk_floor_mb: Option<i64>,
     /// personal or work: the data boundary this host keeps
@@ -62,6 +64,7 @@ pub enum ProjectCmd {
 
 #[derive(Args, Debug)]
 pub struct ProjectRetire {
+    /// The project's id (its slug, like alpha)
     pub id: String,
     /// Stop the project's running agents first, as a delete does. Without
     /// it they keep running, and tiller names them
@@ -71,6 +74,7 @@ pub struct ProjectRetire {
 
 #[derive(Args, Debug)]
 pub struct ProjectDelete {
+    /// The project's id (its slug, like alpha)
     pub id: String,
     /// Delete without asking. Without it, tiller prints what would be removed
     /// and refuses, or asks for the id on a terminal
@@ -80,9 +84,11 @@ pub struct ProjectDelete {
 
 #[derive(Args, Debug)]
 pub struct ProjectStage {
+    /// The project's id (its slug, like alpha)
     pub id: String,
     /// pre-launch or launched
     pub stage: Stage,
+    /// The rev you read; a stale rev is a conflict
     #[arg(long)]
     pub rev: i64,
     /// To pre-launch: the reviewed commit to start from, instead of the
@@ -93,54 +99,76 @@ pub struct ProjectStage {
 
 #[derive(Args, Debug)]
 pub struct ProjectAdd {
+    /// The new project's id: a short slug like alpha
     pub id: String,
+    /// The project's display name
     #[arg(long)]
     pub name: String,
+    /// The GitHub repository as owner/name; leave out for a local-only project
     #[arg(long)]
     pub repo: Option<String>,
+    /// The git remote URL; a github.com remote fills --repo when it is left out
     #[arg(long)]
     pub remote: Option<String>,
+    /// The branch work lands on; main when left out
     #[arg(long)]
     pub default_branch: Option<String>,
+    /// How work lands: no-mistakes, no-mistakes-prod-only, direct-pr, direct-push or local-only
     #[arg(long)]
     pub delivery: Delivery,
     /// The project's checks as JSON
     #[arg(long)]
     pub checks: Option<String>,
+    /// The most runs active at once on this project, a positive number
     #[arg(long)]
     pub capacity: Option<i64>,
+    /// The workflow file a direct-push project deploys with (watched after a land)
     #[arg(long)]
     pub deploy_workflow: Option<String>,
+    /// The GitHub environment that deploy must reach; leave out when the workflow has none
     #[arg(long)]
     pub deploy_environment: Option<String>,
+    /// Minutes to wait for the deploy to finish; 60 when left out
     #[arg(long)]
     pub deploy_timeout_minutes: Option<i64>,
 }
 
 #[derive(Args, Debug)]
 pub struct ProjectEditArgs {
+    /// The project's id (its slug, like alpha)
     pub id: String,
+    /// The rev you read; a stale rev is a conflict
     #[arg(long)]
     pub rev: i64,
+    /// The project's display name
     #[arg(long)]
     pub name: Option<String>,
     /// An empty value clears the field
     #[arg(long)]
     pub repo: Option<String>,
+    /// The git remote URL; an empty value clears the field
     #[arg(long)]
     pub remote: Option<String>,
+    /// The branch work lands on
     #[arg(long)]
     pub default_branch: Option<String>,
+    /// How work lands: no-mistakes, no-mistakes-prod-only, direct-pr, direct-push or local-only
     #[arg(long)]
     pub delivery: Option<Delivery>,
+    /// The project's checks as JSON: an array of commands, or {"full": [...], "no_logic":
+    /// [...]}
     #[arg(long)]
     pub checks: Option<String>,
+    /// The most runs active at once on this project, a positive number
     #[arg(long)]
     pub capacity: Option<i64>,
+    /// The workflow file a direct-push project deploys with
     #[arg(long)]
     pub deploy_workflow: Option<String>,
+    /// The GitHub environment that deploy must reach
     #[arg(long)]
     pub deploy_environment: Option<String>,
+    /// Minutes to wait for the deploy to finish
     #[arg(long)]
     pub deploy_timeout_minutes: Option<i64>,
 }
@@ -153,12 +181,16 @@ pub enum HostCmd {
 
 #[derive(Args, Debug)]
 pub struct HostEditArgs {
+    /// The rev you read; a stale rev is a conflict
     #[arg(long)]
     pub rev: i64,
+    /// How many runs may be active at once on this host
     #[arg(long)]
     pub lane_capacity: Option<i64>,
+    /// Free RAM floor in MB; `tiller spawn` refuses to start a run below it
     #[arg(long)]
     pub ram_floor_mb: Option<i64>,
+    /// Free disk floor in MB; `tiller spawn` refuses to start a run below it
     #[arg(long)]
     pub disk_floor_mb: Option<i64>,
     /// The open project `tiller bug file` files Tiller bugs in
@@ -172,21 +204,36 @@ pub struct HostEditArgs {
 #[derive(Subcommand, Debug)]
 pub enum ConfigCmd {
     /// Set a key in config.toml (dotted keys reach into tables)
-    Set { key: String, value: String },
+    Set {
+        /// The config key; a dotted key reaches into a table, like learning.window_cards
+        key: String,
+        /// The new value as TOML (true, 12, "text" or ["a", "b"]); text that is not valid TOML
+        /// is stored as a string
+        value: String,
+    },
     /// Read one key, or the whole file
-    Get { key: Option<String> },
+    Get {
+        /// The config key to read, dotted like learning.window_cards; the whole file when left
+        /// out
+        key: Option<String>,
+    },
     /// The sha256 of the configuration, for comparing hosts
     Hash,
     /// Compare this host's configuration with a peer's
-    Diff { peer: String },
+    Diff {
+        /// The peer's label, as `tiller peer list` shows it
+        peer: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 pub enum OwnerCmd {
     /// Say which system owns this host: tiller or firstmate
     Set {
+        /// The owning system: one of the two names in the command help
         name: String,
     },
+    /// Print which system owns this host
     Show,
 }
 

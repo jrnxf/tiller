@@ -16,6 +16,8 @@ use crate::app::{App, Done, Outcome};
 
 #[derive(Args, Debug)]
 pub struct Relaunch {
+    /// The run: a ULID or short form, `<display id> <role>`, or a herdr name like
+    /// alpha-42-build
     pub run: String,
     /// The progress the new session starts from
     #[arg(long)]
@@ -23,12 +25,14 @@ pub struct Relaunch {
     /// End the run (`relaunched`) and start attempt n+1 in the same worktree
     #[arg(long, requires = "brief_file")]
     pub new_attempt: bool,
+    /// The new attempt's brief; needed with --new-attempt
     #[arg(long)]
     pub brief_file: Option<PathBuf>,
     /// The new attempt's model; only raises the dispatch rule unless the
     /// owner asks
     #[arg(long, requires_all = ["effort", "new_attempt"])]
     pub model: Option<String>,
+    /// low, medium, high, xhigh or max; needs --model and --new-attempt
     #[arg(long, requires_all = ["model", "new_attempt"])]
     pub effort: Option<Effort>,
     #[command(flatten)]

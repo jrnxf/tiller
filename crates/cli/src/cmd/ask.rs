@@ -21,12 +21,17 @@ pub enum Cmd {
     /// List asks
     List(List),
     /// Show one ask with the cards it touched
-    Show { ask: String },
+    Show {
+        /// The ask: a ULID or its short form
+        ask: String,
+    },
 }
 
 #[derive(Args, Debug)]
 pub struct Note {
+    /// The project's id (its slug, like alpha)
     pub project: String,
+    /// The note's text; or pass - instead to read it from standard input
     #[arg(long)]
     pub text: Option<String>,
     /// Read the text from standard input
@@ -38,6 +43,7 @@ pub struct Note {
 
 #[derive(Args, Debug)]
 pub struct Resolve {
+    /// The ask: a ULID or its short form
     pub ask: String,
     /// new, followup:<card>, chat or cancelled
     pub target: String,
@@ -50,6 +56,7 @@ pub struct Resolve {
 
 #[derive(Args, Debug)]
 pub struct Link {
+    /// The ask: a ULID or its short form
     pub ask: String,
     /// new, or followup:<card>
     pub target: String,
@@ -64,8 +71,10 @@ pub struct List {
     /// Only asks nobody has resolved, oldest first, with their age
     #[arg(long)]
     pub unresolved: bool,
+    /// Only this project's asks (its id)
     #[arg(long)]
     pub project: Option<String>,
+    /// The most asks to list
     #[arg(long, default_value_t = 50)]
     pub limit: i64,
 }

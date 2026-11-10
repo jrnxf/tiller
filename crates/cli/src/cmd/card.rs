@@ -22,7 +22,10 @@ pub enum Cmd {
     /// Park a card until a date
     Hold(Hold_),
     /// Release a card's hold
-    Unhold { card: String },
+    Unhold {
+        /// The card: a display id like alpha-42, a ULID or its short form
+        card: String,
+    },
     /// Add or remove a dependency
     #[command(subcommand)]
     Dep(Dep),
@@ -37,7 +40,10 @@ pub enum Cmd {
     /// Send the project's orchestrator a comment on a card
     Comment(Comment),
     /// Show a card with its column, runs, holds, PRs and approvals
-    Show { card: String },
+    Show {
+        /// The card: a display id like alpha-42, a ULID or its short form
+        card: String,
+    },
     /// List cards
     List(List),
     /// A card's events, newest first
@@ -46,6 +52,7 @@ pub enum Cmd {
 
 #[derive(Args, Debug)]
 pub struct Create {
+    /// The project's id (its slug, like alpha)
     pub project: String,
     #[command(flatten)]
     pub fields: CardFields,
@@ -58,21 +65,27 @@ pub struct Create {
 
 #[derive(Args, Debug)]
 pub struct Edit {
+    /// The card: a display id like alpha-42, a ULID or its short form
     pub card: String,
     /// The rev you read; a stale rev is a conflict
     #[arg(long)]
     pub rev: i64,
+    /// The new title
     #[arg(long)]
     pub title: Option<String>,
+    /// 0 (highest) to 4
     #[arg(long)]
     pub priority: Option<i64>,
     /// An empty value clears the field
     #[arg(long)]
     pub body: Option<String>,
+    /// S, M or L; an empty value clears the field
     #[arg(long)]
     pub size: Option<String>,
+    /// What done looks like, in words; an empty value clears the field
     #[arg(long)]
     pub acceptance: Option<String>,
+    /// A free-text label; an empty value clears the field
     #[arg(long)]
     pub category: Option<String>,
     /// Owner only: <model>:<effort>
@@ -87,50 +100,77 @@ pub struct Edit {
 
 #[derive(Args, Debug)]
 pub struct Hold_ {
+    /// The card: a display id like alpha-42, a ULID or its short form
     pub card: String,
+    /// When the hold ends: 2026-11-07 (09:00 Lisbon), 2026-11-07T14:00 (Lisbon) or an RFC 3339
+    /// time with an offset
     #[arg(long)]
     pub until: String,
+    /// Why the card is parked
     #[arg(long)]
     pub reason: String,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum Dep {
-    Add { card: String, depends_on: String },
-    Rm { card: String, depends_on: String },
+    /// Make a card wait for another
+    Add {
+        /// The card that waits: a display id like alpha-42, a ULID or its short form
+        card: String,
+        /// The card it waits for: a display id, a ULID or its short form
+        depends_on: String,
+    },
+    /// Remove a card's wait on another
+    Rm {
+        /// The card that waits: a display id like alpha-42, a ULID or its short form
+        card: String,
+        /// The card it waited for: a display id, a ULID or its short form
+        depends_on: String,
+    },
 }
 
 #[derive(Args, Debug)]
 pub struct Close {
+    /// The card: a display id like alpha-42, a ULID or its short form
     pub card: String,
+    /// How the card ended: landed, reported, answered, completed, cancelled, failed, abandoned
+    /// or superseded
     #[arg(long, required_unless_present = "reported")]
     pub outcome: Option<CardOutcome>,
     /// Short for --outcome reported
     #[arg(long, conflicts_with = "outcome")]
     pub reported: bool,
+    /// Why the card closed this way
     #[arg(long)]
     pub reason: Option<String>,
 }
 
 #[derive(Args, Debug)]
 pub struct Complete {
+    /// The card: a display id like alpha-42, a ULID or its short form
     pub card: String,
+    /// What shows the work is done: a link, a command and its output, or a short account
     #[arg(long)]
     pub evidence: String,
 }
 
 #[derive(Args, Debug)]
 pub struct Reasoned {
+    /// The card: a display id like alpha-42, a ULID or its short form
     pub card: String,
+    /// Why
     #[arg(long)]
     pub reason: String,
 }
 
 #[derive(Args, Debug)]
 pub struct Comment {
+    /// The card: a display id like alpha-42, a ULID or its short form
     pub card: String,
+    /// The comment; or pass - instead to read it from standard input
     #[arg(long)]
     pub text: Option<String>,
+    /// Pass - to read the comment from standard input
     #[arg(value_parser = ["-"])]
     pub stdin: Option<String>,
     #[command(flatten)]
@@ -139,6 +179,7 @@ pub struct Comment {
 
 #[derive(Args, Debug)]
 pub struct List {
+    /// Only this project's cards (its id)
     #[arg(long)]
     pub project: Option<String>,
     /// open or closed
@@ -154,10 +195,12 @@ pub struct List {
 
 #[derive(Args, Debug)]
 pub struct Timeline {
+    /// The card: a display id like alpha-42, a ULID or its short form
     pub card: String,
     /// Only events before this seq
     #[arg(long)]
     pub before: Option<i64>,
+    /// The most events to list
     #[arg(long, default_value_t = 50)]
     pub limit: i64,
 }

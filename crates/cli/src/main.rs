@@ -26,7 +26,8 @@ struct Cli {
     /// Print the stable JSON response instead of TOON
     #[arg(long, global = true)]
     json: bool,
-    /// The state database; ~/.tiller/state.db by default
+    /// The state database to open; $TILLER_HOME/state.db by default, and TILLER_HOME is
+    /// ~/.tiller unless you set it. `tiller daemon` refuses a database other than that one
     #[arg(long, global = true, env = "TILLER_DB")]
     db: Option<PathBuf>,
     #[command(subcommand)]
@@ -328,5 +329,59 @@ fn main() -> ExitCode {
             emit(failure.into_response(), json);
             ExitCode::from(exit)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::Cli;
+
+    /// Collects every visible argument and subcommand with no help text.
+    fn missing_help(command: &clap::Command, path: &str, found: &mut Vec<String>) {
+        for arg in command.get_arguments() {
+            if arg.is_hide_set() {
+                continue;
+            }
+            let empty = arg
+                .get_help()
+                .is_none_or(|help| help.to_string().trim().is_empty());
+            if empty {
+                let name = if arg.is_positional() {
+                    format!("<{}>", arg.get_id())
+                } else {
+                    format!("--{}", arg.get_id())
+                };
+                found.push(format!("{path} {name}"));
+            }
+        }
+        for sub in command.get_subcommands() {
+            if sub.is_hide_set() {
+                continue;
+            }
+            let name = format!("{path} {}", sub.get_name());
+            let empty = sub
+                .get_about()
+                .is_none_or(|about| about.to_string().trim().is_empty());
+            if empty {
+                found.push(format!("{name} (subcommand)"));
+            }
+            missing_help(sub, &name, found);
+        }
+    }
+
+    #[test]
+    fn every_visible_arg_and_subcommand_has_help() {
+        let mut command = Cli::command();
+        command.build();
+        let mut found = Vec::new();
+        missing_help(&command, "tiller", &mut found);
+        assert!(
+            found.is_empty(),
+            "{} items have no help text:\n{}",
+            found.len(),
+            found.join("\n")
+        );
     }
 }

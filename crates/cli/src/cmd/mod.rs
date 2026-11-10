@@ -36,7 +36,9 @@ use crate::app::{Failure, body_input};
 /// `--key <k>` on every keyed command (`protocol.md` 6.3).
 #[derive(Args, Debug, Clone, Default)]
 pub struct KeyArg {
-    /// Idempotency key; repeating the command with it has no second effect
+    /// Idempotency key. Without --key every owner run is a new request. Pass the same --key
+    /// with the same arguments to retry safely: the retry replays the first result and
+    /// changes nothing. The same key with other arguments is refused
     #[arg(long)]
     pub key: Option<String>,
 }
@@ -44,21 +46,28 @@ pub struct KeyArg {
 /// The card fields `card create` and `ask resolve new` take.
 #[derive(Args, Debug, Clone, Default)]
 pub struct CardFields {
+    /// ship, scout, question or ops
     #[arg(long)]
     pub kind: Option<CardKind>,
+    /// The card's title
     #[arg(long)]
     pub title: Option<String>,
     /// 0 (highest) to 4; the default is 2
     #[arg(long)]
     pub priority: Option<i64>,
+    /// The card's brief in markdown; - reads standard input
     #[arg(long)]
     pub body: Option<String>,
+    /// A file holding the body, or - for standard input; not with --body
     #[arg(long)]
     pub body_file: Option<std::path::PathBuf>,
+    /// S, M or L
     #[arg(long)]
     pub size: Option<Size>,
+    /// What done looks like, in words
     #[arg(long)]
     pub acceptance: Option<String>,
+    /// A free-text label, like tiller-bug
     #[arg(long)]
     pub category: Option<String>,
     /// The card this one fixes

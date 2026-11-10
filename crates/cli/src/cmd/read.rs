@@ -32,6 +32,7 @@ const FALSE_BLOCK_WINDOW_MINUTES: i64 = 2;
 
 #[derive(Args, Debug)]
 pub struct BoardArgs {
+    /// Only this project's cards (its id)
     #[arg(long)]
     pub project: Option<String>,
     /// all, active (working or landing) or needs (waits on you, or asked)
@@ -55,6 +56,7 @@ pub enum Filter {
 
 #[derive(Args, Debug)]
 pub struct AgentsArgs {
+    /// Only this host's label
     #[arg(long)]
     pub host: Option<String>,
 }
@@ -71,8 +73,10 @@ pub struct EventsArgs {
     /// Only events after this seq
     #[arg(long, default_value_t = 0)]
     pub since: i64,
+    /// Only this card's events: a display id like alpha-42, a ULID or its short form
     #[arg(long)]
     pub card: Option<String>,
+    /// The most events to list
     #[arg(long, default_value_t = 100)]
     pub limit: i64,
     /// Keep printing new events as JSON lines until interrupted
@@ -82,6 +86,7 @@ pub struct EventsArgs {
 
 #[derive(Args, Debug)]
 pub struct IntakeStatsArgs {
+    /// The window to measure, in days
     #[arg(long, default_value_t = 7)]
     pub days: i64,
 }
