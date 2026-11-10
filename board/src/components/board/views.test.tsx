@@ -561,6 +561,43 @@ test("Open in herdr asks the daemon to focus that agent, and says where to find 
   );
 });
 
+function laneToggle(header: HTMLElement) {
+  return within(header).getByRole("button", { expanded: true });
+}
+
+test("the lane header folds through one button around the chevron and name, and its actions stay beside it", async () => {
+  stubApi("degraded");
+  await renderApp("degraded");
+
+  const lane = screen.getByTestId("lane-kiln");
+  const header = lane.querySelector(".lane-h") as HTMLElement;
+  // The bar is not itself a button: nothing interactive nests in another.
+  expect(header.getAttribute("role")).toBeNull();
+  expect(header.getAttribute("tabindex")).toBeNull();
+  const toggle = within(header).getByRole("button", { name: "kiln" });
+  expect(toggle.tagName).toBe("BUTTON");
+  expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  expect(toggle.querySelector("button")).toBeNull();
+  for (const name of ["New card", "Start orchestrator"]) {
+    const action = within(header).getByRole("button", { name });
+    expect(toggle.contains(action)).toBe(false);
+  }
+
+  // The button folds and unfolds the lane, once per click, and the mouse can
+  // also click the bar around it.
+  fireEvent.click(toggle);
+  await waitFor(() => expect(lane.getAttribute("data-open")).toBe("false"));
+  expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  fireEvent.click(toggle);
+  await waitFor(() => expect(lane.getAttribute("data-open")).toBe("true"));
+  fireEvent.click(header.querySelector(".c") as HTMLElement);
+  await waitFor(() => expect(lane.getAttribute("data-open")).toBe("false"));
+  // An action in the bar never folds it.
+  fireEvent.click(within(header).getByRole("button", { name: "New card" }));
+  await screen.findByRole("dialog", { name: "New card in kiln" });
+  expect(lane.getAttribute("data-open")).toBe("false");
+});
+
 test("Start orchestrator on a lane with none posts the start and leaves the lane open", async () => {
   const posted = stubApi("degraded");
   await renderApp("degraded");
@@ -575,7 +612,7 @@ test("Start orchestrator on a lane with none posts the start and leaves the lane
   await waitFor(() =>
     expect(screen.getByTestId("toast").textContent).toContain("Started the kiln orchestrator"),
   );
-  expect(header.getAttribute("aria-expanded")).toBe("true");
+  expect(laneToggle(header).getAttribute("aria-expanded")).toBe("true");
   // A lane with a live orchestrator offers no start.
   const alpha = screen.getByTestId("lane-alpha").querySelector(".lane-h") as HTMLElement;
   expect(within(alpha).queryByRole("button", { name: "Start orchestrator" })).toBeNull();
@@ -601,7 +638,7 @@ test("New card files a card for its lane's project and never folds the lane", as
     body: { project: "kiln", kind: "ship", title: "Fix the flaky upload", priority: 2, body: null },
   });
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  expect(header.getAttribute("aria-expanded")).toBe("true");
+  expect(laneToggle(header).getAttribute("aria-expanded")).toBe("true");
 });
 
 test("no lane offers Start orchestrator while the agents cannot be read", async () => {

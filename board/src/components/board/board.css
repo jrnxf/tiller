@@ -318,6 +318,22 @@
 .lane-h:hover {
   background: var(--bg-hover);
 }
+/* The chevron and the name: the one control that folds the lane. It looks
+   like the bar it sits in. */
+.lane-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  height: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
 .lane-h .chev {
   width: 12px;
   height: 12px;
@@ -356,6 +372,9 @@
   padding-left: 6px;
 }
 @media (max-width: 480px) {
+  .lane-toggle {
+    flex: 0 1 auto;
+  }
   .lane-h .nm {
     flex: 0 1 auto;
     min-width: 0;

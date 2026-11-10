@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import type { CSSProperties, KeyboardEvent, MouseEvent } from "react";
+import type { CSSProperties, MouseEvent } from "react";
 
 import type { AgentRow, Machine, Project } from "../../lib/api-types";
 import { agentActivity } from "./activity";
@@ -271,21 +271,25 @@ export function Lane({
     >
       <div
         className="lane-h"
-        role="button"
-        tabIndex={0}
-        aria-expanded={open}
         style={{ "--pc": color } as CSSProperties}
+        // A click anywhere on the bar folds the lane, for the mouse. The
+        // button inside is the control for the keyboard and for assistive
+        // tools; the actions in the bar stop their own clicks.
         onClick={() => toggleLane(key)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            toggleLane(key);
-          }
-        }}
       >
-        <ChevronDownIcon />
-        <span className="pdot" />
-        <span className="nm">{project.name}</span>
+        <button
+          type="button"
+          className="lane-toggle"
+          aria-expanded={open}
+          onClick={(event: MouseEvent) => {
+            event.stopPropagation();
+            toggleLane(key);
+          }}
+        >
+          <ChevronDownIcon />
+          <span className="pdot" />
+          <span className="nm">{project.name}</span>
+        </button>
         <span className="c">{openCount(tiles)} open</span>
         {takesBugs ? <span className="lab sm acc takes-bugs">Takes Tiller bugs</span> : null}
         {remoteHost ? (
@@ -321,7 +325,6 @@ export function Lane({
             event.stopPropagation();
             setFiling(true);
           }}
-          onKeyDown={(event: KeyboardEvent) => event.stopPropagation()}
         >
           <PlusIcon />
           <span>New card</span>

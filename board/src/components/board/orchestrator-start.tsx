@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import type { KeyboardEvent, MouseEvent } from "react";
+import type { MouseEvent } from "react";
 
 import { agentsPath, queryKeyFor } from "../../lib/queries";
 import { ActionError, sendMutation } from "../attention/api";
@@ -47,8 +47,8 @@ async function startOrchestrator(projectId: string, host?: string): Promise<Star
   }
 }
 
-// The lane header's Start orchestrator. It sits inside the header's toggle, so
-// a click or key on it never folds the lane. A peer's project starts on that
+// The lane header's Start orchestrator. It sits in the header bar, so a
+// click on it never folds the lane. A peer's project starts on that
 // host (`host`); `off` says why the lane cannot act, and turns the button off.
 export function StartOrchestratorButton({
   projectId,
@@ -95,7 +95,6 @@ export function StartOrchestratorButton({
       disabled={starting || off !== null}
       title={off ?? `Start the ${projectName} orchestrator in herdr${host ? ` on ${host}` : ""}`}
       onClick={start}
-      onKeyDown={(event: KeyboardEvent) => event.stopPropagation()}
     >
       {starting ? "Starting..." : "Start orchestrator"}
     </button>
