@@ -217,7 +217,14 @@ fn edit(app: &App, args: Edit) -> Done {
         dispatch_override,
     };
     let mut store = app.write()?;
-    // Natural at the current rev; only an explicit key replays at a stale one.
+    // Natural at the current rev; only an explicit key replays at a stale one,
+    // and only for the same edit (`protocol.md` 6.3).
+    if let Some(key) = &args.key.key {
+        app.bind_args(
+            key,
+            &json!({"card": args.card, "rev": args.rev, "edit": edit}),
+        );
+    }
     let applied = store.card_edit(
         &app.ctx(),
         args.key.key.as_deref(),

@@ -4,7 +4,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -286,6 +286,10 @@ pub struct App {
     /// at once, but telling the owner from a script walks the parent chain,
     /// which a read-only command never needs.
     caller: OnceLock<Caller>,
+    /// The key this run resolved and the normalized arguments it carries
+    /// (`key`), so every [`App::ctx`] after it sends them with the key and the
+    /// store refuses the same key with other arguments (`protocol.md` 6.3).
+    keyed: Mutex<Option<(String, Value)>>,
 }
 
 /// The resolved caller.
@@ -310,7 +314,12 @@ impl App {
         } else if let Some(retro) = named("TILLER_RETRO_ID") {
             let _ = caller.set(Caller::of(Actor::Curator(retro)));
         }
-        Self { home, db, caller }
+        Self {
+            home,
+            db,
+            caller,
+            keyed: Mutex::new(None),
+        }
     }
 
     /// An `App` whose caller is already known.
@@ -322,7 +331,12 @@ impl App {
     ) -> Self {
         let caller = OnceLock::new();
         let _ = caller.set(Caller { actor, not_owner });
-        Self { home, db, caller }
+        Self {
+            home,
+            db,
+            caller,
+            keyed: Mutex::new(None),
+        }
     }
 
     fn caller(&self) -> &Caller {
@@ -349,8 +363,27 @@ impl App {
         self.caller().not_owner.as_deref()
     }
 
+    /// The context of a mutation. After [`App::key`] it also carries the
+    /// arguments that key was resolved for.
     pub fn ctx(&self) -> Ctx {
-        Ctx::new(self.actor().clone())
+        let ctx = Ctx::new(self.actor().clone());
+        let keyed = self
+            .keyed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match keyed.as_ref() {
+            Some((key, normalized)) => ctx.with_args(key, normalized),
+            None => ctx,
+        }
+    }
+
+    /// Binds `normalized` to `key` for the contexts this run builds next.
+    pub fn bind_args(&self, key: &str, normalized: &Value) {
+        *self
+            .keyed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((key.to_owned(), normalized.clone()));
     }
 
     /// Opens `state.db` for a read. A missing database is not created by a
@@ -474,7 +507,9 @@ impl App {
 
     /// The key for a keyed command (6.3): the caller's `--key`, else for a
     /// Tiller session one derived from its arguments and turn, else a fresh
-    /// one the response prints so a deliberate retry can repeat it.
+    /// one the response prints so a deliberate retry can repeat it. It also
+    /// binds `normalized` to the key, so the same key with other arguments is
+    /// refused, not replayed.
     pub fn key(
         &self,
         store: &Store,
@@ -483,6 +518,7 @@ impl App {
         explicit: &Option<String>,
     ) -> Result<Keyed, Failure> {
         if let Some(key) = explicit {
+            self.bind_args(key, normalized);
             return Ok(Keyed {
                 key: key.clone(),
                 minted: false,
@@ -492,15 +528,13 @@ impl App {
             let digest = Sha256::digest(normalized.to_string().as_bytes());
             let hash: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
             let anchor = turn_anchor(store, session)?;
-            return Ok(Keyed {
-                key: format!("auto:{session}:{command}:{hash}:{anchor}"),
-                minted: false,
-            });
+            let key = format!("auto:{session}:{command}:{hash}:{anchor}");
+            self.bind_args(&key, normalized);
+            return Ok(Keyed { key, minted: false });
         }
-        Ok(Keyed {
-            key: format!("shell:{}", tiller_core::ids::new_ulid()),
-            minted: true,
-        })
+        let key = format!("shell:{}", tiller_core::ids::new_ulid());
+        self.bind_args(&key, normalized);
+        Ok(Keyed { key, minted: true })
     }
 }
 

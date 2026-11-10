@@ -283,7 +283,10 @@ pub fn approve(app: &App, args: Approve) -> Done {
                     ask.id
                 )));
             }
-            (Ctx::new(Actor::Owner), Some(ask))
+            (
+                Ctx::new(Actor::Owner).with_args(&keyed.key, &normalized),
+                Some(ask),
+            )
         }
     };
     let decision = Decision {
