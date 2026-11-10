@@ -721,6 +721,8 @@ async fn run_link(
         home,
     };
     let mut attempt = 0;
+    // Refusals in a row since the last session that was welcomed.
+    let mut refusals: usize = 0;
     let mut welcomed = false;
     loop {
         let began = Instant::now();
@@ -733,6 +735,7 @@ async fn run_link(
                 if began.elapsed() >= timing.live {
                     attempt = 0;
                 }
+                refusals = 0;
                 link.set(LinkState::Down, None, Some(error)).await;
                 attempt += 1;
                 timing.backoff(attempt - 1)
@@ -750,15 +753,19 @@ async fn run_link(
                 timing.backoff(attempt - 1)
             }
             Ended::Refused { reason, message } => {
-                let retry = matches!(reason.as_str(), "clock_skew" | "version");
+                let quick = matches!(reason.as_str(), "clock_skew" | "version");
                 link.set(LinkState::Refused, Some(reason), Some(message))
                     .await;
-                if !retry {
-                    // The owner pairs again; that changes the key file, and
-                    // the supervisor starts a new task.
-                    return;
+                if quick {
+                    timing.refused_retry
+                } else {
+                    // The peer's owner may clear it (accept turned back on,
+                    // the key accepted again) with no word to this host, so
+                    // the link asks again, slowly. Pairing again changes
+                    // the key file, and the supervisor starts a new task.
+                    refusals += 1;
+                    timing.refused_backoff[(refusals - 1).min(timing.refused_backoff.len() - 1)]
                 }
-                timing.refused_retry
             }
             Ended::HostChanged(message) => {
                 link.set(

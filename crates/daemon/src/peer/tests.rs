@@ -54,6 +54,7 @@ fn quick() -> Timing {
         skew: Duration::from_secs(120),
         backoff: [ms(50); 4],
         refused_retry: ms(200),
+        refused_backoff: [ms(200); 4],
         tick: ms(25),
         supervise: ms(100),
     }
@@ -1043,6 +1044,43 @@ fn revoked_key_refused() {
     assert!(
         matches!(again.next(), Frame::Refused { reason, .. } if reason == "revoked"),
         "a revoked key opened a link"
+    );
+}
+
+/// A refusal the owner clears on the peer (here `federation.accept`
+/// turned back on) does not end the link for good: it tries again on its
+/// slow backoff and goes `live`, with no restart of the daemon.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_link_tries_again_slowly() {
+    let pair = pair();
+    let config = pair.peer.dir.path().join("config.toml");
+    std::fs::write(&config, "[federation]\naccept = false\n").unwrap();
+    let connects = Arc::new(AtomicUsize::new(0));
+    let (peers, _stop) = start(
+        pair.board.dir.path(),
+        Socket {
+            home: pair.peer.dir.path().to_owned(),
+            connects: connects.clone(),
+        },
+    );
+    until("the accept_off refusal", || {
+        let federation = peers.federation();
+        let view = federation.peers.first()?;
+        (view.link == LinkState::Refused && view.link_reason.as_deref() == Some("accept_off"))
+            .then_some(())
+    })
+    .await;
+    std::fs::write(&config, "[federation]\naccept = true\n").unwrap();
+    until("the link to come back", || live_with_rows(&peers)).await;
+
+    // The real delays are slow: a revoked key or a peer that turned links
+    // off is asked again after minutes, never in a tight loop.
+    let real = Timing::default();
+    assert!(real.refused_backoff[0] >= Duration::from_secs(300));
+    assert!(
+        real.refused_backoff
+            .windows(2)
+            .all(|pair| pair[0] <= pair[1])
     );
 }
 

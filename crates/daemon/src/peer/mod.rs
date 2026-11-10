@@ -247,6 +247,10 @@ pub struct Timing {
     pub backoff: [Duration; 4],
     /// The retry delay for a `clock_skew` or `version` refusal.
     pub refused_retry: Duration,
+    /// Retry delays after any other refusal (`accept_off`, `revoked` and
+    /// the rest the peer's owner must clear); the last repeats. Slow, so a
+    /// revoked key never hammers the peer.
+    pub refused_backoff: [Duration; 4],
     /// How often a link checks its frame age, and `peer serve` re-reads
     /// `federation.accept` and the key row.
     pub tick: Duration,
@@ -267,6 +271,7 @@ impl Default for Timing {
             skew: s(120),
             backoff: [s(5), s(15), s(30), s(60)],
             refused_retry: s(60),
+            refused_backoff: [s(300), s(600), s(1200), s(1800)],
             tick: s(1),
             supervise: s(2),
         }
