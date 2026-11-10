@@ -612,6 +612,71 @@ async fn owner_gate(State(state): State<AppState>, mut request: Request, next: N
     next.run(request).await
 }
 
+tokio::task_local! {
+    /// The normalized arguments of the API request this task serves
+    /// ([`bind_args`]).
+    static REQUEST_ARGS: Value;
+}
+
+/// The most body a request may send, as axum's default extractor limit.
+const BODY_LIMIT: usize = 2 * 1024 * 1024;
+
+/// Binds an API write's idempotency key to its arguments (`protocol.md`
+/// 6.3): the method, path and body of every request that is not a read are
+/// kept, in a normalized form, for [`board_ctx`] to record with the key. A
+/// JSON body is normalized by parsing it, so key order and whitespace do not
+/// count. Its top-level `rev` is left out: it is a precondition, not an
+/// argument, and a retry after the write landed may carry the newer one. A
+/// retry must resend the same request, and another request under the same
+/// key is refused.
+async fn bind_args(request: Request, next: Next) -> Response {
+    if matches!(*request.method(), Method::GET | Method::HEAD)
+        || !request.uri().path().starts_with("/api/")
+    {
+        return next.run(request).await;
+    }
+    let (parts, body) = request.into_parts();
+    let bytes = match axum::body::to_bytes(body, BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "usage",
+                "the request body is unreadable or over 2 MiB",
+            )
+            .into_response();
+        }
+    };
+    let mut sent = serde_json::from_slice::<Value>(&bytes)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
+    if let Some(fields) = sent.as_object_mut() {
+        fields.remove("rev");
+    }
+    let args = json!({
+        "method": parts.method.as_str(),
+        "path": parts.uri.path(),
+        "query": parts.uri.query(),
+        "body": sent,
+    });
+    let request = Request::from_parts(parts, Body::from(bytes));
+    REQUEST_ARGS.scope(args, next.run(request)).await
+}
+
+/// The normalized arguments of the request this task serves, when it is an
+/// API write. Read it before moving work to the blocking pool.
+pub(crate) fn request_args() -> Option<Value> {
+    REQUEST_ARGS.try_with(Clone::clone).ok()
+}
+
+/// The board's context for a write under `key`, bound to `args`.
+pub(crate) fn board_ctx(key: &str, args: Option<&Value>) -> Ctx {
+    let ctx = Ctx::new(Actor::Board).with_key(key.to_owned());
+    match args {
+        Some(args) => ctx.with_args(key.to_owned(), args),
+        None => ctx,
+    }
+}
+
 /// A JSON body, refused as 400 when it does not parse.
 pub(crate) fn body<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, ApiError> {
     serde_json::from_slice(bytes).map_err(|error| ApiError::usage(format!("bad body: {error}")))
@@ -636,12 +701,13 @@ async fn mutate(
     }
     let db = state.db();
     let damage = state.0.damage.clone();
+    let args = request_args();
     let joined = tokio::task::spawn_blocking(move || {
         if !db.exists() {
             return Err(uninitialized());
         }
         let done = Store::open_current(&db).and_then(|mut store| {
-            let ctx = Ctx::new(Actor::Board).with_key(key.clone());
+            let ctx = board_ctx(&key, args.as_ref());
             mutation(&mut store, &ctx, &key)
         });
         if let Err(error) = &done {
@@ -790,6 +856,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/logout", post(logout))
         .route("/login/{token}", get(login))
         .fallback(app_shell)
+        .layer(middleware::from_fn(bind_args))
         .layer(middleware::from_fn_with_state(state.clone(), owner_gate))
         .layer(middleware::from_fn_with_state(state.clone(), host_check))
         .with_state(state)
@@ -2134,6 +2201,7 @@ async fn start_orchestrator(
     let key = mutation.key().to_owned();
     let db = state.db();
     let damage = state.0.damage.clone();
+    let args = request_args();
     let joined = tokio::task::spawn_blocking(move || {
         if !db.exists() {
             return Err(uninitialized());
@@ -2142,7 +2210,7 @@ async fn start_orchestrator(
         start_here(
             Some(starter.as_ref()),
             &mut store,
-            &Ctx::new(Actor::Board).with_key(key),
+            &board_ctx(&key, args.as_ref()),
             &id,
             |error| damage.suspect(&db, error),
         )
@@ -4477,6 +4545,78 @@ pub(crate) mod tests {
             .headers
             .get(header::CACHE_CONTROL)
             .and_then(|v| v.to_str().ok())
+    }
+
+    /// A board key replays only for the request it was first used with:
+    /// the same method, path and body (in any key order) replay, another
+    /// body under that key is refused and writes nothing.
+    #[tokio::test]
+    async fn a_board_key_replays_only_its_own_request() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let app = app(home, Assets::of::<Fixture>());
+        let cookie = owner_cookie(home);
+        let headers = [("cookie", cookie.as_str())];
+        let first = send(&app, create(&headers)).await;
+        assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+        let made = cards(&fleet);
+
+        // A true retry, its fields in another order, replays.
+        let mut retry = mutation(
+            "POST",
+            "/api/v1/cards",
+            json!({"title": "Undo strokes", "kind": "ship", "project": "alpha", "idempotency_key": "k-1"}),
+            &headers,
+        );
+        *retry.body_mut() = Body::from(
+            r#"{ "title": "Undo strokes", "kind": "ship", "project": "alpha", "idempotency_key": "k-1" }"#,
+        );
+        let again = send(&app, retry).await;
+        assert_eq!(again.status, StatusCode::OK, "{}", again.body);
+        let body: Value = serde_json::from_str(&again.body).unwrap();
+        assert_eq!(body["replayed"], true, "{body}");
+
+        // The same key with another title is refused.
+        let other = send(
+            &app,
+            mutation(
+                "POST",
+                "/api/v1/cards",
+                json!({"idempotency_key": "k-1", "project": "alpha", "kind": "ship", "title": "Redo strokes"}),
+                &headers,
+            ),
+        )
+        .await;
+        assert_eq!(
+            other.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            other.body
+        );
+        assert!(other.body.contains("other arguments"), "{}", other.body);
+        assert_eq!(cards(&fleet), made);
+
+        // A transition's `rev` is a precondition, not an argument: a retry
+        // that read the newer rev its own write made still replays.
+        let made_body: Value = serde_json::from_str(&first.body).unwrap();
+        let card = &made_body["data"]["card"];
+        let hold = format!("/api/v1/cards/{}/hold", card["id"].as_str().unwrap());
+        let rev = card["rev"].as_i64().unwrap();
+        let held = |rev: i64| {
+            mutation(
+                "POST",
+                &hold,
+                json!({"idempotency_key": "k-hold", "until": "2031-01-01T00:00:00Z",
+                       "reason": "waiting on the vendor", "rev": rev}),
+                &headers,
+            )
+        };
+        let once = send(&app, held(rev)).await;
+        assert_eq!(once.status, StatusCode::OK, "{}", once.body);
+        let twice = send(&app, held(rev + 1)).await;
+        assert_eq!(twice.status, StatusCode::OK, "{}", twice.body);
+        let body: Value = serde_json::from_str(&twice.body).unwrap();
+        assert_eq!(body["replayed"], true, "{body}");
     }
 
     /// The owner check reads `board-owner` on the blocking pool: a slow

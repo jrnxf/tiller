@@ -274,14 +274,10 @@ async fn an_edit_commits_its_one_file_and_nothing_else() {
     let home = home();
     others(&home);
     let before = files(home.path());
-    let done = home
-        .add(
-            "k-1",
-            "alpha",
-            RULE_SECTION,
-            "Run the slow suite before landing",
-        )
-        .await;
+    let first = json!({"project": "alpha", "op": "add", "section": RULE_SECTION,
+                       "text": "Run the slow suite before landing",
+                       "base_blob": home.blob("alpha").await});
+    let done = ok(&home.edit("k-1", first.clone()).await);
     assert!(!done.replayed);
     only(&home, &before, ALPHA);
     assert_eq!(
@@ -304,16 +300,9 @@ async fn an_edit_commits_its_one_file_and_nothing_else() {
         home.git(&["rev-parse", &format!("HEAD:{ALPHA}")]).trim()
     );
 
-    // The same key again changes nothing.
+    // The same key with the same request again changes nothing.
     let head = home.git(&["rev-parse", "HEAD"]);
-    let again = home
-        .add(
-            "k-1",
-            "alpha",
-            RULE_SECTION,
-            "Run the slow suite before landing",
-        )
-        .await;
+    let again = ok(&home.edit("k-1", first).await);
     assert!(again.replayed);
     assert_eq!(home.git(&["rev-parse", "HEAD"]), head);
 

@@ -29,7 +29,8 @@ use utoipa::{IntoParams, ToSchema};
 use self::apply::{Lock, Repo};
 use self::dto::{MemoryLanded, MemoryResponse, MemoryRevision};
 use crate::api::{
-    ApiError, ApiResult, AppState, body, guard, key, not_forwarded, read, read_only, uninitialized,
+    ApiError, ApiResult, AppState, board_ctx, body, guard, key, not_forwarded, read, read_only,
+    request_args, uninitialized,
 };
 use crate::dto::{ErrorBody, MutationResponse, Receipt};
 
@@ -231,7 +232,9 @@ impl Writer {
 /// board's actor.
 async fn write(
     state: &AppState,
-    change: impl FnOnce(&mut Writer, &str) -> tiller_core::Result<Value> + Send + 'static,
+    change: impl FnOnce(&mut Writer, &str, Option<&Value>) -> tiller_core::Result<Value>
+    + Send
+    + 'static,
     key: String,
 ) -> ApiResult<MutationResponse> {
     if let Some(reason) = state.0.damage.reason() {
@@ -240,13 +243,14 @@ async fn write(
     let db = state.db();
     let home = state.0.home.clone();
     let damage = state.0.damage.clone();
+    let args = request_args();
     let joined = tokio::task::spawn_blocking(move || {
         if !db.exists() {
             return Err(uninitialized());
         }
         let done = Store::open_current(&db).and_then(|store| {
             let mut writer = Writer::open(store, &home)?;
-            let data = change(&mut writer, &key)?;
+            let data = change(&mut writer, &key, args.as_ref())?;
             Ok((data, writer.events, writer.replayed))
         });
         if let Err(error) = &done {
@@ -280,10 +284,6 @@ pub(crate) fn refused(entity: &'static str, id: &str, fact: impl Into<String>) -
         id: id.to_owned(),
         fact: fact.into(),
     }
-}
-
-fn board(key: &str) -> Ctx {
-    Ctx::new(Actor::Board).with_key(key.to_owned())
 }
 
 fn home(state: &AppState) -> PathBuf {
@@ -370,11 +370,11 @@ pub(crate) async fn edit(
     };
     write(
         &state,
-        move |w, key| {
+        move |w, key, args| {
             let path = document_path(&request.project);
             let file = w.repo.state(&path, &w.list)?;
             let edited = w.store.mem_edit(
-                &board(key),
+                &board_ctx(key, args),
                 &request.project,
                 &op,
                 &request.base_blob,
@@ -424,7 +424,7 @@ pub(crate) async fn decide(
     }
     write(
         &state,
-        move |w, key| {
+        move |w, key, args| {
             // Per document, the blob it had when the batch began and what it
             // is after this batch's own commits: a later decision shown
             // against the first is decided against the second.
@@ -438,7 +438,7 @@ pub(crate) async fn decide(
                     .iter()
                     .find(|(doc, from, _)| *doc == path && *from == shown)
                     .map_or(shown.clone(), |(_, _, to)| to.clone());
-                let ctx = board(&format!("{key}:{at}"));
+                let ctx = board_ctx(&format!("{key}:{at}"), args);
                 let after: Vec<String> = kept
                     .iter()
                     .filter(|(doc, _)| *doc == path)
@@ -478,7 +478,7 @@ pub(crate) async fn undo(
     let key = key(&request.idempotency_key)?;
     write(
         &state,
-        move |w, key| {
+        move |w, key, args| {
             let change = w.store.memory_change(&proposal)?;
             let path = document_path(&change.project_id);
             let file = w.repo.state(&path, &w.list)?;
@@ -493,7 +493,7 @@ pub(crate) async fn undo(
                 _ => None,
             };
             let undone = w.store.mem_undo(
-                &board(key),
+                &board_ctx(key, args),
                 &proposal,
                 &request.base_blob,
                 &file,
