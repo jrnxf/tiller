@@ -16,6 +16,10 @@ fn quartile_ms(world: &World, args: &[&str]) -> f64 {
         let status = Command::new(env!("CARGO_BIN_EXE_tiller"))
             .env("TILLER_HOME", world.home())
             .args(args)
+            // A terminal on stdin is the owner check's cue to walk the process
+            // chain, so a run from `cargo test` in a shell would time more than
+            // one under nextest. Pin it to the same input everywhere.
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .status()
             .unwrap();

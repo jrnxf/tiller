@@ -80,10 +80,28 @@ pub fn is_claude_code(process: &Process) -> bool {
 
 /// The caller's ancestors, nearest first, up to but not including pid 1.
 pub fn ancestors() -> std::io::Result<Vec<Process>> {
+    #[cfg(target_os = "linux")]
+    let read = read_process;
+    #[cfg(not(target_os = "linux"))]
+    let table = process_table()?;
+    #[cfg(not(target_os = "linux"))]
+    let read = |pid: u32| {
+        table
+            .get(&pid)
+            .cloned()
+            .ok_or_else(|| std::io::Error::other(format!("pid {pid}: no such process")))
+    };
+    walk(std::os::unix::process::parent_id(), read)
+}
+
+fn walk(
+    start: u32,
+    mut read: impl FnMut(u32) -> std::io::Result<(u32, Process)>,
+) -> std::io::Result<Vec<Process>> {
     let mut chain = Vec::new();
-    let mut pid = std::os::unix::process::parent_id();
+    let mut pid = start;
     while pid > 1 && chain.len() < 128 {
-        let (parent, process) = read_process(pid)?;
+        let (parent, process) = read(pid)?;
         chain.push(process);
         pid = parent;
     }
@@ -111,23 +129,44 @@ fn read_process(pid: u32) -> std::io::Result<(u32, Process)> {
     Ok((parent, Process { pid, comm, args }))
 }
 
+/// Off Linux there is no `/proc`, and the workspace forbids the unsafe code
+/// that `sysctl` or `libproc` need, so the table comes from `ps`. It runs
+/// twice for the whole chain, not three times per ancestor, and only when a
+/// command needs to know whether the caller is the owner.
 #[cfg(not(target_os = "linux"))]
-fn read_process(pid: u32) -> std::io::Result<(u32, Process)> {
+fn process_table() -> std::io::Result<std::collections::HashMap<u32, (u32, Process)>> {
     let ps = |field: &str| -> std::io::Result<String> {
         let output = std::process::Command::new("ps")
-            .args(["-o", field, "-p", &pid.to_string()])
+            .args(["-ax", "-o", &format!("pid=,ppid=,{field}=")])
             .output()?;
         if !output.status.success() {
-            return Err(std::io::Error::other(format!("ps found no pid {pid}")));
+            return Err(std::io::Error::other("ps failed"));
         }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     };
-    let parent = ps("ppid=")?
-        .parse()
-        .map_err(|_| std::io::Error::other(format!("pid {pid}: no parent pid")))?;
-    let comm = ps("comm=")?;
-    let args = ps("args=")?;
-    Ok((parent, Process { pid, comm, args }))
+    // `pid ppid rest`, where the rest (a command name or the arguments) may
+    // hold spaces.
+    let rows = |text: &str| -> Vec<(u32, u32, String)> {
+        text.lines()
+            .filter_map(|line| {
+                let mut fields = line.trim_start().splitn(3, char::is_whitespace);
+                let pid = fields.next()?.parse().ok()?;
+                let parent = fields.next()?.parse().ok()?;
+                Some((pid, parent, fields.next()?.trim().to_owned()))
+            })
+            .collect()
+    };
+    let args: std::collections::HashMap<u32, String> = rows(&ps("args")?)
+        .into_iter()
+        .map(|(pid, _, args)| (pid, args))
+        .collect();
+    Ok(rows(&ps("comm")?)
+        .into_iter()
+        .map(|(pid, parent, comm)| {
+            let args = args.get(&pid).cloned().unwrap_or_default();
+            (pid, (parent, Process { pid, comm, args }))
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -184,6 +223,31 @@ mod tests {
             unreadable.contains("parent chain"),
             "an unreadable chain is not the owner"
         );
+    }
+
+    #[test]
+    fn walk_follows_parents_and_stops_before_pid_one() {
+        let parents = [(30, 20, "zsh"), (20, 10, "claude"), (10, 1, "launchd")];
+        let chain = walk(30, |pid| {
+            let (_, parent, comm) = parents
+                .iter()
+                .find(|(candidate, ..)| *candidate == pid)
+                .ok_or_else(|| std::io::Error::other("gone"))?;
+            Ok((*parent, process_at(pid, comm)))
+        })
+        .unwrap();
+        let comms: Vec<_> = chain.iter().map(|process| process.comm.as_str()).collect();
+        assert_eq!(comms, ["zsh", "claude", "launchd"]);
+        assert_eq!(claude_ancestor(&chain), Some(20));
+        assert!(walk(30, |_| Err(std::io::Error::other("gone"))).is_err());
+    }
+
+    fn process_at(pid: u32, comm: &str) -> Process {
+        Process {
+            pid,
+            comm: comm.into(),
+            args: comm.into(),
+        }
     }
 
     #[test]

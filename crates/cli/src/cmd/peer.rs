@@ -91,7 +91,7 @@ pub fn run(app: &App, cmd: PeerCmd) -> Done {
         // for the owner's (G45).
         PeerCmd::Accept {
             unattended: true, ..
-        } if app.actor == Actor::Script => {}
+        } if *app.actor() == Actor::Script => {}
         PeerCmd::Accept {
             unattended: true, ..
         } => app.require_owner("tiller peer accept --unattended")?,
@@ -157,12 +157,12 @@ pub fn serve(app: &App, from: String) -> Result<ExitCode, Failure> {
         timing: Timing::default(),
         herdr: Some(super::spawn::configured_herdr(app)?),
         orchestrators: Some(std::sync::Arc::new(super::spawn::BoardStart {
-            app: App {
-                home: app.home.clone(),
-                db: app.db.clone(),
-                actor: app.actor.clone(),
-                not_owner: app.not_owner.clone(),
-            },
+            app: App::with_caller(
+                app.home.clone(),
+                app.db.clone(),
+                app.actor().clone(),
+                app.not_owner().map(str::to_owned),
+            ),
         })),
     };
     let input = std::io::BufReader::new(std::io::stdin());

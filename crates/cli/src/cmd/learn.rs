@@ -136,7 +136,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// exact answers, so a fleet session never gets them (learning-loop.md,
 /// section 10).
 fn refuse_fleet(app: &App, what: &str) -> Result<(), Failure> {
-    match &app.actor {
+    match app.actor() {
         Actor::Session(id) => Err(Failure::forbidden(format!(
             "{what} is for the owner and the curator; session {id} may not"
         ))),
@@ -307,7 +307,7 @@ fn new_session_id() -> Result<String, Failure> {
 
 fn run_curator(app: &App, args: RetroRun) -> Done {
     app.require_owner("tiller retro run")
-        .or_else(|error| match app.actor {
+        .or_else(|error| match app.actor() {
             Actor::Daemon => Ok(()),
             _ => Err(error),
         })?;

@@ -4,6 +4,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -281,10 +282,18 @@ pub struct Keyed {
 pub struct App {
     pub home: PathBuf,
     pub db: PathBuf,
-    pub actor: Actor,
+    /// Who is calling, found on first use: a session id or retro id names it
+    /// at once, but telling the owner from a script walks the parent chain,
+    /// which a read-only command never needs.
+    caller: OnceLock<Caller>,
+}
+
+/// The resolved caller.
+struct Caller {
+    actor: Actor,
     /// Why a caller with no session id is a script and not the owner: the
     /// owner check it failed (`authority.md` section 3).
-    pub not_owner: Option<String>,
+    not_owner: Option<String>,
 }
 
 impl App {
@@ -294,32 +303,54 @@ impl App {
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".tiller")))
             .unwrap_or_else(|| PathBuf::from(".tiller"));
         let db = db.unwrap_or_else(|| home.join("state.db"));
-        let mut not_owner = None;
-        let actor = match std::env::var("TILLER_SESSION_ID") {
-            Ok(id) if !id.is_empty() => Actor::Session(id),
-            _ => match std::env::var("TILLER_RETRO_ID") {
-                Ok(retro) if !retro.is_empty() => Actor::Curator(retro),
-                // A call from an agent shell, cron or `ssh host tiller` is
-                // never the owner, whatever its environment says.
-                _ => match principal::owner_at_terminal() {
-                    Ok(()) => Actor::Owner,
-                    Err(why) => {
-                        not_owner = Some(why);
-                        Actor::Script
-                    }
-                },
-            },
-        };
-        Self {
-            home,
-            db,
-            actor,
-            not_owner,
+        let caller = OnceLock::new();
+        let named = |var: &str| std::env::var(var).ok().filter(|id| !id.is_empty());
+        if let Some(id) = named("TILLER_SESSION_ID") {
+            let _ = caller.set(Caller::of(Actor::Session(id)));
+        } else if let Some(retro) = named("TILLER_RETRO_ID") {
+            let _ = caller.set(Caller::of(Actor::Curator(retro)));
         }
+        Self { home, db, caller }
+    }
+
+    /// An `App` whose caller is already known.
+    pub fn with_caller(
+        home: PathBuf,
+        db: PathBuf,
+        actor: Actor,
+        not_owner: Option<String>,
+    ) -> Self {
+        let caller = OnceLock::new();
+        let _ = caller.set(Caller { actor, not_owner });
+        Self { home, db, caller }
+    }
+
+    fn caller(&self) -> &Caller {
+        self.caller.get_or_init(|| {
+            // A call from an agent shell, cron or `ssh host tiller` is never
+            // the owner, whatever its environment says.
+            match principal::owner_at_terminal() {
+                Ok(()) => Caller::of(Actor::Owner),
+                Err(why) => Caller {
+                    actor: Actor::Script,
+                    not_owner: Some(why),
+                },
+            }
+        })
+    }
+
+    /// The calling principal. The first call may walk the parent chain.
+    pub fn actor(&self) -> &Actor {
+        &self.caller().actor
+    }
+
+    /// Why a caller with no session id is a script, when it is one.
+    pub fn not_owner(&self) -> Option<&str> {
+        self.caller().not_owner.as_deref()
     }
 
     pub fn ctx(&self) -> Ctx {
-        Ctx::new(self.actor.clone())
+        Ctx::new(self.actor().clone())
     }
 
     /// Opens `state.db` for a read. A missing database is not created by a
@@ -330,7 +361,7 @@ impl App {
             // likely cause is the sandbox hiding it: this `tiller` ran inside
             // it (`authority.md` section 7, "Routes and their controls"). The
             // packaged path is the form that works with or without hooks.
-            if matches!(self.actor, Actor::Session(_) | Actor::Curator(_)) {
+            if matches!(self.actor(), Actor::Session(_) | Actor::Curator(_)) {
                 let packaged = crate::stable::tiller_path()
                     .map_or_else(|_| "tiller".into(), |exe| exe.display().to_string());
                 return Err(Failure::from(Error::Refused {
@@ -401,7 +432,7 @@ impl App {
     /// A session id that resolves to no row, or to an ended session, is
     /// refused for every mutation (`authority.md` section 3).
     fn check_session(&self, store: &Store) -> Result<(), Failure> {
-        let Actor::Session(id) = &self.actor else {
+        let Actor::Session(id) = self.actor() else {
             return Ok(());
         };
         let found = resolve_id(store.conn(), "sessions", "session", id)
@@ -416,7 +447,7 @@ impl App {
 
     /// The calling session's row, when the caller is a session.
     pub fn session(&self, store: &Store) -> Result<Option<Session>, Failure> {
-        let Actor::Session(id) = &self.actor else {
+        let Actor::Session(id) = self.actor() else {
             return Ok(None);
         };
         let full = resolve_id(store.conn(), "sessions", "session", id)?;
@@ -426,10 +457,10 @@ impl App {
     /// Refuses every caller but the owner principal, for the owner-only
     /// commands (G22).
     pub fn require_owner(&self, what: &str) -> Result<(), Failure> {
-        if self.actor.is_owner() {
+        if self.actor().is_owner() {
             return Ok(());
         }
-        if let Some(why) = &self.not_owner {
+        if let Some(why) = self.not_owner() {
             return Err(
                 Failure::forbidden(format!("{what} needs the owner at a terminal: {why}"))
                     .hint("run it yourself in a terminal, not from an agent"),
@@ -437,7 +468,7 @@ impl App {
         }
         Err(Failure::forbidden(format!(
             "{what} is owner only; {} may not",
-            self.actor
+            self.actor()
         )))
     }
 
@@ -457,7 +488,7 @@ impl App {
                 minted: false,
             });
         }
-        if let Actor::Session(session) = &self.actor {
+        if let Actor::Session(session) = self.actor() {
             let digest = Sha256::digest(normalized.to_string().as_bytes());
             let hash: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
             let anchor = turn_anchor(store, session)?;
@@ -540,5 +571,14 @@ pub fn body_input(body: Option<String>, file: Option<&Path>) -> Result<Option<St
                 .to_owned(),
         )),
         (None, None) => Ok(None),
+    }
+}
+
+impl Caller {
+    fn of(actor: Actor) -> Self {
+        Self {
+            actor,
+            not_owner: None,
+        }
     }
 }
