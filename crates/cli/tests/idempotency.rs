@@ -543,3 +543,254 @@ fn a_reused_key_with_other_arguments_is_refused() {
     assert!(world.must(&comment).replayed());
     assert_eq!(world.store().last_seq().unwrap(), seq);
 }
+
+/// How a second owner run of the same command ends when it carries no `--key`.
+enum Again {
+    /// It succeeds, says `replayed` and writes nothing. Its answer may name the
+    /// state it finds, like `unhold` with no hold left.
+    Replays,
+    /// It fails with this exit and error code and writes nothing.
+    Fails(i32, &'static str),
+}
+
+/// Runs `args` as the owner twice with no `--key` and checks the second run
+/// against `again`: either way it changes nothing (`protocol.md` 6.3, T5).
+fn run_again(world: &World, args: &[&str], again: &Again) {
+    let first = world.run(args);
+    assert!(first.ok() && first.code == 0, "{args:?}: {}", first.json);
+    let before = (rows(world), world.store().last_seq().unwrap());
+    let second = world.run(args);
+    match again {
+        Again::Replays => {
+            assert!(
+                second.ok() && second.code == 0 && second.replayed(),
+                "{args:?} did not replay: {}",
+                second.json
+            );
+        }
+        Again::Fails(code, error) => assert_eq!(
+            (second.code, second.error_code()),
+            (*code, *error),
+            "{args:?} again: {}",
+            second.json
+        ),
+    }
+    assert_eq!(
+        (rows(world), world.store().last_seq().unwrap()),
+        before,
+        "{args:?} had a second effect"
+    );
+}
+
+/// T5: an owner run with no `--key` is a new request, yet a second run of
+/// every command that changes one thing is harmless: it replays the result or
+/// is refused with the state it finds, and it writes nothing.
+#[test]
+fn a_second_owner_run_without_a_key_is_harmless() {
+    let world = World::initialized();
+    for n in 1..=7 {
+        let kind = if n == 3 { "ops" } else { "ship" };
+        world.must(&[
+            "card",
+            "create",
+            "alpha",
+            "--kind",
+            kind,
+            "--title",
+            &format!("Card {n}"),
+        ]);
+    }
+    let item = world.must(&[
+        "attention",
+        "open",
+        "alpha-7",
+        "--kind",
+        "decision",
+        "--question",
+        "Which way?",
+    ]);
+    let item = item.data()["id"].as_str().unwrap().to_owned();
+    let rev = |sql: &str| -> String {
+        let rev: i64 = world
+            .store()
+            .conn()
+            .query_row(sql, [], |row| row.get(0))
+            .unwrap();
+        rev.to_string()
+    };
+
+    for args in [
+        vec![
+            "card",
+            "hold",
+            "alpha-1",
+            "--until",
+            "2099-01-05",
+            "--reason",
+            "wait",
+        ],
+        vec!["card", "unhold", "alpha-1"],
+        vec![
+            "card",
+            "close",
+            "alpha-2",
+            "--outcome",
+            "abandoned",
+            "--reason",
+            "dropped",
+        ],
+        vec!["card", "reopen", "alpha-2", "--reason", "back"],
+        vec!["card", "complete", "alpha-3", "--evidence", "ran it"],
+        vec!["card", "cancel", "alpha-4", "--reason", "not needed"],
+        vec!["card", "dep", "add", "alpha-5", "alpha-6"],
+        vec!["card", "dep", "rm", "alpha-5", "alpha-6"],
+        vec!["attention", "withdraw", &item, "--reason", "moot"],
+        vec!["config", "set", "answer", "42"],
+        vec!["owner", "set", "tiller"],
+        vec![
+            "project",
+            "add",
+            "beta",
+            "--name",
+            "Beta",
+            "--delivery",
+            "local-only",
+        ],
+        vec!["project", "retire", "beta"],
+        vec!["init", "--host-label", "host-a", "--lane-capacity", "2"],
+    ] {
+        run_again(&world, &args, &Again::Replays);
+    }
+
+    // An edit against a rev is a conflict the second time, since its first
+    // run moved the rev on.
+    let host_rev = rev("SELECT rev FROM hosts");
+    run_again(
+        &world,
+        &["host", "edit", "--rev", &host_rev, "--lane-capacity", "3"],
+        &Again::Fails(4, "conflict"),
+    );
+    let project_rev = rev("SELECT rev FROM projects WHERE id = 'alpha'");
+    run_again(
+        &world,
+        &[
+            "project",
+            "edit",
+            "alpha",
+            "--rev",
+            &project_rev,
+            "--name",
+            "Alpha two",
+        ],
+        &Again::Fails(4, "conflict"),
+    );
+    world.must(&[
+        "project",
+        "add",
+        "gamma",
+        "--name",
+        "Gamma",
+        "--delivery",
+        "local-only",
+    ]);
+    // A delete leaves nothing to find, and away mode is already on.
+    run_again(
+        &world,
+        &["project", "delete", "gamma", "--yes"],
+        &Again::Fails(3, "not_found"),
+    );
+    run_again(
+        &world,
+        &[
+            "away",
+            "start",
+            "--until",
+            "2099-01-05",
+            "--projects",
+            "alpha",
+            "--merge",
+            "none",
+        ],
+        &Again::Fails(5, "refused"),
+    );
+    run_again(&world, &["away", "end"], &Again::Replays);
+}
+
+/// T5: the commands that create a record are new requests on every owner run
+/// with no `--key`, so a second run makes a second record. `--key` is the
+/// retry that does not (`a_shell_caller_gets_a_minted_key_and_repeating_it_replays`).
+#[test]
+fn a_second_owner_run_of_a_command_that_creates_makes_a_second_record() {
+    let world = World::initialized();
+    world.orchestrator();
+    world.must(&[
+        "card", "create", "alpha", "--kind", "ship", "--title", "One",
+    ]);
+    let count = |table: &str| -> i64 {
+        world
+            .store()
+            .conn()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    for (table, args) in [
+        (
+            "cards",
+            vec![
+                "card", "create", "alpha", "--kind", "ship", "--title", "Two",
+            ],
+        ),
+        ("outbox", vec!["card", "comment", "alpha-1", "--text", "hi"]),
+        ("asks", vec!["ask", "note", "alpha", "--text", "hello"]),
+        (
+            "obligations",
+            vec![
+                "obligation",
+                "open",
+                "alpha-1",
+                "--what",
+                "check it",
+                "--due",
+                "2099-01-05",
+            ],
+        ),
+        (
+            "artifacts",
+            vec![
+                "artifact",
+                "add",
+                "alpha-1",
+                "--kind",
+                "page",
+                "--title",
+                "Page",
+                "--url",
+                "https://example.com/page",
+            ],
+        ),
+        (
+            "grants",
+            vec![
+                "grant",
+                "create",
+                "alpha",
+                "--kind",
+                "merge",
+                "--conditions",
+                "{\"v\":1,\"actions\":[\"squash\"]}",
+            ],
+        ),
+    ] {
+        world.must(&args);
+        let once = count(table);
+        let again = world.must(&args);
+        assert!(
+            !again.replayed(),
+            "{args:?} replayed without a key: {}",
+            again.json
+        );
+        assert!(count(table) > once, "{args:?} did not make a second record");
+    }
+}

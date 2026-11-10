@@ -209,3 +209,38 @@ fn land_is_owner_only() {
         out.json
     );
 }
+
+/// T5: a second owner run with no `--key` of `approval request` returns the
+/// open approval, and of `approve` is refused: neither writes anything.
+#[test]
+fn a_second_owner_run_of_request_and_approve_is_harmless() {
+    let world = World::initialized();
+    let approval = requested(&world);
+    let seq = |world: &World| world.store().last_seq().unwrap();
+
+    let again = world.must(&["approval", "request", "alpha-1", "--kind", "merge"]);
+    assert_eq!(again.data()["id"], approval.as_str());
+    let before = seq(&world);
+    let sha = &HEAD[..12];
+    let first = world.must(&["approve", &approval, "--sha", sha]);
+    assert!(!first.replayed(), "{}", first.json);
+    let accepted = seq(&world);
+    assert!(accepted > before);
+    let second = world.run(&["approve", &approval, "--sha", sha]);
+    // Refused with the state it finds. A retry that must replay carries --key.
+    assert_eq!(
+        (second.code, second.error_code()),
+        (5, "refused"),
+        "{}",
+        second.json
+    );
+    assert_eq!(seq(&world), accepted, "a second accept wrote");
+    let reject = world.run(&["approve", &approval, "--reject"]);
+    assert_eq!(
+        (reject.code, reject.error_code()),
+        (5, "refused"),
+        "{}",
+        reject.json
+    );
+    assert_eq!(seq(&world), accepted, "a reject after an accept wrote");
+}
