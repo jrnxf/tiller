@@ -465,7 +465,7 @@ function card(
     column,
     badge,
     needs_you: WAITS_ON_OWNER.has(badge),
-    parked_until: null,
+    parked_until: extras.parkedReason ? minutes(now, 3 * 24 * 60) : null,
     parked_reason: extras.parkedReason ?? null,
     blocked_by: extras.blockedBy ?? null,
     closed_at: column === "done" ? "2026-11-01T18:20:00.000Z" : null,
@@ -1166,7 +1166,7 @@ function cardDetailFor(
     column: row,
     holds:
       row.badge === "parked"
-        ? [{ id: "01JHOLD0000000000000000001", until_at: null, reason: row.parked_reason }]
+        ? [{ id: "01JHOLD0000000000000000001", until_at: row.parked_until, reason: row.parked_reason }]
         : [],
     deps: [],
     attention: waiting
