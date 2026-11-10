@@ -805,6 +805,22 @@ test("earlier timeline events load on request and the button goes away at the st
   expect(times.at(-1)).toContain("asked in the orchestrator pane");
 });
 
+test("the slug shows whole words, never a title cut mid-word", async () => {
+  stubApi("default");
+  await renderApp("default", `/cards/${CARD_43}`);
+  const page = screen.getByTestId("card-page");
+  const dt = [...page.querySelectorAll(".props dt")].find((node) => node.textContent === "Slug");
+  const slug = dt?.nextElementSibling?.textContent ?? "";
+  const title = page.querySelector("h4")?.textContent ?? "";
+  const words = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  expect(slug.length).toBeGreaterThan(0);
+  const tail = slug.slice(slug.indexOf("-", slug.indexOf("-") + 1) + 1);
+  expect(`${words}-`.startsWith(`${tail}-`)).toBe(true);
+});
+
 test("a card that cannot be loaded says so and links back to the board", async () => {
   stubApi("default");
   await renderApp("default", "/cards/does-not-exist");

@@ -41,6 +41,12 @@ export function badgeText(row: BoardRow): string {
   return LABELS[row.badge] ?? row.badge.replaceAll("_", " ");
 }
 
+// The state alone, for a card page whose banner already says why a card is held.
+// The board's verbs are Hold, Held and Release, so the page says "Held".
+export function stateText(row: BoardRow): string {
+  return row.badge === "parked" ? "Held" : badgeText(row);
+}
+
 // How the chip is tinted: a person must act (warn), something looks wrong
 // (yel for quiet or unknown, bad for errors), or it is just a fact (ghost).
 // A card between the steps of its work (pend) keeps its place and says what

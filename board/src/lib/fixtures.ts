@@ -1155,7 +1155,7 @@ function cardDetailFor(
         BUG_BODIES[row.title] ??
         "A placeholder description for this fixture card. It says what the card is for in a sentence or two.",
       priority: row.priority,
-      slug: `${row.display_id}-${row.title.toLowerCase().replace(/\W+/g, "-").slice(0, 28)}`,
+      slug: slugOf(row.display_id, row.title),
       state: done ? "closed" : "open",
       outcome: done ? row.badge : null,
       model: row.model ?? null,
@@ -1215,6 +1215,24 @@ function cardDetailFor(
       },
     ],
   };
+}
+
+// The display id, then whole title words up to 28 characters, as the daemon makes it.
+function slugOf(displayId: string, title: string): string {
+  const words = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  let kept = "";
+  for (const word of words.split("-")) {
+    const joined = kept === "" ? word : `${kept}-${word}`;
+    if (joined.length > 28) {
+      if (kept === "") kept = word.slice(0, 28);
+      break;
+    }
+    kept = joined;
+  }
+  return `${displayId}-${kept}`;
 }
 
 function timelineFor(

@@ -24,7 +24,7 @@ import {
 } from "../../lib/queries";
 import { agentActivity } from "./activity";
 import { Ago } from "./ago";
-import { badgeText, statusMark } from "./badge";
+import { stateText, statusMark } from "./badge";
 import { CardHeader } from "./card-header";
 import { bugProjectOf, isTillerBug, isUntriaged, machineOf } from "./bugs";
 import { HostChip, PeerNote } from "./host-chip";
@@ -563,11 +563,8 @@ export function CardPage({
           <dt>Status</dt>
           <dd>
             <Status mark={statusMark(column)} />
-            {badgeText(column)}
+            {stateText(column)}
             {untriaged ? <span className="lab sm yel">Untriaged</span> : null}
-            {hold?.until_at ? (
-              <span className="meta">until {formatLisbonMoment(hold.until_at)}</span>
-            ) : null}
             {openDeps.length > 0 ? (
               <span className="meta">
                 blocked by {openDeps.map((dep) => dep.display_id).join(", ")}

@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 
 import type { BoardResponse, BoardRow } from "../../lib/api-types";
-import { badgeText, badgeTone, statusMark } from "./badge";
+import { badgeText, badgeTone, statusMark, stateText } from "./badge";
 import { countsByFilter, onHost, openCount, parseFilter, passesFilter, tilesOf } from "./model";
 
 function row(
@@ -78,6 +78,8 @@ test("badges say what the card_column view computed, and parked and blocked say 
   expect(
     badgeText({ ...row("x", "queued", "parked"), parked_reason: "waiting for the release" }),
   ).toBe("Parked: waiting for the release");
+  expect(stateText({ ...row("x", "queued", "parked"), parked_reason: "waiting" })).toBe("Held");
+  expect(stateText(row("x", "working", "idle"))).toBe("Idle");
   expect(badgeText({ ...row("x", "queued", "blocked"), blocked_by: "alpha-3" })).toBe(
     "Blocked by alpha-3",
   );

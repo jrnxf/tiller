@@ -175,16 +175,29 @@ test("Hold sends a Lisbon time as an instant, with a reason", async () => {
 });
 
 test("a held card shows its hold with Release as the primary", async () => {
-  stubApi({ parked_until: "2026-12-01T09:00:00.000Z" }, SHIP, [
+  stubApi(
     {
-      id: "01JHOLD0000000000000000001",
-      until_at: "2026-12-01T09:00:00.000Z",
-      reason: "waiting on infra",
+      parked_until: "2026-12-01T09:00:00.000Z",
+      badge: "parked",
+      parked_reason: "waiting on infra",
     },
-  ]);
+    SHIP,
+    [
+      {
+        id: "01JHOLD0000000000000000001",
+        until_at: "2026-12-01T09:00:00.000Z",
+        reason: "waiting on infra",
+      },
+    ],
+  );
   const actions = await renderCard();
   const hold = await screen.findByTestId("card-hold");
   expect(hold.textContent).toContain("waiting on infra");
+  // The banner owns the reason and the date. The Status row names the state only.
+  const page = screen.getByTestId("card-page");
+  const status = [...page.querySelectorAll(".props dt")].find((dt) => dt.textContent === "Status");
+  expect(status?.nextElementSibling?.textContent).toBe("Held");
+  expect(page.textContent?.match(/waiting on infra/g)).toHaveLength(1);
   const buttons = within(actions).getAllByRole("button");
   expect(buttons.at(-1)?.textContent).toBe("Release");
   fireEvent.click(buttons.at(-1) as HTMLElement);

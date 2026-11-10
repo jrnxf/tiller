@@ -931,6 +931,9 @@ fn checks(checks: Checks) -> (&'static str, Option<String>) {
     }
 }
 
+/// The most characters of title words a slug carries.
+const SLUG_WORDS: usize = 28;
+
 fn slug(display_id: &str, title: &str) -> String {
     let mut words = String::new();
     for c in title.chars() {
@@ -940,8 +943,26 @@ fn slug(display_id: &str, title: &str) -> String {
             words.push('-');
         }
     }
-    let words: String = words.trim_matches('-').chars().take(28).collect();
-    format!("{display_id}-{}", words.trim_end_matches('-'))
+    // Whole words only: a title cut mid-word reads as a typo.
+    let mut kept = String::new();
+    for word in words.trim_matches('-').split('-') {
+        let joined = if kept.is_empty() {
+            word.len()
+        } else {
+            kept.len() + 1 + word.len()
+        };
+        if joined > SLUG_WORDS {
+            if kept.is_empty() {
+                kept = word.chars().take(SLUG_WORDS).collect();
+            }
+            break;
+        }
+        if !kept.is_empty() {
+            kept.push('-');
+        }
+        kept.push_str(word);
+    }
+    format!("{display_id}-{kept}")
 }
 
 /// An event as one detail-page line.
@@ -1324,14 +1345,97 @@ pub fn timeline(store: &Store, reference: &str, before: Option<i64>) -> Result<T
     })
 }
 
+/// One timeline line as a plain sentence. The board puts the actor in front
+/// ("You", "Tiller"), so this is the rest of it, in the past tense.
 fn timeline_text(event: &Event) -> String {
     if event.kind == "card.routed" {
         return routed_text(&event.payload);
     }
-    let words = event.kind.replace(['.', '_'], " ");
-    match event.payload.get("reason").and_then(Value::as_str) {
-        Some(reason) => format!("{words}: {reason}"),
-        None => words,
+    let field = |name: &str| event.payload.get(name).and_then(Value::as_str);
+    let sentence = match event.kind.as_str() {
+        "card.created" => "created the card".to_owned(),
+        "card.edited" => "edited the card".to_owned(),
+        "card.closed" => match field("outcome") {
+            Some(outcome) => format!("closed the card as {}", outcome.replace('_', " ")),
+            None => "closed the card".to_owned(),
+        },
+        "card.reopened" => "reopened the card".to_owned(),
+        "card.promoted" => "promoted the card".to_owned(),
+        "card.linked" => "linked the card to an ask".to_owned(),
+        "hold.set" => "held the card".to_owned(),
+        "hold.released" => "released the hold".to_owned(),
+        "dep.added" => match field("depends_on_display_id") {
+            Some(on) => format!("made the card depend on {on}"),
+            None => "added a dependency".to_owned(),
+        },
+        "run.started" => "started a run".to_owned(),
+        "run.placed" => "placed the run on a machine".to_owned(),
+        "run.status" => "reported the run status".to_owned(),
+        "run.paused" => "paused the run".to_owned(),
+        "run.ended" => "ended the run".to_owned(),
+        "run.cleaned" => "cleaned up the run".to_owned(),
+        "run.relaunched" => "relaunched the run".to_owned(),
+        "run.reconfigured" => "changed the run setup".to_owned(),
+        "run.reowned" => "gave the run to another owner".to_owned(),
+        "session.started" => "started a session".to_owned(),
+        "session.bound" => "bound a session to the run".to_owned(),
+        "session.unbound" => "unbound a session from the run".to_owned(),
+        "session.stamped" => "stamped the session".to_owned(),
+        "session.ended" => "ended the session".to_owned(),
+        "session.resume_attempted" => "tried to resume the session".to_owned(),
+        "approval.requested" => "asked for an approval".to_owned(),
+        "approval.decided" => "decided an approval".to_owned(),
+        "approval.executing" => "started the approved action".to_owned(),
+        "approval.finished" => "finished the approved action".to_owned(),
+        "pr.linked" => "linked a pull request".to_owned(),
+        "pr.changed" => "updated a pull request".to_owned(),
+        "pr.described" => "described a pull request".to_owned(),
+        "review.recorded" => "recorded a review".to_owned(),
+        "review_pass.created" => "created a review pass".to_owned(),
+        "review_pass.started" => "started a review pass".to_owned(),
+        "review_pass.finished" => "finished a review pass".to_owned(),
+        "attention.opened" => "raised an item for you".to_owned(),
+        "attention.notified" => "notified you about an item".to_owned(),
+        "attention.answered" => "answered an item".to_owned(),
+        "attention.withdrawn" => "withdrew an item".to_owned(),
+        "obligation.opened" => "opened an obligation".to_owned(),
+        "obligation.due" => "found an obligation due".to_owned(),
+        "obligation.met" => "met an obligation".to_owned(),
+        "obligation.cancelled" => "cancelled an obligation".to_owned(),
+        "artifact.added" => "added a page".to_owned(),
+        "artifact.feedback" => "left feedback on a page".to_owned(),
+        "artifact.retired" => "retired a page".to_owned(),
+        "evidence.captured" => "captured evidence".to_owned(),
+        "handoff.written" => "wrote a handoff".to_owned(),
+        "ask.recorded" => "recorded an ask".to_owned(),
+        "ask.resolved" => "resolved an ask".to_owned(),
+        "guard.breached" => "breached a guard".to_owned(),
+        "publish.done" => "published the work".to_owned(),
+        "publish.failed" => "failed to publish the work".to_owned(),
+        "deploy.finished" => "finished a deploy".to_owned(),
+        "proposal.created" => "created a proposal".to_owned(),
+        "proposal.decided" => "decided a proposal".to_owned(),
+        "observation.recorded" => "recorded an observation".to_owned(),
+        "intervention.relabeled" => "relabeled an intervention".to_owned(),
+        "outbox.enqueued" => "queued a message".to_owned(),
+        "outbox.delivered" => "delivered a message".to_owned(),
+        "outbox.acked" => "confirmed a message".to_owned(),
+        "outbox.deferred" => "deferred a message".to_owned(),
+        "outbox.failed" => "failed to deliver a message".to_owned(),
+        "outbox.retargeted" => "redirected a message".to_owned(),
+        other => {
+            // An unlisted kind still reads as a sentence: "recorded a memory restored".
+            let (noun, verb) = other.split_once('.').unwrap_or((other, "changed"));
+            format!(
+                "recorded a {} {}",
+                noun.replace('_', " "),
+                verb.replace('_', " ")
+            )
+        }
+    };
+    match field("reason") {
+        Some(reason) => format!("{sentence}: {reason}"),
+        None => sentence,
     }
 }
 
@@ -2055,6 +2159,43 @@ mod tests {
         assert_eq!(
             slug("alpha-42", "Undo: coalesce strokes!"),
             "alpha-42-undo-coalesce-strokes"
+        );
+        assert_eq!(
+            slug("alpha-2", "Rewrite the importer's dry run"),
+            "alpha-2-rewrite-the-importer-s-dry"
+        );
+    }
+
+    #[test]
+    fn timeline_lines_read_as_plain_sentences() {
+        let event = |kind: &str, payload: Value| -> Event {
+            serde_json::from_value(serde_json::json!({
+                "seq": 1, "id": "e1", "at": "2026-11-10T10:00:00Z", "txn": "t1",
+                "actor": "owner", "entity": "card", "entity_id": "c1", "kind": kind,
+                "rev_after": null, "card_id": "c1", "payload": payload,
+                "idempotency_key": null
+            }))
+            .unwrap()
+        };
+        let text = |kind: &str, payload: Value| timeline_text(&event(kind, payload));
+        assert_eq!(
+            text("card.created", serde_json::json!({})),
+            "created the card"
+        );
+        assert_eq!(
+            text(
+                "hold.set",
+                serde_json::json!({"reason": "Waiting on the schema migration"})
+            ),
+            "held the card: Waiting on the schema migration"
+        );
+        assert_eq!(
+            text("card.closed", serde_json::json!({"outcome": "landed"})),
+            "closed the card as landed"
+        );
+        assert_eq!(
+            text("memory.restored", serde_json::json!({})),
+            "recorded a memory restored"
         );
     }
 
