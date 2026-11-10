@@ -496,11 +496,16 @@ impl Source for Finished {
 /// Tails the transcript of every live local session that has one
 /// (`protocol.md` section 5). It polls each file every two seconds; the
 /// offset lives in the observations, so a restart repeats nothing.
+///
+/// A tailer belongs to one session and one file. `/clear` or a forked
+/// resume binds the session to a new transcript: the old file's tailer
+/// reads once more what came since its last poll, and is then let go.
 pub struct Transcripts {
     store: Store,
     host_id: String,
     intake: bool,
-    tailers: HashMap<String, Tailer>,
+    /// Keyed by (session id, transcript path).
+    tailers: HashMap<(String, String), Tailer>,
 }
 
 impl Source for Transcripts {
@@ -518,14 +523,33 @@ impl Source for Transcripts {
             "ended_at IS NULL AND host_id = ?1 AND transcript_path IS NOT NULL",
             &[&self.host_id],
         )?;
-        self.tailers
-            .retain(|id, _| live.iter().any(|session| &session.id == id));
+        let current = |key: &(String, String)| {
+            live.iter().any(|session| {
+                session.id == key.0 && session.transcript_path.as_deref() == Some(key.1.as_str())
+            })
+        };
+        let old: Vec<(String, String)> = self
+            .tailers
+            .keys()
+            .filter(|key| !current(key))
+            .cloned()
+            .collect();
+        for key in old {
+            // A live session moved to a new file: read the rest of the old
+            // one first. An ended session's file is simply let go.
+            let moved = live.iter().any(|session| session.id == key.0);
+            if moved && let Some(tailer) = self.tailers.get_mut(&key) {
+                tailer.poll(&mut self.store)?;
+            }
+            self.tailers.remove(&key);
+        }
         for session in &live {
-            if !self.tailers.contains_key(&session.id)
-                && let Some(path) = &session.transcript_path
-            {
-                let tailer = Tailer::resume(&self.store, session, path, self.intake)?;
-                self.tailers.insert(session.id.clone(), tailer);
+            if let Some(path) = &session.transcript_path {
+                let key = (session.id.clone(), path.clone());
+                if !self.tailers.contains_key(&key) {
+                    let tailer = Tailer::resume(&self.store, session, path, self.intake)?;
+                    self.tailers.insert(key, tailer);
+                }
             }
         }
         for tailer in self.tailers.values_mut() {
@@ -1052,5 +1076,148 @@ esac
         let settings = Settings::load(home.path());
         assert_eq!(settings.quota_providers, vec!["claude", "codex"]);
         assert_eq!(settings.forge_login.as_deref(), Some("owner"));
+    }
+
+    /// The orchestrator's transcript, as the daemon's tailer source sees it.
+    struct Transcript {
+        fleet: tiller_herdr::testing::Fleet,
+    }
+
+    impl Transcript {
+        fn new() -> Self {
+            Self {
+                fleet: tiller_herdr::testing::Fleet::new(),
+            }
+        }
+
+        fn source(&self) -> Transcripts {
+            Transcripts {
+                store: self.fleet.open(),
+                host_id: self.fleet.host.clone(),
+                intake: false,
+                tailers: HashMap::new(),
+            }
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.fleet.dir.path().join(name)
+        }
+
+        /// `SessionStart` with `source` (`startup`, `clear`, `resume`) binds
+        /// the orchestrator to the Claude session and transcript.
+        fn bind(&mut self, claude_session_id: &str, path: &Path, source: &str) {
+            let session = self.fleet.orchestrator_session.clone();
+            self.fleet
+                .store
+                .run_bind_session(
+                    &Ctx::new(Actor::Hook),
+                    tiller_core::state::runs::Bind {
+                        session_id: session,
+                        claude_session_id: claude_session_id.into(),
+                        pane_id: None,
+                        transcript_path: Some(path.to_string_lossy().into_owned()),
+                        source: source.into(),
+                    },
+                )
+                .unwrap();
+        }
+
+        /// Appends an interrupt entry, or `n` lines that mean nothing.
+        fn interrupt(path: &Path, uuid: &str) {
+            Self::append(
+                path,
+                &serde_json::json!({"type": "user", "uuid": uuid,
+                    "timestamp": "2026-11-02T10:00:00Z",
+                    "message": {"role": "user", "content": "[Request interrupted by user]"}}),
+            );
+        }
+
+        fn filler(path: &Path, n: usize) {
+            for i in 0..n {
+                Self::append(
+                    path,
+                    &serde_json::json!({"type": "assistant", "uuid": format!("f{i}"),
+                        "message": {"role": "assistant", "stop_reason": "tool_use"}}),
+                );
+            }
+        }
+
+        fn append(path: &Path, entry: &serde_json::Value) {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .unwrap();
+            writeln!(file, "{entry}").unwrap();
+        }
+
+        fn recorded(&self) -> Vec<String> {
+            self.fleet
+                .store
+                .conn()
+                .prepare(
+                    "SELECT json_extract(payload, '$.uuid') FROM observations
+                     WHERE source = 'transcript' ORDER BY id",
+                )
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        }
+    }
+
+    /// `/clear` while the daemon runs: the session's transcript moves to a
+    /// new file. The tailer reads what the old file got since its last poll,
+    /// then follows the new one from its head.
+    #[test]
+    fn transcript_tailer_follows_a_cleared_session_to_its_new_file() {
+        let mut t = Transcript::new();
+        let (old, new) = (t.path("old.jsonl"), t.path("new.jsonl"));
+        t.bind("claude-orchestrator", &old, "startup");
+        Transcript::filler(&old, 3);
+        let mut source = t.source();
+        source.poll(Timestamp::now()).unwrap();
+        assert!(t.recorded().is_empty());
+
+        // An interrupt lands in the old file just before `/clear`.
+        Transcript::interrupt(&old, "u1");
+        t.bind("claude-cleared", &new, "clear");
+        Transcript::interrupt(&new, "n1");
+        source.poll(Timestamp::now()).unwrap();
+        assert_eq!(t.recorded(), ["u1", "n1"]);
+
+        Transcript::interrupt(&new, "n2");
+        Transcript::interrupt(&old, "u2");
+        source.poll(Timestamp::now()).unwrap();
+        assert_eq!(t.recorded(), ["u1", "n1", "n2"], "the old file is let go");
+    }
+
+    /// `/clear` while the daemon is down: the restarted tailer reads the new
+    /// file from its head, though the old file's offset is past it.
+    #[test]
+    fn transcript_tailer_after_a_restart_reads_a_new_file_from_its_head() {
+        let mut t = Transcript::new();
+        let (old, new) = (t.path("old.jsonl"), t.path("new.jsonl"));
+        t.bind("claude-orchestrator", &old, "startup");
+        Transcript::filler(&old, 20);
+        Transcript::interrupt(&old, "u1");
+        t.source().poll(Timestamp::now()).unwrap();
+        assert_eq!(t.recorded(), ["u1"]);
+
+        t.bind("claude-cleared", &new, "clear");
+        Transcript::interrupt(&new, "n1");
+        Transcript::filler(&new, 40);
+        assert!(
+            std::fs::metadata(&new).unwrap().len() > std::fs::metadata(&old).unwrap().len(),
+            "the new file is past the old offset"
+        );
+        let mut restarted = t.source();
+        restarted.poll(Timestamp::now()).unwrap();
+        assert_eq!(t.recorded(), ["u1", "n1"]);
+        restarted.poll(Timestamp::now()).unwrap();
+        t.source().poll(Timestamp::now()).unwrap();
+        assert_eq!(t.recorded(), ["u1", "n1"], "nothing twice");
     }
 }

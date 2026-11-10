@@ -138,31 +138,36 @@ pub struct Tailer {
 }
 
 impl Tailer {
-    /// A tailer for `session` that resumes after the newest offset recorded
-    /// for it, so a restarted daemon never records an entry twice.
+    /// A tailer for `session` on the transcript at `path`. It resumes after
+    /// the newest offset recorded for that same file, so a restarted daemon
+    /// never records an entry twice. An offset recorded for another file
+    /// (the session's transcript before `/clear` or a forked resume) or for
+    /// no named file (rows from before the path was stored) says nothing
+    /// about this one: the file is then read from the start and each entry
+    /// is checked against the uuids already recorded for the session.
     pub fn resume(
         store: &Store,
         session: &Session,
         path: impl Into<PathBuf>,
         transcript_intake: bool,
     ) -> tiller_core::Result<Self> {
-        let offset: Option<i64> = store
-            .conn()
-            .query_row(
-                "SELECT max(json_extract(payload, '$.transcript_offset')) FROM observations
-                 WHERE session_id = ?1 AND source = 'transcript'",
-                [&session.id],
-                |row| row.get(0),
-            )
-            .optional()?
-            .flatten();
+        let path = path.into();
+        let (offset, others): (Option<i64>, bool) = store.conn().query_row(
+            "SELECT max(CASE WHEN json_extract(payload, '$.transcript_path') = ?2
+                         THEN json_extract(payload, '$.transcript_offset') END),
+                    count(*) > 0
+             FROM observations WHERE session_id = ?1 AND source = 'transcript'",
+            rusqlite::params![session.id, path.to_string_lossy()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let offset = offset.and_then(|o| u64::try_from(o).ok());
         Ok(Self {
             session_id: session.id.clone(),
             run_id: session.run_id.clone(),
-            path: path.into(),
-            offset: offset.and_then(|o| u64::try_from(o).ok()).unwrap_or(0),
+            path,
+            offset: offset.unwrap_or(0),
             transcript_intake,
-            dedupe: false,
+            dedupe: offset.is_none() && others,
         })
     }
 
@@ -228,7 +233,11 @@ impl Tailer {
             return Ok(false);
         }
         let mut event = detected.event;
-        let mut payload = json!({"transcript_offset": line_end, "uuid": uuid});
+        let mut payload = json!({
+            "transcript_path": self.path.to_string_lossy(),
+            "transcript_offset": line_end,
+            "uuid": uuid,
+        });
         if let Some(id) = &detected.outbox_id {
             // The same check the UserPromptSubmit hook makes (protocol.md 3.2).
             let target: Option<String> = store
@@ -665,6 +674,135 @@ mod tests {
             ]
         );
         assert_eq!(count(&store, "SELECT count(*) FROM asks"), 0);
+    }
+
+    /// Lines that mean nothing on a hook host, `n` of them, to make a file
+    /// long.
+    fn filler(prefix: &str, n: usize) -> Vec<Value> {
+        (0..n)
+            .map(|i| assistant(&format!("{prefix}{i}"), "2026-11-02T10:00:00Z", "tool_use"))
+            .collect()
+    }
+
+    fn transcript_uuids(store: &Store) -> Vec<String> {
+        store
+            .conn()
+            .prepare(
+                "SELECT json_extract(payload, '$.uuid') FROM observations
+                 WHERE source = 'transcript' ORDER BY recorded_at, id",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// `/clear` or a forked resume gives the session a new transcript. A
+    /// tailer on it, after a restart too, starts from the offset recorded
+    /// for that file, never from the old file's: the interrupt at the head
+    /// of the new file is recorded.
+    #[test]
+    fn resume_takes_the_offset_of_its_own_path_only() {
+        let mut store = Store::open_in_memory().unwrap();
+        let fleet = fleet(&mut store);
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old.jsonl");
+        let new = dir.path().join("new.jsonl");
+        let orchestrator = session(&store, &fleet.orchestrator);
+        append(&old, &filler("o", 10));
+        append(
+            &old,
+            &[user(
+                "u1",
+                "2026-11-02T10:00:00Z",
+                json!(INTERRUPT_MARKERS[0]),
+            )],
+        );
+        let mut first = Tailer::resume(&store, &orchestrator, &old, false).unwrap();
+        assert_eq!(first.poll(&mut store).unwrap(), 1);
+        let old_offset = first.offset();
+
+        // The new file is longer than the old offset, its interrupt first.
+        append(
+            &new,
+            &[user(
+                "n1",
+                "2026-11-02T10:01:00Z",
+                json!(INTERRUPT_MARKERS[1]),
+            )],
+        );
+        append(&new, &filler("n", 20));
+        assert!(std::fs::metadata(&new).unwrap().len() > old_offset);
+        let mut second = Tailer::resume(&store, &orchestrator, &new, false).unwrap();
+        assert_eq!(second.offset(), 0, "no offset is recorded for this file");
+        assert_eq!(second.poll(&mut store).unwrap(), 1, "the head interrupt");
+
+        // A restart on each file resumes where that file's rows say: after
+        // its last recorded entry.
+        let mut again = Tailer::resume(&store, &orchestrator, &new, false).unwrap();
+        assert!(again.offset() > 0 && again.offset() < second.offset());
+        assert_eq!(again.poll(&mut store).unwrap(), 0);
+        append(
+            &new,
+            &[user(
+                "n2",
+                "2026-11-02T10:02:00Z",
+                json!(INTERRUPT_MARKERS[0]),
+            )],
+        );
+        assert_eq!(again.poll(&mut store).unwrap(), 1);
+        let back = Tailer::resume(&store, &orchestrator, &old, false).unwrap();
+        assert_eq!(back.offset(), old_offset);
+        assert_eq!(transcript_uuids(&store), ["u1", "n1", "n2"]);
+    }
+
+    /// Rows written before the tailer stored its path name no file. Their
+    /// offset is not trusted: the file is read from the start, and each
+    /// entry already recorded is skipped by its uuid.
+    #[test]
+    fn rows_without_a_path_are_read_again_and_deduped_by_uuid() {
+        let mut store = Store::open_in_memory().unwrap();
+        let fleet = fleet(&mut store);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let orchestrator = session(&store, &fleet.orchestrator);
+        append(
+            &path,
+            &[user(
+                "u1",
+                "2026-11-02T10:00:00Z",
+                json!(INTERRUPT_MARKERS[0]),
+            )],
+        );
+        append(&path, &filler("f", 5));
+        append(
+            &path,
+            &[user(
+                "u2",
+                "2026-11-02T10:00:05Z",
+                json!(INTERRUPT_MARKERS[0]),
+            )],
+        );
+        // An older daemon recorded u1, with an offset and no path.
+        store
+            .observation_record(
+                &Ctx::new(Actor::Daemon),
+                NewObservation {
+                    session_id: Some(fleet.orchestrator.clone()),
+                    run_id: None,
+                    source: ObservationSource::Transcript,
+                    event: "interrupt".into(),
+                    verdict: Some(Activity::Idle),
+                    observed_at: "2026-11-02T10:00:00Z".parse().unwrap(),
+                    payload: json!({"transcript_offset": 999_999, "uuid": "u1"}),
+                },
+            )
+            .unwrap();
+        let mut tailer = Tailer::resume(&store, &orchestrator, &path, false).unwrap();
+        assert_eq!(tailer.offset(), 0);
+        assert_eq!(tailer.poll(&mut store).unwrap(), 1, "only u2 is new");
+        assert_eq!(transcript_uuids(&store), ["u1", "u2"]);
     }
 
     #[test]
