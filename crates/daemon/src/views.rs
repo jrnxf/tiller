@@ -196,13 +196,44 @@ fn listed_row(store: &Store, card_id: &str) -> Result<Option<BoardRow>> {
     Ok(project.retired_at.is_none().then_some(row))
 }
 
-/// `GET /api/v1/board`. `host` is a host id or label; a card is on a host
-/// when it has a run there.
+/// How much of an ask its board tile shows: the first line, cut here.
+const ASK_SUMMARY_CHARS: usize = 200;
+
+/// An ask's first non-blank line, at most [`ASK_SUMMARY_CHARS`] characters,
+/// cut on a character boundary and marked with an ellipsis.
+fn ask_summary(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    if line.chars().count() <= ASK_SUMMARY_CHARS {
+        return line.to_owned();
+    }
+    let cut: String = line.chars().take(ASK_SUMMARY_CHARS - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
+/// This host's board as a peer link carries it: an ask row has its source
+/// but no summary, so the owner's words stay on this host. `host` is a host
+/// id or label; a card is on a host when it has a run there.
 pub fn board(
     store: &Store,
     project: Option<&str>,
     filter: Filter,
     host: Option<&str>,
+) -> Result<BoardResponse> {
+    own_board(store, project, filter, host, false)
+}
+
+/// `GET /api/v1/board` on this host; `summaries` puts each ask's first line
+/// on its row.
+fn own_board(
+    store: &Store,
+    project: Option<&str>,
+    filter: Filter,
+    host: Option<&str>,
+    summaries: bool,
 ) -> Result<BoardResponse> {
     let host_id = host.map(|host| host_id(store, host)).transpose()?;
     // A retired project has left the board, its closed cards with it.
@@ -237,6 +268,8 @@ pub fn board(
         .asked(project)?
         .into_iter()
         .map(|row| AskedRow {
+            summary: summaries.then(|| ask_summary(&row.ask.text)),
+            source: Some(row.ask.source.to_string()),
             id: row.ask.id,
             project_id: row.ask.project_id,
             session_id: row.ask.session_id,
@@ -1837,7 +1870,7 @@ pub fn federated_board(
     if let Scope::Peer(view) = scope {
         return Ok(peer_board(view, project, filter));
     }
-    let mut response = board(store, project, filter, host)?;
+    let mut response = own_board(store, project, filter, host, true)?;
     if peers.peers.is_empty() {
         return Ok(response);
     }

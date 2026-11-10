@@ -158,6 +158,12 @@ function cellOf(text: string) {
   return screen.getByText(text).closest<HTMLElement>(".cell");
 }
 
+function tileOf(text: string): HTMLElement {
+  const tile = screen.getByText(text).closest<HTMLElement>(".card");
+  if (!tile) throw new Error(`no tile holds "${text}"`);
+  return tile;
+}
+
 // ---- Board ----
 
 test("every project is a lane and every card sits in the column its state puts it in", async () => {
@@ -176,7 +182,47 @@ test("every project is a lane and every card sits in the column its state puts i
   expect(cellOf("Move the poller behind a trait")?.dataset.column).toBe("landing");
   expect(cellOf("Document the cutover steps")?.dataset.column).toBe("queued");
   expect(cellOf("Pin the toolchain version")?.dataset.column).toBe("done");
-  expect(cellOf("Waiting for the orchestrator to tag this ask")?.dataset.column).toBe("asked");
+  expect(cellOf("Can the card fade on exit instead of sliding?")?.dataset.column).toBe("asked");
+});
+
+test("an untagged ask shows its source and its first line, and says it waits to be tagged", async () => {
+  stubApi("default");
+  await renderApp();
+
+  const chat = tileOf("Can the card fade on exit instead of sliding?");
+  expect(within(chat).getByText("chat")).toBeTruthy();
+  expect(within(chat).getByText("Waiting for the orchestrator to tag it")).toBeTruthy();
+  const board = tileOf(
+    "Move the export settings into their own page, keep the old links working, and say in the release notes where each one went",
+  );
+  expect(within(board).getByText("board")).toBeTruthy();
+  const script = tileOf("Nightly check: the staging certificate expires in 6 days");
+  expect(within(script).getByText("script")).toBeTruthy();
+  // No ask is shown without its text any more.
+  expect(screen.queryByText("Waiting for the orchestrator to tag this ask")).toBeNull();
+});
+
+test("a peer's ask, which carries no text, still says it waits to be tagged", async () => {
+  stubApi("default");
+  const { queryClient } = await renderApp();
+  const board = queryClient.getQueryData<BoardResponse>(queryKeyFor(boardPath()));
+  if (!board) throw new Error("no board");
+  act(() => {
+    queryClient.setQueryData<BoardResponse>(queryKeyFor(boardPath()), {
+      ...board,
+      asked: [
+        {
+          ...(board.asked[0] as BoardResponse["asked"][number]),
+          summary: undefined,
+          source: undefined,
+        },
+      ],
+    });
+  });
+  await screen.findByText("Waiting for the orchestrator to tag this ask");
+  const tile = tileOf("Waiting for the orchestrator to tag this ask");
+  expect(tile.querySelector(".c-from")).toBeNull();
+  expect(within(tile).queryByText("chat")).toBeNull();
 });
 
 test("the board is on screen at once: no spinner, no empty frame", async () => {
@@ -193,9 +239,9 @@ test("the All / Active / Needs you filter narrows the cards, lives in the URL an
   const [segment] = screen.getAllByRole("group", { name: "Cards shown" });
   if (!segment) throw new Error("no filter");
 
-  // 9 cards and 1 ask: 9 are not done, 3 need the owner.
-  expect(within(segment).getByRole("button", { name: /^All/ }).textContent).toBe("All10");
-  expect(within(segment).getByRole("button", { name: /^Active/ }).textContent).toBe("Active9");
+  // 9 cards and 3 asks: 11 are not done, 3 need the owner.
+  expect(within(segment).getByRole("button", { name: /^All/ }).textContent).toBe("All12");
+  expect(within(segment).getByRole("button", { name: /^Active/ }).textContent).toBe("Active11");
   expect(within(segment).getByRole("button", { name: /^Needs you/ }).textContent).toBe(
     "Needs you3",
   );
@@ -336,9 +382,9 @@ function activeTab() {
 test("the sidebar's Board count is the header's Active count, with and without a machine filter", async () => {
   stubApi("default");
   const { router } = await renderApp();
-  // 8 open cards and 1 ask: the ask counts in both.
-  expect(activeTab()).toBe("9");
-  expect(sidebarCount()).toBe("9");
+  // 8 open cards and 3 asks: the asks count in both.
+  expect(activeTab()).toBe("11");
+  expect(sidebarCount()).toBe("11");
 
   await act(async () => {
     await router.navigate({ to: "/", search: { host: "01JHOSTA00000000000000000A" } });

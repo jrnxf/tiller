@@ -1,6 +1,6 @@
 import { Link, useSearch } from "@tanstack/react-router";
 
-import type { BoardRow } from "../../lib/api-types";
+import type { AskSource, BoardRow } from "../../lib/api-types";
 import { cardDot } from "./activity";
 import type { DotKind } from "./activity";
 import { HOST_PROJECT, hostName, ownerOf, shownId } from "../../lib/peers";
@@ -133,17 +133,37 @@ function CardTile({ row, lane }: { row: BoardRow; lane: LaneHealth["kind"] }) {
   );
 }
 
+// The chip an ask shows for where it came from. A prompt is what the owner
+// typed in an agent's pane, which reads as chat.
+const ASK_SOURCE: Record<AskSource, string> = {
+  prompt: "chat",
+  board: "board",
+  script: "script",
+  import: "import",
+};
+
+const UNTAGGED = "Waiting for the orchestrator to tag this ask";
+
+// An ask that is not a card yet: what was asked, and why it is not a card. A
+// peer's ask carries no text, so its tile says only that it waits.
 function AskTile({ ask }: { ask: NonNullable<Tile["ask"]> }) {
+  const source = ask.source ? ASK_SOURCE[ask.source] : null;
+  const summary = ask.summary || null;
   return (
-    <div className="card" title="An ask the orchestrator has not tagged yet">
+    <div className="card" title={summary ? `${summary}\n${UNTAGGED}` : UNTAGGED}>
       <div className="c-top">
         <Status mark="asked" />
         <span className="id">ask</span>
-        <span className="lab sm">chat</span>
+        {source ? <span className="lab sm">{source}</span> : null}
       </div>
       <div className="c-title">
-        <span>Waiting for the orchestrator to tag this ask</span>
+        <span>{summary ?? UNTAGGED}</span>
       </div>
+      {summary ? (
+        <div className="c-from">
+          <span>Waiting for the orchestrator to tag it</span>
+        </div>
+      ) : null}
       <div className="c-chips">
         <span className="lab sm">
           <Ago at={ask.received_at} prefix="asked" />

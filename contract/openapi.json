@@ -4161,6 +4161,20 @@
               "string",
               "null"
             ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the ask came from: `prompt` (typed in an agent's pane),\n`board`, `script` or `import`. Absent on a row from a peer that\npredates it."
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The ask's first line, at most 200 characters. Only on this host's\nrows: a peer link carries no ask text."
           }
         }
       },

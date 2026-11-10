@@ -56,7 +56,15 @@ export interface AskedRow {
   session_id: string | null;
   received_at: string;
   age_seconds: number;
+  // Where the ask came from: typed in an agent's pane (`prompt`), the board's
+  // ask box, a script or an import. Absent on a row from an older peer.
+  source?: AskSource;
+  // The ask's first line, at most 200 characters. Only on this host's rows:
+  // a peer link carries no ask text.
+  summary?: string;
 }
+
+export type AskSource = "prompt" | "board" | "script" | "import";
 
 export interface BoardResponse {
   rows: BoardRow[];

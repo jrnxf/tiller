@@ -4917,6 +4917,54 @@ pub(crate) mod tests {
         assert_eq!(ask_texts(&fleet).len(), 2);
     }
 
+    /// An untagged ask's row says where it came from and shows its first
+    /// line, cut on a character boundary. The peer link carries the source
+    /// but never the owner's words.
+    #[tokio::test]
+    async fn an_asked_row_carries_its_source_and_first_line() {
+        let fleet = Fleet::new();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let cookie = owner_cookie(fleet.dir.path());
+        let owner = [("cookie", cookie.as_str())];
+        let long = format!("{}\nthe rest", "é".repeat(250));
+        for (key, text) in [
+            ("a-1", "\n  Fade the card on exit  \nsecond line"),
+            ("a-2", &long),
+        ] {
+            let sent = send(&app, ask_request(key, text, &owner)).await;
+            assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
+        }
+
+        let board = get(&app, "/api/v1/board?filter=all").await;
+        assert_eq!(board.status, StatusCode::OK, "{}", board.body);
+        let board: Value = serde_json::from_str(&board.body).unwrap();
+        let asked = board["asked"].as_array().unwrap();
+        assert_eq!(asked.len(), 2, "{board}");
+        assert_eq!(asked[0]["source"], "board");
+        assert_eq!(asked[0]["summary"], "Fade the card on exit");
+        let cut = asked[1]["summary"].as_str().unwrap();
+        assert_eq!(cut.chars().count(), 200);
+        assert_eq!(cut, format!("{}…", "é".repeat(199)));
+
+        // The boot snapshot carries the same fields as the GET.
+        let snapshot = get(&app, "/api/v1/snapshot").await;
+        let snapshot: Value = serde_json::from_str(&snapshot.body).unwrap();
+        let booted = &snapshot["queries"]["/api/v1/board?filter=all"]["asked"];
+        for (index, row) in asked.iter().enumerate() {
+            assert_eq!(booted[index]["source"], row["source"], "{snapshot}");
+            assert_eq!(booted[index]["summary"], row["summary"], "{snapshot}");
+        }
+
+        let peer = crate::peer::serve::own_snapshot(&fleet.open(), Timestamp::now()).unwrap();
+        let carried = &peer.queries.board.asked;
+        assert_eq!(carried.len(), 2);
+        assert!(
+            carried.iter().all(|row| row.summary.is_none()),
+            "{carried:?}"
+        );
+        assert_eq!(carried[0].source.as_deref(), Some("board"));
+    }
+
     #[tokio::test]
     async fn board_ask_refuses_empty_text_and_an_unknown_project() {
         let fleet = Fleet::new();

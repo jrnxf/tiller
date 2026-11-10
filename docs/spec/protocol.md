@@ -499,7 +499,7 @@ A peer's own refusal (404, 409, 422 and their bodies) is passed through unchange
 |---|---|
 | `GET /api/v1/snapshot` | the boot snapshot (7.6) |
 | `GET /api/v1/session` | `owner`: whether the request carries a live owner cookie. At an `--allow-host` name, without one, it is 403 `signed_out` (7.1); Settings shows it as This browser, with Sign out |
-| `GET /api/v1/board?project=&filter=all\|active\|needs&host=` | every open card and recent done card with its `card_column` row, plus the `asked` rows. A card with a category carries `category`; a Tiller bug also carries `filed_from`, the filer's project from its `card.routed` event |
+| `GET /api/v1/board?project=&filter=all\|active\|needs&host=` | every open card and recent done card with its `card_column` row, plus the `asked` rows. An `asked` row carries its `source` (`prompt`, `board`, `script` or `import`) and `summary`, the ask's first line cut to 200 characters; a peer's row has no `summary`. A card with a category carries `category`; a Tiller bug also carries `filed_from`, the filer's project from its `card.routed` event |
 | `GET /api/v1/cards/{id}` | card detail: card, column, runs with sessions and effective activity, holds, deps, attention, PRs, approvals, artifacts, reviews, obligations, freshness |
 | `GET /api/v1/cards/{id}/timeline?before=<seq>` | the card's events, newest first, paged |
 | `GET /api/v1/attention?state=open` | the global attention queue: question, evidence, recommendation, consequence, `still_current`, `stale` (`reason`, `subject`, `at`; null while current), `subject_session_id` and `subject_project_id`; and, separately, sessions in `waiting_permission` |
@@ -709,7 +709,7 @@ One SSH session per paired peer, opened by the board host's daemon: `ssh -T -o B
 |---|---|---|
 | `hello` | board host to peer | `v`, `from`, `key_id`, `viewer_host_id`, `nonce`, `ts`, `sig` (Ed25519 over all of them and the peer's expected `host_id`), `last_seq` (the peer `seq` the board host last applied, or null) |
 | `welcome` / `refused` | peer | `host_id`, `label`, `schema_version`, `tiller_version`, `server_time`; or `reason` (`revoked`, `unknown_key`, `bad_sig`, `clock_skew`, `replayed`, `version`, `accept_off`) |
-| `snapshot` | peer | `server_time`, `last_event_seq`, and `queries`: the peer's own `board?filter=all`, `attention?state=open`, `agents`, `projects` and its local `machines` row, built by the same handlers as 7.6, in one read transaction |
+| `snapshot` | peer | `server_time`, `last_event_seq`, and `queries`: the peer's own `board?filter=all` (its `asked` rows without `summary`: ask text stays on the peer), `attention?state=open`, `agents`, `projects` and its local `machines` row, built by the same handlers as 7.6, in one read transaction |
 | `event` | peer | one `events` row in the SSE change shape (7.5), in `seq` order |
 | `beat` | peer | `server_time`, `last_event_seq`, every 10 s |
 | `refresh` | board host | nothing: asks for a fresh `snapshot` (Fresh, below) |

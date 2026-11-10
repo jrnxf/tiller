@@ -72,6 +72,15 @@ pub struct AskedRow {
     pub session_id: Option<String>,
     pub received_at: String,
     pub age_seconds: f64,
+    /// Where the ask came from: `prompt` (typed in an agent's pane),
+    /// `board`, `script` or `import`. Absent on a row from a peer that
+    /// predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// The ask's first line, at most 200 characters. Only on this host's
+    /// rows: a peer link carries no ask text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     /// The owning host's label, on every row once a peer is paired
     /// (`protocol.md` 7.3); absent on a host with none.
     #[serde(default, skip_serializing_if = "Option::is_none")]

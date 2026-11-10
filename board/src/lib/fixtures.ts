@@ -707,6 +707,8 @@ function boardFor(scenario: Scenario, now: number): BoardResponse {
           session_id: "01JSESS000000000000000000A",
           received_at: minutes(now, -2),
           age_seconds: 120,
+          source: "prompt",
+          summary: "Can the card fade on exit instead of sliding?",
         },
         {
           id: "01JASK000000000000000000A2",
@@ -714,12 +716,16 @@ function boardFor(scenario: Scenario, now: number): BoardResponse {
           session_id: null,
           received_at: minutes(now, -1),
           age_seconds: 60,
+          source: "script",
+          summary: "Nightly check: the staging certificate expires in 6 days",
         },
       ],
     };
   }
   return {
     rows: defaultRows(now),
+    // One untagged ask from each source: typed in the orchestrator's pane,
+    // sent from the board's ask box (long enough to be cut), and a script's.
     asked: [
       {
         id: "01JASK000000000000000000A1",
@@ -727,6 +733,27 @@ function boardFor(scenario: Scenario, now: number): BoardResponse {
         session_id: "01JSESS000000000000000000A",
         received_at: minutes(now, -2),
         age_seconds: 120,
+        source: "prompt",
+        summary: "Can the card fade on exit instead of sliding?",
+      },
+      {
+        id: "01JASK000000000000000000B1",
+        project_id: "beta",
+        session_id: null,
+        received_at: minutes(now, -6),
+        age_seconds: 360,
+        source: "board",
+        summary:
+          "Move the export settings into their own page, keep the old links working, and say in the release notes where each one went",
+      },
+      {
+        id: "01JASK000000000000000000C1",
+        project_id: "gamma",
+        session_id: null,
+        received_at: minutes(now, -14),
+        age_seconds: 840,
+        source: "script",
+        summary: "Nightly check: the staging certificate expires in 6 days",
       },
     ],
   };

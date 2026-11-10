@@ -1,4 +1,4 @@
-import type { BoardFilter, BoardResponse, BoardRow } from "../../lib/api-types";
+import type { AskedRow, BoardFilter, BoardResponse, BoardRow } from "../../lib/api-types";
 import { ownerKey } from "../../lib/peers";
 
 // The five columns of the board, left to right as the work progresses. `asked`
@@ -22,7 +22,7 @@ export interface Tile {
   // Set for cards; asks have no card page.
   row: BoardRow | null;
   // Set for asks.
-  ask: { id: string; age_seconds: number; received_at: string } | null;
+  ask: Pick<AskedRow, "id" | "age_seconds" | "received_at" | "source" | "summary"> | null;
 }
 
 export function tilesOf(board: BoardResponse): Tile[] {
