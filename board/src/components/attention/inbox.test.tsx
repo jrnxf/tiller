@@ -172,6 +172,8 @@ test("a recommendation says who made it, never always the orchestrator", async (
       ...agents,
       orchestrators: [{ ...first, session_id: "01JSESS000000000000000000A", role: "builder" }],
     });
+    // Query notifies its observers on a timer, so stay inside act through it.
+    await new Promise((resolve) => setTimeout(resolve, 0));
   });
   expect(screen.getByText("The builder recommended")).toBeTruthy();
 });

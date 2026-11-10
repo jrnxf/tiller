@@ -135,6 +135,16 @@ const row = (name: string) => screen.getByTestId(`ask-row-${name}`);
 const asksTo = (project: string) =>
   calls.filter((call) => call.path === `/api/v1/projects/${project}/asks`);
 
+test("the editor loads on demand and its box is there from the first paint", async () => {
+  renderDialog();
+  // Before the editor chunk arrives, the box holds its place at the same class,
+  // so the dialog does not move when the editor replaces it.
+  expect(document.querySelector(".ask-ed")).toBeTruthy();
+  expect(prose()).toBeNull();
+  await waitFor(() => expect(prose()).toBeTruthy());
+  expect(document.querySelectorAll(".ask-ed")).toHaveLength(1);
+});
+
 test("it opens with nothing picked and says how to pick", async () => {
   renderDialog();
   await waitFor(() => expect(prose()).toBeTruthy());

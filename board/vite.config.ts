@@ -6,9 +6,11 @@ import { tillerFixtures } from "./vite-fixtures.ts";
 
 export default defineConfig({
   plugins: [
-    // One bundle: route chunks would add a request to the first render, and the
-    // board is served from the local daemon, so the size is not the cost.
-    tanstackRouter({ target: "react", autoCodeSplitting: false }),
+    // One chunk per route. The router loads the first route's chunk before it
+    // renders (main.tsx awaits router.load), and defaultPendingMs keeps the
+    // previous screen up while the next one loads, so a split shows no pending
+    // state and moves no layout. It keeps the main chunk under 500 kB.
+    tanstackRouter({ target: "react", autoCodeSplitting: true }),
     react(),
     tillerFixtures(),
   ],

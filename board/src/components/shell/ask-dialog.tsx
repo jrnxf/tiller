@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import type { Editor } from "@tiptap/core";
-import { useId, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useId, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
 import type { Project, SettingProblem } from "../../lib/api-types";
@@ -20,8 +20,8 @@ import type { ActionError } from "../attention/api";
 import { SendIcon } from "../attention/icons";
 import { showToast } from "../board/toast";
 import { Modal } from "../ui/modal";
-import { AskEditor, removeMention } from "./ask-editor";
-import type { MentionOption } from "./ask-editor";
+import { removeMention } from "./ask-mentions";
+import type { MentionOption } from "./ask-mentions";
 import { useAskSends } from "./ask-send";
 import { settingsOf, StartSettingsFix } from "./start-settings-fix";
 import type { AskTarget, Outcome } from "./ask-send";
@@ -30,6 +30,9 @@ import { useNamedProjects } from "../board/peer-state";
 import { readFailure } from "./project-dialog";
 
 const ASK_MAX_CHARS = 8000;
+
+// The editor and its parts load when the dialog first opens, not with the board.
+const AskEditor = lazy(async () => ({ default: (await import("./ask-editor")).AskEditor }));
 
 // The toast once every ask is sent.
 function sentToast(targets: AskTarget[], outcomes: Record<string, Outcome>) {
@@ -279,19 +282,22 @@ function AskBody({
         <span className="ask-label" id={labelId}>
           Ask
         </span>
-        <AskEditor
-          options={options}
-          used={picked.map((entry) => projectKey(entry.project))}
-          locked={attempted}
-          placeholder="Type @ to pick projects, then say what they should do"
-          labelledBy={labelId}
-          editorRef={editor}
-          onChange={setPieces}
-          onSubmit={() => void submit()}
-          onListOpen={(open) => {
-            listOpen.current = open;
-          }}
-        />
+        {/* The same box the editor fills, so the dialog does not move when it loads. */}
+        <Suspense fallback={<div className="ask-ed" aria-hidden="true" />}>
+          <AskEditor
+            options={options}
+            used={picked.map((entry) => projectKey(entry.project))}
+            locked={attempted}
+            placeholder="Type @ to pick projects, then say what they should do"
+            labelledBy={labelId}
+            editorRef={editor}
+            onChange={setPieces}
+            onSubmit={() => void submit()}
+            onListOpen={(open) => {
+              listOpen.current = open;
+            }}
+          />
+        </Suspense>
         <div className="ask-sends" role="status" aria-live="polite">
           {targets.length > 0 ? (
             <>
