@@ -1371,17 +1371,9 @@ kbd {
   font-weight: var(--w-medium);
 }
 
-.sec-note .lnk {
+.sec-note .btn {
   flex: none;
-  border: 0;
-  background: transparent;
-  padding: 0;
-  font-size: var(--fs-mini);
-  color: var(--fg-3);
-}
-
-.sec-note .lnk:hover {
-  color: var(--fg-1);
+  margin: -2px 0;
 }
 
 /* The first-run screen before `tiller init` (states/setup-screen.tsx) */

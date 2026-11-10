@@ -37,7 +37,9 @@ interface HeaderProps {
 
 const nothing = () => null;
 
-// "All projects 4" or "2 of 4 projects", or the focused project's name.
+// "All projects 4" or "2 of 4 projects", or the focused project's name, then the
+// separator to the title. The separator goes with the name: when the projects
+// cannot be read the title stands alone.
 function ScopeCrumb({ activeHost }: { activeHost: string | undefined }) {
   const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data);
   const { data: board } = useSuspenseQuery(boardQuery());
@@ -52,6 +54,7 @@ function ScopeCrumb({ activeHost }: { activeHost: string | undefined }) {
       <>
         <span className="pdot" style={{ "--pc": projectColor(index) } as CSSProperties} />
         <b>{shown[0].name}</b>
+        <ChevronIcon />
       </>
     );
   }
@@ -61,6 +64,7 @@ function ScopeCrumb({ activeHost }: { activeHost: string | undefined }) {
       <LayersIcon />
       <b>{all ? "All projects" : `${shown.length} of ${projects.projects.length} projects`}</b>
       <span className="cnt">{shown.length}</span>
+      <ChevronIcon />
     </>
   );
 }
@@ -96,7 +100,6 @@ export function Header({ activeHost, menuOpen, onOpenMenu, onOpenAsk }: HeaderPr
           <Section label="Projects" fallback={nothing}>
             <ScopeCrumb activeHost={activeHost} />
           </Section>
-          <ChevronIcon />
           <h1>{pathname.startsWith("/cards/") ? "Card" : (TITLES[pathname] ?? "Tiller")}</h1>
         </div>
         {activeHost ? (

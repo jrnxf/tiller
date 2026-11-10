@@ -156,6 +156,24 @@ test("a failed projects read shows a note in the sidebar, not the error screen",
   expect(screen.getByTestId("machine-host-a")).toBeTruthy();
 });
 
+test("a failed projects read leaves the title alone, with no dangling separator", async () => {
+  stubDaemon({});
+  await renderApp(snapshotWithout("/api/v1/projects"), "/inbox");
+  await screen.findAllByTestId("section-unavailable");
+  const crumb = screen.getByRole("heading", { level: 1, name: "Inbox" }).parentElement;
+  expect(crumb?.className).toBe("crumb");
+  expect(crumb?.children).toHaveLength(1);
+});
+
+test("the Retry on a failed section is a bordered button like the other secondary actions", async () => {
+  stubDaemon({});
+  await renderApp(snapshotWithout("/api/v1/projects"), "/inbox");
+  const notes = await screen.findAllByTestId("section-unavailable");
+  const retry = within(notes[0] as HTMLElement).getByRole("button", { name: "Retry" });
+  expect(retry.classList.contains("btn")).toBe(true);
+  expect(retry.classList.contains("lnk")).toBe(false);
+});
+
 test("a machine nobody has set up boots to the setup screen with the daemon's command", async () => {
   stubDaemon({ "/api/v1/health": { ok: false, version: "0.1.0", initialized: false } });
   const boot = await loadBoot(document.implementation.createHTMLDocument());

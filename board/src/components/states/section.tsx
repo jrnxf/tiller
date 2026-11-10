@@ -111,7 +111,7 @@ export function SectionNote({ label, reason, retry }: SectionFailure) {
       <div className="tx">
         <b>{label} unavailable.</b> {reason}
       </div>
-      <button type="button" className="lnk" onClick={retry}>
+      <button type="button" className="btn sm" onClick={retry}>
         Retry
       </button>
     </div>
