@@ -225,6 +225,33 @@ mod tests {
         );
     }
 
+    /// G22: a caller that carries a session id is that session, and one that
+    /// carries a retro id is the curator. The CLI names either before it runs
+    /// the owner check, and neither is ever the owner, even at a terminal
+    /// with no `CLAUDECODE` and no Claude Code ancestor.
+    #[test]
+    fn owner_commands_refuse_session_callers() {
+        use crate::store::Actor;
+
+        // The facts every caller below shares pass the owner check on their own.
+        owner_check(false, true, chain(shell())).unwrap();
+        for caller in [
+            Actor::Session("01ARZ3NDEKTSV4RRFFQ69G5FAV".into()),
+            Actor::Curator("01JRETRO".into()),
+            Actor::Script,
+        ] {
+            assert!(!caller.is_owner(), "{caller} resolved as the owner");
+            assert!(
+                !caller.to_string().starts_with("owner"),
+                "{caller} is written as the owner"
+            );
+        }
+        assert!(
+            Actor::Owner.is_owner(),
+            "the owner principal stays the owner"
+        );
+    }
+
     #[test]
     fn walk_follows_parents_and_stops_before_pid_one() {
         let parents = [(30, 20, "zsh"), (20, 10, "claude"), (10, 1, "launchd")];
