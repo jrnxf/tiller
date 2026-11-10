@@ -143,6 +143,8 @@ Only the daemon merges a PR or moves a default branch, and only by executing an 
 
 ### The land sequence
 
+An approval binds the head it was requested on, and the owner's accept names the head they reviewed: the board sends it, and the owner CLI refuses `tiller approve <approval>` without `--sha <head>` (a usage error, exit 2; 7 or more hex characters of the bound head match; a reject needs none). The chat route (`--ask`, G06) takes no `--sha`.
+
 For an approval of kind `merge`:
 
 1. The daemon takes the oldest `accepted` approval with no other approval `executing` on the same PR (the partial unique index `approvals_executing`).

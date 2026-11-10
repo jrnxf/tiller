@@ -43,7 +43,8 @@ pub struct Approve {
     /// Reject instead of accepting
     #[arg(long)]
     pub reject: bool,
-    /// The head you reviewed; a different bound head means the approval is stale
+    /// The head you reviewed, 7 or more hex characters. An accept needs it;
+    /// a different bound head means the approval is stale. A reject does not
     #[arg(long, conflicts_with = "ask")]
     pub sha: Option<String>,
     /// Record the owner's word in the orchestrator chat, citing the ask
@@ -215,7 +216,8 @@ fn request(app: &App, args: RequestArgs) -> Done {
             grant_id: None,
         },
     )?;
-    Ok(Outcome::applied(applied).with_help("the owner decides with: tiller approve <approval>"))
+    Ok(Outcome::applied(applied)
+        .with_help("the owner decides with: tiller approve <approval> --sha <head you reviewed>"))
 }
 
 pub fn approve(app: &App, args: Approve) -> Done {
@@ -259,6 +261,13 @@ pub fn approve(app: &App, args: Approve) -> Done {
     let (ctx, cited) = match &args.ask {
         None => {
             app.require_owner("tiller approve")?;
+            // The owner decides on the head they saw, as the board does.
+            if !args.reject && args.sha.is_none() {
+                return Err(Failure::usage(
+                    "an accept needs --sha <head>: pass the head you reviewed (7 or more hex characters)",
+                )
+                .hint("the board shows the head each approval binds"));
+            }
             (app.ctx(), None)
         }
         Some(reference) => {
@@ -374,7 +383,10 @@ pub fn land(app: &App, args: Land) -> Done {
                     "approval {} is requested; approve it first",
                     approval.id
                 ))
-                .hint(format!("tiller approve {}", approval.id)));
+                .hint(format!(
+                    "tiller approve {} --sha <head you reviewed>",
+                    approval.id
+                )));
             }
             other => {
                 let why = approval

@@ -1,0 +1,12 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 2
+{
+  "error": {
+    "code": "usage",
+    "hint": "the board shows the head each approval binds",
+    "message": "an accept needs --sha <head>: pass the head you reviewed (7 or more hex characters)"
+  },
+  "ok": false
+}

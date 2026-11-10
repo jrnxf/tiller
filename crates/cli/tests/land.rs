@@ -69,7 +69,7 @@ fn land_without_the_daemon_exits_seven() {
         "requested, not accepted: {}",
         out.json
     );
-    world.must(&["approve", &approval]);
+    world.must(&["approve", &approval, "--sha", &HEAD[..12]]);
     let out = world.run(&["land", &approval]);
     assert_eq!(
         (out.code, out.error_code()),
@@ -94,7 +94,7 @@ fn land_without_the_daemon_exits_seven() {
 fn land_waits_for_the_daemon_and_reports_the_result() {
     let world = World::initialized();
     let approval = requested(&world);
-    world.must(&["approve", &approval]);
+    world.must(&["approve", &approval, "--sha", &HEAD[..12]]);
     let lock = DaemonLock::acquire(&world.home()).unwrap();
     let db = world.db();
     let id = approval.clone();
@@ -128,7 +128,7 @@ fn land_waits_for_the_daemon_and_reports_the_result() {
 fn land_gives_up_after_its_wait_and_names_the_notice() {
     let world = World::initialized();
     let approval = requested(&world);
-    world.must(&["approve", &approval]);
+    world.must(&["approve", &approval, "--sha", &HEAD[..12]]);
     let lock = DaemonLock::acquire(&world.home()).unwrap();
     let mut store = world.store();
     let card: String = store
@@ -174,7 +174,7 @@ fn land_gives_up_after_its_wait_and_names_the_notice() {
 fn land_with_an_unreadable_result_exits_eight() {
     let world = World::initialized();
     let approval = requested(&world);
-    world.must(&["approve", &approval]);
+    world.must(&["approve", &approval, "--sha", &HEAD[..12]]);
     let mut store = world.store();
     let ctx = Ctx::new(Actor::Daemon);
     store.approval_execute(&ctx, &approval, HEAD).unwrap();
@@ -200,7 +200,7 @@ fn land_is_owner_only() {
     let world = World::initialized();
     let approval = requested(&world);
     let orchestrator = world.orchestrator();
-    world.must(&["approve", &approval]);
+    world.must(&["approve", &approval, "--sha", &HEAD[..12]]);
     let out = world.run_as(&orchestrator, &["land", &approval]);
     assert_eq!(
         (out.code, out.error_code()),

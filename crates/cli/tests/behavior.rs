@@ -161,6 +161,48 @@ fn a_stale_sha_is_refused_before_anything_is_decided() {
     assert_eq!(ok.data()["approval"]["state"], "accepted");
 }
 
+/// The owner's accept names the head they reviewed. Without `--sha` the CLI
+/// refuses with a usage error and writes nothing; 7 hex characters of the
+/// bound head still match; a reject needs no head.
+#[test]
+fn an_accept_without_sha_is_a_usage_error() {
+    let world = World::initialized();
+    world.orchestrator();
+    world.must(&[
+        "card", "create", "alpha", "--kind", "ship", "--title", "One",
+    ]);
+    let (_, worker) = world.builder_run("alpha-1");
+    let approval = requested_approval(&world, &worker);
+    let seq = world.store().last_seq().unwrap();
+
+    let out = world.run(&["approve", &approval]);
+    assert_eq!((out.code, out.error_code()), (2, "usage"), "{}", out.json);
+    let message = out.json["error"]["message"].as_str().unwrap();
+    assert!(message.contains("--sha"), "{message}");
+    assert!(message.contains("head you reviewed"), "{message}");
+    assert_eq!(world.store().last_seq().unwrap(), seq);
+
+    // A prefix of 7 hex characters is enough; 6 is not.
+    let short = world.run(&["approve", &approval, "--sha", &HEAD[..6]]);
+    assert_eq!(short.code, 2, "{}", short.json);
+    assert_eq!(world.store().last_seq().unwrap(), seq);
+    let ok = world.must(&["approve", &approval, "--sha", &HEAD[..7]]);
+    assert_eq!(ok.data()["approval"]["state"], "accepted");
+}
+
+#[test]
+fn a_reject_needs_no_sha() {
+    let world = World::initialized();
+    world.orchestrator();
+    world.must(&[
+        "card", "create", "alpha", "--kind", "ship", "--title", "One",
+    ]);
+    let (_, worker) = world.builder_run("alpha-1");
+    let approval = requested_approval(&world, &worker);
+    let rejected = world.must(&["approve", &approval, "--reject"]);
+    assert_eq!(rejected.data()["approval"]["state"], "rejected");
+}
+
 /// Records a Stop observation at `at` for the orchestrator.
 fn stop(world: &World, session: &str, at: Timestamp, payload: serde_json::Value) {
     world

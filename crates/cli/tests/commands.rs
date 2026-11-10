@@ -620,6 +620,7 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
         &["approval", "request", "alpha-1", "--kind", "merge"],
     );
     let approval_id = id(&approval, "/data/id");
+    fails(&world, 2, "approve_without_sha", &["approve", &approval_id]);
     fails(
         &world,
         5,

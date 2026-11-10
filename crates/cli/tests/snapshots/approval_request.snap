@@ -37,7 +37,7 @@ exit: 0
     "<seq>"
   ],
   "help": [
-    "the owner decides with: tiller approve <approval>"
+    "the owner decides with: tiller approve <approval> --sha <head you reviewed>"
   ],
   "ok": true,
   "replayed": false
