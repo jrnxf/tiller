@@ -5,6 +5,8 @@
 //! cutover's rollback trigger), and opens a `recovery` item with its
 //! evidence, in one transaction.
 
+pub mod principal;
+
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -61,7 +63,7 @@ impl CardAction {
 /// `landed` (`state.md` section 3: no other close comes from reconcile). The
 /// project's live orchestrator acts in its own project, closes anything but
 /// `landed`, and may also create a card in another project of its host.
-/// Workers, hooks and the curator do none of these.
+/// Workers, hooks, the curator and a script do none of these.
 pub fn require_card_scope(
     conn: &Connection,
     actor: &Actor,
@@ -124,7 +126,9 @@ pub fn require_card_scope(
                 session.project_id
             )))
         }
-        Actor::Hook | Actor::Curator(_) => Err(Error::Forbidden(format!("{actor} may not {what}"))),
+        Actor::Hook | Actor::Curator(_) | Actor::Script => {
+            Err(Error::Forbidden(format!("{actor} may not {what}")))
+        }
     }
 }
 

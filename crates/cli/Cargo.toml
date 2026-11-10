@@ -39,6 +39,7 @@ insta.workspace = true
 nix.workspace = true
 rsa.workspace = true
 tempfile.workspace = true
+tiller-core = { workspace = true, features = ["test-owner"] }
 
 [lints]
 workspace = true

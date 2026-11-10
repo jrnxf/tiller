@@ -48,6 +48,7 @@ fn p57_init_creates_owner_only_state_under_a_permissive_umask() {
         .env_remove("TILLER_DB")
         .env_remove("TILLER_SESSION_ID")
         .env_remove("CLAUDECODE")
+        .env("TILLER_TEST_OWNER", "1")
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");

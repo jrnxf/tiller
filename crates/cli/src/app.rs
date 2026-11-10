@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use tiller_core::authority::principal;
 use tiller_core::domain::Session;
 use tiller_core::state::{get, resolve_id};
 use tiller_core::{Actor, Applied, Ctx, Error, Store};
@@ -281,6 +282,9 @@ pub struct App {
     pub home: PathBuf,
     pub db: PathBuf,
     pub actor: Actor,
+    /// Why a caller with no session id is a script and not the owner: the
+    /// owner check it failed (`authority.md` section 3).
+    pub not_owner: Option<String>,
 }
 
 impl App {
@@ -290,14 +294,28 @@ impl App {
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".tiller")))
             .unwrap_or_else(|| PathBuf::from(".tiller"));
         let db = db.unwrap_or_else(|| home.join("state.db"));
+        let mut not_owner = None;
         let actor = match std::env::var("TILLER_SESSION_ID") {
             Ok(id) if !id.is_empty() => Actor::Session(id),
             _ => match std::env::var("TILLER_RETRO_ID") {
                 Ok(retro) if !retro.is_empty() => Actor::Curator(retro),
-                _ => Actor::Owner,
+                // A call from an agent shell, cron or `ssh host tiller` is
+                // never the owner, whatever its environment says.
+                _ => match principal::owner_at_terminal() {
+                    Ok(()) => Actor::Owner,
+                    Err(why) => {
+                        not_owner = Some(why);
+                        Actor::Script
+                    }
+                },
             },
         };
-        Self { home, db, actor }
+        Self {
+            home,
+            db,
+            actor,
+            not_owner,
+        }
     }
 
     pub fn ctx(&self) -> Ctx {
@@ -405,16 +423,22 @@ impl App {
         Ok(Some(get(store.conn(), "session", &full)?))
     }
 
-    /// Refuses a caller that is a fleet session, for the owner-only commands.
+    /// Refuses every caller but the owner principal, for the owner-only
+    /// commands (G22).
     pub fn require_owner(&self, what: &str) -> Result<(), Failure> {
         if self.actor.is_owner() {
-            Ok(())
-        } else {
-            Err(Failure::forbidden(format!(
-                "{what} is owner only; {} may not",
-                self.actor
-            )))
+            return Ok(());
         }
+        if let Some(why) = &self.not_owner {
+            return Err(
+                Failure::forbidden(format!("{what} needs the owner at a terminal: {why}"))
+                    .hint("run it yourself in a terminal, not from an agent"),
+            );
+        }
+        Err(Failure::forbidden(format!(
+            "{what} is owner only; {} may not",
+            self.actor
+        )))
     }
 
     /// The key for a keyed command (6.3): the caller's `--key`, else for a

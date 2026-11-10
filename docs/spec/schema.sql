@@ -485,7 +485,7 @@ CREATE TABLE events (
   id               TEXT NOT NULL UNIQUE,
   at               TEXT NOT NULL,
   txn              TEXT NOT NULL,            -- mutation name, e.g. card.close
-  actor            TEXT NOT NULL,            -- session:<id>, board, board@<viewer label> (ADR 0003), daemon, hook, import, owner
+  actor            TEXT NOT NULL,            -- session:<id>, board, board@<viewer label> (ADR 0003), daemon, hook, import, owner, script
   entity           TEXT NOT NULL,
   entity_id        TEXT NOT NULL,
   kind             TEXT NOT NULL,            -- e.g. card.created, run.ended

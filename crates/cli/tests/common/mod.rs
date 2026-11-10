@@ -3,7 +3,7 @@
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
@@ -50,6 +50,9 @@ pub struct World {
     names: RefCell<Names>,
     /// Extra environment for every command, like a fake forge client.
     env: RefCell<Vec<(String, String)>>,
+    /// Whether a command without a session stands in for the owner at a
+    /// terminal; off, it is a script reading a pipe.
+    terminal: Cell<bool>,
 }
 
 #[derive(Default)]
@@ -63,6 +66,7 @@ impl World {
             dir: tempfile::tempdir().unwrap(),
             names: RefCell::default(),
             env: RefCell::default(),
+            terminal: Cell::new(true),
         }
     }
 
@@ -108,14 +112,24 @@ impl World {
             .env_remove("TILLER_GH")
             // Run from a Claude Code shell, over ssh or neither, the owner
             // checks see the same caller: no `CLAUDECODE`, no
-            // `SSH_CONNECTION`, stdin not a terminal.
+            // `SSH_CONNECTION`, and the test stand-in for a terminal with no
+            // Claude Code behind it (`authority::principal`).
             .env_remove("CLAUDECODE")
             .env_remove("SSH_CONNECTION");
+        if self.terminal.get() {
+            command.env("TILLER_TEST_OWNER", "1");
+        }
         if let Some(session) = session {
             command.env("TILLER_SESSION_ID", session);
         }
         command.envs(self.env.borrow().iter().cloned());
         command
+    }
+
+    /// Runs every later command at the stand-in terminal (the default), or
+    /// with stdin a pipe and no terminal, as a cron job or `ssh host tiller`.
+    pub fn set_terminal(&self, on: bool) {
+        self.terminal.set(on);
     }
 
     /// Sets `key` for every later command.

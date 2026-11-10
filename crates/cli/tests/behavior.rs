@@ -229,6 +229,51 @@ fn intake_stats_count_false_blocks_and_gate_block_once() {
     );
 }
 
+/// `authority.md` section 3 (G22): a call from an agent shell or with no
+/// terminal is never the owner, whatever its environment leaves out. It is a
+/// script: refused an owner-only command, it may still drop a note.
+#[test]
+fn an_agent_shell_or_a_pipe_is_never_the_owner() {
+    let world = World::initialized();
+    let seq = world.store().last_seq().unwrap();
+    let refused = |why: &str| {
+        let out = world.run(&["owner", "set", "tiller"]);
+        assert_eq!(
+            (out.code, out.error_code()),
+            (6, "forbidden"),
+            "{}",
+            out.json
+        );
+        let message = out.json["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("needs the owner at a terminal") && message.contains(why),
+            "{message}"
+        );
+    };
+    world.set_terminal(false);
+    refused("stdin is not a terminal");
+    world.set_terminal(true);
+    world.set_env("CLAUDECODE", "1");
+    refused("CLAUDECODE is set");
+    assert_eq!(
+        world.store().last_seq().unwrap(),
+        seq,
+        "nothing was recorded"
+    );
+
+    let note = world.must(&["ask", "note", "alpha", "--text", "from cron"]);
+    let actor: String = world
+        .store()
+        .conn()
+        .query_row(
+            "SELECT actor FROM events WHERE seq = ?1",
+            [note.events()[0]],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(actor, "script");
+}
+
 /// `protocol.md` 10.1: pairing needs the owner at a terminal on both hosts,
 /// and `federation.accept = false` refuses it before anyone is asked. A
 /// refused `peer add` reaches no peer and leaves no key file.
@@ -243,6 +288,7 @@ fn pairing_needs_the_owner_at_a_terminal() {
     world.set_env("TILLER_SSH", fake.to_str().unwrap());
     let seq = world.store().last_seq().unwrap();
 
+    world.set_terminal(false);
     let out = world.run(&["peer", "add", "host-b", "--ssh", "host-b-alias"]);
     assert_eq!(
         (out.code, out.error_code()),
@@ -255,6 +301,7 @@ fn pairing_needs_the_owner_at_a_terminal() {
         "{}",
         out.json
     );
+    world.set_terminal(true);
     for bad in ["../b", "-b", "a b"] {
         let out = world.run(&["peer", "add", bad, "--ssh", "host-b-alias"]);
         assert_eq!(out.code, 2, "{bad}: {}", out.json);
@@ -279,7 +326,9 @@ fn pairing_needs_the_owner_at_a_terminal() {
             "act",
         ])
     };
+    world.set_terminal(false);
     let out = accept(&world);
+    world.set_terminal(true);
     assert_eq!(
         (out.code, out.error_code()),
         (6, "forbidden"),

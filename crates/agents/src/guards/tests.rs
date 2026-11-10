@@ -135,6 +135,68 @@ fn merge_commands_denied_for_every_fleet_role() {
 }
 
 #[test]
+fn pr_approve_retarget_and_release_delete_denied() {
+    for command in [
+        "gh pr review 12 --approve",
+        "gh pr review --approve 12",
+        "gh pr review 12 --approve=true",
+        "gh pr review 12 -a",
+        "gh pr review 12 -a -b lgtm",
+        "gh pr review 12 -ab lgtm",
+        "gh pr review 12 -ca",
+        "gh-axi pr review 12 --approve",
+        "gh -R example/alpha pr review 12 -a",
+        "gh pr review 12 $FLAG",
+        "echo --approve | xargs gh pr review 12",
+        "gh pr edit 12 --base main",
+        "gh pr edit 12 --base=main",
+        "gh pr edit 12 -B main",
+        "gh pr edit 12 -Bmain",
+        "gh pr edit 12 --base refs/heads/main",
+        "gh pr edit 12 --title x --base main",
+        "gh-axi pr edit 12 --base main",
+        "gh pr edit 12 --base \"$BASE\"",
+        "gh pr edit 12 --base",
+        "gh release delete v1.0.0",
+        "gh release delete v1.0.0 --yes --cleanup-tag",
+        "gh-axi release delete v1.0.0",
+        "gh -R example/alpha release delete v1.0.0",
+        "gh release delete-asset v1.0.0 tiller.tar.gz",
+        "sh -c 'gh pr review 12 --approve'",
+        "gh api repos/o/r/pulls/12/reviews -f event=APPROVE",
+        "gh api -X PATCH repos/o/r/pulls/12 -f base=main",
+        "gh api -X DELETE repos/o/r/releases/1",
+    ] {
+        denied_for_all(command, Code::Merge);
+    }
+    let denial = bash(Role::Builder, "gh pr review 12 --approve").unwrap();
+    assert!(
+        denial.message().contains("approves a PR")
+            && denial
+                .message()
+                .contains("ask the orchestrator to request a merge approval"),
+        "{}",
+        denial.message()
+    );
+    for command in [
+        "gh pr review 12 --comment -b 'looks fine'",
+        "gh pr review 12 --request-changes --body 'see line 4'",
+        "gh pr review 12 -c -b -a",
+        "gh pr review 12 -r -b approve",
+        "gh pr edit 12 --base fm/alpha-0",
+        "gh pr edit 12 -B fm/alpha-0 --title 'merge into main'",
+        "gh pr edit 12 --title 'retarget --base main' --add-label ready",
+        "gh-axi pr edit 12 --body x",
+        "gh release view v1.0.0",
+        "gh release list",
+    ] {
+        for role in Role::ALL {
+            allowed(role, command);
+        }
+    }
+}
+
+#[test]
 fn raw_api_writes_denied() {
     for command in [
         "gh api -X PUT repos/o/r/pulls/12/merge",

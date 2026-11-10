@@ -689,9 +689,15 @@ pub fn config(app: &App, cmd: ConfigCmd) -> Done {
 }
 
 /// Fleet roles can neither read nor write the configuration
-/// (`authority.md`, section 8).
+/// (`authority.md`, section 8). A script reads it: `config diff` runs
+/// `config get` on the peer over ssh, with no terminal.
 fn forbid_fleet(app: &App) -> Result<(), Failure> {
-    if app.actor.is_owner() || app.actor == tiller_core::Actor::Daemon {
+    if app.actor.is_owner()
+        || matches!(
+            app.actor,
+            tiller_core::Actor::Daemon | tiller_core::Actor::Script
+        )
+    {
         Ok(())
     } else {
         Err(Failure::forbidden(format!(

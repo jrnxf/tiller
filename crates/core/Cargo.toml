@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+# The command tests' stand-in for the owner at a terminal
+# (`authority::principal`); only `tiller-cli`'s dev-dependencies turn it on.
+test-owner = []
+
 [dependencies]
 base64.workspace = true
 ed25519-dalek.workspace = true

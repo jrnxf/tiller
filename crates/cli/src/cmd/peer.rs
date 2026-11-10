@@ -4,13 +4,13 @@
 //! board's Add a host runs `accept --unattended` instead, which sshd must
 //! start, as it starts `serve`, the peer's half of a link (10.2).
 
-use std::io::{BufRead, IsTerminal, Read, Write};
-use std::path::Path;
+use std::io::{BufRead, Read, Write};
 use std::process::{Command, ExitCode, Stdio};
 
 use clap::Subcommand;
 use serde_json::{Value, json};
 use tiller_core::Applied;
+use tiller_core::authority::principal::{self, Process};
 use tiller_core::domain::PeerScope;
 use tiller_core::state::peers::{
     self, KeyFile, NewPairing, NewPeerKey, PEER_PROTOCOL, check_alias, check_label, fingerprint,
@@ -85,7 +85,20 @@ pub enum PeerCmd {
 }
 
 pub fn run(app: &App, cmd: PeerCmd) -> Done {
-    app.require_owner("tiller peer")?;
+    match &cmd {
+        // The board host's daemon runs it over ssh with no terminal, so a
+        // script here: the `peer serve` start check in `accept` stands in
+        // for the owner's (G45).
+        PeerCmd::Accept {
+            unattended: true, ..
+        } if app.actor == Actor::Script => {}
+        PeerCmd::Accept {
+            unattended: true, ..
+        } => app.require_owner("tiller peer accept --unattended")?,
+        PeerCmd::Add { .. } => app.require_owner("tiller peer add")?,
+        PeerCmd::Accept { .. } => app.require_owner("tiller peer accept")?,
+        _ => app.require_owner("tiller peer")?,
+    }
     match cmd {
         PeerCmd::Add {
             label,
@@ -148,6 +161,7 @@ pub fn serve(app: &App, from: String) -> Result<ExitCode, Failure> {
                 home: app.home.clone(),
                 db: app.db.clone(),
                 actor: app.actor.clone(),
+                not_owner: app.not_owner.clone(),
             },
         })),
     };
@@ -199,7 +213,7 @@ fn require_sshd_owner(what: &str) -> Result<(), Failure> {
         set("TILLER_SESSION_ID"),
         set("CLAUDECODE"),
         set("SSH_CONNECTION"),
-        ancestors,
+        principal::ancestors,
     )
 }
 
@@ -228,10 +242,9 @@ fn serve_start_check(
         return Err(refuse("SSH_CONNECTION is not set".into()));
     }
     let chain = ancestors().map_err(|error| refuse(format!("the parent chain: {error}")))?;
-    if let Some(claude) = chain.iter().find(|process| is_claude_code(process)) {
+    if let Some(pid) = principal::claude_ancestor(&chain) {
         return Err(refuse(format!(
-            "Claude Code (pid {}) is among its ancestors",
-            claude.pid
+            "Claude Code (pid {pid}) is among its ancestors"
         )));
     }
     Ok(())
@@ -248,7 +261,6 @@ fn add(
 ) -> Done {
     check_label(label)?;
     check_alias(alias)?;
-    require_terminal_owner("tiller peer add")?;
     let mut store = app.write()?;
     let this = store.this_host()?;
     if this.label == label {
@@ -528,7 +540,6 @@ fn accept(app: &App, new: NewPeerKey) -> Done {
     if unattended {
         require_sshd_owner("tiller peer accept --unattended")?;
     } else {
-        require_terminal_owner("tiller peer accept")?;
         confirm(&this.label, &new)?;
     }
     let host_id = meta(store.conn(), "host_id")?.unwrap_or_default();
@@ -637,121 +648,6 @@ fn key_json(key: &tiller_core::domain::PeerKey) -> Value {
     })
 }
 
-// -- the owner at a terminal -----------------------------------------------
-
-/// The CLI owner principal for pairing (`authority.md` section 3, G22): no
-/// `CLAUDECODE`, stdin a terminal, and no Claude Code process among the
-/// caller's ancestors. `require_owner` has already refused a session id.
-fn require_terminal_owner(what: &str) -> Result<(), Failure> {
-    let claudecode = std::env::var_os("CLAUDECODE").is_some_and(|value| !value.is_empty());
-    owner_principal(what, claudecode, std::io::stdin().is_terminal(), ancestors)
-}
-
-/// One process in the caller's parent chain.
-#[derive(Clone, Debug)]
-struct Process {
-    pid: u32,
-    comm: String,
-    args: String,
-}
-
-fn owner_principal(
-    what: &str,
-    claudecode: bool,
-    stdin_terminal: bool,
-    ancestors: impl FnOnce() -> std::io::Result<Vec<Process>>,
-) -> Result<(), Failure> {
-    let refuse = |why: String| {
-        Failure::forbidden(format!("{what} needs the owner at a terminal: {why}"))
-            .hint("run it yourself in a terminal, not from an agent")
-    };
-    if claudecode {
-        return Err(refuse("CLAUDECODE is set".into()));
-    }
-    if !stdin_terminal {
-        return Err(refuse("stdin is not a terminal".into()));
-    }
-    let chain = ancestors().map_err(|error| refuse(format!("the parent chain: {error}")))?;
-    if let Some(claude) = chain.iter().find(|process| is_claude_code(process)) {
-        return Err(refuse(format!(
-            "Claude Code (pid {}) is among its ancestors",
-            claude.pid
-        )));
-    }
-    Ok(())
-}
-
-/// A Claude Code process, however it was installed: the native binary
-/// (`claude`, or `.claude-wrapped` behind a Nix wrapper) or the npm package.
-fn is_claude_code(process: &Process) -> bool {
-    let base = |path: &str| {
-        Path::new(path)
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    };
-    let named = |name: &str| {
-        let name = name.trim_start_matches('.');
-        name.strip_suffix("-wrapped").unwrap_or(name) == "claude"
-    };
-    let argv0 = process.args.split_whitespace().next().unwrap_or_default();
-    named(&base(&process.comm))
-        || named(&base(argv0))
-        || process.args.contains("@anthropic-ai/claude-code")
-}
-
-/// The caller's ancestors, nearest first, up to but not including pid 1.
-fn ancestors() -> std::io::Result<Vec<Process>> {
-    let mut chain = Vec::new();
-    let mut pid = std::os::unix::process::parent_id();
-    while pid > 1 && chain.len() < 128 {
-        let (parent, process) = read_process(pid)?;
-        chain.push(process);
-        pid = parent;
-    }
-    Ok(chain)
-}
-
-#[cfg(target_os = "linux")]
-fn read_process(pid: u32) -> std::io::Result<(u32, Process)> {
-    let invalid = |what: &str| std::io::Error::other(format!("pid {pid}: {what}"));
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    let open = stat.find('(').ok_or_else(|| invalid("no command name"))?;
-    let close = stat.rfind(')').ok_or_else(|| invalid("no command name"))?;
-    let comm = stat.get(open + 1..close).unwrap_or_default().to_owned();
-    let parent = stat
-        .get(close + 1..)
-        .and_then(|rest| rest.split_whitespace().nth(1))
-        .and_then(|ppid| ppid.parse().ok())
-        .ok_or_else(|| invalid("no parent pid"))?;
-    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))?;
-    let args = String::from_utf8_lossy(&cmdline)
-        .split('\0')
-        .filter(|arg| !arg.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    Ok((parent, Process { pid, comm, args }))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn read_process(pid: u32) -> std::io::Result<(u32, Process)> {
-    let ps = |field: &str| -> std::io::Result<String> {
-        let output = Command::new("ps")
-            .args(["-o", field, "-p", &pid.to_string()])
-            .output()?;
-        if !output.status.success() {
-            return Err(std::io::Error::other(format!("ps found no pid {pid}")));
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-    };
-    let parent = ps("ppid=")?
-        .parse()
-        .map_err(|_| std::io::Error::other(format!("pid {pid}: no parent pid")))?;
-    let comm = ps("comm=")?;
-    let args = ps("args=")?;
-    Ok((parent, Process { pid, comm, args }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -766,42 +662,6 @@ mod tests {
 
     fn chain(processes: Vec<Process>) -> impl FnOnce() -> std::io::Result<Vec<Process>> {
         move || Ok(processes)
-    }
-
-    #[test]
-    fn the_owner_is_a_terminal_with_no_claude_code_behind_it() {
-        let shell = vec![process("zsh", "-zsh"), process("sshd", "sshd: user@pts/0")];
-        owner_principal("x", false, true, chain(shell.clone())).unwrap();
-
-        let refused = |claudecode, terminal, processes| {
-            let failure = owner_principal("x", claudecode, terminal, chain(processes)).unwrap_err();
-            assert_eq!(failure.exit, 6);
-            failure.message.clone()
-        };
-        assert!(refused(true, true, shell.clone()).contains("CLAUDECODE"));
-        assert!(refused(false, false, shell.clone()).contains("not a terminal"));
-        for claude in [
-            process("claude", "claude"),
-            process(
-                ".claude-wrapped",
-                "/home/user/.nix-profile/bin/claude --resume",
-            ),
-            process(
-                "node",
-                "node /home/user/lib/node_modules/@anthropic-ai/claude-code/cli.js",
-            ),
-            process("2.1.0", "/home/user/.local/bin/claude"),
-        ] {
-            let mut processes = shell.clone();
-            processes.insert(1, claude.clone());
-            assert!(
-                refused(false, true, processes).contains("Claude Code"),
-                "{claude:?}"
-            );
-        }
-        let unreadable =
-            owner_principal("x", false, true, || Err(std::io::Error::other("gone"))).unwrap_err();
-        assert_eq!(unreadable.exit, 6, "an unreadable chain is not the owner");
     }
 
     #[test]
@@ -829,16 +689,6 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(unreadable.exit, 6, "an unreadable chain never serves");
-    }
-
-    #[test]
-    fn other_programs_named_like_claude_are_not_claude_code() {
-        for other in [
-            process("claude-notes", "claude-notes"),
-            process("vim", "vim claude.md"),
-        ] {
-            assert!(!is_claude_code(&other), "{other:?}");
-        }
     }
 
     #[test]

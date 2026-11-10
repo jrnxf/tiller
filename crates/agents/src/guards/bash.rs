@@ -39,6 +39,76 @@ fn texts(args: &[Arg]) -> String {
         .join(" ")
 }
 
+/// Whether `gh pr review` may approve: `--approve`, `--approve=...`, `-a`
+/// alone or in a cluster of short flags such as `-ab lgtm`, or a word the
+/// guard cannot read that could be one of them.
+fn review_approves(args: &[Arg]) -> bool {
+    const WITH_VALUE: &[&str] = &["-b", "--body", "-F", "--body-file", "-R", "--repo"];
+    let mut j = 0;
+    while let Some(arg) = args.get(j) {
+        let text = arg.text.as_str();
+        if WITH_VALUE.contains(&text) {
+            j += 2;
+            continue;
+        }
+        if !arg.fixed || text == "--approve" || text.starts_with("--approve=") {
+            return true;
+        }
+        if let Some(cluster) = text.strip_prefix('-').filter(|c| !c.starts_with('-'))
+            // `-b`, `-F` and `-R` take the rest of the cluster as their value.
+            && cluster
+                .chars()
+                .take_while(|c| !['b', 'F', 'R'].contains(c))
+                .any(|c| c == 'a')
+        {
+            return true;
+        }
+        j += 1;
+    }
+    false
+}
+
+/// The base `gh pr edit` sets: `--base <b>`, `--base=<b>`, `-B <b>` or
+/// `-B<b>`. A flag with no value after it is a base the guard cannot read.
+fn pr_base(args: &[Arg]) -> Option<Arg> {
+    let mut j = 0;
+    while let Some(arg) = args.get(j) {
+        let text = arg.text.as_str();
+        if text == "--base" || text == "-B" {
+            return Some(args.get(j + 1).cloned().unwrap_or(Arg {
+                text: String::new(),
+                fixed: false,
+            }));
+        }
+        if let Some(value) = text
+            .strip_prefix("--base=")
+            .or_else(|| text.strip_prefix("-B").filter(|v| !v.is_empty()))
+        {
+            return Some(Arg {
+                text: value.to_owned(),
+                fixed: arg.fixed,
+            });
+        }
+        if [
+            "-R",
+            "--repo",
+            "-b",
+            "--body",
+            "-F",
+            "--body-file",
+            "-t",
+            "--title",
+        ]
+        .contains(&text)
+        {
+            j += 2;
+            continue;
+        }
+        j += 1;
+    }
+    None
+}
+
 fn basename(text: &str) -> &str {
     text.rsplit('/').next().unwrap_or(text)
 }
@@ -1612,19 +1682,14 @@ impl Walker<'_, '_> {
                 shown,
             );
         }
-        let facts = self.ctx.facts();
-        let default = match &facts.default_branch {
-            Some(default) => branch == default,
-            None => branch == "main" || branch == "master",
-        };
-        if default {
+        if self.is_default_branch(branch) {
             return self.deny(
                 Code::DefaultPush,
                 format!("the push goes to the default branch {branch}"),
                 shown,
             );
         }
-        match &facts.branch {
+        match &self.ctx.facts().branch {
             Some(own) if own == branch => None,
             Some(own) => self.deny(
                 Code::ForeignBranch,
@@ -1636,6 +1701,16 @@ impl Walker<'_, '_> {
                 "this run has no branch on record",
                 shown,
             ),
+        }
+    }
+
+    /// Whether `branch` is the project's default branch, or `main` or
+    /// `master` when the run has none on record.
+    fn is_default_branch(&self, branch: &str) -> bool {
+        let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+        match &self.ctx.facts().default_branch {
+            Some(default) => branch == default,
+            None => branch == "main" || branch == "master",
         }
     }
 
@@ -1722,7 +1797,7 @@ impl Walker<'_, '_> {
         if appended
             && (positionals.len() < 2
                 || top.text == "api"
-                || (top.text == "pr" && sub == "close")
+                || (top.text == "pr" && ["close", "review", "edit"].contains(&sub))
                 || (top.text == "repo" && sub == "edit"))
         {
             return self.deny(
@@ -1794,6 +1869,31 @@ impl Walker<'_, '_> {
                 return self.deny(
                     Code::DefaultPush,
                     "gh repo edit --default-branch moves the default branch",
+                    shown,
+                );
+            }
+            "pr" if sub == "review" && review_approves(args) => {
+                return self.deny(
+                    Code::Merge,
+                    format!("{name} pr review --approve approves a PR"),
+                    shown,
+                );
+            }
+            "pr" if sub == "edit" => {
+                if let Some(base) = pr_base(args)
+                    && (!base.fixed || self.is_default_branch(&base.text))
+                {
+                    return self.deny(
+                        Code::Merge,
+                        format!("{name} pr edit --base retargets a PR at the default branch"),
+                        shown,
+                    );
+                }
+            }
+            "release" if sub == "delete" || sub == "delete-asset" => {
+                return self.deny(
+                    Code::Merge,
+                    format!("{name} release {sub} deletes a release"),
                     shown,
                 );
             }

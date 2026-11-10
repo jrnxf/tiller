@@ -790,6 +790,7 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
     // Pairing needs the owner at a terminal on both hosts, or sshd on the
     // peer; the harness has neither, so the happy path is the core's tests,
     // the daemon's peer e2e test and a live pairing.
+    world.set_terminal(false);
     fails(
         &world,
         6,
@@ -809,6 +810,7 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
         "act",
     ];
     fails(&world, 6, "peer_accept_needs_a_terminal", &accept);
+    world.set_terminal(true);
     // The board's Add a host: sshd must start it, as it starts `peer serve`.
     let unattended = [&accept[..], &["--unattended"]].concat();
     fails(&world, 6, "peer_accept_unattended_needs_sshd", &unattended);

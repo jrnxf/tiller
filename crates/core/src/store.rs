@@ -46,6 +46,11 @@ pub enum Actor {
     /// section 4): not a fleet role and not the owner. Holds the retro id;
     /// written as `curator:<retro>`.
     Curator(String),
+    /// A CLI call with no session id that fails an owner check: a cron or
+    /// dotfiles job, `ssh host tiller ...`, or any agent shell
+    /// (`authority.md` section 3, Script). It may drop a note; it is never
+    /// the owner.
+    Script,
 }
 
 impl Actor {
@@ -73,6 +78,7 @@ impl fmt::Display for Actor {
             Actor::Owner => f.write_str("owner"),
             Actor::Peer(label) => write!(f, "board@{label}"),
             Actor::Curator(retro) => write!(f, "curator:{retro}"),
+            Actor::Script => f.write_str("script"),
         }
     }
 }
@@ -87,6 +93,7 @@ impl FromStr for Actor {
             "hook" => Ok(Actor::Hook),
             "import" => Ok(Actor::Import),
             "owner" => Ok(Actor::Owner),
+            "script" => Ok(Actor::Script),
             _ => match (
                 s.strip_prefix("session:"),
                 s.strip_prefix("board@"),
