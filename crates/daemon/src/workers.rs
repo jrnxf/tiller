@@ -493,13 +493,25 @@ impl Source for Finished {
 
 // -- transcripts ------------------------------------------------------------------
 
-/// Tails the transcript of every live local session that has one
-/// (`protocol.md` section 5). It polls each file every two seconds; the
-/// offset lives in the observations, so a restart repeats nothing.
+/// How long a session's transcript is still read after the session ends
+/// (`protocol.md` section 5, Retention).
+const TRANSCRIPT_RETENTION_MINUTES: i64 = 10;
+
+/// Tails the transcript of every local session that has one, live or
+/// ended less than [`TRANSCRIPT_RETENTION_MINUTES`] ago (`protocol.md`
+/// section 5). It polls each file every two seconds; the offset lives in
+/// the observations, so a restart repeats nothing.
 ///
 /// A tailer belongs to one session and one file. `/clear` or a forked
 /// resume binds the session to a new transcript: the old file's tailer
 /// reads once more what came since its last poll, and is then let go.
+///
+/// The two rules meet like this. The retention window keeps only the file
+/// the session was bound to when it ended, because Claude Code writes its
+/// last lines there. A file the session had already left is read once
+/// more and let go, whether the session is live or inside its window.
+/// When the window closes, the last file is let go without a read, so a
+/// line appended after the window is never recorded.
 pub struct Transcripts {
     store: Store,
     host_id: String,
@@ -517,14 +529,19 @@ impl Source for Transcripts {
         Duration::from_secs(2)
     }
 
-    fn poll(&mut self, _now: Timestamp) -> Result<(), PollError> {
-        let live: Vec<Session> = list(
+    fn poll(&mut self, now: Timestamp) -> Result<(), PollError> {
+        // Live sessions, and ended ones still inside the retention window.
+        let watched: Vec<Session> = list(
             self.store.conn(),
-            "ended_at IS NULL AND host_id = ?1 AND transcript_path IS NOT NULL",
-            &[&self.host_id],
+            "host_id = ?1 AND transcript_path IS NOT NULL
+             AND (ended_at IS NULL OR ended_at > ?2)",
+            &[
+                &self.host_id,
+                &now.plus_minutes(-TRANSCRIPT_RETENTION_MINUTES),
+            ],
         )?;
         let current = |key: &(String, String)| {
-            live.iter().any(|session| {
+            watched.iter().any(|session| {
                 session.id == key.0 && session.transcript_path.as_deref() == Some(key.1.as_str())
             })
         };
@@ -535,15 +552,15 @@ impl Source for Transcripts {
             .cloned()
             .collect();
         for key in old {
-            // A live session moved to a new file: read the rest of the old
-            // one first. An ended session's file is simply let go.
-            let moved = live.iter().any(|session| session.id == key.0);
+            // A watched session moved to a new file: read the rest of the
+            // old one first. A session past its window is let go unread.
+            let moved = watched.iter().any(|session| session.id == key.0);
             if moved && let Some(tailer) = self.tailers.get_mut(&key) {
                 tailer.poll(&mut self.store)?;
             }
             self.tailers.remove(&key);
         }
-        for session in &live {
+        for session in &watched {
             if let Some(path) = &session.transcript_path {
                 let key = (session.id.clone(), path.clone());
                 if !self.tailers.contains_key(&key) {
@@ -1152,6 +1169,15 @@ esac
             writeln!(file, "{entry}").unwrap();
         }
 
+        /// `SessionEnd` at `at`.
+        fn end(&mut self, at: Timestamp) {
+            let session = self.fleet.orchestrator_session.clone();
+            self.fleet
+                .store
+                .session_end(&Ctx::at(Actor::Hook, at), &session, "exit")
+                .unwrap();
+        }
+
         fn recorded(&self) -> Vec<String> {
             self.fleet
                 .store
@@ -1219,5 +1245,62 @@ esac
         restarted.poll(Timestamp::now()).unwrap();
         t.source().poll(Timestamp::now()).unwrap();
         assert_eq!(t.recorded(), ["u1", "n1"], "nothing twice");
+    }
+
+    /// Retention: a line appended after the session ended is recorded for
+    /// 10 minutes, by the running tailer and by one a restart builds. A
+    /// line appended after the window is never read.
+    #[test]
+    fn transcript_tailer_reads_an_ended_session_for_ten_minutes_then_stops() {
+        let mut t = Transcript::new();
+        let path = t.path("main.jsonl");
+        t.bind("claude-orchestrator", &path, "startup");
+        Transcript::filler(&path, 3);
+        let ended = Timestamp::now();
+        let mut source = t.source();
+        source.poll(ended).unwrap();
+        t.end(ended);
+
+        Transcript::interrupt(&path, "u1");
+        source.poll(ended.plus_minutes(1)).unwrap();
+        assert_eq!(t.recorded(), ["u1"], "read after the end");
+        // The daemon restarts inside the window.
+        Transcript::interrupt(&path, "u2");
+        let mut source = t.source();
+        source.poll(ended.plus_minutes(9)).unwrap();
+        assert_eq!(t.recorded(), ["u1", "u2"], "a restarted tailer too");
+
+        Transcript::interrupt(&path, "u3");
+        source.poll(ended.plus_minutes(10)).unwrap();
+        Transcript::interrupt(&path, "u4");
+        source.poll(ended.plus_minutes(11)).unwrap();
+        t.source().poll(ended.plus_minutes(11)).unwrap();
+        assert_eq!(t.recorded(), ["u1", "u2"], "nothing after the window");
+    }
+
+    /// Retention and `/clear` together: the window keeps the file the
+    /// session was bound to when it ended. A file the session left before
+    /// is read once more and let go, as for a live session.
+    #[test]
+    fn transcript_tailer_keeps_only_an_ended_session_s_last_file() {
+        let mut t = Transcript::new();
+        let (old, new) = (t.path("old.jsonl"), t.path("new.jsonl"));
+        t.bind("claude-orchestrator", &old, "startup");
+        Transcript::filler(&old, 3);
+        let ended = Timestamp::now();
+        let mut source = t.source();
+        source.poll(ended).unwrap();
+
+        Transcript::interrupt(&old, "u1");
+        t.bind("claude-cleared", &new, "clear");
+        t.end(ended);
+        Transcript::interrupt(&new, "n1");
+        source.poll(ended.plus_minutes(1)).unwrap();
+        assert_eq!(t.recorded(), ["u1", "n1"]);
+
+        Transcript::interrupt(&old, "u2");
+        Transcript::interrupt(&new, "n2");
+        source.poll(ended.plus_minutes(2)).unwrap();
+        assert_eq!(t.recorded(), ["u1", "n1", "n2"], "the old file is let go");
     }
 }
