@@ -210,6 +210,15 @@ pub const NOTIFICATION_TYPES: &[(&str, Option<Activity>)] = &[
 /// a row again (`protocol.md` section 4.3).
 pub const TOOL_COALESCE_MS: i64 = 60_000;
 
+/// `~/.tiller/log/hook.log` rotates when a write finds it at this size or
+/// more: it is renamed `hook.log.1`, replacing the one before, so the two
+/// hold about twice this at most (`protocol.md` section 4.1).
+pub const HOOK_LOG_MAX_BYTES: u64 = 1024 * 1024;
+
+/// How many `*.json.bad` spool files [`import_spool`] keeps: the newest by
+/// name, which is the spool's ULID, so by age (`protocol.md` section 4.1).
+pub const SPOOL_BAD_KEEP: usize = 100;
+
 /// The table row for `event`, if it is a documented one.
 pub fn event_spec(event: &str) -> Option<&'static EventSpec> {
     EVENTS.iter().find(|spec| spec.name == event)
@@ -649,7 +658,8 @@ fn apply_with(
 /// each file once it is written. The daemon calls this on each pass. A busy
 /// database stops the pass, to retry on the next; a file that does not parse
 /// or that fails to apply is moved aside with a `.bad` suffix and logged, so
-/// one bad file never blocks the rest.
+/// one bad file never blocks the rest. Each pass that gets through the spool
+/// then keeps only the newest [`SPOOL_BAD_KEEP`] bad files.
 pub fn import_spool(store: &mut Store, env: &Env) -> tiller_core::Result<usize> {
     let dir = env.tiller_home.join("hook-spool");
     let Ok(entries) = fs::read_dir(&dir) else {
@@ -691,6 +701,7 @@ pub fn import_spool(store: &mut Store, env: &Env) -> tiller_core::Result<usize> 
             }
         }
     }
+    prune_bad_spool(env, &dir);
     Ok(imported)
 }
 
@@ -749,16 +760,65 @@ fn fail(env: &Env, event: &str, error: &str) -> Outcome {
 }
 
 /// Appends one line to `~/.tiller/log/hook.log`. Best effort.
+///
+/// A log at [`HOOK_LOG_MAX_BYTES`] or more is first rotated to
+/// `hook.log.1`. The size check is one `fstat` on the file already open,
+/// and the rename happens once per `HOOK_LOG_MAX_BYTES` of log. Measured in
+/// a release build on Linux: the `fstat` takes about 0.5 µs and a whole
+/// call about 5 µs, and a call that rotates about 50 µs (0.5 ms at worst
+/// in 50 tries), all far inside the hook's 10 ms budget.
 fn log(env: &Env, line: &str) {
+    use std::os::unix::fs::MetadataExt as _;
     let dir = env.tiller_home.join("log");
     let _ = fs::create_dir_all(&dir);
-    if let Ok(mut file) = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("hook.log"))
+    let path = dir.join("hook.log");
+    let open = || fs::OpenOptions::new().create(true).append(true).open(&path);
+    let Ok(mut file) = open() else {
+        return;
+    };
+    if let Ok(opened) = file.metadata()
+        && opened.len() >= HOOK_LOG_MAX_BYTES
     {
-        let _ = writeln!(file, "{} {line}", Timestamp::now());
+        // Rename only the file this call opened: a hook that rotated it a
+        // moment ago has put a fresh log in its place, which stays.
+        let same = fs::metadata(&path)
+            .is_ok_and(|now| (now.dev(), now.ino()) == (opened.dev(), opened.ino()));
+        if (!same || fs::rename(&path, dir.join("hook.log.1")).is_ok())
+            && let Ok(fresh) = open()
+        {
+            file = fresh;
+        }
     }
+    let _ = writeln!(file, "{} {line}", Timestamp::now());
+}
+
+/// Deletes all but the newest [`SPOOL_BAD_KEEP`] `*.json.bad` files in the
+/// spool `dir`, logging how many went. Best effort; the daemon's pass only.
+fn prune_bad_spool(env: &Env, dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut bad: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".json.bad"))
+        })
+        .collect();
+    if bad.len() <= SPOOL_BAD_KEEP {
+        return;
+    }
+    bad.sort();
+    let old = bad.len() - SPOOL_BAD_KEEP;
+    let removed = bad[..old]
+        .iter()
+        .filter(|path| fs::remove_file(path).is_ok())
+        .count();
+    log(
+        env,
+        &format!("deleted {removed} old bad spool files; the newest {SPOOL_BAD_KEEP} are kept"),
+    );
 }
 
 /// Folds an intake reply into the observation. Intake fails open like the

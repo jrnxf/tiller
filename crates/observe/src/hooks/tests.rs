@@ -904,6 +904,78 @@ fn a_spool_file_that_fails_to_apply_does_not_block_the_rest() {
     assert_eq!(session(&store, &fleet.worker).activity, Activity::Errored);
 }
 
+/// `hook.log` rotates at its limit into `hook.log.1`, one generation kept.
+#[test]
+fn the_hook_log_rotates_at_its_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = Env {
+        tiller_home: dir.path().to_owned(),
+        user_home: None,
+        tiller_session_id: None,
+    };
+    let logs = dir.path().join("log");
+    let size = |name: &str| fs::metadata(logs.join(name)).map(|m| m.len()).ok();
+    log(&env, "a line");
+    let one_line = size("hook.log").unwrap();
+    // Under the limit, a line is appended.
+    log(&env, "a line");
+    assert_eq!(size("hook.log"), Some(2 * one_line));
+    assert_eq!(size("hook.log.1"), None);
+
+    // At the limit, the old log becomes hook.log.1 and the line starts a
+    // new one.
+    let full = "x".repeat(usize::try_from(HOOK_LOG_MAX_BYTES).unwrap());
+    fs::write(logs.join("hook.log"), &full).unwrap();
+    log(&env, "after the limit");
+    assert_eq!(size("hook.log.1"), Some(HOOK_LOG_MAX_BYTES));
+    let fresh = fs::read_to_string(logs.join("hook.log")).unwrap();
+    assert!(fresh.ends_with(" after the limit\n"), "{fresh}");
+    assert_eq!(fresh.lines().count(), 1);
+
+    // The next rotation replaces hook.log.1: two files at most.
+    fs::write(logs.join("hook.log"), format!("{full}y")).unwrap();
+    log(&env, "again");
+    assert_eq!(size("hook.log.1"), Some(HOOK_LOG_MAX_BYTES + 1));
+    assert_eq!(fs::read_dir(&logs).unwrap().count(), 2);
+}
+
+/// The daemon keeps only the newest `SPOOL_BAD_KEEP` bad spool files.
+#[test]
+fn bad_spool_files_are_pruned_to_the_newest() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join(".tiller");
+    let spool = home.join("hook-spool");
+    fs::create_dir_all(&spool).unwrap();
+    let (mut store, _fleet) = file_store(&home);
+    let env = Env {
+        tiller_home: home.clone(),
+        user_home: None,
+        tiller_session_id: None,
+    };
+    // Names sort as ULIDs do: by age.
+    let name = |n: usize| format!("01J{n:05}");
+    for n in 0..SPOOL_BAD_KEEP + 5 {
+        fs::write(spool.join(format!("{}.json.bad", name(n))), "{").unwrap();
+    }
+    // One more goes bad in this pass, and a file that is not the spool's
+    // is left alone.
+    let newest = name(SPOOL_BAD_KEEP + 5);
+    fs::write(spool.join(format!("{newest}.json")), "not json").unwrap();
+    fs::write(spool.join("README"), "kept").unwrap();
+
+    assert_eq!(import_spool(&mut store, &env).unwrap(), 0);
+    let mut left: Vec<String> = fs::read_dir(&spool)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(left.len(), SPOOL_BAD_KEEP + 1, "{left:?}");
+    assert_eq!(left.last().map(String::as_str), Some("README"));
+    // The six oldest went; the newest, marked bad in this pass, stayed.
+    assert_eq!(left[0], format!("{}.json.bad", name(6)));
+    assert_eq!(left[SPOOL_BAD_KEEP - 1], format!("{newest}.json.bad"));
+}
+
 /// `recovery.md` R10: while a daemon holds `state.db` read-only, a hook writes
 /// nothing to it and spools; the import after the restore finds the record.
 #[test]

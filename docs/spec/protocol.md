@@ -179,6 +179,8 @@ The handler resolves the Tiller session in this order: the `TILLER_SESSION_ID` e
 
 Budget: p95 under 10 ms with the daemon down (T2.6 acceptance). A handler that needs more (none in this table) must move the work to the daemon.
 
+Hook files stay bounded. A write that finds `~/.tiller/log/hook.log` at 1 MiB or more first renames it to `hook.log.1`, replacing the one before, so the two hold about 2 MiB at most. The size check is one `fstat` on the file the hook already opened, and only a hook that logs pays it. A spool file the daemon cannot import is renamed `<ulid>.json.bad` in `~/.tiller/hook-spool/`, and each daemon pass that gets through the spool keeps only the newest 100 of them, deleting the rest and logging how many went. The hook itself never prunes.
+
 ### 4.2 Event to handler
 
 Claude Code documents 33 hook events [D]. Each maps to exactly one handler. `event` is the value written to `observations.event`; `verdict` is the activity it implies, or null when it implies none (`state.md`, Observation).
