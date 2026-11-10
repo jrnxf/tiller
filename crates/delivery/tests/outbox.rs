@@ -338,6 +338,48 @@ fn one_line_per_batch_names_the_oldest() {
     }
 }
 
+/// One message of a batch that cannot be recorded after its line was typed
+/// must not leave the later ones pending: the next pass would type the line
+/// again for messages that were already rung.
+#[test]
+fn a_record_that_fails_midway_does_not_strand_the_rest_of_the_batch() {
+    let mut w = World::new();
+    let first = w.send(None, OutboxKind::Steer, at(1));
+    let second = w.send(None, OutboxKind::Note, at(2));
+    let third = w.send(None, OutboxKind::Wake, at(3));
+    w.fleet
+        .store
+        .conn()
+        .execute_batch(&format!(
+            "CREATE TRIGGER fault BEFORE UPDATE ON outbox WHEN NEW.id = '{}'
+             BEGIN SELECT RAISE(ABORT, 'disk fault'); END;",
+            second.id
+        ))
+        .unwrap();
+
+    let report = w.deliverer.pass(at(4)).unwrap();
+    assert_eq!(w.typed(), 1, "one line for the batch");
+    assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+    assert!(
+        report.errors[0].1.contains("disk fault"),
+        "{:?}",
+        report.errors
+    );
+    assert_eq!(report.rung, [first.id.clone(), third.id.clone()]);
+    assert_eq!(w.message(&first.id).state, OutboxState::Delivered);
+    assert_eq!(w.message(&second.id).state, OutboxState::Pending);
+    assert_eq!(w.message(&third.id).state, OutboxState::Delivered);
+
+    // Once the fault clears the next pass records the one that was missed.
+    w.fleet
+        .store
+        .conn()
+        .execute_batch("DROP TRIGGER fault")
+        .unwrap();
+    w.pass(at(5));
+    assert_eq!(w.message(&second.id).state, OutboxState::Delivered);
+}
+
 #[test]
 fn busy_pane_and_dialog_defer_not_fail() {
     let mut w = World::new();

@@ -320,7 +320,8 @@ impl<H: Herdr> Deliverer<H> {
         let defer = match done {
             Submit::Left => {
                 self.forget(&unacked);
-                return self.deliver(ctx, &unacked, &doorbells, &pane_id, report);
+                self.deliver(ctx, &unacked, &doorbells, &pane_id, report);
+                return Ok(());
             }
             // Still pending, so the next pass finishes it with Enter; a line
             // stuck there for long is reported like held text.
@@ -357,7 +358,10 @@ impl<H: Herdr> Deliverer<H> {
             .collect()
     }
 
-    /// Records every message of a batch as rung at `pane_id`.
+    /// Records every message of a batch as rung at `pane_id`. The line is
+    /// already typed and submitted, so one message that cannot be recorded
+    /// does not stop the rest: they are recorded now, not left pending for a
+    /// second pass to type the line again. Each failure goes in the report.
     fn deliver(
         &mut self,
         ctx: &Ctx,
@@ -365,24 +369,38 @@ impl<H: Herdr> Deliverer<H> {
         doorbells: &HashMap<String, (i64, Option<Timestamp>)>,
         pane_id: &str,
         report: &mut Report,
-    ) -> Result<()> {
+    ) {
         let now = ctx.now;
         for message in unacked {
             let (rings, first) = doorbells.get(&message.id).copied().unwrap_or((0, None));
             let next = next_ring(first.unwrap_or(now), rings + 1, now);
-            match self.store.outbox_deliver(ctx, &message.id, pane_id, next) {
-                Ok(_) => {}
-                // The target's hook acked the batch the moment the line was
-                // submitted, before this record.
-                Err(_)
-                    if get::<OutboxMessage>(self.store.conn(), "outbox message", &message.id)?
-                        .state
-                        == OutboxState::Acked => {}
-                Err(error) => return Err(error.into()),
+            match self.record_ring(ctx, message, pane_id, next) {
+                Ok(()) => report.rung.push(message.id.clone()),
+                Err(error) => Self::failed(report, message.target_session_id.clone(), &error),
             }
-            report.rung.push(message.id.clone());
         }
-        Ok(())
+    }
+
+    fn record_ring(
+        &mut self,
+        ctx: &Ctx,
+        message: &OutboxMessage,
+        pane_id: &str,
+        next: Timestamp,
+    ) -> Result<()> {
+        match self.store.outbox_deliver(ctx, &message.id, pane_id, next) {
+            Ok(_) => Ok(()),
+            // The target's hook acked the batch the moment the line was
+            // submitted, before this record.
+            Err(_)
+                if get::<OutboxMessage>(self.store.conn(), "outbox message", &message.id)?
+                    .state
+                    == OutboxState::Acked =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn serve(
