@@ -499,6 +499,18 @@ test("a proposal or memory event marks every memory view and revision stale, and
   }
 });
 
+test("an eval run or change set event marks every memory view stale", () => {
+  for (const entity of ["eval_run", "change_set"]) {
+    const queryClient = seededClient();
+    const view = queryKeyFor("/api/v1/memory?scope=alpha");
+    queryClient.setQueryData(view, {});
+
+    applyChange(queryClient, event({ entity }));
+
+    expect(queryClient.getQueryState(view)?.isInvalidated).toBe(true);
+  }
+});
+
 test("an ask event marks every board read stale, the unfiltered one too", () => {
   const queryClient = seededClient();
   const project = queryKeyFor(boardPath({ project: "alpha" }));

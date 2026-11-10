@@ -220,8 +220,11 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
     case "proposal":
     case "memory":
     case "memory_revision":
-      // The memory view joins the file at `HEAD` with its rows and open
-      // proposals, so any of them moving refetches every memory read.
+    case "eval_run":
+    case "change_set":
+      // The memory view joins the file at `HEAD` with its rows, open
+      // proposals and their eval results, so any of them moving refetches
+      // every memory read.
       queryClient.invalidateQueries({
         queryKey: API_KEY_PREFIX,
         predicate: (query) => String(query.queryKey[1] ?? "").startsWith("/api/v1/memory"),
