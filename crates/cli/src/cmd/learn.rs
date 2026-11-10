@@ -17,7 +17,7 @@ use tiller_core::domain::{
 };
 use tiller_core::state::learning::{self, EvalResult, Finish, Learning};
 use tiller_core::state::{find, get, list, resolve_id};
-use tiller_core::{Actor, Store, Timestamp};
+use tiller_core::{Actor, Store};
 
 use super::KeyArg;
 use super::admin::load_config;
@@ -339,33 +339,56 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
     let tools = Tools::load(app)?;
     let mut store = app.write()?;
     let retro = learning::resolve_retro(store.conn(), &args.retro)?;
-    // A done retro runs again only when it ended unfinished; the start
-    // below resets it (learning-loop.md, section 4). The running-curator
-    // rule is the start's own.
-    learning::check_start(&retro, Timestamp::now(), 0)?;
-    let brief = brief(&store, &retro)?;
-    let brief_text = format!(
-        "Retro `{}` of card {}.\n\n```json\n{}\n```\n",
-        retro.id,
-        brief["card"]["tag"].as_str().unwrap_or(""),
-        serde_json::to_string_pretty(&brief)?
-    );
+    let timeout_minutes = i64::try_from(config.curator_timeout_minutes).unwrap_or(i64::MAX);
     let session_id = new_session_id()?;
+    // The retro is claimed before its scratch directory is touched, so a
+    // run refused here (a curator is still running in that directory)
+    // changes nothing. A dry run claims nothing but is refused the same way.
+    let retro = if args.dry_run {
+        learning::check_start(&retro, app.ctx().now, timeout_minutes)?;
+        retro
+    } else {
+        store
+            .retro_start(&app.ctx(), &retro.id, Some(&session_id), timeout_minutes)?
+            .value
+    };
     let scratch = tools.scratch_root().join("retros").join(&retro.id);
-    if scratch.exists() {
-        // A second run of the same retro gets its own directory.
-        let _ = std::fs::remove_dir_all(&scratch);
-    }
-    let launch = curator::write(&curator::LaunchSpec {
-        retro_id: &retro.id,
-        scratch: &scratch,
-        tiller: tools.tiller(),
-        tiller_home: tools.tiller_home(),
-        claude: &tools.config.spawn.claude,
-        model: &config.curator_model,
-        brief: &brief_text,
-    })
-    .map_err(super::spawn::failure)?;
+    let prepared = brief(&store, &retro).and_then(|brief| {
+        let brief_text = format!(
+            "Retro `{}` of card {}.\n\n```json\n{}\n```\n",
+            retro.id,
+            brief["card"]["tag"].as_str().unwrap_or(""),
+            serde_json::to_string_pretty(&brief)?
+        );
+        if scratch.exists() {
+            // A second run of the same retro gets its own directory.
+            let _ = std::fs::remove_dir_all(&scratch);
+        }
+        curator::write(&curator::LaunchSpec {
+            retro_id: &retro.id,
+            scratch: &scratch,
+            tiller: tools.tiller(),
+            tiller_home: tools.tiller_home(),
+            claude: &tools.config.spawn.claude,
+            model: &config.curator_model,
+            brief: &brief_text,
+        })
+        .map_err(super::spawn::failure)
+    });
+    let launch = match prepared {
+        Ok(launch) => launch,
+        Err(failure) if args.dry_run => return Err(failure),
+        Err(failure) => {
+            // The retro is claimed: end the run so it can start again at once.
+            unfinished(
+                app,
+                &mut store,
+                &retro.id,
+                "the curator could not be prepared",
+            )?;
+            return Err(failure);
+        }
+    };
     let mut argv = launch.argv.clone();
     argv.extend(["--session-id".to_owned(), session_id.clone()]);
     if args.dry_run {
@@ -378,19 +401,23 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
             "dry_run": true,
         })));
     }
-    let started = store.retro_start(
-        &app.ctx(),
-        &retro.id,
-        Some(&session_id),
-        i64::try_from(config.curator_timeout_minutes).unwrap_or(i64::MAX),
-    )?;
-    let mut events = started.events;
-    let ran = run_with_timeout(
+    let ran = match run_with_timeout(
         &argv,
         &launch.env,
         &scratch,
         Duration::from_secs(config.curator_timeout_minutes.max(1) * 60),
-    )?;
+    ) {
+        Ok(ran) => ran,
+        Err(failure) => {
+            unfinished(
+                app,
+                &mut store,
+                &retro.id,
+                "the curator could not be started",
+            )?;
+            return Err(failure);
+        }
+    };
     let output_path = scratch.join("output.json");
     let _ = std::fs::write(&output_path, &ran.stdout);
     let after = learning::resolve_retro(store.conn(), &retro.id)?;
@@ -406,19 +433,7 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
                 "curator was killed by a signal without finishing the retro".to_owned()
             }
         };
-        let finished = store.retro_finish(
-            &app.ctx(),
-            None,
-            &retro.id,
-            Finish {
-                outcome: RetroOutcome::Unfinished,
-                learning: Some(note),
-                evidence: None,
-                proposal: None,
-            },
-        )?;
-        events.extend(finished.events);
-        finished.value
+        unfinished(app, &mut store, &retro.id, &note)?
     } else {
         after
     };
@@ -434,6 +449,23 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
             retro.id
         )
     })))
+}
+
+/// Ends a claimed retro whose curator did not finish it as `unfinished`,
+/// with `note` as its learning, so the owner can run it again.
+fn unfinished(app: &App, store: &mut Store, retro: &str, note: &str) -> Result<Retro, Failure> {
+    let finished = store.retro_finish(
+        &app.ctx(),
+        None,
+        retro,
+        Finish {
+            outcome: RetroOutcome::Unfinished,
+            learning: Some(note.to_owned()),
+            evidence: None,
+            proposal: None,
+        },
+    )?;
+    Ok(finished.value)
 }
 
 /// What a curator run came to.

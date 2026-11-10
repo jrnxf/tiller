@@ -410,6 +410,73 @@ fn an_unfinished_retro_runs_again() {
 }
 
 #[test]
+fn a_refused_run_leaves_the_running_curators_files_alone() {
+    let (world, _fake, retro) = curator_world(&finishing_curator());
+    // A curator is running: it claimed the retro a moment ago and works in
+    // its scratch directory.
+    world
+        .store()
+        .retro_start(&world.owner_ctx(), &retro, Some("running"), 20)
+        .unwrap();
+    let scratch = world.dir.path().join("scratch/retros").join(&retro);
+    std::fs::create_dir_all(&scratch).unwrap();
+    std::fs::write(scratch.join("notes.md"), "half way").unwrap();
+
+    for args in [
+        vec!["retro", "run", retro.as_str()],
+        vec!["retro", "run", retro.as_str(), "--dry-run"],
+    ] {
+        let second = world.run(&args);
+        assert_eq!(
+            (second.code, second.error_code()),
+            (5, "refused"),
+            "{args:?}: {}",
+            second.json
+        );
+        assert!(
+            second.json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("still running"),
+            "{}",
+            second.json
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("notes.md")).unwrap(),
+            "half way",
+            "{args:?}"
+        );
+    }
+    let shown = world.must(&["retro", "show", &retro]);
+    assert_eq!(shown.data()["retro"]["curator_session"], "running");
+}
+
+#[test]
+fn a_run_that_cannot_start_leaves_the_retro_ready_to_run_again() {
+    let (world, fake, retro) = curator_world(&finishing_curator());
+    std::fs::remove_file(&fake).unwrap();
+    let failed = world.run(&["retro", "run", &retro]);
+    assert_ne!(failed.code, 0, "{}", failed.json);
+    let shown = world.must(&["retro", "show", &retro]);
+    assert_eq!(
+        shown.data()["retro"]["outcome"],
+        "unfinished",
+        "{}",
+        shown.json
+    );
+    // No curator ran, so nothing holds the retro: the next run starts at once.
+    std::fs::write(&fake, finishing_curator()).unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let again = world.must(&["retro", "run", &retro]);
+    assert_eq!(
+        again.data()["retro"]["outcome"],
+        "nothing",
+        "{}",
+        again.json
+    );
+}
+
+#[test]
 fn change_sets_eval_runs_and_the_gate() {
     let world = World::initialized();
     proposal(
