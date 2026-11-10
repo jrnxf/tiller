@@ -1013,6 +1013,80 @@ fn closing_a_card_stales_its_approvals() {
     assert_eq!(error.code(), "refused");
 }
 
+/// A deploy watch on `card`, as a direct push to a project with a deploy
+/// workflow opens it.
+fn deploy_watch(store: &mut Store, card: &Card) -> Obligation {
+    store
+        .obligation_open(
+            &owner(),
+            super::records::NewObligation {
+                project_id: card.project_id.clone(),
+                card_id: Some(card.id.clone()),
+                what: "watch the deploy of a1b2c3d4 to success".into(),
+                trigger_kind: TriggerKind::Event,
+                trigger_event: Some(json!({
+                    "kind": "deploy.finished",
+                    "sha": "a1b2c3d4",
+                    "environment": null,
+                })),
+                due_at: None,
+            },
+        )
+        .unwrap()
+        .value
+}
+
+/// Cancelling a card cancels its deploy watch, so a deploy that finishes
+/// after the card is reopened cannot close it as landed.
+#[test]
+fn cancelling_a_card_cancels_its_deploy_watch() {
+    let (mut store, _) = memory_store();
+    let ship = store
+        .card_create(&owner(), None, card(CardKind::Ship, "deploy"), None)
+        .unwrap()
+        .value;
+    let watch = deploy_watch(&mut store, &ship);
+    store.card_cancel(&owner(), &ship.id, "not needed").unwrap();
+    let obligation: Obligation = super::get(store.conn(), "obligation", &watch.id).unwrap();
+    assert_eq!(obligation.state, ObligationState::Cancelled);
+
+    store.card_reopen(&owner(), &ship.id, "try again").unwrap();
+    let error = store
+        .deploy_record(&daemon(), None, &ship.id, DeployResult::Success, json!({}))
+        .unwrap_err();
+    assert_eq!(error.code(), "refused");
+    assert_eq!(store.card(&ship.id).unwrap().outcome, None);
+}
+
+/// "Reopen work" on a failed deploy's recovery item cancels the watch, so a
+/// later deploy run cannot close the card the owner sent back to work.
+#[test]
+fn reopen_work_cancels_the_deploy_watch() {
+    let (mut store, _) = memory_store();
+    let ship = store
+        .card_create(&owner(), None, card(CardKind::Ship, "deploy"), None)
+        .unwrap()
+        .value;
+    let watch = deploy_watch(&mut store, &ship);
+    let item = store
+        .deploy_record(&daemon(), None, &ship.id, DeployResult::Failed, json!({}))
+        .unwrap()
+        .value
+        .attention
+        .unwrap();
+    store
+        .attention_answer(&owner(), None, &item.id, "Reopen work", AnsweredVia::Board)
+        .unwrap();
+    let obligation: Obligation = super::get(store.conn(), "obligation", &watch.id).unwrap();
+    assert_eq!(obligation.state, ObligationState::Cancelled);
+
+    let error = store
+        .deploy_record(&daemon(), None, &ship.id, DeployResult::Success, json!({}))
+        .unwrap_err();
+    assert_eq!(error.code(), "refused");
+    assert_eq!(store.card(&ship.id).unwrap().outcome, None);
+}
+
 /// When the forge head moved after an approval, the old approval goes stale
 /// and a new requested approval at the new head asks the owner again; that
 /// one can be accepted and executed.

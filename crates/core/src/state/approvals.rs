@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::attention::{NewAttention, answer_attention, open_attention, withdraw_attention};
-use super::cards::{MARK_LANDED, active_runs, close_card, open_attention_id};
+use super::cards::{MARK_LANDED, REOPEN_WORK, active_runs, close_card, open_attention_id};
 use super::outbox::{NewMessage, enqueue, live_orchestrator};
 use super::projects::{require_daemon, require_owner};
 use super::records::{NewObligation, meet_obligation, open_obligation};
@@ -1122,7 +1122,7 @@ impl Store {
                             evidence: Some(
                                 json!({"obligation_id": watch.id, "details": details}).to_string(),
                             ),
-                            options: Some(json!([MARK_LANDED, "Reopen work"])),
+                            options: Some(json!([MARK_LANDED, REOPEN_WORK])),
                             ..NewAttention::default()
                         },
                     )?);

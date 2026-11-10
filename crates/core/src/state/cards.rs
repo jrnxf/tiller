@@ -9,6 +9,7 @@ use super::approvals::mark_stale;
 use super::attention::{NewAttention, open_attention, withdraw_attention, withdraw_quota_items};
 use super::outbox::{NewMessage, enqueue, live_orchestrator};
 use super::projects::local_host;
+use super::records::cancel_obligation;
 use super::runs::{EndRun, end_run};
 use super::{check_rev, find, get, list, refuse, required, resolve_card};
 use crate::authority::{CardAction, require_card_scope};
@@ -368,6 +369,17 @@ pub(crate) fn close_card(
         mark_stale(tx, &approval, &format!("card closed {outcome}"))?;
     }
 
+    // A promise about the closed card, such as a deploy watch, is moot; left
+    // open it would act on the card again after a reopen.
+    let promises: Vec<Obligation> = list(
+        tx.conn(),
+        "card_id = ?1 AND state = 'open' ORDER BY id",
+        &[&card.id],
+    )?;
+    for obligation in promises {
+        cancel_obligation(tx, &obligation, &format!("card closed {outcome}"))?;
+    }
+
     let mut released_holds = Vec::new();
     if let Some(hold) = find::<Hold>(
         tx.conn(),
@@ -478,6 +490,10 @@ fn release_dep(tx: &mut Tx<'_>, dep: &CardDep, reason: DepReleaseReason) -> Resu
 /// The option on a `recovery` item that confirms a change landed outside an
 /// approval: an outside merge, or a deploy fixed by hand (`state.md` 7).
 pub const MARK_LANDED: &str = "Mark landed";
+
+/// The option on a deploy `recovery` item that gives up the deploy watch and
+/// leaves the card open for a new run (`state.md` 7).
+pub const REOPEN_WORK: &str = "Reopen work";
 
 /// Whether the card has the evidence a `landed` outcome needs.
 pub(crate) fn landed_evidence(conn: &rusqlite::Connection, card: &Card) -> Result<bool> {

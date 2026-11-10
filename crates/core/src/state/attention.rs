@@ -5,9 +5,10 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::cards::{close_card, insert_hold, release_hold};
+use super::cards::{REOPEN_WORK, close_card, insert_hold, release_hold};
 use super::outbox::{NewMessage, enqueue, live_orchestrator};
 use super::projects::{ProjectEdit, edit_project, positive};
+use super::records::cancel_obligation;
 use super::{find, get, list, refuse, required, resolve_card, resolve_id};
 use crate::domain::*;
 use crate::error::{Error, Result};
@@ -505,6 +506,25 @@ pub(crate) fn withdraw_attention(
     get(tx.conn(), "attention", &item.id)
 }
 
+/// "Reopen work" on a deploy `recovery` item cancels the watch the item
+/// names, so a later deploy run can no longer close the card (`state.md` 7).
+fn reopen_work(tx: &mut Tx<'_>, item: &Attention) -> Result<()> {
+    let watch = item
+        .evidence
+        .as_deref()
+        .and_then(|evidence| serde_json::from_str::<Value>(evidence).ok())
+        .and_then(|evidence| evidence.get("obligation_id")?.as_str().map(str::to_owned));
+    let Some(watch) = watch else {
+        return Ok(());
+    };
+    if let Some(obligation) =
+        find::<Obligation>(tx.conn(), "id = ?1 AND state = 'open'", &[&watch])?
+    {
+        cancel_obligation(tx, &obligation, REOPEN_WORK)?;
+    }
+    Ok(())
+}
+
 /// `attention.answer` inside a mutation, after the caller resolved the item.
 /// Natural: the same words again return the first answer; different words
 /// are refused, since one row holds one answer.
@@ -582,6 +602,14 @@ pub(crate) fn answer_attention(
     // After the answer's event, so the answer's key belongs to the item.
     if let Some(action) = &applied {
         action.apply(tx, &card)?;
+    }
+    if item.kind == AttentionKind::Recovery
+        && answer
+            .trim()
+            .to_lowercase()
+            .starts_with(&REOPEN_WORK.to_lowercase())
+    {
+        reopen_work(tx, item)?;
     }
     let target = owning_session(tx.conn(), item, &card.project_id)?;
     let message = match target {
