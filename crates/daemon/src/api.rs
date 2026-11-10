@@ -499,9 +499,9 @@ async fn host_check(State(state): State<AppState>, request: Request, next: Next)
 }
 
 /// The checks every mutation passes before its body is read.
-pub(crate) fn guard(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+pub(crate) async fn guard(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     same_origin(state, headers)?;
-    if owner_cookie(state, headers).is_none() {
+    if owner_cookie(state, headers).await.is_none() {
         return Err(not_owner());
     }
     Ok(())
@@ -512,13 +512,25 @@ fn not_owner() -> ApiError {
         .hint("run tiller board --login in a terminal and enter the code or open the link")
 }
 
-/// The request's owner cookie, when it is a live one.
-fn owner_cookie<'a>(state: &AppState, headers: &'a HeaderMap) -> Option<&'a str> {
+/// The request's owner cookie, when it is a live one. The owner file is
+/// read on the blocking pool, so a slow disk holds up this request only.
+async fn owner_cookie(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    let cookie = sent_cookie(headers)?;
+    let home = state.0.home.clone();
+    let asked = cookie.clone();
+    tokio::task::spawn_blocking(move || auth::is_owner(&home, &asked, Timestamp::now()))
+        .await
+        .unwrap_or(false)
+        .then_some(cookie)
+}
+
+/// The owner cookie the request carries, live or not.
+fn sent_cookie(headers: &HeaderMap) -> Option<String> {
     headers
         .get(header::COOKIE)
         .and_then(|value| value.to_str().ok())
         .and_then(auth::cookie_value)
-        .filter(|cookie| auth::is_owner(&state.0.home, cookie, Timestamp::now()))
+        .map(str::to_owned)
 }
 
 /// Whether `headers` name an `--allow-host` name rather than loopback.
@@ -576,7 +588,7 @@ struct SignedOut;
 /// before.
 async fn owner_gate(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
     let headers = request.headers();
-    if !at_allowed_host(&state, headers) || owner_cookie(&state, headers).is_some() {
+    if !at_allowed_host(&state, headers) || owner_cookie(&state, headers).await.is_some() {
         return next.run(request).await;
     }
     let path = request.uri().path();
@@ -1319,10 +1331,11 @@ async fn events(
 const RECHECK: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// At an allowed host, the owner cookie a long-lived stream should end with;
-/// `None` on loopback, where reads need none.
+/// `None` on loopback, where reads need none. The owner gate already let
+/// it through, and [`until_signed_out`] checks it again off the runtime.
 fn watched_cookie(state: &AppState, headers: &HeaderMap) -> Option<String> {
     at_allowed_host(state, headers)
-        .then(|| owner_cookie(state, headers).map(str::to_owned))
+        .then(|| sent_cookie(headers))
         .flatten()
 }
 
@@ -1761,7 +1774,7 @@ async fn submit(
     target: Option<String>,
     bytes: &[u8],
 ) -> ApiResult<MutationResponse> {
-    guard(state, headers)?;
+    guard(state, headers).await?;
     let mutation = Mutation::parse(op, target, bytes)?;
     if let Some(view) = peer_for(state, mutation.host()).await? {
         return forward(state, &view, mutation, bytes).await;
@@ -2034,7 +2047,7 @@ async fn stage_project(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: StageProject = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "a stage switch").await?;
     let stage: Stage = request.stage.parse()?;
@@ -2084,7 +2097,7 @@ async fn start_orchestrator(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let mutation = Mutation::parse(Op::StartOrchestrator, Some(id.clone()), &bytes)?;
     if let Some(view) = peer_for(&state, mutation.host()).await? {
         return forward(&state, &view, mutation, &bytes).await;
@@ -2127,7 +2140,7 @@ async fn restart_stale(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let mutation = Mutation::parse(Op::RestartStale, None, &bytes)?;
     if let Some(view) = peer_for(&state, mutation.host()).await? {
         return forward(&state, &view, mutation, &bytes).await;
@@ -2268,7 +2281,7 @@ async fn delete_project(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: DeleteProject = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "a project delete").await?;
     if request.confirm.trim() != id {
@@ -2298,7 +2311,7 @@ async fn add_project(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: AddProject = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "a project add").await?;
     let delivery: Delivery = request.delivery.parse()?;
@@ -2369,7 +2382,9 @@ async fn add_with_checkout(
     if done.is_err()
         && let Some(undo) = undo
     {
-        undo.run();
+        // Taking back a whole clone is disk work: off the runtime, and done
+        // before the refusal is answered.
+        let _ = tokio::task::spawn_blocking(move || undo.run()).await;
     }
     done
 }
@@ -2606,7 +2621,7 @@ async fn add_peer(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: AddPeer = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "a pairing").await?;
     let key = key(&request.idempotency_key)?;
@@ -2987,7 +3002,7 @@ async fn set_config(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: SetConfig = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "a config change").await?;
     let Some(starter) = state.0.orchestrators.clone() else {
@@ -3086,7 +3101,7 @@ async fn mark_recap_seen(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: MarkRecapSeen = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "marking a recap seen").await?;
     mutate(
@@ -3117,7 +3132,7 @@ async fn pick_bug_project(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: PickBugProject = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "a bug project pick").await?;
     mutate(
@@ -3146,7 +3161,7 @@ async fn retire_project(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: RetireProject = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "a project retire").await?;
     let herdr = state.0.herdr.clone();
@@ -3182,7 +3197,7 @@ async fn relabel_intervention(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: RelabelBody = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "a relabel").await?;
     let label: Option<InterventionKind> = request.label.as_deref().map(str::parse).transpose()?;
@@ -3274,7 +3289,7 @@ async fn withdraw_attention(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: WithdrawBody = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "a withdraw").await?;
     mutate(
@@ -3336,7 +3351,7 @@ async fn away_start(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: AwayScopeBody = body(&bytes)?;
     mutate(
         &state,
@@ -3357,7 +3372,7 @@ async fn away_edit(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: AwayScopeBody = body(&bytes)?;
     mutate(
         &state,
@@ -3378,7 +3393,7 @@ async fn away_end(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: AwayEndBody = body(&bytes)?;
     let reason = request
         .reason
@@ -3508,7 +3523,7 @@ async fn terminal(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> Result<Response, ApiError> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: TerminalOpen = body(&bytes)?;
     let fit = request
         .fit
@@ -3610,7 +3625,7 @@ async fn terminal_input(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: TerminalInput = body(&bytes)?;
     not_forwarded(
         &state,
@@ -3719,7 +3734,7 @@ async fn prompt_read(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<PromptRead> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: PromptAsk = body(&bytes)?;
     not_forwarded(
         &state,
@@ -3764,7 +3779,7 @@ async fn prompt_answer(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: PromptAnswer = body(&bytes)?;
     not_forwarded(
         &state,
@@ -3831,7 +3846,7 @@ async fn terminal_fit(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: TerminalRefit = body(&bytes)?;
     let (cols, rows) = mirror::check_fit(request.cols, request.rows).map_err(ApiError::usage)?;
     not_forwarded(
@@ -3880,7 +3895,7 @@ async fn terminal_history(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<TerminalHistory> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: TerminalHistoryAsk = body(&bytes)?;
     let lines = request.lines.unwrap_or(mirror::MAX_HISTORY);
     if !(1..=mirror::MAX_HISTORY).contains(&lines) {
@@ -3945,7 +3960,7 @@ async fn terminal_tail(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<TerminalTail> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: TerminalTailAsk = body(&bytes)?;
     not_forwarded(
         &state,
@@ -4003,7 +4018,7 @@ async fn focus(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: FocusBody = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "a focus").await?;
     let (session_id, pane, machine) = pane_of(&state, session).await?;
@@ -4063,7 +4078,7 @@ const LOGIN_PATH: &str = "/api/v1/login";
 #[utoipa::path(get, path = "/api/v1/session", tag = "session",
     responses((status = 200, body = SessionView), (status = 403, body = ErrorBody, description = "`signed_out`: at an --allow-host name, without the owner cookie")))]
 async fn session(State(state): State<AppState>, headers: HeaderMap) -> Json<SessionView> {
-    let owner = owner_cookie(&state, &headers).is_some();
+    let owner = owner_cookie(&state, &headers).await.is_some();
     Json(SessionView { owner })
 }
 
@@ -4172,9 +4187,7 @@ fn code_client(headers: &HeaderMap) -> auth::Client {
               (status = 403, body = ErrorBody)))]
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
     same_origin(&state, &headers)?;
-    let cookie = owner_cookie(&state, &headers)
-        .ok_or_else(not_owner)?
-        .to_owned();
+    let cookie = owner_cookie(&state, &headers).await.ok_or_else(not_owner)?;
     let home = state.0.home.clone();
     tokio::task::spawn_blocking(move || auth::sign_out(&home, &cookie, Timestamp::now()))
         .await
@@ -4440,6 +4453,65 @@ pub(crate) mod tests {
             .headers
             .get(header::CACHE_CONTROL)
             .and_then(|v| v.to_str().ok())
+    }
+
+    /// The owner check reads `board-owner` on the blocking pool: a slow
+    /// read (here a FIFO no one writes yet) holds up that one request, never
+    /// the runtime under every other.
+    #[cfg(unix)]
+    #[test]
+    fn the_owner_check_never_blocks_the_runtime() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let fleet = Fleet::new();
+        let home = fleet.dir.path().to_owned();
+        let owner = home.join("board-owner");
+        let _ = std::fs::remove_file(&owner);
+        let made = std::process::Command::new("mkfifo")
+            .arg(&owner)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        // Opens and closes the FIFO's write end until the test is done, so
+        // the reader sees an empty file and moves on.
+        let done = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (done, owner) = (done.clone(), owner.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                while !done.load(Ordering::SeqCst) {
+                    let opened = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&owner);
+                    drop(opened);
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            })
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (waited, status) = runtime.block_on(async {
+            let app = app(&home, Assets::of::<Fixture>());
+            let request = Request::get("/api/v1/session")
+                .header(header::HOST, "board.example.com")
+                .header(header::COOKIE, "tiller_owner=not-a-live-cookie")
+                .body(Body::empty())
+                .unwrap();
+            let pending = tokio::spawn(async move { send(&app, request).await.status });
+            let started = std::time::Instant::now();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let waited = started.elapsed();
+            (waited, pending.await.unwrap())
+        });
+        done.store(true, Ordering::SeqCst);
+        writer.join().unwrap();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            waited < std::time::Duration::from_millis(500),
+            "a 50 ms sleep took {waited:?} while the owner file was read"
+        );
     }
 
     /// The owner cookie, minted and redeemed as the login link does.

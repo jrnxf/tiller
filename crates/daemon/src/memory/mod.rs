@@ -343,7 +343,7 @@ pub(crate) async fn edit(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: MemoryEdit = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "a memory edit").await?;
     let key = key(&request.idempotency_key)?;
@@ -400,7 +400,7 @@ pub(crate) async fn decide(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: MemoryDecide = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "a memory decision").await?;
     let key = key(&request.idempotency_key)?;
@@ -472,7 +472,7 @@ pub(crate) async fn undo(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers)?;
+    guard(&state, &headers).await?;
     let request: MemoryUndo = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "a memory undo").await?;
     let key = key(&request.idempotency_key)?;
