@@ -123,3 +123,67 @@ fn routine_turns_and_settled_items_never_notify() {
     assert_eq!(open[0].id, old.id);
     assert!(w.shown().is_empty());
 }
+
+fn kinds(w: &World, item: &str) -> Vec<String> {
+    let mut stmt = w
+        .fleet
+        .store
+        .conn()
+        .prepare("SELECT kind FROM events WHERE entity_id = ?1 ORDER BY seq")
+        .unwrap();
+    stmt.query_map([item], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+#[test]
+fn a_refused_send_is_recorded_once_and_never_retried() {
+    let mut w = World::new();
+    w.herdr.refuse("notify");
+    let item = w.open(AttentionKind::Decision, "Raise capacity?", 2);
+
+    let report = w.notifier.pass(at(4)).unwrap();
+    assert!(report.notified.is_empty());
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(report.failed[0].0, item.id);
+    assert_eq!(
+        kinds(&w, &item.id),
+        [
+            "attention.opened",
+            "attention.notified",
+            "attention.notify_failed"
+        ]
+    );
+    let error: String = w
+        .fleet
+        .store
+        .conn()
+        .query_row(
+            "SELECT json_extract(payload, '$.error') FROM events WHERE kind = 'attention.notify_failed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(error.contains("refused by the fake"), "{error}");
+
+    // At most once: a second pass and a restart neither send nor record again.
+    let mut restarted = Notifier::new(w.fleet.open(), w.herdr.clone());
+    assert!(w.notifier.pass(at(5)).unwrap().failed.is_empty());
+    assert!(restarted.pass(at(6)).unwrap().failed.is_empty());
+    assert_eq!(kinds(&w, &item.id).len(), 3);
+}
+
+#[test]
+fn a_sent_notification_writes_no_failure() {
+    let mut w = World::new();
+    let item = w.open(AttentionKind::Decision, "Raise capacity?", 2);
+    assert_eq!(
+        w.notifier.pass(at(4)).unwrap().notified,
+        std::slice::from_ref(&item.id)
+    );
+    assert_eq!(
+        kinds(&w, &item.id),
+        ["attention.opened", "attention.notified"]
+    );
+}

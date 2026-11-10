@@ -1,5 +1,6 @@
 //! `notification.record`: the daemon's write-ahead record that it is about to
-//! notify the owner of an attention item (`protocol.md` 3.4, P36).
+//! notify the owner of an attention item (`protocol.md` 3.4, P36), and
+//! `notification.fail`, the record that the send did not go out.
 
 use rusqlite::OptionalExtension;
 use serde_json::json;
@@ -41,6 +42,45 @@ impl Store {
                     .rev(item.rev)
                     .card(&item.card_id)
                     .payload(json!({"kind": item.kind, "notified_at": now})),
+            )?;
+            Ok(item)
+        })
+    }
+
+    /// `notification.fail` (daemon): writes `attention.notify_failed` for an
+    /// item whose `attention.notified` record exists, once. The record came
+    /// first so a crash never sends twice, which means it says the daemon
+    /// tried. This is the outcome when the send was refused: the timeline
+    /// then shows the owner was not pinged.
+    pub fn notification_fail(
+        &mut self,
+        ctx: &Ctx,
+        item: &str,
+        error: &str,
+    ) -> Result<Applied<Attention>> {
+        require_daemon(&ctx.actor, "notification.fail")?;
+        self.write(ctx, "notification.fail", None, |tx| {
+            let id = resolve_id(tx.conn(), "attention", "attention item", item)?;
+            let item: Attention = get(tx.conn(), "attention item", &id)?;
+            let seen = |kind: &str| -> Result<bool> {
+                Ok(tx
+                    .conn()
+                    .query_row(
+                        "SELECT seq FROM events WHERE kind = ?1 AND entity_id = ?2",
+                        [kind, &item.id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?
+                    .is_some())
+            };
+            if !seen("attention.notified")? || seen("attention.notify_failed")? {
+                return Ok(item);
+            }
+            tx.event(
+                NewEvent::new("attention", &item.id, "attention.notify_failed")
+                    .rev(item.rev)
+                    .card(&item.card_id)
+                    .payload(json!({"kind": item.kind, "error": error})),
             )?;
             Ok(item)
         })

@@ -5,7 +5,9 @@
 //! The record comes first. `notification.record` writes `attention.notified`
 //! for the item, once, and only a call that applied sends: a restart or a
 //! second pass finds the event and stays quiet, and a send that fails is
-//! logged, never repeated. Only items opened within [`NEW_MINUTES`] and still
+//! logged, never repeated. The record only says the daemon tried, so a refused
+//! send writes `attention.notify_failed` after it (`notification.fail`), and
+//! the card timeline shows that the owner was not pinged. Only items opened within [`NEW_MINUTES`] and still
 //! current count as new, so a daemon started on an old database does not
 //! announce its backlog.
 
@@ -67,6 +69,8 @@ impl<H: Herdr> Notifier<H> {
                 Ok(()) => report.notified.push(item.id),
                 Err(error) => {
                     tracing::warn!(item = %item.id, %error, "herdr notification failed");
+                    self.store
+                        .notification_fail(&ctx, &item.id, &error.to_string())?;
                     report.failed.push((item.id, error.to_string()));
                 }
             }

@@ -1395,7 +1395,8 @@ fn timeline_text(event: &Event) -> String {
         "review_pass.started" => "started a review pass".to_owned(),
         "review_pass.finished" => "finished a review pass".to_owned(),
         "attention.opened" => "raised an item for you".to_owned(),
-        "attention.notified" => "notified you about an item".to_owned(),
+        "attention.notified" => "tried to notify you about an item".to_owned(),
+        "attention.notify_failed" => "could not notify you about an item".to_owned(),
         "attention.answered" => "answered an item".to_owned(),
         "attention.withdrawn" => "withdrew an item".to_owned(),
         "obligation.opened" => "opened an obligation".to_owned(),
@@ -2192,6 +2193,14 @@ mod tests {
         assert_eq!(
             text("card.closed", serde_json::json!({"outcome": "landed"})),
             "closed the card as landed"
+        );
+        assert_eq!(
+            text("attention.notified", serde_json::json!({})),
+            "tried to notify you about an item"
+        );
+        assert_eq!(
+            text("attention.notify_failed", serde_json::json!({})),
+            "could not notify you about an item"
         );
         assert_eq!(
             text("memory.restored", serde_json::json!({})),
