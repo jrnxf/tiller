@@ -33,6 +33,9 @@ pub struct ReturnBrief {
     pub ended_reason: Option<String>,
     pub orders: Option<String>,
     pub projects: Vec<String>,
+    /// What the merge authority was: `"none"`, `"grants"` (also when the
+    /// scope names none) or the grant conditions object.
+    pub merge: Value,
     pub spend: Spend,
     /// Every run that started in the window.
     pub runs: Vec<RunLine>,
@@ -60,6 +63,7 @@ pub struct Spend {
 pub struct RunLine {
     pub run_id: String,
     pub card: String,
+    pub title: String,
     pub role: RunRole,
     pub started_at: Timestamp,
     pub outcome: Option<RunOutcome>,
@@ -132,9 +136,11 @@ impl ReturnBrief {
         )?;
         let mut run_lines = Vec::new();
         for run in &runs {
+            let card = get::<Card>(conn, "card", &run.card_id)?;
             run_lines.push(RunLine {
                 run_id: run.id.clone(),
-                card: get::<Card>(conn, "card", &run.card_id)?.display_id,
+                card: card.display_id,
+                title: card.title,
                 role: run.role,
                 started_at: run.started_at,
                 outcome: run.outcome,
@@ -205,6 +211,12 @@ impl ReturnBrief {
             });
         }
 
+        let merge = away
+            .scope
+            .as_ref()
+            .and_then(|scope| scope.get("merge"))
+            .cloned()
+            .unwrap_or_else(|| Value::String("grants".into()));
         let new_runs = i64::try_from(runs.len()).unwrap_or(i64::MAX);
         Ok(Some(Self {
             approval_id: away.id,
@@ -215,6 +227,7 @@ impl ReturnBrief {
             ended_reason,
             orders: contract.orders,
             projects: contract.projects,
+            merge,
             spend: Spend {
                 max_new_runs: contract.max_new_runs,
                 new_runs,

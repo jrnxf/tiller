@@ -42,7 +42,7 @@ function isErrorBody(value: unknown): value is ApiErrorBody {
 // Sends one board mutation. Every body carries the control's idempotency key,
 // so a retry of the same click replays the first answer instead of acting twice.
 export async function sendMutation<T>(
-  method: "POST" | "PATCH" | "DELETE",
+  method: "POST" | "PATCH" | "PUT" | "DELETE",
   path: string,
   body: Record<string, unknown> & { idempotency_key: string },
 ): Promise<MutationResponse<T>> {

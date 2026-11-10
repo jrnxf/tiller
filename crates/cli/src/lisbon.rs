@@ -7,11 +7,10 @@
 //! (`Tue 2026-11-03 14:00`). A date input without a time means 09:00 Lisbon
 //! that day; an input with an offset is taken as given (`protocol.md` 6.1).
 
-use jiff::civil;
 use jiff::{Timestamp, ToSpan};
 use serde_json::Value;
 use tiller_core::Error;
-use tiller_core::time::lisbon::{from_local as resolve, offset_hours, zone};
+use tiller_core::time::lisbon::{offset_hours, zone};
 
 /// `Tue 2026-11-03 14:00` for an instant, in Lisbon time.
 pub fn display(ts: Timestamp) -> String {
@@ -20,31 +19,10 @@ pub fn display(ts: Timestamp) -> String {
         .to_string()
 }
 
-/// A Lisbon wall-clock time as an instant.
-fn from_local(local: civil::DateTime) -> Result<Timestamp, Error> {
-    resolve(local).ok_or_else(|| Error::Usage(format!("{local} does not exist in Europe/Lisbon")))
-}
-
 /// Parses a `--until` style input: RFC 3339 with an offset, a date (09:00
 /// Lisbon), or a date and time without an offset (Lisbon).
 pub fn parse_when(input: &str) -> Result<tiller_core::Timestamp, Error> {
-    let input = input.trim();
-    let usage = || {
-        Error::Usage(format!(
-            "not a time: {input:?} (use 2026-11-07, 2026-11-07T14:00 or an RFC 3339 time with an offset)"
-        ))
-    };
-    if let Ok(ts) = input.parse::<Timestamp>() {
-        return Ok(tiller_core::Timestamp::from_jiff(ts));
-    }
-    if input.contains(['T', 't', ' ']) {
-        if let Ok(local) = input.parse::<civil::DateTime>() {
-            return from_local(local).map(tiller_core::Timestamp::from_jiff);
-        }
-    } else if let Ok(date) = input.parse::<civil::Date>() {
-        return from_local(date.at(9, 0, 0, 0)).map(tiller_core::Timestamp::from_jiff);
-    }
-    Err(usage())
+    tiller_core::time::lisbon::parse_when(input)
 }
 
 /// Replaces every stored timestamp string in a response with its Lisbon text,

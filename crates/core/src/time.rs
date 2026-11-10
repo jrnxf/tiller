@@ -139,6 +139,35 @@ pub mod lisbon {
         })
     }
 
+    /// Parses an `--until` style input: RFC 3339 with an offset, a date (09:00
+    /// Lisbon), or a date and time without an offset (Lisbon). The board's
+    /// away dialog sends the same forms.
+    pub fn parse_when(input: &str) -> Result<Timestamp, crate::error::Error> {
+        use crate::error::Error;
+        let input = input.trim();
+        let usage = || {
+            Error::Usage(format!(
+                "not a time: {input:?} (use 2026-11-07, 2026-11-07T14:00 or an RFC 3339 time with an offset)"
+            ))
+        };
+        let at = |local: civil::DateTime| {
+            from_local(local)
+                .map(Timestamp::from_jiff)
+                .ok_or_else(|| Error::Usage(format!("{local} does not exist in Europe/Lisbon")))
+        };
+        if let Ok(ts) = input.parse::<jiff::Timestamp>() {
+            return Ok(Timestamp::from_jiff(ts));
+        }
+        if input.contains(['T', 't', ' ']) {
+            if let Ok(local) = input.parse::<civil::DateTime>() {
+                return at(local);
+            }
+        } else if let Ok(date) = input.parse::<civil::Date>() {
+            return at(date.at(9, 0, 0, 0));
+        }
+        Err(usage())
+    }
+
     /// The weekly review slot: Saturday 06:00 Lisbon time.
     pub const REVIEW_DAY: Weekday = Weekday::Saturday;
     pub const REVIEW_HOUR: i8 = 6;

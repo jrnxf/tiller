@@ -28,6 +28,7 @@ import {
   API_KEY_PREFIX,
   agentsPath,
   attentionPath,
+  awayBriefPath,
   fetchJson,
   machinesPath,
   projectSetupPath,
@@ -228,6 +229,12 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
       // re-bound approval must reach the inbox before the owner clicks.
       queryClient.invalidateQueries({
         queryKey: queryKeyFor(attentionPath),
+        refetchType: "active",
+      });
+      // An away contract is an approval: starting, editing and ending it
+      // moves the header's status and the brief.
+      queryClient.invalidateQueries({
+        queryKey: queryKeyFor(awayBriefPath),
         refetchType: "active",
       });
       break;

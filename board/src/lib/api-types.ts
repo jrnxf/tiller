@@ -897,3 +897,80 @@ export interface MemoryLanded {
   approval_id: string | null;
   blob: string;
 }
+
+// What an away contract allowed on the merge side: `"none"`, `"grants"`, or
+// the conditions of a grant that ends with away mode.
+export type AwayMerge = "none" | "grants" | Record<string, unknown>;
+
+interface AwayRun {
+  run_id: string;
+  card: string;
+  title: string;
+  role: string;
+  started_at: string;
+  outcome: string | null;
+  status: string | null;
+}
+
+interface AwayCard {
+  card: string;
+  title: string;
+  state: string;
+  outcome: string | null;
+}
+
+interface AwayMergeLine {
+  card: string;
+  action: string;
+  pr_url: string | null;
+  grant_id: string | null;
+  state: string;
+  at: string;
+}
+
+interface AwayDecision {
+  attention_id: string;
+  card: string;
+  kind: string;
+  question: string;
+  recommendation: string | null;
+  standing: string;
+  answer: string | null;
+}
+
+interface AwayWaitingApproval {
+  approval_id: string;
+  card: string | null;
+  action: string;
+  requested_at: string;
+}
+
+// `GET /api/v1/away/brief`: the newest away contract with what happened under
+// it, read from the records, so it is the same each time. `away` is true
+// while the contract still binds.
+export interface AwayBrief {
+  approval_id: string;
+  away: boolean;
+  started_at: string;
+  until_at: string;
+  ended_at: string | null;
+  ended_reason: string | null;
+  orders: string | null;
+  projects: string[];
+  merge: AwayMerge;
+  spend: {
+    max_new_runs: number | null;
+    new_runs: number;
+    quota_floor_percent: number | null;
+    cap_reached: boolean;
+  };
+  runs: AwayRun[];
+  landed: AwayCard[];
+  merged_by_grant: AwayMergeLine[];
+  waiting_decisions: AwayDecision[];
+  waiting_approvals: AwayWaitingApproval[];
+}
+
+export interface AwayBriefResponse {
+  brief: AwayBrief | null;
+}

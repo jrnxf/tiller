@@ -11,6 +11,7 @@ import type {
   ProjectRetirePreview,
   ProjectsResponse,
 } from "./api-types.ts";
+import { awayBrief } from "./fixtures-away.ts";
 import { memoryMutation } from "./fixtures-memory.ts";
 import {
   FIXTURE_HEAD_SHA,
@@ -610,6 +611,14 @@ function pickBugProject(body: Record<string, unknown>, scenario: Scenario): Muta
   };
 }
 
+// Starting, editing or ending away mode in the fixtures only records: the
+// stand-in server does not keep a contract.
+function awayMutation(method: string): MutationResult {
+  const brief = awayBrief(false);
+  const data = method === "DELETE" ? { away: null, brief } : { id: brief.approval_id };
+  return { reply: recorded(data, null, brief.approval_id), followUps: [] };
+}
+
 function handle(
   method: string,
   path: string,
@@ -622,6 +631,7 @@ function handle(
   if (method === "POST" && path === "/api/v1/cards" && body.category === "tiller-bug") {
     return createBug(body);
   }
+  if (path === "/api/v1/away") return awayMutation(method);
   const close = /^\/api\/v1\/cards\/([^/]+)\/close$/.exec(path);
   if (method === "POST" && close?.[1]) return closeCard(close[1], body);
   const answer = /^\/api\/v1\/attention\/([^/]+)\/answer$/.exec(path);

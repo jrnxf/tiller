@@ -2,6 +2,7 @@ import { queryOptions } from "@tanstack/react-query";
 
 import type {
   AgentsResponse,
+  AwayBriefResponse,
   AttentionResponse,
   BoardFilter,
   BoardResponse,
@@ -146,6 +147,12 @@ export const healthQuery = () => readQuery<DaemonHealth>(healthPath);
 
 export const signalsPath: QueryPath = "/api/v1/signals";
 export const signalsQuery = () => readQuery<SignalsResponse>(signalsPath);
+
+// The newest away contract and its return brief. Read fresh each time it is
+// shown, since the window it covers is still growing while the owner is away.
+export const awayBriefPath: QueryPath = "/api/v1/away/brief";
+export const awayBriefQuery = () =>
+  queryOptions({ ...readQuery<AwayBriefResponse>(awayBriefPath), staleTime: 0 });
 
 export const projectsPath: QueryPath = "/api/v1/projects";
 export const projectsQuery = () => readQuery<ProjectsResponse>(projectsPath);

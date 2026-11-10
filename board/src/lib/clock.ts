@@ -54,3 +54,43 @@ export function formatLisbonRounded(iso: string | null): string | null {
   if (Number.isNaN(at)) return null;
   return formatLisbon(new Date(Math.round(at / 60_000) * 60_000).toISOString());
 }
+
+const lisbonDay = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Lisbon",
+  weekday: "short",
+  day: "numeric",
+  month: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
+// "Thu 12 Nov, 18:00" in Lisbon time: a time that is not this week needs its date.
+export function formatLisbonDay(iso: string | null): string | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  const p = Object.fromEntries(
+    lisbonDay.formatToParts(date).map((part) => [part.type, part.value]),
+  );
+  return `${p.weekday} ${p.day} ${p.month}, ${p.hour}:${p.minute}`;
+}
+
+const lisbonField = new Intl.DateTimeFormat("sv-SE", {
+  timeZone: "Europe/Lisbon",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
+// The Lisbon wall time as a `datetime-local` field holds it, "2026-11-12T18:00".
+// The daemon reads a time with no offset as Lisbon time too.
+export function lisbonField16(at: number): string {
+  const p = Object.fromEntries(
+    lisbonField.formatToParts(new Date(at)).map((x) => [x.type, x.value]),
+  );
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
+}

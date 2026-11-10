@@ -1092,6 +1092,164 @@
         }
       }
     },
+    "/api/v1/away": {
+      "put": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "away_edit",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AwayScopeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "away_start",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AwayScopeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "away mode is already on",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "away_end",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AwayEndBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`data.away` is the ended contract, `null` when away mode was off; `data.brief` is its return brief",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/away/brief": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "away_brief",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AwayBriefResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/board": {
       "get": {
         "tags": [
@@ -4198,6 +4356,90 @@
             }
           }
         }
+      },
+      "AwayBriefResponse": {
+        "type": "object",
+        "description": "`GET /api/v1/away/brief`: the return brief of the newest away contract,\nor `null` when the owner has never been away. `brief.away` says whether\nthe contract still binds.",
+        "properties": {
+          "brief": {
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        }
+      },
+      "AwayEndBody": {
+        "type": "object",
+        "description": "`DELETE /api/v1/away`.",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "idempotency_key": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why away mode ended; \"ended by the owner\" when absent."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AwayScopeBody": {
+        "type": "object",
+        "description": "`POST` and `PUT /api/v1/away`: the scope `tiller away start` takes. `POST`\nturns away mode on, `PUT` changes the running contract in place.",
+        "required": [
+          "idempotency_key",
+          "until",
+          "projects"
+        ],
+        "properties": {
+          "idempotency_key": {
+            "type": "string"
+          },
+          "max_new_runs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "No run starts once this many have started since the owner left."
+          },
+          "merge": {
+            "description": "`\"none\"`, `\"grants\"` or a grant conditions object."
+          },
+          "orders": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Standing orders the orchestrators read."
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The projects the scope covers, by id."
+          },
+          "quota_floor_percent": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The weekly quota floor while away, 0 to 100."
+          },
+          "until": {
+            "type": "string",
+            "description": "When away mode ends by itself: RFC 3339 with an offset, a date (09:00\nLisbon) or a date and time without an offset (Lisbon)."
+          }
+        },
+        "additionalProperties": false
       },
       "BoardResponse": {
         "type": "object",

@@ -47,6 +47,7 @@ import { isPeerRow } from "./peers.ts";
 import {
   agentsPath,
   attentionPath,
+  awayBriefPath,
   boardPath,
   machinesPath,
   projectsPath,
@@ -54,6 +55,7 @@ import {
   recapPath,
   signalsPath,
 } from "./queries.ts";
+import { awayFor } from "./fixtures-away.ts";
 
 export type Scenario =
   | "default"
@@ -69,7 +71,9 @@ export type Scenario =
   | "live"
   | "federated"
   | "stale-sessions"
-  | "setup-needed";
+  | "setup-needed"
+  | "away"
+  | "away-back";
 
 // The scenarios with paired peers. `stale-sessions` has them so a peer's older
 // sessions show on this host's board.
@@ -92,6 +96,8 @@ export const SCENARIOS: readonly Scenario[] = [
   "federated",
   "stale-sessions",
   "setup-needed",
+  "away",
+  "away-back",
 ];
 
 const WEEKLY_FLOOR_PERCENT = 3;
@@ -1287,6 +1293,9 @@ export function fixtureResponses(scenario: Scenario = "default", now: number = D
     [quotaPath]: quotaFor(scenario, now),
     [projectsPath]: projects,
     [signalsPath]: signalsFor(scenario === "health-bad", now),
+    [awayBriefPath]: awayFor(
+      scenario === "away" ? "running" : scenario === "away-back" ? "back" : "idle",
+    ),
   } satisfies Record<string, unknown>;
 }
 

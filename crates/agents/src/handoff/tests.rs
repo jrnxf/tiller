@@ -821,3 +821,83 @@ fn away_scope_that_cannot_be_enforced_is_refused() {
             .is_none()
     );
 }
+
+#[test]
+fn editing_away_mode_keeps_the_runs_spent_and_swaps_its_temporary_grants() {
+    let mut w = World::new();
+    let export = w.card("alpha", "the billing export");
+    let login = w.card("alpha", "the login page");
+    let report = w.card("alpha", "the usage report");
+
+    let mut scope = w.away_scope(json!({"max_new_runs": 3}));
+    scope["merge"] = json!({"v": 1, "actions": ["merge"], "checks": "success"});
+    w.away_start(scope).unwrap();
+    let (run, _) = w.builder(&export);
+    w.end_run(&run, RunOutcome::Abandoned);
+    let grants_now = |w: &World| -> Vec<(String, bool)> {
+        w.store
+            .conn()
+            .prepare("SELECT conditions, revoked_at IS NOT NULL FROM grants ORDER BY id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert_eq!(grants_now(&w).len(), 1);
+
+    // The edit lowers the cap to the runs already spent: the next run is
+    // refused, so the count did not start over.
+    let mut edited = w.away_scope(json!({"max_new_runs": 1}));
+    edited["merge"] = json!("grants");
+    let applied = w.store.away_edit(&Ctx::new(Actor::Owner), edited).unwrap();
+    assert_eq!(applied.value.rev, 2);
+    let refused = w.try_builder(&login, SpawnChecks::default()).unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("away mode allows 1 new runs and 1 have started"),
+        "{refused}"
+    );
+
+    // The old scope's temporary grant is revoked and the new scope wrote none.
+    let grants = grants_now(&w);
+    assert_eq!(grants.len(), 1);
+    assert!(grants[0].1, "{grants:?}");
+
+    // Raising the cap again lets the next run start, and the brief shows the new scope.
+    let mut raised = w.away_scope(json!({"max_new_runs": 3}));
+    raised["merge"] = json!({"v": 1, "actions": ["merge"], "checks": "success"});
+    w.store.away_edit(&Ctx::new(Actor::Owner), raised).unwrap();
+    w.try_builder(&report, SpawnChecks::default()).unwrap();
+    assert_eq!(grants_now(&w).len(), 2);
+    let brief = ReturnBrief::load(w.store.conn(), None, Timestamp::now())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        brief.merge,
+        json!({"v": 1, "actions": ["merge"], "checks": "success"})
+    );
+    assert_eq!(brief.spend.new_runs, 2);
+
+    // A scope that cannot be enforced, a past time and a contract that is
+    // over are all refused, and an agent may not edit.
+    let mut bad = w.away_scope(json!({"max_new_runs": -1}));
+    bad["merge"] = json!("none");
+    assert!(w.store.away_edit(&Ctx::new(Actor::Owner), bad).is_err());
+    let mut past = w.away_scope(json!({}));
+    past["until_at"] = json!(Timestamp::now().plus_minutes(-5));
+    assert!(w.store.away_edit(&Ctx::new(Actor::Owner), past).is_err());
+    let again = w.away_scope(json!({}));
+    assert!(
+        w.store
+            .away_edit(&Ctx::new(Actor::Session("s-1".into())), again.clone())
+            .is_err()
+    );
+    w.store
+        .away_end(&Ctx::new(Actor::Owner), "ended by the owner")
+        .unwrap();
+    assert!(w.store.away_edit(&Ctx::new(Actor::Owner), again).is_err());
+}

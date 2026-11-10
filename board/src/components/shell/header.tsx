@@ -14,6 +14,7 @@ import { StaleBanner } from "../board/stale-sessions";
 import { ReconnectingBanner } from "../states/reconnecting-banner";
 import { ReloadBanner } from "../states/reload-banner";
 import { Section } from "../states/section";
+import { AwayControl } from "./away";
 import { ChevronIcon, CloseIcon, LayersIcon, MenuIcon, ServerIcon } from "./icons";
 import { useNamedProjects } from "../board/peer-state";
 
@@ -128,6 +129,7 @@ export function Header({ activeHost, menuOpen, onOpenMenu, onOpenAsk }: HeaderPr
             <BoardFilterSegment />
           </Section>
         ) : null}
+        <AwayControl />
         <button type="button" className="btn primary ask-open" onClick={onOpenAsk}>
           <SendIcon />
           Ask

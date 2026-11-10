@@ -1,0 +1,120 @@
+/* The away brief: one card in the Inbox, read from the records. */
+
+.irow .ii.away-ii {
+  color: var(--accent-text);
+}
+
+.ab-card {
+  margin-top: 14px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r8);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-stack);
+}
+
+.ab-s {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line-1);
+}
+
+.ab-quote {
+  margin: 0 0 6px;
+  color: var(--fg-1);
+  font-size: var(--fs-small);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.ab-card .ab-props {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.ab-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+  font-size: var(--fs-mini);
+  font-weight: var(--w-medium);
+  color: var(--fg-3);
+}
+
+.ab-h.warn {
+  color: var(--orange-text);
+}
+
+.ab-h .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.ab-h .n {
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-1);
+  font-weight: var(--w-semibold);
+}
+
+.ab-r {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 3px 6px;
+  margin: 0 -6px;
+  border-radius: var(--r6);
+  color: var(--fg-2);
+  font-size: var(--fs-small);
+  text-decoration: none;
+  min-width: 0;
+}
+
+a.ab-r:hover {
+  background: var(--bg-hover);
+}
+
+.ab-r b {
+  color: var(--fg-1);
+  font-weight: var(--w-medium);
+  font-family: var(--mono);
+  font-size: 12px;
+  flex: none;
+}
+
+.ab-r .ab-t {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ab-r .sp {
+  flex: 1;
+  min-width: 8px;
+}
+
+.ab-r .m {
+  color: var(--fg-3);
+  font-size: var(--fs-mini);
+  white-space: nowrap;
+}
+
+.ab-f {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+}
+
+.ab-f .sp {
+  flex: 1;
+}
+
+.ab-f .btn {
+  height: 32px;
+  padding: 0 14px;
+  font-size: var(--fs-small);
+  text-decoration: none;
+}

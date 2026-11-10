@@ -1,4 +1,4 @@
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useMemo } from "react";
 import type { CSSProperties, ReactNode } from "react";
@@ -6,14 +6,16 @@ import type { CSSProperties, ReactNode } from "react";
 import type { AttentionItem, BoardRow, PermissionPrompt, Project } from "../../lib/api-types";
 import { focusReason, ownerKey, ownerOf, projectIndex, shownId } from "../../lib/peers";
 import type { Owned } from "../../lib/peers";
+import { AWAY_BRIEF_ID, briefIsUnread, briefReadStore } from "../../lib/away";
 import { prefsStore } from "../../lib/prefs";
 import { projectColor } from "../../lib/project-color";
-import { attentionQuery, boardQuery, projectsQuery } from "../../lib/queries";
+import { attentionQuery, awayBriefQuery, boardQuery, projectsQuery } from "../../lib/queries";
 import { scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
 import { CheckIcon } from "../shell/icons";
 import { HostChip } from "../board/host-chip";
 import { useAmbiguousIds, useStanding, useNamedProjects } from "../board/peer-state";
+import { AwayBriefDetail, AwayBriefRow } from "./away-brief";
 import { answeredStore, withdrawnStore } from "./answered";
 import type { Withdrawn } from "./answered";
 import { AnswerForm } from "./answer";
@@ -476,6 +478,10 @@ export function Inbox({
   const prefs = useStore(prefsStore);
   const answered = useStore(answeredStore);
   const withdrawn = useStore(withdrawnStore);
+  // The away brief is a read of its own: a failed one leaves the rest working.
+  const awayBrief = useQuery(awayBriefQuery()).data?.brief;
+  const briefRead = useStore(briefReadStore);
+  const brief = briefIsUnread(awayBrief, briefRead) ? awayBrief : null;
 
   const cards = new Map(board.rows.map((row) => [row.id, row]));
   const shown = new Set(
@@ -529,11 +535,16 @@ export function Inbox({
     .map((prompt) => ({ type: "permission", id: promptId(prompt), prompt }));
 
   const all = [...current, ...prompts, ...stale];
-  const chosen = all.find((entry) => entry.id === selected) ?? (selected ? undefined : all[0]);
+  // The brief leads the list, so it is what shows when nothing is chosen.
+  const briefChosen = brief !== null && (selected === AWAY_BRIEF_ID || !selected);
+  const chosen = briefChosen
+    ? undefined
+    : (all.find((entry) => entry.id === selected) ?? (selected ? undefined : all[0]));
 
   return (
     <div className="inbox" data-pane={selected ? "detail" : "list"} data-testid="inbox">
       <div className="in-list">
+        {brief ? <AwayBriefRow brief={brief} selected={briefChosen} /> : null}
         <RecapCard />
         <Group
           title="Decisions"
@@ -565,7 +576,11 @@ export function Inbox({
         ) : null}
       </div>
       <div className="in-detail">
-        {chosen ? (
+        {brief && briefChosen ? (
+          <div className="inner" key={AWAY_BRIEF_ID}>
+            <AwayBriefDetail brief={brief} ctx={ctx} />
+          </div>
+        ) : chosen ? (
           <div className="inner" key={chosen.id}>
             {chosen.type === "decision" ? (
               <DecisionDetail

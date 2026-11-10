@@ -1,0 +1,189 @@
+/* Away mode in the header: the button, the status pill and its popover, and
+   the Start and Edit dialog. The pill is the one place the board says that
+   orchestrators are working on their own. */
+
+.away-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.top .btn.away-pill {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line-2));
+  background: var(--accent-tint);
+  color: var(--fg-1);
+}
+
+.away-pill .ld {
+  margin-right: 2px;
+}
+
+.away-open[disabled] {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.away-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 60;
+  min-width: 270px;
+  background: var(--bg-pop);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r8);
+  box-shadow: var(--shadow-high);
+}
+
+.away-pop-b {
+  padding: 12px 14px 8px;
+  font-size: var(--fs-small);
+  color: var(--fg-2);
+}
+
+.away-pop-b > b {
+  color: var(--fg-1);
+  font-weight: var(--w-semibold);
+}
+
+.away-pop .away-props {
+  margin: 8px 0 0;
+  padding: 0;
+  border: 0;
+  grid-template-columns: 70px minmax(0, 1fr);
+}
+
+.away-pop .refusal {
+  margin: 8px 0 0;
+}
+
+.away-pop-f {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--line-1);
+}
+
+.away-pop-f .btn[disabled] {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.top .away-pop-f .btn.sm,
+.away-pop-f .btn.sm {
+  height: 24px;
+  padding: 0 10px;
+}
+
+.away-pop-f .btn.primary {
+  background: var(--accent-solid);
+  border-color: transparent;
+  color: var(--accent-fg);
+}
+
+.away-pop-f .btn.primary:hover {
+  background: var(--accent-solid-hover);
+}
+
+.dialog.away-dialog {
+  width: min(500px, 100%);
+  padding: 20px;
+}
+
+.away-dialog .pa-fields {
+  margin-top: 16px;
+  gap: 14px;
+}
+
+.away-fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.away-fieldset legend {
+  padding: 0;
+}
+
+.away-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.away-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r6);
+  background: var(--bg-card);
+  color: var(--fg-1);
+  font-size: var(--fs-small);
+  cursor: pointer;
+}
+
+.away-chip:has(input:checked) {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.away-chip input {
+  accent-color: var(--accent-solid);
+  margin: 0;
+}
+
+.away-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.away-seg {
+  align-self: flex-start;
+  max-width: 100%;
+}
+
+.away-seg button {
+  height: 28px;
+}
+
+.away-cond {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r8);
+  background: var(--bg-1);
+}
+
+.away-cond .pa-l {
+  margin: 4px 0 0;
+}
+
+.away-cond .note-in {
+  margin-top: 0;
+  height: 32px;
+}
+
+@media (max-width: 600px) {
+  .away-when {
+    display: none;
+  }
+
+  .away-pop {
+    position: fixed;
+    top: 50px;
+    right: 8px;
+    left: 8px;
+    min-width: 0;
+  }
+
+  .away-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

@@ -1416,6 +1416,50 @@ pub struct WithdrawBody {
     pub host: Option<String>,
 }
 
+/// `POST` and `PUT /api/v1/away`: the scope `tiller away start` takes. `POST`
+/// turns away mode on, `PUT` changes the running contract in place.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AwayScopeBody {
+    pub idempotency_key: String,
+    /// When away mode ends by itself: RFC 3339 with an offset, a date (09:00
+    /// Lisbon) or a date and time without an offset (Lisbon).
+    pub until: String,
+    /// The projects the scope covers, by id.
+    pub projects: Vec<String>,
+    /// Standing orders the orchestrators read.
+    #[serde(default)]
+    pub orders: Option<String>,
+    /// No run starts once this many have started since the owner left.
+    #[serde(default)]
+    pub max_new_runs: Option<i64>,
+    /// The weekly quota floor while away, 0 to 100.
+    #[serde(default)]
+    pub quota_floor_percent: Option<f64>,
+    /// `"none"`, `"grants"` or a grant conditions object.
+    #[serde(default)]
+    pub merge: Option<Value>,
+}
+
+/// `DELETE /api/v1/away`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AwayEndBody {
+    pub idempotency_key: String,
+    /// Why away mode ended; "ended by the owner" when absent.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// `GET /api/v1/away/brief`: the return brief of the newest away contract,
+/// or `null` when the owner has never been away. `brief.away` says whether
+/// the contract still binds.
+#[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
+pub struct AwayBriefResponse {
+    #[schema(value_type = Option<Object>)]
+    pub brief: Option<tiller_agents::handoff::ReturnBrief>,
+}
+
 /// `POST /api/v1/approvals/{id}/decide`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]

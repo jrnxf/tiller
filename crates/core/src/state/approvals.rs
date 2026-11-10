@@ -993,22 +993,55 @@ impl Store {
                     .rev(1)
                     .payload(json!({"kind": "away", "until_at": until, "projects": projects})),
             )?;
-            if let Some(conditions) = scope.get("merge").filter(|m| m.is_object()) {
-                for project in &projects {
-                    let mut conditions = conditions.clone();
-                    conditions["expires_at"] = json!(until);
-                    conditions["away_approval_id"] = json!(id);
-                    insert_grant(
-                        tx,
-                        &NewGrant {
-                            project_id: project.clone(),
-                            kind: GrantKind::Merge,
-                            conditions,
-                        },
-                    )?;
-                }
-            }
+            insert_away_grants(tx, &id, &scope, &projects, until)?;
             get(tx.conn(), "approval", &id)
+        })
+    }
+
+    /// `away.edit` (owner): changes the running contract's scope in place, so
+    /// the window and the run count since `away.start` carry on. The
+    /// temporary grants of the old scope are revoked and the new scope's are
+    /// written. Refused when away mode is not on.
+    pub fn away_edit(&mut self, ctx: &Ctx, scope: Value) -> Result<Applied<Approval>> {
+        require_owner(&ctx.actor, "away.edit")?;
+        validate_away_scope(&scope)?;
+        self.write(ctx, "away.edit", None, |tx| {
+            let Some(away) = find::<Approval>(tx.conn(), "kind = 'away' AND state = 'accepted'", &[])? else {
+                return Err(Error::Usage("away mode is not on".into()));
+            };
+            let until = scope.get("until_at").and_then(Value::as_str).map(str::parse::<Timestamp>);
+            let Some(Ok(until)) = until else {
+                return Err(Error::Usage("away scope needs until_at".into()));
+            };
+            if until <= tx.now() {
+                return Err(Error::Usage(format!("away until_at {until} is not in the future")));
+            }
+            let projects: Vec<String> = serde_json::from_value(scope.get("projects").cloned().unwrap_or(json!([])))?;
+            if projects.is_empty() {
+                return Err(Error::Usage("away scope names no projects".into()));
+            }
+            for project in &projects {
+                let _: Project = get(tx.conn(), "project", project)?;
+            }
+            tx.conn().execute(
+                "UPDATE approvals SET scope = ?2, rev = rev + 1 WHERE id = ?1",
+                params![away.id, scope],
+            )?;
+            tx.event(
+                NewEvent::new("approval", &away.id, "approval.edited")
+                    .rev(away.rev + 1)
+                    .payload(json!({"kind": "away", "until_at": until, "projects": projects})),
+            )?;
+            let grants: Vec<Grant> = list(
+                tx.conn(),
+                "revoked_at IS NULL AND json_extract(conditions, '$.away_approval_id') = ?1 ORDER BY id",
+                &[&away.id],
+            )?;
+            for grant in grants {
+                revoke_grant(tx, &grant.id, "away mode edited")?;
+            }
+            insert_away_grants(tx, &away.id, &scope, &projects, until)?;
+            get(tx.conn(), "approval", &away.id)
         })
     }
 
@@ -1255,6 +1288,34 @@ fn validate_away_scope(scope: &Value) -> Result<()> {
             "away merge must be \"none\", \"grants\" or a grant conditions object".into(),
         )),
     }
+}
+
+/// The temporary merge grant per project that a `merge` conditions object in
+/// an away scope asks for; it ends with the contract.
+fn insert_away_grants(
+    tx: &mut Tx<'_>,
+    away_id: &str,
+    scope: &Value,
+    projects: &[String],
+    until: Timestamp,
+) -> Result<()> {
+    let Some(conditions) = scope.get("merge").filter(|m| m.is_object()) else {
+        return Ok(());
+    };
+    for project in projects {
+        let mut conditions = conditions.clone();
+        conditions["expires_at"] = json!(until);
+        conditions["away_approval_id"] = json!(away_id);
+        insert_grant(
+            tx,
+            &NewGrant {
+                project_id: project.clone(),
+                kind: GrantKind::Merge,
+                conditions,
+            },
+        )?;
+    }
+    Ok(())
 }
 
 fn insert_grant(tx: &mut Tx<'_>, new: &NewGrant) -> Result<Grant> {

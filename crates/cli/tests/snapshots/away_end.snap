@@ -52,6 +52,7 @@ exit: 0
       "ended_at": "<time>",
       "ended_reason": "back",
       "landed": [],
+      "merge": "none",
       "merged_by_grant": [],
       "orders": "keep going on alpha-42; hold schema changes",
       "projects": [

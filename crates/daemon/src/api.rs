@@ -705,6 +705,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/attention/{id}/answer", post(answer))
         .route("/api/v1/attention/{id}/withdraw", post(withdraw_attention))
         .route("/api/v1/approvals/{id}/decide", post(decide))
+        .route(
+            "/api/v1/away",
+            post(away_start).put(away_edit).delete(away_end),
+        )
+        .route("/api/v1/away/brief", get(away_brief))
         .route("/api/v1/agents", get(agents))
         .route("/api/v1/agents/{session}/focus", post(focus))
         .route("/api/v1/agents/{session}/terminal", post(terminal))
@@ -3300,6 +3305,123 @@ async fn decide(
     submit(&state, &headers, Op::Decide, Some(id), &bytes).await
 }
 
+/// An away scope from the board's body, as `tiller away start` builds it.
+fn away_scope(request: &AwayScopeBody) -> tiller_core::Result<Value> {
+    let until = tiller_core::time::lisbon::parse_when(&request.until)?;
+    let mut scope = json!({"until_at": until, "projects": request.projects});
+    if let Some(orders) = &request.orders {
+        scope["orders"] = json!(orders);
+    }
+    let mut spend = serde_json::Map::new();
+    if let Some(cap) = request.max_new_runs {
+        spend.insert("max_new_runs".into(), json!(cap));
+    }
+    if let Some(floor) = request.quota_floor_percent {
+        spend.insert("quota_floor_percent".into(), json!(floor));
+    }
+    if !spend.is_empty() {
+        scope["spend"] = Value::Object(spend);
+    }
+    if let Some(merge) = &request.merge {
+        scope["merge"] = merge.clone();
+    }
+    Ok(scope)
+}
+
+#[utoipa::path(post, path = "/api/v1/away", tag = "mutations", request_body = AwayScopeBody,
+    responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody),
+              (status = 403, body = ErrorBody), (status = 409, body = ErrorBody, description = "away mode is already on")))]
+async fn away_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers)?;
+    let request: AwayScopeBody = body(&bytes)?;
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| {
+            let scope = away_scope(&request)?;
+            Done::of(store.away_start(ctx, scope)?)
+        },
+    )
+    .await
+}
+
+#[utoipa::path(put, path = "/api/v1/away", tag = "mutations", request_body = AwayScopeBody,
+    responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody),
+              (status = 403, body = ErrorBody)))]
+async fn away_edit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers)?;
+    let request: AwayScopeBody = body(&bytes)?;
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| {
+            let scope = away_scope(&request)?;
+            Done::of(store.away_edit(ctx, scope)?)
+        },
+    )
+    .await
+}
+
+#[utoipa::path(delete, path = "/api/v1/away", tag = "mutations", request_body = AwayEndBody,
+    responses((status = 200, body = MutationResponse, description = "`data.away` is the ended contract, `null` when away mode was off; `data.brief` is its return brief"),
+              (status = 403, body = ErrorBody)))]
+async fn away_end(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers)?;
+    let request: AwayEndBody = body(&bytes)?;
+    let reason = request
+        .reason
+        .clone()
+        .unwrap_or_else(|| "ended by the owner".into());
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| {
+            let applied = store.away_end(ctx, &reason)?;
+            let brief = match &applied.value {
+                Some(away) => tiller_agents::handoff::ReturnBrief::load(
+                    store.conn(),
+                    Some(&away.id),
+                    Timestamp::now(),
+                )?,
+                None => None,
+            };
+            Ok(Done {
+                data: json!({"away": applied.value, "brief": brief}),
+                events: applied.events,
+                replayed: applied.replayed,
+                outbox_id: None,
+                approval_id: None,
+                warning: None,
+            })
+        },
+    )
+    .await
+}
+
+#[utoipa::path(get, path = "/api/v1/away/brief", tag = "reads",
+    responses((status = 200, body = AwayBriefResponse)))]
+async fn away_brief(State(state): State<AppState>) -> ApiResult<AwayBriefResponse> {
+    read(&state, |store| {
+        Ok(AwayBriefResponse {
+            brief: tiller_agents::handoff::ReturnBrief::load(store.conn(), None, Timestamp::now())?,
+        })
+    })
+    .await
+    .map(Json)
+}
+
 /// An agent's session id, its pane, and the saved machine it runs on, if
 /// any.
 async fn pane_of(
@@ -4171,7 +4293,7 @@ async fn app_shell(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
         cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, start_settings, set_config,
-        pick_bug_project, recap, mark_recap_seen, relabel_intervention, memory::view, memory::revision,
+        away_start, away_edit, away_end, away_brief, pick_bug_project, recap, mark_recap_seen, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, session, login_code, logout
     ),
     components(schemas(ChangeEvent, ResetEvent, PeerEvent, LinkEvent, PeerResetEvent, TerminalLine, ErrorBody, ErrorDetail)),
@@ -7486,6 +7608,181 @@ esac"#,
         );
         let remote = send(&app, remote).await;
         assert_ne!(remote.status, StatusCode::OK, "{}", remote.body);
+    }
+
+    #[tokio::test]
+    async fn the_board_starts_edits_and_ends_away_mode_as_the_owner() {
+        let fleet = Fleet::new();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let cookie = owner_cookie(fleet.dir.path());
+        let owner = [("cookie", cookie.as_str())];
+        let until = "2099-11-12T18:00";
+        let scope = |key: &str, extra: Value| {
+            let mut body = json!({"idempotency_key": key, "until": until, "projects": ["alpha"]});
+            for (name, value) in extra.as_object().unwrap() {
+                body[name] = value.clone();
+            }
+            body
+        };
+
+        // Never away: the brief is null.
+        let brief: Value =
+            serde_json::from_str(&get(&app, "/api/v1/away/brief").await.body).unwrap();
+        assert_eq!(brief["brief"], Value::Null, "{brief}");
+
+        // Not the owner: refused, nothing written.
+        let anon = mutation("POST", "/api/v1/away", scope("a-0", json!({})), &[]);
+        let refused = send(&app, anon).await;
+        assert!(
+            refused.status == StatusCode::UNAUTHORIZED || refused.status == StatusCode::FORBIDDEN,
+            "{} {}",
+            refused.status,
+            refused.body
+        );
+
+        // A scope the CLI refuses is refused here too: a past time, no
+        // projects, a floor above 100, an unknown merge mode.
+        for (key, extra) in [
+            ("a-1", json!({"until": "2020-01-01T09:00"})),
+            ("a-2", json!({"projects": []})),
+            ("a-3", json!({"quota_floor_percent": 120.0})),
+            ("a-4", json!({"merge": "always"})),
+            ("a-5", json!({"until": "next tuesday"})),
+        ] {
+            let answer = send(
+                &app,
+                mutation("POST", "/api/v1/away", scope(key, extra), &owner),
+            )
+            .await;
+            assert_eq!(
+                answer.status,
+                StatusCode::BAD_REQUEST,
+                "{key}: {}",
+                answer.body
+            );
+        }
+
+        // Starting writes the contract, with the CLI's scope shape.
+        let started = send(
+            &app,
+            mutation(
+                "POST",
+                "/api/v1/away",
+                scope(
+                    "a-6",
+                    json!({"orders": "keep going", "max_new_runs": 6, "quota_floor_percent": 20.0, "merge": "none"}),
+                ),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(started.status, StatusCode::OK, "{}", started.body);
+        let started: Value = serde_json::from_str(&started.body).unwrap();
+        assert_eq!(started["data"]["kind"], "away", "{started}");
+        assert_eq!(
+            started["data"]["scope"]["spend"]["max_new_runs"], 6,
+            "{started}"
+        );
+        assert_eq!(started["data"]["scope"]["merge"], "none", "{started}");
+        assert_eq!(
+            started["data"]["scope"]["until_at"], "2099-11-12T18:00:00.000Z",
+            "{started}"
+        );
+
+        // The same key replays; a second start is refused.
+        let replay = send(&app, mutation("POST", "/api/v1/away", scope("a-6", json!({"orders": "keep going", "max_new_runs": 6, "quota_floor_percent": 20.0, "merge": "none"})), &owner)).await;
+        let replay: Value = serde_json::from_str(&replay.body).unwrap();
+        assert_eq!(replay["replayed"], true, "{replay}");
+        let twice = send(
+            &app,
+            mutation("POST", "/api/v1/away", scope("a-7", json!({})), &owner),
+        )
+        .await;
+        assert_eq!(
+            twice.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            twice.body
+        );
+
+        // The brief reads the running contract.
+        let brief: Value =
+            serde_json::from_str(&get(&app, "/api/v1/away/brief").await.body).unwrap();
+        assert_eq!(brief["brief"]["away"], true, "{brief}");
+        assert_eq!(brief["brief"]["orders"], "keep going", "{brief}");
+        assert_eq!(brief["brief"]["merge"], "none", "{brief}");
+        assert_eq!(brief["brief"]["spend"]["max_new_runs"], 6, "{brief}");
+
+        // Editing changes the scope in place: the same contract, new limits.
+        let edited = send(
+            &app,
+            mutation(
+                "PUT",
+                "/api/v1/away",
+                scope(
+                    "a-8",
+                    json!({"orders": "slow down", "max_new_runs": 2, "merge": "grants"}),
+                ),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+        let edited: Value = serde_json::from_str(&edited.body).unwrap();
+        assert_eq!(edited["data"]["id"], started["data"]["id"], "{edited}");
+        let brief: Value =
+            serde_json::from_str(&get(&app, "/api/v1/away/brief").await.body).unwrap();
+        assert_eq!(brief["brief"]["orders"], "slow down", "{brief}");
+        assert_eq!(brief["brief"]["merge"], "grants", "{brief}");
+        assert_eq!(
+            brief["brief"]["approval_id"], started["data"]["id"],
+            "{brief}"
+        );
+
+        // Ending turns it off and hands back the brief.
+        let ended = send(
+            &app,
+            mutation(
+                "DELETE",
+                "/api/v1/away",
+                json!({"idempotency_key": "a-9"}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(ended.status, StatusCode::OK, "{}", ended.body);
+        let ended: Value = serde_json::from_str(&ended.body).unwrap();
+        assert_eq!(ended["data"]["away"]["state"], "succeeded", "{ended}");
+        assert_eq!(ended["data"]["brief"]["away"], false, "{ended}");
+        assert_eq!(
+            ended["data"]["brief"]["ended_reason"], "ended by the owner",
+            "{ended}"
+        );
+
+        // Ending again is a no-op, and editing a contract that is over is refused.
+        let again = send(
+            &app,
+            mutation(
+                "DELETE",
+                "/api/v1/away",
+                json!({"idempotency_key": "a-10"}),
+                &owner,
+            ),
+        )
+        .await;
+        let again: Value = serde_json::from_str(&again.body).unwrap();
+        assert_eq!(again["data"]["away"], Value::Null, "{again}");
+        let late = send(
+            &app,
+            mutation("PUT", "/api/v1/away", scope("a-11", json!({})), &owner),
+        )
+        .await;
+        assert_eq!(late.status, StatusCode::BAD_REQUEST, "{}", late.body);
+
+        // The ended contract's brief stays readable.
+        let brief: Value =
+            serde_json::from_str(&get(&app, "/api/v1/away/brief").await.body).unwrap();
+        assert_eq!(brief["brief"]["away"], false, "{brief}");
     }
 
     #[tokio::test]
