@@ -879,6 +879,101 @@ fn owner_tiller_commands_denied() {
     }
 }
 
+/// T3: the owner commands the CLI gates on `require_owner` that the guard
+/// once let through, next to their siblings any role may run.
+#[test]
+fn owner_retro_learn_and_agent_commands_denied() {
+    const CASES: &[(&str, Option<Code>)] = &[
+        ("tiller retro run alpha", Some(Code::OwnerOnly)),
+        ("tiller learn eval 01JABC", Some(Code::OwnerOnly)),
+        ("tiller agent restart --stale", Some(Code::OwnerOnly)),
+        ("tiller agent focus alpha-1", Some(Code::OwnerOnly)),
+        (
+            "tiller --json agent restart --stale --dry-run",
+            Some(Code::OwnerOnly),
+        ),
+        ("sh -c 'tiller agent focus alpha-1'", Some(Code::OwnerOnly)),
+        ("echo run | xargs tiller retro", Some(Code::OwnerOnly)),
+        ("tiller retro list", None),
+        ("tiller retro show 01JABC", None),
+        ("tiller learn status", None),
+        ("tiller agent relaunch alpha-1", None),
+    ];
+    for role in Role::ALL {
+        for (command, verdict) in CASES {
+            match verdict {
+                Some(code) => denied(role, command, *code),
+                None => allowed(role, command),
+            }
+        }
+    }
+}
+
+/// Every `require_owner` call site in the CLI, as `(label, file)`. Each call
+/// passes a string literal that names the command; a call that does not is
+/// a failure, so a new owner command cannot hide from the cross-check.
+fn cli_owner_labels() -> Vec<(String, String)> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../cli/src");
+    let mut files = Vec::new();
+    walk(&root, &mut files);
+    let mut labels = Vec::new();
+    for file in files {
+        let source = fs::read_to_string(&file).unwrap();
+        let shown = file.strip_prefix(&root).unwrap().display().to_string();
+        for (at, _) in source.match_indices("require_owner(") {
+            if source[..at].ends_with("fn ") {
+                continue;
+            }
+            let rest = source[at + "require_owner(".len()..].trim_start();
+            let label = rest
+                .strip_prefix('"')
+                .and_then(|rest| rest.split_once('"'))
+                .map(|(label, _)| label.to_owned())
+                .unwrap_or_else(|| panic!("{shown}: require_owner takes a string literal"));
+            labels.push((label, shown.clone()));
+        }
+    }
+    labels
+}
+
+/// T3: the guard denies every command the CLI refuses to anyone but the
+/// owner, so an agent learns at the hook, not from a failed call. The CLI
+/// remains the boundary; this keeps the two lists from drifting apart.
+#[test]
+fn guard_denies_every_cli_owner_command() {
+    let labels = cli_owner_labels();
+    assert!(labels.len() >= 15, "found only {labels:?}");
+    for (label, file) in &labels {
+        // `mem.rs` names its command without the program: "mem approve".
+        let command = if label.starts_with("tiller ") {
+            label.clone()
+        } else {
+            format!("tiller {label}")
+        };
+        let command = format!("{command} 01JABC");
+        for role in Role::ALL {
+            match bash(role, &command) {
+                Some(denial) => assert!(
+                    [Code::OwnerOnly, Code::Peer].contains(&denial.code),
+                    "{file}: {role}: {command}: {}",
+                    denial.message()
+                ),
+                None => panic!("{file}: {role}: {command} is the owner's, but the guard allows it"),
+            }
+        }
+    }
+}
+
 // -- G43: the peer link --------------------------------------------------------
 
 #[test]

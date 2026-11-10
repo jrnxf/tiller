@@ -2215,6 +2215,9 @@ impl Walker<'_, '_> {
             "config" => unseen || second == "set",
             "project" => second != "list",
             "mem" => unseen || second == "approve",
+            "retro" => unseen || second == "run",
+            "learn" => unseen || second == "eval",
+            "agent" => unseen || second == "restart" || second == "focus",
             _ => false,
         };
         owner_only.then(|| {
