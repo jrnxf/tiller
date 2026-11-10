@@ -29,6 +29,7 @@ const LOADED_PATHS: &[&str] = &[
     ".claude/**",
     "**/.claude/**",
     ".mcp.json",
+    "**/.mcp.json",
 ];
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -294,7 +295,28 @@ pub fn glob(pattern: &str, text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::glob;
+    use super::{LOADED_PATHS, glob};
+
+    fn loaded(file: &str) -> bool {
+        LOADED_PATHS.iter().any(|pattern| glob(pattern, file))
+    }
+
+    #[test]
+    fn loaded_paths_cover_nested_files() {
+        for file in [
+            "AGENTS.md",
+            "docs/AGENTS.md",
+            "crates/core/CLAUDE.md",
+            "tools/.claude/settings.json",
+            ".mcp.json",
+            "tools/.mcp.json",
+            "a/b/.mcp.json",
+        ] {
+            assert!(loaded(file), "{file} must need a memory change");
+        }
+        assert!(!loaded("src/mcp.json"));
+        assert!(!loaded("docs/.mcp.json.md"));
+    }
 
     #[test]
     fn globs_follow_path_segments() {
