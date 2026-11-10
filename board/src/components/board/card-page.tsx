@@ -488,7 +488,9 @@ export function CardPage({
 
   const hold = detail.holds[0];
   const phase = phaseOf(column);
-  const openDeps = detail.deps.filter((dep) => dep.released_at === null);
+  const blockers = detail.deps
+    .filter((dep) => dep.released_at === null)
+    .map((dep) => dep.display_id);
 
   return (
     <div className={`card-page${variant === "drawer" ? " in-drawer" : ""}`} data-testid="card-page">
@@ -563,12 +565,10 @@ export function CardPage({
           <dt>Status</dt>
           <dd>
             <Status mark={statusMark(column)} />
-            {stateText(column)}
+            {stateText(column, blockers)}
             {untriaged ? <span className="lab sm yel">Untriaged</span> : null}
-            {openDeps.length > 0 ? (
-              <span className="meta">
-                blocked by {openDeps.map((dep) => dep.display_id).join(", ")}
-              </span>
+            {blockers.length > 0 && column.badge !== "blocked" ? (
+              <span className="meta">blocked by {blockers.join(", ")}</span>
             ) : null}
           </dd>
           {hostHealth || phase === "closed" ? (

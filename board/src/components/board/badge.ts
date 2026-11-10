@@ -34,17 +34,24 @@ const LABELS: Record<string, string> = {
   superseded: "Superseded",
 };
 
-// The chip text for a card's `badge` (state.md, section 6).
+// The chip text for a card's `badge` (state.md, section 6). The board's verbs
+// are Hold, Held and Release, so a parked card reads "Held" everywhere.
 export function badgeText(row: BoardRow): string {
-  if (row.badge === "parked") return row.parked_reason ? `Parked: ${row.parked_reason}` : "Parked";
+  if (row.badge === "parked") return row.parked_reason ? `Held: ${row.parked_reason}` : "Held";
   if (row.badge === "blocked") return row.blocked_by ? `Blocked by ${row.blocked_by}` : "Blocked";
   return LABELS[row.badge] ?? row.badge.replaceAll("_", " ");
 }
 
 // The state alone, for a card page whose banner already says why a card is held.
-// The board's verbs are Hold, Held and Release, so the page says "Held".
-export function stateText(row: BoardRow): string {
-  return row.badge === "parked" ? "Held" : badgeText(row);
+// A blocked card says what blocks it here, from the open dependencies the page
+// read, so the page names the blockers once.
+export function stateText(row: BoardRow, blockers: string[] = []): string {
+  if (row.badge === "parked") return "Held";
+  if (row.badge === "blocked") {
+    const names = blockers.length > 0 ? blockers : row.blocked_by ? [row.blocked_by] : [];
+    return names.length > 0 ? `Blocked by ${names.join(", ")}` : "Blocked";
+  }
+  return badgeText(row);
 }
 
 // How the chip is tinted: a person must act (warn), something looks wrong

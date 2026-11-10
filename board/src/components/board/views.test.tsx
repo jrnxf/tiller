@@ -795,6 +795,20 @@ test("a card without a PR says an approval comes with one", async () => {
   expect(within(page).queryByText(/Approval is stale/)).toBeNull();
 });
 
+test("a blocked card page names its blockers once and a held card says Held", async () => {
+  stubApi("blocked");
+  await renderApp("blocked", "/cards/01JCARD0000000000000000014");
+  const blocked = screen.getByTestId("card-page");
+  expect(blocked.textContent?.match(/blocked by gamma-12/gi)).toHaveLength(1);
+  expect(blocked.textContent).toContain("Blocked by gamma-12");
+  cleanup();
+
+  await renderApp("blocked", "/cards/01JCARD0000000000000000013");
+  const held = await screen.findByTestId("card-page");
+  expect(held.textContent).toContain("Held");
+  expect(held.textContent).not.toMatch(/parked/i);
+});
+
 test("earlier timeline events load on request and the button goes away at the start", async () => {
   stubApi("default");
   await renderApp("default", `/cards/${CARD_43}`);

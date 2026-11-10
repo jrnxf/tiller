@@ -77,12 +77,18 @@ test("the lane's open count leaves out done cards and asks", () => {
 test("badges say what the card_column view computed, and parked and blocked say why", () => {
   expect(
     badgeText({ ...row("x", "queued", "parked"), parked_reason: "waiting for the release" }),
-  ).toBe("Parked: waiting for the release");
+  ).toBe("Held: waiting for the release");
+  expect(badgeText(row("x", "queued", "parked"))).toBe("Held");
   expect(stateText({ ...row("x", "queued", "parked"), parked_reason: "waiting" })).toBe("Held");
   expect(stateText(row("x", "working", "idle"))).toBe("Idle");
   expect(badgeText({ ...row("x", "queued", "blocked"), blocked_by: "alpha-3" })).toBe(
     "Blocked by alpha-3",
   );
+  // The card page names the blockers once, from its open dependencies.
+  const blocked = { ...row("x", "queued", "blocked"), blocked_by: "alpha-3" };
+  expect(stateText(blocked, ["alpha-3", "alpha-4"])).toBe("Blocked by alpha-3, alpha-4");
+  expect(stateText(blocked)).toBe("Blocked by alpha-3");
+  expect(stateText(row("x", "queued", "blocked"))).toBe("Blocked");
   expect(badgeText(row("x", "working", "permission_prompt", "h1", true))).toBe("Permission prompt");
   expect(badgeText(row("x", "working", "brand_new_state"))).toBe("brand new state");
 });
