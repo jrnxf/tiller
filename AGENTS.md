@@ -35,7 +35,7 @@ Rust, from the repo root:
 | Format | `cargo fmt --all` (check: `cargo fmt --all --check`) |
 | Lint | `cargo clippy --workspace --all-targets -- -D warnings` |
 | Test | `cargo nextest run --workspace` |
-| Run the daemon | `cargo run -- daemon` (placeholder board on `http://127.0.0.1:7421`) |
+| Run the daemon | `cargo run -- daemon` (the board on `http://127.0.0.1:7421`) |
 
 Board, from the repo root (`--cwd board`) or inside `board/`:
 

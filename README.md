@@ -2,7 +2,7 @@
 
 Tiller is a durable board and orchestration layer for coding-agent fleets. One orchestrator per project, every ask becomes a card, and all state lives in one SQLite database per host. A live local board shows every project at once.
 
-This repository is in bootstrap: the workspace, build and CI are in place, and the daemon serves a placeholder board.
+The `tiller` CLI and the board work on the same state. The CLI writes `state.db` directly, and the daemon serves the live board and its API on localhost. The board shows lanes, cards, the Inbox, agents, memory, health and settings, and the owner can act from it. The CLI covers the same actions and adds the agent tools. `docs/design/cli-board-parity.md` lists what each surface can do.
 
 ## Layout
 
