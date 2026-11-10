@@ -73,7 +73,9 @@ export type Scenario =
   | "stale-sessions"
   | "setup-needed"
   | "away"
-  | "away-back";
+  | "away-back"
+  | "new-install"
+  | "blocked";
 
 // The scenarios with paired peers. `stale-sessions` has them so a peer's older
 // sessions show on this host's board.
@@ -98,6 +100,8 @@ export const SCENARIOS: readonly Scenario[] = [
   "setup-needed",
   "away",
   "away-back",
+  "new-install",
+  "blocked",
 ];
 
 const WEEKLY_FLOOR_PERCENT = 3;
@@ -661,8 +665,34 @@ const BUG_BODIES: Record<string, string> = {
     "`tiller card close beta-8 --outcome cancelled --reason ...` closed the card, and the timeline shows no reason.",
 };
 
+// A new install: the first cards are filed and running, and nothing has landed.
+function newInstallRows(now: number): BoardRow[] {
+  return [
+    card(1, "alpha", "working", "working", "Set up the export job", { observedMinutes: 0.2 }, now),
+    card(2, "alpha", "queued", "filed", "Document the cutover steps", { kind: "scout" }, now),
+  ];
+}
+
+// The default board plus a card that waits on another, for the "Blocked by" line.
+function blockedRows(now: number): BoardRow[] {
+  return [
+    ...defaultRows(now),
+    card(
+      14,
+      "gamma",
+      "queued",
+      "blocked",
+      "Rotate the signing key",
+      { kind: "ops", blockedBy: "gamma-12" },
+      now,
+    ),
+  ];
+}
+
 function boardFor(scenario: Scenario, now: number): BoardResponse {
   if (scenario === "empty") return { rows: [], asked: [] };
+  if (scenario === "new-install") return { rows: newInstallRows(now), asked: [] };
+  if (scenario === "blocked") return { rows: blockedRows(now), asked: [] };
   if (scenario === "degraded") return { rows: degradedRows(now), asked: [] };
   if (hasPeers(scenario)) {
     return { rows: [...defaultRows(now), ...bugRows(now), ...peerRows(now)], asked: [] };
@@ -1174,7 +1204,7 @@ function cardDetailFor(
             },
           ]
         : [],
-    deps: [],
+    deps: row.blocked_by ? [{ display_id: row.blocked_by, released_at: null }] : [],
     attention: waiting
       ? attentionFor("default", board, now).items.filter(
           (item) => item.card_id === row.id && item.approval,
@@ -1316,7 +1346,7 @@ export function fixtureResponses(scenario: Scenario = "default", now: number = D
     [machinesPath]: machinesFor(scenario, now),
     [quotaPath]: quotaFor(scenario, now),
     [projectsPath]: projects,
-    [signalsPath]: signalsFor(scenario === "health-bad", now),
+    [signalsPath]: signalsFor(scenario === "health-bad", now, scenario === "new-install"),
     [awayBriefPath]: awayFor(
       scenario === "away" ? "running" : scenario === "away-back" ? "back" : "idle",
     ),

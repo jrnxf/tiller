@@ -152,7 +152,35 @@ const BY_PROJECT = [
   { project_id: "gamma", accepted: 3, needed: 3, answered: 2, median_answer_minutes: 3.2 },
 ];
 
-export function signalsFor(unsafe: boolean, now: number): SignalsResponse {
+// A new install: eight Lisbon weeks, all empty but the current one, which
+// holds the first ask and nothing landed.
+function freshSignals(now: number): SignalsResponse {
+  const first = lisbonWeekStart(now) - 7 * WEEK_MS;
+  const weeks: SignalsWeek[] = Array.from({ length: 8 }, (_, index) => {
+    const start = first + index * WEEK_MS;
+    return {
+      start: new Date(start).toISOString(),
+      end: new Date(start + WEEK_MS).toISOString(),
+      landed: 0,
+      reported: 0,
+      merged_prs: 0,
+      needed: index === 7 ? 1 : 0,
+      answered: 0,
+      median_answer_minutes: null,
+      interventions: { correction: 0, unplanned_escalation: 0, rework: 0, planned: 0 },
+      reverts: 0,
+      escaped: 0,
+      rework: 0,
+      lost_work: 0,
+      duplicate_dispatches: 0,
+      unauthorized: 0,
+    };
+  });
+  return { weeks, by_project: [], interventions: [], machines_live: 1, machines_total: 1 };
+}
+
+export function signalsFor(unsafe: boolean, now: number, fresh = false): SignalsResponse {
+  if (fresh) return freshSignals(now);
   const first = lisbonWeekStart(now) - 7 * WEEK_MS;
   const newest = first + 7 * WEEK_MS;
   const interventions: SignalsIntervention[] = INTERVENTIONS.map((item, index) => {
