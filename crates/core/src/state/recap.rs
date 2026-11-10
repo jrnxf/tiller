@@ -1,4 +1,4 @@
-//! The recap: what happened since the owner last looked (`tiller ahoy` on
+//! The recap: what happened since the owner last looked (`tiller recap` on
 //! the command line, the Inbox's "Since you left" card on the board). Both
 //! read the same events, through [`events_since`], so the two never count
 //! differently. Where the owner last looked lives in the log too: each
