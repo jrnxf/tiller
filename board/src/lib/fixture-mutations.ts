@@ -28,7 +28,15 @@ import {
   startProblems,
   startSettingsFor,
 } from "./fixture-settings.ts";
-import { agentsPath, attentionPath, boardPath, machinesPath, projectsPath } from "./queries.ts";
+import { recapFor } from "./fixtures-recap.ts";
+import {
+  agentsPath,
+  attentionPath,
+  boardPath,
+  machinesPath,
+  projectsPath,
+  recapPath,
+} from "./queries.ts";
 
 interface Reply {
   status: number;
@@ -147,6 +155,9 @@ function currentProject(id: string): Project | undefined {
 const deleted = new Set<string>();
 const retired = new Map<string, string>();
 const stopped = new Set<string>();
+// When the owner last marked the recap seen, since the server started.
+let recapMarkedAt: string | null = null;
+
 // The projects added since the server started, listed after the fixture's.
 const added = new Map<string, Project>();
 
@@ -156,6 +167,9 @@ export function withoutDeleted(path: string, body: unknown, scenario: Scenario):
   const pathname = new URL(path, "http://localhost").pathname;
   const triaged = withTriage(pathname, body);
   if (triaged !== body) return triaged;
+  if (pathname === recapPath && recapMarkedAt !== null) {
+    return recapFor(scenario, Date.now(), recapMarkedAt);
+  }
   if (pathname === "/api/v1/start-settings") return startSettingsFor(scenario);
   const setup = /^\/api\/v1\/projects\/([^/]+)\/setup$/.exec(pathname);
   if (setup?.[1] && (body !== undefined || !gone(setup[1])))
@@ -827,6 +841,26 @@ function handle(
             txn: "mem.apply",
             entity: "memory_revision",
             entity_id: path,
+            rev_after: null,
+            card_id: null,
+            entity_state: null,
+          },
+        },
+      ],
+    };
+  }
+  if (method === "POST" && path === "/api/v1/recap/seen") {
+    recapMarkedAt = new Date().toISOString();
+    return {
+      reply: recorded(recapFor(scenario, Date.now(), recapMarkedAt), null, null),
+      followUps: [
+        {
+          delayMs: 200,
+          event: {
+            kind: "recap.seen",
+            txn: "recap.mark_seen",
+            entity: "recap",
+            entity_id: "owner",
             rev_after: null,
             card_id: null,
             entity_state: null,

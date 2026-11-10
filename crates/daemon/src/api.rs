@@ -762,6 +762,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/memory/proposals/decide", post(memory::decide))
         .route("/api/v1/memory/changes/{proposal}/undo", post(memory::undo))
         .route("/api/v1/memory/revisions/{id}", get(memory::revision))
+        .route("/api/v1/recap", get(recap))
+        .route("/api/v1/recap/seen", post(mark_recap_seen))
         .route("/api/v1/signals", get(signals))
         .route("/api/v1/events", get(events))
         .route("/api/v1/session", get(session))
@@ -3041,6 +3043,57 @@ fn checkout_of(home: &std::path::Path, project: &str) -> Result<Option<String>, 
         .map(str::to_owned))
 }
 
+#[utoipa::path(get, path = "/api/v1/recap", tag = "reads",
+    responses((status = 200, body = RecapResponse), (status = 503, body = ErrorBody)))]
+async fn recap(State(state): State<AppState>) -> ApiResult<RecapResponse> {
+    read(&state, |store| {
+        let recap = tiller_core::state::recap::recap(store.conn(), Timestamp::now())?;
+        Ok(recap_response(&recap))
+    })
+    .await
+    .map(Json)
+}
+
+fn recap_response(recap: &tiller_core::state::recap::Recap) -> RecapResponse {
+    RecapResponse {
+        seen_at: recap.seen_at.map(|at| at.to_string()),
+        since: recap.since.to_string(),
+        landed: recap.tally.landed,
+        decisions: recap.tally.decisions,
+        failed_runs: recap.tally.failed_runs,
+        suggestions: recap.tally.suggestions,
+    }
+}
+
+#[utoipa::path(post, path = "/api/v1/recap/seen", tag = "mutations", request_body = MarkRecapSeen,
+    responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn mark_recap_seen(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers)?;
+    let request: MarkRecapSeen = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "marking a recap seen").await?;
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| {
+            let marked = store.recap_mark_seen(ctx)?;
+            Ok(Done {
+                data: serde_json::to_value(recap_response(&marked.value))?,
+                events: marked.events,
+                replayed: marked.replayed,
+                outbox_id: None,
+                approval_id: None,
+                warning: None,
+            })
+        },
+    )
+    .await
+}
+
 #[utoipa::path(post, path = "/api/v1/bug-project", tag = "mutations", request_body = PickBugProject,
     responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody),
               (status = 409, body = ErrorBody),
@@ -4110,7 +4163,7 @@ async fn app_shell(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
         cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, start_settings, set_config,
-        pick_bug_project, relabel_intervention, memory::view, memory::revision,
+        pick_bug_project, recap, mark_recap_seen, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, session, login_code, logout
     ),
     components(schemas(ChangeEvent, ResetEvent, PeerEvent, LinkEvent, PeerResetEvent, TerminalLine, ErrorBody, ErrorDetail)),
@@ -8188,6 +8241,99 @@ esac"#,
         let cleared = send(&app, pick("k-clear", Value::Null, &after["rev"])).await;
         assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.body);
         assert!(machine(app.clone()).await.get("bug_project").is_none());
+    }
+
+    /// The recap counts what the log holds since the owner's mark, and Mark
+    /// seen moves the mark to now, so the same events are not counted twice.
+    #[tokio::test]
+    async fn the_recap_counts_since_the_mark_and_marking_seen_resets_it() {
+        let fleet = Fleet::new();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let cookie = owner_cookie(fleet.dir.path());
+        let headers = [("cookie", cookie.as_str())];
+        let recap = |app: Router| async move {
+            let answer = get(&app, "/api/v1/recap").await;
+            assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+            serde_json::from_str::<Value>(&answer.body).unwrap()
+        };
+
+        let first = recap(app.clone()).await;
+        assert!(first["seen_at"].is_null(), "{first}");
+        assert_eq!(first["landed"], 0);
+
+        let store = fleet.open();
+        let note = |kind: &str, payload: Value| {
+            store
+                .conn()
+                .execute(
+                    "INSERT INTO events (id, at, txn, actor, entity, entity_id, kind, payload)
+                     VALUES (?1, ?2, 'test', 'daemon', 'x', 'x', ?3, ?4)",
+                    rusqlite::params![
+                        tiller_core::ids::new_ulid(),
+                        Timestamp::now().to_string(),
+                        kind,
+                        payload.to_string()
+                    ],
+                )
+                .unwrap();
+        };
+        note("card.closed", json!({"outcome": "landed"}));
+        note("card.closed", json!({"outcome": "landed"}));
+        note("card.closed", json!({"outcome": "cancelled"}));
+        note("attention.opened", json!({"kind": "decision"}));
+        note("attention.opened", json!({"kind": "report"}));
+        note("run.ended", json!({"outcome": "failed"}));
+        note("run.ended", json!({"outcome": "landed"}));
+        note("proposal.created", json!({}));
+        note("proposal.created", json!({}));
+        note("proposal.created", json!({}));
+
+        let counted = recap(app.clone()).await;
+        assert_eq!(counted["landed"], 2, "{counted}");
+        assert_eq!(counted["decisions"], 1, "{counted}");
+        assert_eq!(counted["failed_runs"], 1, "{counted}");
+        assert_eq!(counted["suggestions"], 3, "{counted}");
+
+        let mark = |key: &str| {
+            mutation(
+                "POST",
+                "/api/v1/recap/seen",
+                json!({"idempotency_key": key}),
+                &headers,
+            )
+        };
+        let marked = send(&app, mark("k-seen")).await;
+        assert_eq!(marked.status, StatusCode::OK, "{}", marked.body);
+        let body: Value = serde_json::from_str(&marked.body).unwrap();
+        assert_eq!(body["data"]["landed"], 0, "{body}");
+        assert!(body["data"]["seen_at"].is_string(), "{body}");
+
+        let after = recap(app.clone()).await;
+        assert!(after["seen_at"].is_string(), "{after}");
+        assert_eq!(after["landed"], 0, "{after}");
+        assert_eq!(after["suggestions"], 0, "{after}");
+
+        // The same key replays and writes no second mark.
+        let again = send(&app, mark("k-seen")).await;
+        let again: Value = serde_json::from_str(&again.body).unwrap();
+        assert_eq!(again["replayed"], true, "{again}");
+
+        // A new event after the mark counts again.
+        note("run.ended", json!({"outcome": "failed"}));
+        assert_eq!(recap(app.clone()).await["failed_runs"], 1);
+
+        // A peer's label is refused: the mark is this daemon's.
+        let refused = send(
+            &app,
+            mutation(
+                "POST",
+                "/api/v1/recap/seen",
+                json!({"idempotency_key": "k-peer", "host": "elsewhere"}),
+                &headers,
+            ),
+        )
+        .await;
+        assert_ne!(refused.status, StatusCode::OK, "{}", refused.body);
     }
 
     /// CI fails when `contract/openapi.json` is stale. Regenerate it with

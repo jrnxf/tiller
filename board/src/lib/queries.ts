@@ -17,6 +17,7 @@ import type {
   ProjectSetup,
   ProjectsResponse,
   QuotaResponse,
+  RecapResponse,
   RunDetail,
   SessionView,
   SignalsResponse,
@@ -119,6 +120,12 @@ export const boardQuery = (params?: BoardParams) => readQuery<BoardResponse>(boa
 
 export const attentionPath: QueryPath = "/api/v1/attention?state=open";
 export const attentionQuery = () => readQuery<AttentionResponse>(attentionPath);
+
+// What happened since the owner last marked a recap seen. It is read after
+// the page opens, not in the boot snapshot, and a change that moves a count
+// refetches it (lib/sse.ts).
+export const recapPath: QueryPath = "/api/v1/recap";
+export const recapQuery = () => readQuery<RecapResponse>(recapPath);
 
 export const agentsPath = (host?: string): QueryPath => withParams("/api/v1/agents", { host });
 export const agentsQuery = (host?: string) => readQuery<AgentsResponse>(agentsPath(host));

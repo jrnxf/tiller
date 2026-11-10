@@ -8,18 +8,13 @@ use serde_json::json;
 use tiller_core::Timestamp;
 use tiller_core::domain::{Ask, AskSource, Attention, AttentionKind, Card, Event};
 use tiller_core::state::attention::stale;
+use tiller_core::state::recap::{self, events_since};
 use tiller_core::state::{get, list};
 
 use crate::app::{App, Done, Failure, Outcome};
 
-/// The recap window when the owner has no earlier ask to measure from.
-const DEFAULT_WINDOW_MINUTES: i64 = 24 * 60;
 /// The most events one recap lists.
 const RECAP_LIMIT: i64 = 100;
-/// The events worth a recap line: what the owner would want to hear happened.
-const RECAP_KINDS: &str = "'card.created', 'card.closed', 'run.started', 'run.ended', \
-    'attention.opened', 'attention.answered', 'attention.withdrawn', 'approval.requested', \
-    'approval.decided', 'approval.finished', 'pr.opened', 'pr.merged', 'deploy.finished'";
 
 #[derive(Args, Debug)]
 pub struct Recap {
@@ -54,26 +49,10 @@ pub fn run(app: &App, args: Recap) -> Done {
     let since = match &args.since {
         Some(text) => crate::lisbon::parse_when(text)?,
         None => previous_ask(&store, project.as_deref())?
-            .unwrap_or_else(|| now.plus_minutes(-DEFAULT_WINDOW_MINUTES)),
+            .unwrap_or_else(|| now.plus_minutes(-recap::DEFAULT_WINDOW_MINUTES)),
     };
 
-    // The project filter runs before the limit, so a busy fleet's other
-    // projects cannot crowd this one out; card-less events are fleet-wide.
-    let events: Vec<Event> = match project.as_deref() {
-        Some(project) => list(
-            store.conn(),
-            &format!(
-                "at > ?1 AND kind IN ({RECAP_KINDS}) AND card_id IN \
-                 (SELECT id FROM cards WHERE project_id = ?3) ORDER BY seq DESC LIMIT ?2"
-            ),
-            &[&since, &RECAP_LIMIT, &project],
-        )?,
-        None => list(
-            store.conn(),
-            &format!("at > ?1 AND kind IN ({RECAP_KINDS}) ORDER BY seq DESC LIMIT ?2"),
-            &[&since, &RECAP_LIMIT],
-        )?,
-    };
+    let events: Vec<Event> = events_since(store.conn(), since, project.as_deref(), RECAP_LIMIT)?;
     let mut recap = Vec::new();
     for event in events.into_iter().rev() {
         let card: Option<Card> = match &event.card_id {

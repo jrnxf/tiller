@@ -5,7 +5,12 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import type { AgentRow, AgentsResponse } from "../../lib/api-types";
 import { hydrateFromSnapshot } from "../../lib/boot";
-import { FIXTURE_HEAD_SHA, fixtureSnapshot, serverResponses } from "../../lib/fixtures";
+import {
+  FIXTURE_HEAD_SHA,
+  fixtureResource,
+  fixtureSnapshot,
+  serverResponses,
+} from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
 import { agentsQuery } from "../../lib/queries";
@@ -58,7 +63,9 @@ function stubDaemon(scenario: Scenario, hold = false) {
   vi.stubGlobal("fetch", async (path: string, init?: RequestInit) => {
     const method = init?.method ?? "GET";
     if (method === "GET") {
-      const data = (serverResponses(scenario) as Record<string, unknown>)[path];
+      const data =
+        (serverResponses(scenario) as Record<string, unknown>)[path] ??
+        fixtureResource(path, scenario);
       return new Response(JSON.stringify(data), { status: 200 });
     }
     calls.push({ method, path, body: JSON.parse(String(init?.body)) as Record<string, unknown> });
@@ -507,4 +514,106 @@ test("O does nothing while the detail pane is hidden or the key is held", async 
   fireEvent.keyDown(window, { key: "o" });
   await flush();
   expect(calls).toHaveLength(1);
+});
+
+const COUNTS = ["Landed", "New decisions", "Failed runs", "Memory suggestions"];
+
+test("the recap card counts what happened since the owner left", async () => {
+  stubDaemon("default");
+  await renderInbox();
+  const card = await screen.findByTestId("recap");
+  expect(card.textContent).toMatch(/Since \w{3} \d\d:\d\d/);
+  for (const [label, count] of [
+    ["Landed", "3"],
+    ["New decisions", "2"],
+    ["Failed runs", "1"],
+    ["Memory suggestions", "4"],
+  ] as const) {
+    const row = within(card).getByText(label).closest("a");
+    expect(row?.textContent).toBe(`${label}${count}`);
+  }
+  expect(
+    COUNTS.map((label) => within(card).getByText(label).closest("a")?.getAttribute("href")),
+  ).toEqual(["/", "/inbox", "/?filter=needs", "/memory"]);
+  // The first decision still opens in the detail.
+  expect(screen.getByTestId("inbox").getAttribute("data-pane")).toBe("list");
+});
+
+test("a quiet recap says nothing is new and has no Mark seen", async () => {
+  stubDaemon("empty");
+  await renderInbox("empty");
+  const card = await screen.findByTestId("recap-quiet");
+  expect(card.textContent).toMatch(/Nothing new since \w{3} \d\d:\d\d/);
+  expect(screen.queryByRole("button", { name: "Mark seen" })).toBeNull();
+});
+
+test("Mark seen posts once and the card turns quiet", async () => {
+  stubDaemon("default", true);
+  replies = [
+    {
+      status: 200,
+      body: {
+        ...ok().body,
+        data: {
+          seen_at: "2026-11-02T14:05:09.000Z",
+          since: "2026-11-02T14:05:09.000Z",
+          landed: 0,
+          decisions: 0,
+          failed_runs: 0,
+          suggestions: 0,
+        },
+      },
+    },
+  ];
+  await renderInbox();
+  const mark = await screen.findByRole("button", { name: "Mark seen" });
+  fireEvent.click(mark);
+  fireEvent.click(mark);
+  release?.();
+  await flush();
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toMatchObject({ method: "POST", path: "/api/v1/recap/seen" });
+  expect(Object.keys(calls[0]?.body ?? {})).toEqual(["idempotency_key"]);
+  expect(screen.getByTestId("recap-quiet").textContent).toContain("Nothing new since");
+});
+
+test("a refused Mark seen shows why and keeps the card", async () => {
+  stubDaemon("default");
+  replies = [
+    {
+      status: 403,
+      body: {
+        ok: false,
+        error: { code: "forbidden", message: "Only the owner can mark this seen." },
+      },
+    },
+  ];
+  await renderInbox();
+  fireEvent.click(await screen.findByRole("button", { name: "Mark seen" }));
+  await flush();
+  expect((await screen.findByRole("alert")).textContent).toContain("Only the owner");
+  expect(screen.getByTestId("recap")).toBeTruthy();
+});
+
+test("a recap event refetches the recap", async () => {
+  stubDaemon("default");
+  const { queryClient } = await renderInbox();
+  await screen.findByTestId("recap");
+  const seen = vi.spyOn(queryClient, "invalidateQueries");
+  act(() => {
+    applyChange(queryClient, {
+      seq: 9001,
+      at: "2026-11-02T14:06:00.000Z",
+      kind: "proposal.created",
+      txn: "proposal.create",
+      entity: "proposal",
+      entity_id: "01JPROP0000000000000000001",
+      rev_after: null,
+      card_id: null,
+      entity_state: null,
+    });
+  });
+  expect(seen).toHaveBeenCalledWith(
+    expect.objectContaining({ queryKey: ["api", "/api/v1/recap"] }),
+  );
 });

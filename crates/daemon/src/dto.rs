@@ -1298,6 +1298,34 @@ pub struct DeleteProject {
     pub confirm: String,
 }
 
+/// `GET /api/v1/recap`: what happened since the owner last marked a recap
+/// seen (the Inbox's "Since you left" card).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct RecapResponse {
+    /// When the owner last marked a recap seen; null before the first.
+    pub seen_at: Option<String>,
+    /// The start of the window counted: `seen_at`, or a day back.
+    pub since: String,
+    /// Cards that closed landed.
+    pub landed: i64,
+    /// Decisions opened for the owner.
+    pub decisions: i64,
+    /// Runs that ended failed.
+    pub failed_runs: i64,
+    /// Memory proposals made.
+    pub suggestions: i64,
+}
+
+/// `POST /api/v1/recap/seen`: moves the recap mark to now.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MarkRecapSeen {
+    pub idempotency_key: String,
+    /// A paired peer's label. Refused: the mark is this daemon's.
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
 /// `POST /api/v1/interventions/{id}/label`: the developer's label for an
 /// intervention. Local to this host; it is not forwarded to a peer.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]

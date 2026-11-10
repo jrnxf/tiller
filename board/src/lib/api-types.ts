@@ -609,6 +609,17 @@ export interface AskRecorded {
   warning: string | null;
 }
 
+// `GET /api/v1/recap`: what happened since the owner last marked a recap seen.
+// The window starts at `seen_at`, or a day back before the first mark.
+export interface RecapResponse {
+  seen_at: string | null;
+  since: string;
+  landed: number;
+  decisions: number;
+  failed_runs: number;
+  suggestions: number;
+}
+
 export interface MutationResponse<T = unknown> {
   ok: true;
   replayed: boolean;

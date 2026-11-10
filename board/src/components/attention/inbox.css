@@ -129,6 +129,105 @@
   min-height: 0;
 }
 
+/* Since you left */
+
+.recap {
+  margin: 12px 12px 4px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line-2));
+  border-radius: var(--r8);
+  background: var(--bg-card);
+  overflow: hidden;
+}
+
+.recap.quiet {
+  border-color: var(--line-1);
+}
+
+.recap-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 6px 8px 6px 14px;
+  color: var(--fg-1);
+}
+
+.recap.quiet .recap-head {
+  color: var(--fg-3);
+  padding-right: 14px;
+}
+
+.recap-head .icon {
+  width: 14px;
+  height: 14px;
+  color: var(--green);
+  flex: none;
+}
+
+.recap-gap {
+  flex: 1;
+}
+
+.recap-mark {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--bg-1);
+  box-shadow: none;
+}
+
+.recap-mark:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--bg-1);
+  filter: brightness(1.08);
+}
+
+.recap-mark:disabled {
+  opacity: 0.6;
+}
+
+.recap-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 14px;
+  border-top: 1px solid var(--line-1);
+  color: var(--fg-2);
+}
+
+.recap-row:hover {
+  background: var(--bg-hover);
+  color: var(--fg-1);
+}
+
+.recap-row .icon {
+  width: 14px;
+  height: 14px;
+  color: var(--fg-3);
+  flex: none;
+}
+
+.recap-row .n {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--w-medium);
+  color: var(--fg-1);
+}
+
+.recap-row.bad .icon,
+.recap-row.bad .n {
+  color: var(--red-text);
+}
+
+:root[data-theme="dark"] .recap-row.bad .icon,
+:root[data-theme="dark"] .recap-row.bad .n {
+  color: var(--red);
+}
+
+.recap .refusal {
+  margin: 0 8px 8px;
+}
+
 .in-detail {
   overflow: auto;
   scroll-padding: 16px;

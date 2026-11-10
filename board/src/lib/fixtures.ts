@@ -41,6 +41,7 @@ import {
   workerActivity,
 } from "./fixtures-federated.ts";
 import { memoryResource } from "./fixtures-memory.ts";
+import { recapFor } from "./fixtures-recap.ts";
 import { signalsFor } from "./fixtures-signals.ts";
 import { isPeerRow } from "./peers.ts";
 import {
@@ -50,6 +51,7 @@ import {
   machinesPath,
   projectsPath,
   quotaPath,
+  recapPath,
   signalsPath,
 } from "./queries.ts";
 
@@ -1526,6 +1528,7 @@ export function fixtureResource(
   if (retire?.[1]) return retirePreviewFor(served, board, retire[1], now);
   const run = /^\/api\/v1\/runs\/([^/]+)$/.exec(url.pathname);
   if (run?.[1]) return runDetailFor(run[1], now);
+  if (url.pathname === recapPath) return recapFor(served, now, null);
   if (url.pathname === "/api/v1/health") return healthFor(now);
   if (url.pathname === "/api/v1/projects/checkout") return checkoutFor(url);
   if (url.pathname.startsWith("/api/v1/memory")) return memoryResource(url);

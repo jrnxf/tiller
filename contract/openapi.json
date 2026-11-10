@@ -3326,6 +3326,82 @@
         }
       }
     },
+    "/api/v1/recap": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "recap",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecapResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/recap/seen": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "mark_recap_seen",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MarkRecapSeen"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/runs/{id}": {
       "get": {
         "tags": [
@@ -5500,6 +5576,26 @@
           }
         }
       },
+      "MarkRecapSeen": {
+        "type": "object",
+        "description": "`POST /api/v1/recap/seen`: moves the recap mark to now.",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label. Refused: the mark is this daemon's."
+          },
+          "idempotency_key": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "MemoryChange": {
         "type": "object",
         "description": "One entry in \"Recent changes\".",
@@ -7081,6 +7177,50 @@
           },
           "title": {
             "type": "string"
+          }
+        }
+      },
+      "RecapResponse": {
+        "type": "object",
+        "description": "`GET /api/v1/recap`: what happened since the owner last marked a recap\nseen (the Inbox's \"Since you left\" card).",
+        "required": [
+          "since",
+          "landed",
+          "decisions",
+          "failed_runs",
+          "suggestions"
+        ],
+        "properties": {
+          "decisions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Decisions opened for the owner."
+          },
+          "failed_runs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Runs that ended failed."
+          },
+          "landed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Cards that closed landed."
+          },
+          "seen_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the owner last marked a recap seen; null before the first."
+          },
+          "since": {
+            "type": "string",
+            "description": "The start of the window counted: `seen_at`, or a day back."
+          },
+          "suggestions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Memory proposals made."
           }
         }
       },

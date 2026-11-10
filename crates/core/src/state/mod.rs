@@ -24,6 +24,7 @@ pub mod peers;
 pub mod projects;
 pub mod publishes;
 pub mod reads;
+pub mod recap;
 pub mod records;
 pub mod review;
 pub mod runs;

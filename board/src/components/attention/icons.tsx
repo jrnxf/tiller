@@ -118,3 +118,29 @@ export const ChevronIcon = () => (
     />
   </Glyph>
 );
+
+export const MergeIcon = () => (
+  <Glyph>
+    <circle cx="4.5" cy="3.5" r="1.6" {...stroke} />
+    <circle cx="4.5" cy="12.5" r="1.6" {...stroke} />
+    <circle cx="11.5" cy="8" r="1.6" {...stroke} />
+    <path d="M4.5 5.1v5.8M4.5 6.5c0 1.5 1.5 1.5 5.4 1.5" strokeLinecap="round" {...stroke} />
+  </Glyph>
+);
+
+export const FailIcon = () => (
+  <Glyph>
+    <circle cx="8" cy="8" r="5.6" {...stroke} />
+    <path d="m5.9 5.9 4.2 4.2m0-4.2-4.2 4.2" strokeLinecap="round" {...stroke} />
+  </Glyph>
+);
+
+export const SparkIcon = () => (
+  <Glyph>
+    <path
+      d="M8 2.2 9.4 6.6 13.8 8 9.4 9.4 8 13.8 6.6 9.4 2.2 8 6.6 6.6z"
+      strokeLinejoin="round"
+      {...stroke}
+    />
+  </Glyph>
+);

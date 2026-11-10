@@ -34,6 +34,7 @@ import {
   projectsPath,
   quotaPath,
   queryKeyFor,
+  recapPath,
   sessionPath,
 } from "./queries";
 
@@ -164,8 +165,21 @@ export function onProjectGone(queryClient: QueryClient, projectId: string) {
 // something moved, and the quiet refetch fetches the joined answer.
 const REFETCH_ENTITIES = new Set(["session", "run", "pane", "observation", "worktree"]);
 
+// The events a recap counts, and the mark that resets it.
+const RECAP_KINDS = new Set([
+  "card.closed",
+  "attention.opened",
+  "run.ended",
+  "proposal.created",
+  "recap.seen",
+]);
+
 export function applyChange(queryClient: QueryClient, event: ChangeEvent): void {
   const state = event.entity_state;
+
+  if (RECAP_KINDS.has(event.kind)) {
+    void queryClient.invalidateQueries({ queryKey: queryKeyFor(recapPath), refetchType: "active" });
+  }
 
   switch (event.entity) {
     case "attention":

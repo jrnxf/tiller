@@ -20,6 +20,7 @@ import { AnswerForm } from "./answer";
 import { ApproveBlock } from "./approve";
 import { CardActions, OpenInHerdr } from "./card-actions";
 import { tidy } from "./ansi";
+import { RecapCard } from "./recap";
 import { KIND_LABELS, PRIORITIES, formatAge, formatWhen, parseEvidence, staleText } from "./format";
 import type { ParsedEvidence } from "./format";
 import {
@@ -523,6 +524,7 @@ export function Inbox({
   return (
     <div className="inbox" data-pane={selected ? "detail" : "list"} data-testid="inbox">
       <div className="in-list">
+        <RecapCard />
         <Group
           title="Decisions"
           why="your call"
