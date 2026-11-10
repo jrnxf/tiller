@@ -22,6 +22,7 @@ use tiller_core::{Store, Timestamp};
 use tiller_herdr::client::Cli;
 
 use super::forward::{self, Mutate};
+use super::nonces;
 use super::{Frame, Hello, PeerQueries, PeerSnapshot, Timing, Welcome, federation_accept};
 use crate::api::{ApiError, pane_tail_of};
 use crate::dto::{ErrorBody, MachinesResponse};
@@ -173,6 +174,14 @@ fn check_hello(
             format!("key {} was accepted for {}", key.id, key.viewer_label),
         );
     }
+    // Last, so only a hello that passed every other check is kept.
+    nonces::take(
+        &config.home,
+        &hello.nonce,
+        &hello.ts,
+        config.timing.skew,
+        now,
+    )?;
     Ok(key)
 }
 

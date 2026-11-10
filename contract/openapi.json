@@ -5786,7 +5786,7 @@
               "string",
               "null"
             ],
-            "description": "Why the peer refused the link: `revoked`, `unknown_key`, `bad_sig`,\n`clock_skew`, `version`, `accept_off`, or `host_changed` when its\n`host_id` is not the paired one."
+            "description": "Why the peer refused the link: `revoked`, `unknown_key`, `bad_sig`,\n`clock_skew`, `replayed`, `version`, `accept_off`, or `host_changed`\nwhen its `host_id` is not the paired one."
           },
           "peer_scope": {
             "type": [

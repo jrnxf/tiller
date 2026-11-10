@@ -1047,6 +1047,60 @@ fn revoked_key_refused() {
     );
 }
 
+/// A captured `hello` sent again is refused, even inside its skew window:
+/// the peer keeps the nonces it took (`protocol.md` 10.2). Each `peer
+/// serve` is its own process, so the set lives on disk, not in memory.
+#[test]
+fn a_replayed_hello_is_refused() {
+    let pair = pair();
+    let captured = hello(&pair, None);
+    let mut first = SyncLink::open(pair.peer.dir.path());
+    first.send(&captured);
+    assert!(matches!(first.next(), Frame::Welcome(_)));
+
+    let mut again = SyncLink::open(pair.peer.dir.path());
+    again.send(&captured);
+    let frame = again.next();
+    assert!(
+        matches!(&frame, Frame::Refused { reason, .. } if reason == "replayed"),
+        "a replayed hello got {frame:?}"
+    );
+
+    // A fresh hello from the same board host still opens a link.
+    linked(&pair);
+}
+
+/// A pane request is taken once: the same signed request again is
+/// refused before it reaches herdr.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replayed_pane_request_is_refused() {
+    let mut pair = pair();
+    let session = pair.peer.worker("w2:p1");
+    let scratch = tempfile::tempdir().unwrap();
+    let open = pane_open(&pair, &session, PaneKind::History);
+    let lines = open_pane(&pair, scratch.path(), open.clone(), "").await;
+    assert!(
+        matches!(
+            serde_json::from_str::<Frame>(&lines[0]).unwrap(),
+            Frame::Result { .. }
+        ),
+        "{lines:?}"
+    );
+    let calls = std::fs::read_to_string(scratch.path().join("calls")).unwrap_or_default();
+
+    let lines = open_pane(&pair, scratch.path(), open, "").await;
+    let frame = serde_json::from_str::<Frame>(&lines[0]).unwrap();
+    assert!(
+        matches!(&frame, Frame::Refused { reason, .. } if reason == "replayed"),
+        "a replayed pane request got {frame:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("calls")).unwrap_or_default(),
+        calls,
+        "a replayed pane request reached herdr"
+    );
+}
+
 /// A refusal the owner clears on the peer (here `federation.accept`
 /// turned back on) does not end the link for good: it tries again on its
 /// slow backoff and goes `live`, with no restart of the daemon.

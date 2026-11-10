@@ -489,8 +489,8 @@ pub struct Machine {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_scope: Option<String>,
     /// Why the peer refused the link: `revoked`, `unknown_key`, `bad_sig`,
-    /// `clock_skew`, `version`, `accept_off`, or `host_changed` when its
-    /// `host_id` is not the paired one.
+    /// `clock_skew`, `replayed`, `version`, `accept_off`, or `host_changed`
+    /// when its `host_id` is not the paired one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_reason: Option<String>,
     /// The open project `tiller bug file` routes to on this host (`state.md`,

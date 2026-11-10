@@ -10,6 +10,7 @@
 
 pub mod forward;
 pub mod link;
+mod nonces;
 pub mod pair;
 pub mod pane;
 pub mod serve;
@@ -45,8 +46,8 @@ pub enum Frame {
     Hello(Hello),
     Welcome(Welcome),
     Refused {
-        /// `revoked`, `unknown_key`, `bad_sig`, `clock_skew`, `version` or
-        /// `accept_off`.
+        /// `revoked`, `unknown_key`, `bad_sig`, `clock_skew`, `replayed`,
+        /// `version` or `accept_off`.
         reason: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,

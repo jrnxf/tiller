@@ -25,6 +25,7 @@ use tiller_core::{Store, Timestamp, ids};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::watch;
 
+use super::nonces;
 use super::serve::{Denied, ServeConfig, ServeError, current_key, refused, skew_ms};
 use super::{Frame, HelloKey};
 use crate::api::{ApiError, pane_error, pane_gone, pane_target, saved_machine};
@@ -171,7 +172,8 @@ fn verify(
             ),
         );
     }
-    Ok(())
+    // Last, so only a request that passed every other check is kept.
+    nonces::take(&config.home, &frame.id, &frame.ts, config.timing.skew, now)
 }
 
 /// `tiller peer pane --from <label>`, on the peer, for as long as the

@@ -360,7 +360,7 @@ export interface Machine {
   link?: LinkState | null;
   peer_scope?: PeerScope | null;
   // Why the peer refused the link (`revoked`, `unknown_key`, `bad_sig`,
-  // `clock_skew`, `version`, `accept_off`), when it did.
+  // `clock_skew`, `replayed`, `version`, `accept_off`), when it did.
   link_reason?: string | null;
   // The project that takes Tiller bugs on this host (`bugs.project`), when one
   // is set and still open; absent for a herdr-only machine.
