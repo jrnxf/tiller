@@ -196,6 +196,42 @@
   background: color-mix(in srgb, var(--yellow) 9%, transparent);
 }
 
+/* A refusal beside the control it is about: in the editor, on a card, or under
+   a line. */
+.docs .refusal.inline {
+  margin: 8px 0 0;
+}
+
+.docs .a-item > .refusal.inline {
+  margin: 4px 12px 6px 36px;
+}
+
+.docs .ed > .refusal.inline {
+  margin: 0 12px;
+}
+
+.docs .a-sug > .refusal.inline {
+  margin: 10px 0 0;
+}
+
+/* A line that changed or went under an open draft: the draft stays, and the
+   choice is on the buttons. */
+.docs .ed-stale {
+  margin: 0 12px;
+  padding: 8px 12px;
+  border-radius: var(--r8);
+  border: 1px solid color-mix(in srgb, var(--yellow) 45%, var(--line-2));
+  background: color-mix(in srgb, var(--yellow) 9%, transparent);
+  color: var(--fg-1);
+  font-size: var(--fs-small);
+  line-height: 1.5;
+}
+
+.docs .ed-stale .was {
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+
 .docs .refusal code {
   font-family: var(--mono);
   font-size: 12px;
@@ -635,7 +671,14 @@
   font-family: var(--mono);
   font-size: 11.5px;
   color: var(--fg-1);
-  white-space: nowrap;
+  /* A long command wraps at any character, so the card never scrolls the
+     page sideways. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.docs .gate > span {
+  min-width: 0;
 }
 
 .docs .gate .gate-run {
@@ -647,12 +690,13 @@
 .docs .sug-f {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 6px;
   margin-top: 12px;
 }
 
 .docs .sug-f .note {
-  margin-left: auto;
+  margin-right: auto;
   font-size: 12px;
   color: var(--fg-4);
 }
