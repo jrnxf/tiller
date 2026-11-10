@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import type { BoardRow, MutationResponse } from "../../lib/api-types";
+import { LIMITS, isTooLong } from "../../lib/limits";
 import { focusReason, hostField, ownerKey, ownerOf, projectGroups } from "../../lib/peers";
 import { agentsQuery, machinesQuery, projectsQuery } from "../../lib/queries";
 import { shortcutsBlocked } from "../../lib/shortcuts";
@@ -14,6 +15,7 @@ import { ActionFailure } from "./action-failure";
 import { sendMutation } from "./api";
 import { PRIORITIES } from "./format";
 import { PaneIcon, SendIcon } from "./icons";
+import { LimitNote } from "./limit-note";
 import { InlineReceipt, ReceiptPanel } from "./receipt";
 import { Select } from "../ui/select";
 import { useAction } from "./use-action";
@@ -87,6 +89,7 @@ export function CommentControl({ card, off }: { card: BoardRow; off: string | nu
     setText("");
   }, []);
   const action = useAction({ binding: `${card.id}:${text.trim()}`, send, onRecorded });
+  const over = isTooLong(text.trim(), LIMITS.comment);
   return (
     <div className="ca-block">
       <label className="ca-l" htmlFor={`comment-${card.id}`}>
@@ -102,13 +105,15 @@ export function CommentControl({ card, off }: { card: BoardRow; off: string | nu
           title={off ?? undefined}
           onChange={(event) => setText(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && text.trim() !== "" && off === null) action.trigger();
+            if (event.key === "Enter" && text.trim() !== "" && !over && off === null) {
+              action.trigger();
+            }
           }}
         />
         <button
           type="button"
           className="btn"
-          disabled={text.trim() === "" || action.pending || off !== null}
+          disabled={text.trim() === "" || over || action.pending || off !== null}
           title={off ?? undefined}
           onClick={action.trigger}
         >
@@ -116,6 +121,7 @@ export function CommentControl({ card, off }: { card: BoardRow; off: string | nu
           {action.pending ? "Sending..." : "Send"}
         </button>
       </div>
+      <LimitNote what="comment" text={text.trim()} limit={LIMITS.comment} />
       <ActionFailure error={action.error} host={ownerOf(card)} />
       {lastReceipt ? (
         <ReceiptPanel
@@ -179,6 +185,7 @@ function AddCardControl({
     setOpen(false);
   }, []);
   const action = useAction({ binding: `${project}:${kind}:${title.trim()}`, send, onRecorded });
+  const over = isTooLong(title.trim(), LIMITS.cardTitle);
 
   return (
     <div className="ca-block">
@@ -187,7 +194,7 @@ function AddCardControl({
           className="ca-form"
           onSubmit={(event) => {
             event.preventDefault();
-            if (title.trim() !== "" && blocked === null) action.trigger();
+            if (title.trim() !== "" && !over && blocked === null) action.trigger();
           }}
         >
           <label className="ca-l" htmlFor={`add-title-${card.id}`}>
@@ -242,12 +249,13 @@ function AddCardControl({
             <button
               type="submit"
               className="btn primary"
-              disabled={title.trim() === "" || action.pending || blocked !== null}
+              disabled={title.trim() === "" || over || action.pending || blocked !== null}
               title={blocked ?? undefined}
             >
               {action.pending ? "Adding..." : "Add card"}
             </button>
           </div>
+          <LimitNote what="title" text={title.trim()} limit={LIMITS.cardTitle} />
           <ActionFailure error={action.error} host={targetHost} />
         </form>
       ) : (

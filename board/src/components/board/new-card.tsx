@@ -1,10 +1,12 @@
 import { useCallback, useId, useRef, useState } from "react";
 
 import type { MutationResponse, Project } from "../../lib/api-types";
+import { LIMITS, isTooLong } from "../../lib/limits";
 import { hostField, ownerOf } from "../../lib/peers";
 import { ActionFailure } from "../attention/action-failure";
 import { sendMutation } from "../attention/api";
 import { PRIORITIES } from "../attention/format";
+import { LimitNote } from "../attention/limit-note";
 import { useAction } from "../attention/use-action";
 import { ProjectDialog } from "../shell/project-dialog";
 import { Select } from "../ui/select";
@@ -64,7 +66,8 @@ export function NewCardDialog({ project, onClose }: { project: Project; onClose:
     send,
     onRecorded: recorded,
   });
-  const armed = title.trim() !== "" && !action.pending;
+  const over = isTooLong(title.trim(), LIMITS.cardTitle) || isTooLong(body.trim(), LIMITS.cardBody);
+  const armed = title.trim() !== "" && !over && !action.pending;
 
   return (
     <ProjectDialog name="new-card" pending={action.pending} onClose={onClose} initial={first}>
@@ -119,6 +122,8 @@ export function NewCardDialog({ project, onClose }: { project: Project; onClose:
             onChange={(event) => setBody(event.target.value)}
           />
         </div>
+        <LimitNote what="title" text={title.trim()} limit={LIMITS.cardTitle} />
+        <LimitNote what="body" text={body.trim()} limit={LIMITS.cardBody} />
         <ActionFailure error={action.error} host={ownerOf(project)} />
         <div className="dialog-actions">
           <button type="button" className="btn" disabled={action.pending} onClick={onClose}>

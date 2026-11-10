@@ -1667,3 +1667,12 @@ kbd {
     transition: none;
   }
 }
+
+/* A field over the daemon's length cap (lib/limits.ts) */
+
+.limit-note {
+  margin: 6px 0 0;
+  font-size: var(--fs-mini);
+  color: var(--yellow-text);
+  line-height: 1.4;
+}

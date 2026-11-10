@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AttentionItem, OwnerAction } from "../../lib/api-types";
+import { LIMITS, isTooLong } from "../../lib/limits";
 import { hostField, ownerOf } from "../../lib/peers";
 import { shortcutsBlocked } from "../../lib/shortcuts";
 import { useStore } from "../../lib/store";
@@ -11,6 +12,7 @@ import { ActionFailure } from "./action-failure";
 import { answeredStore, markAnswered } from "./answered";
 import { sendMutation } from "./api";
 import { SendIcon } from "./icons";
+import { LimitNote } from "./limit-note";
 import { ReceiptPanel } from "./receipt";
 import { useAction } from "./use-action";
 
@@ -61,6 +63,18 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
     onRecorded,
   });
   const locked = action.recorded || action.pending || off !== null || stale;
+  // An answer over the daemon's cap is refused, so Send says so first. With
+  // options the answer is the pick plus the note, so the longest pick counts.
+  const sendable = useCallback(
+    (label: string | null) => !isTooLong(answerText(label, note), LIMITS.answer),
+    [note],
+  );
+  const longest = options.reduce<string | null>(
+    (widest, option) =>
+      widest === null || option.label.length > widest.length ? option.label : widest,
+    null,
+  );
+  const worst = answerText(longest, note);
   const { trigger } = action;
 
   // A new pick sends once the answer holding it has rendered, so the request
@@ -73,6 +87,7 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
 
   const choose = useCallback(
     (label: string) => {
+      if (!sendable(label)) return;
       if (label === pick) {
         trigger();
         return;
@@ -80,7 +95,7 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
       fired.current = true;
       setPick(label);
     },
-    [pick, trigger],
+    [pick, trigger, sendable],
   );
 
   useEffect(() => {
@@ -155,7 +170,11 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
                 key={option.label}
                 type="button"
                 className={`opt${option.recommended ? " rec" : ""}`}
-                disabled={locked || (host !== undefined && option.action !== undefined)}
+                disabled={
+                  locked ||
+                  !sendable(option.label) ||
+                  (host !== undefined && option.action !== undefined)
+                }
                 aria-keyshortcuts={index < 9 ? String(index + 1) : undefined}
                 onClick={() => choose(option.label)}
               >
@@ -192,7 +211,7 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
             <button
               type="button"
               className="btn primary lg"
-              disabled={locked || answer === ""}
+              disabled={locked || answer === "" || !sendable(null)}
               title={off ?? undefined}
               onClick={action.trigger}
             >
@@ -202,6 +221,7 @@ export function AnswerForm({ item }: { item: AttentionItem }) {
           </div>
         </>
       )}
+      <LimitNote what="answer" text={worst} limit={LIMITS.answer} />
       {stale ? (
         <p className="opts-note">
           This no longer applies, so answering is off. Withdraw it instead.

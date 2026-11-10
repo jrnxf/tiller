@@ -91,6 +91,7 @@ const REFUSAL: Record<string, string> = {
   unknown_key: "key unknown there",
   bad_sig: "signature rejected",
   clock_skew: "clocks differ too much",
+  replayed: "it saw this request before",
   version: "version mismatch",
   accept_off: "it is not accepting boards",
   host_changed: "its database was replaced",

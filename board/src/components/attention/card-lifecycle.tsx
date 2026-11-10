@@ -5,6 +5,7 @@ import type { ReactNode, RefObject } from "react";
 
 import type { BoardRow } from "../../lib/api-types";
 import { serverNow } from "../../lib/clock";
+import { LIMITS, isTooLong } from "../../lib/limits";
 import { lisbonDate, lisbonInstant } from "../../lib/lisbon-input";
 import { hostField, ownerOf } from "../../lib/peers";
 import { cardQuery } from "../../lib/queries";
@@ -15,6 +16,7 @@ import { Segmented } from "../ui/segmented";
 import { ActionFailure } from "./action-failure";
 import { sendMutation } from "./api";
 import { CancelCardIcon, DotsIcon, EditIcon, PauseIcon, PlayIcon, ReopenIcon } from "./icons";
+import { LimitNote } from "./limit-note";
 import { useAction } from "./use-action";
 import "./card-lifecycle.css";
 
@@ -532,6 +534,7 @@ export function EditFields({
     send,
     onRecorded: onDone,
   });
+  const over = isTooLong(title.trim(), LIMITS.cardTitle) || isTooLong(body.trim(), LIMITS.cardBody);
   return (
     <>
       <Field label="Title" htmlFor={`edit-title-${card.id}`}>
@@ -553,6 +556,8 @@ export function EditFields({
           onChange={(event) => setBody(event.target.value)}
         />
       </Field>
+      <LimitNote what="title" text={title.trim()} limit={LIMITS.cardTitle} />
+      <LimitNote what="body" text={body.trim()} limit={LIMITS.cardBody} />
       <ActionFailure error={action.error} host={ownerOf(card)} />
       <div className="edit-acts">
         <button type="button" className="btn" disabled={action.pending} onClick={onDone}>
@@ -561,7 +566,7 @@ export function EditFields({
         <button
           type="button"
           className="btn primary"
-          disabled={!changed || title.trim() === "" || action.pending}
+          disabled={!changed || title.trim() === "" || over || action.pending}
           onClick={action.trigger}
         >
           {action.pending ? "Saving..." : "Save"}

@@ -85,6 +85,9 @@ test("link reasons read as one sentence each", () => {
   expect(linkReason("host-b", "refused", null, "bad_sig")).toBe(
     "host-b refused the link: signature rejected",
   );
+  expect(linkReason("host-b", "refused", null, "replayed")).toBe(
+    "host-b refused the link: it saw this request before",
+  );
   expect(linkReason("host-b", "refused", null, "something_new")).toBe(
     "host-b refused the link: something new",
   );
