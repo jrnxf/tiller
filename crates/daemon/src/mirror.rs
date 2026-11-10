@@ -283,21 +283,22 @@ impl Fits {
 
     /// Rewrites the file atomically; an empty set removes it.
     fn save(&self, held: &BTreeMap<String, (u16, u16)>) {
-        let written = if held.is_empty() {
-            match std::fs::remove_file(&self.path) {
-                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
-                _ => Ok(()),
-            }
-        } else {
-            let temporary = self.path.with_extension("tmp");
-            serde_json::to_vec(held)
-                .map_err(std::io::Error::other)
-                .and_then(|bytes| std::fs::write(&temporary, bytes))
-                .and_then(|()| std::fs::rename(&temporary, &self.path))
-        };
-        if let Err(error) = written {
+        if let Err(error) = self.write(held) {
             tracing::warn!(path = %self.path.display(), %error, "cannot keep the Fit sizes");
         }
+    }
+
+    fn write(&self, held: &BTreeMap<String, (u16, u16)>) -> std::io::Result<()> {
+        if held.is_empty() {
+            return match std::fs::remove_file(&self.path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+                _ => Ok(()),
+            };
+        }
+        // A temporary file of its own for each write, so two writers never
+        // rename each other's half-written file into place.
+        let text = serde_json::to_string(held).map_err(std::io::Error::other)?;
+        tiller_core::config_file::write_atomic(&self.path, &text)
     }
 
     /// This pane's turn, once the Fit before it has given the pane back;
@@ -883,6 +884,46 @@ fn unavailable(tx: &mpsc::Sender<Bytes>, message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two writers of one sizes file (two daemons on one home, or a
+    /// restart racing the old one) each keep a whole file: no write fails
+    /// and a reader never sees half of one.
+    #[test]
+    fn two_writers_never_share_a_temporary_file() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("mirror-fits.json");
+        let writers: Vec<_> = (0..2_u16)
+            .map(|writer| {
+                let fits = Fits::at(path.clone());
+                std::thread::spawn(move || {
+                    let mut failed = Vec::new();
+                    for round in 0..300_u16 {
+                        let held = BTreeMap::from([(format!("pane-{writer}"), (round, writer))]);
+                        if let Err(error) = fits.write(&held) {
+                            failed.push(error.to_string());
+                        }
+                    }
+                    failed
+                })
+            })
+            .collect();
+        while writers.iter().any(|writer| !writer.is_finished()) {
+            if let Ok(bytes) = std::fs::read(&path) {
+                let parsed: Result<BTreeMap<String, (u16, u16)>, _> =
+                    serde_json::from_slice(&bytes);
+                assert!(parsed.is_ok(), "a torn file: {:?}", String::from_utf8_lossy(&bytes));
+            }
+        }
+        for writer in writers {
+            let failed = writer.join().unwrap();
+            assert!(failed.is_empty(), "{failed:?}");
+        }
+        let left: Vec<_> = std::fs::read_dir(home.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["mirror-fits.json"]);
+    }
 
     #[test]
     fn the_input_budget_refills_at_its_rate() {
