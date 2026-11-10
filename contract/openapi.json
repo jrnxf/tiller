@@ -2234,6 +2234,16 @@
               }
             }
           },
+          "429": {
+            "description": "`too_many_streams`: this session already holds 64 open streams",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "503": {
             "content": {
               "application/json": {

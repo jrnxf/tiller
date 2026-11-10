@@ -98,6 +98,8 @@ pub struct Inner {
     pub mirrors: Mirrors,
     /// The limit on sign-in code tries, and sign-outs for open streams.
     pub sessions: auth::Sessions,
+    /// The open change streams of each session, for their cap.
+    pub streams: sse::Streams,
     /// `ssh`, or `TILLER_SSH` split on whitespace: what Add a host runs to
     /// reach the new host (`protocol.md` 10.1).
     pub ssh: Vec<OsString>,
@@ -1298,6 +1300,7 @@ pub struct EventsQuery {
     responses(
         (status = 200, content_type = "text/event-stream", body = ChangeEvent,
          description = "`change` messages carry a ChangeEvent; `reset` messages a ResetEvent; `peer` messages a PeerEvent, `link` messages a LinkEvent and `peer_reset` messages a PeerResetEvent"),
+        (status = 429, body = ErrorBody, description = "`too_many_streams`: this session already holds 64 open streams"),
         (status = 503, body = ErrorBody)))]
 async fn events(
     State(state): State<AppState>,
@@ -1311,9 +1314,29 @@ async fn events(
     let after = sse::start(last, query.since);
     let pollers = state.0.pollers.clone();
     let peers = state.0.peers.clone();
+    let cookie = watched_cookie(&state, &headers);
+    let session = cookie.clone().unwrap_or_else(|| "loopback".to_owned());
+    let Some(slot) = state.0.streams.open(&session) else {
+        return ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_streams",
+            format!(
+                "this session already has {} open change streams; close a board tab and try again",
+                sse::STREAMS_PER_SESSION
+            ),
+        )
+        .into_response();
+    };
     // At an allowed host the stream ends when its browser signs out, so a
-    // revoked cookie stops seeing changes at once.
-    let ended = until_signed_out(state.clone(), watched_cookie(&state, &headers));
+    // revoked cookie stops seeing changes at once. The stream's task holds
+    // its slot, so the slot is given back when the stream ends.
+    let ended = {
+        let state = state.clone();
+        async move {
+            let _slot = slot;
+            until_signed_out(state, cookie).await;
+        }
+    };
     sse::stream(
         state.db(),
         after,
@@ -4415,6 +4438,7 @@ pub(crate) mod tests {
             orchestrators: None,
             mirrors: Mirrors::new(home),
             sessions: auth::Sessions::default(),
+            streams: sse::Streams::default(),
             ssh,
         }))
     }
@@ -7542,6 +7566,7 @@ esac"#,
             orchestrators: Some(starter),
             mirrors: Mirrors::new(home),
             sessions: auth::Sessions::default(),
+            streams: sse::Streams::default(),
             ssh: vec!["ssh".into()],
         }))
     }

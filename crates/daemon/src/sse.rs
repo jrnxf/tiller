@@ -37,6 +37,54 @@ pub const KEEPALIVE: Duration = Duration::from_secs(15);
 pub const RETRY: Duration = Duration::from_secs(1);
 /// Rows read per batch.
 const BATCH: i64 = 200;
+/// The most streams one session holds open at once. A board tab holds one,
+/// so an owner never comes near it; a client that keeps opening streams
+/// stops here instead of holding a task and a buffer for each.
+pub const STREAMS_PER_SESSION: usize = 64;
+
+/// The open streams of each session: its owner cookie at an allowed host,
+/// or one shared key for loopback.
+#[derive(Clone, Default)]
+pub struct Streams(Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>);
+
+/// One open stream's place in its session's count, given back on drop.
+pub struct Slot {
+    streams: Streams,
+    session: String,
+}
+
+impl Streams {
+    /// A place for one more stream of `session`, or `None` when it already
+    /// holds [`STREAMS_PER_SESSION`].
+    pub fn open(&self, session: &str) -> Option<Slot> {
+        let mut open = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let count = open.entry(session.to_owned()).or_default();
+        if *count >= STREAMS_PER_SESSION {
+            return None;
+        }
+        *count += 1;
+        Some(Slot {
+            streams: self.clone(),
+            session: session.to_owned(),
+        })
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut open = self
+            .streams
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(count) = open.get_mut(&self.session) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                open.remove(&self.session);
+            }
+        }
+    }
+}
 
 /// Watches `state.db` and publishes the newest `seq` whenever another
 /// connection commits. Runs until `stop` turns true. A missing database is
@@ -208,6 +256,7 @@ pub fn stream(
     // Subscribed before the replay: what a link sends meanwhile waits here
     // and follows the `peer_reset`s.
     let mut from_peers = peers.subscribe();
+    let mut stopping = stop.clone();
     let work = async move {
         if tx
             .send(Event::default().retry(RETRY).comment("tiller"))
@@ -316,11 +365,18 @@ pub fn stream(
             }
         }
     };
-    // `ended` (a sign-out) drops the sender, which ends the stream.
+    // `ended` (a sign-out) or the daemon's stop drops the sender, which ends
+    // the stream, even while a send waits on a browser that stopped reading.
     tokio::spawn(async move {
         tokio::select! {
             () = work => {}
             () = ended => {}
+            () = async {
+                // A daemon with nothing to stop it never stops.
+                if stopping.wait_for(|stop| *stop).await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            } => {}
         }
     });
     let events = futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx).map(|e| e.map(Ok)));
@@ -392,6 +448,7 @@ mod tests {
             orchestrators: None,
             mirrors: crate::mirror::Mirrors::new(home),
             sessions: crate::auth::Sessions::default(),
+            streams: crate::sse::Streams::default(),
             ssh: vec!["ssh".into()],
         }));
         let mut stopping = stop.clone();
@@ -477,6 +534,66 @@ mod tests {
         store.last_seq().unwrap()
     }
 
+    /// The answer's head (and whatever came with it) to a stream request at
+    /// the allowed host with `cookie`.
+    async fn stream_status(addr: SocketAddr, cookie: &str) -> (String, TcpStream) {
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "GET /api/v1/events HTTP/1.0\r\nHost: board.example.com\r\nCookie: {cookie}\r\nAccept: text/event-stream\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut head = String::new();
+        let mut buf = [0_u8; 1024];
+        while !head.contains("\r\n\r\n") {
+            let n = stream.read(&mut buf).await.unwrap();
+            assert!(n > 0, "the stream closed at once: {head}");
+            head.push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+        (head, stream)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_session_holds_at_most_its_cap_of_streams() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _stop = serve(home, listener);
+        let mine = crate::api::tests::owner_cookie(home);
+        let other = crate::api::tests::owner_cookie(home);
+        let mut open = Vec::new();
+        for _ in 0..STREAMS_PER_SESSION {
+            open.push(connect_signed_in(addr, &mine).await);
+        }
+
+        // One more for the same session is refused, with why.
+        let (head, mut refused) = stream_status(addr, &mine).await;
+        assert!(head.starts_with("HTTP/1.0 429"), "{head}");
+        let mut rest = String::new();
+        refused.read_to_string(&mut rest).await.unwrap();
+        let answer = format!("{head}{rest}");
+        assert!(answer.contains("\"too_many_streams\""), "{answer}");
+
+        // Another session is counted on its own.
+        let (status, _theirs) = stream_status(addr, &other).await;
+        assert!(status.starts_with("HTTP/1.0 200"), "{status}");
+
+        // A closed stream gives its place back once the daemon sees it gone.
+        drop(open.pop());
+        let given_back = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (status, stream) = stream_status(addr, &mine).await;
+                if status.starts_with("HTTP/1.0 200") {
+                    break stream;
+                }
+                add_card(&fleet, "Wake the streams");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        assert!(given_back.is_ok(), "the closed stream kept its place");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn the_stream_at_an_allowed_host_ends_when_its_browser_signs_out() {
         let fleet = Fleet::new();
@@ -549,6 +666,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(live, ((while_down + 1)..=after).collect::<Vec<_>>());
+    }
+
+    /// A browser that stops reading fills the stream's buffer, so its send
+    /// waits; a stopping daemon still ends that stream at once rather than
+    /// after the browser takes the whole replay.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stopping_daemon_ends_a_stream_its_browser_stopped_reading() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let mut newest_seq = 0;
+        for n in 0..150 {
+            newest_seq = add_card(&fleet, &format!("Card {n}"));
+        }
+        let (_newest_tx, newest) = watch::channel(newest_seq);
+        let (stop_tx, stop) = watch::channel(false);
+        let sse = stream(
+            home.join("state.db"),
+            Some(0),
+            newest,
+            stop,
+            crate::peer::link::Peers::idle(),
+            LocalHealth::default,
+            std::future::pending(),
+        );
+        // Nothing reads the body yet: the replay fills the buffer and waits.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        stop_tx.send_replace(true);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let body = axum::response::IntoResponse::into_response(sse).into_body();
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(10),
+            axum::body::to_bytes(body, usize::MAX),
+        )
+        .await
+        .expect("the stream did not end")
+        .unwrap();
+        let sent = String::from_utf8_lossy(&bytes).matches("event: change").count();
+        assert!(
+            i64::try_from(sent).unwrap() < newest_seq,
+            "the stream sent all {sent} rows after the stop"
+        );
     }
 
     #[test]
