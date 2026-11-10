@@ -63,14 +63,47 @@ function inProgress(week: SignalsWeek, now: number): boolean {
   return now < Date.parse(week.end);
 }
 
+// A week in which Tiller did anything the counts can see. The signals carry no
+// install date, so the first week with any count stands in for "the first
+// event": a week before it is a week that was not there to be quiet.
+function hadActivity(week: SignalsWeek): boolean {
+  const { interventions } = week;
+  return [
+    week.landed,
+    week.reported,
+    week.merged_prs,
+    week.needed,
+    week.answered,
+    interventions.correction,
+    interventions.unplanned_escalation,
+    interventions.rework,
+    interventions.planned,
+    week.reverts,
+    week.escaped,
+    week.rework,
+    week.lost_work,
+    week.duplicate_dispatches,
+    week.unauthorized,
+  ].some((value) => value > 0);
+}
+
+// True when no week up to and including `before` had any activity.
+function beforeFirstEvent(response: SignalsResponse, before: SignalsWeek): boolean {
+  const index = response.weeks.indexOf(before);
+  return !response.weeks.slice(0, index + 1).some(hadActivity);
+}
+
 function shipping(response: SignalsResponse, now: number): Signal | null {
   const weeks = lastWeek(response);
   if (!weeks) return null;
   const cur = accepted(weeks.now);
   const prev = weeks.before ? accepted(weeks.before) : null;
   const quiet = cur === 0 && prev === 0;
+  // A new install has no earlier week to compare with, so it is not quiet.
+  const fresh = quiet && weeks.before !== null && beforeFirstEvent(response, weeks.before);
   let read: string;
-  if (quiet) read = "Nothing has landed for two weeks.";
+  if (fresh) read = "Nothing has landed yet.";
+  else if (quiet) read = "Nothing has landed for two weeks.";
   else if (prev === null) read = `${cur} so far this week.`;
   else if (inProgress(weeks.now, now)) {
     read = `${cur} so far this week, against ${prev} in all of last week.`;
@@ -84,7 +117,7 @@ function shipping(response: SignalsResponse, now: number): Signal | null {
   return {
     id: "shipping",
     title: "Shipping",
-    state: quiet ? "watch" : "good",
+    state: quiet && !fresh ? "watch" : "good",
     big: cur,
     unit: cur === 1 ? "card landed this week" : "cards landed this week",
     read,

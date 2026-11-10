@@ -91,6 +91,32 @@ test("shipping is on watch only after two weeks with nothing landed", () => {
   expect(quiet.state).toBe("watch");
 });
 
+test("a new install says nothing has landed yet, not that two weeks went by", () => {
+  const nothing = {
+    landed: 0,
+    reported: 0,
+    merged_prs: 0,
+    needed: 0,
+    answered: 0,
+    median_answer_minutes: null,
+    interventions: { correction: 0, unplanned_escalation: 0, rework: 0, planned: 0 },
+    rework: 0,
+  };
+  // The week before the first event had nothing in it; the current one only
+  // has the first ask.
+  const fresh = signal(counts({ ...nothing, needed: 1 }, nothing), "shipping");
+  expect(fresh.read).toBe("Nothing has landed yet.");
+  expect(fresh.state).toBe("good");
+  // Once any earlier week had activity, the same zeros are a real quiet spell.
+  const response = counts(nothing, nothing);
+  response.weeks.unshift(
+    week({ start: "2026-10-12T00:00:00.000Z", end: "2026-10-19T00:00:00.000Z" }),
+  );
+  const quiet = signal(response, "shipping");
+  expect(quiet.read).toBe("Nothing has landed for two weeks.");
+  expect(quiet.state).toBe("watch");
+});
+
 test("your time reads the median answer time against the last one", () => {
   const faster = signal(
     counts({ needed: 8, median_answer_minutes: 5.2 }, { median_answer_minutes: 7 }),
