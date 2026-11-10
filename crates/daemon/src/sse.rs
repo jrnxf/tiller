@@ -51,26 +51,21 @@ pub fn watch_changes(
     stop: watch::Receiver<bool>,
     newer: impl Fn(usize),
 ) {
-    let mut store: Option<Store> = None;
-    let mut version: Option<i64> = None;
-    while !*stop.borrow() {
-        if store.is_none() && db.exists() {
-            store = Store::open_current(&db).ok();
-        }
-        let Some(open) = &store else {
-            std::thread::sleep(Duration::from_secs(1));
-            continue;
-        };
-        let now: Option<i64> = open
-            .conn()
-            .query_row("PRAGMA data_version", [], |row| row.get(0))
-            .ok();
-        if now.is_none() {
-            store = None;
-            continue;
-        }
-        if now != version {
-            version = now;
+    poll_changes(
+        || *stop.borrow(),
+        || {
+            if db.exists() {
+                Store::open_current(&db).ok()
+            } else {
+                None
+            }
+        },
+        |open| {
+            open.conn()
+                .query_row("PRAGMA data_version", [], |row| row.get(0))
+                .ok()
+        },
+        |open| {
             let schema: Option<usize> = open
                 .conn()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
@@ -78,7 +73,7 @@ pub fn watch_changes(
                 .and_then(|schema| usize::try_from(schema).ok());
             if let Some(schema) = schema.filter(|schema| *schema > tiller_core::migrate::LATEST) {
                 newer(schema);
-                return;
+                return true;
             }
             if let Ok(seq) = open.last_seq() {
                 newest.send_if_modified(|current| {
@@ -87,8 +82,44 @@ pub fn watch_changes(
                     changed
                 });
             }
+            false
+        },
+        std::thread::sleep,
+    );
+}
+
+/// The loop under [`watch_changes`]: `open` the store when none is held,
+/// `probe` its data version, call `changed` when the version moves (it
+/// returns true to end the watch) and `nap` between passes. Every pass naps,
+/// including one whose probe failed: a store that reopens but cannot be read
+/// must not spin a core.
+fn poll_changes<S>(
+    stopped: impl Fn() -> bool,
+    mut open: impl FnMut() -> Option<S>,
+    probe: impl Fn(&S) -> Option<i64>,
+    mut changed: impl FnMut(&S) -> bool,
+    mut nap: impl FnMut(Duration),
+) {
+    let mut store: Option<S> = None;
+    let mut version: Option<i64> = None;
+    while !stopped() {
+        if store.is_none() {
+            store = open();
         }
-        std::thread::sleep(POLL);
+        let Some(held) = &store else {
+            nap(Duration::from_secs(1));
+            continue;
+        };
+        let now = probe(held);
+        if now.is_none() {
+            store = None;
+        } else if now != version {
+            version = now;
+            if changed(held) {
+                return;
+            }
+        }
+        nap(POLL);
     }
 }
 
@@ -298,6 +329,28 @@ pub fn stream(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_probe_still_naps() {
+        use std::cell::Cell;
+        let opens = Cell::new(0_u32);
+        let naps = Cell::new(Vec::new());
+        super::poll_changes(
+            || opens.get() >= 5,
+            || {
+                opens.set(opens.get() + 1);
+                Some(())
+            },
+            |()| None,
+            |()| false,
+            |pause| {
+                let mut all = naps.take();
+                all.push(pause);
+                naps.set(all);
+            },
+        );
+        assert_eq!(naps.take(), vec![super::POLL; 5]);
+    }
+
     use super::*;
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
