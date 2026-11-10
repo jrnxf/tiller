@@ -507,6 +507,30 @@ fn check_capacity(conn: &Connection, host: &Host, project: &Project) -> Result<(
     Ok((host_reserved, project_reserved))
 }
 
+/// Whether the run's worktree went back to the pool: a run of its relaunch
+/// chain on the same worktree was cleaned (`run.clean`). The chain shares one
+/// worktree and one lease, so a clean by any of its runs returned it. The
+/// worktree reading's `gone_at` is not the test: the pool may have handed the
+/// path to another run since, and a later reading clears it.
+fn worktree_returned(conn: &Connection, run: &Run, path: &str) -> Result<bool> {
+    let mut root = run.clone();
+    while let Some(id) = root.predecessor_run_id.clone() {
+        root = get(conn, "run", &id)?;
+    }
+    Ok(conn.query_row(
+        "WITH RECURSIVE chain(id) AS (
+             SELECT ?1
+             UNION SELECT r.id FROM runs r JOIN chain c ON r.predecessor_run_id = c.id
+         )
+         SELECT EXISTS (SELECT 1 FROM chain c
+                        JOIN runs r ON r.id = c.id
+                        JOIN events e ON e.entity = 'run' AND e.entity_id = r.id AND e.kind = 'run.cleaned'
+                        WHERE r.host_id = ?2 AND r.worktree_path = ?3)",
+        params![root.id, run.host_id, path],
+        |row| row.get(0),
+    )?)
+}
+
 /// `run.relaunch`'s transaction body, shared with its rehearsal.
 fn relaunch_in(tx: &mut Tx<'_>, run: &str, relaunch: &Relaunch) -> Result<Relaunched> {
     let run = load_run(tx, run)?;
@@ -520,11 +544,18 @@ fn relaunch_in(tx: &mut Tx<'_>, run: &str, relaunch: &Relaunch) -> Result<Relaun
             )));
         }
     }
-    if run.worktree_path.is_none() {
+    let Some(path) = run.worktree_path.as_deref() else {
         return Err(Error::refused(
             "run",
             &run.id,
             "run has no worktree to relaunch in",
+        ));
+    };
+    if worktree_returned(tx.conn(), &run, path)? {
+        return Err(Error::refused(
+            "run",
+            &run.id,
+            "the run's worktree was already returned; spawn a run on a fresh worktree instead",
         ));
     }
     let card: Card = get(tx.conn(), "card", &run.card_id)?;
@@ -1859,6 +1890,21 @@ impl Store {
                 &[&run.host_id, &path],
             )?
             .ok_or_else(|| Error::refused("worktree", &path, "no reading of the worktree"))?;
+            // A relaunch in place (`--new-attempt`) hands the worktree to a
+            // successor. Checked here, in the transaction that marks the
+            // worktree gone, so no successor can start between the check and
+            // the write.
+            if let Some(successor) = find::<Run>(
+                tx.conn(),
+                "host_id = ?1 AND worktree_path = ?2 AND ended_at IS NULL AND id != ?3",
+                &[&run.host_id, &path, &run.id],
+            )? {
+                return Err(Error::refused(
+                    "worktree",
+                    &path,
+                    format!("the worktree is in use by active run {}", successor.id),
+                ));
+            }
             if worktree.gone_at.is_some() {
                 return Ok(run);
             }

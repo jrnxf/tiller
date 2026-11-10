@@ -986,6 +986,136 @@ fn only_mark_landed_confirms_an_outside_merge() {
     assert_eq!(closed.card.outcome, Some(CardOutcome::Landed));
 }
 
+/// A reopen starts the card over: a "Mark landed" answer given before it is
+/// no evidence for closing the card `landed` again. A new answer is.
+#[test]
+fn a_mark_landed_answer_before_a_reopen_is_not_evidence() {
+    let (mut store, _) = memory_store();
+    let ship = store
+        .card_create(&owner(), None, card(CardKind::Ship, "outside"), None)
+        .unwrap()
+        .value;
+    let item = recovery(&mut store, &ship);
+    store
+        .attention_answer(&owner(), None, &item.id, MARK_LANDED, AnsweredVia::Board)
+        .unwrap();
+    store
+        .card_close(&owner(), &ship.id, CardOutcome::Landed, None, None)
+        .unwrap();
+    store
+        .card_reopen(&owner(), &ship.id, "the merge was reverted")
+        .unwrap();
+
+    let error = store
+        .card_close(&owner(), &ship.id, CardOutcome::Landed, None, None)
+        .unwrap_err();
+    assert_eq!(error.code(), "refused");
+    assert!(
+        error
+            .to_string()
+            .contains("since the card was last reopened"),
+        "{error}"
+    );
+    assert_eq!(store.card(&ship.id).unwrap().outcome, None);
+
+    let item = recovery(&mut store, &ship);
+    store
+        .attention_answer(&owner(), None, &item.id, MARK_LANDED, AnsweredVia::Board)
+        .unwrap();
+    let closed = store
+        .card_close(&owner(), &ship.id, CardOutcome::Landed, None, None)
+        .unwrap()
+        .value;
+    assert_eq!(closed.card.outcome, Some(CardOutcome::Landed));
+}
+
+/// A merge that succeeded before a reopen is no evidence for closing the
+/// card `landed` again.
+#[test]
+fn a_merge_before_a_reopen_is_not_evidence() {
+    let (mut store, _) = memory_store();
+    let (ship, approval) = requested_merge(&mut store, 1, "a1b2c3d4e5f6a7b8");
+    store
+        .approval_decide(&owner(), None, &approval.id, accept())
+        .unwrap();
+    store
+        .approval_execute(&daemon(), &approval.id, "a1b2c3d4e5f6a7b8")
+        .unwrap();
+    store
+        .approval_finish(
+            &daemon(),
+            &approval.id,
+            Finish::Succeeded,
+            json!({"sha": "f".repeat(40)}),
+        )
+        .unwrap();
+    if store.card(&ship.id).unwrap().outcome.is_none() {
+        store
+            .card_close(&owner(), &ship.id, CardOutcome::Landed, None, None)
+            .unwrap();
+    }
+    store
+        .card_reopen(&owner(), &ship.id, "the merge was reverted")
+        .unwrap();
+
+    let error = store
+        .card_close(&owner(), &ship.id, CardOutcome::Landed, None, None)
+        .unwrap_err();
+    assert_eq!(error.code(), "refused");
+    assert_eq!(store.card(&ship.id).unwrap().outcome, None);
+}
+
+/// A report recorded before a reopen is no evidence for closing the card
+/// `reported` again. A new report is.
+#[test]
+fn a_report_before_a_reopen_is_not_evidence() {
+    let (mut store, _) = memory_store();
+    let scout = store
+        .card_create(&owner(), None, card(CardKind::Scout, "look around"), None)
+        .unwrap()
+        .value;
+    let report = |store: &mut Store, title: &str| {
+        store
+            .artifact_add(
+                &owner(),
+                super::records::NewArtifact {
+                    card: scout.id.clone(),
+                    run_id: None,
+                    kind: ArtifactKind::Report,
+                    title: title.into(),
+                    url: Some("https://example.com/report".into()),
+                    path: None,
+                },
+            )
+            .unwrap();
+    };
+    report(&mut store, "findings");
+    store
+        .card_close(&owner(), &scout.id, CardOutcome::Reported, None, None)
+        .unwrap();
+    store
+        .card_reopen(&owner(), &scout.id, "needs a second look")
+        .unwrap();
+
+    let error = store
+        .card_close(&owner(), &scout.id, CardOutcome::Reported, None, None)
+        .unwrap_err();
+    assert_eq!(error.code(), "refused");
+    assert!(
+        error
+            .to_string()
+            .contains("since the card was last reopened"),
+        "{error}"
+    );
+
+    report(&mut store, "second look");
+    let closed = store
+        .card_close(&owner(), &scout.id, CardOutcome::Reported, None, None)
+        .unwrap()
+        .value;
+    assert_eq!(closed.card.outcome, Some(CardOutcome::Reported));
+}
+
 /// Cancelling a card stales its requested and accepted approvals, so the
 /// daemon can never execute one for a closed card.
 #[test]
@@ -1519,6 +1649,184 @@ fn run_clean_refuses_uncommitted_changes() {
         .cache_worktree(&Ctx::new(Actor::Daemon), &run.host_id, reading(Some(false)))
         .unwrap();
     store.run_clean(&owner(), &run.id, true).unwrap();
+}
+
+/// A new attempt works in its predecessor's worktree, so `run.clean` of the
+/// predecessor refuses while the new attempt is active and leaves the
+/// worktree held. Once the worktree is cleaned, no run of the chain can be
+/// relaunched in it.
+#[test]
+fn run_clean_refuses_a_worktree_a_successor_works_in() {
+    let (mut store, _) = memory_store();
+    let card = store
+        .card_create(&owner(), None, card(CardKind::Ship, "work"), None)
+        .unwrap()
+        .value;
+    let path = "/home/user/worktrees/alpha-1".to_owned();
+    let old = store
+        .run_start(
+            &owner(),
+            None,
+            NewRun {
+                worktree_path: Some(path.clone()),
+                ..builder_run(&card.id)
+            },
+        )
+        .unwrap()
+        .value
+        .run;
+    let relaunch = || Relaunch {
+        note: "fresh brief".into(),
+        new_attempt: true,
+        stop_proof: Some("pane exited".into()),
+        model: None,
+        checks: None,
+    };
+    let new = store
+        .run_relaunch(&owner(), &old.id, relaunch())
+        .unwrap()
+        .value
+        .run;
+    assert_eq!(new.worktree_path.as_deref(), Some(path.as_str()));
+    let clean_reading = super::caches::WorktreeReading {
+        path: path.clone(),
+        project_id: Some("alpha".into()),
+        run_id: Some(new.id.clone()),
+        branch: None,
+        head_sha: None,
+        dirty: Some(false),
+        unlanded_commits: Some(0),
+    };
+    store
+        .cache_worktree(
+            &Ctx::new(Actor::Daemon),
+            &old.host_id,
+            clean_reading.clone(),
+        )
+        .unwrap();
+
+    let error = store.run_clean(&owner(), &old.id, true).unwrap_err();
+    assert_eq!(error.code(), "refused");
+    assert!(error.to_string().contains(&new.id), "{error}");
+    let gone: Option<String> = store
+        .conn()
+        .query_row(
+            "SELECT gone_at FROM worktrees WHERE host_id = ?1 AND path = ?2",
+            [&old.host_id, &path],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(gone, None);
+    assert_eq!(
+        store
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind = 'run.cleaned'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+
+    // The last run of the chain returns the worktree. After that, neither
+    // run may be relaunched in it.
+    store
+        .run_end(
+            &owner(),
+            &new.id,
+            super::runs::EndRun {
+                outcome: RunOutcome::Abandoned,
+                note: None,
+            },
+        )
+        .unwrap();
+    store
+        .cache_worktree(&Ctx::new(Actor::Daemon), &new.host_id, clean_reading)
+        .unwrap();
+    store.run_clean(&owner(), &new.id, true).unwrap();
+    for run in [&old.id, &new.id] {
+        let error = store.run_relaunch(&owner(), run, relaunch()).unwrap_err();
+        assert_eq!(error.code(), "refused");
+        assert!(error.to_string().contains("already returned"), "{error}");
+    }
+}
+
+/// A cache reading that sees the path again (the pool reissued it) clears
+/// `gone_at`, but the run that cleaned it still may not be relaunched there.
+#[test]
+fn a_cleaned_run_is_not_relaunched_after_a_new_reading() {
+    let (mut store, _) = memory_store();
+    let card = store
+        .card_create(&owner(), None, card(CardKind::Ship, "work"), None)
+        .unwrap()
+        .value;
+    let path = "/home/user/worktrees/alpha-1".to_owned();
+    let run = store
+        .run_start(
+            &owner(),
+            None,
+            NewRun {
+                worktree_path: Some(path.clone()),
+                ..builder_run(&card.id)
+            },
+        )
+        .unwrap()
+        .value
+        .run;
+    store
+        .run_end(
+            &owner(),
+            &run.id,
+            super::runs::EndRun {
+                outcome: RunOutcome::Abandoned,
+                note: None,
+            },
+        )
+        .unwrap();
+    let reading = super::caches::WorktreeReading {
+        path: path.clone(),
+        project_id: Some("alpha".into()),
+        run_id: None,
+        branch: None,
+        head_sha: None,
+        dirty: Some(false),
+        unlanded_commits: Some(0),
+    };
+    store
+        .cache_worktree(&Ctx::new(Actor::Daemon), &run.host_id, reading.clone())
+        .unwrap();
+    store.run_clean(&owner(), &run.id, true).unwrap();
+    store
+        .cache_worktree(&Ctx::new(Actor::Daemon), &run.host_id, reading)
+        .unwrap();
+
+    let error = store
+        .run_relaunch(
+            &owner(),
+            &run.id,
+            Relaunch {
+                note: "fresh brief".into(),
+                new_attempt: true,
+                stop_proof: None,
+                model: None,
+                checks: None,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "refused");
+    assert!(error.to_string().contains("already returned"), "{error}");
+    assert_eq!(
+        store
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM runs WHERE card_id = ?1",
+                [&card.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
 }
 
 fn orchestrator_notes(store: &Store, session: &str) -> Vec<String> {

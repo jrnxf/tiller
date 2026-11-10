@@ -495,24 +495,72 @@ pub const MARK_LANDED: &str = "Mark landed";
 /// leaves the card open for a new run (`state.md` 7).
 pub const REOPEN_WORK: &str = "Reopen work";
 
-/// Whether the card has the evidence a `landed` outcome needs.
+/// The `seq` of the card's last `card.reopened` event, or 0 for a card never
+/// reopened. A reopen starts the card over (`state.md` 6), so evidence for an
+/// outcome counts only when its event is newer than this.
+fn reopened_seq(conn: &rusqlite::Connection, card: &Card) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT coalesce(max(seq), 0) FROM events
+         WHERE entity = 'card' AND entity_id = ?1 AND kind = 'card.reopened'",
+        [&card.id],
+        |row| row.get(0),
+    )?)
+}
+
+/// The tail of an evidence refusal: names the reopen when the card had one,
+/// so the caller knows why older evidence on the card does not count.
+fn since_reopen(conn: &rusqlite::Connection, card: &Card) -> Result<&'static str> {
+    Ok(if reopened_seq(conn, card)? == 0 {
+        ""
+    } else {
+        " since the card was last reopened"
+    })
+}
+
+/// Whether the card has the evidence a `landed` outcome needs, recorded
+/// since the card was created or last reopened.
 pub(crate) fn landed_evidence(conn: &rusqlite::Connection, card: &Card) -> Result<bool> {
     // An approval reached `succeeded`, or the owner confirmed an outside merge
     // by answering a `recovery` item on the card with "Mark landed", alone or
     // qualified ("Mark landed, not me"; `recovery.md` R07). Any other answer
-    // is not evidence.
+    // is not evidence. A row with no event (imported history) counts only on
+    // a card never reopened.
+    let since = reopened_seq(conn, card)?;
     let approved: bool = conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM approvals WHERE card_id = ?1 AND kind IN ('merge', 'land_direct') AND state = 'succeeded')",
-        [&card.id],
+        "SELECT EXISTS (SELECT 1 FROM approvals a
+                        WHERE a.card_id = ?1 AND a.kind IN ('merge', 'land_direct') AND a.state = 'succeeded'
+                          AND (?2 = 0 OR EXISTS (SELECT 1 FROM events e
+                                                 WHERE e.entity = 'approval' AND e.entity_id = a.id
+                                                   AND e.kind = 'approval.finished' AND e.seq > ?2)))",
+        params![card.id, since],
         |row| row.get(0),
     )?;
     if approved {
         return Ok(true);
     }
     Ok(conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM attention WHERE card_id = ?1 AND kind = 'recovery'
-                        AND lower(trim(answer)) LIKE lower(?2) || '%')",
-        params![card.id, MARK_LANDED],
+        "SELECT EXISTS (SELECT 1 FROM attention a
+                        WHERE a.card_id = ?1 AND a.kind = 'recovery'
+                          AND lower(trim(a.answer)) LIKE lower(?2) || '%'
+                          AND (?3 = 0 OR EXISTS (SELECT 1 FROM events e
+                                                 WHERE e.entity = 'attention' AND e.entity_id = a.id
+                                                   AND e.kind = 'attention.answered' AND e.seq > ?3)))",
+        params![card.id, MARK_LANDED, since],
+        |row| row.get(0),
+    )?)
+}
+
+/// Whether the card has the report artifact a `reported` outcome needs,
+/// recorded since the card was created or last reopened.
+fn report_evidence(conn: &rusqlite::Connection, card: &Card) -> Result<bool> {
+    let since = reopened_seq(conn, card)?;
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM artifacts a
+                        WHERE a.card_id = ?1 AND a.kind = 'report' AND a.retired_at IS NULL
+                          AND (?2 = 0 OR EXISTS (SELECT 1 FROM events e
+                                                 WHERE e.entity = 'artifact' AND e.entity_id = a.id
+                                                   AND e.kind = 'artifact.added' AND e.seq > ?2)))",
+        params![card.id, since],
         |row| row.get(0),
     )?)
 }
@@ -933,21 +981,22 @@ impl Store {
             }
             match outcome {
                 CardOutcome::Landed if !landed_evidence(tx.conn(), &card)? => {
+                    let since = since_reopen(tx.conn(), &card)?;
                     return Err(Error::refused(
                         "card",
                         &card.display_id,
-                        "landed needs a succeeded merge or land approval, or a recovery item answered \"Mark landed\"",
+                        format!(
+                            "landed needs a succeeded merge or land approval, or a recovery item answered \"Mark landed\"{since}"
+                        ),
                     ));
                 }
-                CardOutcome::Reported => {
-                    let report: bool = tx.conn().query_row(
-                        "SELECT EXISTS (SELECT 1 FROM artifacts WHERE card_id = ?1 AND kind = 'report' AND retired_at IS NULL)",
-                        [&card.id],
-                        |row| row.get(0),
-                    )?;
-                    if !report {
-                        return Err(Error::refused("card", &card.display_id, "no report artifact is recorded on the card"));
-                    }
+                CardOutcome::Reported if !report_evidence(tx.conn(), &card)? => {
+                    let since = since_reopen(tx.conn(), &card)?;
+                    return Err(Error::refused(
+                        "card",
+                        &card.display_id,
+                        format!("no report artifact is recorded on the card{since}"),
+                    ));
                 }
                 CardOutcome::Completed => required("evidence", evidence.unwrap_or_default())?,
                 CardOutcome::Cancelled
