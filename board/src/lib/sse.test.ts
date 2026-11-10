@@ -1,4 +1,4 @@
-import { QueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import type {
@@ -13,6 +13,7 @@ import type {
 import { connectionStore } from "./connection";
 import { fixtureSnapshot } from "./fixtures";
 import { hydrateFromSnapshot } from "./boot";
+import type { QueryPath } from "./queries";
 import {
   attentionPath,
   boardPath,
@@ -21,6 +22,8 @@ import {
   queryKeyFor,
   quotaPath,
   ReadError,
+  signalsPath,
+  startSettingsPath,
 } from "./queries";
 import { signedOutStore } from "./session";
 import { applyChange, connectEvents } from "./sse";
@@ -484,7 +487,7 @@ test("a review pass or obligation event marks the projects stale", () => {
 });
 
 test("a proposal or memory event marks every memory view and revision stale, and nothing else", () => {
-  for (const entity of ["proposal", "memory", "memory_revision"]) {
+  for (const entity of ["proposal", "memory", "memory_revision", "eval_run", "change_set"]) {
     const queryClient = seededClient();
     const view = queryKeyFor("/api/v1/memory?scope=alpha");
     const revision = queryKeyFor("/api/v1/memory/revisions/01JREV");
@@ -730,5 +733,197 @@ test("peer_reset replaces the peer's attention, agents and projects, and a missi
   expect(attention().filter((item) => item.host === "host-d")).toHaveLength(0);
   expect(projects().some((project) => project.host === "host-d")).toBe(false);
   expect(projects().some((project) => project.host === undefined)).toBe(true);
+  stop();
+});
+
+test("a config event marks the start settings and every project setup stale, and nothing else", () => {
+  const queryClient = seededClient();
+  const settings = queryKeyFor(startSettingsPath);
+  const setup = queryKeyFor("/api/v1/projects/alpha/setup");
+  const other = queryKeyFor("/api/v1/memory?scope=alpha");
+  for (const key of [settings, setup, other]) queryClient.setQueryData(key, {});
+
+  applyChange(
+    queryClient,
+    event({ kind: "config.changed", entity: "config", entity_id: "spawn.pool_root" }),
+  );
+
+  expect(queryClient.getQueryState(settings)?.isInvalidated).toBe(true);
+  expect(queryClient.getQueryState(setup)?.isInvalidated).toBe(true);
+  expect(queryClient.getQueryState(other)?.isInvalidated).toBe(false);
+});
+
+test("a config event refetches the open Settings read without a reload", async () => {
+  const queryClient = seededClient();
+  const read = vi
+    .fn<() => Promise<{ pool_root: string | null }>>()
+    .mockResolvedValueOnce({ pool_root: null })
+    .mockResolvedValue({ pool_root: "/home/user/pool" });
+  const key = queryKeyFor(startSettingsPath);
+  const observer = new QueryObserver(queryClient, { queryKey: key, queryFn: read, staleTime: 0 });
+  const unsubscribe = observer.subscribe(() => {});
+  await vi.waitFor(() => {
+    expect(observer.getCurrentResult().data).toEqual({ pool_root: null });
+  });
+
+  applyChange(
+    queryClient,
+    event({ kind: "config.changed", entity: "config", entity_id: "spawn.pool_root" }),
+  );
+
+  await vi.waitFor(() => {
+    expect(observer.getCurrentResult().data).toEqual({ pool_root: "/home/user/pool" });
+  });
+  unsubscribe();
+});
+
+test("an event that carries no entity state marks the list it belongs to stale", () => {
+  const cases: [string, string][] = [
+    ["attention", attentionPath],
+    ["host", machinesPath],
+    ["quota", quotaPath],
+    ["project", projectsPath],
+  ];
+  for (const [entity, path] of cases) {
+    const queryClient = seededClient();
+
+    applyChange(queryClient, event({ entity, entity_id: "x", entity_state: null }));
+
+    expect(queryClient.getQueryState(queryKeyFor(path as QueryPath))?.isInvalidated, entity).toBe(
+      true,
+    );
+  }
+});
+
+test("an event that carries its entity state does not refetch the list", () => {
+  const queryClient = seededClient();
+  const machine = queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath))
+    ?.machines[0] as MachinesResponse["machines"][number];
+
+  applyChange(
+    queryClient,
+    event({ entity: "host", entity_id: machine.id, entity_state: { ...machine } }),
+  );
+
+  expect(queryClient.getQueryState(queryKeyFor(machinesPath))?.isInvalidated).toBe(false);
+});
+
+test("a pull request event marks the contributions stale, and a run or attention event the signals", () => {
+  const queryClient = seededClient();
+  const all = queryKeyFor("/api/v1/contributions");
+  const one = queryKeyFor("/api/v1/contributions?project=alpha");
+  const signals = queryKeyFor(signalsPath);
+  for (const key of [all, one, signals]) queryClient.setQueryData(key, {});
+
+  applyChange(queryClient, event({ entity: "pr", card_id: "c1" }));
+  expect(queryClient.getQueryState(all)?.isInvalidated).toBe(true);
+  expect(queryClient.getQueryState(one)?.isInvalidated).toBe(true);
+  expect(queryClient.getQueryState(signals)?.isInvalidated).toBe(true);
+
+  const fresh = seededClient();
+  fresh.setQueryData(signals, {});
+  fresh.setQueryData(all, {});
+  applyChange(fresh, event({ entity: "attention", entity_state: null }));
+  expect(fresh.getQueryState(signals)?.isInvalidated).toBe(true);
+  expect(fresh.getQueryState(all)?.isInvalidated).toBe(false);
+});
+
+test("a reset marks every daemon read stale, not only the snapshot paths", async () => {
+  const queryClient = seededClient();
+  const stop = connect(queryClient, 4181, fixtureSnapshot("quota-red", NOW));
+  const source = FakeSource.all[0] as FakeSource;
+  const card = queryKeyFor("/api/v1/cards/c1");
+  const timeline = queryKeyFor("/api/v1/cards/c1/timeline");
+  const memory = queryKeyFor("/api/v1/memory?scope=alpha");
+  const settings = queryKeyFor(startSettingsPath);
+  for (const key of [card, timeline, memory, settings]) queryClient.setQueryData(key, {});
+
+  source.emit("reset", { seq: 100 });
+
+  await vi.waitFor(() => {
+    expect(queryClient.getQueryData<QuotaResponse>(queryKeyFor(quotaPath))?.windows[0]?.dot).toBe(
+      "red",
+    );
+  });
+  for (const key of [card, timeline, memory, settings]) {
+    expect(queryClient.getQueryState(key)?.isInvalidated, String(key[1])).toBe(true);
+  }
+  // The hydrated paths hold the new data and need no second fetch.
+  expect(queryClient.getQueryState(queryKeyFor(quotaPath))?.isInvalidated).toBe(false);
+  stop();
+});
+
+test("a failed resync after a reset is retried until it lands", async () => {
+  vi.useFakeTimers();
+  const queryClient = seededClient();
+  const snapshot = fixtureSnapshot("quota-red", NOW);
+  const fetchSnapshot = vi
+    .fn<() => Promise<typeof snapshot>>()
+    .mockRejectedValueOnce(new Error("daemon is restarting"))
+    .mockRejectedValueOnce(new Error("daemon is restarting"))
+    .mockResolvedValue(snapshot);
+  const stop = connectEvents({
+    queryClient,
+    lastEventSeq: 4181,
+    createEventSource: (url) => new FakeSource(url),
+    fetchSnapshot,
+  });
+  const source = FakeSource.all[0] as FakeSource;
+
+  source.emit("reset", { seq: 100 });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetchSnapshot).toHaveBeenCalledTimes(1);
+  expect(queryClient.getQueryData<QuotaResponse>(queryKeyFor(quotaPath))?.windows[0]?.dot).toBe(
+    "green",
+  );
+
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(fetchSnapshot).toHaveBeenCalledTimes(3);
+  expect(queryClient.getQueryData<QuotaResponse>(queryKeyFor(quotaPath))?.windows[0]?.dot).toBe(
+    "red",
+  );
+
+  // Landed: no more tries.
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(fetchSnapshot).toHaveBeenCalledTimes(3);
+  stop();
+});
+
+test("while a resync is pending the stream resumes after the old cursor, so the daemon resets again", async () => {
+  vi.useFakeTimers();
+  const queryClient = seededClient();
+  const stop = connectEvents({
+    queryClient,
+    lastEventSeq: 4181,
+    createEventSource: (url) => new FakeSource(url),
+    fetchSnapshot: () => Promise.reject(new Error("daemon is restarting")),
+  });
+  const first = FakeSource.all[0] as FakeSource;
+
+  first.emit("reset", { seq: 100 });
+  await vi.advanceTimersByTimeAsync(0);
+  first.readyState = 2;
+  first.emit("error");
+  await vi.advanceTimersByTimeAsync(1000);
+
+  const second = FakeSource.all[1] as FakeSource;
+  expect(second.url).toBe("/api/v1/events?since=4181");
+  stop();
+});
+
+test("once a resync after a reset lands, the stream resumes after the snapshot's seq", async () => {
+  vi.useFakeTimers();
+  const queryClient = seededClient();
+  const snapshot = { ...fixtureSnapshot("default", NOW), last_event_seq: 120 };
+  const stop = connect(queryClient, 4181, snapshot);
+  const first = FakeSource.all[0] as FakeSource;
+
+  first.emit("reset", { seq: 100 });
+  await vi.advanceTimersByTimeAsync(0);
+  first.readyState = 2;
+  first.emit("error");
+  await vi.advanceTimersByTimeAsync(1000);
+
+  expect((FakeSource.all[1] as FakeSource).url).toBe("/api/v1/events?since=120");
   stop();
 });

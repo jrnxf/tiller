@@ -21,7 +21,7 @@ import type {
 } from "./api-types";
 import { connectionStore } from "./connection";
 import { isPeerRow, ownerKey, ownerOf } from "./peers";
-import { SNAPSHOT_PATH, hydrateFromSnapshot } from "./boot";
+import { SNAPSHOT_PATH, refreshFromSnapshot } from "./boot";
 import { recordProgress } from "./receipts";
 import { isSignedOut, signedOutStore } from "./session";
 import {
@@ -29,6 +29,7 @@ import {
   agentsPath,
   attentionPath,
   awayBriefPath,
+  CONTRIBUTIONS_PREFIX,
   fetchJson,
   machinesPath,
   projectSetupPath,
@@ -37,7 +38,10 @@ import {
   queryKeyFor,
   recapPath,
   sessionPath,
+  signalsPath,
+  startSettingsPath,
 } from "./queries";
+import type { QueryPath } from "./queries";
 
 const EVENTS_PATH = "/api/v1/events";
 
@@ -162,6 +166,48 @@ export function onProjectGone(queryClient: QueryClient, projectId: string) {
   void queryClient.invalidateQueries({ queryKey: API_KEY_PREFIX, refetchType: "active" });
 }
 
+// Mark the reads at `paths` stale: the ones on screen fetch again, the rest
+// when they next mount.
+function refetchPaths(queryClient: QueryClient, ...paths: QueryPath[]) {
+  for (const path of paths) {
+    void queryClient.invalidateQueries({ queryKey: queryKeyFor(path), refetchType: "active" });
+  }
+}
+
+// Mark every read whose path satisfies `matches` stale.
+function refetchMatching(queryClient: QueryClient, matches: (path: string) => boolean) {
+  void queryClient.invalidateQueries({
+    queryKey: API_KEY_PREFIX,
+    predicate: (query) => matches(String(query.queryKey[1] ?? "")),
+    refetchType: "active",
+  });
+}
+
+// `/api/v1/projects/<id>/setup`, whatever the project.
+const PROJECT_SETUP_PATH = /^\/api\/v1\/projects\/[^/?]+\/setup$/;
+
+// The list read of each entity the board writes in place from `entity_state`.
+// The daemon sends no state when it could not read the entity (one bad row
+// never stalls the stream), and then only a fetch can say what it is.
+const ENTITY_LISTS: Record<string, QueryPath> = {
+  attention: attentionPath,
+  host: machinesPath,
+  quota: quotaPath,
+  project: projectsPath,
+};
+
+// What the Health signals count: open and answered items, ended runs, merged
+// PRs, closed cards, interventions, breached guards and live hosts.
+const SIGNAL_ENTITIES = new Set([
+  "attention",
+  "run",
+  "pr",
+  "card",
+  "intervention",
+  "guard",
+  "host",
+]);
+
 // Entities whose API shape is a join of several tables: the event says
 // something moved, and the quiet refetch fetches the joined answer.
 const REFETCH_ENTITIES = new Set(["session", "run", "pane", "observation", "worktree"]);
@@ -182,7 +228,23 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
     void queryClient.invalidateQueries({ queryKey: queryKeyFor(recapPath), refetchType: "active" });
   }
 
+  const gone = event.kind === "project.deleted" || event.kind === "project.retired";
+  const list = ENTITY_LISTS[event.entity];
+  if (!state && list !== undefined && !gone) refetchPaths(queryClient, list);
+
+  if (SIGNAL_ENTITIES.has(event.entity)) refetchPaths(queryClient, signalsPath);
+  if (event.entity === "pr" || event.entity === "card") {
+    // The contributions list names each PR with its card's title.
+    refetchMatching(queryClient, (path) => path.startsWith(CONTRIBUTIONS_PREFIX));
+  }
+
   switch (event.entity) {
+    case "config":
+      // `tiller config set` in a terminal moves what Settings and the project
+      // detail show, and no screen of the board sent it.
+      refetchPaths(queryClient, startSettingsPath);
+      refetchMatching(queryClient, (path) => PROJECT_SETUP_PATH.test(path));
+      break;
     case "attention":
       if (state) writeAttention(queryClient, state as AttentionItem);
       break;
@@ -193,7 +255,7 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
       if (state) writeQuota(queryClient, state as QuotaWindow);
       break;
     case "project":
-      if (event.kind === "project.deleted" || event.kind === "project.retired") {
+      if (gone) {
         onProjectGone(queryClient, event.entity_id);
       } else if (state) writeProject(queryClient, state as Project);
       queryClient.invalidateQueries({
@@ -463,22 +525,60 @@ export function connectEvents(options: EventsOptions): () => void {
   const fetchSnapshot = options.fetchSnapshot ?? (() => fetchJson<Snapshot>(SNAPSHOT_PATH));
   const fetchSession = options.fetchSession ?? (() => fetchJson(sessionPath));
 
+  // The resume cursor: the newest seq this page holds a consistent view of.
+  // It moves only with an applied change while in sync, and with a snapshot
+  // that landed. While a resync is pending it stays where it was, so a stream
+  // that drops now resumes after the old cursor and the daemon sends `reset`
+  // again, which is a second reason to try.
   let lastSeq = options.lastEventSeq;
+  // Set from a `reset` (or a start with no snapshot) until a snapshot lands.
+  let pending = lastSeq === null;
+  // While pending: changes at or below `floor` are old. It follows the daemon's
+  // newest seq from the `reset` on, so a change that arrives before the new
+  // snapshot lands is applied and not dropped as old, even when a restored
+  // database put the seq below the cursor. Null accepts any change.
+  let floor: number | null = null;
   let source: EventSourceLike | null = null;
   let stopped = false;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let resyncTimer: ReturnType<typeof setTimeout> | undefined;
+  let resyncing = false;
+  // A `reset` came while a snapshot was in flight: that snapshot may be older
+  // than the reset, so it is fetched again.
+  let again = false;
+  let failures = 0;
 
   // Refresh every query from a new snapshot while the UI stays put: only the
-  // degraded pill shows, never a spinner or an empty state.
+  // degraded pill shows, never a spinner or an empty state. A snapshot that
+  // fails is tried again with a growing wait, and when the stream opens.
   async function resync() {
+    clearTimeout(resyncTimer);
+    if (stopped) return;
+    if (resyncing) {
+      again = true;
+      return;
+    }
+    resyncing = true;
+    again = false;
     try {
       const snapshot = await fetchSnapshot();
       if (stopped) return;
       // Exact, not max: after a restored database the newest seq goes down.
-      lastSeq = hydrateFromSnapshot(queryClient, snapshot);
+      // Changes applied meanwhile can be newer than the snapshot, and those
+      // are not replayed.
+      lastSeq = Math.max(refreshFromSnapshot(queryClient, snapshot), floor ?? -1);
+      pending = false;
+      floor = null;
+      failures = 0;
     } catch {
-      // Still unreachable: the next reconnect tries again.
+      if (!stopped) {
+        failures += 1;
+        resyncTimer = setTimeout(() => void resync(), Math.min(1000 * 2 ** (failures - 1), 30_000));
+      }
+    } finally {
+      resyncing = false;
     }
+    if (again && !stopped) void resync();
   }
 
   function open() {
@@ -493,7 +593,7 @@ export function connectEvents(options: EventsOptions): () => void {
 
     next.addEventListener("open", () => {
       connectionStore.set("live");
-      if (lastSeq === null) void resync();
+      if (pending) void resync();
     });
     next.addEventListener("error", () => {
       connectionStore.set("reconnecting");
@@ -509,8 +609,10 @@ export function connectEvents(options: EventsOptions): () => void {
     });
     next.addEventListener("change", (message) => {
       const event = JSON.parse(message.data) as ChangeEvent;
-      if (lastSeq !== null && event.seq <= lastSeq) return;
-      lastSeq = event.seq;
+      const seen = pending ? floor : lastSeq;
+      if (seen !== null && event.seq <= seen) return;
+      if (pending) floor = event.seq;
+      else lastSeq = event.seq;
       applyChange(queryClient, event);
     });
     // A peer's messages carry no `id`: its `seq` is not this host's, so they
@@ -525,9 +627,8 @@ export function connectEvents(options: EventsOptions): () => void {
       applyLink(queryClient, JSON.parse(message.data) as LinkEvent);
     });
     next.addEventListener("reset", (message) => {
-      // Follow the daemon's newest seq at once, so a change that arrives
-      // before the new snapshot lands is applied and not dropped as old.
-      lastSeq = (JSON.parse(message.data) as { seq: number }).seq;
+      pending = true;
+      floor = (JSON.parse(message.data) as { seq: number }).seq;
       void resync();
     });
   }
@@ -535,6 +636,7 @@ export function connectEvents(options: EventsOptions): () => void {
   function stop() {
     stopped = true;
     clearTimeout(retryTimer);
+    clearTimeout(resyncTimer);
     source?.close();
   }
 

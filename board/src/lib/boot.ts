@@ -38,6 +38,23 @@ export function hydrateFromSnapshot(queryClient: QueryClient, snapshot: Snapshot
   return snapshot.last_event_seq;
 }
 
+// The page lost its place in the event log (a `reset`, or a stream that began
+// with no boot snapshot). The snapshot covers six reads; every other read in
+// the cache (an open card, its timeline, memory, Settings, Health) is only
+// marked stale, so the ones on screen fetch again and the rest fetch when they
+// next mount. The UI stays put: nothing is cleared first. Returns the
+// snapshot's seq.
+export function refreshFromSnapshot(queryClient: QueryClient, snapshot: Snapshot): number {
+  const seq = hydrateFromSnapshot(queryClient, snapshot);
+  const hydrated = new Set(Object.keys(snapshot.queries));
+  void queryClient.invalidateQueries({
+    queryKey: API_KEY_PREFIX,
+    predicate: (query) => !hydrated.has(String(query.queryKey[1] ?? "")),
+    refetchType: "active",
+  });
+  return seq;
+}
+
 export const SNAPSHOT_PATH = "/api/v1/snapshot";
 const HEALTH_PATH = "/api/v1/health";
 

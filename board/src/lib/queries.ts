@@ -161,8 +161,10 @@ export const projectsQuery = () => readQuery<ProjectsResponse>(projectsPath);
 export const retiredProjectsQuery = () =>
   readQuery<ProjectsResponse>(withParams(projectsPath, { retired: "true" }));
 
+// The prefix of every contributions read, with or without a project filter.
+export const CONTRIBUTIONS_PREFIX = "/api/v1/contributions";
 const contributionsPath = (project?: string): QueryPath =>
-  withParams("/api/v1/contributions", { project });
+  withParams(CONTRIBUTIONS_PREFIX, { project });
 export const contributionsQuery = (project?: string) =>
   readQuery<ContributionsResponse>(contributionsPath(project));
 
@@ -202,14 +204,15 @@ export const projectCheckoutQuery = (params: {
     staleTime: 0,
   });
 
-// The host-level settings an orchestrator start reads. A config change
+// The host-level settings an orchestrator start reads. A `config` event
 // refreshes it (lib/sse.ts).
-const startSettingsPath: QueryPath = "/api/v1/start-settings";
+export const startSettingsPath: QueryPath = "/api/v1/start-settings";
 export const startSettingsQuery = () =>
   queryOptions({ ...readQuery<StartSettings>(startSettingsPath), staleTime: 0 });
 
 // The project detail's merge gate and checkout. A project event refreshes it,
-// since the hourly ruleset check moves the gate (lib/sse.ts).
+// since the hourly ruleset check moves the gate, and so does a `config` event,
+// since `checkouts.<id>` lives in config.toml (lib/sse.ts).
 export const projectSetupPath = (projectId: string): QueryPath =>
   `/api/v1/projects/${projectId}/setup`;
 export const projectSetupQuery = (projectId: string) =>
