@@ -11,6 +11,7 @@
 
 use std::ffi::OsString;
 use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -115,6 +116,39 @@ fn follow_config(initial: Cli, config: std::path::PathBuf) -> Cli {
         }
         seen.1.clone()
     })
+}
+
+/// Why this `--db` (or `TILLER_DB`) cannot go to the daemon, or `None` when
+/// there is none or it names the database the daemon opens anyway.
+///
+/// The daemon takes every path from `TILLER_HOME`: `state.db`, its lock and
+/// `daemon.json`, the backups, the mirror and the peer keys. Honoring `--db`
+/// alone would split one daemon across two places, so a database anywhere but
+/// `<home>/state.db` is refused and the message names `TILLER_HOME`.
+pub fn refuse_db(db: Option<&Path>) -> Option<String> {
+    let db = db?;
+    let home = crate::app::App::from_env(None).home;
+    let own = home.join("state.db");
+    if same_path(db, &own) {
+        return None;
+    }
+    Some(format!(
+        "--db and TILLER_DB do not apply to the daemon: it opens {} and keeps its lock, backups and mirror in {}. Set TILLER_HOME to the directory that holds the database to serve.",
+        own.display(),
+        home.display()
+    ))
+}
+
+/// Whether two paths name one file, even when it does not exist yet.
+fn same_path(a: &Path, b: &Path) -> bool {
+    let resolved = |path: &Path| -> PathBuf {
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+        match (parent.map(Path::canonicalize), path.file_name()) {
+            (Some(Ok(parent)), Some(name)) => parent.join(name),
+            _ => path.to_path_buf(),
+        }
+    };
+    a == b || resolved(a) == resolved(b)
 }
 
 /// The exit code for a database newer than this binary (`recovery.md` R11).

@@ -134,6 +134,48 @@ fn info(world: &World) -> Option<Value> {
     serde_json::from_str(&text).ok()
 }
 
+/// B4: the daemon derives its lock, peers, backups and mirror from
+/// `TILLER_HOME`, so a `--db` (or `TILLER_DB`) that names another database is
+/// refused, not half honored. The refusal is a usage error (exit 2) that names
+/// `TILLER_HOME`, and nothing is created.
+#[test]
+fn a_db_other_than_the_home_database_is_refused() {
+    let world = World::new();
+    let other = world.dir.path().join("other.db");
+    let mut child = spawn(&world, &["--db", other.to_str().unwrap()]);
+    let status = wait(&mut child);
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert_eq!(status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("TILLER_HOME"), "{stderr}");
+    assert!(stderr.contains("--db"), "{stderr}");
+    assert!(!other.exists(), "the daemon created the named database");
+    assert!(!world.home().exists(), "the daemon created a default home");
+
+    // The environment variable is the same flag.
+    let mut child = daemon_command(&world)
+        .env("TILLER_HERDR", "/nonexistent/herdr")
+        .env("TILLER_DB", &other)
+        .spawn()
+        .unwrap();
+    assert_eq!(wait(&mut child).code(), Some(2));
+    assert!(!other.exists());
+}
+
+/// The one `--db` the daemon accepts is the database it opens anyway.
+#[test]
+fn the_home_database_is_accepted_for_the_daemon() {
+    let world = World::initialized();
+    let db = world.db();
+    let mut daemon = start_with(&world, &["--db", db.to_str().unwrap()]);
+    assert!(terminate(&mut daemon).success());
+}
+
 #[test]
 fn a_second_daemon_names_the_first_and_exits_zero() {
     let world = World::initialized();

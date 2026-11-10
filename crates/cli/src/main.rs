@@ -304,6 +304,10 @@ fn main() -> ExitCode {
         };
     }
     if let Command::Daemon(args) = &cli.command {
+        if let Some(message) = daemon::refuse_db(cli.db.as_deref()) {
+            eprintln!("tiller daemon: {message}");
+            return ExitCode::from(2);
+        }
         return match daemon::run(args) {
             Ok(code) => code,
             Err(error) => {
