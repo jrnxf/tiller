@@ -273,7 +273,7 @@ All derived from state; none stored.
 | Column | A card is here when |
 |---|---|
 | Asked | an ask event has no disposition yet (should last seconds) |
-| Queued | filed, waiting on capacity, a dependency or a date; dated holds show as Parked with their reason |
+| Queued | filed, waiting on capacity, a dependency or a date; dated holds show as Held with their reason |
 | Working | a worker is attached and hooks or herdr say working |
 | Needs you | a decision or credential hold, a PR ready with merge authority off, or a pane blocked on a prompt; sorted by age |
 | Landing | PR open; pipeline, review or CI running. This replaces the developer's "Review", which was ambiguous (human review is Needs you, machine review is Landing) |
