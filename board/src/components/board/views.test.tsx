@@ -268,7 +268,11 @@ test("a card event moves the card to its new column without remounting the other
 
   const board = queryClient.getQueryData<BoardResponse>(queryKeyFor(boardPath()));
   const row = board?.rows.find((candidate) => candidate.display_id === "alpha-42") as BoardRow;
-  act(() => {
+  // TanStack Query hands a write to React on a timer, and the glide applies
+  // the move as a transition. Outside act, a loaded machine renders that
+  // transition in slices between timers, past the wait below. Staying in act
+  // until the timer has fired makes React render the move to its end.
+  await act(async () => {
     applyChange(queryClient, {
       seq: 5000,
       at: "2026-11-02T12:00:00.000Z",
@@ -281,6 +285,7 @@ test("a card event moves the card to its new column without remounting the other
       entity_state: null,
       card: { ...row, column: "landing", badge: "checks" },
     } satisfies ChangeEvent);
+    await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
   await waitFor(() =>
