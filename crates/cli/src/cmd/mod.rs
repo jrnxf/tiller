@@ -3,7 +3,6 @@
 //! command to an [`Outcome`](crate::app::Outcome); none writes SQL of its own.
 
 pub mod admin;
-pub mod ahoy;
 pub mod approval;
 pub mod ask;
 pub mod attention;
@@ -19,6 +18,7 @@ pub mod learn;
 pub mod mem;
 pub mod peer;
 pub mod read;
+pub mod recap;
 pub mod records;
 pub mod review;
 pub mod run;

@@ -1,5 +1,5 @@
-//! `tiller ahoy`: the recap and the decision walkthrough the owner asks for
-//! with `/ahoy` (P35). It reads the record, so it needs no chat history: the
+//! `tiller recap`: the recap and the decision walkthrough the owner asks for
+//! with `/recap` (P35). It reads the record, so it needs no chat history: the
 //! recap is what happened since the owner's previous ask, and the decisions
 //! are every open attention item that still applies, most blocking first.
 
@@ -22,7 +22,7 @@ const RECAP_KINDS: &str = "'card.created', 'card.closed', 'run.started', 'run.en
     'approval.decided', 'approval.finished', 'pr.opened', 'pr.merged', 'deploy.finished'";
 
 #[derive(Args, Debug)]
-pub struct Ahoy {
+pub struct Recap {
     /// Only this project; the calling orchestrator's project by default
     #[arg(long)]
     pub project: Option<String>,
@@ -44,7 +44,7 @@ fn rank(kind: AttentionKind) -> u8 {
     }
 }
 
-pub fn run(app: &App, args: Ahoy) -> Done {
+pub fn run(app: &App, args: Recap) -> Done {
     let store = app.read()?;
     let project = match args.project {
         Some(project) => Some(project),
@@ -140,7 +140,7 @@ pub fn run(app: &App, args: Ahoy) -> Done {
 }
 
 /// When the owner asked something before their latest ask, which is the
-/// `/ahoy` itself while it is still unresolved.
+/// `/recap` itself while it is still unresolved.
 fn previous_ask(
     store: &tiller_core::Store,
     project: Option<&str>,

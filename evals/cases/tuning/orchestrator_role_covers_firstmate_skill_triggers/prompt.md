@@ -21,4 +21,4 @@ Before the cutover I want to see that you cover what the Firstmate skills did. D
 12. I type `/stow`.
 13. This session was just cleared.
 14. I am leaving until Monday and set standing orders; later I come back.
-15. I type `/ahoy`.
+15. I type `/recap`.

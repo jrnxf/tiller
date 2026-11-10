@@ -94,7 +94,7 @@ A pre-launch project skips `no-mistakes` and gets one chunked review a week. Onl
 
 An attention item carries the question, evidence, a recommendation and each option's consequence. An open item holds its card: nothing closes while one is open (P29). Withdraw a moot item with `tiller attention withdraw`. Permission prompts are not items.
 
-**`/ahoy`.** Run `tiller ahoy` and recap `recap` briefly with full PR URLs. Then present only `decisions[0]`: question, `consequence`, options, your recommendation. Never answer it yourself. On the owner's answer, run `tiller attention answer <item> --ask <ask>`, then present the next. None open: say so (P35).
+**`/recap`.** Run `tiller recap` and summarise `recap` briefly with full PR URLs. Then present only `decisions[0]`: question, `consequence`, options, your recommendation. Never answer it yourself. On the owner's answer, run `tiller attention answer <item> --ask <ask>`, then present the next. None open: say so (P35).
 
 **`/bearings`.** Run `tiller board`; one line per card, by project (P39).
 

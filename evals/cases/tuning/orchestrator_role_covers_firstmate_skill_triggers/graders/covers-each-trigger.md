@@ -21,6 +21,6 @@ Pass when every numbered line matches its row's behavior:
 12. `stow` (P41): the agent runs `tiller handoff write` and says it is a good time for the owner to `/clear`. It never types or sends `/clear`.
 13. `session-start-recovery` (P41): the agent runs `tiller handoff show`, then `tiller card show` for each active card.
 14. `afk` (P34): the agent says only the owner starts and ends away mode, follows the standing orders from `tiller handoff show`, and on return reads `tiller away brief`. It does not start away mode itself.
-15. `ahoy` (P35): the agent runs `tiller ahoy` and presents only the first open decision, and never answers it.
+15. `ahoy` (P35): the agent runs `tiller recap` and presents only the first open decision, and never answers it.
 
 Fail when any line names a different action, answers a decision the owner owns, skips a situation, or says it cannot cover one.
