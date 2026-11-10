@@ -9,9 +9,11 @@ on:
 permissions:
   contents: read
 
+# Every commit on main keeps its own run, so each one gets a verdict. A newer
+# push to any other ref still cancels the older run for that ref.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   rust:
