@@ -1,5 +1,5 @@
 import { formatLisbon, minutesSince } from "../../lib/clock";
-import type { StaleInfo } from "../../lib/api-types";
+import type { AgentRow, StaleInfo } from "../../lib/api-types";
 
 // "4m", "3h 57m", "2d 5h": how long something has waited.
 export function formatAge(iso: string | null): string {
@@ -14,6 +14,22 @@ export function formatAge(iso: string | null): string {
 
 export function formatWhen(iso: string | null): string {
   return formatLisbon(iso) ?? "unknown";
+}
+
+// Who made a recommendation: the owner when no session opened the item, else
+// the role of the session that did (the orchestrator, a builder, a scout).
+// A session that has ended is no longer listed, so its role is not known.
+export function recommender(
+  openedBy: string | null,
+  agents: AgentRow[],
+): { initial: string; text: string } {
+  if (openedBy === null) return { initial: "Y", text: "You recommended" };
+  const session = agents
+    .flatMap((agent) => [agent, ...agent.workers])
+    .find((agent) => agent.session_id === openedBy);
+  if (!session) return { initial: "S", text: "A session recommended" };
+  const role = session.role.replaceAll("_", " ");
+  return { initial: role.charAt(0).toUpperCase(), text: `The ${role} recommended` };
 }
 
 export function shortSha(sha: string): string {

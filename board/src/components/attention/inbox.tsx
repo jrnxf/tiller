@@ -9,7 +9,13 @@ import type { Owned } from "../../lib/peers";
 import { AWAY_BRIEF_ID, briefIsUnread, briefReadStore } from "../../lib/away";
 import { prefsStore } from "../../lib/prefs";
 import { projectColor } from "../../lib/project-color";
-import { attentionQuery, awayBriefQuery, boardQuery, projectsQuery } from "../../lib/queries";
+import {
+  agentsQuery,
+  attentionQuery,
+  awayBriefQuery,
+  boardQuery,
+  projectsQuery,
+} from "../../lib/queries";
 import { scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
 import { CheckIcon } from "../shell/icons";
@@ -24,7 +30,15 @@ import { CardActions, OpenInHerdr } from "./card-actions";
 import { CardOverflow } from "./card-lifecycle";
 import { tidy } from "./ansi";
 import { RecapCard } from "./recap";
-import { KIND_LABELS, PRIORITIES, formatAge, formatWhen, parseEvidence, staleText } from "./format";
+import {
+  KIND_LABELS,
+  PRIORITIES,
+  formatAge,
+  formatWhen,
+  parseEvidence,
+  recommender,
+  staleText,
+} from "./format";
 import type { ParsedEvidence } from "./format";
 import {
   BackIcon,
@@ -243,6 +257,8 @@ function DecisionDetail({
     </span>
   );
   const card = ctx.cards.get(item.card_id) ?? null;
+  const agents = useQuery(agentsQuery()).data?.orchestrators;
+  const by = recommender(item.opened_by_session_id, agents ?? []);
   return (
     <>
       <BackLink />
@@ -275,9 +291,9 @@ function DecisionDetail({
         <div className="blk">
           <div className="blk-h">Recommendation</div>
           <div className="rec">
-            <span className="av lg">C</span>
+            <span className="av lg">{by.initial}</span>
             <div className="tx">
-              <span className="who">The orchestrator recommends</span>
+              <span className="who">{by.text}</span>
               {item.recommendation}
             </div>
           </div>

@@ -149,6 +149,33 @@ test("an item shows its question, evidence, recommendation, consequence and that
   expect(screen.getByTestId("current").textContent).toContain("Still waiting");
 });
 
+test("a recommendation says who made it, never always the orchestrator", async () => {
+  stubDaemon("default");
+  // Opened by the owner: no session behind it.
+  await renderInbox("default", CAPACITY);
+  expect(screen.getByText("You recommended")).toBeTruthy();
+  expect(screen.queryByText(/The orchestrator recommend/)).toBeNull();
+  cleanup();
+
+  // Opened by a session that is no longer listed: its role is not known.
+  const { queryClient } = await renderInbox("default", RETRY);
+  expect(screen.getByText("A session recommended")).toBeTruthy();
+
+  // Opened by a live session: its role says who it is.
+  await flush();
+  const key = agentsQuery().queryKey;
+  const agents = queryClient.getQueryData<AgentsResponse>(key);
+  const first = agents?.orchestrators[0];
+  if (!agents || !first) throw new Error("no fixture agents");
+  await act(async () => {
+    queryClient.setQueryData<AgentsResponse>(key, {
+      ...agents,
+      orchestrators: [{ ...first, session_id: "01JSESS000000000000000000A", role: "builder" }],
+    });
+  });
+  expect(screen.getByText("The builder recommended")).toBeTruthy();
+});
+
 test("an item that no longer applies offers Withdraw and turns its options off", async () => {
   stubDaemon("default");
   await renderInbox("default", QUIET);
