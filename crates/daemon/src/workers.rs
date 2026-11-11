@@ -648,7 +648,7 @@ impl Source for Transcripts {
 /// cannot write is logged, the pass goes on to the others, and the
 /// poller's health shows the failure; the mark stays at or before it, so
 /// the next pass tries it again, until an hour after its observation was
-/// recorded or its session ended. The pass that tries it last logs that it
+/// recorded or its session ended. The first pass past that hour logs that it
 /// gave the copy up, and its health line counts it.
 pub struct MemoryLoads {
     store: Store,

@@ -219,10 +219,13 @@ impl Store {
     /// [`CopyPass::failed`], the pass goes on to the next one, and the mark
     /// stays at or before it, so every later pass tries it again until it
     /// is made, or until [`COPY_WINDOW_MINUTES`] after its observation was
-    /// recorded or its session ended. The try at or past that time is its
-    /// last ([`FailedCopy::given_up`]) and holds no mark: a copy that never
-    /// goes in does not make every pass read a growing history, and the
-    /// next pass does not read it again.
+    /// recorded or its session ended. The first pass at or past that time
+    /// gives it up ([`FailedCopy::given_up`]): it tries it a last time when
+    /// the observation's hour passed, and not at all when the session's
+    /// did, since a copy is owed only within an hour of the session's end.
+    /// A copy given up holds no mark, so one that never goes in does not
+    /// make every pass read a growing history, and the next pass does not
+    /// read it again.
     pub fn mem_load_owed(&mut self, ctx: &Ctx, since: Option<CopyMark>) -> Result<CopyPass> {
         let owed = self.owed_copies(ctx.now, since)?;
         let window = ctx.now.plus_minutes(-COPY_WINDOW_MINUTES);
@@ -235,14 +238,27 @@ impl Store {
             },
         };
         for (session, trigger, at, recorded_at, ended_at) in owed {
+            if ended_at.is_some_and(|ended| ended <= window) {
+                // Its session's hour passed since the last pass read it,
+                // so it is not made late, and its drop is reported.
+                pass.failed.push(FailedCopy {
+                    session_id: session,
+                    trigger,
+                    observed_at: at,
+                    error: Error::Internal(
+                        "its session ended an hour ago, before the copy went in".to_owned(),
+                    ),
+                    given_up: true,
+                });
+                continue;
+            }
             match self.mem_load_again(ctx, &session, &trigger, at) {
                 Ok(copied) if copied.value.revision_ids.is_empty() => {}
                 Ok(copied) => pass.made.push(copied.value),
                 Err(error) => {
                     // The next floor is the mark less the slack, so this
                     // observation is read again, until it is given up.
-                    let given_up = recorded_at <= window
-                        || ended_at.is_some_and(|ended: Timestamp| ended <= window);
+                    let given_up = recorded_at <= window;
                     if !given_up {
                         pass.mark.read_from = pass.mark.read_from.min(recorded_at);
                     }
@@ -264,7 +280,7 @@ impl Store {
     /// `recorded_at` and the session's `ended_at`, in observation order.
     /// With a mark, a copy the last pass read past its window (made or
     /// given up then) is not read again; one that crossed its window since
-    /// is read once more, so its last try is reported.
+    /// is read once more, so its drop is reported.
     fn owed_copies(&self, now: Timestamp, since: Option<CopyMark>) -> Result<Vec<OwedCopy>> {
         // With no mark every observation is read, so the planner, not the
         // `recorded_at` index, picks the scan.
@@ -910,6 +926,40 @@ mod tests {
         let next = Ctx::at(Actor::Daemon, past.now.plus_minutes(1));
         let third = store.mem_load_owed(&next, Some(second.mark)).unwrap();
         assert!(third.failed.is_empty(), "{:?}", third.failed);
+    }
+
+    /// A poller that did not run for longer than the copy window does not
+    /// make a copy for a session that ended over an hour ago: the drop is
+    /// reported as given up.
+    #[test]
+    fn a_stalled_pass_gives_up_a_copy_whose_session_hour_passed() {
+        let (mut store, session) = memory_store();
+        document(&store);
+        let daemon = Ctx::new(Actor::Daemon);
+        store
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .unwrap();
+        let mark = store.mem_load_owed(&daemon, None).unwrap().mark;
+        observe(
+            &mut store,
+            &session,
+            "SessionStart:clear",
+            daemon.now.plus_minutes(1),
+        );
+        let ended = daemon.now.plus_minutes(2);
+        store
+            .conn()
+            .execute(
+                "UPDATE sessions SET ended_at = ?1 WHERE id = ?2",
+                params![ended, session],
+            )
+            .unwrap();
+        let late = Ctx::at(Actor::Daemon, ended.plus_minutes(COPY_WINDOW_MINUTES + 1));
+        let pass = store.mem_load_owed(&late, Some(mark)).unwrap();
+        assert!(pass.made.is_empty(), "{:?}", pass.made);
+        assert_eq!(pass.failed.len(), 1);
+        assert!(pass.failed[0].given_up, "{:?}", pass.failed);
+        assert_eq!(triggers(&store, &session), ["startup"]);
     }
 
     /// An observation from before the session's first load owes no copy:

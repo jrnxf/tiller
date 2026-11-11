@@ -19,7 +19,7 @@ use tiller_core::state::attention::NewAttention;
 use tiller_core::state::cards::{MARK_LANDED, reopened_seq};
 use tiller_core::state::runs::EndRun;
 use tiller_core::state::{find, get, list};
-use tiller_core::{Result, Timestamp};
+use tiller_core::{Actor, Result, Timestamp};
 
 use crate::grants;
 use crate::pass::{Breach, Reconciler, Report};
@@ -287,16 +287,18 @@ impl Reconciler {
     /// finish leaves it to this sweep on a later pass. It has its own key,
     /// not the one of the item an unreadable forge opened while the
     /// approval was `uncertain`, so the developer sees the final state; its
-    /// question then says that it replaces the earlier one.
+    /// question then says that the forge answers now.
     ///
     /// Only the newest approval of its kind on an open card is asked about:
     /// one a newer approval followed is settled, so the sweep reads at most
     /// one approval per kind and open card. An approval a recovery item
-    /// already shows as `failed`, or whose recovery item the developer
-    /// answered, is not asked about again (items an earlier version opened
-    /// under the unreadable key). A key another actor holds is still tried,
-    /// so its refusal is reported ([`Reconciler::planted`]).
+    /// already shows as `failed` (one an earlier version opened under the
+    /// unreadable key) is not asked about again. A key another actor holds
+    /// is still tried, so its refusal is reported ([`Reconciler::planted`]).
     fn failed_executions(&mut self, now: Timestamp, report: &mut Report) -> Result<()> {
+        // The actor of every pass write (`Reconciler::ctx`), as in
+        // `Reconciler::key_used`.
+        let actor = Actor::Daemon.to_string();
         let failed: Vec<Approval> = list(
             self.conn(),
             "state = 'failed' AND kind IN ('merge', 'land_direct')
@@ -309,36 +311,32 @@ impl Reconciler {
                                      > (approvals.requested_at, approvals.id))
                AND NOT EXISTS (SELECT 1 FROM idempotency_keys k
                                WHERE k.key = 'reconcile:R08:failed:' || approvals.id
-                                 AND (k.actor IS NULL OR k.actor = 'daemon'))
+                                 AND (k.actor IS NULL OR k.actor = ?1))
                AND NOT EXISTS (
                    SELECT 1 FROM attention i
                    WHERE i.card_id = approvals.card_id AND i.kind = 'recovery'
                      AND CASE WHEN json_valid(i.evidence)
                               THEN json_extract(i.evidence, '$.approval_id') = approvals.id
-                                   AND (json_extract(i.evidence, '$.state') = 'failed'
-                                        OR i.answered_at IS NOT NULL)
+                                   AND json_extract(i.evidence, '$.state') = 'failed'
                               ELSE 0 END)
              ORDER BY id",
-            &[],
+            &[&actor],
         )?;
         for approval in failed {
+            let key = failed_key(&approval.id);
+            if self.still_planted(&key)? {
+                continue;
+            }
             let what = match approval.kind {
                 ApprovalKind::LandDirect => "the push did not land",
                 _ => "the merge did not happen",
             };
-            let asked: bool = self.conn().query_row(
-                "SELECT EXISTS (SELECT 1 FROM idempotency_keys WHERE key = ?1)",
-                [unreadable_key(&approval.id)],
-                |row| row.get(0),
-            )?;
-            let why = if asked {
-                format!("{what}; this replaces the earlier question about it")
+            let why = if self.key_used(&unreadable_key(&approval.id))? {
+                format!("{what}; the forge answers now, after the earlier question about it")
             } else {
                 what.to_owned()
             };
-            if let Err(error) =
-                self.failed_execution_item(&approval, &failed_key(&approval.id), &why, now, report)
-            {
+            if let Err(error) = self.failed_execution_item(&approval, &key, &why, now, report) {
                 report.error(&format!("failed approval {}", approval.id), &error);
             }
         }

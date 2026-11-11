@@ -5,8 +5,8 @@ mod common;
 
 use common::*;
 use tiller_core::domain::{
-    ApprovalAction, ApprovalKind, ApprovalState, AttentionKind, CardOutcome, Coverage, Delivery,
-    Effort, GrantKind, Reviewer, RunOutcome, RunRole, Verdict,
+    AnsweredVia, ApprovalAction, ApprovalKind, ApprovalState, AttentionKind, CardOutcome, Coverage,
+    Delivery, Effort, GrantKind, Reviewer, RunOutcome, RunRole, Verdict,
 };
 use tiller_core::state::approvals::{NewApproval, NewGrant};
 use tiller_core::state::cards::NewCard;
@@ -670,10 +670,10 @@ fn an_unreadable_execution_that_failed_says_failed() {
         "the item shows the final state: {items:?}"
     );
     assert!(
-        items
-            .iter()
-            .any(|item| item.question.contains("this replaces the earlier question")),
-        "it says it replaces the uncertain one: {items:?}"
+        items.iter().any(|item| item
+            .question
+            .contains("the forge answers now, after the earlier question")),
+        "it says it follows the uncertain one: {items:?}"
     );
 }
 
@@ -735,5 +735,81 @@ fn a_failed_execution_key_another_actor_holds_is_reported() {
             .iter()
             .any(|e| e.contains(&format!("pass key {key}"))),
         "{report:?}"
+    );
+}
+
+/// R08: the developer answered the unreadable item, and nothing acted on
+/// it, so the `failed` resolution still gets its own item.
+#[test]
+fn a_failed_execution_whose_unreadable_item_was_answered_says_failed() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let approval = w.approve(&worker, &pr, "a1a1a1a1", true);
+    w.store_mut()
+        .approval_execute(&daemon(), &approval, "a1a1a1a1")
+        .unwrap();
+    w.forge.pr_error(REPO, 7, "the forge is down");
+    w.pass(now().plus_minutes(11));
+    let card = w.run_of(&worker).card_id;
+    let items = w.open_items(&card);
+    let uncertain = items
+        .iter()
+        .find(|item| item.question.contains("is uncertain"))
+        .unwrap_or_else(|| panic!("{items:?}"));
+    w.store_mut()
+        .attention_answer(
+            &owner(),
+            None,
+            &uncertain.id,
+            "Approve again",
+            AnsweredVia::Board,
+        )
+        .unwrap();
+    w.forge.pr(REPO, 7, open_pr("a1a1a1a1"));
+    w.pass(now().plus_minutes(12));
+    assert_eq!(w.approval(&approval).state, ApprovalState::Failed);
+    let items = w.open_items(&card);
+    assert!(
+        items.iter().any(|item| item
+            .question
+            .contains("is failed: the merge did not happen")),
+        "{items:?}"
+    );
+}
+
+/// R08: an unreadable key another actor planted is no earlier question
+/// the pass asked, so the `failed` item does not refer to one.
+#[test]
+fn a_failed_item_does_not_refer_to_a_question_another_actor_planted() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let approval = w.approve(&worker, &pr, "a1a1a1a1", true);
+    w.store_mut()
+        .approval_execute(&daemon(), &approval, "a1a1a1a1")
+        .unwrap();
+    plant_key(
+        &w,
+        &format!("reconcile:R08:execution:{approval}"),
+        Some("session:another"),
+    );
+    w.forge.pr(REPO, 7, open_pr("a1a1a1a1"));
+    w.pass(now());
+    let card = w.run_of(&worker).card_id;
+    let items = w.open_items(&card);
+    let item = items
+        .iter()
+        .find(|item| {
+            item.question
+                .contains("is failed: the merge did not happen")
+        })
+        .unwrap_or_else(|| panic!("{items:?}"));
+    assert!(
+        !item.question.contains("earlier question"),
+        "{}",
+        item.question
     );
 }
