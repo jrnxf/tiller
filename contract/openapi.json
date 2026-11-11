@@ -9408,7 +9408,7 @@
             "items": {
               "$ref": "#/components/schemas/MemoryEvalJob"
             },
-            "description": "The holdout evals the board started that are running, or that failed\nsince the daemon started."
+            "description": "The holdout evals the board started that are running, or that failed\nwith no later recorded run of their change set, across restarts."
           }
         },
         "additionalProperties": false

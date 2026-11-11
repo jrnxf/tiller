@@ -6,7 +6,8 @@
 //! A run takes model quota, so a start is refused under this host's quota
 //! floor for new work, and the plan says how many model runs and how much
 //! of the week it will probably take. One eval runs at a time. A run that
-//! records nothing keeps its reason here until the daemon stops. A run the
+//! records nothing keeps its reason here and in an `eval_run.failed` event,
+//! which the memory view still shows after the daemon restarts. A run the
 //! daemon stops is stopped with everything its runner started, and only
 //! the newest runs' directories stay under `<home>/evals`.
 
@@ -27,7 +28,7 @@ use tiller_agents::spawn::quota_floor;
 use tiller_core::domain::{ChangeSet, QuotaWindow, RunRole};
 use tiller_core::memory::document_path;
 use tiller_core::state::approvals::active_away;
-use tiller_core::state::learning::{self, Learning};
+use tiller_core::state::learning::{self, EvalFailure, Learning};
 use tiller_core::state::list;
 use tiller_core::{Actor, Ctx, Error, Store, Timestamp, ids};
 use tiller_herdr::process::Interrupt;
@@ -88,13 +89,37 @@ impl Evals {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// What the memory view shows, newest first.
-    pub fn jobs(&self) -> Vec<MemoryEvalJob> {
-        self.lock()
+    /// What the memory view shows, newest first: this daemon's jobs, then
+    /// the failures its `eval_run.failed` events keep for every other
+    /// proposal, so a failure outlives a restart.
+    pub fn jobs(&self, conn: &rusqlite::Connection) -> tiller_core::Result<Vec<MemoryEvalJob>> {
+        let mut jobs: Vec<MemoryEvalJob> = self
+            .lock()
             .iter()
             .rev()
             .map(|job| job.view.clone())
-            .collect()
+            .collect();
+        for failed in learning::failed_evals(conn, KEPT)? {
+            if jobs.len() >= KEPT {
+                break;
+            }
+            if jobs
+                .iter()
+                .any(|job| job.proposal_id == failed.failure.proposal_id)
+            {
+                continue;
+            }
+            jobs.push(MemoryEvalJob {
+                proposal_id: failed.failure.proposal_id,
+                change_set: failed.change_set,
+                cases: failed.failure.cases,
+                started_at: failed.failure.started_at,
+                minutes: failed.failure.minutes,
+                error: Some(failed.failure.error),
+                finished_at: Some(failed.finished_at),
+            });
+        }
+        Ok(jobs)
     }
 
     fn running(&self) -> Option<MemoryEvalJob> {
@@ -161,10 +186,30 @@ impl Evals {
         self.lock().retain(|job| job.key != key);
     }
 
-    fn failed(&self, key: &str, error: String) {
-        if let Some(job) = self.lock().iter_mut().find(|job| job.key == key) {
-            job.view.error = Some(error);
-            job.view.finished_at = Some(Timestamp::now().to_string());
+    /// A run that recorded nothing: the job keeps why, and so does an
+    /// `eval_run.failed` event on `set`, which the view reads after a
+    /// restart.
+    fn failed(&self, store: Option<&mut Store>, set: &str, key: &str, error: String) {
+        let mut jobs = self.lock();
+        let Some(job) = jobs.iter_mut().find(|job| job.key == key) else {
+            return;
+        };
+        job.view.error = Some(error.clone());
+        job.view.finished_at = Some(Timestamp::now().to_string());
+        let failure = EvalFailure {
+            proposal_id: job.view.proposal_id.clone(),
+            cases: job.view.cases,
+            started_at: job.view.started_at.clone(),
+            minutes: job.view.minutes,
+            error,
+        };
+        drop(jobs);
+        let Some(store) = store else {
+            tracing::warn!(change_set = %set, "the failed holdout eval is kept until the daemon stops only: state.db did not open");
+            return;
+        };
+        if let Err(error) = store.eval_run_fail(&Ctx::new(Actor::Daemon), set, failure) {
+            tracing::warn!(%error, change_set = %set, "the failed holdout eval is kept until the daemon stops only");
         }
     }
 }
@@ -486,6 +531,7 @@ pub(crate) async fn eval_start(
             evals.start(key, job.clone());
             let registry = evals.clone();
             let job_key = key.to_owned();
+            let set_id = set.id.clone();
             let key = key.to_owned();
             let started = registry.spawn(move |interrupt| {
                 let recorded = holdout::run(&evals_dir, &out, &candidate, members, interrupt)
@@ -507,13 +553,14 @@ pub(crate) async fn eval_start(
                     Ok(_) => evals.recorded(&key),
                     Err(error) => {
                         tracing::warn!(%error, change_set = %set.name, "the holdout eval recorded nothing");
-                        evals.failed(&key, error);
+                        let mut store = Store::open_current(&db).ok();
+                        evals.failed(store.as_mut(), &set.id, &key, error);
                     }
                 }
             });
             if let Err(error) = started {
                 let error = format!("start the holdout eval: {error}");
-                registry.failed(&job_key, error.clone());
+                registry.failed(Some(&mut w.store), &set_id, &job_key, error.clone());
                 return Err(Error::Internal(error));
             }
             Ok(json!(job))

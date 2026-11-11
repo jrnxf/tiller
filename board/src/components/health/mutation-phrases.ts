@@ -41,6 +41,7 @@ const PHRASE_TEXT: Record<string, string> = {
   "dep.release": "released a dependency",
   "deploy.record": "recorded a deploy",
   "eval_run.record": "recorded an eval run",
+  "eval_run.fail": "kept why an eval run recorded nothing",
   "grant.create": "created a grant",
   "grant.revoke": "revoked a grant",
   "guard.breach": "recorded a guard breach",

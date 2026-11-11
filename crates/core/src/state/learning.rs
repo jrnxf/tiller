@@ -109,6 +109,71 @@ pub struct EvalResult {
     pub result_path: Option<String>,
 }
 
+/// A holdout eval the board started that recorded nothing, as its
+/// `eval_run.failed` event keeps it (learning-loop.md, section 9).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EvalFailure {
+    /// The suggestion the board ran it for.
+    pub proposal_id: String,
+    pub cases: u64,
+    pub started_at: String,
+    /// The estimated minutes it would run.
+    pub minutes: f64,
+    /// Why it recorded nothing.
+    pub error: String,
+}
+
+/// An [`EvalFailure`] read back, with its change set's name and when it
+/// ended.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FailedEval {
+    pub failure: EvalFailure,
+    pub change_set: String,
+    pub finished_at: String,
+}
+
+/// The longest failure reason an `eval_run.failed` event keeps, in
+/// characters.
+pub const EVAL_ERROR_MAX_CHARS: usize = 2_000;
+
+/// The newest failed holdout eval of each proposal, newest first and at most
+/// `limit`, leaving out one whose change set recorded a run after it.
+pub fn failed_evals(conn: &Connection, limit: usize) -> Result<Vec<FailedEval>> {
+    let mut statement = conn.prepare(
+        "SELECT failed.payload, failed.at FROM events AS failed
+         WHERE failed.kind = 'eval_run.failed'
+           AND failed.seq = (
+               SELECT max(newer.seq) FROM events AS newer
+               WHERE newer.kind = 'eval_run.failed'
+                 AND json_extract(newer.payload, '$.proposal_id')
+                     = json_extract(failed.payload, '$.proposal_id'))
+           AND NOT EXISTS (
+               SELECT 1 FROM events AS recorded
+               WHERE recorded.kind = 'eval_run.recorded' AND recorded.seq > failed.seq
+                 AND json_extract(recorded.payload, '$.change_set') = failed.entity_id)
+         ORDER BY failed.seq DESC LIMIT ?1",
+    )?;
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let rows = statement.query_map([limit], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut failed = Vec::new();
+    for row in rows {
+        let (payload, at) = row?;
+        let payload: Value = serde_json::from_str(&payload)?;
+        let change_set = payload["change_set_name"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        failed.push(FailedEval {
+            failure: serde_json::from_value(payload)?,
+            change_set,
+            finished_at: at,
+        });
+    }
+    Ok(failed)
+}
+
 /// The gate's verdict on one proposal (learning-loop.md, section 7).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Gate {
@@ -1065,6 +1130,34 @@ impl Store {
                 })),
             )?;
             get(tx.conn(), "eval run", &id)
+        })
+    }
+
+    /// `eval_run.fail` (daemon): a holdout eval the board started for the
+    /// set recorded nothing. Only its `eval_run.failed` event keeps it, so
+    /// the board still shows why after the daemon restarts. The reason is
+    /// cut to [`EVAL_ERROR_MAX_CHARS`].
+    pub fn eval_run_fail(
+        &mut self,
+        ctx: &Ctx,
+        set: &str,
+        failure: EvalFailure,
+    ) -> Result<Applied<ChangeSet>> {
+        super::projects::require_daemon(&ctx.actor, "eval_run.fail")?;
+        self.write(ctx, "eval_run.fail", None, |tx| {
+            let set = resolve_set(tx.conn(), set)?;
+            let error: String = failure.error.chars().take(EVAL_ERROR_MAX_CHARS).collect();
+            tx.event(
+                NewEvent::new("change_set", &set.id, "eval_run.failed").payload(json!({
+                    "proposal_id": failure.proposal_id,
+                    "change_set_name": set.name,
+                    "cases": failure.cases,
+                    "started_at": failure.started_at,
+                    "minutes": failure.minutes,
+                    "error": error,
+                })),
+            )?;
+            Ok(set)
         })
     }
 

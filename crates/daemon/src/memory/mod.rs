@@ -309,9 +309,10 @@ pub(crate) async fn view(
     Query(query): Query<MemoryQuery>,
 ) -> ApiResult<MemoryResponse> {
     let home = home(&state);
-    let evals = state.0.evals.jobs();
+    let evals = state.0.evals.clone();
     let project = query.scope.unwrap_or_else(|| ids::FLEET_PROJECT.to_owned());
     let view = read(&state, move |store| {
+        let evals = evals.jobs(store.conn())?;
         let repo = Repo::at(&home);
         let list = scrub::terms(&home);
         let view = store.memory_view(

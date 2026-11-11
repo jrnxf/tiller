@@ -1273,7 +1273,7 @@ export interface MemoryResponse {
   docs: MemoryDocSummary[];
   doc: MemoryDocument;
   // The holdout evals the board started that are running, or that failed
-  // since the daemon started.
+  // with no later recorded run of their change set, across restarts.
   evals: MemoryEvalJob[];
 }
 

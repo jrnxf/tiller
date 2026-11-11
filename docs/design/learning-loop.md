@@ -141,6 +141,7 @@ A model upgrade changes the `claude` part of every new hash; `tiller learn statu
 | `change_set.close` | owner (`abandoned`), sweep (`window_complete`), `mem.repropose` (`abandoned`, a set it leaves empty) | set not `closed` | `change_sets` | `change_set.closed` |
 | `change_set.measure` | sweep | set `open`, a member `applied` | `change_sets.state`, `measuring_from` | `change_set.measuring` |
 | `eval_run.record` | `tiller learn eval` (owner) | set exists; result parses | `eval_runs` | `eval_run.recorded` |
+| `eval_run.fail` | the daemon, when a holdout eval the board started records nothing | set exists; the reason is cut to 2,000 characters | none (the event is the record) | `eval_run.failed` |
 | `config.manifest_record` | `tiller spawn` | none; a known hash writes nothing | `config_manifests` | `config.manifest_recorded` |
 
 Every row is authoritative and backed up with `state.db` (`state.md` section 10). `result_path` and transcript paths are local pointers; nothing in these tables is committed to git.

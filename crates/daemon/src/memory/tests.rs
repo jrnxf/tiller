@@ -1152,6 +1152,39 @@ async fn a_holdout_eval_that_records_nothing_keeps_its_reason() {
     assert_eq!(shown["eval_clears"], true, "it can run again");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_holdout_eval_is_still_shown_after_a_restart() {
+    let mut home = home();
+    home.add("k-1", "alpha", RULE_SECTION, "Run the slow suite")
+        .await;
+    let proposal = propose(&home, "alpha", "The parser test flakes");
+    let checkout = evals_checkout("exit 3");
+    point_at(&home, checkout.path());
+    weekly(&home, 60.0);
+    ok(&home
+        .post(
+            &format!("/api/v1/memory/proposals/{proposal}/eval"),
+            json!({"idempotency_key": "e-1"}),
+        )
+        .await);
+    let before = settled(&home, "alpha").await["evals"][0].clone();
+    // A new daemon on the same home starts with no jobs in memory.
+    home.evals = Evals::default();
+    home.app = app_with_evals(home.path(), home.evals.clone());
+    let view = home.view("alpha").await;
+    let job = &view["evals"][0];
+    assert_eq!(job["proposal_id"], proposal.as_str(), "{view}");
+    assert_eq!(job["error"], before["error"]);
+    assert!(
+        job["error"]
+            .as_str()
+            .unwrap()
+            .contains("evals/run.sh exited with code 3")
+    );
+    assert!(job["finished_at"].is_string(), "{job}");
+    assert_eq!(view["evals"].as_array().unwrap().len(), 1, "{view}");
+}
+
 fn gone(pid: &str) -> bool {
     let out = Command::new("ps")
         .args(["-o", "stat=", "-p", pid])
