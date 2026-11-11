@@ -755,7 +755,7 @@ impl Store {
     /// and 6). Owner, daemon.
     pub fn learning_sweep(&mut self, ctx: &Ctx, config: &Learning) -> Result<Applied<Swept>> {
         self.write(ctx, "learning.sweep", None, |tx| {
-            require_owner_or_daemon(tx.actor(), "the learning sweep")?;
+            require_owner_or_daemon(tx.actor(), "tiller retro sweep")?;
             let mut swept = Swept::default();
 
             // Closed cards with no retro for their close.

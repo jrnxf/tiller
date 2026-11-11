@@ -894,10 +894,28 @@ fn owner_retro_learn_and_agent_commands_denied() {
         ),
         ("sh -c 'tiller agent focus alpha-1'", Some(Code::OwnerOnly)),
         ("echo run | xargs tiller retro", Some(Code::OwnerOnly)),
-        ("tiller retro list", None),
-        ("tiller retro show 01JABC", None),
-        ("tiller learn status", None),
+        // A second word not known before the command runs may be the
+        // owner's one, so it is denied like an unseen one.
+        ("tiller agent \"$SUB\" alpha-1", Some(Code::OwnerOnly)),
+        ("tiller retro $(echo run) 01JABC", Some(Code::OwnerOnly)),
+        ("tiller learn $VERB 01JABC", Some(Code::OwnerOnly)),
+        ("tiller mem \"$X\" --class rule", Some(Code::OwnerOnly)),
+        ("tiller config ${OP} k v", Some(Code::OwnerOnly)),
+        ("tiller migrate \"$WAY\"", Some(Code::OwnerOnly)),
+        // The CLI refuses these to every session (`refuse_fleet`), or core
+        // takes them only from the owner or the daemon.
+        ("tiller retro list", Some(Code::OwnerOnly)),
+        ("tiller retro show 01JABC", Some(Code::OwnerOnly)),
+        ("tiller retro sweep", Some(Code::OwnerOnly)),
+        ("tiller learn status", Some(Code::OwnerOnly)),
+        ("tiller learn bundle placement 01JABC", Some(Code::OwnerOnly)),
+        ("tiller learn add placement 01JABC", Some(Code::OwnerOnly)),
+        ("tiller learn abandon placement", Some(Code::OwnerOnly)),
+        ("tiller learn gate 01JABC", None),
         ("tiller agent relaunch alpha-1", None),
+        ("tiller agent interrupt \"$SESSION\"", None),
+        ("tiller mem note alpha --text \"$T\"", None),
+        ("tiller config get \"$KEY\"", None),
     ];
     for role in Role::ALL {
         for (command, verdict) in CASES {
@@ -909,9 +927,11 @@ fn owner_retro_learn_and_agent_commands_denied() {
     }
 }
 
-/// Every `require_owner` call site in the CLI, as `(label, file)`. Each call
-/// passes a string literal that names the command; a call that does not is
-/// a failure, so a new owner command cannot hide from the cross-check.
+/// Every call site of a gate that refuses a command to the fleet, as
+/// `(label, file)`: `require_owner` and `refuse_fleet` in the CLI, and
+/// `require_owner_or_daemon` in core's learning state. Each call passes a
+/// string literal that names the command; a call that does not is a failure,
+/// so a new owner command cannot hide from the cross-check.
 fn cli_owner_labels() -> Vec<(String, String)> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         for entry in fs::read_dir(dir).unwrap() {
@@ -923,24 +943,34 @@ fn cli_owner_labels() -> Vec<(String, String)> {
             }
         }
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../cli/src");
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let mut files = Vec::new();
-    walk(&root, &mut files);
+    walk(&crates.join("cli/src"), &mut files);
+    files.push(crates.join("core/src/state/learning.rs"));
     let mut labels = Vec::new();
     for file in files {
         let source = fs::read_to_string(&file).unwrap();
-        let shown = file.strip_prefix(&root).unwrap().display().to_string();
-        for (at, _) in source.match_indices("require_owner(") {
-            if source[..at].ends_with("fn ") {
-                continue;
+        let shown = file.strip_prefix(&crates).unwrap().display().to_string();
+        let gates: &[&str] = if shown.starts_with("cli/") {
+            &["require_owner(", "refuse_fleet("]
+        } else {
+            &["require_owner_or_daemon("]
+        };
+        for gate in gates {
+            for (at, _) in source.match_indices(gate) {
+                if source[..at].ends_with("fn ") {
+                    continue;
+                }
+                // The label is the call's first string literal.
+                let call = &source[at + gate.len()..];
+                let call = &call[..call.find(';').unwrap_or(call.len())];
+                let label = call
+                    .split_once('"')
+                    .and_then(|(_, rest)| rest.split_once('"'))
+                    .map(|(label, _)| label.to_owned())
+                    .unwrap_or_else(|| panic!("{shown}: {gate} takes a string literal"));
+                labels.push((label, shown.clone()));
             }
-            let rest = source[at + "require_owner(".len()..].trim_start();
-            let label = rest
-                .strip_prefix('"')
-                .and_then(|rest| rest.split_once('"'))
-                .map(|(label, _)| label.to_owned())
-                .unwrap_or_else(|| panic!("{shown}: require_owner takes a string literal"));
-            labels.push((label, shown.clone()));
         }
     }
     labels

@@ -168,7 +168,7 @@ fn gh_flag(args: &[Arg], short: Option<char>, long: &str, flags: &GhFlags) -> bo
     unknown > 0 && words.saturating_sub(2) + unknown > flags.slots
 }
 
-/// The base `gh pr edit` sets:`--base <b>`, `--base=<b>`, `-B <b>` or
+/// The base `gh pr edit` sets: `--base <b>`, `--base=<b>`, `-B <b>` or
 /// `-B<b>`. A flag with no value after it is a base the guard cannot read.
 fn pr_base(args: &[Arg]) -> Option<Arg> {
     let mut j = 0;
@@ -2999,8 +2999,11 @@ impl Walker<'_, '_> {
                 shown,
             );
         }
-        // `xargs tiller migrate` takes `down` from its input.
-        let unseen = appended && positionals.len() < 2;
+        // `xargs tiller migrate` takes `down` from its input, and
+        // `tiller agent "$SUB"` takes `restart` from the shell: a second word
+        // the guard cannot read may be the owner's one.
+        let unseen = (appended && positionals.len() < 2)
+            || positionals.get(1).is_some_and(|arg| !arg.fixed);
         let second = positionals
             .get(1)
             .map(|arg| arg.text.as_str())
@@ -3021,8 +3024,15 @@ impl Walker<'_, '_> {
             "config" => unseen || second == "set",
             "project" => second != "list",
             "mem" => unseen || second == "approve",
-            "retro" => unseen || second == "run",
-            "learn" => unseen || second == "eval",
+            // Every retro command is the owner's or the curator's: the CLI
+            // refuses `list` and `show` to any session, core takes `sweep`
+            // and `run` only from the owner or the daemon, and `finish` only
+            // from the retro's curator.
+            "retro" => true,
+            // `gate` and `config` are reads any role may run. The CLI refuses
+            // `status` to any session, and core takes `eval`, `bundle`, `add`
+            // and `abandon` only from the owner or the daemon.
+            "learn" => unseen || !matches!(second, "" | "gate" | "config"),
             "agent" => unseen || second == "restart" || second == "focus",
             _ => false,
         };
