@@ -156,6 +156,29 @@ fn the_home_database_is_accepted_for_the_daemon() {
     assert!(terminate(&mut daemon).success());
 }
 
+/// The address line is the readiness signal: a request that follows it must
+/// find every poller, not a 404 for one the daemon registers a moment later.
+#[test]
+fn every_poller_is_registered_when_the_daemon_says_it_is_listening() {
+    let world = World::initialized();
+    for _ in 0..5 {
+        let mut daemon = start(&world);
+        let body = health(daemon.port);
+        let sources: Vec<&str> = body["pollers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|poller| poller["source"].as_str())
+            .collect();
+        // The first poller, the reconcile loop and one from the middle of the
+        // list `workers::start` spawns.
+        for expected in ["herdr:local", "reconcile", "memory_loads"] {
+            assert!(sources.contains(&expected), "{expected} in {sources:?}");
+        }
+        assert!(terminate(&mut daemon).success());
+    }
+}
+
 #[test]
 fn a_second_daemon_names_the_first_and_exits_zero() {
     let world = World::initialized();
