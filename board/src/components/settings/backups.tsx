@@ -3,12 +3,13 @@ import { useState } from "react";
 
 import type { BackupRow } from "../../lib/api-types";
 import { formatLisbonDay } from "../../lib/clock";
-import { backupsPath, backupsQuery, queryKeyFor } from "../../lib/queries";
+import { ReadError, backupsPath, backupsQuery, queryKeyFor } from "../../lib/queries";
 import { ActionError, sendMutation } from "../attention/api";
 import { ulid } from "../attention/ulid";
 import "./settings.css";
 
-// How many backups the list shows. The daemon keeps more.
+// How many backups the list shows. The daemon keeps more, and sends as many
+// as this.
 const SHOWN = 6;
 
 const MB = 1024 * 1024;
@@ -21,11 +22,22 @@ export function sizeText(bytes: number): string {
   return `${Math.round(mb)} MB`;
 }
 
-// Why a copy did not verify, as a sentence: the daemon's reason, then what
-// the owner can count on and do.
-function failureText(error: string | null): string {
-  const reason = (error ?? "the copy did not verify").replace(/[.\s]+$/, "");
-  return `Not verified: ${reason}. The previous verified backup is kept. Try again.`;
+// Why a backup failed, as a sentence: the daemon's reason, then what the
+// owner can count on and do. A run that left no copy (no size) kept the
+// previous backup; a listed copy whose file went or changed cannot be used.
+function failureText(row: BackupRow): string {
+  const reason = (row.error ?? "the copy did not verify").replace(/[.\s]+$/, "");
+  const next =
+    row.size === null
+      ? "The previous verified backup is kept. Try again."
+      : "This copy is missing or changed and cannot be restored.";
+  return `Not verified: ${reason}. ${next}`;
+}
+
+// Why the list did not load, as a sentence.
+function listErrorText(error: unknown): string {
+  const reason = error instanceof ReadError ? error.reason : null;
+  return `The backups did not load${reason ? `: ${reason.replace(/[.\s]+$/, "")}` : ""}. Back up now still works.`;
 }
 
 function BackupLine({ row }: { row: BackupRow }) {
@@ -43,7 +55,7 @@ function BackupLine({ row }: { row: BackupRow }) {
       <div className="set-text">
         <h2>{row.kind === "nightly" ? "Nightly" : "By hand"}</h2>
         <p>{detail}</p>
-        {failed ? <p className="set-error">{failureText(row.error)}</p> : null}
+        {failed ? <p className="set-error">{failureText(row)}</p> : null}
       </div>
       <div className="set-value">
         <span className={`set-status ${failed ? "fail" : "ok"}`}>
@@ -59,14 +71,15 @@ function BackupLine({ row }: { row: BackupRow }) {
 // is the owner's, so the section shows only to the owner.
 export function Backups({ host }: { host: string | null }) {
   const queryClient = useQueryClient();
-  const list = useQuery({
+  const query = useQuery({
     ...backupsQuery(),
-    refetchInterval: (query) => (query.state.data?.running ? 2000 : false),
-  }).data;
+    refetchInterval: (read) => (read.state.data?.running ? 2000 : false),
+  });
+  const list = query.data;
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  if (!list) return null;
-  const running = starting || list.running;
+  if (!list && !query.isError) return null;
+  const running = starting || (list?.running ?? false);
   const refresh = () => queryClient.invalidateQueries({ queryKey: queryKeyFor(backupsPath) });
   const backUp = () => {
     if (running) return;
@@ -105,7 +118,13 @@ export function Backups({ host }: { host: string | null }) {
             </div>
           </div>
         ) : null}
-        {list.backups.length === 0 ? (
+        {!list ? (
+          <div className="set-row" data-testid="backups-unread">
+            <div className="set-text">
+              <p className="set-error">{listErrorText(query.error)}</p>
+            </div>
+          </div>
+        ) : list.backups.length === 0 ? (
           <div className="set-row" data-testid="no-backups">
             <div className="set-text">
               <h2>No backup yet</h2>
@@ -115,23 +134,30 @@ export function Backups({ host }: { host: string | null }) {
         ) : (
           list.backups.slice(0, SHOWN).map((row) => <BackupLine key={row.id} row={row} />)
         )}
-        <div className="set-row">
-          <div className="set-text">
-            <h2>Folder</h2>
-            <p>Where the copies are kept</p>
+        {list ? (
+          <div className="set-row">
+            <div className="set-text">
+              <h2>Folder</h2>
+              <p>Where the copies are kept</p>
+            </div>
+            <div className="set-value">
+              <code>{list.folder}</code>
+            </div>
           </div>
-          <div className="set-value">
-            <code>{list.folder}</code>
-          </div>
-        </div>
+        ) : null}
         <div className="set-row">
           <div className="set-text">
             <h2>Export and restore</h2>
-            <p>They write outside this folder or replace the state, so they stay in a terminal</p>
+            <p>
+              They write outside this folder or replace the state, so they stay in a terminal. Stop
+              the daemon before a restore, and run it with --dry-run first. With no file it takes
+              the newest verified backup.
+            </p>
           </div>
-          <div className="set-value set-commands">
+          <div className="set-value set-commands" data-testid="backup-commands">
             <code>tiller export --jsonl &lt;dir&gt;</code>
-            <code>tiller restore &lt;file&gt;</code>
+            <code>tiller restore --dry-run</code>
+            <code>tiller restore {list ? list.folder : "<folder>"}/&lt;file&gt; --dry-run</code>
           </div>
         </div>
       </div>

@@ -84,6 +84,8 @@ export type Scenario =
   | "blocked"
   | "backing-up"
   | "backup-failed"
+  // Settings > Backups when the manifest does not parse (P20).
+  | "backups-unread"
   // A paused run, a dead pane and a silent orchestrator (P11).
   | "lifecycle"
   // A project delete blocked by a live run, then by a live session (P15).
@@ -121,6 +123,7 @@ export const SCENARIOS: readonly Scenario[] = [
   "blocked",
   "backing-up",
   "backup-failed",
+  "backups-unread",
   "lifecycle",
   "delete-blocked",
   "merge-ready",
