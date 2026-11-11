@@ -401,6 +401,21 @@ fn a_manual_resume_clears_the_pause() {
     assert_eq!(rig.events("run.unpaused", &spawned.run.id), 2);
 }
 
+/// A resume whose launch line never reaches the pane leaves the pause in
+/// place, so the run's alarms stay quiet while it is still stopped.
+#[test]
+fn a_manual_resume_that_fails_to_start_keeps_the_pause() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    pause(&mut rig, &spawned.run.id);
+    rig.herdr.set_screen(&spawned.pane_id, Screen::Shell);
+    rig.herdr.refuse("send_text");
+    let ctx = rig.orchestrator();
+    resume_it(&mut rig, &ctx, &quick(), &spawned.run.id).unwrap_err();
+    assert!(rig.run(&spawned.run.id).pause_until.is_some());
+    assert_eq!(rig.events("run.unpaused", &spawned.run.id), 0);
+}
+
 #[test]
 fn resume_relaunches_claude_resume_in_its_pane() {
     let mut rig = Rig::new();

@@ -390,7 +390,6 @@ pub fn resume(
             }),
         )?
         .events;
-    events.extend(store.run_unpause(&unkeyed, &run.id)?.events);
 
     let card: Card = get(store.conn(), "card", &run.card_id)?;
     let pane_id = match pane {
@@ -419,6 +418,9 @@ pub fn resume(
     let warning = type_line(store, world.herdr, run, &session.id, &pane_id, &line)?;
     let (started, evidence) =
         wait_started(store, world.herdr, waits, &session.id, &pane_id, since)?;
+    // The pause clears only once the session is seen running: a resume that
+    // failed to start leaves the run paused and its alarms quiet.
+    events.extend(store.run_unpause(&unkeyed, &run.id)?.events);
     Ok(Applied {
         value: Resumed {
             run: get(store.conn(), "run", &run.id)?,
