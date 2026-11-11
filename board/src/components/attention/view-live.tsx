@@ -3,7 +3,7 @@ import { useState } from "react";
 
 import { TerminalIcon } from "../board/icons";
 import { LiveTerminal } from "../board/live-terminal";
-import { agentName, useSessionAgent } from "./agent-name";
+import { agentTitle, useSessionAgent } from "./agent-name";
 
 // View live: the session's own live terminal, the Agents view's expanded
 // one, opened over the page and closed back to it. A saved machine's agent
@@ -11,7 +11,7 @@ import { agentName, useSessionAgent } from "./agent-name";
 export function ViewLive({ sessionId }: { sessionId: string }) {
   const [open, setOpen] = useState(false);
   const { agent, saved: remote } = useSessionAgent(sessionId);
-  const name = agentName(agent);
+  const name = agentTitle(agent);
   return (
     <>
       <button

@@ -39,7 +39,7 @@ type Answer =
 
 // A prompt read that failed: `status` is the daemon's, or null when it did
 // not answer or found no dialog yet.
-class ReadError extends Error {
+class PromptReadError extends Error {
   constructor(
     message: string,
     readonly status: number | null,
@@ -53,7 +53,7 @@ class ReadError extends Error {
 // machine's agent, a session that waits on nothing) stays one.
 function tryAgain(failures: number, error: Error): boolean {
   if (failures >= 2) return false;
-  const status = error instanceof ReadError ? error.status : null;
+  const status = error instanceof PromptReadError ? error.status : null;
   return status === null || status >= 500;
 }
 
@@ -109,9 +109,9 @@ export function AnswerStrip({
     queryKey: ["prompt", sessionId, next],
     queryFn: async ({ signal }) => {
       const result = await readPane<PromptRead>(promptPath(sessionId), signal);
-      if (!result.ok) throw new ReadError(result.detail, result.status);
+      if (!result.ok) throw new PromptReadError(result.detail, result.status);
       if (result.body.reason === "no_dialog") {
-        throw new ReadError("no dialog on the screen yet", null);
+        throw new PromptReadError("no dialog on the screen yet", null);
       }
       return result.body;
     },

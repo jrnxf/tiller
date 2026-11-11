@@ -4612,13 +4612,16 @@ const DIALOG_LEFT_EVERY: std::time::Duration = std::time::Duration::from_millis(
 /// Waits, a short while at most, for the dialog an answer went to to leave
 /// the pane: the agent redraws a moment after it reads the keys. A second
 /// answer waits on this turn, so it reads the redrawn screen. A read that
-/// fails ends the wait; the answer was sent either way.
+/// fails, or one still running at the bound, ends the wait; the answer was
+/// sent either way. The turn is the daemon's own: the endpoint's contract
+/// (`protocol.md` 7.4) is unchanged.
 async fn dialog_left(state: &AppState, pane: &str, wait: prompt::Wait, screen: &str) {
     let until = tokio::time::Instant::now() + DIALOG_LEFT_WAIT;
-    while tokio::time::Instant::now() < until {
+    while tokio::time::Instant::now() + DIALOG_LEFT_EVERY < until {
         tokio::time::sleep(DIALOG_LEFT_EVERY).await;
-        match read_dialog(state, pane, wait.clone()).await {
-            Ok(Some(dialog)) if dialog.prompt.screen == screen => continue,
+        let read = tokio::time::timeout_at(until, read_dialog(state, pane, wait.clone()));
+        match read.await {
+            Ok(Ok(Some(dialog))) if dialog.prompt.screen == screen => continue,
             _ => return,
         }
     }
@@ -9202,8 +9205,10 @@ esac"#,
 case "$*" in
 *"pane read"*)
   [ -e '{dir}/slow' ] && sleep 0.3
+  [ -e '{dir}/hang' ] && sleep 3
   if [ -e '{dir}/screen' ]; then cat '{dir}/screen'; else printf 'one\n\033[34mtwo\033[0m\n'; fi;;
 *"pane send-keys"*)
+  mv '{dir}/hang-after-keys' '{dir}/hang' 2>/dev/null
   mv '{dir}/after-keys' '{dir}/screen' 2>/dev/null || true;;
 *"pane layout"*)
   read cols rows < '{dir}/size'
@@ -9640,6 +9645,53 @@ esac"#,
         assert_eq!(other["reason"], "no_dialog", "{other}");
         let late = send(&app, mutation("POST", &answer, press(screen, 2), &owner)).await;
         assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
+    }
+
+    #[tokio::test]
+    async fn an_answer_waits_for_its_dialog_to_leave_no_longer_than_its_bound() {
+        let mut fleet = Fleet::new();
+        let session = fleet.worker("w2:p1");
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+        let app = mirror_app(&fleet, dir);
+        let cookie = owner_cookie(fleet.dir.path());
+        let owner = [("cookie", cookie.as_str())];
+        let read = format!("/api/v1/agents/{session}/prompt");
+        let answer = format!("/api/v1/agents/{session}/prompt/answer");
+        let trust = include_str!("../../herdr/tests/fixtures/claude/trust-dialog.ansi");
+        std::fs::write(dir.join("screen"), trust).unwrap();
+        fleet
+            .open()
+            .conn()
+            .execute(
+                "UPDATE sessions SET activity = 'waiting_input', activity_observed_at = ?2
+                 WHERE id = ?1",
+                rusqlite::params![session, at(0)],
+            )
+            .unwrap();
+        let shown = send(&app, mutation("POST", &read, json!({}), &owner)).await;
+        let shown: Value = serde_json::from_str(&shown.body).unwrap();
+        let screen = shown["prompt"]["screen"].as_str().unwrap().to_owned();
+
+        // Once the keys went, every screen read hangs.
+        std::fs::write(dir.join("hang-after-keys"), "").unwrap();
+        let started = std::time::Instant::now();
+        let sent = send(
+            &app,
+            mutation(
+                "POST",
+                &answer,
+                json!({"option": 2, "screen": screen}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
+        assert!(
+            started.elapsed() < DIALOG_LEFT_WAIT + std::time::Duration::from_millis(1500),
+            "the answer took {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]

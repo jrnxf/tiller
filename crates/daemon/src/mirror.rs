@@ -119,7 +119,7 @@ impl Mirrors {
 
     /// Waits for the session's turn to answer its prompt: one answer at a
     /// time, so a second tap reads the screen only after the first one's
-    /// keys went (`protocol.md` 7.4). The turn ends when the guard drops.
+    /// keys went. The turn ends when the guard drops.
     pub async fn answer_turn(&self, session: &str) -> OwnedMutexGuard<()> {
         let lock = {
             let mut answers = self.answers.lock().unwrap_or_else(PoisonError::into_inner);

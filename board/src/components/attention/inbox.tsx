@@ -35,7 +35,14 @@ import { useAmbiguousIds, useStanding, useNamedProjects } from "../board/peer-st
 import { readPane, terminalTailPath } from "../board/terminal-stream";
 import type { Tail } from "../board/terminal-stream";
 import { AwayBriefDetail, AwayBriefRow } from "./away-brief";
-import { answeredStore, dropStaleSent, markSent, sentStore, withdrawnStore } from "./answered";
+import {
+  answeredStore,
+  clearSent,
+  dropStaleSent,
+  markSent,
+  sentStore,
+  withdrawnStore,
+} from "./answered";
 import type { Withdrawn } from "./answered";
 import { AnswerForm } from "./answer";
 import { ApproveBlock } from "./approve";
@@ -66,7 +73,7 @@ import {
 } from "./icons";
 import { Terminal } from "./terminal";
 import { ViewLive } from "./view-live";
-import { agentName, useSessionAgent } from "./agent-name";
+import { agentName, useSavedMachine, useSessionAgent } from "./agent-name";
 import { WithdrawButton } from "./withdraw";
 import "./inbox.css";
 
@@ -405,7 +412,7 @@ function onSaved(name: string, what: string, machine: string): string {
 }
 
 function PermissionDetail({ prompt, ctx }: { prompt: PermissionPrompt; ctx: Context }) {
-  const { agent, saved } = useSessionAgent(prompt.session_id);
+  const { agent, saved, known } = useSessionAgent(prompt.session_id);
   const owner = ctx.cards.get(prompt.card_id) ?? prompt;
   const peer = ownerOf(owner);
   const name = agentName(agent);
@@ -464,14 +471,20 @@ function PermissionDetail({ prompt, ctx }: { prompt: PermissionPrompt; ctx: Cont
             {name} is stopped on a permission dialog. Press an answer, and the board types it in the
             pane.
           </p>
-          <AnswerStrip
-            key={prompt.session_id}
-            sessionId={prompt.session_id}
-            waiting
-            observedAt={prompt.since}
-            fallback={asking}
-            onSent={(receipt) => markSent(promptId(prompt), prompt.since, receipt)}
-          />
+          {/* Until the agents list says which machine runs it, a read could go
+              to a saved machine's pane, which the daemon refuses. */}
+          {known ? (
+            <AnswerStrip
+              key={prompt.session_id}
+              sessionId={prompt.session_id}
+              waiting
+              observedAt={prompt.since}
+              fallback={asking}
+              onSent={(receipt) => markSent(promptId(prompt), prompt.since, receipt)}
+            />
+          ) : (
+            asking
+          )}
         </>
       )}
       <CardActions card={ctx.cards.get(prompt.card_id) ?? null} sessionId={null} />
@@ -534,7 +547,7 @@ function DialogDetail({ agent, ctx }: { agent: AgentRow; ctx: Context }) {
   const peer = ownerOf(owner);
   const off = focusReason(peer);
   const ambiguous = useAmbiguousIds();
-  const { saved } = useSessionAgent(agent.session_id);
+  const saved = useSavedMachine(agent.host_id);
   const name = agentName(agent);
   const since = agent.state_since ?? agent.activity_observed_at;
   const chip = (
@@ -617,7 +630,7 @@ function DialogDetail({ agent, ctx }: { agent: AgentRow; ctx: Context }) {
             runId: agent.run_id ?? null,
           }}
           lead={lead}
-          onSent={(receipt) => markSent(dialogId(agent), since, receipt)}
+          onSent={(receipt) => markSent(dialogId(agent), agent.activity_observed_at, receipt)}
           reading={
             <>
               {top(false)}
@@ -832,11 +845,26 @@ export function Inbox({
   // The brief leads the list, so it is what shows when nothing is chosen.
   const sent = useStore(sentStore);
   const sentHere = selected ? sent[selected]?.receipt : undefined;
-  // A prompt or dialog back in the list for a later wait drops the mark of
-  // the one answered from here, so a later "Answered" never shows its receipt.
-  // It runs after each render and changes the store only when a mark is stale.
-  const waits = prompts.map((entry) => ({ id: entry.id, since: sinceOfEntry(entry) }));
+  // A prompt or dialog back for a later wait, in scope or not, drops the mark
+  // of the one answered from here, so a later "Answered" never shows its
+  // receipt. A wait is named as the answer strip names it (protocol.md 7.4,
+  // Prompt): a permission prompt by when it began, a dialog by the activity
+  // observed then. It runs after each render and changes the store only when a
+  // mark is stale.
+  const waits = [
+    ...attention.permission_prompts.map((prompt) => ({
+      id: promptId(prompt),
+      since: prompt.since,
+    })),
+    ...(agents ? dialogWaits(agents) : []).map((agent) => ({
+      id: dialogId(agent),
+      since: agent.activity_observed_at,
+    })),
+  ];
   useEffect(() => dropStaleSent(waits));
+  // A wait that came and went while the Inbox was closed could leave a mark
+  // stale with nothing to show it, so the marks last while the Inbox is open.
+  useEffect(() => clearSent, []);
   const briefChosen = brief !== null && (selected === AWAY_BRIEF_ID || !selected);
   const picked = briefChosen
     ? undefined
@@ -912,7 +940,7 @@ export function Inbox({
               {selected
                 ? sentHere
                   ? `Sent ${sentHere}. The agent went on, so it left the inbox.`
-                  : "It was answered or withdrawn elsewhere."
+                  : "It was answered or withdrawn."
                 : "Nothing in the shown projects needs you."}
             </div>
           </div>

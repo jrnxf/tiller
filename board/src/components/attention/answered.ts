@@ -42,6 +42,10 @@ export function markSent(id: string, since: string, receipt: string) {
   sentStore.update((current) => ({ ...current, [id]: { since, receipt } }));
 }
 
+export function clearSent() {
+  sentStore.set({});
+}
+
 // Drops each mark whose entry is back in the inbox for a later wait.
 export function dropStaleSent(shown: { id: string; since: string }[]) {
   const current = sentStore.get();
