@@ -1044,17 +1044,18 @@ fn a_replayed_run_again_after_a_restart_starts_no_second_curator() {
     assert_eq!(view["status"], "unfinished", "{view}");
     assert_eq!(count(), 1);
     assert!(terminate(&mut daemon).success());
-    // A start writes the curator's launch before it answers, so a launch
-    // written again shows as a new prompt file once the answer is in.
-    let prompt = world
+    // A start clears the curator's scratch directory and writes its launch
+    // there before it answers, and a curator starts only from a written
+    // launch. So a marker that is still there once the answer is in proves
+    // that the replay neither prepared nor started a curator.
+    let marker = world
         .dir
         .path()
         .join("scratch")
         .join("retros")
         .join(&retro)
-        .join("prompt.md");
-    let written = || std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&prompt).unwrap());
-    let launch = written();
+        .join("first-run-marker");
+    std::fs::write(&marker, "first run").unwrap();
 
     let mut daemon = start(&world);
     let (status, again) = run_again(&world, daemon.port, &retro, "click-1");
@@ -1062,9 +1063,7 @@ fn a_replayed_run_again_after_a_restart_starts_no_second_curator() {
     assert_eq!(again["replayed"], true, "{again}");
     assert_eq!(again["data"]["id"], retro.as_str(), "{again}");
     assert_eq!(again["events"], serde_json::json!([]), "{again}");
-    assert_eq!(written(), launch, "the replay wrote a new launch");
-    // Give a wrongly started curator time to run.
-    std::thread::sleep(Duration::from_millis(500));
+    assert!(marker.exists(), "the replay prepared the curator again");
     let later = settled(daemon.port, &retro);
     assert_eq!(count(), 1, "a second curator ran for one click");
     assert_eq!(later["status"], "unfinished", "{later}");
