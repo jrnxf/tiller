@@ -142,7 +142,10 @@ pub fn refuse_db(db: Option<&Path>) -> Option<String> {
 /// Whether two paths name one file, even when it does not exist yet.
 fn same_path(a: &Path, b: &Path) -> bool {
     let resolved = |path: &Path| -> PathBuf {
-        let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+        // A bare name's parent is "": the working directory.
+        let parent = path
+            .parent()
+            .map(|p| if p.as_os_str().is_empty() { Path::new(".") } else { p });
         match (parent.map(Path::canonicalize), path.file_name()) {
             (Some(Ok(parent)), Some(name)) => parent.join(name),
             _ => path.to_path_buf(),
@@ -225,6 +228,16 @@ pub fn run(args: &Args) -> anyhow::Result<ExitCode> {
 mod tests {
     use super::*;
     use tiller_herdr::front::Terminal;
+
+    /// `cd ~/.tiller && tiller --db state.db daemon` names the home database:
+    /// a bare name resolves against the working directory.
+    #[test]
+    fn a_bare_name_is_the_file_in_the_working_directory() {
+        let cwd = std::env::current_dir().unwrap();
+        assert!(same_path(Path::new("Cargo.toml"), &cwd.join("Cargo.toml")));
+        assert!(same_path(Path::new("not-there.db"), &cwd.join("not-there.db")));
+        assert!(!same_path(Path::new("Cargo.toml"), &cwd.join("src/Cargo.toml")));
+    }
 
     fn table(text: &str) -> toml::Table {
         text.parse().unwrap()
