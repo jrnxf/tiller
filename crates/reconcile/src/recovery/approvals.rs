@@ -34,6 +34,19 @@ pub const LANDED_NOT_ME: &str = "Mark landed, not me";
 pub const KEEP_OPEN: &str = "Keep open";
 pub use tiller_core::state::cards::SUPERSEDED;
 
+/// The key of the item an execution the forge or the remote would not
+/// answer opens while it is `uncertain`.
+fn unreadable_key(approval: &str) -> String {
+    format!("reconcile:R08:execution:{approval}")
+}
+
+/// The key of the item a `failed` execution opens. It is not
+/// [`unreadable_key`], so an item opened while the approval was
+/// `uncertain` does not stand in for it.
+fn failed_key(approval: &str) -> String {
+    format!("reconcile:R08:failed:{approval}")
+}
+
 impl Reconciler {
     pub(crate) fn approvals(&mut self, now: Timestamp, report: &mut Report) -> Result<()> {
         let projects: Vec<Project> = list(self.conn(), "retired_at IS NULL ORDER BY id", &[])?;
@@ -47,6 +60,9 @@ impl Reconciler {
         }
         // The detector runs even when an answer fails to apply: it raises
         // the rollback trigger, so nothing else may hold it back.
+        if let Err(error) = self.failed_executions(now, report) {
+            report.error("failed executions", &error);
+        }
         let answers = self.outside_merge_answers(now, report);
         let raised = self.store.raise_wrong_principal_decisions(&self.ctx(now))?;
         for found in &raised.value {
@@ -233,15 +249,8 @@ impl Reconciler {
             "R08 uncertain approval {} resolved from the forge: {}",
             approval.id, finished.value.approval.state
         ));
-        if finish == Finish::Failed {
-            // The item shows the approval as the pass just finished it.
-            self.failed_execution_item(
-                &finished.value.approval,
-                "the merge did not happen",
-                now,
-                report,
-            )?;
-        }
+        // A `failed` one goes to the developer from
+        // [`Self::failed_executions`], later in this pass.
         Ok(())
     }
 
@@ -260,6 +269,7 @@ impl Reconciler {
             if executed_at.plus_minutes(self.config.thresholds.uncertain_merge) <= now
                 && let Err(error) = self.failed_execution_item(
                     &approval,
+                    &unreadable_key(&approval.id),
                     "the forge has been unreadable since it executed",
                     now,
                     report,
@@ -271,9 +281,50 @@ impl Reconciler {
         Ok(())
     }
 
+    /// R08: every `failed` execution the pass resolved goes to the
+    /// developer, once. The item opens apart from the transaction that
+    /// finished the approval, so a pass whose item failed to open after the
+    /// finish leaves it to this sweep on a later pass. It has its own key,
+    /// not the one of the item an unreadable forge opened while the
+    /// approval was `uncertain`, so the developer sees the final state. An
+    /// approval a recovery item already shows as `failed` (one opened under
+    /// the unreadable key by an earlier version) is not asked about again.
+    fn failed_executions(&mut self, now: Timestamp, report: &mut Report) -> Result<()> {
+        let failed: Vec<Approval> = list(
+            self.conn(),
+            "state = 'failed' AND kind IN ('merge', 'land_direct')
+               AND json_extract(result, '$.resolved_by') = 'reconcile'
+               AND card_id IN (SELECT id FROM cards WHERE state = 'open')
+               AND NOT EXISTS (SELECT 1 FROM idempotency_keys k
+                               WHERE k.key = 'reconcile:R08:failed:' || approvals.id)
+               AND NOT EXISTS (
+                   SELECT 1 FROM attention i
+                   WHERE i.card_id = approvals.card_id AND i.kind = 'recovery'
+                     AND CASE WHEN json_valid(i.evidence)
+                              THEN json_extract(i.evidence, '$.approval_id') = approvals.id
+                                   AND json_extract(i.evidence, '$.state') = 'failed'
+                              ELSE 0 END)
+             ORDER BY id",
+            &[],
+        )?;
+        for approval in failed {
+            let why = match approval.kind {
+                ApprovalKind::LandDirect => "the push did not land",
+                _ => "the merge did not happen",
+            };
+            if let Err(error) =
+                self.failed_execution_item(&approval, &failed_key(&approval.id), why, now, report)
+            {
+                report.error(&format!("failed approval {}", approval.id), &error);
+            }
+        }
+        Ok(())
+    }
+
     fn failed_execution_item(
         &mut self,
         approval: &Approval,
+        key: &str,
         why: &str,
         now: Timestamp,
         report: &mut Report,
@@ -282,10 +333,9 @@ impl Reconciler {
             return Ok(());
         };
         let card: Card = get(self.conn(), "card", &card_id)?;
-        let key = format!("reconcile:R08:execution:{}", approval.id);
         if self.recovery(
             now,
-            &key,
+            key,
             NewAttention {
                 card: card.id.clone(),
                 run_id: approval.run_id.clone(),
@@ -661,6 +711,7 @@ impl Reconciler {
                         at.plus_minutes(self.config.thresholds.uncertain_merge) <= now
                     }) && let Err(error) = self.failed_execution_item(
                         approval,
+                        &unreadable_key(&approval.id),
                         "the remote has been unreadable since it executed",
                         now,
                         report,
@@ -716,21 +767,14 @@ impl Reconciler {
                 return Ok(());
             }
         };
-        let finished = self
-            .store
+        self.store
             .approval_finish(&self.ctx(now), &approval.id, finish, result)?;
         report.repair(format!(
             "R08 uncertain land_direct {} resolved from the default branch: {finish:?}",
             approval.id
         ));
-        if finish == Finish::Failed {
-            self.failed_execution_item(
-                &finished.value.approval,
-                "the push did not land",
-                now,
-                report,
-            )?;
-        }
+        // A `failed` one goes to the developer from
+        // [`Self::failed_executions`], later in this pass.
         Ok(())
     }
 

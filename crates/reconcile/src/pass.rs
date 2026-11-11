@@ -138,8 +138,10 @@ pub struct Reconciler {
     /// reported once, not on every pass.
     pub(crate) planted: HashMap<String, (String, Timestamp)>,
     /// Refusals the keyed-write helpers met and no returned report carried
-    /// yet: one line each.
-    pub(crate) refusals: Vec<String>,
+    /// yet: the pass key and one line, at most one per key. A newer refusal
+    /// of a key replaces the older one, so a hold that passed to another
+    /// actor while passes failed is reported as it now stands.
+    pub(crate) refusals: Vec<(String, String)>,
 }
 
 impl Reconciler {
@@ -175,18 +177,15 @@ impl Reconciler {
     /// One pass, every step in order.
     pub fn pass(&mut self, now: Timestamp) -> Result<Report> {
         let mut report = Report::default();
-        let result = self.steps(now, &mut report);
         // The keyed-write helpers take no report: their refusals join it
         // here. A pass that fails drops its report, so its refusals wait
         // for the next report a pass returns, and their keys stay planted.
-        if result.is_err() {
-            return result.map(|()| report);
-        }
-        for line in std::mem::take(&mut self.refusals) {
+        self.steps(now, &mut report)?;
+        for (_, line) in std::mem::take(&mut self.refusals) {
             tracing::warn!(%line, "reconcile step failed");
             report.errors.push(line);
         }
-        result.map(|()| report)
+        Ok(report)
     }
 
     fn steps(&mut self, now: Timestamp, report: &mut Report) -> Result<()> {
@@ -465,7 +464,9 @@ impl Reconciler {
                 };
                 if self.planted.get(key) != Some(&holder) {
                     self.planted.insert(key.to_owned(), holder);
-                    self.refusals.push(format!("pass key {key}: {error}"));
+                    self.refusals.retain(|(queued, _)| queued != key);
+                    self.refusals
+                        .push((key.to_owned(), format!("pass key {key}: {error}")));
                 }
                 Ok(None)
             }
@@ -494,11 +495,13 @@ impl Reconciler {
     /// 6.3). When the pass tried the message and the store refused it
     /// because another actor holds the key ([`Self::planted`]), the clock
     /// starts when that actor stored the key: a planted key can bring the
-    /// next step forward, never hold it back. A message the pass never
-    /// tried (no live orchestrator) starts no clock. The try is known only
-    /// while this engine runs: after a restart the clock waits for the next
-    /// try.
-    pub(crate) fn message_at(&self, key: &str) -> Result<Option<Timestamp>> {
+    /// next step forward, never hold it back. The planted time counts only
+    /// while that hold is still there ([`Self::still_planted`]), so a hold
+    /// that lapsed or passed to another actor starts no clock from its old
+    /// time. A message the pass never tried (no live orchestrator) starts
+    /// no clock. The try is known only while this engine runs: after a
+    /// restart the clock waits for the next try.
+    pub(crate) fn message_at(&mut self, key: &str) -> Result<Option<Timestamp>> {
         let actor = Actor::Daemon.to_string();
         let own = self
             .conn()
@@ -508,7 +511,10 @@ impl Reconciler {
                 |row| row.get(0),
             )
             .optional()?;
-        Ok(own.or_else(|| self.planted.get(key).map(|(_, at)| *at)))
+        if own.is_some() || !self.still_planted(key)? {
+            return Ok(own);
+        }
+        Ok(self.planted.get(key).map(|(_, at)| *at))
     }
 
     /// Records `guard`'s breach once, under the pass key `key`. When
@@ -787,5 +793,70 @@ pub(crate) fn ts(at: Option<Timestamp>) -> Value {
     match at {
         Some(at) => json!(at.to_string()),
         None => Value::Null,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use crate::testing::World;
+
+    /// Stores `key` as `actor` stored it, as a session that ran a mutation
+    /// under the pass's key first would.
+    fn hold(w: &World, key: &str, actor: &str) {
+        w.store()
+            .conn()
+            .execute(
+                "INSERT OR REPLACE INTO idempotency_keys
+                     (key, command, entity, entity_id, response, created_at, actor)
+                 VALUES (?1, 'note.send', 'card', 'x', '{}', ?2, ?3)",
+                rusqlite::params![key, Timestamp::now(), actor],
+            )
+            .unwrap();
+    }
+
+    fn refused() -> Result<()> {
+        Err(tiller_core::Error::Refused {
+            entity: "key",
+            id: "k".into(),
+            fact: "held by another actor".into(),
+        })
+    }
+
+    /// While no report carries the queued refusals, a newer refusal of the
+    /// same key replaces the older one: a hold that passed from one actor
+    /// to another is reported once, as it now stands.
+    #[test]
+    fn a_newer_refusal_of_a_key_replaces_the_queued_one() {
+        let mut w = World::new();
+        let key = "reconcile:test:held";
+        hold(&w, key, "session:a");
+        w.reconciler().planted(key, refused()).unwrap();
+        hold(&w, key, "session:b");
+        w.reconciler().planted(key, refused()).unwrap();
+        hold(&w, "reconcile:test:other", "session:a");
+        w.reconciler()
+            .planted("reconcile:test:other", refused())
+            .unwrap();
+        let queued = &w.reconciler().refusals;
+        assert_eq!(queued.len(), 2, "{queued:?}");
+    }
+
+    /// The escalation clock of a planted key runs only while the hold the
+    /// pass met is still there: a hold that lapsed starts no clock.
+    #[test]
+    fn a_lapsed_hold_starts_no_clock() {
+        let mut w = World::new();
+        let key = "reconcile:test:lapsed";
+        hold(&w, key, "session:a");
+        w.reconciler().planted(key, refused()).unwrap();
+        assert!(w.reconciler().message_at(key).unwrap().is_some());
+        w.store()
+            .conn()
+            .execute("DELETE FROM idempotency_keys WHERE key = ?1", [key])
+            .unwrap();
+        assert_eq!(w.reconciler().message_at(key).unwrap(), None);
     }
 }

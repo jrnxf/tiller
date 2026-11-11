@@ -52,11 +52,11 @@ pub struct CopyPass {
     /// each one.
     pub failed: Vec<FailedCopy>,
     /// The `since` of the next pass: the pass's time (`ctx.now`), or the
-    /// `recorded_at` of the earliest observation whose copy failed, when
-    /// that is earlier, but never more than [`COPY_WINDOW_MINUTES`] before
-    /// the pass. Every observation committed after the pass read is stamped
-    /// later than the pass's time, less [`MARK_SLACK_MINUTES`], and a failed
-    /// copy is read, and tried, again on each pass for that window.
+    /// `recorded_at` of the earliest observation whose copy failed and is
+    /// not [`FailedCopy::given_up`], when that is earlier. Every observation
+    /// committed after the pass read is stamped later than the pass's time,
+    /// less [`MARK_SLACK_MINUTES`], and a failed copy is read, and tried,
+    /// again on each pass until it is given up.
     pub mark: Timestamp,
 }
 
@@ -67,6 +67,10 @@ pub struct FailedCopy {
     pub trigger: String,
     pub observed_at: Timestamp,
     pub error: Error,
+    /// This was the copy's last try: its observation was recorded
+    /// [`COPY_WINDOW_MINUTES`] or more before the pass, so no later pass
+    /// reads it again, and `session_loads` keeps no row for it.
+    pub given_up: bool,
 }
 
 /// The `session_loads.trigger` values a `SessionStart` observation copies
@@ -74,7 +78,8 @@ pub struct FailedCopy {
 const COPY_TRIGGERS: &[&str] = &["resume", "clear", "compact"];
 
 /// How long after its session ended a `SessionStart` observation still
-/// gets its copy: the daemon may have been down when it came in.
+/// gets its copy: the daemon may have been down when it came in. A failed
+/// copy is tried again for as long after its observation was recorded.
 const COPY_WINDOW_MINUTES: i64 = 60;
 
 /// How far before the last pass's mark a pass still reads. An observation
@@ -157,10 +162,11 @@ impl Store {
     /// `mem.load` on a resume, `/clear` or `/compact` (the daemon, on the
     /// `SessionStart` observation, `protocol.md` 4.2): copies the session's
     /// newest set at `at` with the new trigger at `at`, so a copy made late
-    /// copies the set the session had then, not one recorded after. It renders and hashes
-    /// nothing, since the appended prompt is the one the session launched
-    /// with. A session that loaded nothing writes nothing and opens no
-    /// transaction; a copy already recorded at `at` writes nothing either.
+    /// copies the set the session had then, not one recorded after. It
+    /// renders and hashes nothing, since the appended prompt is the one the
+    /// session launched with. A session that loaded nothing by `at` writes
+    /// nothing and opens no transaction; a copy already recorded at `at`
+    /// writes nothing either.
     pub fn mem_load_again(
         &mut self,
         ctx: &Ctx,
@@ -185,10 +191,10 @@ impl Store {
 
     /// The daemon's copy pass: makes each copy a `SessionStart` observation
     /// for resume, clear or compact owes. One is owed when the hook
-    /// recorded it for a session that loaded memory, live or ended less
-    /// than [`COPY_WINDOW_MINUTES`] ago, the hook bound the session (no
-    /// `bind_refused` in its payload), and no row of its trigger is
-    /// recorded at its time.
+    /// recorded it for a session that had loaded memory by its time, live
+    /// or ended less than [`COPY_WINDOW_MINUTES`] ago, the hook bound the
+    /// session (no `bind_refused` in its payload), and no row of its
+    /// trigger is recorded at its time.
     ///
     /// `since` is the [`CopyPass::mark`] of the caller's last pass: only
     /// observations recorded after it, less [`MARK_SLACK_MINUTES`], are
@@ -196,10 +202,50 @@ impl Store {
     /// reads every observation, as the first pass after a start does. A
     /// copy that fails is returned in [`CopyPass::failed`], the pass goes
     /// on to the next one, and the mark stays at or before it, so every
-    /// later pass tries it again until it is made or it was recorded
-    /// [`COPY_WINDOW_MINUTES`] ago: a copy that never goes in does not make
-    /// every pass read a growing history.
+    /// later pass tries it again until it is made or its observation was
+    /// recorded [`COPY_WINDOW_MINUTES`] ago. The try at or past that time is
+    /// its last ([`FailedCopy::given_up`]) and holds no mark: a copy that
+    /// never goes in does not make every pass read a growing history.
     pub fn mem_load_owed(&mut self, ctx: &Ctx, since: Option<Timestamp>) -> Result<CopyPass> {
+        let owed = self.owed_copies(ctx.now, since)?;
+        let window = ctx.now.plus_minutes(-COPY_WINDOW_MINUTES);
+        let mut pass = CopyPass {
+            made: Vec::new(),
+            failed: Vec::new(),
+            mark: ctx.now,
+        };
+        for (session, trigger, at, recorded_at) in owed {
+            match self.mem_load_again(ctx, &session, &trigger, at) {
+                Ok(copied) if copied.value.revision_ids.is_empty() => {}
+                Ok(copied) => pass.made.push(copied.value),
+                Err(error) => {
+                    // The next floor is the mark less the slack, so this
+                    // observation is read again, until it is given up.
+                    let given_up = recorded_at <= window;
+                    if !given_up {
+                        pass.mark = pass.mark.min(recorded_at);
+                    }
+                    pass.failed.push(FailedCopy {
+                        session_id: session,
+                        trigger,
+                        observed_at: at,
+                        error,
+                        given_up,
+                    });
+                }
+            }
+        }
+        Ok(pass)
+    }
+
+    /// The observations [`Self::mem_load_owed`] owes a copy at `now`, read
+    /// from `since` less the slack: session, trigger, `observed_at` and
+    /// `recorded_at`, in observation order.
+    fn owed_copies(
+        &self,
+        now: Timestamp,
+        since: Option<Timestamp>,
+    ) -> Result<Vec<(String, String, Timestamp, Timestamp)>> {
         // With no mark every observation is read, so the planner, not the
         // `recorded_at` index, picks the scan.
         let (index, floor) = match since {
@@ -214,15 +260,15 @@ impl Store {
             .map(|trigger| format!("'SessionStart:{trigger}'"))
             .collect::<Vec<_>>()
             .join(", ");
-        let owed: Vec<(String, String, Timestamp, Timestamp)> = {
-            let mut stmt = self.conn().prepare_cached(&format!(
-                "SELECT o.session_id, substr(o.event, length('SessionStart:') + 1), o.observed_at,
+        let mut stmt = self.conn().prepare_cached(&format!(
+            "SELECT o.session_id, substr(o.event, length('SessionStart:') + 1), o.observed_at,
                         o.recorded_at
                  FROM observations o {index}
                  JOIN sessions s ON s.id = o.session_id
                  WHERE o.recorded_at > ?2
                    AND (s.ended_at IS NULL OR s.ended_at > ?1)
-                   AND EXISTS (SELECT 1 FROM session_loads l WHERE l.session_id = s.id)
+                   AND EXISTS (SELECT 1 FROM session_loads l
+                               WHERE l.session_id = s.id AND l.loaded_at <= o.observed_at)
                    AND o.source = 'hook'
                    AND o.event IN ({events})
                    AND json_extract(o.payload, '$.bind_refused') IS NULL
@@ -231,38 +277,12 @@ impl Store {
                        WHERE l.session_id = o.session_id AND l.loaded_at = o.observed_at
                          AND l.trigger = substr(o.event, length('SessionStart:') + 1))
                  ORDER BY o.observed_at, o.id"
-            ))?;
-            let rows = stmt.query_map(
-                params![ctx.now.plus_minutes(-COPY_WINDOW_MINUTES), floor],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )?;
-            rows.collect::<rusqlite::Result<_>>()?
-        };
-        let mut pass = CopyPass {
-            made: Vec::new(),
-            failed: Vec::new(),
-            mark: ctx.now,
-        };
-        for (session, trigger, at, recorded_at) in owed {
-            match self.mem_load_again(ctx, &session, &trigger, at) {
-                Ok(copied) if copied.value.revision_ids.is_empty() => {}
-                Ok(copied) => pass.made.push(copied.value),
-                Err(error) => {
-                    // The next floor is the mark less the slack, so this
-                    // observation is read again.
-                    pass.mark = pass
-                        .mark
-                        .min(recorded_at.max(ctx.now.plus_minutes(-COPY_WINDOW_MINUTES)));
-                    pass.failed.push(FailedCopy {
-                        session_id: session,
-                        trigger,
-                        observed_at: at,
-                        error,
-                    });
-                }
-            }
-        }
-        Ok(pass)
+        ))?;
+        let rows = stmt.query_map(
+            params![now.plus_minutes(-COPY_WINDOW_MINUTES), floor],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// The session's newest load set: the revisions of its latest
@@ -662,10 +682,12 @@ mod tests {
         assert_eq!(third.mark, last.now);
     }
 
-    /// A copy that never goes in holds the mark back at most the copy
-    /// window, so a pass does not read a growing history for it.
+    /// A failed copy of an observation recorded longer than the copy window
+    /// ago, as the first pass after a start meets one, is given up at once.
+    /// It holds the mark back not at all, so the next pass does not read the
+    /// window's history again for a copy it would not try.
     #[test]
-    fn a_failed_copy_holds_the_mark_back_at_most_the_window() {
+    fn a_failed_copy_past_the_window_is_given_up_at_once() {
         let (mut store, session) = memory_store();
         document(&store);
         let daemon = Ctx::new(Actor::Daemon);
@@ -689,7 +711,81 @@ mod tests {
         let later = Ctx::at(Actor::Daemon, daemon.now.plus_minutes(120));
         let pass = store.mem_load_owed(&later, None).unwrap();
         assert_eq!(pass.failed.len(), 1);
-        assert_eq!(pass.mark, later.now.plus_minutes(-COPY_WINDOW_MINUTES));
+        assert!(pass.failed[0].given_up, "{:?}", pass.failed);
+        assert_eq!(pass.mark, later.now);
+    }
+
+    /// A copy that never goes in is tried again until an hour after its
+    /// observation was recorded. The pass that tries it last gives it up,
+    /// and the pass after it does not read it.
+    #[test]
+    fn a_failed_copy_is_given_up_an_hour_after_its_observation() {
+        let (mut store, session) = memory_store();
+        document(&store);
+        let daemon = Ctx::new(Actor::Daemon);
+        store
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .unwrap();
+        store
+            .conn()
+            .execute_batch(
+                "CREATE TEMP TRIGGER no_clear BEFORE INSERT ON session_loads
+                 WHEN NEW.trigger = 'clear'
+                 BEGIN SELECT RAISE(ABORT, 'no clear copies'); END;",
+            )
+            .unwrap();
+        observe(
+            &mut store,
+            &session,
+            "SessionStart:clear",
+            daemon.now.plus_minutes(1),
+        );
+        let recorded: Timestamp = store
+            .conn()
+            .query_row(
+                "SELECT recorded_at FROM observations WHERE event = 'SessionStart:clear'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let within = Ctx::at(
+            Actor::Daemon,
+            recorded.plus_minutes(COPY_WINDOW_MINUTES - 1),
+        );
+        let first = store.mem_load_owed(&within, None).unwrap();
+        assert_eq!(first.failed.len(), 1);
+        assert!(!first.failed[0].given_up, "{:?}", first.failed);
+        assert_eq!(first.mark, recorded);
+        let past = Ctx::at(Actor::Daemon, recorded.plus_minutes(COPY_WINDOW_MINUTES));
+        let second = store.mem_load_owed(&past, Some(first.mark)).unwrap();
+        assert_eq!(second.failed.len(), 1, "the last try");
+        assert!(second.failed[0].given_up, "{:?}", second.failed);
+        assert_eq!(second.mark, past.now, "a copy given up holds no mark");
+        let next = Ctx::at(Actor::Daemon, past.now.plus_minutes(1));
+        let third = store.mem_load_owed(&next, Some(second.mark)).unwrap();
+        assert!(third.failed.is_empty(), "{:?}", third.failed);
+    }
+
+    /// An observation from before the session's first load owes no copy:
+    /// the session had no set then. The pass does not select it, so it is
+    /// not read on every pass with no mark.
+    #[test]
+    fn an_observation_before_the_first_load_owes_no_copy() {
+        let (mut store, session) = memory_store();
+        document(&store);
+        let daemon = Ctx::new(Actor::Daemon);
+        observe(
+            &mut store,
+            &session,
+            "SessionStart:clear",
+            daemon.now.plus_minutes(-1),
+        );
+        store
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .unwrap();
+        assert_eq!(store.owed_copies(daemon.now, None).unwrap(), Vec::new());
+        assert!(owed(&mut store, &daemon).is_empty());
+        assert_eq!(triggers(&store, &session), ["startup"]);
     }
 
     /// A copy made late copies the set the session had at the observation,

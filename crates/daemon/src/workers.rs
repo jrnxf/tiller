@@ -646,7 +646,9 @@ impl Source for Transcripts {
 /// (`mark`); the first pass after a start reads them all. A copy this pass
 /// cannot write is logged, the pass goes on to the others, and the
 /// poller's health shows the failure; the mark stays at or before it, so
-/// the next pass tries it again, for up to an hour.
+/// the next pass tries it again, until an hour after its observation was
+/// recorded. The pass that tries it last logs that it gave the copy up, and
+/// its health line counts it.
 pub struct MemoryLoads {
     store: Store,
     mark: Option<Timestamp>,
@@ -675,20 +677,37 @@ impl Source for MemoryLoads {
             );
         }
         let failed = pass.failed.len();
+        let given_up = pass.failed.iter().filter(|f| f.given_up).count();
         let Some(first) = pass.failed.first().map(|f| f.error.to_string()) else {
             return Ok(());
         };
         for copy in pass.failed {
-            tracing::warn!(
-                session = copy.session_id,
-                trigger = copy.trigger,
-                observed_at = %copy.observed_at,
-                error = %copy.error,
-                "could not copy a session's memory load"
-            );
+            if copy.given_up {
+                tracing::warn!(
+                    session = copy.session_id,
+                    trigger = copy.trigger,
+                    observed_at = %copy.observed_at,
+                    error = %copy.error,
+                    "gave up copying a session's memory load: an hour of tries failed, \
+                     so its Loaded by record lacks this load"
+                );
+            } else {
+                tracing::warn!(
+                    session = copy.session_id,
+                    trigger = copy.trigger,
+                    observed_at = %copy.observed_at,
+                    error = %copy.error,
+                    "could not copy a session's memory load"
+                );
+            }
         }
+        let given_up = if given_up > 0 {
+            format!(" ({given_up} given up after an hour)")
+        } else {
+            String::new()
+        };
         Err(PollError::State(tiller_core::Error::Internal(format!(
-            "{failed} memory load copies failed; the first: {first}"
+            "{failed} memory load copies failed{given_up}; the first: {first}"
         ))))
     }
 }
