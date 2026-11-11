@@ -1,8 +1,9 @@
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
+import { holdInert } from "../../lib/inert";
 import { applyAppearance, prefsStore } from "../../lib/prefs";
-import { shortcutsBlocked } from "../../lib/shortcuts";
+import { blockShortcuts, dialogOpen, shortcutsBlocked } from "../../lib/shortcuts";
 import { useStore } from "../../lib/store";
 import { ToastHost } from "../board/toast";
 import { AskDialog } from "./ask-dialog";
@@ -40,6 +41,7 @@ export function Shell({
   const [menuOpen, setMenuOpen] = useState(false);
   const shellRef = useRef<HTMLDivElement>(null);
   const menuWasOpen = useRef(false);
+  const mainRef = useRef<HTMLDivElement>(null);
   useAppearance();
 
   const closePalette = useCallback(() => setPaletteOpen(false), []);
@@ -56,11 +58,11 @@ export function Shell({
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         // It closes the palette too, but opens nothing over another dialog.
         event.preventDefault();
-        const blocked = shortcutsBlocked();
+        const blocked = dialogOpen();
         setPaletteOpen((open) => (open ? false : !blocked));
       } else if (event.key === "Escape") {
         // An Escape a dialog took closes that dialog only.
-        if (!event.defaultPrevented && !shortcutsBlocked()) setMenuOpen(false);
+        if (!event.defaultPrevented && !dialogOpen()) setMenuOpen(false);
       } else if (event.key.toLowerCase() === "a" && isPlainKey(event) && !shortcutsBlocked(event)) {
         // The Ask button's shortcut, as long as nothing else is being typed into.
         event.preventDefault();
@@ -82,8 +84,22 @@ export function Shell({
     return () => media.removeEventListener("change", onChange);
   }, []);
 
-  // The phone drawer is modal: focus moves into it when it opens and back to
-  // its button when it closes, so a keyboard user is never left behind a scrim.
+  // The phone drawer is modal: the screen beside it is inert and no shortcut
+  // acts on it. A dialog opened from the drawer holds the screen inert too, so
+  // the screen comes back only when both let go, in either order.
+  useLayoutEffect(() => {
+    const main = mainRef.current;
+    if (!menuOpen || !main) return;
+    const release = holdInert([main]);
+    const unblock = blockShortcuts();
+    return () => {
+      release();
+      unblock();
+    };
+  }, [menuOpen]);
+
+  // Focus moves into the drawer when it opens and back to its button when it
+  // closes, so a keyboard user is never left behind a scrim.
   useEffect(() => {
     const shell = shellRef.current;
     if (!shell) return;
@@ -106,7 +122,7 @@ export function Shell({
         onOpenPalette={() => setPaletteOpen(true)}
       />
       <div className="nav-scrim" onClick={closeMenu} aria-hidden="true" />
-      <div className="main" inert={menuOpen}>
+      <div ref={mainRef} className="main">
         <Header
           activeHost={activeHost}
           menuOpen={menuOpen}

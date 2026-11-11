@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useRef, useState } from "react";
 import { afterEach, expect, test, vi } from "vitest";
 
+import { holdInert } from "../../lib/inert";
 import { Modal } from "./modal";
 
 afterEach(() => {
@@ -268,4 +269,75 @@ test("a dialog that takes another's place gives focus back to the first one's op
   fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(document.activeElement).toBe(opener);
+});
+
+// Two dialogs side by side, the second opened over the first: either can
+// close first.
+function Pair() {
+  const [lower, setLower] = useState(true);
+  return (
+    <>
+      <button type="button">Board</button>
+      {lower ? (
+        <Modal className="dialog" label="Lower" onClose={() => setLower(false)}>
+          <button type="button">Lower</button>
+        </Modal>
+      ) : null}
+      <Modal className="dialog" label="Upper" onClose={() => {}}>
+        <button type="button" onClick={() => setLower(false)}>
+          Close the lower one
+        </button>
+      </Modal>
+    </>
+  );
+}
+
+test("the board stays inert while any dialog is open, whichever closes first", () => {
+  render(<Pair />);
+  const board = screen.getByRole("button", { name: "Board", hidden: true });
+  expect(board.closest("[inert]")).not.toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Close the lower one" }));
+  expect(screen.queryByRole("dialog", { name: "Lower", hidden: true })).toBeNull();
+  expect(board.closest("[inert]")).not.toBeNull();
+});
+
+test("the page stays inert while a dialog is open, after the drawer under it lets go", () => {
+  // The phone drawer holds the screen beside it inert, then a dialog opens
+  // from the drawer.
+  const main = document.body.appendChild(document.createElement("div"));
+  render(<Page />);
+  const drawer = holdInert([main]);
+  openDialog();
+  drawer();
+  expect(main.hasAttribute("inert")).toBe(true);
+
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+  expect(document.querySelector("[inert]")).toBeNull();
+  main.remove();
+});
+
+test("a dialog opened by a click that does not focus its button gives focus back to it", () => {
+  // Safari, and Firefox on macOS, never focus a button that is clicked.
+  render(<Page />);
+  (document.activeElement as HTMLElement | null)?.blur();
+  const opener = screen.getByRole("button", { name: "Open" });
+  fireEvent.pointerDown(opener);
+  fireEvent.mouseDown(opener);
+  fireEvent.click(opener);
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "First" }));
+
+  fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+  expect(document.activeElement).toBe(opener);
+});
+
+test("a dialog opened by a key after a click has no opener to go back to", () => {
+  render(<Page />);
+  (document.activeElement as HTMLElement | null)?.blur();
+  const opener = screen.getByRole("button", { name: "Open" });
+  fireEvent.pointerDown(opener);
+  // A key moves on from the click: what it opens was not the button's.
+  fireEvent.keyDown(document.body, { key: "x" });
+  fireEvent.click(opener);
+  fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+  expect(document.activeElement).toBe(document.body);
 });

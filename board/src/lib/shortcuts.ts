@@ -23,10 +23,29 @@ function typingInto(target: EventTarget | null): boolean {
   );
 }
 
+// Whether a modal dialog is on screen now.
+export function dialogOpen(): boolean {
+  return modalOpen(document);
+}
+
+// Layers that are modal without being a dialog, such as the phone drawer.
+let layers = 0;
+
+// Blocks every shortcut until the returned function is called.
+export function blockShortcuts(): () => void {
+  layers += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    layers -= 1;
+  };
+}
+
 // The one check every board-wide key handler makes first. A key belongs to
-// the modal on screen, so no shortcut acts behind it. Given the event, a key
-// typed into a field is the field's own too.
+// the modal on screen, or the drawer, so no shortcut acts behind it. Given
+// the event, a key typed into a field is the field's own too.
 export function shortcutsBlocked(event?: Event): boolean {
-  if (modalOpen(document)) return true;
+  if (layers > 0 || modalOpen(document)) return true;
   return event !== undefined && typingInto(event.target);
 }

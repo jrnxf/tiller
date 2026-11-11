@@ -2,9 +2,14 @@ import { useEffect, useEffectEvent, useLayoutEffect, useRef } from "react";
 import type { KeyboardEvent, ReactNode, RefObject } from "react";
 import { createPortal } from "react-dom";
 
+import { holdInert } from "../../lib/inert";
+
 // Every modal on the board is this one dialog. It owns what each used to
 // copy: Escape and the backdrop close it, Tab stays on its own controls, the
 // page behind it is inert, and focus goes back to what opened it on close.
+
+// The controls Tab stops on, in order, and what a dialog's opener can be.
+const CONTROLS = 'a[href], button, input, select, textarea, [contenteditable="true"], [tabindex]';
 
 // The open modals, the newest last: only the top one takes a stray Escape.
 const stack: object[] = [];
@@ -15,7 +20,27 @@ const stack: object[] = [];
 // menu or popover: the item is gone.
 const recent: HTMLElement[] = [];
 let last: HTMLElement | null = null;
+// The control the pointer pressed last, until a key moves on from it. Safari,
+// and Firefox on macOS, do not focus a button that is clicked, so a dialog it
+// opens finds its opener here.
+let pressed: HTMLElement | null = null;
 if (typeof document !== "undefined") {
+  document.addEventListener(
+    "pointerdown",
+    (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      const control = target?.closest<HTMLElement>(CONTROLS) ?? null;
+      pressed = control && !control.closest('[role="menu"]') ? control : null;
+    },
+    true,
+  );
+  document.addEventListener(
+    "keydown",
+    () => {
+      pressed = null;
+    },
+    true,
+  );
   document.addEventListener(
     "focusin",
     (event) => {
@@ -36,6 +61,8 @@ function openerNow(): HTMLElement | null {
   const active = document.activeElement;
   const inMenu = active instanceof HTMLElement && active.closest('[role="menu"]') !== null;
   if (active instanceof HTMLElement && active !== document.body && !inMenu) return active;
+  // A click that left focus on the page: the control it pressed.
+  if (active === document.body && pressed?.isConnected) return pressed;
   // Focus fell to the page because the control that had it was removed, not
   // because the owner clicked the page.
   const dropped = active === document.body && last?.isConnected === false;
@@ -47,10 +74,8 @@ function openerNow(): HTMLElement | null {
   return null;
 }
 
-// The controls Tab stops on, in order. A part marked `data-trap-skip` (a live
-// terminal) is never one of the ends Tab wraps between.
-const CONTROLS = 'a[href], button, input, select, textarea, [contenteditable="true"], [tabindex]';
-
+// A part marked `data-trap-skip` (a live terminal) is never one of the ends
+// Tab wraps between.
 function tabStops(dialog: HTMLElement): HTMLElement[] {
   return [...dialog.querySelectorAll<HTMLElement>(CONTROLS)].filter(
     (element) =>
@@ -59,21 +84,6 @@ function tabStops(dialog: HTMLElement): HTMLElement[] {
       !(element instanceof HTMLInputElement && element.type === "hidden") &&
       !element.closest("[hidden], [inert], [data-trap-skip]"),
   );
-}
-
-// Marks each element inert, and records it in `made`. One that holds a part
-// marked `data-modal-exempt` (the toast, which must still be announced) stays
-// live itself, and its other children are marked instead.
-function makeInert(elements: Iterable<Element>, made: Element[]) {
-  for (const element of elements) {
-    if (element.hasAttribute("inert") || element.hasAttribute("data-modal-exempt")) continue;
-    if (element.querySelector("[data-modal-exempt]")) {
-      makeInert(element.children, made);
-    } else {
-      element.setAttribute("inert", "");
-      made.push(element);
-    }
-  }
 }
 
 export function Modal({
@@ -126,10 +136,9 @@ export function Modal({
     stack.push(token);
     // Everything on the page before this dialog: the board, and any dialog
     // under it. What opens later (a list, a menu, a toast) stays usable.
-    const made: Element[] = [];
     const before: Element[] = [];
     for (let at = root.previousElementSibling; at; at = at.previousElementSibling) before.push(at);
-    makeInert(before, made);
+    const release = holdInert(before);
     // Escape with focus outside the dialog, such as on the page body.
     const onKey = (event: globalThis.KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented || stack.at(-1) !== token) return;
@@ -141,7 +150,7 @@ export function Modal({
     return () => {
       document.removeEventListener("keydown", onKey);
       stack.splice(stack.indexOf(token), 1);
-      for (const element of made) element.removeAttribute("inert");
+      release();
       // Unless what closed it moved focus on purpose.
       const active = document.activeElement;
       const lost = !active || active === document.body || box.contains(active);
