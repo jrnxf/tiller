@@ -186,6 +186,10 @@ pub struct Recorded {
     pub observation: Observation,
     /// The session's activity moved to the observation's verdict.
     pub verdict_changed: bool,
+    /// When the hold ends on a `herdr:idle` that a fresh hook `working`
+    /// held (`protocol.md` 4.5); `None` when the observation was not held.
+    #[serde(default)]
+    pub idle_held_until: Option<Timestamp>,
 }
 
 /// How long a hook `working` holds against a `herdr:idle` (`protocol.md`
@@ -193,14 +197,21 @@ pub struct Recorded {
 pub const HOOK_WORKING_HOLD_MS: i64 = 30_000;
 
 /// A `herdr:idle` never replaces a hook `working` less than 30 s old.
-fn herdr_idle_held(session: &Session, new: &NewObservation) -> bool {
-    new.source == ObservationSource::Herdr
-        && new.verdict == Some(Activity::Idle)
-        && session.activity == Activity::Working
-        && session.activity_source == Some(ObservationSource::Hook)
-        && session
-            .activity_observed_at
-            .is_some_and(|at| new.observed_at.as_millis() - at.as_millis() < HOOK_WORKING_HOLD_MS)
+/// Returns when the hold ends, if it holds.
+fn herdr_idle_held(session: &Session, new: &NewObservation) -> Option<Timestamp> {
+    if new.source != ObservationSource::Herdr
+        || new.verdict != Some(Activity::Idle)
+        || session.activity != Activity::Working
+        || session.activity_source != Some(ObservationSource::Hook)
+    {
+        return None;
+    }
+    let until = session.activity_observed_at?.as_millis() + HOOK_WORKING_HOLD_MS;
+    if new.observed_at.as_millis() < until {
+        Timestamp::from_millis(until)
+    } else {
+        None
+    }
 }
 
 /// A `panes` filter for the panes of the run bound at `?{param}`. A pane row
@@ -2029,10 +2040,12 @@ impl Store {
                 ],
             )?;
             let mut verdict_changed = false;
+            let mut idle_held_until = None;
             if let (Some(session_id), Some(verdict)) = (&new.session_id, new.verdict) {
                 let session: Session = get(tx.conn(), "session", session_id)?;
                 let newer = session.activity_observed_at.is_none_or(|at| new.observed_at > at);
-                if newer && !herdr_idle_held(&session, &new) {
+                idle_held_until = herdr_idle_held(&session, &new);
+                if newer && idle_held_until.is_none() {
                     tx.conn().execute(
                         "UPDATE sessions SET activity = ?2, activity_observed_at = ?3, activity_source = ?4 WHERE id = ?1",
                         params![session.id, verdict, new.observed_at, new.source],
@@ -2060,6 +2073,7 @@ impl Store {
             Ok(Recorded {
                 observation: get(tx.conn(), "observation", &id)?,
                 verdict_changed,
+                idle_held_until,
             })
         })
     }
