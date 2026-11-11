@@ -3098,6 +3098,16 @@ fn project_edit_follows_a_remote_that_names_the_repo_in_another_case() {
     );
     assert_eq!(typed.repo.as_deref(), Some("Example/Lambda"));
 
+    // A new address of the same repo keeps the case the owner chose.
+    let same = edit(
+        &mut store,
+        ProjectEdit {
+            remote: Some(Some("ssh://github.com/example/lambda.git".into())),
+            ..ProjectEdit::default()
+        },
+    );
+    assert_eq!(same.repo.as_deref(), Some("Example/Lambda"));
+
     let moved = edit(
         &mut store,
         ProjectEdit {

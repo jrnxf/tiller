@@ -342,7 +342,11 @@ pub(crate) fn edit_project(
         let rederive = changed.contains_key("remote") && edit.repo.is_none() && followed;
         let mut repo = if rederive { None } else { next.repo.clone() };
         detect_forge(&next.id, next.remote.as_deref(), next.delivery, &mut repo)?;
-        if rederive && repo.is_some() && repo != next.repo {
+        // A repo that names the same GitHub repo in another case keeps the
+        // case the owner chose.
+        let same =
+            matches!((&repo, &next.repo), (Some(new), Some(old)) if new.eq_ignore_ascii_case(old));
+        if rederive && repo.is_some() && !same {
             next.repo = repo;
             changed.insert("repo".into(), json!(next.repo));
         }
