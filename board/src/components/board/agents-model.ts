@@ -34,41 +34,46 @@ export function agentGroups(
   ambiguous: Set<string> = new Set(),
 ): AgentGroup[] {
   const cards = new Map(rows.map((row) => [row.id, row]));
+  // The label's tree glyph is set once the group is whole (below).
+  const workerLine = (worker: AgentRow): AgentLine => {
+    const card = worker.card_id ? (cards.get(worker.card_id) ?? null) : null;
+    const name = workerName(worker, card, ambiguous);
+    return { agent: worker, orchestrator: false, label: `${name} ${worker.role}`, name, card };
+  };
   const groups: AgentGroup[] = [];
   for (const project of projects) {
-    for (const orchestrator of roster.orchestrators) {
-      if (
-        orchestrator.project_id === undefined ||
-        ownerKey(orchestrator.project_id, orchestrator) !== projectKey(project)
-      ) {
+    const lines: AgentLine[] = [];
+    for (const top of roster.orchestrators) {
+      if (top.project_id === undefined || ownerKey(top.project_id, top) !== projectKey(project)) {
         continue;
       }
-      const workers = orchestrator.workers.filter((worker) => !host || worker.host_id === host);
-      if (host && orchestrator.host_id !== host && workers.length === 0) continue;
-      const lines: AgentLine[] = [];
-      if (!host || orchestrator.host_id === host) {
+      // A worker whose orchestrator has ended is listed on its own.
+      if (top.role !== "orchestrator") {
+        if (!host || top.host_id === host) lines.push(workerLine(top));
+        continue;
+      }
+      const workers = top.workers.filter((worker) => !host || worker.host_id === host);
+      if (host && top.host_id !== host && workers.length === 0) continue;
+      if (!host || top.host_id === host) {
         lines.push({
-          agent: orchestrator,
+          agent: top,
           orchestrator: true,
           label: project.id,
           name: project.id,
           card: null,
         });
       }
-      workers.forEach((worker, index) => {
-        const card = worker.card_id ? (cards.get(worker.card_id) ?? null) : null;
-        const glyph = index === workers.length - 1 ? "└" : "├";
-        const name = workerName(worker, card, ambiguous);
-        lines.push({
-          agent: worker,
-          orchestrator: false,
-          label: `${glyph} ${name} ${worker.role}`,
-          name,
-          card,
-        });
-      });
-      groups.push({ project, lines });
+      for (const worker of workers) lines.push(workerLine(worker));
     }
+    if (lines.length === 0) continue;
+    // Only the group's last worker line closes the tree, so a worker
+    // listed on its own after another worker still reads as a branch.
+    let last = -1;
+    for (const [index, line] of lines.entries()) if (!line.orchestrator) last = index;
+    for (const [index, line] of lines.entries()) {
+      if (!line.orchestrator) line.label = `${index === last ? "└" : "├"} ${line.label}`;
+    }
+    groups.push({ project, lines });
   }
   return groups;
 }

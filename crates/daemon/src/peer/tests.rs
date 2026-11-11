@@ -1670,6 +1670,7 @@ impl OrchestratorStart for RecordingStarter {
         _store: &mut Store,
         ctx: &tiller_core::Ctx,
         project: &str,
+        _restart: bool,
     ) -> Result<tiller_core::Applied<tiller_agents::spawn::orchestrator::Orchestrator>, StartError>
     {
         self.seen.lock().unwrap().push((

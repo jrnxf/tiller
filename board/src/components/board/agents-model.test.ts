@@ -114,3 +114,29 @@ test("N finds the next agent that needs you after the current one, wrapping", ()
   expect(next("w1", new Set(["w1"]))).toBe("w1");
   expect(next("w1", new Set())).toBeUndefined();
 });
+
+test("a worker whose orchestrator has ended is listed on its own, in its project's block", () => {
+  const orphaned: AgentsResponse = {
+    orchestrators: [
+      agent("w4", "build", "h1", { card_id: "c1" }),
+      agent("o2", "orchestrator", "h1", { project_id: "beta" }),
+    ],
+  };
+  const groups = agentGroups(orphaned, [project("alpha"), project("beta")], rows, undefined);
+  expect(groups.map((group) => group.project.id)).toEqual(["alpha", "beta"]);
+  expect(groups[0]?.lines).toMatchObject([
+    { label: "└ alpha-1 build", orchestrator: false, name: "alpha-1" },
+  ]);
+  expect(agentGroups(orphaned, [project("alpha")], rows, "h2")).toEqual([]);
+});
+
+test("workers listed on their own close the tree only once, at the block's end", () => {
+  const orphaned: AgentsResponse = {
+    orchestrators: [
+      agent("w4", "build", "h1", { card_id: "c1" }),
+      agent("w5", "review", "h1", { card_id: "c2" }),
+    ],
+  };
+  const [group] = agentGroups(orphaned, [project("alpha")], rows, undefined);
+  expect(group?.lines.map((line) => line.label)).toEqual(["├ alpha-1 build", "└ alpha-2 review"]);
+});

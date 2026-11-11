@@ -159,7 +159,7 @@ pub fn status(app: &App, args: Status) -> Done {
         &args.text,
     )?;
     if let Some(until) = until {
-        let paused = store.run_pause(&app.ctx(), &run_id, until)?;
+        let paused = store.run_pause(&app.ctx(), &run_id, until, Some(&args.text))?;
         applied.events.extend(paused.events);
         applied.replayed &= paused.replayed;
         applied.value = paused.value;
@@ -197,7 +197,7 @@ pub fn run_cmd(app: &App, cmd: RunCmd) -> Done {
             let until = lisbon::parse_when(&until)?;
             let mut store = app.write()?;
             let run = resolve_run(&store, &run)?;
-            let applied = store.run_pause(&app.ctx(), &run.id, until)?;
+            let applied = store.run_pause(&app.ctx(), &run.id, until, Some(&reason))?;
             Ok(Outcome::applied_as(
                 applied,
                 |run| json!({"run": run, "reason": reason}),

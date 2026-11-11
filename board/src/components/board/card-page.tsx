@@ -1,4 +1,4 @@
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
@@ -15,6 +15,7 @@ import type {
 import { HOST_PROJECT, focusReason, hostName, ownerOf, shownId } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import {
+  agentsQuery,
   cardQuery,
   fetchJson,
   machinesQuery,
@@ -60,6 +61,8 @@ import {
   UserIcon,
   WarnIcon,
 } from "./icons";
+import { PausedNote, RunDialogs, RunMenu, runStateOf, useGoOn, useResumeSession } from "./run-menu";
+import type { RunDialog, RunTarget } from "./run-menu";
 import { KindLabel, ModelChip } from "./tile";
 import { BugTriage } from "./triage";
 import { CheckIcon, CloseIcon } from "../shell/icons";
@@ -156,10 +159,16 @@ function Timeline({
   );
 }
 
-function RunCard({ run, owner }: { run: CardRun; owner: string | undefined }) {
+function RunCard({ run, owner, name }: { run: CardRun; owner: string | undefined; name: string }) {
   const off = focusReason(owner);
   const focus = useHerdrFocus();
   const { data: machines } = useSuspenseQuery(machinesQuery());
+  // The run's pause is on its session's agents row. The page does not wait
+  // on it: without it the run reads as not paused.
+  const session = useQuery(agentsQuery())
+    .data?.orchestrators.flatMap((orchestrator) => [orchestrator, ...orchestrator.workers])
+    .find((agent) => agent.session_id === run.session_id);
+  const pause = session?.run_id === run.id ? (session.pause ?? null) : null;
   const failed = run.outcome === "failed";
   const active = run.ended_at === null;
   const activity = run.activity
@@ -167,6 +176,7 @@ function RunCard({ run, owner }: { run: CardRun; owner: string | undefined }) {
         activity: run.activity,
         activity_observed_at: run.activity_observed_at ?? "",
         role: run.role,
+        pause,
       })
     : null;
   const seconds = durationSeconds(run.started_at, run.ended_at);
@@ -178,13 +188,29 @@ function RunCard({ run, owner }: { run: CardRun; owner: string | undefined }) {
   // Only the owner sees an agent's terminal: live for this machine's agents,
   // a read-only tail for a saved machine's.
   const mirror = active && sessionId && hostId && off === null;
+  const onOpen = () => {
+    if (sessionId && hostId) focus({ session_id: sessionId, host_id: hostId });
+  };
+  // The run's controls reach a pane on this machine only, as on the agents
+  // view: not a peer's, and not a saved machine's.
+  const local = active && sessionId !== null && hostId !== null && off === null && !remote;
+  const target: RunTarget = {
+    sessionId: sessionId ?? "",
+    name,
+    orchestrator: false,
+    state: activity ? runStateOf({ activity: run.activity ?? "" }, activity) : "running",
+    runOpen: active,
+  };
+  const [dialog, setDialog] = useState<RunDialog | null>(null);
+  const resumeSession = useResumeSession(target);
+  const goOn = useGoOn(target.sessionId, pause);
   const openPane = (
     <button
       type="button"
       className="btn sm"
       disabled={off !== null}
       title={off ?? focusTooltip(machine)}
-      onClick={() => sessionId && hostId && focus({ session_id: sessionId, host_id: hostId })}
+      onClick={onOpen}
     >
       <PaneIcon />
       Open in herdr
@@ -219,9 +245,29 @@ function RunCard({ run, owner }: { run: CardRun; owner: string | undefined }) {
               <i className={`ld ${activity.dot}`} /> {activity.label}
             </span>
           ) : null}
+          {local ? (
+            <RunMenu
+              small
+              target={target}
+              onDialog={setDialog}
+              onResumeSession={resumeSession}
+              onGoOn={goOn.sent === null ? goOn.trigger : undefined}
+            />
+          ) : null}
           {mirror ? <TerminalToggle size="sm" /> : null}
           {openPane}
         </div>
+      ) : null}
+      {local && pause && target.state === "paused" ? (
+        <PausedNote pause={pause} receiptKey={goOn.sent} />
+      ) : null}
+      {local ? (
+        <RunDialogs
+          target={target}
+          dialog={dialog}
+          onClose={() => setDialog(null)}
+          onOpen={onOpen}
+        />
       ) : null}
       {mirror && terminalOpen ? (
         <LiveTerminal
@@ -682,7 +728,9 @@ export function CardPage({
               </span>
             </div>
             {detail.runs.length > 0 ? (
-              detail.runs.map((run) => <RunCard key={run.id} run={run} owner={ownerOf(column)} />)
+              detail.runs.map((run) => (
+                <RunCard key={run.id} run={run} owner={ownerOf(column)} name={id} />
+              ))
             ) : (
               <div className="run">
                 <p style={{ margin: 0 }}>

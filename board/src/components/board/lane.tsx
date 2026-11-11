@@ -17,7 +17,11 @@ import type { Standing } from "../../lib/peers";
 import { useHerdrFocus } from "./herdr";
 import { NewCardDialog } from "./new-card";
 import { MoveBugsDialog } from "./triage";
-import { StartOrchestratorButton } from "./orchestrator-start";
+import {
+  RestartOrchestratorButton,
+  RestartOrchestratorDialog,
+  StartOrchestratorButton,
+} from "./orchestrator-start";
 import { PlusIcon, ServerIcon } from "../shell/icons";
 import { StaleChip } from "./stale-sessions";
 import type { LaneHealth } from "../states/degraded";
@@ -180,10 +184,23 @@ export function Lane({
     setFiling(false);
     newCard.current?.focus();
   }, []);
+  const [restarting, setRestarting] = useState(false);
+  const restart = useRef<HTMLButtonElement>(null);
+  const closeRestart = useCallback(() => {
+    setRestarting(false);
+    restart.current?.focus();
+  }, []);
   const key = projectKey(project);
   const off = focusReason(ownerOf(project));
   // A peer's project starts on its host, through the forwarded start.
   const startable = !orchestrator && orchestratorsKnown;
+  // A silent orchestrator on this machine can be restarted, behind a
+  // confirmation. A peer's or a saved machine's is restarted on its own host.
+  const restartable =
+    orchestrator !== undefined &&
+    health.kind === "stale" &&
+    ownerOf(project) === undefined &&
+    remoteHost === undefined;
   const counts = COLUMNS.map((column) => ({
     column,
     count: tiles.filter((tile) => tile.column === column.id).length,
@@ -314,6 +331,14 @@ export function Lane({
         </span>
         <span className="sp" />
         {hostLane ? <BugRoute bugProject={bugProject} /> : null}
+        {restartable ? (
+          <RestartOrchestratorButton
+            projectName={project.name}
+            off={standing.canAct ? null : standing.reason}
+            button={restart}
+            onAsk={() => setRestarting(true)}
+          />
+        ) : null}
         <button
           ref={newCard}
           type="button"
@@ -341,6 +366,14 @@ export function Lane({
         ) : null}
       </div>
       {filing ? <NewCardDialog project={project} onClose={closeFiling} /> : null}
+      {restarting ? (
+        <RestartOrchestratorDialog
+          projectId={project.id}
+          projectName={project.name}
+          silent
+          onClose={closeRestart}
+        />
+      ) : null}
       {health.kind === "ok" ? null : (
         <LaneNote health={health} projectName={project.name} hostLabel={hostLabel} />
       )}

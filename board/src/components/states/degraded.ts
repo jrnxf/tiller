@@ -48,7 +48,7 @@ export function laneHealth(
 // An agent on a host that does not answer has no live state: the last verdict
 // is an old one, so it reads as unknown rather than working or idle.
 export function hostAwareActivity(
-  agent: Pick<AgentRow, "activity" | "activity_observed_at" | "role">,
+  agent: Pick<AgentRow, "activity" | "activity_observed_at" | "role" | "pause">,
   machine: Machine | undefined,
   now?: number,
 ): ActivityView {

@@ -535,6 +535,10 @@ fn agent_row(store: &Store, session: &Session) -> Result<AgentRow> {
          ORDER BY observed_at DESC LIMIT 1",
         &[&session.id],
     )?;
+    let pause = match &run {
+        Some(run) => pause_of(store, run)?,
+        None => None,
+    };
     Ok(AgentRow {
         session_id: session.id.clone(),
         role,
@@ -560,7 +564,35 @@ fn agent_row(store: &Store, session: &Session) -> Result<AgentRow> {
             prompt_changed: stale.prompt_changed,
             restart_queued: session.restart_queued_at.is_some(),
         }),
+        pause,
     })
+}
+
+/// An active run's dated pause while its date is ahead, with who took it,
+/// when and why, from its newest `run.paused` event.
+fn pause_of(store: &Store, run: &Run) -> Result<Option<PauseInfo>> {
+    let Some(until) = run.pause_until else {
+        return Ok(None);
+    };
+    if run.ended_at.is_some() || until <= Timestamp::now() {
+        return Ok(None);
+    }
+    let taken: Option<(Timestamp, String, Option<String>)> = store
+        .conn()
+        .query_row(
+            "SELECT at, actor, json_extract(payload, '$.reason') FROM events
+             WHERE entity = 'run' AND entity_id = ?1 AND kind = 'run.paused'
+             ORDER BY seq DESC LIMIT 1",
+            [&run.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    Ok(taken.map(|(taken_at, by, reason)| PauseInfo {
+        until: at(until),
+        at: at(taken_at),
+        by,
+        reason,
+    }))
 }
 
 /// A run's herdr agent name (`protocol.md` section 6.1).

@@ -559,7 +559,8 @@
   min-height: 18px;
 }
 .card .c-top .id {
-  flex: 1;
+  /* The id keeps its width; a long age line is what gets cut. */
+  flex: 1 0 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1510,17 +1511,14 @@ a.card:hover {
   align-items: center;
   gap: 8px;
   min-width: 0;
+  margin-right: auto;
   white-space: normal;
 }
 .card-page .run .acts .meta .ld {
   margin: 0;
 }
 .card-page .run .acts .btn {
-  margin-left: auto;
   flex: none;
-}
-.card-page .run .acts .btn + .btn {
-  margin-left: 0;
 }
 
 @media (max-width: 1180px) {

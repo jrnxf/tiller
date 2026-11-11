@@ -2747,3 +2747,43 @@ fn the_bug_project_is_an_open_project_this_host_owns() {
         .unwrap();
     assert!(payload.contains("project beta was deleted"), "{payload}");
 }
+
+/// `run.pause` keeps its reason: the same date and reason again is natural,
+/// a new reason on the same date is a new pause (`protocol.md` 6.4).
+#[test]
+fn a_pause_records_its_reason_and_repeats_naturally() {
+    let (mut store, session) = memory_store();
+    let card = store
+        .card_create(&owner(), None, card(CardKind::Ship, "work"), None)
+        .unwrap()
+        .value;
+    let run = store
+        .run_start(
+            &Ctx::new(Actor::Session(session)),
+            None,
+            builder_run(&card.id),
+        )
+        .unwrap()
+        .value
+        .run;
+    let until = Timestamp::now().plus_minutes(60);
+    let board = Ctx::new(Actor::Board);
+    let first = store
+        .run_pause(&board, &run.id, until, Some(" the API key "))
+        .unwrap();
+    assert!(!first.events.is_empty());
+    let again = store
+        .run_pause(&board, &run.id, until, Some("the API key"))
+        .unwrap();
+    assert!(again.events.is_empty(), "the same pause is natural");
+    let changed = store
+        .run_pause(&board, &run.id, until, Some("a review"))
+        .unwrap();
+    assert!(!changed.events.is_empty());
+    assert_eq!(
+        super::runs::pause_reason(store.conn(), &run.id)
+            .unwrap()
+            .as_deref(),
+        Some("a review")
+    );
+}

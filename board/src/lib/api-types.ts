@@ -213,6 +213,45 @@ export interface AgentRow extends Federated {
   // started on ("unknown" with no record), whether its role prompt changed,
   // and whether a restart waits for it to go idle.
   stale?: SessionStale | null;
+  // The run's dated pause (`run.pause`), while its date is ahead: who took
+  // it, when and why (protocol.md section 7.3).
+  pause?: PauseInfo | null;
+}
+
+export interface PauseInfo {
+  until: string;
+  at: string;
+  // `board`, `owner`, or the session that took it.
+  by: string;
+  reason: string | null;
+}
+
+// `POST /api/v1/agents/{session}/stop` and `.../resume` (protocol.md 7.4).
+export interface AgentControlBody {
+  idempotency_key: string;
+  host?: string;
+}
+
+// `POST /api/v1/agents/{session}/pause`: `tiller run pause` on its run.
+export interface PauseBody {
+  idempotency_key: string;
+  until: string;
+  reason: string;
+  host?: string;
+}
+
+// `POST /api/v1/agents/{session}/relaunch`: `tiller agent relaunch` on its run.
+export interface RelaunchBody {
+  idempotency_key: string;
+  note: string;
+  new_attempt?: boolean;
+  host?: string;
+}
+
+// `data` of a resume: `left_alone` when the agent was still running.
+export interface Resumed {
+  left_alone: boolean;
+  pane_id: string | null;
 }
 
 export interface SessionStale {

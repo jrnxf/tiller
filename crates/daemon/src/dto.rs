@@ -258,6 +258,22 @@ pub struct AgentRow {
     /// Present when the session runs an older tiller than its host does now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale: Option<StaleInfo>,
+    /// The run's dated pause (`run.pause`), while its date is ahead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause: Option<PauseInfo>,
+}
+
+/// A run's dated pause, as the newest `run.paused` event records it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct PauseInfo {
+    /// When the pause stops silencing the run's alarms.
+    pub until: String,
+    /// When the pause was taken.
+    pub at: String,
+    /// Who took it: `board`, `owner`, the worker's own session or its
+    /// orchestrator's.
+    pub by: String,
+    pub reason: Option<String>,
 }
 
 /// How a session's launch differs from what its host's tiller would write
@@ -1904,6 +1920,11 @@ pub struct StartOrchestrator {
     /// (`protocol.md` 7.4).
     #[serde(default)]
     pub host: Option<String>,
+    /// Stop the live orchestrator first and start a new one, as `tiller
+    /// orchestrator start --restart` does: only on the owner's explicit
+    /// Restart, and never for a peer's (its forwarded owner may not).
+    #[serde(default)]
+    pub restart: bool,
 }
 
 /// `POST /api/v1/agents/restart-stale`: restarts the sessions that run an
@@ -2154,6 +2175,51 @@ pub struct SteerBody {
 pub struct InterruptBody {
     pub idempotency_key: String,
     /// A paired peer's label; an interrupt is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
+/// `POST /api/v1/agents/{session}/stop` and `.../resume`: `tiller agent
+/// stop` and `tiller agent resume` through the commands' own path
+/// (`protocol.md` 6.4, 7.4).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentControlBody {
+    pub idempotency_key: String,
+    /// A paired peer's label; a stop or a resume is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
+/// `POST /api/v1/agents/{session}/pause`: `tiller run pause` on the
+/// session's run.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PauseBody {
+    pub idempotency_key: String,
+    /// RFC 3339, in the future.
+    pub until: String,
+    /// Why the run waits, at most 20,000 characters.
+    pub reason: String,
+    /// A paired peer's label; a pause is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
+/// `POST /api/v1/agents/{session}/relaunch`: `tiller agent relaunch` on
+/// the session's run.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RelaunchBody {
+    pub idempotency_key: String,
+    /// The progress the new session starts from, at most 20,000
+    /// characters.
+    pub note: String,
+    /// End the run (`relaunched`) and start attempt n+1 on the run's own
+    /// brief.
+    #[serde(default)]
+    pub new_attempt: bool,
+    /// A paired peer's label; a relaunch is not forwarded.
     #[serde(default)]
     pub host: Option<String>,
 }

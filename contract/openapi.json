@@ -256,6 +256,95 @@
         }
       }
     },
+    "/api/v1/agents/{session}/pause": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "summary": "A dated pause on the session's run, which silences its alarms until\nthen: `tiller run pause` (`protocol.md` 6.4, 7.4).",
+        "operationId": "pause_agent",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PauseBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "a date that does not parse, or an empty or too long reason",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`refused`: an orchestrator, an ended run, or a date not in the future",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agents/{session}/prompt": {
       "post": {
         "tags": [
@@ -454,6 +543,203 @@
         }
       }
     },
+    "/api/v1/agents/{session}/relaunch": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "summary": "A new session on the run, in the same worktree, after a proven stop of\nthe live one: `tiller agent relaunch` (`protocol.md` 6.4, 7.4).",
+        "operationId": "relaunch_agent",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RelaunchBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the relaunch: `run`, `session`, `ended_session`, `stop_proof`, `pane_id`, `started`, `evidence`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "an empty or too long note",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`refused`: an orchestrator, an ended run, a worktree on another branch, a brief that is missing, or a stop that could not be proven; nothing was changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "herdr is unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{session}/resume": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "summary": "`claude --resume` in the run's worktree for a session whose agent is\ngone: `tiller agent resume` (`protocol.md` 6.4, 7.4).",
+        "operationId": "resume_agent",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentControlBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the resume: `run`, `session`, `pane_id`, `left_alone`, `started`, `evidence`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`refused`: an orchestrator, an ended run, no Claude session to resume, or another host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "herdr is unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agents/{session}/steer": {
       "post": {
         "tags": [
@@ -532,6 +818,104 @@
           },
           "502": {
             "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{session}/stop": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "summary": "The proven stop of `tiller agent stop` (`protocol.md` 6.4, 7.4): a\nworker whose run has ended, or an orchestrator. The request waits for\nthe proof.",
+        "operationId": "stop_agent",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentControlBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the stop: `session`, `stop_proof`, `cleaned`, `closed_pane`, `warning`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`refused`: the run is active, the pane holds a draft or a dialog, or the agent runs on another host or a saved machine; nothing was sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "herdr is unreachable",
             "content": {
               "application/json": {
                 "schema": {
@@ -5121,6 +5505,26 @@
         },
         "additionalProperties": false
       },
+      "AgentControlBody": {
+        "type": "object",
+        "description": "`POST /api/v1/agents/{session}/stop` and `.../resume`: `tiller agent\nstop` and `tiller agent resume` through the commands' own path\n(`protocol.md` 6.4, 7.4).",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label; a stop or a resume is not forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "AgentRow": {
         "type": "object",
         "description": "A live session: an orchestrator with its workers nested, or a worker.",
@@ -5204,6 +5608,17 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "pause": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PauseInfo",
+                "description": "The run's dated pause (`run.pause`), while its date is ahead."
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "project_id": {
@@ -8930,6 +9345,65 @@
         ],
         "description": "An owner-only change an option applies when the owner picks it\n(`state.md`, Attention)."
       },
+      "PauseBody": {
+        "type": "object",
+        "description": "`POST /api/v1/agents/{session}/pause`: `tiller run pause` on the\nsession's run.",
+        "required": [
+          "idempotency_key",
+          "until",
+          "reason"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label; a pause is not forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the run waits, at most 20,000 characters."
+          },
+          "until": {
+            "type": "string",
+            "description": "RFC 3339, in the future."
+          }
+        },
+        "additionalProperties": false
+      },
+      "PauseInfo": {
+        "type": "object",
+        "description": "A run's dated pause, as the newest `run.paused` event records it.",
+        "required": [
+          "until",
+          "at",
+          "by"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "description": "When the pause was taken."
+          },
+          "by": {
+            "type": "string",
+            "description": "Who took it: `board`, `owner`, the worker's own session or its\norchestrator's."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "until": {
+            "type": "string",
+            "description": "When the pause stops silencing the run's alarms."
+          }
+        }
+      },
       "PeerEvent": {
         "type": "object",
         "description": "One `event: peer` message: a paired peer's change, with no SSE `id`, since\na peer's `seq` is not this host's.",
@@ -9912,6 +10386,35 @@
         },
         "additionalProperties": false
       },
+      "RelaunchBody": {
+        "type": "object",
+        "description": "`POST /api/v1/agents/{session}/relaunch`: `tiller agent relaunch` on\nthe session's run.",
+        "required": [
+          "idempotency_key",
+          "note"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label; a relaunch is not forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "new_attempt": {
+            "type": "boolean",
+            "description": "End the run (`relaunched`) and start attempt n+1 on the run's own\nbrief."
+          },
+          "note": {
+            "type": "string",
+            "description": "The progress the new session starts from, at most 20,000\ncharacters."
+          }
+        },
+        "additionalProperties": false
+      },
       "ResetEvent": {
         "type": "object",
         "description": "One `event: reset` message: the client refetches the snapshot.",
@@ -10830,6 +11333,10 @@
           },
           "idempotency_key": {
             "type": "string"
+          },
+          "restart": {
+            "type": "boolean",
+            "description": "Stop the live orchestrator first and start a new one, as `tiller\norchestrator start --restart` does: only on the owner's explicit\nRestart, and never for a peer's (its forwarded owner may not)."
           }
         },
         "additionalProperties": false

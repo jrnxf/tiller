@@ -34,6 +34,10 @@ import { AsOf, HostChip, PeerNote } from "./host-chip";
 import { useAmbiguousIds, useStanding, useNamedProjects } from "./peer-state";
 import { StaleChip } from "./stale-sessions";
 import { NO_RUN, NOT_WORKING, SteerBar } from "./steer-bar";
+import { RestartOrchestratorDialog } from "./orchestrator-start";
+import { PausedNote, RunDialogs, RunMenu, runStateOf, useGoOn, useResumeSession } from "./run-menu";
+import type { RunDialog, RunTarget } from "./run-menu";
+import { PlayIcon, ReopenIcon } from "../attention/icons";
 import { ModelChip, ownerSearch } from "./tile";
 import { BoardIcon, CloseIcon, ServerIcon } from "../shell/icons";
 import "./board.css";
@@ -523,11 +527,52 @@ function Stage({
   const activity = hostAwareActivity(agent, host);
   const needs = activity.dot === "waiting";
   const remote = host?.kind === "remote";
+  // The run's controls act on a pane on this machine only, as steer does.
+  const local = !remote && !peerHost;
+  const state = runStateOf(agent, activity);
+  const orchestrator = agent.role === "orchestrator";
+  // The loader reads every listed agent's run, so this is already cached.
+  const run = useQuery({
+    ...runQuery(agent.run_id ?? "", ownerOf(agent)),
+    enabled: Boolean(agent.run_id),
+  }).data;
+  const target: RunTarget = {
+    sessionId: agent.session_id,
+    name: line.name,
+    orchestrator,
+    state,
+    runOpen: run?.ended_at === null,
+  };
+  // The Stage stays mounted across agents, so an open dialog is kept with the
+  // session it was opened for and never shows over another agent.
+  const [asked, setAsked] = useState<{ session: string; dialog: RunDialog | "restart" } | null>(
+    null,
+  );
+  const asking = asked?.session === agent.session_id ? asked.dialog : null;
+  const ask = (next: RunDialog | "restart") =>
+    setAsked({ session: agent.session_id, dialog: next });
+  const closeAsk = () => setAsked(null);
+  const resumeSession = useResumeSession(target);
+  const goOn = useGoOn(agent.session_id, agent.pause);
+  const paused = state === "paused" && agent.pause ? agent.pause : null;
+  // The primary follows the run: Resume a pause, bring back a dead pane,
+  // otherwise open the pane. Open in herdr moves into the Run menu then.
+  const primary = !local
+    ? "open"
+    : paused
+      ? "resume"
+      : state === "dead"
+        ? orchestrator
+          ? "restart"
+          : "relaunch"
+        : "open";
   const detail = needs
     ? promptText(prompt)
-    : activity.dot === "live"
-      ? agent.last_status_line
-      : null;
+    : paused
+      ? `until ${formatLisbonMoment(paused.until) ?? paused.until}`
+      : activity.dot === "live"
+        ? agent.last_status_line
+        : null;
   const heading = (
     <span className="mir-title">
       {line.label}
@@ -602,6 +647,15 @@ function Stage({
           </div>
         </div>
         <div className="av-acts">
+          {local ? (
+            <RunMenu
+              target={target}
+              onDialog={ask}
+              onResumeSession={resumeSession}
+              onRestart={orchestrator && primary !== "restart" ? () => ask("restart") : undefined}
+              onOpen={primary === "open" ? undefined : onOpen}
+            />
+          ) : null}
           <button
             type="button"
             className="btn"
@@ -625,20 +679,64 @@ function Stage({
               Open card
             </Link>
           ) : null}
-          <button
-            type="button"
-            className="btn primary"
-            disabled={off !== null}
-            title={off ?? focusTooltip(host)}
-            onClick={onOpen}
-          >
-            <PaneIcon />
-            Open in herdr
-            <kbd>O</kbd>
-          </button>
+          {primary === "resume" ? (
+            <button
+              type="button"
+              className="btn primary"
+              disabled={goOn.pending || goOn.sent !== null}
+              title={`Send ${line.name} a "go on" line`}
+              onClick={goOn.trigger}
+            >
+              <PlayIcon />
+              {goOn.pending ? "Resuming..." : "Resume"}
+            </button>
+          ) : primary === "relaunch" || primary === "restart" ? (
+            <button
+              type="button"
+              className="btn primary"
+              title={
+                primary === "restart"
+                  ? `Stop the ${project.name} orchestrator and start a new one`
+                  : `Start a new pane for ${line.name} on the same branch`
+              }
+              onClick={() => ask(primary)}
+            >
+              <ReopenIcon />
+              {primary === "restart" ? "Restart..." : "Relaunch..."}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="btn primary"
+              disabled={off !== null}
+              title={off ?? focusTooltip(host)}
+              onClick={onOpen}
+            >
+              <PaneIcon />
+              Open in herdr
+              <kbd>O</kbd>
+            </button>
+          )}
         </div>
       </div>
       <PeerNote standing={standing} />
+      {paused ? <PausedNote pause={paused} receiptKey={goOn.sent} /> : null}
+      {local ? (
+        <RunDialogs
+          target={target}
+          dialog={asking === "restart" ? null : asking}
+          onClose={closeAsk}
+          onOpen={onOpen}
+        />
+      ) : null}
+      {local && orchestrator && asking === "restart" ? (
+        <RestartOrchestratorDialog
+          projectId={project.id}
+          projectName={project.name}
+          silent={activity.dot === "stale"}
+          onClose={closeAsk}
+        />
+      ) : null}
       <div className="av-card-b" ref={bodyRef}>
         {body}
         {
@@ -646,7 +744,7 @@ function Stage({
           // pane is watch only, and a saved machine's pane is read as a tail.
           remote || peerHost ? null : (
             <SteerBar
-              key={agent.session_id}
+              key={`${agent.session_id}:steer`}
               sessionId={agent.session_id}
               name={line.name}
               off={!agent.run_id ? NO_RUN : activity.dot === "live" ? null : NOT_WORKING}

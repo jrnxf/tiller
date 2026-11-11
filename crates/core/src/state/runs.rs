@@ -1,7 +1,7 @@
 //! Runs, sessions and observations: `run.*`, `session.*`,
 //! `observation.record` (`state.md` sections 3 and 8).
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -1771,13 +1771,23 @@ impl Store {
         })
     }
 
-    /// `run.pause`: a dated worker pause that silences alarms until then.
-    /// Natural: the same date writes nothing.
-    pub fn run_pause(&mut self, ctx: &Ctx, run: &str, until: Timestamp) -> Result<Applied<Run>> {
+    /// `run.pause`: a dated worker pause that silences alarms until then,
+    /// with why, when one is given. Natural: the same date and reason write
+    /// nothing.
+    pub fn run_pause(
+        &mut self,
+        ctx: &Ctx,
+        run: &str,
+        until: Timestamp,
+        reason: Option<&str>,
+    ) -> Result<Applied<Run>> {
+        let reason = reason.map(str::trim).filter(|reason| !reason.is_empty());
         self.write(ctx, "run.pause", None, |tx| {
             let run = load_run(tx, run)?;
             require_active(&run)?;
-            if run.pause_until == Some(until) {
+            if run.pause_until == Some(until)
+                && pause_reason(tx.conn(), &run.id)?.as_deref() == reason
+            {
                 return Ok(run);
             }
             if until <= tx.now() {
@@ -1795,7 +1805,7 @@ impl Store {
                 NewEvent::new("run", &run.id, "run.paused")
                     .rev(run.rev + 1)
                     .card(&run.card_id)
-                    .payload(json!({"until": until})),
+                    .payload(json!({"until": until, "reason": reason})),
             )?;
             get(tx.conn(), "run", &run.id)
         })
@@ -2029,4 +2039,18 @@ impl Store {
             })
         })
     }
+}
+
+/// Why the run's newest pause was taken, when it said.
+pub fn pause_reason(conn: &Connection, run: &str) -> Result<Option<String>> {
+    let reason = conn
+        .query_row(
+            "SELECT json_extract(payload, '$.reason') FROM events
+             WHERE entity = 'run' AND entity_id = ?1 AND kind = 'run.paused'
+             ORDER BY seq DESC LIMIT 1",
+            [run],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?;
+    Ok(reason.flatten())
 }

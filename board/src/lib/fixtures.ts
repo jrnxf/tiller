@@ -41,6 +41,7 @@ import {
   peerSnapshot,
   workerActivity,
 } from "./fixtures-federated.ts";
+import { withLifecycle } from "./fixtures-lifecycle.ts";
 import { memoryResource } from "./fixtures-memory.ts";
 import { retrosResource, settleRetros } from "./fixtures-retros.ts";
 import { recapFor } from "./fixtures-recap.ts";
@@ -80,7 +81,9 @@ export type Scenario =
   | "new-install"
   | "blocked"
   | "backing-up"
-  | "backup-failed";
+  | "backup-failed"
+  // A paused run, a dead pane and a silent orchestrator (P11).
+  | "lifecycle";
 
 // The scenarios with paired peers. `stale-sessions` has them so a peer's older
 // sessions show on this host's board.
@@ -109,6 +112,7 @@ export const SCENARIOS: readonly Scenario[] = [
   "blocked",
   "backing-up",
   "backup-failed",
+  "lifecycle",
 ];
 
 const WEEKLY_FLOOR_PERCENT = 3;
@@ -973,6 +977,11 @@ function sessionId(key: string): string {
   return `01JSESS${key.replace(/\W/g, "").padEnd(19, "0").slice(0, 19).toUpperCase()}`;
 }
 
+// The session of this host's orchestrator for a project.
+export function orchestratorSession(projectId: string): string {
+  return sessionId(`O${projectId}`);
+}
+
 // Minutes since a worker's last output: a waiting or idle one spoke when its
 // turn ended, and alpha-42 runs a long test suite, so it has gone quiet.
 function lastOutputMinutes(row: BoardRow, stale: boolean, index: number): number {
@@ -1084,13 +1093,24 @@ function agentsFor(
         host_id: host,
         workers: live.map((row, index) => workerFor(row, now, index)),
         project_id: project.id,
-        run_id: runIdFor(`orch-${project.id}`, 1),
+        // An orchestrator works on no run, as in the daemon.
+        run_id: null,
         pane_id: `pane-${project.id}`,
         workspace_label: project.id,
         state_since: minutes(now, -(40 + projectIndex * 9)),
         last_output_at: minutes(now, quiet ? -41 : -(0.2 + projectIndex)),
         ...(staleTiller && projectIndex < 2 ? staleOf(sessionId(`O${project.id}`)) : {}),
       };
+    })
+    .flatMap((orchestrator) => {
+      const workers = orchestrator.workers.flatMap((worker) => {
+        const row = withLifecycle(worker, scenario, now);
+        return row ? [row] : [];
+      });
+      const shown = withLifecycle(orchestrator, scenario, now);
+      // As in the daemon, a worker whose orchestrator was stopped is listed on
+      // its own.
+      return shown ? [{ ...shown, workers }] : workers;
     });
   return {
     orchestrators: [
@@ -1159,11 +1179,14 @@ function cardDetailFor(
   board: BoardResponse,
   cardId: string,
   now: number = Date.now(),
+  scenario: Scenario = "default",
 ): CardDetail | null {
   const row = board.rows.find((candidate) => candidate.id === cardId);
   if (!row) return null;
   const done = row.column === "done";
   const active = row.column === "working" || row.column === "landing";
+  // The run's worker as the board's run controls left it.
+  const worker = active ? withLifecycle(workerFor(row, now, 0), scenario, now) : null;
   const role = row.kind === "scout" ? "scout" : "build";
   const sha = fakeSha(row.id);
   const prs: CardPr[] = row.pr_number
@@ -1254,7 +1277,7 @@ function cardDetailFor(
             note: null,
             session_id: sessionId(`W${row.display_id}`),
             host_id: row.host_id,
-            activity: workerActivity(row),
+            activity: worker?.activity ?? workerActivity(row),
             activity_observed_at: row.observed_at ?? minutes(now, -1),
           },
         ]
@@ -1687,7 +1710,7 @@ export function fixtureResource(
     );
   }
   const detail = /^\/api\/v1\/cards\/([^/]+)$/.exec(url.pathname);
-  if (detail?.[1]) return cardDetailFor(board, detail[1], now) ?? undefined;
+  if (detail?.[1]) return cardDetailFor(board, detail[1], now, served) ?? undefined;
   if (url.pathname === "/api/v1/contributions") {
     return contributionsFor(board, url.searchParams.get("project"), now);
   }

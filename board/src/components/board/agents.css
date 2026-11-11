@@ -1024,7 +1024,10 @@
     display: none;
   }
 
+  /* With the Run menu the row can be wider than a phone: it wraps, and the
+     primary stays last, on the right. */
   .av-acts {
+    flex-wrap: wrap;
     width: 100%;
     justify-content: flex-end;
   }

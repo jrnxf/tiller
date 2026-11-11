@@ -81,3 +81,29 @@ test("a working agent is quiet after 10 minutes with no output, counted from a n
   // A host with hooks blocked reports no output: never quiet.
   expect(quiet(null, 30)).toBeNull();
 });
+
+test("a paused run reads Paused while it is quiet, and its own state once the pause has passed or it works", () => {
+  syncClock(new Date(NOW).toISOString(), { worker_stale_minutes: 15 });
+  const pause = (hoursAhead: number) => ({
+    until: new Date(NOW + hoursAhead * 3_600_000).toISOString(),
+    at: minutesAgo(35),
+    by: "board",
+    reason: "Waiting for the vendor's new bucket.",
+  });
+  const paused = (activity: string, observed: number, hoursAhead = 18) => ({
+    ...agent(activity, observed),
+    pause: pause(hoursAhead),
+  });
+  expect(agentActivity(paused("idle", 40), NOW)).toEqual({
+    dot: "idle",
+    label: "Paused",
+    old: false,
+  });
+  expect(agentActivity(paused("working", 40), NOW).label).toBe("Paused");
+  // Fresh work and a prompt still say what they are.
+  expect(agentActivity(paused("working", 2), NOW).label).toBe("Working");
+  expect(agentActivity(paused("waiting_permission", 40), NOW).dot).toBe("waiting");
+  // A dead pane is not hidden behind its pause.
+  expect(agentActivity(paused("ended", 40), NOW).label).not.toBe("Paused");
+  expect(agentActivity(paused("idle", 40, -1), NOW).label).toBe("Stale, was idle");
+});

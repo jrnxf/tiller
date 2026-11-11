@@ -138,7 +138,7 @@ export function SteerBar({
 }
 
 // Where the last steer line is: queued until the pane is idle, then typed.
-function SteerState({ receiptKey, text }: { receiptKey: string; text: string }) {
+export function SteerState({ receiptKey, text }: { receiptKey: string; text: string }) {
   const state = useStore(receiptsStore);
   const receipt = state.byKey[receiptKey];
   if (!receipt) return <span>{IDLE_NOTE}</span>;

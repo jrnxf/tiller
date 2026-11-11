@@ -508,7 +508,8 @@ export function peerAgents(
         ...base,
       })),
       project_id: project.id,
-      run_id: `01JPRUN${peerSession(`O${host}${project.id}`).slice(-18)}1`,
+      // An orchestrator works on no run, as in the daemon.
+      run_id: null,
       pane_id: `pane-${project.id}`,
       workspace_label: project.id,
       state_since: at(now, 40 + index * 9),

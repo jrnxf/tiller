@@ -525,6 +525,7 @@ mod tests {
             _store: &mut Store,
             _ctx: &Ctx,
             _project: &str,
+            _restart: bool,
         ) -> Result<Applied<tiller_agents::spawn::orchestrator::Orchestrator>, StartError> {
             unreachable!("a retro run starts no orchestrator")
         }

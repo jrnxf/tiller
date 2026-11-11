@@ -26,8 +26,10 @@ import {
   restartStaleFixture,
   fixtureResponses,
   orchestratorLive,
+  orchestratorSession,
   startOrchestratorFixture,
 } from "./fixtures.ts";
+import { changeSession, sessionDrafted, sessionStopped } from "./fixtures-lifecycle.ts";
 import { runPollerFixture } from "./fixture-doctor.ts";
 import type { Scenario } from "./fixtures.ts";
 import { relabelFixture } from "./fixtures-signals.ts";
@@ -1427,10 +1429,18 @@ function handle(
         followUps: [],
       };
     }
-    const { live } = startOrchestratorFixture(
-      project,
-      typeof body.host === "string" ? body.host : undefined,
-    );
+    const host = typeof body.host === "string" ? body.host : undefined;
+    const restart = body.restart === true;
+    if (restart && host) {
+      const reply = refused(422, "refused", "a restart runs on the orchestrator's own host");
+      return { reply, followUps: [] };
+    }
+    // A stopped or restarted orchestrator starts fresh: its pane is back.
+    const own = orchestratorSession(project);
+    const wasStopped = !host && sessionStopped(own);
+    if (!host && (restart || wasStopped)) changeSession(own, { fresh: true, stopped: false });
+    const { live: wasLive } = startOrchestratorFixture(project, host);
+    const live = wasLive && !restart && !wasStopped;
     const session = fakeId("01JSESS");
     const data = {
       session: { id: session, project_id: project, role: "orchestrator" },
@@ -1465,6 +1475,10 @@ function handle(
   const control = /^\/api\/v1\/agents\/([^/]+)\/(steer|interrupt)$/.exec(path);
   if (method === "POST" && control?.[1]) {
     return agentControl(decodeURIComponent(control[1]), control[2] ?? "", body);
+  }
+  const lifecycle = /^\/api\/v1\/agents\/([^/]+)\/(stop|pause|resume|relaunch)$/.exec(path);
+  if (method === "POST" && lifecycle?.[1]) {
+    return agentLifecycle(decodeURIComponent(lifecycle[1]), lifecycle[2] ?? "", body, scenario);
   }
   const poller = /^\/api\/v1\/pollers\/([^/]+)\/run$/.exec(path);
   if (method === "POST" && poller?.[1]) {
@@ -1507,6 +1521,106 @@ function handle(
 }
 
 const changed = new Set<string>();
+
+// A session's lifecycle change as a change event, so the board refetches the
+// agents list.
+function sessionEvent(session: string, kind: string): FollowUp {
+  return {
+    delayMs: 400,
+    event: {
+      kind,
+      txn: kind,
+      entity: "session",
+      entity_id: session,
+      rev_after: null,
+      card_id: null,
+      entity_state: null,
+    },
+  };
+}
+
+// Stop, pause, resume and relaunch (protocol.md 7.4), with the refusals core
+// gives: an orchestrator has no run, and a worker whose run is still open is
+// not stopped.
+function agentLifecycle(
+  session: string,
+  verb: string,
+  body: Record<string, unknown>,
+  scenario: Scenario,
+): MutationResult {
+  const agent = (fixtureResponses(scenario)[agentsPath()] as AgentsResponse).orchestrators
+    .flatMap((orchestrator) => [orchestrator, ...orchestrator.workers])
+    .find((row) => row.session_id === session);
+  if (!agent) return { reply: refused(404, "not_found", `no session ${session}`), followUps: [] };
+  const name = agent.herdr_name ?? session;
+  const orchestrator = agent.role === "orchestrator";
+  const at = new Date().toISOString();
+  const refuse = (fact: string) => ({
+    reply: refused(422, "refused", `session ${session}: ${fact}`),
+    followUps: [],
+  });
+  if (orchestrator && verb !== "stop") {
+    return refuse(`it is an orchestrator, which has no run to ${verb}`);
+  }
+  const dead = agent.activity === "ended" || agent.activity === "errored";
+  if (verb === "stop") {
+    if (!orchestrator && !dead) {
+      const run = agent.run_id ?? "";
+      return refuse(
+        `run ${run} is active; end it first with tiller done ${run} --outcome <outcome>, then stop its agent; nothing was sent`,
+      );
+    }
+    // An orchestrator's first stop finds a draft in its composer, so the dev
+    // server shows that refusal before the stop goes through.
+    if (orchestrator && !sessionDrafted(session)) {
+      changeSession(session, { drafted: true });
+      return refuse(
+        `the composer of pane ${agent.pane_id ?? name} holds a draft ("check the queue"); send or clear it first`,
+      );
+    }
+    changeSession(session, { stopped: true });
+    const data = { session_id: session, pane_id: agent.pane_id ?? null };
+    return {
+      reply: recorded(data, null, null),
+      followUps: [sessionEvent(session, "session.ended")],
+    };
+  }
+  if (verb === "pause") {
+    const until = typeof body.until === "string" ? body.until : "";
+    const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+    if (Number.isNaN(Date.parse(until)) || Date.parse(until) <= Date.now()) {
+      return { reply: refused(400, "usage", "--until must be a time ahead"), followUps: [] };
+    }
+    if (reason === "")
+      return { reply: refused(400, "usage", "the reason is empty"), followUps: [] };
+    const pause = { until, at, by: "board", reason };
+    changeSession(session, { pause });
+    return {
+      reply: recorded({ run_id: agent.run_id, pause }, null, null),
+      followUps: [sessionEvent(session, "run.paused")],
+    };
+  }
+  if (verb === "resume") {
+    if (!dead) {
+      return {
+        reply: recorded({ left_alone: true, pane_id: agent.pane_id }, null, null),
+        followUps: [],
+      };
+    }
+    changeSession(session, { fresh: true, activity: "working", at, pause: null });
+    return {
+      reply: recorded({ left_alone: false, pane_id: agent.pane_id }, null, null),
+      followUps: [sessionEvent(session, "session.resumed")],
+    };
+  }
+  const note = typeof body.note === "string" ? body.note.trim() : "";
+  if (note === "") return { reply: refused(400, "usage", "the note is empty"), followUps: [] };
+  changeSession(session, { fresh: true, activity: "working", at, pause: null });
+  return {
+    reply: recorded({ session_id: session, pane_id: agent.pane_id }, null, null),
+    followUps: [sessionEvent(session, "session.relaunched")],
+  };
+}
 
 // How many interrupts each fixture agent was sent: the first is confirmed, the
 // next is not, so the dev server shows both results.

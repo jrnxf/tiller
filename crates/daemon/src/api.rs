@@ -120,15 +120,51 @@ pub struct Inner {
 }
 
 /// Starts a project's orchestrator, or returns the live one, as `tiller
-/// orchestrator start` does. The binary provides it: the spawn tools are
-/// read from `config.toml` there.
+/// orchestrator start` does, and controls an agent's run as `tiller agent`
+/// does. The binary provides it: the spawn tools are read from
+/// `config.toml` there, and each call runs the command's own path.
 pub trait OrchestratorStart: Send + Sync {
+    /// With `restart`, the live orchestrator is stopped and replaced, as
+    /// `--restart` does; without it, a live one is returned.
     fn start(
         &self,
         store: &mut Store,
         ctx: &Ctx,
         project: &str,
+        restart: bool,
     ) -> Result<Applied<Orchestrator>, StartError>;
+
+    /// `tiller agent stop` on `session`.
+    fn stop_agent(
+        &self,
+        _store: &mut Store,
+        _ctx: &Ctx,
+        _session: &Session,
+    ) -> Result<Controlled, StartError> {
+        Err(cannot("stop agents"))
+    }
+
+    /// `tiller agent resume` on `run`.
+    fn resume_run(
+        &self,
+        _store: &mut Store,
+        _ctx: &Ctx,
+        _run: &Run,
+    ) -> Result<Controlled, StartError> {
+        Err(cannot("resume agents"))
+    }
+
+    /// `tiller agent relaunch` on `run`, keyed by `ctx.key`. A new attempt
+    /// takes the run's own brief.
+    fn relaunch_run(
+        &self,
+        _store: &mut Store,
+        _ctx: &Ctx,
+        _run: &Run,
+        _relaunch: BoardRelaunch,
+    ) -> Result<Controlled, StartError> {
+        Err(cannot("relaunch agents"))
+    }
 
     /// The host-level settings a start reads, and what it would refuse
     /// about them.
@@ -197,6 +233,25 @@ pub struct CuratorRun {
     >,
 }
 
+/// What one of the binary's agent controls did, as the command prints it.
+pub struct Controlled {
+    pub applied: Applied<Value>,
+    /// What the command would warn of: a stop or start it could not see.
+    pub warning: Option<String>,
+}
+
+/// The board's Relaunch: the note the new session starts from, and whether
+/// it counts as a new attempt.
+pub struct BoardRelaunch {
+    pub note: String,
+    pub new_attempt: bool,
+}
+
+/// A host whose binary gave the daemon no agent controls.
+fn cannot(what: &str) -> StartError {
+    StartError::from(Error::Unavailable(format!("this host cannot {what}")))
+}
+
 /// A start that failed, as `tiller orchestrator start` reports it.
 #[derive(Debug)]
 pub enum StartError {
@@ -216,6 +271,15 @@ pub enum StartError {
         /// every one (`settings`).
         current: Option<Value>,
     },
+}
+
+impl From<Error> for StartError {
+    fn from(error: Error) -> Self {
+        Self::State {
+            error: Box::new(error),
+            notes: None,
+        }
+    }
 }
 
 impl AppState {
@@ -891,6 +955,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/agents/{session}/steer", post(steer_agent))
         .route("/api/v1/agents/{session}/interrupt", post(interrupt_agent))
+        .route("/api/v1/agents/{session}/stop", post(stop_agent))
+        .route("/api/v1/agents/{session}/pause", post(pause_agent))
+        .route("/api/v1/agents/{session}/resume", post(resume_agent))
+        .route("/api/v1/agents/{session}/relaunch", post(relaunch_agent))
         .route("/api/v1/agents/{session}/prompt", post(prompt_read))
         .route(
             "/api/v1/agents/{session}/prompt/answer",
@@ -1713,7 +1781,7 @@ enum Parsed {
     Answer(AnswerBody),
     Decide(DecideBody, bool),
     AskNote(AskNote),
-    StartOrchestrator,
+    StartOrchestrator(bool),
     RestartStale(Option<Vec<String>>),
 }
 
@@ -1841,7 +1909,7 @@ impl Mutation {
                 (
                     request.idempotency_key,
                     request.host,
-                    Parsed::StartOrchestrator,
+                    Parsed::StartOrchestrator(request.restart),
                 )
             }
             Op::RestartStale => {
@@ -1982,7 +2050,7 @@ impl Mutation {
                 Ok(done)
             }
             // Needs the daemon's starter, so it never reaches the store alone.
-            Parsed::StartOrchestrator | Parsed::RestartStale(_) => Err(Error::Internal(
+            Parsed::StartOrchestrator(_) | Parsed::RestartStale(_) => Err(Error::Internal(
                 "a start or restart runs through its starter".into(),
             )),
         }
@@ -1998,9 +2066,9 @@ impl Mutation {
         starter: Option<&dyn OrchestratorStart>,
     ) -> Result<MutationResponse, ApiError> {
         let (op, target) = (self.op, self.target.clone());
-        if matches!(self.parsed, Parsed::StartOrchestrator) {
+        if let Parsed::StartOrchestrator(restart) = self.parsed {
             let project = target.as_deref().unwrap_or_default();
-            let applied = start_here(starter, store, ctx, project, |_| {})?;
+            let applied = start_here(starter, store, ctx, project, restart, |_| {})?;
             return Ok(Done::of(applied)?.response());
         }
         if let Parsed::RestartStale(sessions) = &self.parsed {
@@ -2024,25 +2092,28 @@ impl Mutation {
 }
 
 /// The same start as `tiller orchestrator start`, as the board: a live
-/// orchestrator is returned (`replayed`), never a second one, and a retry of
-/// a start that landed replays it by its key. `suspect` sees a store error,
-/// so the daemon can check the database for damage.
+/// orchestrator is returned (`replayed`), never a second one, unless the
+/// owner asked for a `restart`, and a retry of a start that landed replays
+/// it by its key. `suspect` sees a store error, so the daemon can check the
+/// database for damage.
 fn start_here(
     starter: Option<&dyn OrchestratorStart>,
     store: &mut Store,
     ctx: &Ctx,
     project: &str,
+    restart: bool,
     suspect: impl FnOnce(&Error),
 ) -> Result<Applied<Orchestrator>, ApiError> {
     let Some(starter) = starter else {
         return Err(Error::Unavailable("this host cannot start orchestrators".into()).into());
     };
     starter
-        .start(store, ctx, project)
+        .start(store, ctx, project, restart)
         .map_err(|error| start_refusal(error, suspect))
 }
 
-/// A refused start as the board gets it. A store failure is handed to
+/// A refused start or agent control as the board gets it, with the
+/// command's own exit code as the status. A store failure is handed to
 /// `suspect`, for the damage check.
 pub(crate) fn start_refusal(error: StartError, suspect: impl FnOnce(&Error)) -> ApiError {
     match error {
@@ -2418,6 +2489,7 @@ async fn start_orchestrator(
         return Err(Error::Unavailable("this daemon cannot start orchestrators".into()).into());
     };
     let key = mutation.key().to_owned();
+    let restart = matches!(mutation.parsed, Parsed::StartOrchestrator(true));
     let db = state.db();
     let damage = state.0.damage.clone();
     let args = request_args();
@@ -2431,6 +2503,7 @@ async fn start_orchestrator(
             &mut store,
             &board_ctx(&key, args.as_ref()),
             &id,
+            restart,
             |error| damage.suspect(&db, error),
         )
     })
@@ -4805,6 +4878,211 @@ async fn interrupt_agent(
     .await
 }
 
+/// Runs one of the binary's agent controls as the board, off the async
+/// runtime: the command's own path, through [`OrchestratorStart`].
+async fn control(
+    state: &AppState,
+    key: String,
+    action: impl FnOnce(&dyn OrchestratorStart, &mut Store, &Ctx) -> Result<Controlled, StartError>
+    + Send
+    + 'static,
+) -> ApiResult<MutationResponse> {
+    writable(state)?;
+    let Some(starter) = state.0.orchestrators.clone() else {
+        return Err(Error::Unavailable("this daemon cannot control agents".into()).into());
+    };
+    let db = state.db();
+    let damage = state.0.damage.clone();
+    let args = request_args();
+    let joined = tokio::task::spawn_blocking(move || {
+        if !db.exists() {
+            return Err(uninitialized());
+        }
+        let mut store = Store::open_current(&db).map_err(ApiError::from)?;
+        let ctx = board_ctx(&key, args.as_ref());
+        let controlled = action(starter.as_ref(), &mut store, &ctx)
+            .map_err(|error| start_refusal(error, |error| damage.suspect(&db, error)))?;
+        let done = Done::of(controlled.applied).map_err(ApiError::from)?;
+        Ok(done.with_warning(controlled.warning))
+    })
+    .await;
+    let done = match joined {
+        Ok(result) => result?,
+        Err(error) => return Err(Error::Internal(error.to_string()).into()),
+    };
+    Ok(Json(done.response()))
+}
+
+/// The session `session` names, and its run, which an orchestrator lacks.
+fn session_run(store: &Store, session: &str, what: &str) -> tiller_core::Result<(Session, Run)> {
+    let id = resolve_id(store.conn(), "sessions", "session", session)?;
+    let session: Session = get_row(store.conn(), "session", &id)?;
+    let Some(run_id) = &session.run_id else {
+        return Err(Error::Refused {
+            entity: "session",
+            id,
+            fact: format!("it is an orchestrator, which has no run to {what}"),
+        });
+    };
+    let run: Run = get_row(store.conn(), "run", run_id)?;
+    Ok((session, run))
+}
+
+/// The proven stop of `tiller agent stop` (`protocol.md` 6.4, 7.4): a
+/// worker whose run has ended, or an orchestrator. The request waits for
+/// the proof.
+#[utoipa::path(post, path = "/api/v1/agents/{session}/stop", tag = "mutations", request_body = AgentControlBody,
+    params(("session" = String, Path)),
+    responses((status = 200, body = MutationResponse, description = "`data` is the stop: `session`, `stop_proof`, `cleaned`, `closed_pane`, `warning`"),
+              (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "`refused`: the run is active, the pane holds a draft or a dialog, or the agent runs on another host or a saved machine; nothing was sent"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
+              (status = 503, body = ErrorBody, description = "herdr is unreachable")))]
+async fn stop_agent(
+    State(state): State<AppState>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers).await?;
+    let request: AgentControlBody = body(&bytes)?;
+    not_forwarded(
+        &state,
+        request.host.as_deref(),
+        "a stop (a peer's agent is stopped on its own host)",
+    )
+    .await?;
+    control(
+        &state,
+        key(&request.idempotency_key)?,
+        move |starter, store, ctx| {
+            let id = resolve_id(store.conn(), "sessions", "session", &session)?;
+            let session: Session = get_row(store.conn(), "session", &id)?;
+            starter.stop_agent(store, ctx, &session)
+        },
+    )
+    .await
+}
+
+/// A dated pause on the session's run, which silences its alarms until
+/// then: `tiller run pause` (`protocol.md` 6.4, 7.4).
+#[utoipa::path(post, path = "/api/v1/agents/{session}/pause", tag = "mutations", request_body = PauseBody,
+    params(("session" = String, Path)),
+    responses((status = 200, body = MutationResponse, description = "`data` is the run"),
+              (status = 400, body = ErrorBody, description = "a date that does not parse, or an empty or too long reason"),
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "`refused`: an orchestrator, an ended run, or a date not in the future"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn pause_agent(
+    State(state): State<AppState>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers).await?;
+    let request: PauseBody = body(&bytes)?;
+    not_forwarded(
+        &state,
+        request.host.as_deref(),
+        "a pause (a peer's run is paused on its own host)",
+    )
+    .await?;
+    let until: Timestamp = request.until.parse()?;
+    if request.reason.trim().is_empty() {
+        return Err(ApiError::usage("say why the run waits"));
+    }
+    within("the reason", &request.reason, COMMENT_MAX_CHARS)?;
+    let reason = request.reason;
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| {
+            let (_, run) = session_run(store, &session, "pause")?;
+            Done::of(store.run_pause(ctx, &run.id, until, Some(&reason))?)
+        },
+    )
+    .await
+}
+
+/// `claude --resume` in the run's worktree for a session whose agent is
+/// gone: `tiller agent resume` (`protocol.md` 6.4, 7.4).
+#[utoipa::path(post, path = "/api/v1/agents/{session}/resume", tag = "mutations", request_body = AgentControlBody,
+    params(("session" = String, Path)),
+    responses((status = 200, body = MutationResponse, description = "`data` is the resume: `run`, `session`, `pane_id`, `left_alone`, `started`, `evidence`"),
+              (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "`refused`: an orchestrator, an ended run, no Claude session to resume, or another host"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
+              (status = 503, body = ErrorBody, description = "herdr is unreachable")))]
+async fn resume_agent(
+    State(state): State<AppState>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers).await?;
+    let request: AgentControlBody = body(&bytes)?;
+    not_forwarded(
+        &state,
+        request.host.as_deref(),
+        "a resume (a peer's agent is resumed on its own host)",
+    )
+    .await?;
+    control(
+        &state,
+        key(&request.idempotency_key)?,
+        move |starter, store, ctx| {
+            let (_, run) = session_run(store, &session, "resume")?;
+            starter.resume_run(store, ctx, &run)
+        },
+    )
+    .await
+}
+
+/// A new session on the run, in the same worktree, after a proven stop of
+/// the live one: `tiller agent relaunch` (`protocol.md` 6.4, 7.4).
+#[utoipa::path(post, path = "/api/v1/agents/{session}/relaunch", tag = "mutations", request_body = RelaunchBody,
+    params(("session" = String, Path)),
+    responses((status = 200, body = MutationResponse, description = "`data` is the relaunch: `run`, `session`, `ended_session`, `stop_proof`, `pane_id`, `started`, `evidence`"),
+              (status = 400, body = ErrorBody, description = "an empty or too long note"),
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "`refused`: an orchestrator, an ended run, a worktree on another branch, a brief that is missing, or a stop that could not be proven; nothing was changed"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
+              (status = 503, body = ErrorBody, description = "herdr is unreachable")))]
+async fn relaunch_agent(
+    State(state): State<AppState>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers).await?;
+    let request: RelaunchBody = body(&bytes)?;
+    not_forwarded(
+        &state,
+        request.host.as_deref(),
+        "a relaunch (a peer's agent is relaunched on its own host)",
+    )
+    .await?;
+    if request.note.trim().is_empty() {
+        return Err(ApiError::usage(
+            "write the note the new session starts from",
+        ));
+    }
+    within("the note", &request.note, COMMENT_MAX_CHARS)?;
+    let relaunch = BoardRelaunch {
+        note: request.note,
+        new_attempt: request.new_attempt,
+    };
+    control(
+        &state,
+        key(&request.idempotency_key)?,
+        move |starter, store, ctx| {
+            let (_, run) = session_run(store, &session, "relaunch")?;
+            starter.relaunch_run(store, ctx, &run, relaunch)
+        },
+    )
+    .await
+}
+
 /// An interrupt's failure as the store's errors: herdr out of reach is 503,
 /// and any other precondition a refusal naming the run.
 fn interrupt_refused(run: &str, error: tiller_agents::spawn::SpawnError) -> Error {
@@ -5121,7 +5399,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health, doctor, run_poller,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, add_dep, remove_dep, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, host_config_read, set_config,
+        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stop_agent, pause_agent, resume_agent, relaunch_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, host_config_read, set_config,
         project_grants, create_grant, revoke_grant,
         away_start, away_edit, away_end, away_brief, host_fields, edit_host, crate::backups::list, crate::backups::take, pick_bug_project, recap, mark_recap_seen, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, memory::repropose, memory::eval::eval_plan,
@@ -9002,6 +9280,7 @@ esac"#,
             _store: &mut Store,
             _ctx: &Ctx,
             _project: &str,
+            _restart: bool,
         ) -> Result<Applied<Orchestrator>, StartError> {
             unreachable!("the stale restart does not start an orchestrator")
         }
@@ -9065,6 +9344,7 @@ esac"#,
             _store: &mut Store,
             _ctx: &Ctx,
             _project: &str,
+            _restart: bool,
         ) -> Result<Applied<Orchestrator>, StartError> {
             Err(StartError::Refused {
                 exit: 2,
@@ -9369,6 +9649,7 @@ esac"#,
             _store: &mut Store,
             _ctx: &Ctx,
             _project: &str,
+            _restart: bool,
         ) -> Result<Applied<Orchestrator>, StartError> {
             Err(StartError::Refused {
                 exit: 5,
@@ -11321,6 +11602,321 @@ esac"#,
             )
             .unwrap();
         assert_eq!(outcome.as_deref(), Some("completed"));
+    }
+
+    /// A starter that records each lifecycle control it is handed, and as
+    /// whom: the stop and the relaunch go through with a warning, a resume
+    /// is refused, and a start reports whether it was a restart.
+    #[derive(Default)]
+    struct FakeControls(Mutex<Vec<String>>);
+
+    impl FakeControls {
+        fn calls(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+
+        fn record(&self, call: String) {
+            self.0.lock().unwrap().push(call);
+        }
+
+        fn warned(value: Value) -> Controlled {
+            Controlled {
+                applied: Applied {
+                    value,
+                    events: Vec::new(),
+                    replayed: false,
+                },
+                warning: Some("the cleanup refused".into()),
+            }
+        }
+    }
+
+    impl OrchestratorStart for FakeControls {
+        fn start(
+            &self,
+            _store: &mut Store,
+            ctx: &Ctx,
+            project: &str,
+            restart: bool,
+        ) -> Result<Applied<Orchestrator>, StartError> {
+            self.record(format!("start {} {project} restart={restart}", ctx.actor));
+            Err(StartError::Refused {
+                exit: 4,
+                code: "conflict",
+                message: "a live orchestrator".into(),
+                hint: None,
+                current: None,
+            })
+        }
+
+        fn stop_agent(
+            &self,
+            _store: &mut Store,
+            ctx: &Ctx,
+            session: &Session,
+        ) -> Result<Controlled, StartError> {
+            self.record(format!("stop {} {}", ctx.actor, session.id));
+            Ok(Self::warned(json!({"session": session.id})))
+        }
+
+        fn resume_run(
+            &self,
+            _store: &mut Store,
+            ctx: &Ctx,
+            run: &Run,
+        ) -> Result<Controlled, StartError> {
+            self.record(format!("resume {} {}", ctx.actor, run.id));
+            Err(StartError::Refused {
+                exit: 5,
+                code: "refused",
+                message: format!("run {} has no Claude session to resume", run.id),
+                hint: None,
+                current: None,
+            })
+        }
+
+        fn relaunch_run(
+            &self,
+            _store: &mut Store,
+            ctx: &Ctx,
+            run: &Run,
+            relaunch: BoardRelaunch,
+        ) -> Result<Controlled, StartError> {
+            self.record(format!(
+                "relaunch {} {} {} new_attempt={}",
+                ctx.actor, run.id, relaunch.note, relaunch.new_attempt
+            ));
+            Ok(Self::warned(json!({"run": run.id})))
+        }
+    }
+
+    /// P11: the board's Stop, Resume and Relaunch reach the commands' own
+    /// path as the board, with the session's run; an orchestrator, which has
+    /// no run, is refused before the starter is asked.
+    #[tokio::test]
+    async fn the_board_stops_resumes_and_relaunches_through_the_command_path() {
+        let mut fleet = Fleet::new();
+        let worker = fleet.worker("w2:p1");
+        let run: String = fleet
+            .open()
+            .conn()
+            .query_row(
+                "SELECT run_id FROM sessions WHERE id = ?1",
+                [&worker],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let orchestrator = fleet.orchestrator_session.clone();
+        let starter = Arc::new(FakeControls::default());
+        let app = app_restarting(fleet.dir.path(), starter.clone());
+        let cookie = owner_cookie(fleet.dir.path());
+        let post = |path: String, body: Value| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                send(
+                    &app,
+                    mutation("POST", &path, body, &[("cookie", cookie.as_str())]),
+                )
+                .await
+            }
+        };
+
+        let stopped = post(
+            format!("/api/v1/agents/{worker}/stop"),
+            json!({"idempotency_key": "k-stop"}),
+        )
+        .await;
+        assert_eq!(stopped.status, StatusCode::OK, "{}", stopped.body);
+        let stopped: Value = serde_json::from_str(&stopped.body).unwrap();
+        assert_eq!(stopped["data"]["session"], worker.as_str());
+        assert_eq!(stopped["warning"], "the cleanup refused", "{stopped}");
+
+        let resumed = post(
+            format!("/api/v1/agents/{worker}/resume"),
+            json!({"idempotency_key": "k-resume"}),
+        )
+        .await;
+        assert_eq!(
+            resumed.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            resumed.body
+        );
+        assert!(
+            resumed.body.contains("no Claude session"),
+            "{}",
+            resumed.body
+        );
+
+        let blank = post(
+            format!("/api/v1/agents/{worker}/relaunch"),
+            json!({"idempotency_key": "k-blank", "note": "  "}),
+        )
+        .await;
+        assert_eq!(blank.status, StatusCode::BAD_REQUEST, "{}", blank.body);
+        let relaunched = post(
+            format!("/api/v1/agents/{worker}/relaunch"),
+            json!({"idempotency_key": "k-relaunch", "note": "tests pass", "new_attempt": true}),
+        )
+        .await;
+        assert_eq!(relaunched.status, StatusCode::OK, "{}", relaunched.body);
+
+        for verb in ["resume", "relaunch"] {
+            let refused = post(
+                format!("/api/v1/agents/{orchestrator}/{verb}"),
+                if verb == "relaunch" {
+                    json!({"idempotency_key": "k-o-relaunch", "note": "n"})
+                } else {
+                    json!({"idempotency_key": "k-o-resume"})
+                },
+            )
+            .await;
+            assert_eq!(
+                refused.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{}",
+                refused.body
+            );
+            assert!(
+                refused.body.contains(&format!("has no run to {verb}")),
+                "{}",
+                refused.body
+            );
+        }
+
+        assert_eq!(
+            starter.calls(),
+            [
+                format!("stop board {worker}"),
+                format!("resume board {run}"),
+                format!("relaunch board {run} tests pass new_attempt=true"),
+            ]
+        );
+    }
+
+    /// P11: the board's Pause until is `tiller run pause` as the board; the
+    /// agents view shows the pause with who took it and why.
+    #[tokio::test]
+    async fn the_board_pauses_a_run_and_the_agents_view_shows_why() {
+        let mut fleet = Fleet::new();
+        let worker = fleet.worker("w2:p1");
+        let orchestrator = fleet.orchestrator_session.clone();
+        let app = app_restarting(fleet.dir.path(), Arc::new(FakeControls::default()));
+        let cookie = owner_cookie(fleet.dir.path());
+        let path = format!("/api/v1/agents/{worker}/pause");
+        let until = Timestamp::now().plus_minutes(48 * 60).to_string();
+        let pause = |body: Value, path: String| {
+            let app = app.clone();
+            let cookie = cookie.clone();
+            async move {
+                send(
+                    &app,
+                    mutation("POST", &path, body, &[("cookie", cookie.as_str())]),
+                )
+                .await
+            }
+        };
+
+        let blank = pause(
+            json!({"idempotency_key": "k-0", "until": until, "reason": " "}),
+            path.clone(),
+        )
+        .await;
+        assert_eq!(blank.status, StatusCode::BAD_REQUEST, "{}", blank.body);
+        let bad_date = pause(
+            json!({"idempotency_key": "k-0", "until": "Thursday", "reason": "r"}),
+            path.clone(),
+        )
+        .await;
+        assert_eq!(
+            bad_date.status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            bad_date.body
+        );
+        let orchestrated = pause(
+            json!({"idempotency_key": "k-0", "until": until, "reason": "r"}),
+            format!("/api/v1/agents/{orchestrator}/pause"),
+        )
+        .await;
+        assert_eq!(
+            orchestrated.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            orchestrated.body
+        );
+
+        let body =
+            json!({"idempotency_key": "k-1", "until": until, "reason": "waiting on the API key"});
+        let paused = pause(body.clone(), path.clone()).await;
+        assert_eq!(paused.status, StatusCode::OK, "{}", paused.body);
+        let again = pause(body, path.clone()).await;
+        assert_eq!(again.status, StatusCode::OK, "{}", again.body);
+
+        let read: Value = serde_json::from_str(&get(&app, "/api/v1/agents").await.body).unwrap();
+        let row = read["orchestrators"][0]["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["session_id"] == worker.as_str())
+            .unwrap()
+            .clone();
+        assert_eq!(row["pause"]["by"], "board", "{row}");
+        assert_eq!(row["pause"]["reason"], "waiting on the API key");
+        let shown: Timestamp = row["pause"]["until"].as_str().unwrap().parse().unwrap();
+        assert_eq!(shown, until.parse::<Timestamp>().unwrap());
+        let paused_events: i64 = fleet
+            .open()
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind = 'run.paused' AND actor = 'board'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(paused_events, 1, "the retry replays");
+    }
+
+    /// P11: Restart on the board is `tiller orchestrator start --restart`
+    /// as the board; a plain Start is never a restart.
+    #[tokio::test]
+    async fn only_the_boards_explicit_restart_restarts_an_orchestrator() {
+        let fleet = Fleet::new();
+        let starter = Arc::new(FakeControls::default());
+        let app = app_restarting(fleet.dir.path(), starter.clone());
+        let cookie = owner_cookie(fleet.dir.path());
+        for (key, body) in [
+            ("k-start", json!({"idempotency_key": "k-start"})),
+            (
+                "k-restart",
+                json!({"idempotency_key": "k-restart", "restart": true}),
+            ),
+        ] {
+            let answer = send(
+                &app,
+                mutation(
+                    "POST",
+                    "/api/v1/projects/alpha/orchestrator",
+                    body,
+                    &[("cookie", cookie.as_str())],
+                ),
+            )
+            .await;
+            assert_eq!(
+                answer.status,
+                StatusCode::CONFLICT,
+                "{key}: {}",
+                answer.body
+            );
+        }
+        assert_eq!(
+            starter.calls(),
+            [
+                "start board alpha restart=false",
+                "start board alpha restart=true"
+            ]
+        );
     }
 
     /// CI fails when `contract/openapi.json` is stale. Regenerate it with

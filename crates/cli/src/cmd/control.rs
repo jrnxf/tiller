@@ -1,14 +1,16 @@
 //! `tiller agent interrupt`, `resume`, `relaunch` and `stop` (T2.5, T4.5): the
 //! herdr half lives in `tiller_agents::control`; this parses the call and
-//! picks the tools.
+//! picks the tools. The board's Resume, Relaunch and Stop run the same
+//! `*_run` and `stop_session` the commands do, through the daemon.
 
 use std::path::PathBuf;
 
 use clap::Args;
 use serde_json::json;
-use tiller_agents::control::{self, RelaunchOutcome, RelaunchRequest, Waits};
-use tiller_agents::spawn::readings;
-use tiller_core::domain::{Effort, Run};
+use tiller_agents::control::{self, RelaunchOutcome, RelaunchRequest, Resumed, Stopped, Waits};
+use tiller_agents::spawn::{SpawnError, launch, readings};
+use tiller_core::domain::{Effort, Run, Session};
+use tiller_core::{Applied, Ctx, Store};
 
 use super::spawn::{Tools, failure, read_brief};
 use super::{KeyArg, resolve_run, resolve_session};
@@ -64,21 +66,34 @@ pub fn interrupt(app: &App, run: &str) -> Done {
     Ok(Outcome::applied(applied).with_warning(warning))
 }
 
+/// What a control did, and what it warns of.
+pub(super) type Warned<T> = Result<(Applied<T>, Option<String>), SpawnError>;
+
 /// `tiller agent resume <run>`: `claude --resume` in the run's worktree; a
 /// live session herdr shows running is left alone.
 pub fn resume(app: &App, run: &str) -> Done {
     let tools = Tools::load(app)?;
     let mut store = app.write()?;
     let run = resolve_run(&store, run)?;
-    let world = tools.world(readings::ram_free_mb(), disk_free_mb(&run));
-    let applied = control::resume(&mut store, &app.ctx(), &world, &Waits::default(), &run)
-        .map_err(failure)?;
+    let (applied, warning) = resume_run(&tools, &mut store, &app.ctx(), &run).map_err(failure)?;
+    Ok(Outcome::applied(applied).with_warning(warning))
+}
+
+/// The resume `tiller agent resume` and the board's Resume both run.
+pub(super) fn resume_run(
+    tools: &Tools,
+    store: &mut Store,
+    ctx: &Ctx,
+    run: &Run,
+) -> Warned<Resumed> {
+    let world = tools.world(readings::ram_free_mb(), disk_free_mb(run));
+    let applied = control::resume(store, ctx, &world, &Waits::default(), run)?;
     let warning = match applied.value.started {
         Some(proof) => unseen("the start", proof, &applied.value.evidence),
         None => None,
     }
     .or_else(|| applied.value.warning.clone());
-    Ok(Outcome::applied(applied).with_warning(warning))
+    Ok((applied, warning))
 }
 
 /// `tiller agent relaunch <run> --note <t>`: stops the live session, proven,
@@ -89,7 +104,6 @@ pub fn relaunch(app: &App, args: Relaunch) -> Done {
     let tools = Tools::load(app)?;
     let mut store = app.write()?;
     let run = resolve_run(&store, &args.run)?;
-    let world = tools.world(readings::ram_free_mb(), disk_free_mb(&run));
     let normalized = json!({
         "run": run.id,
         "note": args.note,
@@ -99,12 +113,11 @@ pub fn relaunch(app: &App, args: Relaunch) -> Done {
         "effort": args.effort,
     });
     let keyed = app.key(&store, "run.relaunch", &normalized, &args.key.key)?;
-    let applied = control::relaunch(
+    let (applied, warning) = relaunch_run(
+        &tools,
         &mut store,
         &app.ctx(),
         Some(&keyed.key),
-        &world,
-        &Waits::default(),
         &run,
         RelaunchRequest {
             note: args.note,
@@ -114,15 +127,46 @@ pub fn relaunch(app: &App, args: Relaunch) -> Done {
         },
     )
     .map_err(failure)?;
+    Ok(Outcome::applied(applied)
+        .with_key(&keyed)
+        .with_warning(warning))
+}
+
+/// The relaunch `tiller agent relaunch` and the board's Relaunch both run.
+pub(super) fn relaunch_run(
+    tools: &Tools,
+    store: &mut Store,
+    ctx: &Ctx,
+    key: Option<&str>,
+    run: &Run,
+    request: RelaunchRequest,
+) -> Warned<RelaunchOutcome> {
+    let world = tools.world(readings::ram_free_mb(), disk_free_mb(run));
+    let applied = control::relaunch(store, ctx, key, &world, &Waits::default(), run, request)?;
     let warning = match &applied.value {
         RelaunchOutcome::Relaunched(done) => {
             unseen("the start", done.started, &done.evidence).or_else(|| done.warning.clone())
         }
         RelaunchOutcome::Replayed { .. } => None,
     };
-    Ok(Outcome::applied(applied)
-        .with_key(&keyed)
-        .with_warning(warning))
+    Ok((applied, warning))
+}
+
+/// The brief a run was launched on, from its prompt in the run scratch: the
+/// board's new attempt starts on it, since the board takes no brief file.
+pub(super) fn run_brief(tools: &Tools, run: &Run) -> Result<String, SpawnError> {
+    let prompt = tools.scratch_root().join(&run.id).join("prompt.md");
+    std::fs::read_to_string(&prompt)
+        .ok()
+        .and_then(|text| launch::brief_of(&text).map(str::to_owned))
+        .filter(|brief| !brief.is_empty())
+        .ok_or_else(|| {
+            SpawnError::Refused(format!(
+                "{} is missing or holds no brief, so a new attempt has nothing to start on; run tiller agent relaunch {} --new-attempt --brief-file <f> from a terminal; nothing was changed",
+                prompt.display(),
+                run.id
+            ))
+        })
 }
 
 /// `tiller agent stop <run|session>`: stops the agent of an ended run, or
@@ -132,9 +176,20 @@ pub fn stop(app: &App, target: &str) -> Done {
     let tools = Tools::load(app)?;
     let mut store = app.write()?;
     let session = resolve_session(&store, target)?;
-    let world = tools.world(None, None);
-    let applied = control::stop_agent(&mut store, &app.ctx(), &world, &Waits::default(), &session)
-        .map_err(failure)?;
-    let warning = applied.value.warning.clone();
+    let (applied, warning) =
+        stop_session(&tools, &mut store, &app.ctx(), &session).map_err(failure)?;
     Ok(Outcome::applied(applied).with_warning(warning))
+}
+
+/// The stop `tiller agent stop` and the board's Stop agent both run.
+pub(super) fn stop_session(
+    tools: &Tools,
+    store: &mut Store,
+    ctx: &Ctx,
+    session: &Session,
+) -> Warned<Stopped> {
+    let world = tools.world(None, None);
+    let applied = control::stop_agent(store, ctx, &world, &Waits::default(), session)?;
+    let warning = applied.value.warning.clone();
+    Ok((applied, warning))
 }

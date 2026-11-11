@@ -1,0 +1,58 @@
+/* The Run menu, its dialogs and a paused run's note (protocol.md 7.4, P11). */
+.run-menu {
+  min-width: 210px;
+}
+
+.run-dlg .refusal {
+  margin: 0 0 12px;
+}
+
+.run-cbx {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 2px 0 12px;
+  font-size: var(--fs-small);
+  color: var(--fg-1);
+  cursor: pointer;
+}
+
+.run-cbx input {
+  flex: none;
+  margin: 3px 0 0;
+  accent-color: var(--accent-solid);
+}
+
+.run-cbx small {
+  display: block;
+  color: var(--fg-3);
+  font-size: var(--fs-mini);
+}
+
+/* Under the header, in the card: the pause, then what Resume does. */
+.run-paused {
+  flex: none;
+  padding: 0 14px 10px;
+}
+
+.run-paused .ch-note {
+  margin: 0;
+}
+
+.run-paused .av-steer-st {
+  min-height: 0;
+  padding: 8px 0 0;
+}
+
+.run-note {
+  margin: 8px 0 0;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+  line-height: 1.5;
+}
+
+@media (max-width: 820px) {
+  .run-paused {
+    padding: 10px 12px 0;
+  }
+}

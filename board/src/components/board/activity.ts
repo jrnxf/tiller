@@ -1,5 +1,5 @@
 import type { AgentRow, BoardRow } from "../../lib/api-types";
-import { clockStore } from "../../lib/clock";
+import { clockStore, serverNow } from "../../lib/clock";
 import { secondsSince } from "./format";
 
 // The dot kinds in the mocks: live (green, pulsing), waiting (orange), idle
@@ -44,14 +44,21 @@ export function quietFor(
 
 // An observation older than the role's threshold reads as stale, as the
 // `session_activity` view says; a prompt, `unknown` and `ended` do not age. A
-// dated pause also silences staleness there, but the API does not carry the
-// pause yet, so the daemon's snapshot is the only place that applies it.
+// dated pause silences staleness, as it does there: an agent that is not
+// working while its run is paused reads as Paused (protocol.md 6.4,
+// `run pause`).
 export function agentActivity(
-  agent: Pick<AgentRow, "activity" | "activity_observed_at" | "role">,
+  agent: Pick<AgentRow, "activity" | "activity_observed_at" | "role" | "pause">,
   now?: number,
 ): ActivityView {
   const age = secondsSince(agent.activity_observed_at, now);
   const stale = age !== null && age > thresholdMinutes(agent.role) * 60;
+  const quietWork = agent.activity === "working" && stale;
+  // The row can outlive its pause while the page stays open.
+  const paused = agent.pause ? Date.parse(agent.pause.until) > (now ?? serverNow()) : false;
+  if (paused && (agent.activity === "idle" || agent.activity === "stale" || quietWork)) {
+    return { dot: "idle", label: "Paused", old: false };
+  }
   switch (agent.activity) {
     case "working":
       return stale

@@ -85,7 +85,7 @@ fn dated_pause_silences_silent_escalation() {
     let run = w.run_of(&worker);
     w.observe(&worker, Activity::Working, ago(45));
     w.store_mut()
-        .run_pause(&owner(), &run.id, now().plus_minutes(120))
+        .run_pause(&owner(), &run.id, now().plus_minutes(120), None)
         .unwrap();
     let report = w.pass(now());
     assert!(!report.did("R12"), "{report:?}");
@@ -105,7 +105,9 @@ fn silent_alarm_returns_after_the_pause_date() {
     let t0 = now();
     w.observe(&worker, Activity::Working, t0.plus_minutes(-45));
     let until = t0.plus_minutes(120);
-    w.store_mut().run_pause(&owner(), &run.id, until).unwrap();
+    w.store_mut()
+        .run_pause(&owner(), &run.id, until, None)
+        .unwrap();
 
     // Well before the date, and just past it but inside the grace: silent.
     for at in [t0, t0.plus_minutes(60), until.plus_minutes(10)] {

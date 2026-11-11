@@ -142,6 +142,13 @@ export const EscIcon = () => (
   </Glyph>
 );
 
+// Stop agent: the pane closes and its session ends.
+export const StopIcon = () => (
+  <Glyph>
+    <rect x="4" y="4" width="8" height="8" rx="1.4" {...stroke} />
+  </Glyph>
+);
+
 // A steer line that waits in the queue.
 export const QueuedIcon = () => (
   <Glyph>

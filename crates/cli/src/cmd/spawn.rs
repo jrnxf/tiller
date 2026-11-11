@@ -14,7 +14,7 @@ use tiller_agents::spawn::pool::Treehouse;
 use tiller_agents::spawn::trust::ClaudeConfig;
 use tiller_agents::spawn::{self as agents, Request, SpawnError, World, readings};
 use tiller_core::state::resolve_card;
-use tiller_daemon::api::StartError;
+use tiller_daemon::api::{BoardRelaunch, Controlled, StartError};
 use tiller_herdr::client::{Cli, HerdrError};
 use tiller_reconcile::git::GitScanner;
 
@@ -375,9 +375,10 @@ pub(super) fn start_orchestrator(
     )
 }
 
-/// The board's Start orchestrator, which the daemon runs as the board:
-/// the tools are read from `config.toml` at each start, as the command
-/// reads them, and a live orchestrator is returned, never restarted.
+/// The board's Start orchestrator and its agent controls, which the daemon
+/// runs as the board: the tools are read from `config.toml` at each call,
+/// as the commands read them, and each call is the command's own path. A
+/// live orchestrator is returned unless the owner asked for a restart.
 pub struct BoardStart {
     pub app: App,
 }
@@ -388,25 +389,12 @@ impl tiller_daemon::api::OrchestratorStart for BoardStart {
         store: &mut tiller_core::Store,
         ctx: &tiller_core::Ctx,
         project: &str,
+        restart: bool,
     ) -> Result<tiller_core::Applied<agents::orchestrator::Orchestrator>, StartError> {
         let tools = Tools::load(&self.app).map_err(refused)?;
         let homes = orchestrator_homes(&tools).map_err(refused)?;
-        start_orchestrator(&tools, &homes, store, ctx, project, false).map_err(
+        start_orchestrator(&tools, &homes, store, ctx, project, restart).map_err(
             |error| match error {
-                SpawnError::State(error) => StartError::State {
-                    error: Box::new(error),
-                    notes: None,
-                },
-                SpawnError::Undone { error, notes } => match *error {
-                    SpawnError::State(error) => StartError::State {
-                        error: Box::new(error),
-                        notes: Some(notes),
-                    },
-                    error => refused(failure(SpawnError::Undone {
-                        error: Box::new(error),
-                        notes,
-                    })),
-                },
                 // A start returns the first setting it finds wrong; the board
                 // shows every one.
                 error @ SpawnError::Config(_) => {
@@ -430,9 +418,57 @@ impl tiller_daemon::api::OrchestratorStart for BoardStart {
                     }
                     refusal
                 }
-                error => refused(failure(error)),
+                error => start_error(error),
             },
         )
+    }
+
+    fn stop_agent(
+        &self,
+        store: &mut tiller_core::Store,
+        ctx: &tiller_core::Ctx,
+        session: &tiller_core::domain::Session,
+    ) -> Result<Controlled, StartError> {
+        let tools = Tools::load(&self.app).map_err(refused)?;
+        controlled(super::control::stop_session(&tools, store, ctx, session))
+    }
+
+    fn resume_run(
+        &self,
+        store: &mut tiller_core::Store,
+        ctx: &tiller_core::Ctx,
+        run: &tiller_core::domain::Run,
+    ) -> Result<Controlled, StartError> {
+        let tools = Tools::load(&self.app).map_err(refused)?;
+        controlled(super::control::resume_run(&tools, store, ctx, run))
+    }
+
+    fn relaunch_run(
+        &self,
+        store: &mut tiller_core::Store,
+        ctx: &tiller_core::Ctx,
+        run: &tiller_core::domain::Run,
+        relaunch: BoardRelaunch,
+    ) -> Result<Controlled, StartError> {
+        let tools = Tools::load(&self.app).map_err(refused)?;
+        let brief = if relaunch.new_attempt {
+            Some(super::control::run_brief(&tools, run).map_err(start_error)?)
+        } else {
+            None
+        };
+        controlled(super::control::relaunch_run(
+            &tools,
+            store,
+            ctx,
+            ctx.key.as_deref(),
+            run,
+            tiller_agents::control::RelaunchRequest {
+                note: relaunch.note,
+                new_attempt: relaunch.new_attempt,
+                brief,
+                asked: None,
+            },
+        ))
     }
 
     fn doctor(&self) -> Option<tiller_daemon::dto::DoctorReport> {
@@ -516,6 +552,42 @@ impl BoardStart {
         let tools = Tools::load(&self.app).map_err(|failure| failure.message.clone())?;
         let homes = orchestrator_homes(&tools).map_err(|failure| failure.message.clone())?;
         super::stale::restart_session(&tools, &homes, store, ctx, session)
+    }
+}
+
+/// A control's answer as the daemon hands it to the board.
+fn controlled<T: serde::Serialize>(
+    done: super::control::Warned<T>,
+) -> Result<Controlled, StartError> {
+    let (applied, warning) = done.map_err(start_error)?;
+    let value = serde_json::to_value(&applied.value)
+        .map_err(|error| StartError::from(tiller_core::Error::from(error)))?;
+    Ok(Controlled {
+        applied: tiller_core::Applied {
+            value,
+            events: applied.events,
+            replayed: applied.replayed,
+        },
+        warning,
+    })
+}
+
+/// A start or a control that failed, as the board gets it: the store's
+/// own error, so the daemon checks the database, or the command's refusal.
+fn start_error(error: SpawnError) -> StartError {
+    match error {
+        SpawnError::State(error) => StartError::from(error),
+        SpawnError::Undone { error, notes } => match *error {
+            SpawnError::State(error) => StartError::State {
+                error: Box::new(error),
+                notes: Some(notes),
+            },
+            error => refused(failure(SpawnError::Undone {
+                error: Box::new(error),
+                notes,
+            })),
+        },
+        error => refused(failure(error)),
     }
 }
 
