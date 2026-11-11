@@ -10,9 +10,11 @@ import { fixtureResource, fixtureSnapshot } from "../../lib/fixtures";
 import { resetMemoryFixture } from "../../lib/fixtures-memory";
 import { RUN_MS, resetRetrosFixture } from "../../lib/fixtures-retros";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
-import { createQueryClient } from "../../lib/query-client";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
+import { createTestQueryClient, loadRouteChunks } from "../../test-app";
+
+await loadRouteChunks();
 
 // Wed 11 Nov 2026, 15:40 in Lisbon (UTC this time of year). The seeded retro
 // of alpha-14 was cut at its 20 min limit at 04:20 the same day.
@@ -44,7 +46,7 @@ function stubDaemon() {
 }
 
 async function renderAt(path: string) {
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot("default", NOW));
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: [path] }));
   await router.load();

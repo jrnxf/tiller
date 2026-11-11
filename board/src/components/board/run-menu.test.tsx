@@ -9,13 +9,15 @@ import { fixtureMutation } from "../../lib/fixture-mutations";
 import { fixtureResource, fixtureSnapshot } from "../../lib/fixtures";
 import { changeSession, resetLifecycleFixture } from "../../lib/fixtures-lifecycle";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
-import { createQueryClient } from "../../lib/query-client";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
 import { ActionError } from "../attention/api";
 import { resetBoardLook } from "./board-prefs";
 import { stopRefusal } from "./run-menu";
 import { NO_RUN } from "./steer-bar";
+import { createTestQueryClient, loadRouteChunks } from "../../test-app";
+
+await loadRouteChunks();
 
 // The `lifecycle` fixture: beta-7's run is paused, alpha-44's pane is gone,
 // alpha-42 works on its run, and gamma's orchestrator has gone silent.
@@ -45,10 +47,7 @@ function stubDaemon(): Posted[] {
 }
 
 async function renderApp(path: string) {
-  const queryClient = createQueryClient();
-  queryClient.setDefaultOptions({
-    queries: { ...queryClient.getDefaultOptions().queries, retryDelay: 0 },
-  });
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot("lifecycle"));
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: [path] }));
   await router.load();
