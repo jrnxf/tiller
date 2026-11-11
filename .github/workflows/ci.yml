@@ -75,8 +75,8 @@ jobs:
       # clippy, fmt, nextest and the board checks run in the rust and board jobs.
       - name: Generated bun.nix is fresh
         run: nix build --print-build-logs .#checks.x86_64-linux.bunNixFresh
-      - name: Every listed system's dev shell evaluates
-        run: nix build --print-build-logs .#checks.x86_64-linux.devShellsEvaluate
+      - name: Every listed system's dev shells and packages evaluate
+        run: nix build --print-build-logs .#checks.x86_64-linux.systemsEvaluate
       - name: Build
         run: nix build --print-build-logs
       - name: Smoke test

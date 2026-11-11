@@ -199,14 +199,21 @@
                     || { echo "board/bun.nix is stale: run 'bun run nix:sync' in board/" >&2; exit 1; }
                   touch $out
                 '';
-            # The dev shell of every listed system evaluates. Evaluation alone
-            # catches a package that the locked nixpkgs does not offer on one
-            # of them, so nothing for the other systems is built.
-            devShellsEvaluate = pkgs.writeText "tiller-dev-shells-evaluate" (
-              lib.concatMapStringsSep "\n" (
-                s: "${s} ${builtins.unsafeDiscardStringContext self.devShells.${s}.default.drvPath}"
-              ) systems
-            );
+            # Every dev shell and package of every listed system evaluates.
+            # Evaluation alone catches a package that the locked nixpkgs does
+            # not offer on one of them, so nothing for the other systems is
+            # built.
+            systemsEvaluate =
+              let
+                drvs =
+                  s: kind:
+                  lib.mapAttrsToList (
+                    name: drv: "${s} ${kind}.${name} ${builtins.unsafeDiscardStringContext drv.drvPath}"
+                  ) self.${kind}.${s};
+              in
+              pkgs.writeText "tiller-systems-evaluate" (
+                lib.concatStringsSep "\n" (lib.concatMap (s: drvs s "devShells" ++ drvs s "packages") systems)
+              );
             # A rebuild restarts the daemon only because the launchd agent and
             # the systemd unit change with the package (see nix/module.nix).
             # Evaluates the module against stub home-manager options with two
