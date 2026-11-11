@@ -1,0 +1,14 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "grants": [],
+    "project": "alpha"
+  },
+  "help": [
+    "no grant yet: `tiller grant create alpha --kind merge --conditions <json>`"
+  ],
+  "ok": true
+}

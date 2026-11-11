@@ -8,6 +8,7 @@ import type {
   CardApproval,
   CardArtifact,
   CardPr,
+  CardReview,
   CardRun,
   TimelineEntry,
   TimelineResponse,
@@ -42,7 +43,7 @@ import {
   useNamedProjects,
   useStanding,
 } from "./peer-state";
-import { approvalFor, approvalStanding, mergeTimeline } from "./card-model";
+import { approvalFor, approvalStanding, mergeTimeline, reviewFor, sameSha } from "./card-model";
 import { durationSeconds, formatAge, formatLisbonMoment, secondsSince, shortSha } from "./format";
 import { focusTooltip, useHerdrFocus, useOpenKey } from "./herdr";
 import { LiveTerminal, TerminalToggle, useTerminalOpen } from "./live-terminal";
@@ -289,17 +290,49 @@ function RunCard({ run, owner, name }: { run: CardRun; owner: string | undefined
   );
 }
 
+// The review and the commit it covered. A review of an older head says so,
+// since it says nothing about the commits after it.
+function ReviewLine({ review, head }: { review: CardReview; head: string }) {
+  const tone = review.verdict === "pass" ? "ok" : review.verdict === "fail" ? "bad" : "yel";
+  const covered = review.head_sha ?? null;
+  return (
+    <>
+      <span className={`lab sm ${tone}`}>
+        {review.verdict === "pass" ? <CheckIcon /> : null}
+        {review.verdict}
+      </span>
+      <span className="meta">
+        {formatLisbonMoment(review.at)},{" "}
+        {!covered ? (
+          "head not recorded"
+        ) : sameSha(covered, head) ? (
+          <>
+            on <span className="sha">{shortSha(covered)}</span>
+          </>
+        ) : (
+          <>
+            on <span className="sha old">{shortSha(covered)}</span>, an older head
+          </>
+        )}
+      </span>
+    </>
+  );
+}
+
 // The pull request and its approval are one card: what is being approved on the
 // left, what you can do about it on the right.
 function PullRequest({
   pr,
   approvals,
   attention,
+  reviews,
 }: {
   pr: CardPr;
   approvals: CardApproval[];
   attention: AttentionItem[];
+  reviews: CardReview[];
 }) {
+  const review = reviewFor(reviews, pr);
   const approval = approvalFor(approvals, pr);
   const standing = approval ? approvalStanding(approval, pr) : null;
   const stale = standing === "stale";
@@ -349,6 +382,14 @@ function PullRequest({
               <>
                 <dt>Diff</dt>
                 <dd>{pr.diff_summary}</dd>
+              </>
+            ) : null}
+            {review ? (
+              <>
+                <dt>Review</dt>
+                <dd>
+                  <ReviewLine review={review} head={pr.head_sha} />
+                </dd>
               </>
             ) : null}
             <dt>Approval</dt>
@@ -744,6 +785,7 @@ export function CardPage({
                 pr={pr}
                 approvals={detail.approvals}
                 attention={detail.attention}
+                reviews={detail.reviews}
               />
             ))
           ) : (

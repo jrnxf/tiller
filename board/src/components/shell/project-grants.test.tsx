@@ -149,6 +149,9 @@ test("New grant sends the conditions tiller grant create takes, and the grant jo
   fireEvent.click(form.getByLabelText("merge"));
   fireEvent.click(form.getByLabelText("rebase"));
   fireEvent.change(form.getByLabelText(/^Head/), { target: { value: "alpha-*" } });
+  // No kind chosen is any kind, so the field is left out until one is.
+  fireEvent.click(form.getByLabelText("ship"));
+  fireEvent.click(form.getByLabelText("ops"));
   fireEvent.click(form.getByLabelText("spec-review"));
   // A review appears with the high findings choice, None by default.
   expect(form.getByRole("button", { name: "None" }).getAttribute("aria-pressed")).toBe("true");
@@ -176,6 +179,7 @@ test("New grant sends the conditions tiller grant create takes, and the grant jo
           checks: "success",
           // alpha ships through no-mistakes, so its pipeline must pass too.
           pipeline: "passed",
+          card_kinds: ["ship", "ops"],
           reviews: { require: ["spec-review"], max_high: 0 },
           exclude_paths: ["migrations/**", "infra/*"],
         },
@@ -186,6 +190,7 @@ test("New grant sends the conditions tiller grant create takes, and the grant jo
   ]);
   const live = await dialog.findByText("Rebase into main");
   expect(live.closest("li")?.textContent).toContain("Ends Fri 20 Nov, 18:00 · not used yet");
+  expect(live.closest("li")?.textContent).toContain("Only ship or ops cards");
   expect(await dialog.findByText(/Grant made/)).toBeTruthy();
   expect(grantsFor("alpha").grants[0]?.granted_by).toBe("board");
 });
@@ -215,6 +220,13 @@ test("New grant keeps Create off with no merge action or a past end, and shows t
   fireEvent.change(form.getByLabelText(/^Ends/), { target: { value: "" } });
   expect(create.disabled).toBe(false);
   expect(calls).toEqual([]);
+
+  // A condition core refuses comes back in the daemon's own words.
+  const shape = 'grant conditions: unknown key "exclude_path"; version 1 takes v, actions';
+  refuseNext = { status: 400, code: "usage", message: shape };
+  fireEvent.click(create);
+  expect((await form.findByRole("alert")).textContent).toBe(shape);
+  expect(calls).toHaveLength(1);
 
   refuseNext = { status: 403, code: "forbidden", message: "only the owner makes a grant" };
   fireEvent.click(create);

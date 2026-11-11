@@ -309,7 +309,49 @@ pub fn glob(pattern: &str, text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{LOADED_PATHS, glob};
+    #![allow(clippy::unwrap_used)]
+
+    use serde_json::{Value, json};
+    use tiller_core::domain::{GrantKind, validate_grant_conditions};
+
+    use super::{Conditions, LOADED_PATHS, glob};
+
+    /// Every conditions object `grant.create` accepts is one the land
+    /// sequence can read, so no grant made today turns unreadable when it
+    /// comes to merge.
+    #[test]
+    fn conditions_grant_create_accepts_are_readable_at_land() {
+        let accepted: [Value; 4] = [
+            json!({
+                "v": 1, "actions": ["squash"], "base_ref": "main", "head_ref_pattern": "fm/*",
+                "opened_by_fleet_run": true, "card_kinds": ["ship"], "checks": "success",
+                "pipeline": "passed", "reviews": {"require": ["code-review"], "max_high": 0},
+                "exclude_paths": [".github/workflows/**"], "expires_at": null,
+                "away_approval_id": null
+            }),
+            json!({
+                "v": 1, "actions": ["rebase"], "base_ref": null, "head_ref_pattern": null,
+                "card_kinds": null, "checks": null, "pipeline": null,
+                "reviews": {"require": ["human"], "max_high": null}, "expires_at": null
+            }),
+            json!({"v": 1, "actions": ["merge"], "reviews": null, "exclude_paths": []}),
+            json!({"v": 1, "actions": ["merge"], "expires_at": "2099-02-01T09:00:00Z"}),
+        ];
+        for conditions in accepted {
+            validate_grant_conditions(GrantKind::Merge, &conditions).unwrap();
+            assert!(
+                serde_json::from_value::<Conditions>(conditions.clone()).is_ok(),
+                "{conditions}"
+            );
+        }
+        // Why grant.create refuses these nulls: the land sequence cannot read them.
+        for key in ["opened_by_fleet_run", "exclude_paths"] {
+            let mut conditions = json!({"v": 1, "actions": ["merge"]});
+            conditions[key] = Value::Null;
+            assert!(validate_grant_conditions(GrantKind::Merge, &conditions).is_err());
+            assert!(serde_json::from_value::<Conditions>(conditions).is_err());
+        }
+    }
 
     fn loaded(file: &str) -> bool {
         LOADED_PATHS.iter().any(|pattern| glob(pattern, file))

@@ -653,6 +653,22 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
     let none = world.run(&["land", "fleet-1"]);
     assert_eq!(none.code, 5, "land with nothing pending: {}", none.json);
     assert!(none.json.to_string().contains("fleet-1"));
+    step(&world, "grant_list_empty", &["grant", "list", "alpha"]);
+    fails(&world, 3, "grant_list_unknown", &["grant", "list", "nope"]);
+    fails(
+        &world,
+        2,
+        "grant_create_unknown_key",
+        &[
+            "grant",
+            "create",
+            "alpha",
+            "--kind",
+            "merge",
+            "--conditions",
+            "{\"v\":1,\"actions\":[\"squash\"],\"exclude_path\":[\"migrations/**\"]}",
+        ],
+    );
     let grant = step(
         &world,
         "grant_create",
@@ -670,6 +686,7 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
             "grant-1",
         ],
     );
+    step(&world, "grant_list", &["grant", "list", "alpha"]);
     step(
         &world,
         "grant_revoke",
@@ -680,6 +697,26 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
             "--reason",
             "changed my mind",
         ],
+    );
+    // A typo in the away merge conditions is refused before the window opens,
+    // named as the away merge.
+    let typo = world.run(&[
+        "away",
+        "start",
+        "--until",
+        "2099-03-01",
+        "--projects",
+        "alpha",
+        "--merge",
+        "{\"v\":1,\"actions\":[\"merge\"],\"exclude_path\":[\"x/**\"]}",
+    ]);
+    assert_eq!(typo.code, 2, "away merge typo: {}", typo.json);
+    assert!(
+        typo.json["error"]["message"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("away merge: grant conditions: unknown key")),
+        "{}",
+        typo.json
     );
     step(
         &world,

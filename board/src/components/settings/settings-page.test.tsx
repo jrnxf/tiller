@@ -454,6 +454,33 @@ test("the owner sets a start folder from Settings and a refusal says why", async
   expect(posts.map((post) => post.value)).toEqual(["relative", "/home/user/pool"]);
 });
 
+test("the host picker heads Starting agents, and the start folders follow it", async () => {
+  serveSettings(true);
+  renderSettings();
+  const region = await screen.findByRole("region", { name: "Starting agents" });
+  // One picker, on the first section it moves.
+  expect(screen.getAllByRole("combobox", { name: "Host" })).toHaveLength(1);
+  fireEvent.click(within(region).getByRole("combobox", { name: "Host" }));
+  const option = await screen.findByRole("option", { name: "host-b" });
+  fireEvent.pointerDown(option);
+  fireEvent.click(option);
+
+  await waitFor(() =>
+    expect(region.textContent).toContain(
+      "What a project's orchestrator needs before it can start on host-b.",
+    ),
+  );
+  const section = within(region);
+  expect(section.queryAllByRole("textbox")).toHaveLength(0);
+  expect(section.queryAllByRole("button", { name: "Save" })).toHaveLength(0);
+  const pool = section.getByTestId("setting-spawn.pool_root");
+  expect(pool.textContent).toContain("Set on host-b.");
+  expect(pool.textContent).toContain("tiller config set spawn.pool_root <path>");
+  // This host's problems and derived folders are not host-b's.
+  expect(pool.textContent).not.toContain("is not set");
+  expect(section.queryByText("/home/user/.tiller/scratch")).toBeNull();
+});
+
 test("a browser that is not the owner reads the start folders and cannot change them", async () => {
   serveSettings(false);
   renderSettings();

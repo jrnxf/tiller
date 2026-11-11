@@ -1,7 +1,6 @@
 import type { ReactNode } from "react";
 
 import type { HostConfig } from "../../lib/api-types";
-import { Select } from "../ui/select";
 import { Fact } from "./fact";
 import { SettingField } from "./setting-field";
 import type { Control } from "./setting-field";
@@ -219,19 +218,18 @@ export function HostConfigSections({
   config,
   owner,
   host,
-  hosts,
   viewing,
-  onView,
+  picker,
 }: {
   config: HostConfig;
   owner: boolean;
   // The host serving this board, by its label; null until the list loads.
   host: string | null;
-  // Every host's label, this one among them.
-  hosts: string[];
-  // Whose config the sections show.
+  // Whose config the sections show, as the Settings page's host picker says.
   viewing: string;
-  onView: (label: string) => void;
+  // The picker, when these sections lead the host-scoped ones; Starting
+  // agents carries it otherwise.
+  picker: ReactNode;
 }) {
   const here = host ?? "this host";
   const other = viewing === here ? null : viewing;
@@ -249,16 +247,6 @@ export function HostConfigSections({
       </Section>
     );
   }
-  const picker =
-    hosts.length > 1 ? (
-      <Select
-        label="Host"
-        className="form-select"
-        value={viewing}
-        options={hosts.map((label) => ({ value: label, label }))}
-        onValueChange={onView}
-      />
-    ) : null;
   return (
     <>
       <Section
@@ -272,14 +260,14 @@ export function HostConfigSections({
       <Section
         name="Peers and memory"
         testid="host-config-peers"
-        intro="What other hosts may do here, and where memory is pushed."
+        intro={`What other hosts may do on ${on}, and where its memory is pushed.`}
       >
         <Rows rows={peerRows(config)} owner={owner} other={other} />
       </Section>
       <Section
         name="Learning"
         testid="host-config-learning"
-        intro="How retros sample cards and how the curator runs."
+        intro={`How retros on ${on} sample cards and how the curator runs.`}
       >
         <Rows rows={learningRows(config)} owner={owner} other={other} />
       </Section>

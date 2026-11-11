@@ -1,0 +1,11 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 2
+{
+  "error": {
+    "code": "usage",
+    "message": "grant conditions: unknown key \"exclude_path\"; version 1 takes v, actions, base_ref, head_ref_pattern, opened_by_fleet_run, card_kinds, checks, pipeline, reviews, exclude_paths, expires_at or away_approval_id"
+  },
+  "ok": false
+}

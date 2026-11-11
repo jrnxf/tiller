@@ -1682,3 +1682,51 @@ kbd {
   color: var(--yellow-text);
   line-height: 1.4;
 }
+
+/* A checkbox drawn as a chip: the grant form and away mode share it. The
+   checked chip takes the accent border and tint, with no second ring, and the
+   keyboard focus ring sits on the chip, not on the box inside it. */
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r6);
+  background: var(--bg-card);
+  color: var(--fg-1);
+  font-size: var(--fs-small);
+  cursor: pointer;
+}
+
+.chip-check.mono {
+  font-family: var(--mono);
+  font-size: var(--fs-mini);
+}
+
+.chip-check:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+}
+
+.chip-check:has(input:focus-visible) {
+  outline: 2px solid var(--indigo);
+  outline-offset: 2px;
+}
+
+.chip-check input {
+  margin: 0;
+  accent-color: var(--accent-solid);
+}
+
+.chip-check input:focus-visible {
+  outline: none;
+}

@@ -19,6 +19,10 @@ import "./project-grants.css";
 // The reviewers a grant can require (authority.md section 6).
 const REVIEWERS = ["code-review", "spec-review", "no-mistakes", "human"] as const;
 
+// The card kinds a grant can be limited to (`card_kinds`, authority.md
+// section 6).
+const CARD_KINDS = ["ship", "scout", "question", "ops"] as const;
+
 // The ended grants the dialog lists under the live ones, newest first.
 const ENDED_SHOWN = 5;
 
@@ -316,6 +320,7 @@ interface Draft {
   fleet: boolean;
   checks: boolean;
   pipeline: boolean;
+  kinds: string[];
   reviewers: string[];
   noHigh: "none" | "any";
   exclude: string;
@@ -332,6 +337,8 @@ function conditionsOf(draft: Draft): Record<string, unknown> {
   if (draft.fleet) conditions.opened_by_fleet_run = true;
   if (draft.checks) conditions.checks = "success";
   if (draft.pipeline) conditions.pipeline = "passed";
+  // No kind chosen is any kind: an empty list would match no card.
+  if (draft.kinds.length > 0) conditions.card_kinds = draft.kinds;
   if (draft.reviewers.length > 0) {
     conditions.reviews = {
       require: draft.reviewers,
@@ -434,6 +441,7 @@ function GrantForm({
     fleet: true,
     checks: true,
     pipeline: pipelined,
+    kinds: [],
     reviewers: [],
     noHigh: "none",
     exclude: "",
@@ -506,9 +514,9 @@ function GrantForm({
           <>
             <fieldset className="pa-f gr-fieldset">
               <legend className="pa-l">May merge by</legend>
-              <div className="gr-chips">
+              <div className="chips">
                 {MERGE_ACTIONS.map((name) => (
-                  <label key={name} className="gr-chip">
+                  <label key={name} className="chip-check mono">
                     <input
                       type="checkbox"
                       checked={draft.actions.includes(name)}
@@ -582,13 +590,33 @@ function GrantForm({
                 ) : null}
               </div>
             </fieldset>
+            <fieldset className="pa-f gr-fieldset" aria-describedby={`${ids}-kinds-help`}>
+              <legend className="pa-l">
+                Card kinds <span className="pa-opt">Optional</span>
+              </legend>
+              <div className="chips">
+                {CARD_KINDS.map((name) => (
+                  <label key={name} className="chip-check mono">
+                    <input
+                      type="checkbox"
+                      checked={draft.kinds.includes(name)}
+                      onChange={() => set({ kinds: toggled(draft.kinds, name) })}
+                    />
+                    {name}
+                  </label>
+                ))}
+              </div>
+              <p className="pa-help" id={`${ids}-kinds-help`}>
+                Only a PR for a card of these kinds. None chosen means any kind.
+              </p>
+            </fieldset>
             <fieldset className="pa-f gr-fieldset">
               <legend className="pa-l">
                 Reviews that must pass <span className="pa-opt">Optional</span>
               </legend>
-              <div className="gr-chips">
+              <div className="chips">
                 {REVIEWERS.map((name) => (
-                  <label key={name} className="gr-chip">
+                  <label key={name} className="chip-check mono">
                     <input
                       type="checkbox"
                       checked={draft.reviewers.includes(name)}

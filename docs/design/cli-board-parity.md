@@ -34,7 +34,7 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 | Open and list attention | Full: `attention open`, `attention list` | Part | The board lists the items in the Inbox. `attention open` is an agent tool. |
 | Decide an approval | Full: `approve` | Full | An accept names the head commit. The CLI takes `--sha` and the board sends the head it shows. |
 | Land a change | Full: `land` | No | |
-| Grants | Full: `grant create`, `grant revoke` | No | |
+| Grants | Full: `grant create`, `grant list`, `grant revoke` | No | |
 | Away mode | Part: `away start`, `away end`, `away brief` | Full | The board also edits an away window in place. |
 | Recap | Part: `tiller recap` | Part | Both read the same events. Only the board marks the recap seen. |
 | Start an orchestrator | Full: `orchestrator start` | Part | The board has no restart. |

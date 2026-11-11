@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import type { DaemonHealth, Machine, StartSettings } from "../../lib/api-types";
@@ -19,6 +20,7 @@ import { useStore } from "../../lib/store";
 import { useTick } from "../board/ago";
 import { formatAge, secondsSince } from "../board/format";
 import { Segmented } from "../ui/segmented";
+import { Select } from "../ui/select";
 import { ChevronIcon, PlusIcon } from "../shell/icons";
 import { AddHostForm } from "./add-host";
 import { Backups } from "./backups";
@@ -375,19 +377,27 @@ function Hosts({
 const problemOf = (settings: StartSettings, key: string) =>
   settings.problems.find((problem) => problem.key === key)?.problem ?? null;
 
-// The two folders every orchestrator start reads from this host's config.toml,
+// The two folders every orchestrator start reads from a host's config.toml,
 // set here as `tiller config set` does. The project's checkout is set where
-// the project is edited.
+// the project is edited. The section follows the host picker: another host's
+// rows give the command to run there, since the peer link does not carry a
+// config write (authority.md section 3).
 function StartSettingsSection({
   settings,
   owner,
   host,
+  viewing,
+  picker,
 }: {
   settings: StartSettings;
   owner: boolean;
   host: string | null;
+  // Whose config the section shows.
+  viewing: string;
+  picker: ReactNode;
 }) {
-  const on = host ? ` on ${host}` : "";
+  const here = host ?? "this host";
+  const other = viewing === here ? null : viewing;
   const rows = [
     {
       key: "spawn.pool_root",
@@ -409,14 +419,25 @@ function StartSettingsSection({
       <div className="set-sec-h">
         <div>
           <h2>Starting agents</h2>
-          <p>
-            What a project's orchestrator needs before it can start{on}. Another host keeps its own,
-            set on that host.
-          </p>
+          <p>What a project&apos;s orchestrator needs before it can start on {other ?? here}.</p>
         </div>
+        {picker}
       </div>
       <div className="set-panel">
-        {settings.config_error ? (
+        {other ? (
+          rows.map((row) => (
+            <SettingField
+              key={row.key}
+              settingKey={row.key}
+              label={row.label}
+              hint={row.hint}
+              value={null}
+              problem={null}
+              valueName="path"
+              host={other}
+            />
+          ))
+        ) : settings.config_error ? (
           <Fact label="config.toml" hint="Fix the file, then reload this page">
             <span className="set-status fail">{settings.config_error.replaceAll("`", "")}</span>
           </Fact>
@@ -443,17 +464,17 @@ function StartSettingsSection({
             ),
           )
         )}
-        {settings.orchestrator_home ? (
+        {!other && settings.orchestrator_home ? (
           <Fact label="Orchestrator homes" hint="Follows from the folders above">
             <code>{settings.orchestrator_home}</code>
           </Fact>
         ) : null}
-        {settings.scratch_root ? (
+        {!other && settings.scratch_root ? (
           <Fact label="Run scratch" hint="Follows from the folders above">
             <code>{settings.scratch_root}</code>
           </Fact>
         ) : null}
-        {owner ? null : (
+        {owner || other ? null : (
           <Fact label="Change these" hint="Sign this browser in as the owner">
             <span className="set-status missing">Not signed in</span>
           </Fact>
@@ -521,8 +542,24 @@ export function SettingsPage() {
   const [chosen, setChosen] = useState<string | null>(null);
   const hosts = (machines ?? []).map((machine) => machine.label);
   const viewing = chosen !== null && hosts.includes(chosen) ? chosen : (host ?? "this host");
+  // One picker heads the config.toml sections, which follow it together.
+  const picker =
+    hosts.length > 1 ? (
+      <Select
+        label="Host"
+        className="form-select"
+        value={viewing}
+        options={hosts.map((label) => ({ value: label, label }))}
+        onValueChange={setChosen}
+      />
+    ) : null;
   return (
     <div className="settings-page" data-testid="settings">
+      {/* These four take no host picker. Hosts already lists every host. The
+          Merge App, Boards that reach this host and Backups read this
+          daemon's own health, accepted keys and backups, and their actions
+          are never forwarded (protocol.md 7.3 and 7.4), so each names this
+          host instead. */}
       {health ? <MergeAppSection app={health.merge_app} host={host} /> : null}
       {health ? (
         <Hosts machines={machines} health={health} owner={session?.owner ?? false} />
@@ -534,6 +571,8 @@ export function SettingsPage() {
           settings={startSettings}
           owner={session?.owner ?? false}
           host={host}
+          viewing={viewing}
+          picker={picker}
         />
       ) : null}
       {hostConfig ? (
@@ -541,9 +580,8 @@ export function SettingsPage() {
           config={hostConfig}
           owner={session?.owner ?? false}
           host={host}
-          hosts={hosts}
           viewing={viewing}
-          onView={setChosen}
+          picker={startSettings ? null : picker}
         />
       ) : null}
       <section className="set-sec" aria-label="This browser">

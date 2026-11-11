@@ -1,0 +1,30 @@
+---
+source: crates/cli/tests/common/mod.rs
+---
+exit: 0
+{
+  "data": {
+    "grants": [
+      {
+        "conditions": {
+          "actions": [
+            "squash"
+          ],
+          "expires_at": "<time>",
+          "v": 1
+        },
+        "granted_at": "<time>",
+        "granted_by": "owner",
+        "id": "<id63>",
+        "kind": "merge",
+        "project_id": "alpha",
+        "revoke_reason": null,
+        "revoked_at": null,
+        "short": "<id63.short>",
+        "uses": 0
+      }
+    ],
+    "project": "alpha"
+  },
+  "ok": true
+}

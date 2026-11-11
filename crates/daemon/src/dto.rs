@@ -453,6 +453,9 @@ pub struct ReviewRow {
     pub id: String,
     pub verdict: String,
     pub at: String,
+    /// The full commit SHA the review covered (B11). Null on a row from
+    /// before migration 16, and absent from an older peer.
+    pub head_sha: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]

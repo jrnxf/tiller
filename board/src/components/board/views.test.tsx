@@ -981,6 +981,26 @@ test("the page lists runs, the PR with its head, events and how fresh each signa
   expect(within(page).getAllByRole("button", { name: /Open in herdr/ })).toHaveLength(1);
 });
 
+test("the PR shows the newest review and the head it covered", async () => {
+  stubApi("default");
+  await renderApp("default", `/cards/${CARD_44}`);
+  let box = await screen.findByText("Review");
+  let line = box.nextElementSibling as HTMLElement;
+  expect(line.textContent).toContain("pass");
+  // A review of the current head shows that head, short and plain.
+  expect(line.querySelector(".sha")?.textContent).toBe(FIXTURE_HEAD_SHA.slice(0, 7));
+  expect(line.querySelector(".sha.old")).toBeNull();
+  cleanup();
+
+  stubApi("default");
+  await renderApp("default", `/cards/${CARD_43}`);
+  box = await screen.findByText("Review");
+  line = box.nextElementSibling as HTMLElement;
+  // A review of an older head says so.
+  expect(line.querySelector(".sha.old")?.textContent).toHaveLength(7);
+  expect(line.textContent).toContain("an older head");
+});
+
 test("a card without a PR says an approval comes with one", async () => {
   stubApi("default");
   await renderApp("default", `/cards/${CARD_41}`);

@@ -105,36 +105,6 @@
   padding: 0;
 }
 
-.away-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.away-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 28px;
-  padding: 0 10px;
-  border: 1px solid var(--line-2);
-  border-radius: var(--r6);
-  background: var(--bg-card);
-  color: var(--fg-1);
-  font-size: var(--fs-small);
-  cursor: pointer;
-}
-
-.away-chip:has(input:checked) {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
-}
-
-.away-chip input {
-  accent-color: var(--accent-solid);
-  margin: 0;
-}
-
 .away-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

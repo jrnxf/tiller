@@ -1272,6 +1272,7 @@ pub fn card_detail(store: &Store, reference: &str) -> Result<CardDetail> {
                 id: review.id,
                 verdict: review.verdict.to_string(),
                 at: at(review.recorded_at),
+                head_sha: review.head_sha,
             })
             .collect(),
         obligations: obligations

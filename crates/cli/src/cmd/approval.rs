@@ -72,6 +72,12 @@ pub struct Land {
 pub enum Grant {
     /// A standing decision to land matching work (owner only)
     Create(GrantCreate),
+    /// Every grant of a project, newest first, live and ended alike, each
+    /// with the number of approvals it accepted
+    List {
+        /// The project's id (its slug, like alpha)
+        project: String,
+    },
     /// End a grant
     Revoke {
         /// The grant: a ULID or its short form
@@ -482,9 +488,22 @@ fn land_notices(store: &Store, approval: &str) -> Result<Vec<(String, String)>, 
 
 pub fn run_grant(app: &App, cmd: Grant) -> Done {
     app.require_owner("tiller grant")?;
-    let mut store = app.write()?;
     match cmd {
+        Grant::List { project } => {
+            let store = app.read()?;
+            let grants = store.grants(&project)?;
+            let empty = grants.is_empty();
+            let outcome = Outcome::read(json!({"project": project, "grants": grants}));
+            Ok(if empty {
+                outcome.with_help(format!(
+                    "no grant yet: `tiller grant create {project} --kind merge --conditions <json>`"
+                ))
+            } else {
+                outcome
+            })
+        }
         Grant::Create(args) => {
+            let mut store = app.write()?;
             let mut conditions: Value = serde_json::from_str(&args.conditions)?;
             if !conditions.is_object() {
                 return Err(Failure::usage("--conditions is a JSON object"));
@@ -508,11 +527,14 @@ pub fn run_grant(app: &App, cmd: Grant) -> Done {
             )?;
             Ok(Outcome::applied(applied).with_key(&keyed))
         }
-        Grant::Revoke { grant, reason } => Ok(Outcome::applied(store.grant_revoke(
-            &app.ctx(),
-            &grant,
-            &reason,
-        )?)),
+        Grant::Revoke { grant, reason } => {
+            let mut store = app.write()?;
+            Ok(Outcome::applied(store.grant_revoke(
+                &app.ctx(),
+                &grant,
+                &reason,
+            )?))
+        }
     }
 }
 

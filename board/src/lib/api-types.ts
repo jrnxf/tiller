@@ -364,6 +364,16 @@ export interface CardArtifact {
   created_at: string;
 }
 
+// A review recorded on the card, oldest first. `head_sha` is the full commit
+// the review covered (B11): null on a row from before it was recorded, and
+// absent from an older peer.
+export interface CardReview {
+  id: string;
+  verdict: string;
+  at: string;
+  head_sha?: string | null;
+}
+
 // One dependency of a card (state.md, Dependency): open until the card waited
 // on closes with a satisfying outcome (`release_reason` is that outcome) or it
 // is removed by hand (`removed`). The waited-on card's title, column and badge
@@ -406,7 +416,7 @@ export interface CardDetail {
   prs: CardPr[];
   approvals: CardApproval[];
   artifacts: CardArtifact[];
-  reviews: { id: string; verdict: string; at: string }[];
+  reviews: CardReview[];
   obligations: { id: string; summary: string; state: string }[];
   events: EventLine[];
   freshness: Freshness[];

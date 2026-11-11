@@ -22,6 +22,7 @@ use crate::time::Timestamp;
 /// A grant and the number of approvals it accepted.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GrantUses {
+    #[serde(flatten)]
     pub grant: Grant,
     pub uses: i64,
 }
@@ -1311,7 +1312,13 @@ fn validate_away_scope(scope: &Value) -> Result<()> {
     }
     match scope.get("merge") {
         None => Ok(()),
-        Some(merge) if merge.is_object() => Ok(()),
+        // The same check the grant gets, before the window opens, and named
+        // as the away merge so the owner knows which JSON to fix.
+        Some(merge) if merge.is_object() => validate_grant_conditions(GrantKind::Merge, merge)
+            .map_err(|error| match error {
+                Error::Usage(text) => Error::Usage(format!("away merge: {text}")),
+                other => other,
+            }),
         Some(Value::String(mode)) if mode == "none" || mode == "grants" => Ok(()),
         Some(_) => Err(Error::Usage(
             "away merge must be \"none\", \"grants\" or a grant conditions object".into(),
@@ -1349,28 +1356,7 @@ fn insert_away_grants(
 
 fn insert_grant(tx: &mut Tx<'_>, new: &NewGrant) -> Result<Grant> {
     let project: Project = get(tx.conn(), "project", &new.project_id)?;
-    if new.conditions.get("v").and_then(Value::as_i64) != Some(1) {
-        return Err(Error::Usage(
-            "grant conditions must be version 1 (\"v\": 1)".into(),
-        ));
-    }
-    let actions = new.conditions.get("actions").and_then(Value::as_array);
-    let allowed: &[&str] = match new.kind {
-        GrantKind::Merge => &["merge", "squash", "rebase"],
-        GrantKind::LandDirect => &["push"],
-    };
-    if !actions.is_some_and(|list| {
-        !list.is_empty()
-            && list
-                .iter()
-                .all(|a| a.as_str().is_some_and(|a| allowed.contains(&a)))
-    }) {
-        return Err(Error::Usage(format!(
-            "a {} grant's actions must be some of {}",
-            new.kind,
-            allowed.join(", ")
-        )));
-    }
+    validate_grant_conditions(new.kind, &new.conditions)?;
     let id = ids::new_ulid();
     tx.conn().execute(
         "INSERT INTO grants (id, project_id, kind, conditions, granted_at, granted_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",

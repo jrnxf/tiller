@@ -11326,6 +11326,13 @@
           "at": {
             "type": "string"
           },
+          "head_sha": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The full commit SHA the review covered (B11). Null on a row from\nbefore migration 16, and absent from an older peer."
+          },
           "id": {
             "type": "string"
           },

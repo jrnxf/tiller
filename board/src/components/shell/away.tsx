@@ -198,9 +198,9 @@ function AwayDialog({
         </div>
         <fieldset className="pa-f away-fieldset">
           <legend className="pa-l">Projects</legend>
-          <div className="away-chips">
+          <div className="chips">
             {projects.map((project, index) => (
-              <label key={project.id} className="away-chip">
+              <label key={project.id} className="chip-check">
                 <input
                   type="checkbox"
                   checked={form.projects.includes(project.id)}
@@ -282,9 +282,9 @@ function AwayDialog({
           </p>
           {form.merge === "conditions" ? (
             <div className="away-cond" role="group" aria-label="Grant conditions">
-              <div className="away-chips">
+              <div className="chips">
                 {MERGE_ACTIONS.map((name) => (
-                  <label key={name} className="away-chip">
+                  <label key={name} className="chip-check">
                     <input
                       type="checkbox"
                       checked={form.actions.includes(name)}
@@ -293,7 +293,7 @@ function AwayDialog({
                     {name}
                   </label>
                 ))}
-                <label className="away-chip">
+                <label className="chip-check">
                   <input
                     type="checkbox"
                     checked={form.checks}

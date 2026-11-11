@@ -7217,6 +7217,20 @@ pub(crate) mod tests {
                         ('a-2', 'c-1', 'report', 'Local report', NULL, '/home/user/report.md', '2026-11-01T13:00:00Z')",
             )
             .unwrap();
+        // A review names the head it covered (B11); a row from before
+        // migration 16 has none.
+        store
+            .conn()
+            .execute_batch(&format!(
+                "INSERT INTO runs (id, card_id, role, attempt, model, effort, host_id, supervisor_session_id, started_at)
+                 VALUES ('r-1', 'c-1', 'reviewer', 1, 'm', 'high', '{}', '{}', '2026-11-01T12:30:00Z');
+                 INSERT INTO reviews (id, run_id, card_id, reviewer, coverage, verdict, recorded_at, head_sha)
+                 VALUES ('v-1', 'r-1', 'c-1', 'code-review', 'diff', 'fail', '2026-11-01T12:40:00Z', NULL),
+                        ('v-2', 'r-1', 'c-1', 'code-review', 'diff', 'pass', '2026-11-01T12:50:00Z',
+                         '7c2d0e1f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d');",
+                fleet.host, fleet.orchestrator_session
+            ))
+            .unwrap();
         let app = app(fleet.dir.path(), Assets::of::<Fixture>());
 
         let all = get(&app, "/api/v1/contributions").await;
@@ -7243,6 +7257,11 @@ pub(crate) mod tests {
             "https://pages.example.com/mockup.html"
         );
         assert_eq!(card["artifacts"][1]["url"], Value::Null);
+        assert_eq!(card["reviews"][0]["head_sha"], Value::Null, "{card}");
+        assert_eq!(
+            card["reviews"][1]["head_sha"], "7c2d0e1f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d",
+            "{card}"
+        );
     }
 
     /// The board's stage switch: to pre-launch it reads the default-branch
@@ -7648,6 +7667,29 @@ pub(crate) mod tests {
                 refused.body
             );
         }
+        // The full v1 shape is checked in core, as the CLI checks it, and the
+        // board shows the message as it comes.
+        let typo = send(
+            &app,
+            write(
+                "POST",
+                "/api/v1/projects/alpha/grants",
+                json!({"idempotency_key": "k-g-10b", "kind": "merge",
+                    "conditions": {"v": 1, "actions": ["squash"], "card_kinds": ["bug"]}}),
+                &cookie,
+            ),
+        )
+        .await;
+        assert_eq!(typo.status, StatusCode::BAD_REQUEST, "{}", typo.body);
+        let typo: Value = serde_json::from_str(&typo.body).unwrap();
+        assert_eq!(typo["error"]["code"], "usage", "{typo}");
+        assert!(
+            typo["error"]["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("grant conditions: card_kinds takes \"ship\""),
+            "{typo}"
+        );
         let unknown = send(
             &app,
             write(

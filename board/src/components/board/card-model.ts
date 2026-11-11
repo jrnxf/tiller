@@ -1,4 +1,20 @@
-import type { CardApproval, CardPr, TimelineEntry } from "../../lib/api-types";
+import type { CardApproval, CardPr, CardReview, TimelineEntry } from "../../lib/api-types";
+
+// The forge and a reviewer may write a SHA in different cases; the grant
+// matcher compares them in lower case, and so does the board.
+export const sameSha = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+// The review a PR shows. Reviews belong to the card's runs, not to one PR, so
+// a PR shows the newest review of its own head. An open PR with none there
+// shows the card's newest review, as one of an older head. A merged or closed
+// PR shows only a review of its own head. `reviews` is oldest first.
+export function reviewFor(reviews: CardReview[], pr: CardPr): CardReview | undefined {
+  for (let i = reviews.length - 1; i >= 0; i -= 1) {
+    const covered = reviews[i]?.head_sha;
+    if (covered && sameSha(covered, pr.head_sha)) return reviews[i];
+  }
+  return pr.state === "open" ? reviews.at(-1) : undefined;
+}
 
 // How an approval stands against its PR's head commit.
 //   current  - bound to the head the PR has now

@@ -1390,7 +1390,14 @@ function cardDetailFor(
           },
         ]
       : [],
-    reviews: [],
+    // A card with a PR has had it reviewed. The stale card's review covered
+    // the head its approval is bound to, before the newer commits.
+    reviews: approvals.map((approval) => ({
+      id: `01JREV${row.id.slice(-20)}`,
+      verdict: "pass",
+      at: minutes(now, -85),
+      head_sha: approval.head_sha,
+    })),
     obligations: [],
     events: eventsFor(row, now),
     freshness: [
