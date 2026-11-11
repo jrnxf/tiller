@@ -201,7 +201,7 @@ impl Evals {
     /// say how it ended.
     pub fn wait(&self, deadline: Instant) {
         let threads: Vec<JoinHandle<()>> = self.threads().drain(..).collect();
-        crate::server::join_until(threads, deadline);
+        crate::threads::join_until(threads, deadline);
     }
 
     /// A run that recorded: the suggestion's holdout shows it from now on.

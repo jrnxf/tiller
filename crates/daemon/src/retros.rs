@@ -193,7 +193,7 @@ impl Retros {
     /// record how it ended.
     pub fn wait(&self, deadline: Instant) {
         let handles: Vec<JoinHandle<()>> = self.runs().drain(..).collect();
-        crate::server::join_until(handles, deadline);
+        crate::threads::join_until(handles, deadline);
     }
 }
 

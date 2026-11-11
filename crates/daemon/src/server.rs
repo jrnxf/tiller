@@ -123,19 +123,6 @@ pub(crate) fn stop_board_runs(
     evals.wait(deadline);
 }
 
-/// Joins each thread that ends before `deadline`, and leaves the rest
-/// running.
-pub(crate) fn join_until(threads: Vec<std::thread::JoinHandle<()>>, deadline: Instant) {
-    for thread in threads {
-        while !thread.is_finished() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        if thread.is_finished() {
-            let _ = thread.join();
-        }
-    }
-}
-
 /// Why a daemon stopped itself.
 #[derive(Clone, Copy, Debug)]
 enum Fatal {
