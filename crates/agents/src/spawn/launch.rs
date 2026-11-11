@@ -605,10 +605,13 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
 /// orchestrator's) or the files are missing. [`write`] keeps the brief in
 /// its own `brief.md`, so the memory text in `prompt.md` cannot be taken
 /// for it. A run launched before `brief.md` existed has only `prompt.md`,
-/// whose brief follows the first brief heading.
+/// whose brief follows the first brief heading. A `brief.md` that is there
+/// but cannot be read gives `None`, not that fallback.
 pub fn brief_in(scratch: &Path) -> Option<String> {
-    if let Ok(brief) = fs::read_to_string(scratch.join(BRIEF_FILE)) {
-        return Some(brief.trim().to_owned());
+    match fs::read_to_string(scratch.join(BRIEF_FILE)) {
+        Ok(brief) => return Some(brief.trim().to_owned()),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return None,
+        Err(_) => {}
     }
     let prompt = fs::read_to_string(scratch.join("prompt.md")).ok()?;
     let (_, brief) = prompt.split_once(BRIEF_HEADING)?;
@@ -763,6 +766,24 @@ mod tests {
 
     const HELP_WITH_AUTO: &str = "  --permission-mode <mode>   Permission mode\n                             (choices: \"acceptEdits\", \"auto\",\n                             \"dontAsk\", \"plan\")\n";
     const HELP_WITHOUT_AUTO: &str = "  --permission-mode <mode>   Permission mode\n                             (choices: \"acceptEdits\", \"default\",\n                             \"dontAsk\", \"plan\")\n  --other   an \"auto\" thing\n";
+
+    /// Only a missing `brief.md` falls back to the heading split of
+    /// `prompt.md`; one that is there but cannot be read gives no brief, so
+    /// a memory heading is never taken for it.
+    #[test]
+    fn an_unreadable_brief_file_does_not_fall_back_to_the_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("prompt.md"),
+            format!("# Memory\n\n{BRIEF_HEADING}not the brief\n"),
+        )
+        .unwrap();
+        assert_eq!(brief_in(dir.path()).as_deref(), Some("not the brief"));
+        fs::write(dir.path().join(BRIEF_FILE), [0xff, 0xfe]).unwrap();
+        assert_eq!(brief_in(dir.path()), None);
+        fs::write(dir.path().join(BRIEF_FILE), "the brief\n").unwrap();
+        assert_eq!(brief_in(dir.path()).as_deref(), Some("the brief"));
+    }
 
     #[test]
     fn help_parser_reads_the_permission_mode_choices() {

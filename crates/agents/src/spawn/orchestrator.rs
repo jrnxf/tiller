@@ -181,8 +181,10 @@ pub fn start(
         ))
     })?;
     let memory = memory::render(store, world.tiller_home, &project.id, role)?;
-    // Every refusal comes before the stop: a restart that cannot start a
-    // new orchestrator leaves the live one running.
+    // Every check comes before the stop: a restart refused by a check
+    // leaves the live one running. The writes after the stop (the home, the
+    // launch files, the manifest, the herdr workspace) can still fail and
+    // leave the project with no orchestrator.
     if let Some((live, waits)) = restarting {
         let stopped = control::stop_orchestrator(store, ctx, world.herdr, waits, &live, RESTARTED)?;
         events.extend(stopped.events);
