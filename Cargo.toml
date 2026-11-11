@@ -62,7 +62,7 @@ utoipa = { version = "6", features = ["axum_extras"] }
 
 # Tests
 insta = { version = "1", features = ["json"] }
-nix = { version = "0.30", default-features = false, features = ["resource"] }
+nix = { version = "0.30", default-features = false, features = ["resource", "sched"] }
 proptest = "1"
 rsa = "0.9"
 tempfile = "3"

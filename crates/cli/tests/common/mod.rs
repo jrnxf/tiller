@@ -398,7 +398,9 @@ pub fn snap(world: &World, name: &str, out: &Out) {
 
 /// CPU time (user plus system) of every child this process has reaped. The
 /// difference across one call is that call's own work: unlike wall time it
-/// does not grow when other processes compete for the cores.
+/// does not grow while the call waits for a core. It still grows when the
+/// call runs on a slower core, so a test that gates it first calls
+/// [`pin_to_performance_cores`].
 pub fn children_cpu() -> std::time::Duration {
     use nix::sys::resource::{UsageWho, getrusage};
     use std::time::Duration;
@@ -406,4 +408,53 @@ pub fn children_cpu() -> std::time::Duration {
     let timeval =
         |t: nix::sys::time::TimeVal| Duration::new(t.tv_sec() as u64, t.tv_usec() as u32 * 1000);
     timeval(usage.user_time()) + timeval(usage.system_time())
+}
+
+/// Pins this thread, and so every child it starts from here on, to the
+/// host's performance cores when its CPU mixes two kinds of core, and
+/// returns them. A budget on CPU time needs it: an Intel hybrid CPU's
+/// efficient cores do the same work in about 1.5 times the CPU time (`tiller
+/// card show` measured 6.9 ms pinned to a performance core and 10.6 ms pinned
+/// to an efficient one, with the same page faults), and the scheduler moves a
+/// child onto them as soon as load fills the performance cores. Linux names
+/// the performance cores in `/sys/devices/cpu_core/cpus`. On any other CPU,
+/// or when none of them is allowed, nothing changes and the answer is `None`.
+pub fn pin_to_performance_cores() -> Option<Vec<usize>> {
+    #[cfg(target_os = "linux")]
+    {
+        use nix::sched::{CpuSet, sched_getaffinity, sched_setaffinity};
+        use nix::unistd::Pid;
+        let listed = std::fs::read_to_string("/sys/devices/cpu_core/cpus").ok()?;
+        let allowed = sched_getaffinity(Pid::from_raw(0)).ok()?;
+        let fast: Vec<usize> = parse_cpu_list(&listed)
+            .into_iter()
+            .filter(|&cpu| allowed.is_set(cpu).unwrap_or(false))
+            .collect();
+        if fast.is_empty() {
+            return None;
+        }
+        let mut set = CpuSet::new();
+        for &cpu in &fast {
+            set.set(cpu).ok()?;
+        }
+        sched_setaffinity(Pid::from_raw(0), &set).ok()?;
+        Some(fast)
+    }
+    #[cfg(not(target_os = "linux"))]
+    None
+}
+
+/// The CPUs a sysfs CPU list names, such as `0-2,6-13,15`.
+pub fn parse_cpu_list(text: &str) -> Vec<usize> {
+    text.trim()
+        .split(',')
+        .filter(|part| !part.is_empty())
+        .flat_map(|part| match part.split_once('-') {
+            Some((first, last)) => match (first.parse::<usize>(), last.parse::<usize>()) {
+                (Ok(first), Ok(last)) => (first..=last).collect(),
+                _ => Vec::new(),
+            },
+            None => part.parse().into_iter().collect(),
+        })
+        .collect()
 }

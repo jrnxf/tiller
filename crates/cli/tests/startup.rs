@@ -8,7 +8,7 @@ mod common;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{World, children_cpu};
+use common::{World, children_cpu, parse_cpu_list, pin_to_performance_cores};
 
 /// The T2.2 budget for one command, start to exit.
 const BUDGET: Duration = Duration::from_millis(10);
@@ -43,9 +43,15 @@ fn run(world: &World, args: &[&str]) -> (Duration, Duration) {
 /// Wall time moves with whatever else the host does: one run measured 24 ms
 /// at a load average of 22, with the binary unchanged. So the budget is
 /// checked against the command's own CPU time (user plus system, from
-/// `getrusage`), which load does not inflate: the median must stay inside it,
-/// which fails if every run gets more work. The wall lower quartile must stay
-/// inside a ceiling that only a wait reaches, which fails if startup blocks.
+/// `getrusage`): the median must stay inside it, which fails if every run
+/// gets more work. The wall lower quartile must stay inside a ceiling that
+/// only a wait reaches, which fails if startup blocks.
+///
+/// CPU time still grew with load on a hybrid CPU (a median of about 11 ms at
+/// load averages of 18 to 25), because the scheduler moved the runs onto
+/// efficient cores, which take about 1.5 times as long for the same work. So
+/// the runs are pinned to the performance cores first, where the budget
+/// applies.
 ///
 /// `.config/nextest.toml` still runs this test alone, in the `wall-clock`
 /// group, so its own neighbours do not share the cores it measures. Under
@@ -63,6 +69,8 @@ fn startup_is_under_ten_milliseconds() {
     world.must(&[
         "card", "create", "alpha", "--kind", "ship", "--title", "One",
     ]);
+    let pinned = pin_to_performance_cores();
+    eprintln!("measured on the performance cores {pinned:?} (None: one kind of core)");
     for args in [&["version"][..], &["card", "show", "alpha-1"][..]] {
         for _ in 0..WARM_UP {
             run(&world, args);
@@ -86,4 +94,13 @@ fn startup_is_under_ten_milliseconds() {
             "{args:?} wall lower quartile {wall_quartile:?}: {wall:?}"
         );
     }
+}
+
+/// The sysfs CPU list forms `pin_to_performance_cores` reads.
+#[test]
+fn cpu_lists_parse_like_sysfs_writes_them() {
+    assert_eq!(parse_cpu_list("0-11\n"), (0..=11).collect::<Vec<_>>());
+    assert_eq!(parse_cpu_list("0-2,6-8,15"), vec![0, 1, 2, 6, 7, 8, 15]);
+    assert_eq!(parse_cpu_list("3"), vec![3]);
+    assert!(parse_cpu_list("\n").is_empty());
 }
