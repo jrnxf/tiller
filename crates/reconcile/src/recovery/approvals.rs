@@ -58,11 +58,11 @@ impl Reconciler {
                 report.error(&format!("default branch of {}", project.id), &error);
             }
         }
-        // The detector runs even when an answer fails to apply: it raises
-        // the rollback trigger, so nothing else may hold it back.
         if let Err(error) = self.failed_executions(now, report) {
             report.error("failed executions", &error);
         }
+        // The detector runs even when an answer fails to apply: it raises
+        // the rollback trigger, so nothing else may hold it back.
         let answers = self.outside_merge_answers(now, report);
         let raised = self.store.raise_wrong_principal_decisions(&self.ctx(now))?;
         for found in &raised.value {
@@ -286,34 +286,58 @@ impl Reconciler {
     /// finished the approval, so a pass whose item failed to open after the
     /// finish leaves it to this sweep on a later pass. It has its own key,
     /// not the one of the item an unreadable forge opened while the
-    /// approval was `uncertain`, so the developer sees the final state. An
-    /// approval a recovery item already shows as `failed` (one opened under
-    /// the unreadable key by an earlier version) is not asked about again.
+    /// approval was `uncertain`, so the developer sees the final state; its
+    /// question then says that it replaces the earlier one.
+    ///
+    /// Only the newest approval of its kind on an open card is asked about:
+    /// one a newer approval followed is settled, so the sweep reads at most
+    /// one approval per kind and open card. An approval a recovery item
+    /// already shows as `failed`, or whose recovery item the developer
+    /// answered, is not asked about again (items an earlier version opened
+    /// under the unreadable key). A key another actor holds is still tried,
+    /// so its refusal is reported ([`Reconciler::planted`]).
     fn failed_executions(&mut self, now: Timestamp, report: &mut Report) -> Result<()> {
         let failed: Vec<Approval> = list(
             self.conn(),
             "state = 'failed' AND kind IN ('merge', 'land_direct')
                AND json_extract(result, '$.resolved_by') = 'reconcile'
                AND card_id IN (SELECT id FROM cards WHERE state = 'open')
+               AND NOT EXISTS (SELECT 1 FROM approvals newer
+                               WHERE newer.card_id = approvals.card_id
+                                 AND newer.kind = approvals.kind
+                                 AND (newer.requested_at, newer.id)
+                                     > (approvals.requested_at, approvals.id))
                AND NOT EXISTS (SELECT 1 FROM idempotency_keys k
-                               WHERE k.key = 'reconcile:R08:failed:' || approvals.id)
+                               WHERE k.key = 'reconcile:R08:failed:' || approvals.id
+                                 AND (k.actor IS NULL OR k.actor = 'daemon'))
                AND NOT EXISTS (
                    SELECT 1 FROM attention i
                    WHERE i.card_id = approvals.card_id AND i.kind = 'recovery'
                      AND CASE WHEN json_valid(i.evidence)
                               THEN json_extract(i.evidence, '$.approval_id') = approvals.id
-                                   AND json_extract(i.evidence, '$.state') = 'failed'
+                                   AND (json_extract(i.evidence, '$.state') = 'failed'
+                                        OR i.answered_at IS NOT NULL)
                               ELSE 0 END)
              ORDER BY id",
             &[],
         )?;
         for approval in failed {
-            let why = match approval.kind {
+            let what = match approval.kind {
                 ApprovalKind::LandDirect => "the push did not land",
                 _ => "the merge did not happen",
             };
+            let asked: bool = self.conn().query_row(
+                "SELECT EXISTS (SELECT 1 FROM idempotency_keys WHERE key = ?1)",
+                [unreadable_key(&approval.id)],
+                |row| row.get(0),
+            )?;
+            let why = if asked {
+                format!("{what}; this replaces the earlier question about it")
+            } else {
+                what.to_owned()
+            };
             if let Err(error) =
-                self.failed_execution_item(&approval, &failed_key(&approval.id), why, now, report)
+                self.failed_execution_item(&approval, &failed_key(&approval.id), &why, now, report)
             {
                 report.error(&format!("failed approval {}", approval.id), &error);
             }

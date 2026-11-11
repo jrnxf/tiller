@@ -669,4 +669,71 @@ fn an_unreadable_execution_that_failed_says_failed() {
             .contains("is failed: the merge did not happen")),
         "the item shows the final state: {items:?}"
     );
+    assert!(
+        items
+            .iter()
+            .any(|item| item.question.contains("this replaces the earlier question")),
+        "it says it replaces the uncertain one: {items:?}"
+    );
+}
+
+/// R08: a `failed` approval a newer approval of its kind followed is
+/// settled, so a later pass does not ask about it.
+#[test]
+fn a_failed_execution_a_newer_approval_followed_is_not_asked_about() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let approval = w.approve(&worker, &pr, "a1a1a1a1", true);
+    w.store_mut()
+        .approval_execute(&daemon(), &approval, "a1a1a1a1")
+        .unwrap();
+    w.forge.pr(REPO, 7, open_pr("a1a1a1a1"));
+    w.store()
+        .conn()
+        .execute_batch(
+            "CREATE TRIGGER no_items BEFORE INSERT ON attention \
+             BEGIN SELECT RAISE(ABORT, 'no items for the test'); END;",
+        )
+        .unwrap();
+    w.pass(now());
+    assert_eq!(w.approval(&approval).state, ApprovalState::Failed);
+    w.store()
+        .conn()
+        .execute_batch("DROP TRIGGER no_items;")
+        .unwrap();
+    let newer = w.approve(&worker, &pr, "a1a1a1a1", true);
+    assert_ne!(newer, approval);
+    let report = w.pass(now().plus_minutes(1));
+    assert!(
+        !report.did(&format!("R08 approval {approval}")),
+        "settled: {report:?}"
+    );
+}
+
+/// R08: a `failed` item's key another actor holds is reported, not
+/// skipped without a word.
+#[test]
+fn a_failed_execution_key_another_actor_holds_is_reported() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let approval = w.approve(&worker, &pr, "a1a1a1a1", true);
+    w.store_mut()
+        .approval_execute(&daemon(), &approval, "a1a1a1a1")
+        .unwrap();
+    w.forge.pr(REPO, 7, open_pr("a1a1a1a1"));
+    let key = format!("reconcile:R08:failed:{approval}");
+    plant_key(&w, &key, Some("session:another"));
+    let report = w.pass(now());
+    assert_eq!(w.approval(&approval).state, ApprovalState::Failed);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains(&format!("pass key {key}"))),
+        "{report:?}"
+    );
 }

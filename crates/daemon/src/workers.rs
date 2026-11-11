@@ -24,6 +24,7 @@ use tiller_agents::spawn::readings;
 use tiller_core::backup::{self, Nightly};
 use tiller_core::domain::{Host, HostKind, PipelineState, Session};
 use tiller_core::state::list;
+use tiller_core::state::memory_load::CopyMark;
 use tiller_core::{Actor, Ctx, Store, Timestamp};
 use tiller_delivery::notify::Notifier;
 use tiller_delivery::outbox::Deliverer;
@@ -647,11 +648,11 @@ impl Source for Transcripts {
 /// cannot write is logged, the pass goes on to the others, and the
 /// poller's health shows the failure; the mark stays at or before it, so
 /// the next pass tries it again, until an hour after its observation was
-/// recorded. The pass that tries it last logs that it gave the copy up, and
-/// its health line counts it.
+/// recorded or its session ended. The pass that tries it last logs that it
+/// gave the copy up, and its health line counts it.
 pub struct MemoryLoads {
     store: Store,
-    mark: Option<Timestamp>,
+    mark: Option<CopyMark>,
 }
 
 impl Source for MemoryLoads {
@@ -682,27 +683,23 @@ impl Source for MemoryLoads {
             return Ok(());
         };
         for copy in pass.failed {
-            if copy.given_up {
-                tracing::warn!(
-                    session = copy.session_id,
-                    trigger = copy.trigger,
-                    observed_at = %copy.observed_at,
-                    error = %copy.error,
-                    "gave up copying a session's memory load: an hour of tries failed, \
-                     so its Loaded by record lacks this load"
-                );
+            let what = if copy.given_up {
+                "gave up copying a session's memory load: its window passed, \
+                 so its Loaded by record lacks this load"
             } else {
-                tracing::warn!(
-                    session = copy.session_id,
-                    trigger = copy.trigger,
-                    observed_at = %copy.observed_at,
-                    error = %copy.error,
-                    "could not copy a session's memory load"
-                );
-            }
+                "could not copy a session's memory load"
+            };
+            tracing::warn!(
+                session = copy.session_id,
+                trigger = copy.trigger,
+                observed_at = %copy.observed_at,
+                given_up = copy.given_up,
+                error = %copy.error,
+                "{what}"
+            );
         }
         let given_up = if given_up > 0 {
-            format!(" ({given_up} given up after an hour)")
+            format!(" ({given_up} given up, past their window)")
         } else {
             String::new()
         };
