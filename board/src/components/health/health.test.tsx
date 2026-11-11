@@ -13,13 +13,15 @@ import { fixtureResponses, fixtureSnapshot } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
 import { lisbonWeekStart, signalsFor } from "../../lib/fixtures-signals";
 import { loadPrefs, prefsStore, updatePrefs } from "../../lib/prefs";
-import { createQueryClient } from "../../lib/query-client";
 import { createAppRouter } from "../../lib/router";
 import { niceAxis } from "./charts";
 import { mutationPhrase } from "./mutation-phrases";
 import { lisbonDay, lisbonWeekLabel } from "./lisbon";
 import { BUSY_WEEK_FACTOR, SLOW_ANSWER_MINUTES, quotaBlockOf, signalsOf } from "./model";
 import { choose } from "../../test-select";
+import { createTestQueryClient, loadRouteChunks } from "../../test-app";
+
+await loadRouteChunks();
 
 // Tue 2026-11-03 14:00 Lisbon is the fixture quota reset; this Sunday evening
 // is inside the last fixture week, which therefore is in progress.
@@ -437,7 +439,7 @@ function stubMedia() {
 }
 
 async function renderHealth(scenario: Scenario = "default") {
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot(scenario));
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: ["/health"] }));
   await router.load();

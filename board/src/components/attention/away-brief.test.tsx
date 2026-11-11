@@ -9,13 +9,15 @@ import { fixtureSnapshot } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
 import { queryKeyFor, awayBriefPath } from "../../lib/queries";
-import { createQueryClient } from "../../lib/query-client";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
 import { applyChange } from "../../lib/sse";
+import { createTestQueryClient, loadRouteChunks } from "../../test-app";
+
+await loadRouteChunks();
 
 async function renderInbox(scenario: Scenario, path = "/inbox") {
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot(scenario, Date.parse("2026-11-04T09:00:00Z")));
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: [path] }));
   await router.load();

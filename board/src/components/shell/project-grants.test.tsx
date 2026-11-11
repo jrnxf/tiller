@@ -7,9 +7,9 @@ import { fixtureMutation, withoutDeleted } from "../../lib/fixture-mutations";
 import { fixtureResource, fixtureResponses } from "../../lib/fixtures";
 import { grantMutation, grantsFor, resetGrantsFixture } from "../../lib/fixtures-grants";
 import { projectsPath } from "../../lib/queries";
-import { createQueryClient } from "../../lib/query-client";
 import { receiptsStore } from "../../lib/receipts";
 import { ProjectDetail } from "./project-stage";
+import { createTestQueryClient } from "../../test-app";
 
 // Wed 11 Nov 2026, 12:00 in Lisbon (winter time is UTC).
 const NOW = Date.parse("2026-11-11T12:00:00Z");
@@ -70,7 +70,7 @@ const alpha = (fixtureResponses()[projectsPath] as ProjectsResponse).projects.fi
 
 function renderDetail(project: Project = alpha) {
   render(
-    <QueryClientProvider client={createQueryClient()}>
+    <QueryClientProvider client={createTestQueryClient()}>
       <ProjectDetail project={project} id="detail" />
     </QueryClientProvider>,
   );

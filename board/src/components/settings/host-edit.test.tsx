@@ -6,9 +6,9 @@ import type { HostFields } from "../../lib/api-types";
 import type { Scenario } from "../../lib/fixtures";
 import { fixtureResource } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
-import { createQueryClient } from "../../lib/query-client";
 import { signedOutStore } from "../../lib/session";
 import { SettingsPage } from "./settings-page";
+import { createTestQueryClient } from "../../test-app";
 
 const GB = 1024;
 
@@ -80,7 +80,7 @@ const patches = (fetch: ReturnType<typeof serve>) =>
 
 async function openHostA() {
   render(
-    <QueryClientProvider client={createQueryClient()}>
+    <QueryClientProvider client={createTestQueryClient()}>
       <SettingsPage />
     </QueryClientProvider>,
   );

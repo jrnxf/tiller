@@ -13,9 +13,11 @@ import { fixtureResource, fixtureSnapshot } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
 import { resetMemoryFixture } from "../../lib/fixtures-memory";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
-import { createQueryClient } from "../../lib/query-client";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
+import { createTestQueryClient, loadRouteChunks } from "../../test-app";
+
+await loadRouteChunks();
 
 const NOW = Date.parse("2026-11-02T12:00:00Z");
 
@@ -51,7 +53,7 @@ const view = (scope?: string) =>
   fixtureResource(scope ? `/api/v1/memory?scope=${scope}` : "/api/v1/memory") as MemoryResponse;
 
 async function renderMemory(path = "/memory") {
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot("default", NOW));
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: [path] }));
   await router.load();

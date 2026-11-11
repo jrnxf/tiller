@@ -7,8 +7,10 @@ import type { AgentRow, AskRecorded, BoardResponse } from "../../lib/api-types";
 import { hydrateFromSnapshot } from "../../lib/boot";
 import { fixtureSnapshot } from "../../lib/fixtures";
 import { boardPath, queryKeyFor } from "../../lib/queries";
-import { createQueryClient } from "../../lib/query-client";
 import { AskDialog } from "./ask-dialog";
+import { createTestQueryClient, loadAskEditor } from "../../test-app";
+
+await loadAskEditor();
 
 interface Call {
   path: string;
@@ -108,7 +110,7 @@ function stub() {
 const RUNNING = [{ project_id: "alpha" }] as AgentRow[];
 
 function renderDialog(onClose = vi.fn()) {
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot("federated"));
   const board: BoardResponse = { rows: [], asked: [] };
   queryClient.setQueryData(queryKeyFor(boardPath()), board);

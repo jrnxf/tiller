@@ -9,9 +9,11 @@ import { connectionStore } from "../../lib/connection";
 import { fixtureSnapshot } from "../../lib/fixtures";
 import { prefsStore, loadPrefs } from "../../lib/prefs";
 import { ReadError } from "../../lib/queries";
-import { createQueryClient } from "../../lib/query-client";
 import { createAppRouter } from "../../lib/router";
 import { SETUP_POLL_MS, SetupScreen } from "./setup-screen";
+import { createTestQueryClient, loadRouteChunks } from "../../test-app";
+
+await loadRouteChunks();
 
 const UNINITIALIZED = {
   ok: false,
@@ -48,12 +50,7 @@ function snapshotWithout(...missing: string[]): Snapshot {
 }
 
 async function renderApp(snapshot: Snapshot, path = "/") {
-  const queryClient = createQueryClient();
-  // The board's one retry, without the real second of backoff before it,
-  // so a loaded test run cannot push these tests past their timeout.
-  queryClient.setDefaultOptions({
-    queries: { ...queryClient.getDefaultOptions().queries, retryDelay: 0 },
-  });
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, snapshot);
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: [path] }));
   await router.load();

@@ -10,17 +10,19 @@ import { fixtureResource, fixtureSnapshot } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
 import { machinesQuery } from "../../lib/queries";
-import { createQueryClient } from "../../lib/query-client";
 import { createAppRouter } from "../../lib/router";
 import { resetBoardLook } from "../board/board-prefs";
 import { hostAwareActivity, laneHealth } from "./degraded";
+import { createTestQueryClient, loadRouteChunks } from "../../test-app";
+
+await loadRouteChunks();
 
 async function renderApp(scenario: Scenario, path = "/") {
   vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
     const body = fixtureResource(String(input), scenario);
     return new Response(JSON.stringify(body ?? {}), { status: body === undefined ? 404 : 200 });
   });
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot(scenario));
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: [path] }));
   await router.load();

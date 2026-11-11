@@ -5,8 +5,8 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { fixtureMutation, withoutDeleted } from "../../lib/fixture-mutations";
 import type { Scenario } from "../../lib/fixtures";
 import { forgetTakenBackups } from "../../lib/fixtures-backups";
-import { createQueryClient } from "../../lib/query-client";
 import { Backups, sizeText } from "./backups";
+import { createTestQueryClient } from "../../test-app";
 
 function serve(scenario: Scenario, post?: () => Response) {
   const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -24,7 +24,7 @@ function serve(scenario: Scenario, post?: () => Response) {
 
 function renderBackups() {
   render(
-    <QueryClientProvider client={createQueryClient()}>
+    <QueryClientProvider client={createTestQueryClient()}>
       <Backups host="host-a" />
     </QueryClientProvider>,
   );

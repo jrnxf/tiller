@@ -18,7 +18,6 @@ import { FIXTURE_HEAD_SHA, fixtureResource, fixtureSnapshot } from "../../lib/fi
 import type { Scenario } from "../../lib/fixtures";
 import { loadPrefs, prefsStore, updatePrefs } from "../../lib/prefs";
 import { receiptsStore } from "../../lib/receipts";
-import { createQueryClient } from "../../lib/query-client";
 import { boardPath, projectsPath, queryKeyFor } from "../../lib/queries";
 import { createAppRouter } from "../../lib/router";
 import { applyChange } from "../../lib/sse";
@@ -26,6 +25,9 @@ import { ArchiveProject } from "../shell/project-archive";
 import { ProjectDetail } from "../shell/project-stage";
 import { DeleteProject } from "../shell/project-delete";
 import { resetBoardLook } from "./board-prefs";
+import { createTestQueryClient, loadRouteChunks } from "../../test-app";
+
+await loadRouteChunks();
 
 const HOST_B = "01JHOSTB00000000000000000B";
 const CARD_43 = "01JCARD0000000000000000043";
@@ -115,12 +117,7 @@ function stubMedia(matching: (query: string) => boolean = () => false) {
 
 // `unread` leaves those paths out of the boot snapshot, so they are fetched.
 async function renderApp(scenario: Scenario = "default", path = "/", unread: string[] = []) {
-  const queryClient = createQueryClient();
-  // The board's one retry, without the real second of backoff before it,
-  // so a loaded test run cannot push these tests past their timeout.
-  queryClient.setDefaultOptions({
-    queries: { ...queryClient.getDefaultOptions().queries, retryDelay: 0 },
-  });
+  const queryClient = createTestQueryClient();
   const snapshot = fixtureSnapshot(scenario);
   snapshot.queries = Object.fromEntries(
     Object.entries(snapshot.queries).filter(([key]) => !unread.includes(key)),
@@ -148,6 +145,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   document.documentElement.removeAttribute("data-theme");
@@ -840,7 +838,7 @@ test("the drawer expands to the full page, and Back returns to the board with th
 
 test("opening the drawer fetches the card page's route chunk, so the full page needs no wait", async () => {
   stubApi("default");
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot("default"));
   const router = createAppRouter(
     queryClient,
@@ -869,7 +867,7 @@ test("opening the drawer fetches the card page's route chunk, so the full page n
 
 test("the board with no card open fetches no card page", async () => {
   stubApi("default");
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot("default"));
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: ["/"] }));
   const preload = vi.spyOn(router, "preloadRoute");
@@ -1350,7 +1348,13 @@ test("adding a project closes the dialog, or keeps it open to show the add's war
   expect(screen.queryByRole("dialog")).toBeNull();
 });
 
+// The Add project dialog checks the folder once typing has stopped for 300 ms.
+// Under fake time this skips that wait instead of sleeping it out.
+const settle = () => act(() => vi.advanceTimersByTimeAsync(300));
+
 test("Add project checks the local checkout on the daemon and says what it will do", async () => {
+  // Fake time still moves with the clock, so the waits below run as usual.
+  vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "clearTimeout"] });
   const posted = stubApi("default");
   await renderApp();
 
@@ -1360,6 +1364,7 @@ test("Add project checks the local checkout on the daemon and says what it will 
   const folder = within(dialog).getByLabelText("Local checkout");
   const verdict = () => document.getElementById(folder.getAttribute("aria-describedby") ?? "");
   fireEvent.change(within(dialog).getByLabelText("Id"), { target: { value: "delta" } });
+  await settle();
 
   // No checkout at the default folder yet: the daemon says to clone.
   await waitFor(() =>
@@ -1372,6 +1377,7 @@ test("Add project checks the local checkout on the daemon and says what it will 
 
   // A clone needs the repo, and a folder under the checkouts root.
   fireEvent.click(within(dialog).getByRole("button", { name: "Clone" }));
+  await settle();
   await waitFor(() =>
     expect(verdict()?.textContent).toBe(
       "a clone needs the project's repo; fill in Repo as owner/name",
@@ -1379,11 +1385,13 @@ test("Add project checks the local checkout on the daemon and says what it will 
   );
   fireEvent.change(within(dialog).getByLabelText(/^Repo/), { target: { value: "example/delta" } });
   fireEvent.change(folder, { target: { value: "/srv/delta" } });
+  await settle();
   await waitFor(() => expect(verdict()?.textContent).toMatch(/^\/srv\/delta is not under/));
   expect(submit.disabled).toBe(true);
   expect(folder.getAttribute("aria-invalid")).toBe("true");
 
   fireEvent.change(folder, { target: { value: "/home/user/src/delta" } });
+  await settle();
   await waitFor(() =>
     expect(verdict()?.textContent).toBe(
       "Clones https://github.com/example/delta.git into /home/user/src/delta.",

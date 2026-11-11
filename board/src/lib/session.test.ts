@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { ReadError, agentsQuery, boardQuery } from "./queries";
-import { createQueryClient } from "./query-client";
 import { sendMutation } from "../components/attention/api";
 import { codeDigits, isSignedOut, signIn, signOut, signedOutStore } from "./session";
+import { createTestQueryClient } from "../test-app";
 
 beforeEach(() => signedOutStore.set(false));
 afterEach(() => vi.unstubAllGlobals());
@@ -108,7 +108,7 @@ test("a mutation refused as signed out flips the board to the signed-out screen"
 
 test("any read refused as signed out flips the board to the signed-out screen", async () => {
   answer(403, refusal("not_owner"));
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   await queryClient.fetchQuery(boardQuery()).catch(() => {});
   expect(signedOutStore.get()).toBe(false);
 

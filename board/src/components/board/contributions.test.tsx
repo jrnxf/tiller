@@ -7,9 +7,11 @@ import { hydrateFromSnapshot } from "../../lib/boot";
 import { connectionStore } from "../../lib/connection";
 import { fixtureResource, fixtureSnapshot } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
-import { createQueryClient } from "../../lib/query-client";
 import { createAppRouter } from "../../lib/router";
 import { resetBoardLook } from "./board-prefs";
+import { createTestQueryClient, loadRouteChunks } from "../../test-app";
+
+await loadRouteChunks();
 
 const CARD_43 = "01JCARD0000000000000000043";
 
@@ -23,7 +25,7 @@ async function renderApp(path: string) {
         : new Response(JSON.stringify(body), { status: 200 });
     }),
   );
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot());
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: [path] }));
   await router.load();

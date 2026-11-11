@@ -5,8 +5,8 @@ import { afterEach, expect, test, vi } from "vitest";
 import type { Project, ProjectFields, ProjectsResponse } from "../../lib/api-types";
 import { fixtureResponses } from "../../lib/fixtures";
 import { projectsPath } from "../../lib/queries";
-import { createQueryClient } from "../../lib/query-client";
 import { ProjectDetail } from "./project-stage";
+import { createTestQueryClient } from "../../test-app";
 
 afterEach(() => {
   cleanup();
@@ -95,7 +95,7 @@ function serve(other?: Partial<ProjectFields>) {
 
 function renderDetail(project: Project = alpha) {
   render(
-    <QueryClientProvider client={createQueryClient()}>
+    <QueryClientProvider client={createTestQueryClient()}>
       <ProjectDetail project={project} id="detail" />
     </QueryClientProvider>,
   );

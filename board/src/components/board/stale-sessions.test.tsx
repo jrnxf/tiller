@@ -8,9 +8,11 @@ import { connectionStore } from "../../lib/connection";
 import { fixtureMutation } from "../../lib/fixture-mutations";
 import { fixtureResource, fixtureSnapshot } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
-import { createQueryClient } from "../../lib/query-client";
 import { createAppRouter } from "../../lib/router";
 import { resetBoardLook } from "./board-prefs";
+import { createTestQueryClient, loadRouteChunks } from "../../test-app";
+
+await loadRouteChunks();
 
 beforeEach(() => {
   localStorage.clear();
@@ -42,7 +44,7 @@ afterEach(() => {
 });
 
 test("older sessions get a banner, chips and a restart dialog that queues the working one", async () => {
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot("stale-sessions"));
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: ["/"] }));
   await router.load();

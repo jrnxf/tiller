@@ -11,12 +11,14 @@ import type { Scenario } from "../../lib/fixtures";
 import type { AgentsResponse } from "../../lib/api-types";
 import { agentsPath, queryKeyFor } from "../../lib/queries";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
-import { createQueryClient } from "../../lib/query-client";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
 import { answeredStore, withdrawnStore } from "../attention/answered";
 import { choose } from "../../test-select";
 import { resetBoardLook } from "./board-prefs";
+import { createTestQueryClient, loadRouteChunks } from "../../test-app";
+
+await loadRouteChunks();
 
 // The cards the `federated` fixture scenario gives each paired peer.
 const GAMMA_12_D = "01JPCARDD00000000000000012";
@@ -57,7 +59,7 @@ function stubApi(scenario: Scenario) {
 }
 
 async function renderApp(scenario: Scenario, path = "/") {
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot(scenario));
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: [path] }));
   await router.load();

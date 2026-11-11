@@ -7,8 +7,10 @@ import type { AgentRow, AskRecorded, BoardResponse } from "../../lib/api-types";
 import { hydrateFromSnapshot } from "../../lib/boot";
 import { fixtureSnapshot } from "../../lib/fixtures";
 import { boardPath, projectsPath, queryKeyFor } from "../../lib/queries";
-import { createQueryClient } from "../../lib/query-client";
 import { AskDialog } from "./ask-dialog";
+import { createTestQueryClient, loadAskEditor } from "../../test-app";
+
+await loadAskEditor();
 
 interface Call {
   path: string;
@@ -78,7 +80,7 @@ const RUNNING = [
 ] as AgentRow[];
 
 function renderDialog(onClose = vi.fn(), running: AgentRow[] = RUNNING) {
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot("federated"));
   const board: BoardResponse = { rows: [], asked: [] };
   queryClient.setQueryData(queryKeyFor(boardPath()), board);
@@ -395,10 +397,7 @@ test("with the projects not read, Ask still opens and says why Send waits", asyn
         ),
     ),
   );
-  const queryClient = createQueryClient();
-  queryClient.setDefaultOptions({
-    queries: { ...queryClient.getDefaultOptions().queries, retryDelay: 0 },
-  });
+  const queryClient = createTestQueryClient();
   const snapshot = fixtureSnapshot("default");
   const queries = { ...snapshot.queries };
   delete queries[projectsPath];

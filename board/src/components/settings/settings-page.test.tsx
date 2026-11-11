@@ -5,9 +5,9 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { DaemonHealth } from "../../lib/api-types";
 import { fixtureResource } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
-import { createQueryClient } from "../../lib/query-client";
 import { signedOutStore } from "../../lib/session";
 import { SettingsPage } from "./settings-page";
+import { createTestQueryClient } from "../../test-app";
 
 // `gated`: an `--allow-host` name, where reads need the cookie.
 function serve(owner: boolean, logout: [number, unknown] = [200, { owner: false }], gated = true) {
@@ -36,7 +36,7 @@ function serve(owner: boolean, logout: [number, unknown] = [200, { owner: false 
 
 function renderSettings() {
   render(
-    <QueryClientProvider client={createQueryClient()}>
+    <QueryClientProvider client={createTestQueryClient()}>
       <SettingsPage />
     </QueryClientProvider>,
   );

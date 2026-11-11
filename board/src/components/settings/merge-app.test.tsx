@@ -3,8 +3,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import type { DoctorReport, MergeAppHealth, ProjectSetup } from "../../lib/api-types";
-import { createQueryClient } from "../../lib/query-client";
 import { MergeAppSection } from "./merge-app";
+import { createTestQueryClient } from "../../test-app";
 
 const READY: MergeAppHealth = {
   status: "ok",
@@ -64,7 +64,7 @@ function serve(doctor: DoctorReport | null) {
 
 function renderSection(app: MergeAppHealth) {
   render(
-    <QueryClientProvider client={createQueryClient()}>
+    <QueryClientProvider client={createTestQueryClient()}>
       <MergeAppSection app={app} host="host-a" />
     </QueryClientProvider>,
   );

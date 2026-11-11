@@ -8,11 +8,13 @@ import { hydrateFromSnapshot } from "../../lib/boot";
 import { connectionStore } from "../../lib/connection";
 import { fixtureResource, fixtureSnapshot } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
-import { createQueryClient } from "../../lib/query-client";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
 import { choose } from "../../test-select";
 import { closeOutcome, outcomeLabel } from "./card-lifecycle";
+import { createTestQueryClient, loadRouteChunks } from "../../test-app";
+
+await loadRouteChunks();
 
 const SHIP = "01JCARD0000000000000000041";
 const DONE = "01JCARD0000000000000000009";
@@ -60,7 +62,7 @@ function stubApi(patch: Partial<BoardRow> = {}, cardId = SHIP, holds: unknown[] 
 }
 
 async function renderCard(cardId = SHIP) {
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot("default"));
   const router = createAppRouter(
     queryClient,
@@ -264,7 +266,7 @@ test("the priority saves as soon as one is picked", async () => {
 
 test("an Inbox row has the same set in its overflow menu", async () => {
   stubApi();
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot("default"));
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: ["/inbox"] }));
   await router.load();

@@ -6,9 +6,9 @@ import type { HostConfig } from "../../lib/api-types";
 import { hostConfigFor, setConfigFixture } from "../../lib/fixture-settings";
 import { fixtureResource } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
-import { createQueryClient } from "../../lib/query-client";
 import { signedOutStore } from "../../lib/session";
 import { SettingsPage } from "./settings-page";
+import { createTestQueryClient } from "../../test-app";
 
 // This host's other keys, served beside the rest. A POST is answered by the
 // stand-in server's rules, which mirror the daemon's.
@@ -49,7 +49,7 @@ function serve(owner: boolean, config: Partial<HostConfig> = {}) {
 
 function renderSettings() {
   render(
-    <QueryClientProvider client={createQueryClient()}>
+    <QueryClientProvider client={createTestQueryClient()}>
       <SettingsPage />
     </QueryClientProvider>,
   );

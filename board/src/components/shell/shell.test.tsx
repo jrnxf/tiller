@@ -8,8 +8,10 @@ import { connectionStore } from "../../lib/connection";
 import { fixtureSnapshot } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
 import { prefsStore, loadPrefs } from "../../lib/prefs";
-import { createQueryClient } from "../../lib/query-client";
 import { createAppRouter } from "../../lib/router";
+import { createTestQueryClient, loadAskEditor, loadRouteChunks } from "../../test-app";
+
+await Promise.all([loadRouteChunks(), loadAskEditor()]);
 
 function stubMedia(dark: boolean) {
   vi.stubGlobal("matchMedia", (query: string) => ({
@@ -24,7 +26,7 @@ function stubMedia(dark: boolean) {
 }
 
 async function renderApp(scenario: Scenario = "default", path = "/") {
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot(scenario));
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: [path] }));
   await router.load();

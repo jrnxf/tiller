@@ -10,9 +10,11 @@ import { awayBrief } from "../../lib/fixtures-away";
 import { fixtureSnapshot } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
-import { createQueryClient } from "../../lib/query-client";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
+import { createTestQueryClient, loadRouteChunks } from "../../test-app";
+
+await loadRouteChunks();
 
 interface Call {
   method: string;
@@ -47,7 +49,7 @@ function stubDaemon(ended = awayBrief(false)) {
 }
 
 async function renderApp(scenario: Scenario, path = "/") {
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot(scenario, Date.parse("2026-11-02T12:00:00Z")));
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: [path] }));
   await router.load();

@@ -6,9 +6,9 @@ import type { DaemonHealth, PollerHealth } from "../../lib/api-types";
 import type { Scenario } from "../../lib/fixtures";
 import { fixtureResource } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
-import { createQueryClient } from "../../lib/query-client";
 import { signedOutStore } from "../../lib/session";
 import { SettingsPage } from "./settings-page";
+import { createTestQueryClient } from "../../test-app";
 
 // The fixture host's health, doctor report and hosts list. Run now on a
 // poller answers with that poller polled, and health lists it so after.
@@ -59,7 +59,7 @@ function serve(scenario: Scenario, { owner = true, doctor = true } = {}) {
 
 function renderSettings() {
   render(
-    <QueryClientProvider client={createQueryClient()}>
+    <QueryClientProvider client={createTestQueryClient()}>
       <SettingsPage />
     </QueryClientProvider>,
   );

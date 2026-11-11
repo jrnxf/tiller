@@ -14,10 +14,12 @@ import { fixtureMutation } from "./fixture-mutations";
 import { fixtureResource, fixtureSnapshot } from "./fixtures";
 import { resetMemoryFixture } from "./fixtures-memory";
 import { loadPrefs, prefsStore } from "./prefs";
-import { createQueryClient } from "./query-client";
 import { receiptsStore } from "./receipts";
 import { createAppRouter } from "./router";
 import { applyChange } from "./sse";
+import { createTestQueryClient, loadRouteChunks } from "../test-app";
+
+await loadRouteChunks();
 
 const NOW = Date.parse("2026-11-02T12:00:00Z");
 const FIRST = /^Before asking me to merge a sizeable PR/;
@@ -71,7 +73,7 @@ afterEach(() => {
 });
 
 async function renderMemory() {
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot("default", NOW));
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: ["/memory"] }));
   await router.load();

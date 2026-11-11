@@ -9,12 +9,14 @@ import { fixtureResource, fixtureSnapshot, serverResponses } from "../../lib/fix
 import { LIMITS, charCount, isTooLong } from "../../lib/limits";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
 import { boardPath } from "../../lib/queries";
-import { createQueryClient } from "../../lib/query-client";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
 import { NewCardDialog } from "../board/new-card";
 import { answeredStore, withdrawnStore } from "./answered";
 import { EditFields } from "./card-lifecycle";
+import { createTestQueryClient, loadRouteChunks } from "../../test-app";
+
+await loadRouteChunks();
 
 // The daemon refuses text over these lengths with 400 `usage` (protocol.md
 // 7.4). Each board input that sends one of these fields says so before Send,
@@ -77,7 +79,7 @@ test("the limits count characters the way the daemon does", () => {
 });
 
 async function renderInbox(item: string) {
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot("default", Date.parse("2026-11-02T12:00:00Z")));
   const router = createAppRouter(
     queryClient,

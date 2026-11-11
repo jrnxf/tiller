@@ -4,8 +4,8 @@ import { afterEach, expect, test, vi } from "vitest";
 
 import type { AgentsResponse } from "../../lib/api-types";
 import { agentsPath, queryKeyFor } from "../../lib/queries";
-import { createQueryClient } from "../../lib/query-client";
 import { ReloadBanner } from "./reload-banner";
+import { createTestQueryClient } from "../../test-app";
 
 afterEach(() => {
   cleanup();
@@ -13,7 +13,7 @@ afterEach(() => {
 });
 
 function setup(version: string) {
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   const set = (tiller_version: string | undefined) =>
     queryClient.setQueryData<AgentsResponse>(queryKeyFor(agentsPath()), {
       orchestrators: [],

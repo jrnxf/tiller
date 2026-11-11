@@ -14,12 +14,14 @@ import {
 import type { Scenario } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
 import { agentsQuery } from "../../lib/queries";
-import { createQueryClient } from "../../lib/query-client";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
 import { applyChange } from "../../lib/sse";
 import { answeredStore, withdrawnStore } from "./answered";
 import { choose } from "../../test-select";
+import { createTestQueryClient, loadRouteChunks } from "../../test-app";
+
+await loadRouteChunks();
 
 const RETRY = "01JATTN0000000000000000000";
 const MERGE = "01JATTN0000000000000000001";
@@ -77,7 +79,7 @@ function stubDaemon(scenario: Scenario, hold = false) {
 }
 
 async function renderInbox(scenario: Scenario = "default", item?: string) {
-  const queryClient = createQueryClient();
+  const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot(scenario, Date.parse("2026-11-02T12:00:00Z")));
   const path = item ? `/inbox?item=${item}` : "/inbox";
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: [path] }));
