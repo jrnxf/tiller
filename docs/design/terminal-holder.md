@@ -1,6 +1,6 @@
 # Terminal holder
 
-- **Status:** proposed. Written Wednesday 2026-11-11 (Lisbon time).
+- **Status:** accepted Wednesday 2026-11-11 (Lisbon time), with ADR 0004. Written the same day.
 - **Decision record:** [ADR 0004](../adr/0004-own-terminal-holder.md).
 - **Replaces:** herdr as the owner of agent panes. [`herdr-layout.md`](herdr-layout.md) becomes history at cutover.
 - **Owner choices (Wednesday 2026-11-11):**
@@ -12,7 +12,7 @@
   - Owner notifications go to the owner's desktop notification app, which shows them as cards.
   - A builder records raw PTY fixtures of real Claude Code sessions, after the owner gives the go.
 
-This doc is the design. The contract changes it needs in `docs/spec/` land as their own task (H01), before any code.
+This doc is the design. The contract changes it needs in `docs/spec/` land in task H01, in the same PR as this doc and before any code. The specs tag each changed rule [H]: it states the behavior after the cutover (section 11), and herdr does that work until then.
 
 ## 1. Why
 
@@ -383,6 +383,7 @@ With no target, it shows the switcher first.
   - `s` opens the switcher.
   - `n` and `p` go to the next and the previous agent.
   - `Ctrl-\` sends one `Ctrl-\` to the agent.
+  - `?` shows a help screen over the pane that lists every prefix key. It sends nothing to the pane. Any key closes it and asks for a repaint.
   - Any other key closes the prefix and does nothing.
   - `[attach] prefix` in `config.toml` can change the prefix key.
 - **The kitty keyboard.** When the agent pushed kitty keyboard flags, the owner's terminal sends `Ctrl-\` as `CSI 92;5u`, not as byte `0x1c`. `tiller attach` knows the pane's mode from the holder and reads both forms.
@@ -543,6 +544,7 @@ These drive `tiller attach` through a PTY harness in the test:
 - Raw mode is on during attach and off after detach.
 - Detach puts back every mode the agent had turned on.
 - The prefix works as byte `0x1c` and as `CSI 92;5u`. `Ctrl-\ Ctrl-\` sends one `0x1c`.
+- `Ctrl-\ ?` shows the help screen with every prefix key and sends nothing to the pane. The next key closes it, and the pane is repainted.
 - Two clients get the same output, and the size follows the one that typed last.
 - `--read-only` sends nothing.
 - The switcher works with the daemon down.
@@ -554,13 +556,18 @@ These drive `tiller attach` through a PTY harness in the test:
 
 ## 10. Every spec and doc change
 
-These land in H01, before the code, so that each builder builds against a written contract.
+The doc rows land in H01, before the code, so that each builder builds against a written contract. The specs tag each changed rule [H]. The code rows land with the code that needs them:
+- `contract/openapi.json` is generated, and its staleness test fails on a hand edit. H11 and H13 regenerate it.
+- `nix/module.nix` goes with H06 (the holder service) and H13 (herdr removed).
+- `flake.nix`, `roles/*.settings.json`, `scripts/two-host-demo.sh` and `demo/` go with H13. The daemon reads the role files, so they change with the code.
+- The board files of 10.1 go with H12.
+- `docs/spec/schema.sql` keeps today's DDL with [H] comments until H10's migration.
 
 | File | Change |
 |---|---|
 | `docs/spec/protocol.md` | 3.1 and 3.3: "typed through the holder", target check by pane key, composer read by `screen`. 3.4: notifications through `[notify] command`, opened with `tiller attach`. 4.5: the `herdr` poller rows become `holder` (exit and screen). 6.4: `tiller attach`, `tiller holder` and `tiller holder upgrade`, `agent focus` as Open in terminal, `peer add` without `--herdr-machine`, and doctor's `holder` check. 7.3: `tools.holder`. 7.4: rewrite Open in herdr and the Terminal mirror for the holder, and drop Tail for saved machines. 9: drop herdr-only machines and `herdr_link_down`. 10.1 and 10.7: peers only, link on the holder. 12: coverage rows |
 | `docs/spec/recovery.md` | Sources: `holder` in place of herdr. The ladder: step 2 is the holder's `list` and the pane key, step 3 is `state` and the exit code. R04: drop the layout step. R05: peers only. R18: rewrite as "Holder unreachable" (no tokens to re-report). New R21: holder lost. New R22: holder upgrade failed (the old holder runs on, `upgrade_refused` is a Health warning) |
-| `docs/spec/state.md` | `panes` table owned by the holder (section 11.1). `hosts.herdr_machine` dropped. Observation source `holder`. `meta.holder_instance`. Poller name `holder`. Events `holder.upgraded` and `holder.lost` |
+| `docs/spec/state.md`, `docs/spec/schema.sql` | `panes` table owned by the holder (section 11.1). `hosts.herdr_machine` dropped. Observation source `holder`. `meta.holder_instance`. Poller name `holder`. Events `holder.upgraded` and `holder.lost` |
 | `docs/spec/authority.md` | Agents are denied `tiller holder`, `tiller attach` and `$TILLER_HOME/run`, in place of the `herdr` CLI. The owner's input through `tiller attach` is the owner's, as a board tap is (G29) |
 | `docs/design/host-capabilities.md` | The "herdr status works" minimum becomes "the holder starts and its socket answers". The no-user-service row: the daemon and attach start the holder detached. Rows that name herdr panes now name holder panes |
 | `docs/design/herdr-layout.md` | A header: superseded by `terminal-holder.md` at cutover, kept as history |
@@ -635,20 +642,29 @@ Each step is done by the owner, or by a builder with the owner present, at a che
 
 Each task is one builder, one branch, one worktree and one PR, with a `/code-review` before the PR and `no-mistakes` as the gate. Times are agent wall-clock time, with review and CI included.
 
-**Where the port lands.** H00 to H08 add code or docs that nothing uses yet, so they merge to `main`. The port (H09 to H14) cannot land on `main` piece by piece without a fallback, and the owner ruled out a fallback. So those tasks merge into an integration branch, `holder-port`, and the owner merges `holder-port` into `main` once, at cutover. The builder of each port task merges `main` into `holder-port` first. The live tiller is never deployed from `holder-port`.
+**Where the port lands.** H00 to H08, S1a and S1b add code or docs that nothing uses yet, so they merge to `main`. The port (S1c, then H09 to H14) cannot land on `main` piece by piece without a fallback, and the owner ruled out a fallback. So those tasks merge into an integration branch, `holder-port`, and the owner merges `holder-port` into `main` once, at cutover. S1c creates `holder-port` from `main`. The builder of each later port task merges `main` into `holder-port` first. The live tiller is never deployed from `holder-port`. The S1P preview runs on a test home, not on the live tiller.
+
+**The first slice (S1).** Before H02, a thin slice lets the owner type in a terminal that the holder owns, reload the board and restart the daemon, and find the same terminal still running. S1a and S1b are the minimal parts of H02, H03 and H04. S1c is the minimal daemon wiring, the first part of H09 to H11. H02 to H11 then extend the slice code: each builder reads it first and keeps its interfaces unless this doc says otherwise. Their times below are what is left after the slice.
+- **The slice is done** when the owner, on the S1P preview, types in a shell pane and sees the output, reloads the page and sees the same screen, and restarts the daemon with the holder still up and gets the same pane back, with its history, still taking input.
+- **"Resumable" in the slice** means a board reload and a daemon restart only. A holder restart, a live upgrade and a reboot come with H05 and H10.
 
 | # | Task | Depends on | Time |
 |---|---|---|---|
 | H00 | Freeze today's composer and prompt results on the 9 fixtures as `insta` snapshots | - | 30 min |
-| H01 | Spec amendments: every row of section 10 except the code ones, plus ADR 0004 marked accepted | this doc merged | 2 h |
-| H02 | `tiller-panes` and `tiller-poll`: protocol types, framing, version handshake, `Panes` and `Live` traits, `HolderClient`, `FakePanes`, key names. Move `composer.rs`, `submit.rs`, `process.rs`, `front.rs`, `testing.rs` and the generic poller there, with `tiller-herdr` re-exporting them so `main` still builds | H00, H01 | 4 h |
-| H03 | `tiller-holder` core: PTYs with `rustix`, spawn, reaper, env, `alacritty_terminal` model with `catch_unwind`, socket with the peer check, lock, and the requests other than `subscribe` and `upgrade`. The model gate of 9.1 | H02 | 5 h |
-| H04 | Repaint renderer, query answers and filter, `subscribe` with passthrough and sync buffering, leases, back-pressure, limits. Round-trip proptest and fault tests of 9.4 | H03 | 5 h |
-| H05 | Live upgrade: first the model state check of 6.2, then the handover record, preflight, dry run, re-exec and resume. The tests of 9.3 | H04 | 6 h |
+| H01 | Spec amendments: every row of section 10 except the code ones, plus ADR 0004 marked accepted and the S1 rows of this section. It lands in one PR with this doc | - | 2 h |
+| S1a | The minimal part of H02: the `tiller-panes` crate with protocol types, framing (kinds 0, 1 and 2), the version handshake, `HolderClient`, the `Panes` trait with the methods the slice uses, and `FakePanes`. No module moves. Framing round-trip tests and a handshake version mismatch test | H01, H00 | 2 h |
+| S1b | The minimal part of H03 and H04: `tiller holder` with the socket (mode 0600, peer check), the lock, PTY spawn and reaping with exit codes, the `alacritty_terminal` model with `catch_unwind`, `subscribe` with a full repaint and then passthrough, raw input, and resize. One fixed cap on each client's output queue: a full queue drops the client. No leases, sync buffering or fault tests. An end-to-end test that spawns a shell, types and reads the repaint, a peer check test and an exit code test | S1a | 2.5 h |
+| S1c (`holder-port`) | The minimal daemon wiring: new agents launch in the holder, the agent record keeps the pane id, the terminal and input endpoints use the holder, and the daemon finds its panes after it restarts. Only the board copy it needs. It tests against `FakePanes` first. Its end-to-end test, the first of 9.2, restarts the daemon with the holder up and checks that the endpoint serves the same pane and takes input | S1a, and S1b for the end-to-end test | 1.5 h |
+| S1P | A preview from `holder-port` on one host: a holder and a daemon on a test `TILLER_HOME`, the board on a spare port, and one plain shell pane, never a model agent. The owner checks the slice. Steps to run the same preview on the other hosts | S1b, S1c | 30 min |
+| H02 | Finish `tiller-panes` and add `tiller-poll`: the rest of the protocol types, the `Live` trait, the rest of the `Panes` methods, and key names. Move `composer.rs`, `submit.rs`, `process.rs`, `front.rs`, `testing.rs` and the generic poller there, with `tiller-herdr` re-exporting them so `main` still builds | S1P (the slice done) | 3 h |
+| H03 | Finish the `tiller-holder` core: env, the requests other than `subscribe` and `upgrade` that the slice left out, and the model gate of 9.1 | H02 | 4 h |
+| H04 | Repaint renderer, query answers and filter, sync buffering, leases, back-pressure in place of the slice's fixed cap, limits. Round-trip proptest and fault tests of 9.4 | H03 | 4.5 h |
+| HA1 | A read-only audit: list the `alacritty_terminal` state that the handover of 6.2 must carry, with its public read and write path. A field with no such path stops H05 until the owner picks an upstream change or a patch in `nix/patches/` | H03 | 30 min |
+| H05 | Live upgrade: first the model state check of 6.2, then the handover record, preflight, dry run, re-exec and resume. The tests of 9.3 | H04, HA1 | 6 h |
 | H06 | `tiller holder` service: `--detach`, `upgrade`, the Nix module service and launchd agent, the doctor `holder` check | H03 | 3 h |
 | H07 | `tiller attach`: raw mode, prefix (both encodings), detach restore, many clients, read-only, switcher. The tests of 9.5 | H04 | 5 h |
 | H08 | Raw fixture recording (owner's go): recorder, about 20 min of real sessions, scrub, marks, raw stream gate | H04 | 3 h |
-| H09 (`holder-port`) | Agents and delivery on `Panes`: spawn, resume, control, stop, submit, notifier on `[notify] command`, labels. `fake-agent` and the restart tests of 9.2 | H05, H06 | 6 h |
+| H09 (`holder-port`) | Agents and delivery on `Panes`, from S1c's wiring: spawn, resume, control, stop, submit, notifier on `[notify] command`, labels. `fake-agent` and the restart tests of 9.2 left after S1c | S1c, H05, H06 | 6 h |
 | H10 (`holder-port`) | Reconcile, observe and state: `HolderSource`, ladder, R18, R21 and R22, `holder` observations, the migration of 11.1, config keys | H09 | 6 h |
 | H11 (`holder-port`) | Daemon API and peers: live view on `subscribe`, Fit as a lease, history, prompt, input, Open in terminal, peer pane link, the saved-machine paths removed | H10, H07 | 5 h |
 | H12 (`holder-port`) | Board: copy, `terminal-open.ts`, stream semantics, the tail UI for saved machines removed, screenshots in both themes at 1440 and 390 px | H11 | 4 h |
@@ -656,7 +672,7 @@ Each task is one builder, one branch, one worktree and one PR, with a `/code-rev
 | H14 (`holder-port`) | End-to-end soak on a test home with `fake-agent` panes: 4 h of daemon restarts, 3 live upgrades and a holder kill, with no gap in any counter. Then the full CI gate and `nix flake check` | H13 | 6 h (4 h is the soak itself) |
 | H15 | Cutover on the live tiller, with the owner (section 11.3), after the owner merges `holder-port` | H14 | 1 h |
 
-**Total:** about 65 hours of agent time. H00 runs beside H01. H06, H07 and H08 run beside H04 and H05. The critical path is H01, H02 to H05, then H09 to H15: about 53 hours.
+**Total:** about 69 hours of agent time: about 9 hours for H00, H01 and the slice, and about 60 hours for H02 to H15 with HA1. H00 runs beside H01, and S1c beside S1b. H06, H07, H08 and HA1 run beside H04 and H05. The critical path is H01, S1a, S1b and S1P, then H02 to H05, then H09 to H15: about 56 hours.
 
 ## 14. What stays open
 

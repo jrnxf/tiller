@@ -1,6 +1,6 @@
 # Host capabilities
 
-Drafted Sunday 2026-11-01, 21:25 Lisbon time (WET), from the capability probe (`probe/tiller-probe.sh`, task T0.3). The minimum common behavior below was approved as the baseline at CP2, Monday 2026-11-02 (`docs/spec/cp2-open.md`, H01); host C's probe is still pending.
+Drafted Sunday 2026-11-01, 21:25 Lisbon time (WET), from the capability probe (`probe/tiller-probe.sh`, task T0.3). The minimum common behavior below was approved as the baseline at CP2, Monday 2026-11-02 (`docs/spec/cp2-open.md`, H01); host C's probe is still pending. Amended by ADR 0004 (Tiller owns its terminals), accepted Wednesday 2026-11-11: the minimum common behavior. Text tagged [H] states the behavior after the terminal holder cutover (`terminal-holder.md`, section 11); until then herdr does that work, as this doc said before. The Results and the live checks are measurements and stay as they were taken.
 
 Hosts are named by role:
 
@@ -21,7 +21,7 @@ Read-only carve-out: the probe writes only under its temp root, except that the 
 | Hook events under the real login | The same | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, `SessionEnd` all fire in project, local and flag scope | All six fire in project and local scope; flag scope fires `SessionStart` and `Stop` | pending |
 | User or system service | The daemon (T2.8) | systemd `--user` running, lingering on, a transient unit ran | launchd agent loaded and ran (a probe agent from its temp dir) | pending (launchd; MDM may restrict background items) |
 | Localhost port | The board and its API (T2.8) | Bind and connect on 127.0.0.1 work | Bind and connect on 127.0.0.1 work | pending |
-| herdr CLI and `api snapshot` | The herdr adapter (T2.5) | herdr 0.9.3; `status` and `api snapshot` work; snapshot holds `workspaces`, `tabs`, `panes`, `layouts`, `agents` | herdr 0.9.3; `status` and `api snapshot` work; snapshot holds 4 workspaces, 4 panes, 4 agents (protocol 22) | pending |
+| herdr CLI and `api snapshot` | The herdr adapter (T2.5); [H] gone at the cutover, when the terminal holder replaces it | herdr 0.9.3; `status` and `api snapshot` work; snapshot holds `workspaces`, `tabs`, `panes`, `layouts`, `agents` | herdr 0.9.3; `status` and `api snapshot` work; snapshot holds 4 workspaces, 4 panes, 4 agents (protocol 22) | pending |
 | Auto memory and `CLAUDE_CODE_DISABLE_AUTO_MEMORY` | Fleet roles load only approved memory (plan default) | Honored in a session launched from a herdr pane: with the variable set, the memory directory is not created and `MEMORY.md` does not load | Honored offline: with the variable set, the memory directory is not created. `MEMORY.md` loads when auto memory is on. Not run from a herdr pane, so the herdr-launched case is unanswered | pending |
 | `claude --append-system-prompt-file` | The worker launch form (plan default) | Works | Works (canary seen in the session) | pending |
 | `claude plugin eval --no-publish` | Skill-trigger evals (T4.6) | Works; the report stays local | Works (exit 0, score 1); the report stays local | pending |
@@ -107,11 +107,11 @@ Tiller can assume these on every host. Each row has a fallback for a host that f
 
 | Tiller assumes | Fallback if a host falls short |
 |---|---|
-| Project-scope hooks fire for `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` and `SessionEnd`. Tiller installs its hooks in project or local scope, never user scope, so a user-level `disableAllHooks` is the only setting that turns them off | **Hooks blocked by managed policy** (`allowManagedHooksOnly` or a managed `disableAllHooks`): observations come only from the transcript tailer and herdr agent status; intake reads asks from the transcript; the PreToolUse backstop does not exist, so the guards are conventions plus permission deny rules on that host. This is the "reduced behavior" T6.4 refers to |
-| A per-user service manager: systemd `--user` with lingering on Linux, a launchd agent in the GUI domain on macOS | **No user service** (MDM blocks background items): the daemon runs in a herdr pane started by the developer; reconcile covers its restarts |
+| Project-scope hooks fire for `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` and `SessionEnd`. Tiller installs its hooks in project or local scope, never user scope, so a user-level `disableAllHooks` is the only setting that turns them off | **Hooks blocked by managed policy** (`allowManagedHooksOnly` or a managed `disableAllHooks`): observations come only from the transcript tailer and herdr agent status ([H] the holder's screen and exit observations); intake reads asks from the transcript; the PreToolUse backstop does not exist, so the guards are conventions plus permission deny rules on that host. This is the "reduced behavior" T6.4 refers to |
+| A per-user service manager: systemd `--user` with lingering on Linux, a launchd agent in the GUI domain on macOS | **No user service** (MDM blocks background items): the daemon runs in a herdr pane started by the developer; reconcile covers its restarts. [H] The daemon and `tiller attach` start the holder detached (`tiller holder --detach`), and the developer starts the daemon in a terminal |
 | The daemon can bind 127.0.0.1 | **No localhost port**: the board is unavailable on that host; the CLI still works |
-| `herdr status` and `herdr api snapshot` work for the local server | None. Without herdr, Tiller cannot run on that host |
-| `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` stops auto memory for fleet roles launched from herdr panes | Launch roles with an `autoMemoryDirectory` pointing at an empty, read-only directory (untested) |
+| `herdr status` and `herdr api snapshot` work for the local server. [H] The holder starts and its socket answers (`tiller doctor`'s `holder` check) | None. Without herdr ([H] the holder), Tiller cannot run on that host |
+| `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` stops auto memory for fleet roles launched from herdr panes ([H] holder panes) | Launch roles with an `autoMemoryDirectory` pointing at an empty, read-only directory (untested) |
 | `claude --append-system-prompt-file <role>.md` adds the role to the default system prompt | `--append-system-prompt "$(cat <role>.md)"` |
 | `claude plugin eval --no-publish` runs locally | Evals run on host A or B only |
 | A binary from the Nix store runs | None. Without it, Tiller cannot be installed on that host |

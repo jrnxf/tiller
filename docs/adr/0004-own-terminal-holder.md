@@ -1,6 +1,6 @@
 # 0004. Tiller owns its terminals
 
-- **Status:** proposed (Wednesday 2026-11-11, Lisbon time). The owner made the direction choices below on the same day. It becomes accepted in task H01, when the spec amendments land.
+- **Status:** accepted (Wednesday 2026-11-11, Lisbon time), with the owner's direction choices below, made the same day. It was accepted in task H01, with the spec amendments. Each amended spec marks the rules that hold after the cutover with [H].
 - **Date:** Wednesday 2026-11-11 (Lisbon time)
 - **Reopens:** [`herdr-layout.md`](../design/herdr-layout.md) (herdr owns every agent pane), P23 (herdr as a home-manager service, now withdrawn), and the "herdr status works" minimum in [`host-capabilities.md`](../design/host-capabilities.md)
 - **Sources:** [`docs/design/terminal-holder.md`](../design/terminal-holder.md), [`docs/spec/protocol.md`](../spec/protocol.md) (sections 3, 4.5, 7.4 and 10.7), [`docs/spec/recovery.md`](../spec/recovery.md) (R04, R18 and the liveness ladder), ADR 0003

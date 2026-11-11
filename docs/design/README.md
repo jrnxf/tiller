@@ -7,7 +7,7 @@ These are the design inputs Tiller is built from, imported by task T0.2 on Sunda
 Every doc names hosts by role:
 
 - **Host A**: the personal Mac.
-- **Host B**: the remote Linux host, reached from host A through herdr's saved machine.
+- **Host B**: the remote Linux host, reached from host A through herdr's saved machine. After the terminal holder cutover (ADR 0004) it is reached as a paired peer.
 - **Host C**: the work Mac. It is managed, and its data never leaves it.
 
 Project names in examples (`alpha`, `beta`, `gamma`, card ids like `alpha-42`) are placeholders.
@@ -21,8 +21,8 @@ Project names in examples (`alpha`, `beta`, `gamma`, card ids like `alpha-42`) a
 | [`plan-v2.md`](plan-v2.md) | The response to the second opinion: the current plan. When it and `plan.md` conflict, it wins |
 | [`design-basis.html`](design-basis.html) | The design basis: Linear tokens and a working mock. Open it in a browser |
 | [`mocks.html`](mocks.html) | The UI mocks the developer approved at CP-UI. Open it in a browser. The board shell is checked against it |
-| [`herdr-layout.md`](herdr-layout.md) | How orchestrators and workers are laid out in herdr |
-| [`terminal-holder.md`](terminal-holder.md) | Tiller's own terminal holder, which replaces herdr: the protocol, the screen model, upgrades, `tiller attach`, the cutover and the build plan (proposed, ADR 0004) |
+| [`herdr-layout.md`](herdr-layout.md) | How orchestrators and workers are laid out in herdr. History from the terminal holder cutover, which supersedes it |
+| [`terminal-holder.md`](terminal-holder.md) | Tiller's own terminal holder, which replaces herdr: the protocol, the screen model, upgrades, `tiller attach`, the cutover and the build plan (ADR 0004, accepted Wednesday 2026-11-11) |
 | [`host-capabilities.md`](host-capabilities.md) | The minimum common behavior across hosts, from the capability probe (T0.3) |
 | [`parity.md`](parity.md) | The Firstmate parity matrix: the checklist for "comparable" (T0.6) |
 | [`pre-launch-validation.md`](pre-launch-validation.md) | Pre-launch stage: a weekly batched review in place of per-change validation, decided 2026-11-03 |
