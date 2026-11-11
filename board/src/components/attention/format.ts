@@ -16,14 +16,16 @@ export function formatWhen(iso: string | null): string {
   return formatLisbon(iso) ?? "unknown";
 }
 
-// Who made a recommendation: the owner when no session opened the item, else
-// the role of the session that did (the orchestrator, a builder, a scout).
-// A session that has ended is no longer listed, so its role is not known.
+// Who made a recommendation: Tiller itself when no session opened the item
+// (the daemon, the reconciler's gates and approvals, the nightly backup), else
+// the role of the session that did (the orchestrator, a builder, a scout). The
+// owner never opens an item with a recommendation. A session that has ended
+// is no longer listed, so its role is not known.
 export function recommender(
   openedBy: string | null,
   agents: AgentRow[],
 ): { initial: string; text: string } {
-  if (openedBy === null) return { initial: "Y", text: "You recommended" };
+  if (openedBy === null) return { initial: "T", text: "Tiller recommended" };
   const session = agents
     .flatMap((agent) => [agent, ...agent.workers])
     .find((agent) => agent.session_id === openedBy);

@@ -240,9 +240,11 @@ test("an item shows its question, evidence, recommendation, consequence and that
 
 test("a recommendation says who made it, never always the orchestrator", async () => {
   stubDaemon("default");
-  // Opened by the owner: no session behind it.
+  // Opened by Tiller itself (the reconciler, a gate, the nightly backup): no
+  // session behind it. The owner never opens an item with a recommendation.
   await renderInbox("default", CAPACITY);
-  expect(screen.getByText("You recommended")).toBeTruthy();
+  expect(screen.getByText("Tiller recommended")).toBeTruthy();
+  expect(screen.queryByText("You recommended")).toBeNull();
   expect(screen.queryByText(/The orchestrator recommend/)).toBeNull();
   cleanup();
 
