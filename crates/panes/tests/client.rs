@@ -263,6 +263,27 @@ fn spawn_and_list_round_trip_and_an_error_reply_keeps_the_connection() {
 }
 
 #[test]
+fn a_reply_of_the_wrong_type_retires_the_connection() {
+    let holder = Holder::serve(vec![Box::new(|mut peer: Peer| {
+        peer.handshake(SUPPORTED);
+        let id = peer.request().id().unwrap();
+        // A list answered as a spawn is a protocol break.
+        peer.send(&HolderMessage::Pane {
+            id,
+            pane: pane(1),
+            existing: false,
+        });
+        assert_eq!(peer.frame(), None);
+    })]);
+    let client = HolderClient::connect(&holder.path, "daemon").unwrap();
+    let err = client.list().unwrap_err();
+    assert!(matches!(err, PanesError::Protocol(_)), "{err:?}");
+    let err = client.list().unwrap_err();
+    assert!(matches!(err, PanesError::Unreachable(_)), "{err:?}");
+    holder.join();
+}
+
+#[test]
 fn a_broken_reply_retires_the_connection() {
     let holder = Holder::serve(vec![Box::new(|mut peer: Peer| {
         peer.handshake(SUPPORTED);
@@ -521,10 +542,12 @@ fn subscription_holder(script: impl FnOnce(&mut Peer, u32) + Send + 'static) -> 
 
 #[test]
 fn a_lagged_subscriber_is_told_and_its_stream_ends() {
-    let holder = subscription_holder(|peer, stream| {
+    let (closed, connection_closed) = std::sync::mpsc::channel();
+    let holder = subscription_holder(move |peer, stream| {
         peer.send(&HolderMessage::Lagged { stream });
-        // The holder may keep the connection open; the stream is over anyway.
+        // The holder may keep the connection open; the client ends it.
         assert_eq!(peer.frame(), None);
+        closed.send(()).unwrap();
     });
     let client = HolderClient::connect(&holder.path, "daemon").unwrap();
     let mut subscription = client
@@ -536,6 +559,53 @@ fn a_lagged_subscriber_is_told_and_its_stream_ends() {
     ));
     assert_eq!(subscription.recv().unwrap(), Some(Update::Lagged));
     assert_eq!(subscription.recv().unwrap(), None);
+    // The connection ends with the stream, while the subscription lives.
+    connection_closed
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    drop(subscription);
+    drop(client);
+    holder.join();
+}
+
+#[test]
+fn an_error_with_no_id_on_a_subscription_ends_the_stream() {
+    let (closed, connection_closed) = std::sync::mpsc::channel();
+    let holder = subscription_holder(move |peer, _| {
+        assert!(matches!(peer.request(), Request::Resize { .. }));
+        // An error that names no request is not charged to the resize.
+        peer.send(&HolderMessage::Error {
+            id: None,
+            code: ErrorCode::Other("shutting_down".into()),
+            message: "the holder is stopping".into(),
+        });
+        assert_eq!(peer.frame(), None);
+        closed.send(()).unwrap();
+    });
+    let client = HolderClient::connect(&holder.path, "daemon").unwrap();
+    let mut subscription = client
+        .subscribe(&"p1".into(), Subscribe::default())
+        .unwrap();
+    assert!(matches!(
+        subscription.recv(),
+        Ok(Some(Update::Repaint { .. }))
+    ));
+    subscription.resize(100, 30).unwrap();
+    let err = subscription.recv().unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            PanesError::Refused {
+                request: "subscription",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert_eq!(subscription.recv().unwrap(), None);
+    connection_closed
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
     drop(subscription);
     drop(client);
     holder.join();

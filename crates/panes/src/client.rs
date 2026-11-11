@@ -20,11 +20,11 @@ use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::error::{PanesError, Result};
-use crate::frame::{Frame, read_frame};
+use crate::frame::{Frame, FrameError, encode_input, read_frame};
 use crate::handshake::{Hello, ProtoRange, SUPPORTED, Welcome};
 use crate::message::{
     ErrorCode, Exit, HolderMessage, Listing, Pane, PaneId, Request, Spawn, SyncMode,
@@ -42,13 +42,21 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// One end of a socket whose reads and writes stop at a deadline. Each
-/// read or write sets the socket's timeout to the time left, so a peer that
-/// trickles bytes cannot stretch a call past it. With no deadline, the
-/// socket's own timeout stands.
+/// How far past a deadline a read or write may run before the socket's
+/// timeout is set again. It saves one system call on most reads and writes.
+const TIMEOUT_SLACK: Duration = Duration::from_millis(100);
+
+/// One end of a socket whose reads and writes stop at a deadline. Before a
+/// read or write, the socket's timeout is set to the time left, unless the
+/// timeout set earlier already ends no sooner and less than
+/// [`TIMEOUT_SLACK`] later. So a peer that trickles bytes cannot stretch a
+/// call much past it. With no deadline, the socket's own timeout stands.
 struct Timed {
     stream: UnixStream,
     deadline: Option<Instant>,
+    /// The read and write timeouts last set on the socket.
+    read_armed: Option<Duration>,
+    write_armed: Option<Duration>,
 }
 
 impl Timed {
@@ -56,26 +64,39 @@ impl Timed {
         Self {
             stream,
             deadline: None,
+            read_armed: None,
+            write_armed: None,
         }
     }
 
-    fn left(&self) -> io::Result<Option<Duration>> {
+    /// The timeout to set before the next read or write, if the one set
+    /// earlier (`armed`) does not fit the time left.
+    fn rearm(&self, armed: Option<Duration>) -> io::Result<Option<Duration>> {
         let Some(deadline) = self.deadline else {
             return Ok(None);
         };
-        match deadline.saturating_duration_since(Instant::now()) {
-            left if left.is_zero() => {
-                Err(io::Error::new(io::ErrorKind::TimedOut, "no answer in time"))
-            }
-            left => Ok(Some(left)),
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "no answer in time"));
         }
+        let fits = armed.is_some_and(|armed| armed >= left && armed <= left + TIMEOUT_SLACK);
+        Ok((!fits).then_some(left))
+    }
+
+    /// Reads with no limit from here on, as a subscription's do.
+    fn unlimit_reads(&mut self) -> io::Result<()> {
+        self.deadline = None;
+        self.stream.set_read_timeout(None)?;
+        self.read_armed = None;
+        Ok(())
     }
 }
 
 impl Read for Timed {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if let Some(left) = self.left()? {
+        if let Some(left) = self.rearm(self.read_armed)? {
             self.stream.set_read_timeout(Some(left))?;
+            self.read_armed = Some(left);
         }
         self.stream.read(buf)
     }
@@ -83,8 +104,9 @@ impl Read for Timed {
 
 impl Write for Timed {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if let Some(left) = self.left()? {
+        if let Some(left) = self.rearm(self.write_armed)? {
             self.stream.set_write_timeout(Some(left))?;
+            self.write_armed = Some(left);
         }
         self.stream.write(buf)
     }
@@ -98,11 +120,15 @@ impl Write for Timed {
 /// found before any byte is written, so it is a refusal that keeps the
 /// connection.
 fn encode(name: &'static str, frame: &Frame) -> Result<Vec<u8>> {
-    frame.to_bytes().map_err(|err| PanesError::Refused {
+    frame.to_bytes().map_err(|err| refused(name, &err))
+}
+
+fn refused(name: &'static str, err: &FrameError) -> PanesError {
+    PanesError::Refused {
         request: name,
         code: ErrorCode::BadRequest,
         message: err.to_string(),
-    })
+    }
 }
 
 /// A request's wire bytes, as [`encode`].
@@ -168,10 +194,28 @@ fn await_reply(
     }
 }
 
+/// Sends one request's `wire` bytes and reads until its reply, for at most
+/// [`REQUEST_TIMEOUT`] in all. The clock starts once the write side is
+/// taken, so a wait behind another writer does not count against it.
+fn exchange(
+    reader: &mut BufReader<Timed>,
+    writer: &Mutex<Timed>,
+    name: &'static str,
+    id: Option<u64>,
+    wire: &[u8],
+) -> Result<HolderMessage> {
+    let mut writer = lock(writer);
+    let deadline = Instant::now() + REQUEST_TIMEOUT;
+    let sent = send(&mut writer, wire, deadline);
+    drop(writer);
+    sent?;
+    await_reply(reader, name, id, deadline)
+}
+
 /// One handshaken connection.
 struct Conn {
     reader: BufReader<Timed>,
-    writer: Timed,
+    writer: Mutex<Timed>,
 }
 
 impl Conn {
@@ -183,12 +227,12 @@ impl Conn {
         let stream = UnixStream::connect(path)
             .map_err(|err| PanesError::Unreachable(format!("{}: {err}", path.display())))?;
         let mut conn = Conn {
-            writer: Timed::new(stream.try_clone()?),
+            writer: Mutex::new(Timed::new(stream.try_clone()?)),
             reader: BufReader::new(Timed::new(stream)),
         };
         let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
         let hello = encode_request("hello", &Request::Hello(Hello::new(client)))?;
-        send(&mut conn.writer, &hello, deadline)?;
+        send(&mut lock(&conn.writer), &hello, deadline)?;
         let welcome = match await_reply(&mut conn.reader, "hello", None, deadline)? {
             HolderMessage::Welcome(welcome) => welcome,
             HolderMessage::Refused(refused) => {
@@ -215,13 +259,10 @@ impl Conn {
         Ok((conn, welcome))
     }
 
-    /// Sends `request` and reads until its reply, for at most
-    /// [`REQUEST_TIMEOUT`] in all.
+    /// Sends `request` and reads until its reply, as [`exchange`].
     fn call(&mut self, name: &'static str, request: &Request) -> Result<HolderMessage> {
         let wire = encode_request(name, request)?;
-        let deadline = Instant::now() + REQUEST_TIMEOUT;
-        send(&mut self.writer, &wire, deadline)?;
-        await_reply(&mut self.reader, name, request.id(), deadline)
+        exchange(&mut self.reader, &self.writer, name, request.id(), &wire)
     }
 }
 
@@ -250,7 +291,7 @@ pub struct HolderClient {
     client: String,
     welcome: Welcome,
     /// Why the request connection is no longer used, once it is not.
-    retired: Mutex<Option<String>>,
+    retired: OnceLock<String>,
     /// Held for a whole request and its reply, so one call is in flight.
     reader: Mutex<BufReader<Timed>>,
     /// Held only while one frame is written.
@@ -266,7 +307,7 @@ impl std::fmt::Debug for HolderClient {
             .field("path", &self.path)
             .field("client", &self.client)
             .field("welcome", &self.welcome)
-            .field("retired", &*lock(&self.retired))
+            .field("retired", &self.retired.get())
             .finish_non_exhaustive()
     }
 }
@@ -280,14 +321,15 @@ impl HolderClient {
         let path = path.into();
         let client = client.into();
         let (conn, welcome) = Conn::open(&path, &client)?;
+        let socket = lock(&conn.writer).stream.try_clone()?;
         Ok(Self {
             path,
             client,
             welcome,
-            retired: Mutex::new(None),
-            socket: conn.writer.stream.try_clone()?,
+            retired: OnceLock::new(),
+            socket,
             reader: Mutex::new(conn.reader),
-            writer: Mutex::new(conn.writer),
+            writer: conn.writer,
             next_id: AtomicU64::new(1),
         })
     }
@@ -303,7 +345,7 @@ impl HolderClient {
 
     /// `Unreachable` once the request connection is retired.
     fn check(&self) -> Result<()> {
-        match &*lock(&self.retired) {
+        match self.retired.get() {
             None => Ok(()),
             Some(why) => Err(PanesError::Unreachable(format!(
                 "the connection to the holder failed earlier ({why}); connect again"
@@ -314,7 +356,7 @@ impl HolderClient {
     /// Stops using the request connection, and shuts its socket so a call
     /// waiting on it ends now.
     fn retire(&self, why: String) {
-        lock(&self.retired).get_or_insert(why);
+        let _ = self.retired.set(why);
         let _ = self.socket.shutdown(Shutdown::Both);
     }
 
@@ -328,14 +370,20 @@ impl HolderClient {
         result
     }
 
-    fn call(&self, name: &'static str, request: Request) -> Result<HolderMessage> {
+    /// Sends `request` and picks the value out of its reply. A reply of a
+    /// type this request does not take ([`unexpected`]) breaks the protocol,
+    /// so `pick`'s error retires the connection as any broken reply does.
+    fn call<T>(
+        &self,
+        name: &'static str,
+        request: Request,
+        pick: impl FnOnce(HolderMessage) -> Result<T>,
+    ) -> Result<T> {
         self.check()?;
         let wire = encode_request(name, &request)?;
         let mut reader = lock(&self.reader);
         self.check()?;
-        let deadline = Instant::now() + REQUEST_TIMEOUT;
-        let sent = send(&mut lock(&self.writer), &wire, deadline);
-        let result = sent.and_then(|()| await_reply(&mut reader, name, request.id(), deadline));
+        let result = exchange(&mut reader, &self.writer, name, request.id(), &wire).and_then(pick);
         self.settle(result)
     }
 
@@ -344,13 +392,8 @@ impl HolderClient {
     /// hold it up.
     pub fn raw_input(&self, num: u32, bytes: &[u8]) -> Result<()> {
         self.check()?;
-        let wire = encode(
-            "raw input",
-            &Frame::Input {
-                num,
-                bytes: bytes.to_vec(),
-            },
-        )?;
+        let mut wire = Vec::new();
+        encode_input(num, bytes, &mut wire).map_err(|err| refused("raw input", &err))?;
         let mut writer = lock(&self.writer);
         self.check()?;
         let sent = send(&mut writer, &wire, Instant::now() + REQUEST_TIMEOUT);
@@ -391,8 +434,7 @@ impl HolderClient {
         };
         // Output may be quiet for hours: reads have no limit from here.
         let Conn { mut reader, writer } = conn;
-        reader.get_mut().deadline = None;
-        reader.get_ref().stream.set_read_timeout(None)?;
+        reader.get_mut().unlimit_reads()?;
         Ok(Subscription {
             stream,
             cols,
@@ -401,7 +443,7 @@ impl HolderClient {
             resizer: Resizer(Arc::new(ResizeSide {
                 pane: pane.clone(),
                 lease: format!("stream-{stream}"),
-                writer: Mutex::new(writer),
+                writer,
                 next_id: AtomicU64::new(id + 1),
                 pending: Mutex::new(VecDeque::new()),
             })),
@@ -416,17 +458,21 @@ impl Panes for HolderClient {
             id: self.id(),
             spawn: req.clone(),
         };
-        match self.call("spawn", request)? {
+        self.call("spawn", request, |reply| match reply {
             HolderMessage::Pane { pane, .. } => Ok(pane),
             reply => Err(unexpected("spawn", &reply)),
-        }
+        })
     }
 
     fn list(&self) -> Result<Listing> {
-        match self.call("list", Request::List { id: self.id() })? {
-            HolderMessage::Panes { listing, .. } => Ok(listing),
-            reply => Err(unexpected("list", &reply)),
-        }
+        self.call(
+            "list",
+            Request::List { id: self.id() },
+            |reply| match reply {
+                HolderMessage::Panes { listing, .. } => Ok(listing),
+                reply => Err(unexpected("list", &reply)),
+            },
+        )
     }
 }
 
@@ -560,17 +606,11 @@ impl ResizeSide {
         lock(&self.pending)
     }
 
-    /// Takes the pending resize this reply answers: the one with its `id`,
-    /// or with no `id`, the oldest, since the holder answers in order.
-    fn answered(&self, id: Option<u64>) -> Option<u64> {
+    /// Takes the pending resize with this `id`, if there is one.
+    fn answered(&self, id: u64) -> Option<u64> {
         let mut pending = self.pending();
-        match id {
-            Some(id) => {
-                let at = pending.iter().position(|pending| *pending == id)?;
-                pending.remove(at)
-            }
-            None => pending.pop_front(),
-        }
+        let at = pending.iter().position(|pending| *pending == id)?;
+        pending.remove(at)
     }
 }
 
@@ -609,11 +649,18 @@ impl Subscription {
         }
         let result = self.read_update();
         match &result {
-            Ok(None | Some(Update::Lagged)) => self.state = StreamState::Ended,
-            Err(err) if !keeps_connection(err) => self.state = StreamState::Ended,
+            Ok(None | Some(Update::Lagged)) => self.end(),
+            Err(err) if !keeps_connection(err) => self.end(),
             _ => {}
         }
         result
+    }
+
+    /// Ends the stream, and its connection, so the holder drops the
+    /// subscriber and its lease now, not when this value is dropped.
+    fn end(&mut self) {
+        self.state = StreamState::Ended;
+        let _ = self.reader.get_ref().stream.shutdown(Shutdown::Both);
     }
 
     fn read_update(&mut self) -> Result<Option<Update>> {
@@ -656,7 +703,7 @@ impl Subscription {
                     }
                     HolderMessage::Ok { id, cols, rows } => {
                         let (Some(_), Some(cols), Some(rows)) =
-                            (self.resizer.0.answered(Some(id)), cols, rows)
+                            (self.resizer.0.answered(id), cols, rows)
                         else {
                             return Err(PanesError::Protocol(format!(
                                 "an ok (id {id}) that answers no resize of stream {}",
@@ -671,10 +718,24 @@ impl Subscription {
                     HolderMessage::Lagged { stream } if stream == self.stream => {
                         return Ok(Some(Update::Lagged));
                     }
-                    HolderMessage::Error { id, code, message } => {
+                    HolderMessage::Error {
+                        id: None,
+                        code,
+                        message,
+                    } => {
+                        // An error that names no request is about the
+                        // subscription itself, not a resize: it ends.
+                        self.end();
+                        return Err(PanesError::from_reply("subscription", code, message));
+                    }
+                    HolderMessage::Error {
+                        id: Some(id),
+                        code,
+                        message,
+                    } => {
                         if self.resizer.0.answered(id).is_none() {
                             return Err(PanesError::Protocol(format!(
-                                "an error (id {id:?}) that answers no resize of stream {}: {code}: {message}",
+                                "an error (id {id}) that answers no resize of stream {}: {code}: {message}",
                                 self.stream
                             )));
                         }

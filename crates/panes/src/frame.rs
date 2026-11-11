@@ -77,41 +77,14 @@ impl Frame {
         }
     }
 
-    /// The frame's `len`: the kind byte and the body.
-    fn len(&self) -> u64 {
-        let body = match self {
-            Frame::Message(text) => text.len(),
-            Frame::Output { bytes, .. } | Frame::Input { bytes, .. } => ADDRESS_BYTES + bytes.len(),
-        };
-        1 + body as u64
-    }
-
     /// Appends the frame's wire bytes to `out`. A frame over the limit is
     /// refused here, so a sender never writes one the peer must reject.
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), FrameError> {
-        let len = self.len();
-        let wire = u32::try_from(len)
-            .ok()
-            .filter(|len| *len <= MAX_FRAME_LEN)
-            .ok_or(FrameError::TooLarge { len })?;
-        out.reserve(LEN_BYTES + wire as usize);
-        out.extend_from_slice(&wire.to_be_bytes());
-        out.push(self.kind());
         match self {
-            Frame::Message(text) => out.extend_from_slice(text.as_bytes()),
-            Frame::Output {
-                stream: address,
-                bytes,
-            }
-            | Frame::Input {
-                num: address,
-                bytes,
-            } => {
-                out.extend_from_slice(&address.to_be_bytes());
-                out.extend_from_slice(bytes);
-            }
+            Frame::Message(text) => encode_parts(KIND_MESSAGE, None, text.as_bytes(), out),
+            Frame::Output { stream, bytes } => encode_parts(KIND_OUTPUT, Some(*stream), bytes, out),
+            Frame::Input { num, bytes } => encode_parts(KIND_INPUT, Some(*num), bytes, out),
         }
-        Ok(())
     }
 
     /// The frame's wire bytes.
@@ -162,6 +135,36 @@ fn check_kind(kind: u8, len: usize) -> Result<usize, FrameError> {
         KIND_OUTPUT | KIND_INPUT => Ok(ADDRESS_BYTES),
         other => Err(FrameError::UnknownKind(other)),
     }
+}
+
+/// Appends a kind 2 frame for `bytes` to `out`, as [`Frame::Input`] would,
+/// without copying `bytes` into a frame first.
+pub fn encode_input(num: u32, bytes: &[u8], out: &mut Vec<u8>) -> Result<(), FrameError> {
+    encode_parts(KIND_INPUT, Some(num), bytes, out)
+}
+
+/// Appends `[len][kind][address][body]` to `out`, or refuses a frame over
+/// the limit before anything is appended.
+fn encode_parts(
+    kind: u8,
+    address: Option<u32>,
+    body: &[u8],
+    out: &mut Vec<u8>,
+) -> Result<(), FrameError> {
+    let address_bytes = if address.is_some() { ADDRESS_BYTES } else { 0 };
+    let len = 1 + address_bytes as u64 + body.len() as u64;
+    let wire = u32::try_from(len)
+        .ok()
+        .filter(|len| *len <= MAX_FRAME_LEN)
+        .ok_or(FrameError::TooLarge { len })?;
+    out.reserve(LEN_BYTES + wire as usize);
+    out.extend_from_slice(&wire.to_be_bytes());
+    out.push(kind);
+    if let Some(address) = address {
+        out.extend_from_slice(&address.to_be_bytes());
+    }
+    out.extend_from_slice(body);
+    Ok(())
 }
 
 /// Writes one frame and flushes it.
@@ -351,7 +354,12 @@ mod tests {
         for frame in samples() {
             let wire = frame.to_bytes().unwrap();
             assert_eq!(decode_all(&wire), vec![frame.clone()]);
-            assert_eq!(read_frame(&wire[..]).unwrap(), Some(frame));
+            assert_eq!(read_frame(&wire[..]).unwrap(), Some(frame.clone()));
+            if let Frame::Input { num, bytes } = &frame {
+                let mut borrowed = Vec::new();
+                encode_input(*num, bytes, &mut borrowed).unwrap();
+                assert_eq!(borrowed, wire);
+            }
         }
     }
 
@@ -424,6 +432,12 @@ mod tests {
             over.to_bytes(),
             Err(FrameError::TooLarge { len }) if len == u64::from(MAX_FRAME_LEN) + 1
         ));
+        let mut out = vec![9];
+        assert!(matches!(
+            encode_input(1, &[0; MAX_FRAME_LEN as usize - 4], &mut out),
+            Err(FrameError::TooLarge { .. })
+        ));
+        assert_eq!(out, [9], "a refused frame appends nothing");
 
         // A peer that sends a `len` over the limit is rejected at once, before
         // its body arrives.
