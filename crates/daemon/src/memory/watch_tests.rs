@@ -297,6 +297,34 @@ async fn the_boards_own_write_is_not_an_outside_change() {
     std::fs::write(&fleet_md, text).unwrap();
     look(&mut watcher);
     assert_eq!(look(&mut watcher), Some(vec!["fleet.md".to_owned()]));
+    git(&root, &["checkout", "--quiet", "--", "fleet.md"]);
+    look(&mut watcher);
+    look(&mut watcher);
+
+    // A commit made by hand, then Tiller's commit on top of it in one
+    // window: the document the hand commit wrote is a change, though it
+    // matches HEAD.
+    commit(&root, "projects/alpha.md", "# Alpha, committed by hand\n");
+    edit("k-5", "Keep the fifth line").await;
+    look(&mut watcher);
+    assert_eq!(
+        look(&mut watcher),
+        Some(vec!["projects/alpha.md".to_owned()])
+    );
+
+    // Tiller commits the bytes it writes, with no clean filter between, so
+    // a filter in the repo does not make its own write look like an
+    // outside one.
+    git(
+        &root,
+        &["config", "filter.shout.clean", "sed s/sixth/SIXTH/"],
+    );
+    std::fs::write(root.join(".git/info/attributes"), "fleet.md filter=shout\n").unwrap();
+    edit("k-6", "Keep the sixth line").await;
+    let stored = git(&root, &["show", "HEAD:fleet.md"]);
+    assert!(stored.contains("Keep the sixth line"), "{stored}");
+    look(&mut watcher);
+    assert_eq!(look(&mut watcher), None);
 }
 
 /// A document the watcher cannot read is a change of that document, not a
@@ -313,10 +341,12 @@ fn an_unreadable_document_does_not_stop_the_watcher() {
 
     let alpha = root.join("projects/alpha.md");
     std::fs::set_permissions(&alpha, std::fs::Permissions::from_mode(0o000)).unwrap();
-    assert!(
-        std::fs::read(&alpha).is_err(),
-        "this test needs a user that file modes bind"
-    );
+    if std::fs::read(&alpha).is_ok() {
+        // File modes do not bind this user (root): nothing here can make a
+        // document unreadable.
+        eprintln!("skipped: file modes do not bind this user");
+        return;
+    }
     std::fs::write(root.join("fleet.md"), "# Fleet\n\n- Saved by hand.\n").unwrap();
     look(&mut watcher);
     assert_eq!(
@@ -333,6 +363,22 @@ fn an_unreadable_document_does_not_stop_the_watcher() {
         look(&mut watcher),
         Some(vec!["projects/alpha.md".to_owned()])
     );
+}
+
+/// A file whose name holds a newline is not a memory document: git's batch
+/// input is one path a line, so the watcher never takes one.
+#[test]
+fn a_name_with_a_newline_is_not_watched() {
+    let home = tempfile::tempdir().unwrap();
+    let root = repo(home.path(), "# Fleet\n\n- First.\n");
+    let mut watcher = watcher(home.path());
+    look(&mut watcher);
+
+    std::fs::create_dir_all(root.join("projects")).unwrap();
+    std::fs::write(root.join("projects/a\nb.md"), "# Split\n").unwrap();
+    std::fs::write(root.join("fleet.md"), "# Fleet\n\n- Saved by hand.\n").unwrap();
+    look(&mut watcher);
+    assert_eq!(look(&mut watcher), Some(vec!["fleet.md".to_owned()]));
 }
 
 /// An edit made while the daemon is down is seen when it starts again: the

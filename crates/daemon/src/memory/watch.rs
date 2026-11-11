@@ -20,10 +20,11 @@
 //!
 //! Tiller's own commit is not an outside change. When `HEAD` is the commit
 //! of a revision Tiller recorded since the last look, a changed document
-//! that matches `HEAD` is Tiller's write: that write's own events already
-//! refreshed the board. The change names only the documents that differ
-//! from `HEAD`, and when none does the watcher writes nothing. That check
-//! reads `HEAD` with one git process, after the lock is released.
+//! that commit wrote, and whose bytes are still the commit's, is Tiller's
+//! write: that write's own events already refreshed the board. The change
+//! names only the other documents (one the commit did not write, or one
+//! changed again since), and when there are none the watcher writes nothing.
+//! That check runs two git processes, after the lock is released.
 //!
 //! A missing repo is not an error. It has no `HEAD` and no documents, and a
 //! repo made or replaced later is a change like any other. A document that
@@ -143,8 +144,13 @@ impl Stamp {
                 if name.starts_with('.') || !name.ends_with(".md") {
                     continue;
                 }
+                // Only a name git's batch input can carry, one path a line.
+                let path = format!("{PROJECTS}/{name}");
+                if checked(&path).is_err() {
+                    continue;
+                }
                 if let Some(stat) = Stat::of(&entry.path()) {
-                    docs.insert(format!("{PROJECTS}/{name}"), stat);
+                    docs.insert(path, stat);
                 }
             }
         }
@@ -379,21 +385,38 @@ impl Watcher {
         recorded.then_some(head)
     }
 
-    /// The documents of `changed` whose bytes, as `next` read them, are not
-    /// the file at `commit`: those Tiller's commit does not explain. One git
-    /// process reads them all.
+    /// The documents of `changed` that Tiller's `commit` does not explain:
+    /// one it did not write (an outside commit under it, or an editor's
+    /// save), and one it wrote whose bytes, as `next` read them, are not
+    /// the file at `commit`. Tiller commits the bytes it writes, with no
+    /// git filter between (`git apply --cached`), so the bytes compare
+    /// as they are. Two git processes read it all.
     fn not_at(&self, commit: &str, next: &Seen, changed: Vec<String>) -> Result<Vec<String>> {
-        let at = self.repo.bytes_at(commit, &changed)?;
-        Ok(changed
-            .into_iter()
+        let wrote = self.repo.written_by(commit)?;
+        let mine: Vec<String> = changed
+            .iter()
+            .filter(|path| wrote.contains(*path))
+            .cloned()
+            .collect();
+        let at = self.repo.bytes_at(commit, &mine)?;
+        let explained: BTreeSet<&String> = mine
+            .iter()
             .zip(at)
             .filter(|(path, bytes)| {
-                bytes.as_deref().map(sha256_hex).as_ref() != next.texts.get(path)
+                bytes.as_deref().map(sha256_hex).as_ref() == next.texts.get(*path)
             })
             .map(|(path, _)| path)
+            .collect();
+        Ok(changed
+            .into_iter()
+            .filter(|path| !explained.contains(path))
             .collect())
     }
 }
+
+/// How the digest of a document that cannot be read starts. No sha256 hex
+/// digest does.
+const UNREADABLE: &str = "unreadable: ";
 
 /// A document's digest; `None` when it is not there. One that cannot be read
 /// has a digest of its own, so it is a change and the look goes on.
@@ -404,7 +427,7 @@ fn digest(repo: &Repo, path: &str) -> Option<String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
             tracing::warn!(path, %error, "the memory watcher cannot read a document");
-            Some(format!("unreadable: {:?}", error.kind()))
+            Some(format!("{UNREADABLE}{:?}", error.kind()))
         }
     }
 }

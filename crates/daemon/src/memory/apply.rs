@@ -5,6 +5,7 @@
 //! Nothing here writes outside `<repo>/.git` and the one canonical file the
 //! approval names.
 
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
@@ -53,7 +54,9 @@ fn internal(what: &str, error: impl std::fmt::Display) -> Error {
 
 /// A canonical path: relative, with plain components only.
 pub(crate) fn checked(path: &str) -> Result<&str> {
+    // A control character would split a line of git's batch input.
     let plain = !path.is_empty()
+        && !path.chars().any(char::is_control)
         && Path::new(path)
             .components()
             .all(|part| matches!(part, Component::Normal(_)));
@@ -268,6 +271,29 @@ impl Repo {
             }
         }
         Ok(found)
+    }
+
+    /// The paths `commit` added, changed or removed against its parent (or
+    /// all its files, for a first commit).
+    pub(crate) fn written_by(&self, commit: &str) -> Result<HashSet<String>> {
+        let out = self.git(
+            None,
+            &[
+                "diff-tree",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                "--root",
+                "-z",
+                commit,
+            ],
+            None,
+        )?;
+        Ok(out
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect())
     }
 
     /// The file as Tiller checks it before every change.
