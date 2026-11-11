@@ -712,6 +712,8 @@
 .setting-control .note-in {
   flex: 1;
   min-width: 0;
+  /* The input shares a line with Save: no top margin to push it off centre. */
+  margin-top: 0;
 }
 
 .setting-control .btn {
@@ -728,5 +730,104 @@
 @media (max-width: 820px) {
   .setting-field {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* A typed value, with the unit it counts in set inside its right edge. */
+.set-input {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+
+.set-input .note-in {
+  flex: 1;
+}
+
+.set-unit {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  width: 120px;
+}
+
+.setting-control .set-unit .note-in {
+  flex: 1;
+  padding-right: 44px;
+}
+
+.set-unit > span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 10px;
+  display: flex;
+  align-items: center;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+  pointer-events: none;
+}
+
+.setting-control .seg,
+.setting-control .sel-trigger {
+  flex: none;
+}
+
+.setting-control.wrap {
+  flex-wrap: wrap;
+}
+
+.setting-refusal > p {
+  margin: 0;
+}
+
+/* The numbers behind a refusal, beside what the rule needs. */
+.set-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px 14px;
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r8);
+  background: var(--bg-2);
+  font-size: var(--fs-small);
+  font-variant-numeric: tabular-nums;
+}
+
+.set-facts dt {
+  color: var(--fg-3);
+}
+
+.set-facts dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--fg-1);
+}
+
+.set-facts dd.bad {
+  color: var(--red-text);
+}
+
+.set-facts .meta {
+  margin-left: 6px;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.set-facts .meta + .meta::before {
+  content: "\00b7";
+  margin-right: 6px;
+}
+
+@media (max-width: 820px) {
+  .set-facts {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  .set-facts dd {
+    margin-bottom: 6px;
   }
 }

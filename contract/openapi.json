@@ -2636,6 +2636,34 @@
         }
       }
     },
+    "/api/v1/host-config": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "host_config_read",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostConfig"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/interventions/{id}/label": {
       "post": {
         "tags": [
@@ -6646,6 +6674,56 @@
           }
         }
       },
+      "HostConfig": {
+        "type": "object",
+        "description": "`GET /api/v1/host-config`: the other host keys the board sets, as this\nhost's `config.toml` has them now, with the default each key falls back\nto. `owner_guard.decider_key` is never here.",
+        "required": [
+          "stop_hook_mode",
+          "accept_peers",
+          "learning"
+        ],
+        "properties": {
+          "accept_peers": {
+            "type": "boolean",
+            "description": "`federation.accept`: unset reads as true."
+          },
+          "boundary": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`personal` or `work`. A work host never pushes its memory repo."
+          },
+          "config_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why `config.toml` could not be read; the rest is then the defaults."
+          },
+          "herdr_terminal": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`herdr.terminal`; absent when unset, so Open in herdr only focuses."
+          },
+          "learning": {
+            "$ref": "#/components/schemas/LearningConfig"
+          },
+          "memory_remote": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`memory.remote`; absent or empty keeps memory on this host."
+          },
+          "stop_hook_mode": {
+            "type": "string",
+            "description": "`stop_hook_mode`: `off`, `observe` or `block-once`. An unset or\nunknown value reads as `observe`."
+          }
+        }
+      },
       "InterruptBody": {
         "type": "object",
         "description": "`POST /api/v1/agents/{session}/interrupt`: Escape to a working agent's\npane, and whether its turn ended within 10 s (`protocol.md` 6.4, 7.4).",
@@ -6665,6 +6743,42 @@
           }
         },
         "additionalProperties": false
+      },
+      "LearningConfig": {
+        "type": "object",
+        "description": "The `[learning]` keys with their defaults (`learning-loop.md` section 10).",
+        "required": [
+          "sample_every",
+          "window_cards",
+          "curator_model",
+          "curator_timeout_minutes"
+        ],
+        "properties": {
+          "curator_model": {
+            "type": "string"
+          },
+          "curator_timeout_minutes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "evals_dir": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The checkout that holds `evals/run.sh`; absent when unset."
+          },
+          "sample_every": {
+            "type": "integer",
+            "format": "int64",
+            "description": "One routine card in this many gets a full retro."
+          },
+          "window_cards": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Cards a kept change set is measured over."
+          }
+        }
       },
       "LinkEvent": {
         "type": "object",
@@ -9119,7 +9233,7 @@
       },
       "SetConfig": {
         "type": "object",
-        "description": "`POST /api/v1/config`: `tiller config set` for the settings an\norchestrator start needs, and no other key.",
+        "description": "`POST /api/v1/config`: `tiller config set` for the settings an\norchestrator start needs and the host keys in `GET /api/v1/host-config`,\nand no other key.",
         "required": [
           "idempotency_key",
           "key",
@@ -9138,11 +9252,11 @@
           },
           "key": {
             "type": "string",
-            "description": "`checkouts.<project>`, `spawn.pool_root` or `spawn.checkouts_root`."
+            "description": "A start setting (`checkouts.<project>`, `spawn.pool_root` or\n`spawn.checkouts_root`) or one of the keys `GET /api/v1/host-config`\nshows. Any other key is refused."
           },
           "value": {
             "type": "string",
-            "description": "A full path."
+            "description": "A full path for a start setting, the key's own text otherwise\n(`true`, `block-once`, `20`)."
           }
         },
         "additionalProperties": false

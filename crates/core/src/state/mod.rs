@@ -31,6 +31,7 @@ pub mod review;
 pub mod runs;
 pub mod signals;
 pub mod stamps;
+pub mod stop_hook;
 
 #[cfg(test)]
 pub(crate) mod testing;

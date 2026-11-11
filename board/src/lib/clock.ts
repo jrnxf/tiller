@@ -94,3 +94,21 @@ export function lisbonField16(at: number): string {
   );
   return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
 }
+
+const lisbonDate = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Lisbon",
+  weekday: "short",
+  day: "numeric",
+  month: "short",
+});
+
+// "Tue 3 Nov" in Lisbon time: a day, with its weekday, and no clock time.
+export function formatLisbonDate(iso: string | null): string | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  const p = Object.fromEntries(
+    lisbonDate.formatToParts(date).map((part) => [part.type, part.value]),
+  );
+  return `${p.weekday} ${p.day} ${p.month}`;
+}

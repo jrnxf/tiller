@@ -40,6 +40,7 @@ import {
   recapPath,
   sessionPath,
   signalsPath,
+  hostConfigPath,
   startSettingsPath,
 } from "./queries";
 import type { QueryPath } from "./queries";
@@ -244,6 +245,7 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
       // `tiller config set` in a terminal moves what Settings and the project
       // detail show, and no screen of the board sent it.
       refetchPaths(queryClient, startSettingsPath);
+      refetchPaths(queryClient, hostConfigPath);
       refetchMatching(queryClient, (path) => PROJECT_SETUP_PATH.test(path));
       break;
     case "attention":

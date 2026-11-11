@@ -1415,8 +1415,43 @@ pub struct StartSettings {
     pub config_error: Option<String>,
 }
 
+/// `GET /api/v1/host-config`: the other host keys the board sets, as this
+/// host's `config.toml` has them now, with the default each key falls back
+/// to. `owner_guard.decider_key` is never here.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct HostConfig {
+    /// `herdr.terminal`; absent when unset, so Open in herdr only focuses.
+    pub herdr_terminal: Option<String>,
+    /// `stop_hook_mode`: `off`, `observe` or `block-once`. An unset or
+    /// unknown value reads as `observe`.
+    pub stop_hook_mode: String,
+    /// `federation.accept`: unset reads as true.
+    pub accept_peers: bool,
+    /// `memory.remote`; absent or empty keeps memory on this host.
+    pub memory_remote: Option<String>,
+    /// `personal` or `work`. A work host never pushes its memory repo.
+    pub boundary: Option<String>,
+    pub learning: LearningConfig,
+    /// Why `config.toml` could not be read; the rest is then the defaults.
+    pub config_error: Option<String>,
+}
+
+/// The `[learning]` keys with their defaults (`learning-loop.md` section 10).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct LearningConfig {
+    /// One routine card in this many gets a full retro.
+    pub sample_every: i64,
+    /// Cards a kept change set is measured over.
+    pub window_cards: i64,
+    pub curator_model: String,
+    pub curator_timeout_minutes: i64,
+    /// The checkout that holds `evals/run.sh`; absent when unset.
+    pub evals_dir: Option<String>,
+}
+
 /// `POST /api/v1/config`: `tiller config set` for the settings an
-/// orchestrator start needs, and no other key.
+/// orchestrator start needs and the host keys in `GET /api/v1/host-config`,
+/// and no other key.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetConfig {
@@ -1425,9 +1460,12 @@ pub struct SetConfig {
     /// that owns it (`protocol.md` 7.4).
     #[serde(default)]
     pub host: Option<String>,
-    /// `checkouts.<project>`, `spawn.pool_root` or `spawn.checkouts_root`.
+    /// A start setting (`checkouts.<project>`, `spawn.pool_root` or
+    /// `spawn.checkouts_root`) or one of the keys `GET /api/v1/host-config`
+    /// shows. Any other key is refused.
     pub key: String,
-    /// A full path.
+    /// A full path for a start setting, the key's own text otherwise
+    /// (`true`, `block-once`, `20`).
     pub value: String,
 }
 

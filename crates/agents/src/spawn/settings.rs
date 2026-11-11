@@ -177,14 +177,21 @@ pub fn problems(
     resolve(config, home_root, scratch_root, project).1
 }
 
-/// Whether `key` is one the board may set: the two host roots and a
-/// project's checkout.
-pub fn settable(key: &str) -> bool {
+/// Whether `key` is one of the start settings: the two host roots and a
+/// project's checkout. [`check`] judges these.
+pub fn start_setting(key: &str) -> bool {
     key == POOL_ROOT
         || key == CHECKOUTS_ROOT
         || key
             .strip_prefix("checkouts.")
             .is_some_and(|project| !project.is_empty() && !project.contains('.'))
+}
+
+/// Whether `key` is one the board may set: a start setting, or one of the
+/// other host keys in [`tiller_core::host_config`]. The decider key is a
+/// secret and is neither.
+pub fn settable(key: &str) -> bool {
+    start_setting(key) || tiller_core::host_config::is_key(key)
 }
 
 /// Checks `value` for `key` before it is written: the rules a start applies
@@ -198,7 +205,7 @@ pub fn check(
     key: &str,
     value: &str,
 ) -> Result<Vec<String>, String> {
-    if !settable(key) {
+    if !start_setting(key) {
         return Err(format!("{key} is not a setting the board can change"));
     }
     if value.trim().is_empty() {
@@ -381,6 +388,46 @@ mod tests {
                 .contains("not a setting")
         );
         assert!(run("checkouts.a.b", "/x").is_err());
+    }
+
+    #[test]
+    fn the_host_keys_are_settable_and_the_secret_is_not() {
+        for key in [
+            "herdr.terminal",
+            "stop_hook_mode",
+            "federation.accept",
+            "memory.remote",
+            "learning.sample_every",
+            "learning.window_cards",
+            "learning.curator_model",
+            "learning.curator_timeout_minutes",
+            "learning.evals_dir",
+            POOL_ROOT,
+            "checkouts.alpha",
+        ] {
+            assert!(settable(key), "{key}");
+        }
+        for key in [
+            "owner_guard.decider_key",
+            "owner_guard.enabled",
+            "owner_guard",
+            "intake_source",
+            "learning",
+            "herdr",
+            "checkouts.a.b",
+            "",
+        ] {
+            assert!(!settable(key), "{key}");
+        }
+        // A host key is not a start setting: `check` holds the start rules only.
+        let base = config(None, None, &[]);
+        let run = |key: &str| check(&base, Path::new(HOMES), Path::new(SCRATCH), key, "x");
+        assert!(run("herdr.terminal").unwrap_err().contains("not a setting"));
+        assert!(
+            run("owner_guard.decider_key")
+                .unwrap_err()
+                .contains("not a setting")
+        );
     }
 
     #[test]

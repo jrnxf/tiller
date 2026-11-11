@@ -2,9 +2,17 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useId, useState } from "react";
 import type { ReactNode } from "react";
 
-import { projectSetupPath, queryKeyFor, startSettingsQuery } from "../../lib/queries";
+import {
+  hostConfigQuery,
+  projectSetupPath,
+  queryKeyFor,
+  startSettingsQuery,
+} from "../../lib/queries";
 import { sendMutation } from "../attention/api";
 import { useAction } from "../attention/use-action";
+import { Segmented } from "../ui/segmented";
+import { Select } from "../ui/select";
+import { SwitchingRule, switchingRuleOf } from "./switching-rule";
 // The text input, as Add project and Add a host use it.
 import "../attention/inbox.css";
 import "./settings.css";
@@ -19,9 +27,17 @@ interface Saved {
 // A daemon sentence carries `code` marks meant for a terminal.
 const plain = (text: string) => text.replaceAll("`", "");
 
-// `tiller config set <key> <value>` from the board, for one of the settings an
-// orchestrator start reads. The daemon checks the value as a start would and
-// answers in plain words when it refuses.
+// How a setting is picked. A path or a name is typed; a few fixed values are
+// a segmented control; a short list is a select; a count has its unit.
+export type Control =
+  | { kind: "text" }
+  | { kind: "choice"; options: { value: string; label: string }[] }
+  | { kind: "select"; options: { value: string; label: string }[] }
+  | { kind: "number"; unit: string };
+
+// `tiller config set <key> <value>` from the board, for a setting of this
+// host's config.toml. The daemon checks the value as the code that reads it
+// would and answers in plain words when it refuses.
 export function SettingField({
   settingKey,
   label,
@@ -31,9 +47,13 @@ export function SettingField({
   problem,
   placeholder,
   host,
+  control = { kind: "text" },
+  mono = true,
+  allowEmpty = false,
+  valueName = "path",
   onSaved,
 }: {
-  // `spawn.pool_root`, `spawn.checkouts_root` or `checkouts.<project>`.
+  // `spawn.pool_root`, `checkouts.<project>`, `stop_hook_mode`, ...
   settingKey: string;
   label: string;
   hint: ReactNode;
@@ -47,6 +67,13 @@ export function SettingField({
   // The peer the setting belongs to. It is written on that host, so the
   // board shows the command and no input.
   host?: string | null;
+  control?: Control;
+  // A name or address, not a path: the input is not set in the mono face.
+  mono?: boolean;
+  // An empty value is a valid save, such as no memory remote.
+  allowEmpty?: boolean;
+  // What the command shows for the value, `<path>` by default.
+  valueName?: string;
   onSaved?: () => void;
 }) {
   const queryClient = useQueryClient();
@@ -66,6 +93,7 @@ export function SettingField({
   );
   const recorded = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: startSettingsQuery().queryKey });
+    void queryClient.invalidateQueries({ queryKey: hostConfigQuery().queryKey });
     const project = settingKey.startsWith("checkouts.")
       ? settingKey.slice("checkouts.".length)
       : null;
@@ -87,7 +115,11 @@ export function SettingField({
         <div className="set-text">
           <h2>{label}</h2>
           <p>
-            Set on {host}. Run <code>tiller config set {settingKey} &lt;path&gt;</code> there.
+            Set on {host}. Run{" "}
+            <code>
+              tiller config set {settingKey} &lt;{valueName}&gt;
+            </code>{" "}
+            there.
           </p>
           {problem ? <p className="set-error">{plain(problem)}</p> : null}
         </div>
@@ -96,7 +128,9 @@ export function SettingField({
   }
 
   const next = draft.trim();
-  const armed = next !== "" && next !== value && !action.pending && !action.recorded;
+  const armed =
+    (next !== "" || allowEmpty) && next !== (value ?? "") && !action.pending && !action.recorded;
+  const rule = action.error ? switchingRuleOf(action.error) : null;
   return (
     <form
       className="setting-field"
@@ -109,29 +143,64 @@ export function SettingField({
     >
       <div className="set-text">
         <h2>
-          <label htmlFor={`${id}-input`}>{label}</label>
+          {control.kind === "text" || control.kind === "number" ? (
+            <label htmlFor={`${id}-input`}>{label}</label>
+          ) : (
+            label
+          )}
         </h2>
         <p>{hint}</p>
         {problem && !action.error ? <p className="set-error">{plain(problem)}</p> : null}
       </div>
-      <div className="setting-control">
-        <input
-          id={`${id}-input`}
-          className="note-in mono"
-          autoComplete="off"
-          autoCapitalize="off"
-          spellCheck={false}
-          placeholder={placeholder}
-          value={draft}
-          disabled={action.pending}
-          aria-invalid={problem || action.error ? true : undefined}
-          onChange={(event) => setTyped(event.target.value)}
-        />
+      <div className={`setting-control${control.kind === "choice" ? " wrap" : ""}`}>
+        {control.kind === "choice" ? (
+          <Segmented
+            label={label}
+            options={control.options}
+            value={draft}
+            disabled={action.pending}
+            onChange={setTyped}
+          />
+        ) : control.kind === "select" ? (
+          <Select
+            label={label}
+            className="form-select"
+            value={draft}
+            disabled={action.pending}
+            options={
+              control.options.some((option) => option.value === draft)
+                ? control.options
+                : [...control.options, { value: draft, label: draft }]
+            }
+            onValueChange={setTyped}
+          />
+        ) : (
+          <span className={control.kind === "number" ? "set-unit" : "set-input"}>
+            <input
+              id={`${id}-input`}
+              className={`note-in${mono && control.kind === "text" ? " mono" : ""}`}
+              autoComplete="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              inputMode={control.kind === "number" ? "numeric" : undefined}
+              placeholder={placeholder}
+              value={draft}
+              disabled={action.pending}
+              aria-invalid={problem || action.error ? true : undefined}
+              onChange={(event) => setTyped(event.target.value)}
+            />
+            {control.kind === "number" ? <span aria-hidden="true">{control.unit}</span> : null}
+          </span>
+        )}
         <button type="submit" className="btn primary" disabled={!armed}>
           {action.pending ? "Saving..." : action.recorded ? "Saved" : "Save"}
         </button>
       </div>
-      {action.error ? (
+      {action.error && rule ? (
+        <div className="set-error setting-refusal" role="alert">
+          <SwitchingRule rule={rule} />
+        </div>
+      ) : action.error ? (
         <p className="set-error setting-refusal" role="alert">
           {plain(action.error.message)}
         </p>

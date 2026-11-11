@@ -32,6 +32,7 @@ use tiller_core::domain::{
     OutboxKind, PeerScope, Run, Session,
 };
 use tiller_core::domain::{Delivery, InterventionKind, Stage};
+use tiller_core::host_config;
 use tiller_core::limits::{
     ANSWER_MAX_CHARS, ASK_NOTE_MAX_CHARS, BODY_MAX_CHARS, COMMENT_MAX_CHARS, TITLE_MAX_CHARS,
     within,
@@ -43,6 +44,7 @@ use tiller_core::state::peers::{
     self as pairing, KeyFile, NewPairing, check_alias, check_label, fingerprint,
 };
 use tiller_core::state::projects::meta;
+use tiller_core::state::stop_hook;
 use tiller_core::state::{get as get_row, resolve_id};
 use tiller_core::{Actor, Applied, Ctx, Error, Store, Timestamp, ids};
 use tiller_herdr::client::{Cli, Herdr, HerdrError};
@@ -849,6 +851,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/projects", get(projects).post(add_project))
         .route("/api/v1/projects/checkout", get(project_checkout))
         .route("/api/v1/start-settings", get(start_settings))
+        .route("/api/v1/host-config", get(host_config_read))
         .route("/api/v1/config", post(set_config))
         .route("/api/v1/peers", post(add_peer))
         .route("/api/v1/bug-project", post(pick_bug_project))
@@ -2746,12 +2749,22 @@ fn write_checkout(
     key: &str,
     path: &str,
 ) -> Result<bool, tiller_core::config_file::ConfigError> {
+    write_config(home, key, toml::Value::String(path.to_owned()))
+}
+
+/// Sets `key` in `<home>/config.toml` to `value`; `false` when it already
+/// was.
+fn write_config(
+    home: &std::path::Path,
+    key: &str,
+    value: toml::Value,
+) -> Result<bool, tiller_core::config_file::ConfigError> {
     let file = home.join("config.toml");
     let mut config = config_toml::load(&file)?;
-    if config_toml::get(&config, key).and_then(toml::Value::as_str) == Some(path) {
+    if config_toml::get(&config, key) == Some(&value) {
         return Ok(false);
     }
-    config_toml::set(&mut config, key, toml::Value::String(path.to_owned()))?;
+    config_toml::set(&mut config, key, value)?;
     config_toml::store(&file, &config)?;
     Ok(true)
 }
@@ -3289,6 +3302,61 @@ async fn start_settings(State(state): State<AppState>) -> ApiResult<StartSetting
     }
 }
 
+#[utoipa::path(get, path = "/api/v1/host-config", tag = "reads",
+    responses((status = 200, body = HostConfig), (status = 503, body = ErrorBody)))]
+async fn host_config_read(State(state): State<AppState>) -> ApiResult<HostConfig> {
+    let home = state.0.home.clone();
+    let db = state.db();
+    let read = tokio::task::spawn_blocking(move || {
+        let boundary = Store::open_current(&db)
+            .ok()
+            .and_then(|store| meta(store.conn(), "boundary").ok().flatten());
+        host_config_of(&home, boundary)
+    })
+    .await;
+    match read {
+        Ok(config) => Ok(Json(config)),
+        Err(error) => Err(Error::Internal(error.to_string()).into()),
+    }
+}
+
+/// The host keys of `<home>/config.toml`. A file that does not parse reads as
+/// the defaults and says why.
+fn host_config_of(home: &std::path::Path, boundary: Option<String>) -> HostConfig {
+    let (table, config_error) = match config_toml::load(&home.join("config.toml")) {
+        Ok(table) => (table, None),
+        Err(error) => (toml::Table::new(), Some(error.to_string())),
+    };
+    let text = |key: &str| {
+        config_toml::get(&table, key)
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned)
+    };
+    let (learning, learning_error) =
+        match tiller_core::state::learning::Learning::from_table(&table) {
+            Ok(learning) => (learning, None),
+            Err(error) => (Default::default(), Some(error.to_string())),
+        };
+    HostConfig {
+        herdr_terminal: text(host_config::HERDR_TERMINAL),
+        stop_hook_mode: text(host_config::STOP_HOOK_MODE)
+            .filter(|mode| host_config::STOP_HOOK_MODES.contains(&mode.as_str()))
+            .unwrap_or_else(|| "observe".to_owned()),
+        accept_peers: crate::peer::federation_accept(home),
+        memory_remote: text(host_config::MEMORY_REMOTE).filter(|remote| !remote.is_empty()),
+        boundary,
+        learning: LearningConfig {
+            sample_every: i64::try_from(learning.sample_every).unwrap_or(i64::MAX),
+            window_cards: learning.window_cards,
+            curator_model: learning.curator_model,
+            curator_timeout_minutes: i64::try_from(learning.curator_timeout_minutes)
+                .unwrap_or(i64::MAX),
+            evals_dir: learning.evals_dir,
+        },
+        config_error: config_error.or(learning_error),
+    }
+}
+
 #[utoipa::path(post, path = "/api/v1/config", tag = "mutations", request_body = SetConfig,
     responses((status = 200, body = MutationResponse, description = "`data` is the key and the value; `warning` says what else the change leaves wrong"),
               (status = 400, body = ErrorBody, description = "`usage`: not a setting the board sets, or a value a start would refuse"),
@@ -3312,6 +3380,9 @@ async fn set_config(
         value,
         ..
     } = request.clone();
+    if setting == host_config::STOP_HOOK_MODE && value == "block-once" {
+        block_once_allowed(&state).await?;
+    }
     mutate(
         &state,
         key(&request.idempotency_key)?,
@@ -3321,18 +3392,36 @@ async fn set_config(
                     "{setting} is not a setting the board can change"
                 )));
             }
-            if let Some(project) = setting.strip_prefix("checkouts.") {
-                store.project(project)?;
-            }
-            let warnings = starter
-                .check_setting(&setting, &value)
+            // A start setting is a path judged by the rules of a start. Any
+            // other settable key is judged by its own rule, into the TOML its
+            // reader takes.
+            let (typed, warnings) = if host_config::is_key(&setting) {
+                let boundary = meta(store.conn(), "boundary")?;
+                let typed = host_config::check(
+                    &setting,
+                    &value,
+                    host_config::Host {
+                        boundary: boundary.as_deref(),
+                    },
+                )
                 .map_err(Error::Usage)?;
-            let changed = write_checkout(&home, &setting, &value)
+                (typed, Vec::new())
+            } else {
+                if let Some(project) = setting.strip_prefix("checkouts.") {
+                    store.project(project)?;
+                }
+                let warnings = starter
+                    .check_setting(&setting, &value)
+                    .map_err(Error::Usage)?;
+                (toml::Value::String(value.clone()), warnings)
+            };
+            let recorded = serde_json::to_value(&typed)?;
+            let changed = write_config(&home, &setting, typed)
                 .map_err(|error| Error::Unavailable(error.to_string()))?;
             // As `tiller config set`: a key already at that value records
             // nothing.
             let applied = if changed {
-                store.config_changed(ctx, &setting, json!(value))?
+                store.config_changed(ctx, &setting, recorded.clone())?
             } else {
                 Applied {
                     value: 0,
@@ -3341,7 +3430,7 @@ async fn set_config(
                 }
             };
             let mut done = Done::of(Applied {
-                value: json!({"key": setting, "value": value, "changed": changed}),
+                value: json!({"key": setting, "value": recorded, "changed": changed}),
                 events: applied.events,
                 replayed: applied.replayed,
             })?;
@@ -3350,6 +3439,32 @@ async fn set_config(
         },
     )
     .await
+}
+
+/// The switching rule for `stop_hook_mode = "block-once"` (`protocol.md`
+/// 2.5), judged as `tiller config set` judges it. A refusal is a 422 with
+/// the numbers behind it in `current`, and the window they cover.
+async fn block_once_allowed(state: &AppState) -> Result<(), ApiError> {
+    let now = jiff::Timestamp::now();
+    let stats = read(state, move |store| {
+        stop_hook::intake_stats_at(store, stop_hook::STOP_HOOK_DAYS, now)
+    })
+    .await?;
+    let Some(refusal) = stats.refusal() else {
+        return Ok(());
+    };
+    let mut current = serde_json::to_value(&stats).unwrap_or(Value::Null);
+    current["since"] = json!(
+        Timestamp::from_jiff(
+            now.checked_add(jiff::SignedDuration::from_hours(-24 * stats.days))
+                .unwrap_or(now)
+        )
+        .to_string()
+    );
+    current["until"] = json!(Timestamp::from_jiff(now).to_string());
+    let mut error = ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "refused", refusal);
+    error.body.error.current = Some(current);
+    Err(error)
 }
 
 /// `checkouts.<project>` from `<home>/config.toml`, as `tiller config get`
@@ -4768,7 +4883,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health, doctor, run_poller,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, add_dep, remove_dep, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, set_config,
+        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, host_config_read, set_config,
         away_start, away_edit, away_end, away_brief, pick_bug_project, recap, mark_recap_seen, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, memory::repropose, memory::eval::eval_plan,
         memory::eval::eval_start, session, login_code, logout
@@ -8552,6 +8667,174 @@ esac"#,
         );
         let remote = send(&app, remote).await;
         assert_ne!(remote.status, StatusCode::OK, "{}", remote.body);
+    }
+
+    #[tokio::test]
+    async fn the_board_sets_the_other_host_keys_one_at_a_time() {
+        let fleet = Fleet::new();
+        let app = app_restarting(fleet.dir.path(), Arc::new(FakeSettings));
+        let cookie = owner_cookie(fleet.dir.path());
+        let owner = [("cookie", cookie.as_str())];
+        let config = fleet.dir.path().join("config.toml");
+        let mut n = 0;
+        let mut set = |setting: &str, value: &str| {
+            n += 1;
+            mutation(
+                "POST",
+                "/api/v1/config",
+                json!({"idempotency_key": format!("h-{n}"), "key": setting, "value": value}),
+                &owner,
+            )
+        };
+
+        // The secret and every other key stay out, and nothing is written.
+        for setting in [
+            "owner_guard.decider_key",
+            "owner_guard.endpoint",
+            "intake_source",
+            "learning",
+        ] {
+            let answer = send(&app, set(setting, "x")).await;
+            assert_eq!(
+                answer.status,
+                StatusCode::BAD_REQUEST,
+                "{setting}: {}",
+                answer.body
+            );
+            assert!(answer.body.contains("not a setting"), "{}", answer.body);
+        }
+        assert!(!config.exists());
+
+        // A value its reader would refuse changes nothing.
+        for (setting, value) in [
+            ("herdr.terminal", ""),
+            ("stop_hook_mode", "block once"),
+            ("federation.accept", "yes"),
+            ("memory.remote", "http://example.com/memory.git"),
+            ("learning.sample_every", "0"),
+            ("learning.window_cards", "many"),
+            ("learning.curator_model", "--help"),
+            ("learning.curator_timeout_minutes", "0"),
+            ("learning.evals_dir", "/nonexistent/evals"),
+        ] {
+            let answer = send(&app, set(setting, value)).await;
+            assert_eq!(
+                answer.status,
+                StatusCode::BAD_REQUEST,
+                "{setting}: {}",
+                answer.body
+            );
+        }
+        assert!(!config.exists());
+
+        // block-once is refused by the switching rule, with the numbers.
+        let refused = send(&app, set("stop_hook_mode", "block-once")).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            refused.body
+        );
+        let refused: Value = serde_json::from_str(&refused.body).unwrap();
+        assert_eq!(refused["error"]["code"], "refused", "{refused}");
+        let current = &refused["error"]["current"];
+        assert_eq!(current["stops"], 0, "{refused}");
+        assert_eq!(current["min_stops"], 200, "{refused}");
+        assert_eq!(current["max_false_block_rate"], 0.02, "{refused}");
+        assert_eq!(current["rule_met"], false, "{refused}");
+        assert!(
+            current["since"].is_string() && current["until"].is_string(),
+            "{refused}"
+        );
+        assert!(!config.exists());
+
+        // Off and observe always save; a typed value lands as the TOML the
+        // reader takes, and each change is one config event.
+        for (setting, value) in [
+            ("stop_hook_mode", "off"),
+            ("stop_hook_mode", "observe"),
+            ("herdr.terminal", "Ghostty"),
+            ("federation.accept", "false"),
+            ("memory.remote", "git@example.com:team/memory.git"),
+            ("learning.sample_every", "3"),
+            ("learning.window_cards", "12"),
+            ("learning.curator_model", "opus"),
+            ("learning.curator_timeout_minutes", "30"),
+        ] {
+            let sent = send(&app, set(setting, value)).await;
+            assert_eq!(sent.status, StatusCode::OK, "{setting}: {}", sent.body);
+        }
+        let evals = tempfile::tempdir().unwrap();
+        std::fs::create_dir(evals.path().join("evals")).unwrap();
+        std::fs::write(evals.path().join("evals/run.sh"), "#!/bin/sh\n").unwrap();
+        let dir = evals.path().to_str().unwrap();
+        let sent = send(&app, set("learning.evals_dir", dir)).await;
+        assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
+        let table: toml::Table = std::fs::read_to_string(&config).unwrap().parse().unwrap();
+        assert_eq!(table["stop_hook_mode"].as_str(), Some("observe"));
+        assert_eq!(table["herdr"]["terminal"].as_str(), Some("Ghostty"));
+        assert_eq!(table["federation"]["accept"].as_bool(), Some(false));
+        assert_eq!(table["learning"]["sample_every"].as_integer(), Some(3));
+        assert_eq!(table["learning"]["window_cards"].as_integer(), Some(12));
+        assert_eq!(table["learning"]["curator_model"].as_str(), Some("opus"));
+        assert_eq!(
+            table["learning"]["curator_timeout_minutes"].as_integer(),
+            Some(30)
+        );
+        let events: Vec<(String, String)> = {
+            let store = fleet.open();
+            let mut stmt = store
+                .conn()
+                .prepare("SELECT entity_id, payload FROM events WHERE kind = 'config.changed' ORDER BY seq")
+                .unwrap();
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert_eq!(events.len(), 10, "{events:?}");
+        assert_eq!(events[0].0, "stop_hook_mode");
+        assert!(events[0].1.contains("\"off\""), "{}", events[0].1);
+        assert_eq!(events[3].0, "federation.accept");
+        assert!(events[3].1.contains("false"), "{}", events[3].1);
+        assert!(!events.iter().any(|(_, payload)| payload.contains("<set>")));
+
+        // The same value again records nothing.
+        let again = send(&app, set("learning.sample_every", "3")).await;
+        let again: Value = serde_json::from_str(&again.body).unwrap();
+        assert_eq!(again["data"]["changed"], false, "{again}");
+
+        // The read shows what was saved.
+        let read: Value =
+            serde_json::from_str(&get(&app, "/api/v1/host-config").await.body).unwrap();
+        assert_eq!(read["stop_hook_mode"], "observe", "{read}");
+        assert_eq!(read["herdr_terminal"], "Ghostty", "{read}");
+        assert_eq!(read["accept_peers"], false, "{read}");
+        assert_eq!(
+            read["memory_remote"], "git@example.com:team/memory.git",
+            "{read}"
+        );
+        assert_eq!(read["learning"]["sample_every"], 3, "{read}");
+        assert_eq!(read["learning"]["curator_model"], "opus", "{read}");
+        assert_eq!(read["learning"]["evals_dir"], dir, "{read}");
+        assert_eq!(read["boundary"], "personal", "{read}");
+        assert!(read["config_error"].is_null(), "{read}");
+        assert!(!read.to_string().contains("decider"), "{read}");
+
+        // A work host never pushes its memory repo, but may clear the remote.
+        fleet
+            .open()
+            .conn()
+            .execute("UPDATE meta SET value = 'work' WHERE key = 'boundary'", [])
+            .unwrap();
+        let pushed = send(&app, set("memory.remote", "git@example.com:team/other.git")).await;
+        assert_eq!(pushed.status, StatusCode::BAD_REQUEST, "{}", pushed.body);
+        assert!(pushed.body.contains("work host"), "{}", pushed.body);
+        let cleared = send(&app, set("memory.remote", "")).await;
+        assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.body);
+        let read: Value =
+            serde_json::from_str(&get(&app, "/api/v1/host-config").await.body).unwrap();
+        assert!(read["memory_remote"].is_null(), "{read}");
     }
 
     /// Services whose checks report one failed required check and the owner

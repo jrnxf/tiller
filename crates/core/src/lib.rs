@@ -11,6 +11,7 @@ pub mod error;
 #[cfg(test)]
 mod events;
 pub mod health;
+pub mod host_config;
 pub mod ids;
 pub mod import;
 pub mod limits;

@@ -29,6 +29,7 @@ import { runPollerFixture } from "./fixture-doctor.ts";
 import type { Scenario } from "./fixtures.ts";
 import { relabelFixture } from "./fixtures-signals.ts";
 import {
+  hostConfigFor,
   projectSetupFor,
   setConfigFixture,
   startProblems,
@@ -346,6 +347,7 @@ export function withoutDeleted(path: string, body: unknown, scenario: Scenario):
     return recapFor(scenario, Date.now(), recapMarkedAt);
   }
   if (pathname === "/api/v1/start-settings") return startSettingsFor(scenario);
+  if (pathname === "/api/v1/host-config") return hostConfigFor();
   const setup = /^\/api\/v1\/projects\/([^/]+)\/setup$/.exec(pathname);
   if (setup?.[1] && (body !== undefined || !gone(setup[1]))) {
     const saved = edited.get(setup[1]);
@@ -1206,7 +1208,12 @@ function handle(
   }
   if (method === "POST" && path === "/api/v1/config") {
     const saved = setConfigFixture(body, scenario);
-    if (!saved.ok) return { reply: refused(400, "usage", saved.message), followUps: [] };
+    if (!saved.ok) {
+      return {
+        reply: refused(saved.status, saved.code, saved.message, saved.current),
+        followUps: [],
+      };
+    }
     return { reply: recorded(saved.data, null, null), followUps: [] };
   }
   const orchestrator = /^\/api\/v1\/projects\/([^/]+)\/orchestrator$/.exec(path);

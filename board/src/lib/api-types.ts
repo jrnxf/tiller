@@ -578,6 +578,33 @@ export interface StartSettings {
   config_error: string | null;
 }
 
+// `GET /api/v1/host-config`: the other host keys the board sets, as this
+// host's config.toml has them now, with the default each key falls back to.
+// `owner_guard.decider_key` is never here.
+export interface HostConfig {
+  // Null when unset: Open in herdr only focuses.
+  herdr_terminal: string | null;
+  // `off`, `observe` or `block-once`; unset reads as `observe`.
+  stop_hook_mode: string;
+  // Unset reads as true.
+  accept_peers: boolean;
+  // Null or empty keeps memory on this host.
+  memory_remote: string | null;
+  // `personal` or `work`; a work host never pushes its memory repo.
+  boundary: string | null;
+  learning: LearningConfig;
+  // Set when config.toml cannot be read; the rest is then the defaults.
+  config_error: string | null;
+}
+
+export interface LearningConfig {
+  sample_every: number;
+  window_cards: number;
+  curator_model: string;
+  curator_timeout_minutes: number;
+  evals_dir: string | null;
+}
+
 // `GET /api/v1/projects/{id}/retire`: whether an archive applies now, and the
 // running agents it can stop first.
 export interface ProjectRetirePreview {

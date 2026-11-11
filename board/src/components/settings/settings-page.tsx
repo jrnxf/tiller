@@ -1,5 +1,4 @@
 import { useCallback, useRef, useState } from "react";
-import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import type { DaemonHealth, Machine, MergeAppHealth, StartSettings } from "../../lib/api-types";
@@ -12,6 +11,7 @@ import {
   healthQuery,
   machinesQuery,
   sessionQuery,
+  hostConfigQuery,
   startSettingsQuery,
 } from "../../lib/queries";
 import { signOut } from "../../lib/session";
@@ -25,7 +25,9 @@ import type { Paired } from "./add-host";
 import { checkLines, needsYou, whenText } from "./check-lines";
 import type { Tone } from "./check-lines";
 import { HostCard } from "./host-card";
+import { Fact } from "./fact";
 import { HostChecks } from "./host-checks";
+import { HostConfigSections } from "./host-config-sections";
 import { SettingField } from "./setting-field";
 import "./settings.css";
 
@@ -60,18 +62,6 @@ function Choice<Value extends string>({
         <p>{hint}</p>
       </div>
       <Segmented label={label} options={options} value={value} onChange={onChange} />
-    </div>
-  );
-}
-
-function Fact({ label, hint, children }: { label: string; hint: string; children: ReactNode }) {
-  return (
-    <div className="set-row">
-      <div className="set-text">
-        <h2>{label}</h2>
-        <p>{hint}</p>
-      </div>
-      <div className="set-value">{children}</div>
     </div>
   );
 }
@@ -534,7 +524,12 @@ export function SettingsPage() {
   const session = useQuery(sessionQuery()).data;
   const machines = useQuery(machinesQuery()).data?.machines;
   const startSettings = useQuery(startSettingsQuery()).data;
+  const hostConfig = useQuery(hostConfigQuery()).data;
   const host = machines?.find((machine) => machine.kind === "local")?.label ?? null;
+  // Whose config the host sections show: this host's, or a peer's command.
+  const [chosen, setChosen] = useState<string | null>(null);
+  const hosts = (machines ?? []).map((machine) => machine.label);
+  const viewing = chosen !== null && hosts.includes(chosen) ? chosen : (host ?? "this host");
   return (
     <div className="settings-page" data-testid="settings">
       {health ? <MergeApp app={health.merge_app} host={host} /> : null}
@@ -546,6 +541,16 @@ export function SettingsPage() {
           settings={startSettings}
           owner={session?.owner ?? false}
           host={host}
+        />
+      ) : null}
+      {hostConfig ? (
+        <HostConfigSections
+          config={hostConfig}
+          owner={session?.owner ?? false}
+          host={host}
+          hosts={hosts}
+          viewing={viewing}
+          onView={setChosen}
         />
       ) : null}
       <section className="set-sec" aria-label="This browser">

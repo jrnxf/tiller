@@ -20,10 +20,10 @@ use tiller_core::state::projects::{HostEdit, Init, NewProject, ProjectEdit};
 use tiller_herdr::client::Cli;
 
 use super::clearable;
-use super::read::{STOP_HOOK_MAX_RATE, STOP_HOOK_MIN_STOPS, intake_stats};
 use super::review::checkout_head;
 use super::spawn::{configured_herdr, failure};
 use crate::app::{App, Done, Failure, Outcome};
+use tiller_core::state::stop_hook::{STOP_HOOK_DAYS, intake_stats};
 
 #[derive(Args, Debug)]
 pub struct InitArgs {
@@ -688,16 +688,9 @@ pub fn config(app: &App, cmd: ConfigCmd) -> Done {
                 ));
             }
             if key == "stop_hook_mode" && value.as_str() == Some("block-once") {
-                let stats = intake_stats(&store, 7)?;
-                if !stats.rule_met {
-                    let mut failure = Failure::refused(format!(
-                        "block-once needs {STOP_HOOK_MIN_STOPS} orchestrator stops in 7 days with a false-block rate under {:.0}%; there are {} stops and a rate of {}",
-                        STOP_HOOK_MAX_RATE * 100.0,
-                        stats.stops,
-                        stats
-                            .false_block_rate
-                            .map_or("unknown".to_owned(), |rate| format!("{:.1}%", rate * 100.0)),
-                    ));
+                let stats = intake_stats(&store, STOP_HOOK_DAYS)?;
+                if let Some(refusal) = stats.refusal() {
+                    let mut failure = Failure::refused(refusal);
                     failure.current = Some(serde_json::to_value(&stats).unwrap_or(Value::Null));
                     return Err(failure);
                 }

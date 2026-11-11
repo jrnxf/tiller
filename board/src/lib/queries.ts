@@ -11,6 +11,7 @@ import type {
   ContributionsResponse,
   DaemonHealth,
   DoctorReport,
+  HostConfig,
   MachinesResponse,
   MemoryEvalPlan,
   MemoryResponse,
@@ -218,6 +219,12 @@ export const projectCheckoutQuery = (params: {
 export const startSettingsPath: QueryPath = "/api/v1/start-settings";
 export const startSettingsQuery = () =>
   queryOptions({ ...readQuery<StartSettings>(startSettingsPath), staleTime: 0 });
+
+// The other host keys the board sets (`GET /api/v1/host-config`). A `config`
+// event refreshes it (lib/sse.ts).
+export const hostConfigPath: QueryPath = "/api/v1/host-config";
+export const hostConfigQuery = () =>
+  queryOptions({ ...readQuery<HostConfig>(hostConfigPath), staleTime: 0 });
 
 // The project detail's merge gate and checkout. A project event refreshes it,
 // since the hourly ruleset check moves the gate, and so does a `config` event,
