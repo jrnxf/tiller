@@ -1507,6 +1507,66 @@ esac
         assert_eq!(moved, 0, "the activity never left ended");
     }
 
+    /// A session ended with no `Ended` verdict (a relaunch) still takes the
+    /// state of a line stamped before the end that Claude Code flushed late,
+    /// and only a line stamped after the end moves nothing.
+    #[test]
+    fn a_late_line_from_before_the_end_still_moves_an_ended_session() {
+        let mut t = Transcript::new();
+        let path = t.path("main.jsonl");
+        t.bind("claude-orchestrator", &path, "startup");
+        let session = t.fleet.orchestrator_session.clone();
+        let ended = Timestamp::now();
+        let mut source = t.source();
+        source.intake = true;
+        source.poll(ended).unwrap();
+        t.fleet
+            .store
+            .observation_record(
+                &Ctx::at(Actor::Hook, ended),
+                tiller_core::state::runs::NewObservation {
+                    session_id: Some(session.clone()),
+                    run_id: None,
+                    source: tiller_core::domain::ObservationSource::Hook,
+                    event: "UserPromptSubmit".into(),
+                    verdict: Some(tiller_core::domain::Activity::Working),
+                    observed_at: ended.plus_minutes(-2),
+                    payload: serde_json::json!({}),
+                },
+            )
+            .unwrap();
+        t.end(ended);
+
+        let turn = |uuid: &str, at: Timestamp| {
+            serde_json::json!({"type": "assistant", "uuid": uuid, "timestamp": at.to_string(),
+                "message": {"role": "assistant", "stop_reason": "end_turn"}})
+        };
+        Transcript::append(&path, &turn("late", ended.plus_minutes(-1)));
+        source.poll(ended.plus_minutes(2)).unwrap();
+        let row: Session =
+            tiller_core::state::get(t.fleet.store.conn(), "session", &session).unwrap();
+        assert_eq!(row.activity, tiller_core::domain::Activity::Idle);
+
+        t.fleet
+            .store
+            .observation_record(
+                &Ctx::at(Actor::Hook, ended.plus_minutes(3)),
+                tiller_core::state::runs::NewObservation {
+                    session_id: Some(session.clone()),
+                    run_id: None,
+                    source: tiller_core::domain::ObservationSource::Hook,
+                    event: "UserPromptSubmit".into(),
+                    verdict: Some(tiller_core::domain::Activity::Working),
+                    observed_at: ended.plus_minutes(3),
+                    payload: serde_json::json!({}),
+                },
+            )
+            .unwrap();
+        let row: Session =
+            tiller_core::state::get(t.fleet.store.conn(), "session", &session).unwrap();
+        assert_eq!(row.activity, tiller_core::domain::Activity::Idle);
+    }
+
     /// Retention and `/clear` together: the window keeps the file the
     /// session was bound to when it ended. A file the session left before
     /// is read once more and let go, as for a live session.
