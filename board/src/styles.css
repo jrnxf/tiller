@@ -1413,17 +1413,33 @@ kbd {
   user-select: all;
 }
 
+/* The same 14px above the list, between its steps and below it. */
 .setup-card .setup-steps {
-  margin: 0;
+  margin: 14px 0 0;
   padding: 0;
   list-style: none;
 }
 
-.setup-card .setup-steps pre {
-  margin: 10px 0 0;
+.setup-card .setup-steps li + li {
+  margin-top: 14px;
 }
 
-.setup-card .setup-steps + .sub {
+.setup-card .setup-steps pre {
+  margin: 0;
+}
+
+.setup-card .step-note {
+  margin: 0 0 6px;
+}
+
+.setup-card .step-n {
+  margin-right: 6px;
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--w-semibold);
+  color: var(--fg-1);
+}
+
+.setup-card .setup-steps + .wait {
   margin-top: 14px;
 }
 
@@ -1432,6 +1448,7 @@ kbd {
 }
 
 .setup-card p code {
+  white-space: nowrap;
   font-family: var(--mono);
   font-size: var(--fs-mini);
   color: var(--fg-1);

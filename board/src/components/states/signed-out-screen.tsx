@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import { CODE_LENGTH, codeDigits, signIn } from "../../lib/session";
+import { Logo } from "../shell/logo";
 import { useAppearance } from "../shell/shell";
 
 // `text` with each `command` span set as code.
@@ -48,8 +49,7 @@ export function SignedOutScreen({ onSignedIn }: { onSignedIn: () => void }) {
     <main className="setup" data-testid="signed-out">
       <div className="setup-card signin-card">
         <div className="ws">
-          <div className="logo">T</div>
-          <div className="name">tiller</div>
+          <Logo />
         </div>
         <h1>Sign in to this board</h1>
         <p>

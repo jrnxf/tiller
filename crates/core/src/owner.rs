@@ -18,7 +18,7 @@ pub const MARKER: &str = "owner";
 pub const TILLER: &str = "tiller";
 
 /// The command that hands the host back to Tiller.
-pub const FLIP_BACK: &str = "tiller owner set tiller";
+pub const FLIP_BACK: &str = flip_back!();
 
 /// [`Error::OwnerMarker`] while the marker in `home` names another system,
 /// or cannot be read.
@@ -176,5 +176,14 @@ mod tests {
     fn an_in_memory_store_has_no_marker() {
         let mut store = Store::open_in_memory().unwrap();
         assert!(store.rehearse(&owner(), "card.create", |_| Ok(())).is_ok());
+    }
+
+    #[test]
+    fn the_init_hints_name_the_flip_back_command() {
+        assert_eq!(crate::INIT_HINT.lines().next(), Some(FLIP_BACK));
+        assert_eq!(
+            crate::RUN_INIT,
+            format!("run {FLIP_BACK}, then tiller init")
+        );
     }
 }

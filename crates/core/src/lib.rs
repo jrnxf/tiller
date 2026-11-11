@@ -3,6 +3,15 @@
 //! function. The CLI, the hooks, the daemon and the board API all call these
 //! functions; none of them writes SQL of its own (`protocol.md` section 1).
 
+/// The command that hands the host to Tiller, as a literal, so that
+/// [`owner::FLIP_BACK`], [`INIT_HINT`] and [`RUN_INIT`] are built from one
+/// text with `concat!`. Defined before the modules, so `owner` sees it.
+macro_rules! flip_back {
+    () => {
+        "tiller owner set tiller"
+    };
+}
+
 pub mod authority;
 pub mod backup;
 pub mod config_file;
@@ -28,12 +37,14 @@ pub mod time;
 /// owner marker names another system, so the owner hands the host to Tiller
 /// first (`tiller owner set tiller` is a no-op when the marker already says so).
 /// The board's setup screen shows each line as its own command.
-pub const INIT_HINT: &str =
-    "tiller owner set tiller\ntiller init --host-label <label> --lane-capacity <n>";
+pub const INIT_HINT: &str = concat!(
+    flip_back!(),
+    "\ntiller init --host-label <label> --lane-capacity <n>"
+);
 
 /// The same two steps as one clause, for the end of a refusal before
 /// `tiller init`: "state.db is not initialized; run ...".
-pub const RUN_INIT: &str = "run tiller owner set tiller, then tiller init";
+pub const RUN_INIT: &str = concat!("run ", flip_back!(), ", then tiller init");
 
 /// The refusal every read and write gives before `tiller init`.
 pub fn not_initialized() -> String {

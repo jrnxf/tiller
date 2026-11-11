@@ -420,7 +420,8 @@ impl App {
                         .into(),
                 })
                 .hint(format!(
-                    "run tiller as one command on its own, typed as `{packaged} <command>`: not after cd, in a pipe, after && or with a redirect. If it already ran that way, the Tiller home has no state.db yet (tiller init)"
+                    "run tiller as one command on its own, typed as `{packaged} <command>`: not after cd, in a pipe, after && or with a redirect. If it already ran that way, the Tiller home has no state.db yet, and the owner must {}",
+                    tiller_core::RUN_INIT
                 )));
             }
             return Err(Failure::from(Error::Refused {

@@ -198,12 +198,19 @@ test("the setup screen opens the board once tiller init has run", async () => {
   stubDaemon(answers);
   const onReady = vi.fn();
   render(<SetupScreen command={SETUP_COMMANDS} onReady={onReady} />);
-  // Each command is its own copyable block, owner set first.
-  const blocks = screen.getAllByRole("listitem").map((item) => item.textContent);
-  expect(blocks).toEqual([
+  // Each command is its own numbered, copyable block, owner set first, and
+  // `--boundary work` is named on the init step, not after both.
+  const steps = screen.getAllByRole("listitem");
+  expect(steps.map((step) => step.querySelector("pre")?.textContent)).toEqual([
     "tiller owner set tiller",
     "tiller init --host-label <label> --lane-capacity <n>",
   ]);
+  expect(steps.map((step) => step.querySelector(".step-n")?.textContent)).toEqual(["1.", "2."]);
+  expect(steps[0]?.querySelector(".step-note")?.textContent).toContain("Hand this machine");
+  expect(steps[1]?.querySelector(".step-note")?.textContent).toContain(
+    "add --boundary work to this command",
+  );
+  expect(screen.getByText(/one at a time, in this order/)).toBeTruthy();
 
   await act(() => vi.advanceTimersByTimeAsync(SETUP_POLL_MS));
   expect(onReady).not.toHaveBeenCalled();
@@ -213,6 +220,22 @@ test("the setup screen opens the board once tiller init has run", async () => {
   answers["/api/v1/snapshot"] = fixtureSnapshot("default");
   await act(() => vi.advanceTimersByTimeAsync(SETUP_POLL_MS * 3));
   expect(onReady).toHaveBeenCalledTimes(1);
+});
+
+test("a one-command hint shows one block with no number and no order to follow", () => {
+  stubDaemon({});
+  render(
+    <SetupScreen
+      command="tiller init --host-label <label> --lane-capacity <n>"
+      onReady={() => {}}
+    />,
+  );
+  const steps = screen.getAllByRole("listitem");
+  expect(steps).toHaveLength(1);
+  expect(steps[0]?.querySelector(".step-n")).toBeNull();
+  expect(steps[0]?.querySelector(".step-note")?.textContent).toContain("--boundary work");
+  expect(screen.getByText(/Run this in a terminal:/)).toBeTruthy();
+  expect(screen.queryByText(/in this order/)).toBeNull();
 });
 
 test("a refused read carries the daemon's reason and hint", async () => {
