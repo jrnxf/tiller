@@ -352,7 +352,9 @@ function apiMiddleware(): Connect.NextHandleFunction {
       return;
     }
 
-    if (req.method === "POST" || req.method === "PATCH") {
+    // Every mutation method the board sends (`sendMutation`), DELETE included:
+    // ending away mode and removing a dependency are DELETEs.
+    if (["POST", "PATCH", "PUT", "DELETE"].includes(req.method ?? "")) {
       readBody(req)
         .then((body) => {
           const { reply, followUps } = fixtureMutation(req.method ?? "POST", url, body, scenario);
