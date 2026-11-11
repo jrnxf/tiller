@@ -1065,24 +1065,31 @@ impl Store {
         })
     }
 
-    /// Whether ending each of `runs` and then closing the card would all
-    /// apply, in one transaction that always rolls back. A caller that
-    /// carries out a close as separate writes learns first that none of
-    /// them will be refused, so a refusal never leaves it half done.
-    pub fn card_close_rehearse(
+    /// `card.close` after ending every active run of the card with `end`,
+    /// all in one transaction: a refused end or close writes nothing, so a
+    /// refusal never leaves some runs ended on a card that stays open. The
+    /// runs are read inside the transaction, so a run that starts or ends
+    /// meanwhile is seen as it is.
+    pub fn card_close_ending_runs(
         &mut self,
         ctx: &Ctx,
         card: &str,
         outcome: CardOutcome,
         reason: Option<&str>,
         evidence: Option<&str>,
-        runs: &[(String, EndRun)],
-    ) -> Result<()> {
-        self.rehearse(ctx, "card.close", |tx| {
-            for (run, end) in runs {
-                super::runs::run_end_in(tx, run, end.clone())?;
+        end: &EndRun,
+    ) -> Result<Applied<Closed>> {
+        self.write(ctx, "card.close", None, |tx| {
+            let card_id = resolve_card(tx.conn(), card)?.id;
+            let runs: Vec<Run> = list(
+                tx.conn(),
+                "card_id = ?1 AND ended_at IS NULL ORDER BY started_at",
+                &[&card_id],
+            )?;
+            for run in runs {
+                super::runs::run_end_in(tx, &run.id, end.clone())?;
             }
-            card_close_in(tx, card, outcome, reason, evidence).map(drop)
+            card_close_in(tx, &card_id, outcome, reason, evidence)
         })
     }
 
