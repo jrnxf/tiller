@@ -385,6 +385,85 @@ fn a_daemon_on_an_empty_home_makes_the_database_and_serves_agents() {
     assert!(terminate(&mut again).success());
 }
 
+/// A daemon that started before anyone ran `tiller init` names the host after
+/// the machine. `tiller init` with another label refuses, so `tiller host
+/// edit --label` is how the owner renames it.
+#[test]
+fn a_self_initialized_host_takes_a_new_label_and_boundary() {
+    let world = World::new();
+    let mut daemon = start(&world);
+    assert_eq!(health(daemon.port)["initialized"], true);
+    assert!(terminate(&mut daemon).success());
+
+    let refused = world.run(&["init", "--host-label", "work-mac", "--lane-capacity", "2"]);
+    assert_eq!(refused.error_code(), "refused", "{}", refused.json);
+    assert!(
+        refused.json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("tiller host edit --label"),
+        "{}",
+        refused.json
+    );
+
+    let edited = world.must(&["host", "edit", "--rev", "1", "--label", "work-mac"]);
+    assert_eq!(edited.data()["label"], "work-mac");
+    assert_eq!(edited.data()["rev"], 2);
+    // `tiller init` with the new label is now the natural replay.
+    world.must(&["init", "--host-label", "work-mac", "--lane-capacity", "2"]);
+    // A replay never changes the boundary, so it does not answer ok as if
+    // it had.
+    let work = world.run(&[
+        "init",
+        "--host-label",
+        "work-mac",
+        "--lane-capacity",
+        "2",
+        "--boundary",
+        "work",
+    ]);
+    assert_eq!(work.error_code(), "refused", "{}", work.json);
+    assert!(
+        work.json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("already keeps the personal boundary"),
+        "{}",
+        work.json
+    );
+
+    // Nothing records the boundary yet, so the owner may still pick it.
+    let moved = world.must(&["host", "edit", "--rev", "2", "--boundary", "work"]);
+    assert_eq!(moved.data()["rev"], 3);
+    world.must(&[
+        "init",
+        "--host-label",
+        "work-mac",
+        "--lane-capacity",
+        "2",
+        "--boundary",
+        "work",
+    ]);
+    // A floor the owner set clears again, as the board's empty field does.
+    let floor = world.must(&["host", "edit", "--rev", "3", "--ram-floor-mb", "4096"]);
+    assert_eq!(floor.data()["ram_floor_mb"], 4096);
+    let cleared = world.must(&["host", "edit", "--rev", "4", "--no-ram-floor"]);
+    assert!(cleared.data()["ram_floor_mb"].is_null(), "{}", cleared.json);
+    assert_eq!(cleared.data()["rev"], 5);
+    // A backup records it: from then on it stays.
+    world.must(&["backup"]);
+    let kept = world.run(&["host", "edit", "--rev", "5", "--boundary", "personal"]);
+    assert_eq!(kept.error_code(), "refused", "{}", kept.json);
+    assert!(
+        kept.json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("a backup already records the work boundary"),
+        "{}",
+        kept.json
+    );
+}
+
 #[test]
 fn a_daemon_leaves_a_home_owned_by_another_system_uninitialized() {
     let world = World::new();

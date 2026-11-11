@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 
+use super::manifest::{ExportRecord, Manifest};
 use super::{
     DaemonLock, Paths, create_private_dir, facts, hash_file, hex, io_error, remove_if_exists,
     sync_dir, write_synced,
@@ -66,8 +67,17 @@ pub struct Imported {
 }
 
 /// Exports every table of `conn` to `dir`, which must be absent or empty,
-/// from one read snapshot.
-pub fn export_jsonl(conn: &Connection, dir: &Path, now: Timestamp) -> Result<ExportManifest> {
+/// from one read snapshot, and records the export in the backups manifest
+/// of `paths`.
+pub fn export_jsonl(
+    conn: &Connection,
+    paths: &Paths,
+    dir: &Path,
+    now: Timestamp,
+) -> Result<ExportManifest> {
+    // An unreadable manifest refuses before any file is written: the export
+    // could not be recorded.
+    let mut backups = Manifest::load(paths)?;
     if fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_some()) {
         return Err(Error::refused(
             "export",
@@ -130,6 +140,13 @@ pub fn export_jsonl(conn: &Connection, dir: &Path, now: Timestamp) -> Result<Exp
     let mut text = serde_json::to_string_pretty(&manifest)?;
     text.push('\n');
     write_synced(&dir.join(MANIFEST), text.as_bytes())?;
+    backups.exports.push(ExportRecord {
+        host_id: manifest.host_id.clone(),
+        boundary: manifest.boundary.clone(),
+        max_seq: manifest.max_seq,
+        at: now,
+    });
+    backups.save(paths)?;
     Ok(manifest)
 }
 

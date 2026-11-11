@@ -26,12 +26,13 @@ use serde_json::{Value, json};
 use tiller_agents::land::app::{APP_DIR, APP_ID_FILE, AppKey, KEY_FILE, KeyError};
 use tiller_agents::spawn::config::SpawnConfig;
 use tiller_agents::spawn::orchestrator::Orchestrator;
+use tiller_agents::spawn::readings;
 use tiller_core::config_file as config_toml;
 use tiller_core::domain::{
     Activity, AnsweredVia, Approval, AskSource, CardKind, CardOutcome, HoldReleaseReason, Host,
     OutboxKind, PeerScope, Run, Session,
 };
-use tiller_core::domain::{Delivery, GrantKind, InterventionKind, Stage};
+use tiller_core::domain::{Boundary, Delivery, GrantKind, InterventionKind, Stage};
 use tiller_core::host_config;
 use tiller_core::limits::{
     ANSWER_MAX_CHARS, ASK_NOTE_MAX_CHARS, BODY_MAX_CHARS, COMMENT_MAX_CHARS, TITLE_MAX_CHARS,
@@ -854,6 +855,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/host-config", get(host_config_read))
         .route("/api/v1/config", post(set_config))
         .route("/api/v1/peers", post(add_peer))
+        .route("/api/v1/host", get(host_fields).patch(edit_host))
         .route("/api/v1/bug-project", post(pick_bug_project))
         .route("/api/v1/contributions", get(contributions))
         .route("/api/v1/projects/{id}/stage", post(stage_project))
@@ -3639,6 +3641,73 @@ async fn mark_recap_seen(
     .await
 }
 
+#[utoipa::path(get, path = "/api/v1/host", tag = "reads",
+    responses((status = 200, body = HostFields), (status = 503, body = ErrorBody)))]
+async fn host_fields(State(state): State<AppState>) -> ApiResult<HostFields> {
+    let home = state.0.home.clone();
+    read(&state, move |store| {
+        let host = store.local_host()?;
+        Ok(HostFields {
+            lanes_busy: store
+                .capacity()?
+                .into_iter()
+                .find(|lanes| lanes.host_id == host.id)
+                .map_or(0, |lanes| lanes.reserved),
+            boundary: tiller_core::state::projects::meta(store.conn(), "boundary")?,
+            boundary_recorded_by: store.boundary_recorded()?.map(str::to_owned),
+            ram_free_mb: readings::ram_free_mb(),
+            disk_free_mb: readings::disk_free_mb(&home),
+            id: host.id,
+            label: host.label,
+            lane_capacity: host.lane_capacity,
+            ram_floor_mb: host.ram_floor_mb,
+            disk_floor_mb: host.disk_floor_mb,
+            rev: host.rev,
+        })
+    })
+    .await
+    .map(Json)
+}
+
+#[utoipa::path(patch, path = "/api/v1/host", tag = "mutations", request_body = EditHost,
+    responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody),
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 409, body = ErrorBody, description = "`conflict`: `rev` is stale; `current` holds the new `rev` and the stored value of the first field the edit changes"),
+              (status = 422, body = ErrorBody, description = "`refused`: the label is taken or a peer is paired, or memory, a backup or an export records the boundary"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn edit_host(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers).await?;
+    let request: EditHost = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "a host edit").await?;
+    let boundary = request
+        .boundary
+        .as_deref()
+        .map(str::parse::<Boundary>)
+        .transpose()?;
+    let edit = tiller_core::state::projects::HostEdit {
+        label: request.label,
+        lane_capacity: request.lane_capacity,
+        ram_floor_mb: request.ram_floor_mb,
+        disk_floor_mb: request.disk_floor_mb,
+        bug_project_id: None,
+        boundary,
+    };
+    let rev = request.rev;
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| {
+            let host = store.local_host()?;
+            Done::of(store.host_edit(ctx, &host.id, rev, edit)?)
+        },
+    )
+    .await
+}
+
 #[utoipa::path(post, path = "/api/v1/bug-project", tag = "mutations", request_body = PickBugProject,
     responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody), (status = 404, body = ErrorBody),
               (status = 409, body = ErrorBody),
@@ -4989,7 +5058,7 @@ async fn app_shell(
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, add_dep, remove_dep, close,
         cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, host_config_read, set_config,
         project_grants, create_grant, revoke_grant,
-        away_start, away_edit, away_end, away_brief, pick_bug_project, recap, mark_recap_seen, relabel_intervention, memory::view, memory::revision,
+        away_start, away_edit, away_end, away_brief, host_fields, edit_host, pick_bug_project, recap, mark_recap_seen, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, memory::repropose, memory::eval::eval_plan,
         memory::eval::eval_start, session, login_code, logout
     ),
@@ -10548,6 +10617,98 @@ esac"#,
         let cleared = send(&app, pick("k-clear", Value::Null, &after["rev"])).await;
         assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.body);
         assert!(machine(app.clone()).await.get("bug_project").is_none());
+    }
+
+    /// Settings > Hosts edits this host's label, lanes, floors and boundary
+    /// against the `rev` it read, as `tiller host edit` does: a null clears a
+    /// floor, a stale `rev` is a conflict, and the boundary stays once a
+    /// backup records it.
+    #[tokio::test]
+    async fn the_board_edits_this_hosts_fields_against_its_rev() {
+        let fleet = Fleet::new();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let cookie = owner_cookie(fleet.dir.path());
+        let headers = [("cookie", cookie.as_str())];
+        let fields = |app: Router| async move {
+            let answer = get(&app, "/api/v1/host").await;
+            assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+            serde_json::from_str::<Value>(&answer.body).unwrap()
+        };
+        let edit = |body: Value| mutation("PATCH", "/api/v1/host", body, &headers);
+
+        let before = fields(app.clone()).await;
+        assert_eq!(before["label"], "test-host");
+        assert_eq!(before["boundary"], "personal");
+        assert!(before["boundary_recorded_by"].is_null(), "{before}");
+        assert_eq!(before["lane_capacity"], 4);
+        assert!(before["ram_floor_mb"].is_null(), "{before}");
+        // An orchestrator holds no lane.
+        assert_eq!(before["lanes_busy"], 0);
+
+        let saved = send(
+            &app,
+            edit(
+                json!({"idempotency_key": "k-cap", "rev": before["rev"], "label": "host-a",
+                        "lane_capacity": 2, "ram_floor_mb": 8192, "disk_floor_mb": 20480}),
+            ),
+        )
+        .await;
+        assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+        let after = fields(app.clone()).await;
+        assert_eq!(after["label"], "host-a");
+        assert_eq!(after["lane_capacity"], 2);
+        assert_eq!(after["ram_floor_mb"], 8192);
+        assert_eq!(after["disk_floor_mb"], 20480);
+        assert_eq!(after["rev"], before["rev"].as_i64().unwrap() + 1);
+
+        // The rev read before the save is stale now.
+        let stale = send(
+            &app,
+            edit(json!({"idempotency_key": "k-stale", "rev": before["rev"], "lane_capacity": 3})),
+        )
+        .await;
+        assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.body);
+
+        // A null clears a floor; the field left out keeps its value.
+        let cleared = send(
+            &app,
+            edit(
+                json!({"idempotency_key": "k-clear", "rev": after["rev"], "ram_floor_mb": null,
+                        "boundary": "work"}),
+            ),
+        )
+        .await;
+        assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.body);
+        let now = fields(app.clone()).await;
+        assert!(now["ram_floor_mb"].is_null(), "{now}");
+        assert_eq!(now["disk_floor_mb"], 20480);
+        assert_eq!(now["boundary"], "work");
+
+        // A backup records the boundary: the board reads that, and an edit
+        // of it is refused in plain words.
+        let paths = tiller_core::backup::Paths::in_home(fleet.dir.path());
+        tiller_core::backup::backup(fleet.store.conn(), &paths, Timestamp::now()).unwrap();
+        let recorded = fields(app.clone()).await;
+        assert_eq!(recorded["boundary_recorded_by"], "a backup");
+        let refused = send(
+            &app,
+            edit(json!({"idempotency_key": "k-back", "rev": recorded["rev"],
+                        "boundary": "personal"})),
+        )
+        .await;
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            refused.body
+        );
+        assert!(
+            refused
+                .body
+                .contains("a backup already records the work boundary"),
+            "{}",
+            refused.body
+        );
     }
 
     /// The recap counts what the log holds since the owner's mark, and Mark

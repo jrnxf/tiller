@@ -351,6 +351,12 @@ impl Store {
         }
     }
 
+    /// The directory that holds `state.db`, its backups and its owner
+    /// marker; none for an in-memory database.
+    pub(crate) fn home(&self) -> Option<&Path> {
+        self.home.as_deref()
+    }
+
     /// The connection, for reads. Writes go through [`Store::write`].
     pub fn conn(&self) -> &Connection {
         &self.conn

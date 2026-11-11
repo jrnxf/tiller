@@ -34,7 +34,7 @@ use crate::time::Timestamp;
 pub use export::{
     EXPORT_FORMAT, ExportManifest, ExportedTable, Imported, export_jsonl, import_jsonl,
 };
-pub use manifest::{Entry, EntryKind, Failure, Manifest};
+pub use manifest::{Entry, EntryKind, ExportRecord, Failure, Manifest};
 pub use nightly::{
     KEEP_DAILY, KEEP_WEEKLY, MIN_VERIFIED, Nightly, RETRY_AFTER_MINUTES, Retention, backup,
     next_due, nightly,

@@ -2714,6 +2714,118 @@
         }
       }
     },
+    "/api/v1/host": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "host_fields",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostFields"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "edit_host",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditHost"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`conflict`: `rev` is stale; `current` holds the new `rev` and the stored value of the first field the edit changes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`refused`: the label is taken or a peer is paired, or memory, a backup or an export records the boundary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/host-config": {
       "get": {
         "tags": [
@@ -6548,6 +6660,70 @@
         },
         "additionalProperties": false
       },
+      "EditHost": {
+        "type": "object",
+        "description": "`PATCH /api/v1/host`: edit this host's label, capacity, floors or\nboundary against its `rev`, as `tiller host edit` does. Local to this\nhost; it is not forwarded to a peer.",
+        "required": [
+          "idempotency_key",
+          "rev"
+        ],
+        "properties": {
+          "boundary": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`personal` or `work`. Refused once memory, a backup or an export\nrecords the boundary."
+          },
+          "disk_floor_mb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "MB; null clears the floor."
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label. Refused: a host edit is not forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A word: a letter or digit, then letters, digits, `_` or `-`. Refused\nwhile a peer is paired, since each peer knows this host by it."
+          },
+          "lane_capacity": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "At least 1."
+          },
+          "ram_floor_mb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "MB; null clears the floor."
+          },
+          "rev": {
+            "type": "integer",
+            "format": "int64",
+            "description": "This host's `rev`, from `GET /api/v1/host`."
+          }
+        },
+        "additionalProperties": false
+      },
       "EditProject": {
         "type": "object",
         "description": "`PATCH /api/v1/projects/{id}`: `tiller project edit` from the board,\nagainst the `rev` the board read. An absent field stays as it is. An\nempty text clears `repo`, `remote`, `deploy_workflow` and\n`deploy_environment`, as an empty CLI flag does. Local to the owning\nhost; it is not forwarded to a peer.",
@@ -7008,6 +7184,87 @@
           "stop_hook_mode": {
             "type": "string",
             "description": "`stop_hook_mode`: `off`, `observe` or `block-once`. An unset or\nunknown value reads as `observe`."
+          }
+        }
+      },
+      "HostFields": {
+        "type": "object",
+        "description": "`GET /api/v1/host`: the fields `tiller host edit` sets on this host, what\nit runs and has free now, and the `rev` an edit is sent against.",
+        "required": [
+          "id",
+          "label",
+          "lanes_busy",
+          "rev"
+        ],
+        "properties": {
+          "boundary": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`personal` or `work`."
+          },
+          "boundary_recorded_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What already records the boundary, so it stays: `memory`, `a backup`\nor `an export`. Null while the owner may still change it."
+          },
+          "disk_floor_mb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "No new agent starts while free disk is under it; null for no floor."
+          },
+          "disk_free_mb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Free disk under the Tiller home now; null when it cannot be read."
+          },
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "lane_capacity": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How many agents may run at once."
+          },
+          "lanes_busy": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Lanes held now: one per agent a spawn reserved, until it ends. A\nnew agent starts only while this is under `lane_capacity`."
+          },
+          "ram_floor_mb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "No new agent starts while free RAM is under it; null for no floor."
+          },
+          "ram_free_mb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Free RAM now; null when it cannot be read."
+          },
+          "rev": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },

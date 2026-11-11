@@ -831,3 +831,139 @@
     margin-bottom: 6px;
   }
 }
+
+/* This host's own settings in its card, under the checks: a row of fields,
+   then the section's note and its Reset and Save, Save on the right. */
+
+.set-hfields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+  gap: 12px;
+  padding: 10px 0 4px;
+  border-top: 1px solid var(--line-1);
+}
+
+.set-hfields-2 {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.set-hfields .pa-l {
+  font-size: var(--fs-mini);
+  color: var(--fg-2);
+}
+
+.set-hfields .note-in[disabled] {
+  color: var(--fg-3);
+  background: var(--bg-2);
+  cursor: not-allowed;
+}
+
+.set-hfields .seg {
+  align-self: flex-start;
+}
+
+.set-card p.pa-help {
+  margin: 6px 0 0;
+  font-size: var(--fs-mini);
+  line-height: 1.5;
+  color: var(--fg-3);
+  overflow-wrap: anywhere;
+}
+
+.set-card p.pa-help[data-problem="true"] {
+  color: var(--red-text);
+}
+
+.set-receipt {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--green) 35%, var(--line-2));
+  border-radius: var(--r6);
+  background: color-mix(in srgb, var(--green) 6%, var(--bg-card));
+  font-size: var(--fs-small);
+  line-height: 1.45;
+  color: var(--fg-2);
+}
+
+.set-receipt .icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+  color: var(--green-text);
+}
+
+.set-receipt.warn {
+  border-color: color-mix(in srgb, var(--yellow-text) 35%, var(--line-2));
+  background: color-mix(in srgb, var(--yellow) 8%, var(--bg-card));
+}
+
+.set-receipt.warn .icon {
+  color: var(--yellow-text);
+}
+
+.set-receipt b {
+  color: var(--fg-1);
+  font-weight: var(--w-medium);
+}
+
+.set-card .refusal.set-hrefusal {
+  font-size: var(--fs-mini);
+}
+
+.set-hfoot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 0 12px;
+}
+
+.set-hnote {
+  flex: 1 1 200px;
+  margin-right: auto;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.set-hfoot .btn {
+  height: 28px;
+  padding: 0 12px;
+  font-size: var(--fs-small);
+}
+
+.set-hfoot .btn.primary {
+  background: var(--accent-solid);
+  border-color: transparent;
+  color: var(--accent-fg);
+}
+
+.set-hfoot .btn.primary:hover {
+  background: var(--accent-solid-hover);
+}
+
+.set-hfoot .btn[disabled] {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.set-hfoot .set-line-r {
+  margin-left: auto;
+}
+
+@media (max-width: 820px) {
+  .set-hfields,
+  .set-hfields-2 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* The note takes its own line, so Reset and Save stay side by side. */
+  .set-hnote {
+    flex-basis: 100%;
+  }
+}

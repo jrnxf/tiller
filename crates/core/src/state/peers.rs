@@ -889,6 +889,65 @@ mod tests {
         assert_eq!(store.paired_hosts().unwrap().len(), 1);
     }
 
+    /// The local host's label changes with an event, never to another host's
+    /// label, never on a remote row, and not while a peer is paired.
+    #[test]
+    fn a_rename_needs_a_free_label_and_no_paired_peer() {
+        use super::super::projects::HostEdit;
+        let mut store = store();
+        let rename = |label: &str| HostEdit {
+            label: Some(label.into()),
+            ..HostEdit::default()
+        };
+        let local = store.this_host().unwrap();
+
+        let renamed = store
+            .host_edit(&owner(), &local.id, local.rev, rename("work-mac"))
+            .unwrap();
+        assert_eq!(kinds(&store, &renamed.events), ["host.edited"]);
+        assert_eq!(renamed.value.label, "work-mac");
+        let payload: String = store
+            .conn()
+            .query_row(
+                "SELECT payload FROM events WHERE seq = ?1",
+                [renamed.events[0]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(payload.contains(r#""label":"work-mac""#), "{payload}");
+        let local = renamed.value;
+
+        let bad = store
+            .host_edit(&owner(), &local.id, local.rev, rename("work mac"))
+            .unwrap_err();
+        assert_eq!(bad.code(), "usage");
+
+        let paired = store
+            .peer_pair(&owner(), pairing("host-b", PEER_HOST))
+            .unwrap()
+            .value;
+        let taken = refused(store.host_edit(&owner(), &local.id, local.rev, rename("host-b")));
+        assert!(taken.contains("label host-b is taken"), "{taken}");
+        let remote = refused(store.host_edit(&owner(), &paired.id, paired.rev, rename("host-z")));
+        assert!(remote.contains("remote host keeps"), "{remote}");
+        let under = refused(store.host_edit(&owner(), &local.id, local.rev, rename("host-a")));
+        assert!(under.contains("unpair first: host-b knows"), "{under}");
+
+        // The same label again changes nothing, paired or not.
+        assert!(
+            store
+                .host_edit(&owner(), &local.id, local.rev, rename("work-mac"))
+                .unwrap()
+                .events
+                .is_empty()
+        );
+        store.peer_remove(&owner(), "host-b").unwrap();
+        let after = store
+            .host_edit(&owner(), &local.id, local.rev, rename("host-a"))
+            .unwrap();
+        assert_eq!(after.value.label, "host-a");
+    }
+
     #[test]
     fn pair_marks_a_herdr_machine_and_remove_leaves_it() {
         let mut store = store();

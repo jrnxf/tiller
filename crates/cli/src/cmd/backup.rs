@@ -63,7 +63,7 @@ pub fn backup(app: &App) -> Done {
 pub fn export(app: &App, args: ExportArgs) -> Done {
     app.require_owner("tiller export")?;
     let store = app.read()?;
-    let manifest = backup::export_jsonl(store.conn(), &args.jsonl, Timestamp::now())?;
+    let manifest = backup::export_jsonl(store.conn(), &paths(app), &args.jsonl, Timestamp::now())?;
     Ok(Outcome::read(manifest)
         .with_help("the export holds work data: keep it on this host and out of git"))
 }

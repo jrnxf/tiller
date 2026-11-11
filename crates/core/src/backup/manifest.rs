@@ -21,6 +21,21 @@ pub struct Manifest {
     /// When the next night's backup is due; `None` before the first one.
     #[serde(default)]
     pub next_night: Option<Timestamp>,
+    /// Every JSONL export taken from this home, oldest first. An export
+    /// lives in a directory the owner names, so this is the home's only
+    /// record of it: `host.edit` keeps the boundary an export records
+    /// (`memory.md` section 8).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exports: Vec<ExportRecord>,
+}
+
+/// One `tiller export --jsonl`, as the backups manifest records it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExportRecord {
+    pub host_id: Option<String>,
+    pub boundary: Option<String>,
+    pub max_seq: i64,
+    pub at: Timestamp,
 }
 
 /// One verified copy (`recovery.md` R10: file, size, sha256, schema version,
@@ -85,6 +100,18 @@ impl Manifest {
         let mut text = serde_json::to_string_pretty(self)?;
         text.push('\n');
         write_synced(&path, text.as_bytes())
+    }
+
+    /// Whether a backup, a pre-migration copy or an export ever recorded
+    /// this home's boundary, so a restore or an import would bring it back.
+    pub fn records_boundary(&self) -> Option<&'static str> {
+        if !self.entries.is_empty() {
+            Some("a backup")
+        } else if !self.exports.is_empty() {
+            Some("an export")
+        } else {
+            None
+        }
     }
 
     /// Entries retention has not superseded, newest first.

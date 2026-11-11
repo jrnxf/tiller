@@ -583,6 +583,30 @@ export interface ProjectGrants {
   grants: GrantRow[];
 }
 
+export type Boundary = "personal" | "work";
+
+// GET /api/v1/host: the fields `tiller host edit` sets on this host, what it
+// holds and has free now, and the `rev` an edit is sent against.
+export interface HostFields {
+  id: string;
+  label: string;
+  boundary: Boundary | null;
+  // What already records the boundary, so it stays: `memory`, `a backup` or
+  // `an export`. Null while the owner may still change it.
+  boundary_recorded_by: string | null;
+  lane_capacity: number | null;
+  // No new agent starts while free RAM or disk is under its floor; null for
+  // no floor.
+  ram_floor_mb: number | null;
+  disk_floor_mb: number | null;
+  // Lanes held now, one per agent a spawn reserved.
+  lanes_busy: number;
+  // Null when the host cannot read it.
+  ram_free_mb: number | null;
+  disk_free_mb: number | null;
+  rev: number;
+}
+
 // `GET /api/v1/projects/checkout`: what Add project would do with a local
 // checkout. Either `problem` is set and the rest is null, or the reverse.
 export interface CheckoutCheck {

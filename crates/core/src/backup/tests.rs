@@ -8,7 +8,7 @@ use crate::domain::*;
 use crate::state::asks::{NewAsk, Resolution};
 use crate::state::attention::NewAttention;
 use crate::state::cards::NewCard;
-use crate::state::projects::{Init, NewProject};
+use crate::state::projects::{HostEdit, Init, NewProject, NewRemoteHost};
 use crate::state::runs::NewOrchestrator;
 use crate::state::{get, list};
 use crate::store::{Actor, Ctx, Store};
@@ -496,17 +496,20 @@ fn export_then_import_reproduces_every_row() {
     open_decision(&mut store, &card.display_id, "Which way?");
     let dir = tempfile::tempdir().unwrap();
     let export = dir.path().join("export");
-    let first = export_jsonl(store.conn(), &export, Timestamp::now()).unwrap();
+    let first = export_jsonl(store.conn(), &host.paths, &export, Timestamp::now()).unwrap();
     assert_eq!(first.boundary.as_deref(), Some("work"));
     let events = first.tables.iter().find(|t| t.name == "events").unwrap();
     assert!(events.rows > 0);
     assert_eq!(
-        export_jsonl(store.conn(), &export, Timestamp::now())
+        export_jsonl(store.conn(), &host.paths, &export, Timestamp::now())
             .unwrap_err()
             .code(),
         "refused",
         "an export never writes into a used directory"
     );
+    let recorded = Manifest::load(paths).unwrap().exports;
+    assert_eq!(recorded.len(), 1, "the refused export is not recorded");
+    assert_eq!(recorded[0].boundary.as_deref(), Some("work"));
 
     let target = self::host();
     let imported = import_jsonl(&export, &target.paths, Boundary::Work).unwrap();
@@ -518,7 +521,13 @@ fn export_then_import_reproduces_every_row() {
     assert_eq!(integrity(&target.paths.db), "ok");
 
     let reopened = Store::open(&target.paths.db).unwrap();
-    let again = export_jsonl(reopened.conn(), &dir.path().join("again"), Timestamp::now()).unwrap();
+    let again = export_jsonl(
+        reopened.conn(),
+        &target.paths,
+        &dir.path().join("again"),
+        Timestamp::now(),
+    )
+    .unwrap();
     assert_eq!(exported_hashes(&again), exported_hashes(&first));
     assert_eq!(again.max_seq, first.max_seq);
     // The imported database keeps working: new events continue the seq.
@@ -538,7 +547,7 @@ fn import_refuses_a_tampered_file_another_boundary_and_an_existing_database() {
     setup(&mut store, "test-host", Boundary::Personal);
     let dir = tempfile::tempdir().unwrap();
     let export = dir.path().join("export");
-    export_jsonl(store.conn(), &export, Timestamp::now()).unwrap();
+    export_jsonl(store.conn(), &host.paths, &export, Timestamp::now()).unwrap();
 
     let target = self::host();
     let error = import_jsonl(&export, &target.paths, Boundary::Work).unwrap_err();
@@ -568,7 +577,7 @@ fn import_refuses_rows_whose_foreign_keys_do_not_hold() {
         .unwrap();
     let dir = tempfile::tempdir().unwrap();
     let export = dir.path().join("export");
-    export_jsonl(store.conn(), &export, Timestamp::now()).unwrap();
+    export_jsonl(store.conn(), &host.paths, &export, Timestamp::now()).unwrap();
 
     // Drop every project but keep the manifest consistent with the files.
     let projects = export.join("projects.jsonl");
@@ -801,7 +810,7 @@ fn backups_and_exports_are_owner_only() {
     nightly(&mut store, paths, at("2026-11-02T03:00:00Z")).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let export = dir.path().join("export");
-    export_jsonl(store.conn(), &export, Timestamp::now()).unwrap();
+    export_jsonl(store.conn(), &host.paths, &export, Timestamp::now()).unwrap();
     for dir in [&paths.backups, &export] {
         let mode = fs::metadata(dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700, "{}", dir.display());
@@ -892,4 +901,105 @@ fn concurrent_first_open_of_an_old_database_succeeds_in_both() {
             .collect();
         assert_eq!(leftovers, Vec::<String>::new(), "trial {trial}");
     }
+}
+
+/// `host.edit --boundary`: allowed while nothing records the boundary,
+/// refused once memory, a backup or an export does (`memory.md` section 8).
+#[test]
+fn a_boundary_changes_only_while_nothing_records_it() {
+    let to = |boundary: Boundary| HostEdit {
+        boundary: Some(boundary),
+        ..HostEdit::default()
+    };
+    let boundary = |store: &Store| crate::state::projects::meta(store.conn(), "boundary").unwrap();
+    let edit = |store: &mut Store, b: Boundary| {
+        let host = store.this_host().unwrap();
+        store.host_edit(&owner(), &host.id, host.rev, to(b))
+    };
+
+    // Unused: the change writes meta.boundary and one host.edited event.
+    let host = host();
+    let mut store = Store::open(&host.paths.db).unwrap();
+    setup(&mut store, "test-host", Boundary::Personal);
+    let changed = edit(&mut store, Boundary::Work).unwrap();
+    assert_eq!(boundary(&store).as_deref(), Some("work"));
+    assert_eq!(changed.events.len(), 1);
+    let payload: String = store
+        .conn()
+        .query_row(
+            "SELECT payload FROM events WHERE seq = ?1",
+            [changed.events[0]],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(payload.contains(r#""boundary":"work""#), "{payload}");
+    assert!(
+        edit(&mut store, Boundary::Work).unwrap().events.is_empty(),
+        "the same boundary writes nothing"
+    );
+
+    // A remote host has no boundary here.
+    let remote = store
+        .host_add(
+            &owner(),
+            NewRemoteHost {
+                label: "host-b".into(),
+                herdr_machine: "host-b".into(),
+            },
+        )
+        .unwrap()
+        .value;
+    let error = store
+        .host_edit(&owner(), &remote.id, remote.rev, to(Boundary::Personal))
+        .unwrap_err();
+    assert!(error.to_string().contains("remote host keeps"), "{error}");
+
+    // An export records it: refused, and nothing changes.
+    let dir = tempfile::tempdir().unwrap();
+    let export = dir.path().join("export");
+    export_jsonl(store.conn(), &host.paths, &export, Timestamp::now()).unwrap();
+    let error = edit(&mut store, Boundary::Personal).unwrap_err();
+    assert_eq!(error.code(), "refused");
+    assert!(
+        error
+            .to_string()
+            .contains("an export already records the work boundary"),
+        "{error}"
+    );
+    assert_eq!(boundary(&store).as_deref(), Some("work"));
+
+    // A backup records it.
+    let other = self::host();
+    let mut store = Store::open(&other.paths.db).unwrap();
+    setup(&mut store, "test-host", Boundary::Personal);
+    backup(store.conn(), &other.paths, Timestamp::now()).unwrap();
+    let error = edit(&mut store, Boundary::Work).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("a backup already records the personal boundary"),
+        "{error}"
+    );
+
+    // A memory row records it.
+    let third = self::host();
+    let mut store = Store::open(&third.paths.db).unwrap();
+    setup(&mut store, "test-host", Boundary::Personal);
+    store
+        .conn()
+        .execute_batch(
+            "INSERT INTO memory_sources (id, project_id, boundary, kind, loaded_path, canonical_repo,
+                                         canonical_path, apply_method, load_mode, added_at)
+             VALUES ('src', 'alpha', 'personal', 'tiller_doc', 'alpha.md', '/home/user/memory',
+                     'alpha.md', 'tiller_commit', 'rendered', '2026-11-01T00:00:00.000Z');",
+        )
+        .unwrap();
+    let error = edit(&mut store, Boundary::Work).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("memory already records the personal boundary"),
+        "{error}"
+    );
+    assert_eq!(boundary(&store).as_deref(), Some("personal"));
 }

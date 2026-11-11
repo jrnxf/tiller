@@ -12,6 +12,7 @@ import type {
   DaemonHealth,
   DoctorReport,
   HostConfig,
+  HostFields,
   MachinesResponse,
   MemoryEvalPlan,
   MemoryResponse,
@@ -155,6 +156,13 @@ export const healthQuery = () => readQuery<DaemonHealth>(healthPath);
 const doctorPath: QueryPath = "/api/v1/doctor";
 export const doctorQuery = () =>
   queryOptions({ ...readQuery<DoctorReport>(doctorPath), staleTime: 0 });
+
+// The fields `tiller host edit` sets on this host, and what it holds and has
+// free now. Read fresh each time its card opens, so a save goes against the
+// current `rev`.
+export const hostFieldsPath: QueryPath = "/api/v1/host";
+export const hostFieldsQuery = () =>
+  queryOptions({ ...readQuery<HostFields>(hostFieldsPath), staleTime: 0 });
 
 export const signalsPath: QueryPath = "/api/v1/signals";
 export const signalsQuery = () => readQuery<SignalsResponse>(signalsPath);

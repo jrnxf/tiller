@@ -175,7 +175,7 @@ pub struct ProjectEditArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum HostCmd {
-    /// Edit this host's capacity, floors and bug project against the rev you read
+    /// Edit this host's label, capacity, floors, bug project and boundary against the rev you read
     Edit(HostEditArgs),
 }
 
@@ -184,21 +184,33 @@ pub struct HostEditArgs {
     /// The rev you read; a stale rev is a conflict
     #[arg(long)]
     pub rev: i64,
+    /// This host's new label, such as host-a; refused while a peer is paired
+    #[arg(long)]
+    pub label: Option<String>,
     /// How many runs may be active at once on this host
     #[arg(long)]
     pub lane_capacity: Option<i64>,
     /// Free RAM floor in MB; `tiller spawn` refuses to start a run below it
-    #[arg(long)]
+    #[arg(long, conflicts_with = "no_ram_floor")]
     pub ram_floor_mb: Option<i64>,
-    /// Free disk floor in MB; `tiller spawn` refuses to start a run below it
+    /// Keep no RAM floor
     #[arg(long)]
+    pub no_ram_floor: bool,
+    /// Free disk floor in MB; `tiller spawn` refuses to start a run below it
+    #[arg(long, conflicts_with = "no_disk_floor")]
     pub disk_floor_mb: Option<i64>,
+    /// Keep no disk floor
+    #[arg(long)]
+    pub no_disk_floor: bool,
     /// The open project `tiller bug file` files Tiller bugs in
     #[arg(long, conflicts_with = "no_bug_project")]
     pub bug_project: Option<String>,
     /// File Tiller bugs in fleet again, where they wait for the owner
     #[arg(long)]
     pub no_bug_project: bool,
+    /// personal or work: this host's data boundary; refused once memory, a backup or an export records it
+    #[arg(long)]
+    pub boundary: Option<Boundary>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -556,14 +568,24 @@ pub fn host(app: &App, cmd: HostCmd) -> Done {
         .find(|host| host.kind == HostKind::Local)
         .ok_or_else(|| Failure::refused("state.db is not initialized; run tiller init"))?;
     let edit = HostEdit {
+        label: args.label,
         lane_capacity: args.lane_capacity,
-        ram_floor_mb: args.ram_floor_mb.map(Some),
-        disk_floor_mb: args.disk_floor_mb.map(Some),
+        ram_floor_mb: if args.no_ram_floor {
+            Some(None)
+        } else {
+            args.ram_floor_mb.map(Some)
+        },
+        disk_floor_mb: if args.no_disk_floor {
+            Some(None)
+        } else {
+            args.disk_floor_mb.map(Some)
+        },
         bug_project_id: if args.no_bug_project {
             Some(None)
         } else {
             args.bug_project.map(Some)
         },
+        boundary: args.boundary,
     };
     Ok(Outcome::applied(store.host_edit(
         &app.ctx(),

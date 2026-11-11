@@ -28,6 +28,7 @@ import { HostCard } from "./host-card";
 import { Fact } from "./fact";
 import { HostChecks } from "./host-checks";
 import { HostConfigSections } from "./host-config-sections";
+import { HostEdit } from "./host-edit";
 import { SettingField } from "./setting-field";
 import "./settings.css";
 
@@ -135,6 +136,7 @@ function HostRow({
   board,
   health,
   owner,
+  peers,
   attention,
   open,
   onToggle,
@@ -143,6 +145,8 @@ function HostRow({
   board: { label: string; version: string };
   health: DaemonHealth;
   owner: boolean;
+  // The paired peers' labels: each knows this host by its label.
+  peers: string[];
   attention: { tone: Tone; text: string } | null;
   open: boolean;
   onToggle: () => void;
@@ -235,6 +239,7 @@ function HostRow({
                 health={health}
                 owner={owner}
               />
+              {local ? <HostEdit owner={owner} peers={peers} /> : null}
             </HostCard>
           </td>
         </tr>
@@ -299,6 +304,8 @@ function Hosts({
   sorted.sort((a, b) => a.label.localeCompare(b.label));
   // Unknown until the hosts list is read.
   const alone = machines?.every((machine) => machine.kind === "local") ?? false;
+  // The paired peers, by label, as `sorted` holds them.
+  const peers = sorted.filter((machine) => machine.peer_scope).map((machine) => machine.label);
   return (
     <section className="set-sec" aria-label="Hosts" data-testid="hosts">
       <div className="set-sec-h">
@@ -348,6 +355,7 @@ function Hosts({
                 board={board}
                 health={health}
                 owner={owner}
+                peers={peers}
                 attention={machine.kind === "local" ? attention : null}
                 open={opened.has(machine.id)}
                 onToggle={() => toggle(machine.id)}

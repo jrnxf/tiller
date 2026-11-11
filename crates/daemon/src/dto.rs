@@ -1604,6 +1604,76 @@ pub struct PickBugProject {
     pub rev: i64,
 }
 
+/// `GET /api/v1/host`: the fields `tiller host edit` sets on this host, what
+/// it runs and has free now, and the `rev` an edit is sent against.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct HostFields {
+    pub id: String,
+    pub label: String,
+    /// `personal` or `work`.
+    pub boundary: Option<String>,
+    /// What already records the boundary, so it stays: `memory`, `a backup`
+    /// or `an export`. Null while the owner may still change it.
+    pub boundary_recorded_by: Option<String>,
+    /// How many agents may run at once.
+    pub lane_capacity: Option<i64>,
+    /// No new agent starts while free RAM is under it; null for no floor.
+    pub ram_floor_mb: Option<i64>,
+    /// No new agent starts while free disk is under it; null for no floor.
+    pub disk_floor_mb: Option<i64>,
+    /// Lanes held now: one per agent a spawn reserved, until it ends. A
+    /// new agent starts only while this is under `lane_capacity`.
+    pub lanes_busy: i64,
+    /// Free RAM now; null when it cannot be read.
+    pub ram_free_mb: Option<i64>,
+    /// Free disk under the Tiller home now; null when it cannot be read.
+    pub disk_free_mb: Option<i64>,
+    pub rev: i64,
+}
+
+/// A field that may be absent, null or a value: `Some(None)` is a null the
+/// caller sent, which clears the field.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+/// `PATCH /api/v1/host`: edit this host's label, capacity, floors or
+/// boundary against its `rev`, as `tiller host edit` does. Local to this
+/// host; it is not forwarded to a peer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EditHost {
+    pub idempotency_key: String,
+    /// A paired peer's label. Refused: a host edit is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// This host's `rev`, from `GET /api/v1/host`.
+    pub rev: i64,
+    /// A word: a letter or digit, then letters, digits, `_` or `-`. Refused
+    /// while a peer is paired, since each peer knows this host by it.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// At least 1.
+    #[serde(default)]
+    pub lane_capacity: Option<i64>,
+    /// MB; null clears the floor.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(value_type = Option<i64>)]
+    pub ram_floor_mb: Option<Option<i64>>,
+    /// MB; null clears the floor.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(value_type = Option<i64>)]
+    pub disk_floor_mb: Option<Option<i64>>,
+    /// `personal` or `work`. Refused once memory, a backup or an export
+    /// records the boundary.
+    #[serde(default)]
+    pub boundary: Option<String>,
+}
+
 /// The owner's way past a refused delete.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct DeleteUnblock {

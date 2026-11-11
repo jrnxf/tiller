@@ -8,6 +8,7 @@ import type {
   BoardResponse,
   CardDep,
   CardDetail,
+  HostFields,
   InterventionKind,
   ProjectDeletePreview,
   ProjectFields,
@@ -346,7 +347,7 @@ function editProject(id: string, body: Record<string, unknown>): MutationResult 
 // deleted or archived project's own previews are gone (a 404).
 export function withoutDeleted(path: string, body: unknown, scenario: Scenario): unknown {
   const pathname = new URL(path, "http://localhost").pathname;
-  const triaged = withTriage(pathname, body);
+  const triaged = withTriage(pathname, body, scenario);
   if (triaged !== body) return triaged;
   const depended = withDeps(pathname, body, scenario);
   if (depended !== body) return depended;
@@ -355,6 +356,7 @@ export function withoutDeleted(path: string, body: unknown, scenario: Scenario):
   }
   if (pathname === "/api/v1/start-settings") return startSettingsFor(scenario);
   if (pathname === "/api/v1/host-config") return hostConfigFor();
+  if (pathname === "/api/v1/host") return hostFieldsFor(scenario);
   const setup = /^\/api\/v1\/projects\/([^/]+)\/setup$/.exec(pathname);
   if (setup?.[1] && (body !== undefined || !gone(setup[1]))) {
     const saved = edited.get(setup[1]);
@@ -583,13 +585,25 @@ function forwarded(
   return null;
 }
 
-// Tiller bug triage on the stand-in server: the cards a Move made, the cards
-// it or "Close as not a bug" closed, and this host's bug project once the
-// owner picks one. Every card the fixtures know is in the federated scenario.
+// Tiller bug triage on the stand-in server: the cards a Move made, and the
+// cards it or "Close as not a bug" closed. Every card the fixtures know is in
+// the federated scenario.
 const madeCards = new Map<string, BoardRow>();
 const madeBodies = new Map<string, string>();
 const closedCards = new Map<string, BoardRow>();
-let pickedBugProject: { project: string | null; rev: number } | null = null;
+
+// This host's row as the owner changed it: the bug project Triage picks and
+// the fields Settings > Hosts edits, under the one host `rev` both bump.
+interface HostOverlay {
+  rev: number;
+  bug_project?: string | null;
+  label?: string;
+  lane_capacity?: number;
+  ram_floor_mb?: number | null;
+  disk_floor_mb?: number | null;
+  boundary?: "personal" | "work";
+}
+let hostOverlay: HostOverlay | null = null;
 // The first Move that closes a host-d card is sent and never confirmed, so the
 // board shows the partial state; the retry, with the same key, closes it.
 const unsureCloses = new Set<string>();
@@ -603,9 +617,154 @@ function knownCard(id: string): BoardRow | undefined {
 function localMachine(scenario: Scenario): Machine | undefined {
   const { machines } = fixtureResponses(scenario)[machinesPath] as { machines: Machine[] };
   const local = machines.find((machine) => machine.kind === "local");
-  if (!local || !pickedBugProject) return local;
-  const { project, rev } = pickedBugProject;
-  return { ...local, rev, ...(project ? { bug_project: project } : { bug_project: null }) };
+  if (!local || !hostOverlay) return local;
+  const overlay = hostOverlay;
+  const capacity = overlay.lane_capacity ?? local.capacity;
+  const busy = lanesBusy(local);
+  return {
+    ...local,
+    rev: overlay.rev,
+    label: overlay.label ?? local.label,
+    capacity,
+    free_slots: capacity === null ? local.free_slots : capacity - busy,
+    ...(overlay.bug_project === undefined ? {} : { bug_project: overlay.bug_project }),
+  };
+}
+
+// The lanes this host's agents hold: its capacity less its free slots.
+function lanesBusy(machine: Machine): number {
+  return machine.capacity === null || machine.free_slots === null
+    ? 0
+    : machine.capacity - machine.free_slots;
+}
+
+// What the stand-in host has free, as a host reads it.
+const FIXTURE_RAM_FREE_MB = 21 * 1024 + 310;
+const FIXTURE_DISK_FREE_MB = 140 * 1024 + 520;
+
+// `GET /api/v1/host`. The default host already keeps memory, so its boundary
+// stays; the empty one has nothing that records it yet.
+function hostFieldsFor(scenario: Scenario): HostFields | undefined {
+  const machine = localMachine(scenario);
+  if (!machine) return undefined;
+  const overlay = hostOverlay ?? { rev: machine.rev };
+  return {
+    id: machine.id,
+    label: machine.label,
+    boundary: overlay.boundary ?? "personal",
+    boundary_recorded_by: scenario === "empty" ? null : "memory",
+    lane_capacity: machine.capacity,
+    ram_floor_mb: overlay.ram_floor_mb === undefined ? 8 * 1024 : overlay.ram_floor_mb,
+    disk_floor_mb: overlay.disk_floor_mb === undefined ? 20 * 1024 : overlay.disk_floor_mb,
+    lanes_busy: lanesBusy(machine),
+    ram_free_mb: FIXTURE_RAM_FREE_MB,
+    disk_free_mb: FIXTURE_DISK_FREE_MB,
+    rev: machine.rev,
+  };
+}
+
+// The `host.edited` event a save sends, with the Machines row it leaves.
+function hostEdited(scenario: Scenario, id: string): FollowUp {
+  const next = localMachine(scenario);
+  return {
+    delayMs: 100,
+    event: {
+      kind: "host.edited",
+      txn: "host.edit",
+      entity: "host",
+      entity_id: id,
+      rev_after: next?.rev ?? null,
+      card_id: null,
+      entity_state: next,
+    },
+  };
+}
+
+const LABEL = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
+// A floor in the body: absent keeps it, null clears it, else whole MB.
+function floorOf(value: unknown): number | null | undefined | false {
+  if (value === undefined || value === null) return value;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : false;
+}
+
+// `PATCH /api/v1/host`: this host's label, lanes, floors and boundary,
+// checked against its `rev` and refused as the daemon refuses them.
+function editHost(body: Record<string, unknown>, scenario: Scenario): MutationResult {
+  const fields = hostFieldsFor(scenario);
+  if (!fields) return refusal(400, "usage", "state.db is not initialized; run tiller init");
+  if (body.rev !== fields.rev) {
+    return {
+      reply: refused(
+        409,
+        "stale",
+        `host ${fields.label} is at rev ${fields.rev}, you changed rev ${String(body.rev)}`,
+        { rev: fields.rev },
+      ),
+      followUps: [],
+    };
+  }
+  const label = typeof body.label === "string" ? body.label : undefined;
+  if (label !== undefined && label !== fields.label) {
+    if (!LABEL.test(label)) {
+      return refusal(
+        400,
+        "usage",
+        `a peer label is a letter or digit, then letters, digits, '_' or '-' (at most 64): "${label}"`,
+      );
+    }
+    const { machines } = fixtureResponses(scenario)[machinesPath] as { machines: Machine[] };
+    const paired = machines.filter((machine) => machine.peer_scope).map((machine) => machine.label);
+    paired.sort();
+    if (paired.length > 0) {
+      return refusal(
+        422,
+        "refused",
+        `unpair first: ${paired.join(", ")} ${paired.length === 1 ? "knows" : "know"} this host by its label; remove each with tiller peer remove, rename, then pair again`,
+      );
+    }
+  }
+  const lanes = body.lane_capacity;
+  if (
+    lanes !== undefined &&
+    !(typeof lanes === "number" && Number.isInteger(lanes) && lanes >= 1)
+  ) {
+    return refusal(400, "usage", "lane capacity must be at least 1");
+  }
+  const ram = floorOf(body.ram_floor_mb);
+  const disk = floorOf(body.disk_floor_mb);
+  if (ram === false || disk === false) {
+    return refusal(400, "usage", "a floor is a whole number of MB");
+  }
+  const boundary =
+    body.boundary === "personal" || body.boundary === "work" ? body.boundary : undefined;
+  if (body.boundary !== undefined && boundary === undefined) {
+    return refusal(400, "usage", `unknown boundary ${String(body.boundary)}`);
+  }
+  if (boundary !== undefined && boundary !== fields.boundary && fields.boundary_recorded_by) {
+    return refusal(
+      422,
+      "refused",
+      `${fields.boundary_recorded_by} already records the ${fields.boundary} boundary; it changes only before any memory, backup or export`,
+    );
+  }
+  hostOverlay = {
+    ...hostOverlay,
+    rev: fields.rev + 1,
+    ...(label === undefined ? {} : { label }),
+    ...(typeof lanes === "number" ? { lane_capacity: lanes } : {}),
+    ...(ram === undefined ? {} : { ram_floor_mb: ram }),
+    ...(disk === undefined ? {} : { disk_floor_mb: disk }),
+    ...(boundary === undefined ? {} : { boundary }),
+  };
+  const host = {
+    id: fields.id,
+    label: label ?? fields.label,
+    kind: "local",
+    lane_capacity: typeof lanes === "number" ? lanes : fields.lane_capacity,
+    rev: fields.rev + 1,
+  };
+  return { reply: recorded(host, null, null), followUps: [hostEdited(scenario, fields.id)] };
 }
 
 function cardEvent(kind: string, txn: string, row: BoardRow): FollowUp {
@@ -627,18 +786,18 @@ function cardEvent(kind: string, txn: string, row: BoardRow): FollowUp {
 // The reads a triage changed: the board gains the moved cards and shows the
 // closed ones in Done, a card read follows its row, and the local Machines
 // row carries the bug project the owner picked.
-function withTriage(pathname: string, body: unknown): unknown {
+function withTriage(pathname: string, body: unknown, scenario: Scenario): unknown {
   if (pathname === boardPath().split("?")[0] && body && madeCards.size + closedCards.size > 0) {
     const board = body as BoardResponse;
     const rows = board.rows.map((row) => closedCards.get(row.id) ?? row);
     const fresh = [...madeCards.values()].filter((row) => !rows.some((r) => r.id === row.id));
     return { ...board, rows: [...rows, ...fresh.map((row) => closedCards.get(row.id) ?? row)] };
   }
-  if (pathname === machinesPath && body && pickedBugProject) {
+  if (pathname === machinesPath && body && hostOverlay) {
     const { machines } = body as { machines: Machine[] };
     return {
       machines: machines.map((machine) =>
-        machine.kind === "local" ? (localMachine("federated") ?? machine) : machine,
+        machine.kind === "local" ? (localMachine(scenario) ?? machine) : machine,
       ),
     };
   }
@@ -910,8 +1069,7 @@ function pickBugProject(body: Record<string, unknown>, scenario: Scenario): Muta
   if (project && !projects.some((p) => p.id === project && !p.host && !gone(p.id))) {
     return refusal(404, "not_found", `no project ${project}`);
   }
-  pickedBugProject = { project, rev: machine.rev + 1 };
-  const next = localMachine(scenario);
+  hostOverlay = { ...hostOverlay, rev: machine.rev + 1, bug_project: project };
   // Like the daemon, the reply is the host record, not its Machines row.
   const host = {
     id: machine.id,
@@ -919,23 +1077,7 @@ function pickBugProject(body: Record<string, unknown>, scenario: Scenario): Muta
     bug_project_id: project,
     rev: machine.rev + 1,
   };
-  return {
-    reply: recorded(host, null, null),
-    followUps: [
-      {
-        delayMs: 100,
-        event: {
-          kind: "host.edited",
-          txn: "host.edit",
-          entity: "host",
-          entity_id: machine.id,
-          rev_after: next?.rev ?? null,
-          card_id: null,
-          entity_state: next,
-        },
-      },
-    ],
-  };
+  return { reply: recorded(host, null, null), followUps: [hostEdited(scenario, machine.id)] };
 }
 
 // Starting, editing or ending away mode in the fixtures only records: the
@@ -955,6 +1097,7 @@ function handle(
   const peer = forwarded(method, path, body);
   if (peer) return peer;
   if (method === "POST" && path === "/api/v1/bug-project") return pickBugProject(body, scenario);
+  if (method === "PATCH" && path === "/api/v1/host") return editHost(body, scenario);
   if (method === "POST" && path === "/api/v1/cards" && body.category === "tiller-bug") {
     return createBug(body);
   }

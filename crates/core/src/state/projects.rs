@@ -41,11 +41,17 @@ pub struct NewRemoteHost {
 /// The owner-editable host fields; `None` leaves a field as it is.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HostEdit {
+    /// The local host's new label; a remote host keeps the name it was added
+    /// under.
+    pub label: Option<String>,
     pub lane_capacity: Option<i64>,
     pub ram_floor_mb: Option<Option<i64>>,
     pub disk_floor_mb: Option<Option<i64>>,
     /// The project `tiller bug file` routes to; `Some(None)` clears it.
     pub bug_project_id: Option<Option<String>>,
+    /// The local host's new boundary (`meta.boundary`), only while nothing
+    /// records the old one (`memory.md` section 8).
+    pub boundary: Option<Boundary>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -98,6 +104,96 @@ pub struct RetirePreview {
     /// The agents still running for the project. Retiring stops no agent:
     /// the owner stops them first, or keeps them knowingly.
     pub agents: Vec<LiveAgent>,
+}
+
+/// Whether `host` may take `label`: only the local host is renamed here, the
+/// label is no other host's, and no peer is paired. A peer checks the board
+/// host's label on every hello (`protocol.md` 10.2), so a rename under a
+/// pairing would break the link until the owner paired again.
+fn label_free(conn: &rusqlite::Connection, host: &Host, label: &str) -> Result<()> {
+    if host.kind == HostKind::Remote {
+        return Err(Error::refused(
+            "host",
+            &host.id,
+            "a remote host keeps the label it was added under",
+        ));
+    }
+    if find::<Host>(conn, "label = ?1 AND id != ?2", &[&label, &host.id])?.is_some() {
+        return Err(Error::refused(
+            "host",
+            &host.id,
+            format!("label {label} is taken"),
+        ));
+    }
+    let paired: Vec<String> = conn
+        .prepare("SELECT label FROM hosts WHERE peer_scope IS NOT NULL ORDER BY label")?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !paired.is_empty() {
+        return Err(Error::refused(
+            "host",
+            &host.id,
+            format!(
+                "unpair first: {} {} this host by its label; remove each with tiller peer remove, rename, then pair again",
+                paired.join(", "),
+                if paired.len() == 1 { "knows" } else { "know" },
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// What already records this host's boundary, if anything: a memory row
+/// stamped with it, or a backup or an export a restore or an import would
+/// check it against (`memory.md` section 8). Until one exists nothing has
+/// read the boundary, so the owner may still pick the one the host belongs
+/// to.
+fn boundary_record(
+    conn: &rusqlite::Connection,
+    home: Option<&std::path::Path>,
+) -> Result<Option<&'static str>> {
+    let stamped: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM memory_sources) OR EXISTS (SELECT 1 FROM evidence)
+             OR EXISTS (SELECT 1 FROM proposals)",
+        [],
+        |row| row.get(0),
+    )?;
+    if stamped {
+        return Ok(Some("memory"));
+    }
+    Ok(match home {
+        Some(home) => {
+            crate::backup::Manifest::load(&crate::backup::Paths::in_home(home))?.records_boundary()
+        }
+        None => None,
+    })
+}
+
+/// Refuses a boundary change on a remote host, or once anything records the
+/// boundary ([`boundary_record`]).
+fn boundary_unused(
+    conn: &rusqlite::Connection,
+    host: &Host,
+    home: Option<&std::path::Path>,
+    kept: &str,
+) -> Result<()> {
+    if host.kind == HostKind::Remote {
+        return Err(Error::refused(
+            "host",
+            &host.id,
+            "a remote host keeps the boundary set on that host",
+        ));
+    }
+    match boundary_record(conn, home)? {
+        Some(what) => Err(Error::refused(
+            "host",
+            &host.id,
+            format!(
+                "{what} already records the {kept} boundary; it changes only before any memory, backup or export"
+            ),
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Why a project that is not retired may not retire.
@@ -292,7 +388,21 @@ impl Store {
                     return Err(Error::refused(
                         "host",
                         &host.id,
-                        format!("state.db already belongs to host {}", host.label),
+                        format!(
+                            "state.db already belongs to host {}; tiller host edit --label renames it",
+                            host.label
+                        ),
+                    ));
+                }
+                // A replay never changes the boundary, so it must not
+                // answer as if it had (`memory.md` section 8).
+                if let Some(kept) = meta(tx.conn(), "boundary")?
+                    && kept != init.boundary.as_str()
+                {
+                    return Err(Error::refused(
+                        "host",
+                        &host.id,
+                        format!("state.db already keeps the {kept} boundary; tiller init does not change it"),
                     ));
                 }
                 return Ok(Initialized {
@@ -386,9 +496,19 @@ impl Store {
         })
     }
 
-    /// `host.edit`: capacity, resource floors and the bug project, against
-    /// `expected_rev`. The bug project must be an open project this host
-    /// owns, never `fleet`, which is where a bug goes without one.
+    /// What already records this host's boundary, so `host.edit` refuses to
+    /// change it: `memory`, `a backup` or `an export`; `None` while nothing
+    /// does.
+    pub fn boundary_recorded(&self) -> Result<Option<&'static str>> {
+        boundary_record(self.conn(), self.home())
+    }
+
+    /// `host.edit`: the label, capacity, resource floors, the bug project and
+    /// the boundary, against `expected_rev`. The bug project must be an open
+    /// project this host owns, never `fleet`, which is where a bug goes
+    /// without one. The label must be free, and it changes only while this
+    /// host has no paired peer: each peer knows its board host by that
+    /// label. The boundary changes only while nothing records it.
     pub fn host_edit(
         &mut self,
         ctx: &Ctx,
@@ -397,14 +517,27 @@ impl Store {
         edit: HostEdit,
     ) -> Result<Applied<Host>> {
         require_owner(&ctx.actor, "host.edit")?;
+        if let Some(label) = &edit.label {
+            // A word on the peer's command line, as `tiller peer add` checks.
+            super::peers::check_label(label)?;
+        }
         if let Some(n) = edit.lane_capacity {
             positive("lane capacity", n)?;
         }
         non_negative("ram floor", edit.ram_floor_mb.flatten())?;
         non_negative("disk floor", edit.disk_floor_mb.flatten())?;
+        let home = self.home().map(std::path::Path::to_path_buf);
         self.write(ctx, "host.edit", None, |tx| {
             let host: Host = get(tx.conn(), "host", host_id)?;
+            // The boundary is the local host's, kept in `meta`, not `hosts`.
+            let kept = match host.kind {
+                HostKind::Local => meta(tx.conn(), "boundary")?,
+                HostKind::Remote => None,
+            };
             let mut changed = serde_json::Map::new();
+            if let Some(label) = edit.label.as_ref().filter(|label| host.label != **label) {
+                changed.insert("label".into(), json!(label));
+            }
             if let Some(n) = edit.lane_capacity.filter(|n| host.lane_capacity != Some(*n)) {
                 changed.insert("lane_capacity".into(), json!(n));
             }
@@ -417,11 +550,16 @@ impl Store {
             if let Some(id) = edit.bug_project_id.as_ref().filter(|id| host.bug_project_id != **id) {
                 changed.insert("bug_project_id".into(), json!(id));
             }
+            if let Some(boundary) = edit.boundary.filter(|b| kept.as_deref() != Some(b.as_str())) {
+                changed.insert("boundary".into(), json!(boundary));
+            }
             let named = [
+                ("label", edit.label.is_some()),
                 ("lane_capacity", edit.lane_capacity.is_some()),
                 ("ram_floor_mb", edit.ram_floor_mb.is_some()),
                 ("disk_floor_mb", edit.disk_floor_mb.is_some()),
                 ("bug_project_id", edit.bug_project_id.is_some()),
+                ("boundary", edit.boundary.is_some()),
             ]
             .into_iter()
             .find_map(|(field, sent)| sent.then_some(field));
@@ -429,10 +567,19 @@ impl Store {
                 return Ok(host);
             };
             let first = changed.keys().next().map_or(named, String::as_str);
-            let current = serde_json::to_value(&host)?;
-            check_rev("host", &host.id, host.rev, expected_rev, Some((first, current[first].clone())))?;
+            let now = match first {
+                "boundary" => json!(kept),
+                field => serde_json::to_value(&host)?[field].clone(),
+            };
+            check_rev("host", &host.id, host.rev, expected_rev, Some((first, now)))?;
             if changed.is_empty() {
                 return Ok(host);
+            }
+            if let Some(label) = changed.get("label").and_then(Value::as_str) {
+                label_free(tx.conn(), &host, label)?;
+            }
+            if changed.contains_key("boundary") {
+                boundary_unused(tx.conn(), &host, home.as_deref(), kept.as_deref().unwrap_or("unset"))?;
             }
             if host.kind == HostKind::Remote && changed.contains_key("lane_capacity") {
                 return Err(Error::refused("host", &host.id, "a remote host has no lane capacity here"));
@@ -466,15 +613,23 @@ impl Store {
             }
             tx.conn().execute(
                 "UPDATE hosts SET lane_capacity = ?2, ram_floor_mb = ?3, disk_floor_mb = ?4,
-                     bug_project_id = ?5, rev = rev + 1 WHERE id = ?1",
+                     bug_project_id = ?5, label = ?6, rev = rev + 1 WHERE id = ?1",
                 params![
                     host.id,
                     edit.lane_capacity.or(host.lane_capacity),
                     edit.ram_floor_mb.unwrap_or(host.ram_floor_mb),
                     edit.disk_floor_mb.unwrap_or(host.disk_floor_mb),
                     edit.bug_project_id.clone().unwrap_or(host.bug_project_id.clone()),
+                    edit.label.as_ref().unwrap_or(&host.label),
                 ],
             )?;
+            if let Some(boundary) = changed.get("boundary").and(edit.boundary) {
+                tx.conn().execute(
+                    "INSERT INTO meta (key, value) VALUES ('boundary', ?1)
+                         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    params![boundary],
+                )?;
+            }
             tx.event(
                 NewEvent::new("host", &host.id, "host.edited")
                     .rev(host.rev + 1)

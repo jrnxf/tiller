@@ -31,6 +31,7 @@ import {
   awayBriefPath,
   CONTRIBUTIONS_PREFIX,
   fetchJson,
+  hostFieldsPath,
   machinesPath,
   projectFieldsPath,
   projectSetupPath,
@@ -257,6 +258,13 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
       break;
     case "host":
       if (state) writeMachine(queryClient, state as Machine);
+      // The host card's edit fields read this host's own row.
+      queryClient.invalidateQueries({
+        queryKey: queryKeyFor(hostFieldsPath),
+        refetchType: "active",
+      });
+      // A boundary edit moves what the host keys show.
+      refetchPaths(queryClient, hostConfigPath);
       break;
     case "quota":
       if (state) writeQuota(queryClient, state as QuotaWindow);
