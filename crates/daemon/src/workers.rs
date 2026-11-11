@@ -916,7 +916,7 @@ pub fn start(
     spawn(registry, Gated::new(home, quota), stop, &mut handles);
     spawn(registry, Gated::new(home, pages), stop, &mut handles);
     spawn(registry, Gated::new(home, backups), stop, &mut handles);
-    spawn(registry, memory, stop, &mut handles);
+    spawn(registry, Gated::new(home, memory), stop, &mut handles);
     Ok(handles)
 }
 
