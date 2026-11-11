@@ -383,7 +383,7 @@ With no target, it shows the switcher first.
   - `s` opens the switcher.
   - `n` and `p` go to the next and the previous agent.
   - `Ctrl-\` sends one `Ctrl-\` to the agent.
-  - `?` shows a help screen over the pane that lists every prefix key. It sends nothing to the pane. Any key closes it and asks for a repaint.
+  - `?` shows a help screen over the pane that lists every prefix key. It sends nothing to the pane. Any key closes it and asks for a repaint. That key is swallowed and never reaches the pane.
   - Any other key closes the prefix and does nothing.
   - `[attach] prefix` in `config.toml` can change the prefix key.
 - **The kitty keyboard.** When the agent pushed kitty keyboard flags, the owner's terminal sends `Ctrl-\` as `CSI 92;5u`, not as byte `0x1c`. `tiller attach` knows the pane's mode from the holder and reads both forms.
@@ -544,7 +544,7 @@ These drive `tiller attach` through a PTY harness in the test:
 - Raw mode is on during attach and off after detach.
 - Detach puts back every mode the agent had turned on.
 - The prefix works as byte `0x1c` and as `CSI 92;5u`. `Ctrl-\ Ctrl-\` sends one `0x1c`.
-- `Ctrl-\ ?` shows the help screen with every prefix key and sends nothing to the pane. The next key closes it, and the pane is repainted.
+- `Ctrl-\ ?` shows the help screen with every prefix key and sends nothing to the pane. The next key closes it, and the pane is repainted. That key is swallowed, and nothing reaches the pane.
 - Two clients get the same output, and the size follows the one that typed last.
 - `--read-only` sends nothing.
 - The switcher works with the daemon down.
