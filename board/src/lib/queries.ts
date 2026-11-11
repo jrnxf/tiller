@@ -26,6 +26,7 @@ import type {
   ProjectsResponse,
   QuotaResponse,
   RecapResponse,
+  RetrosResponse,
   RunDetail,
   SessionView,
   SignalsResponse,
@@ -286,6 +287,13 @@ export const runQuery = (runId: string, owner?: string) =>
 // one (protocol.md section 7.3). Memory is local, so there is no `host`.
 const memoryPath = (scope?: string): QueryPath => withParams("/api/v1/memory", { scope });
 export const memoryQuery = (scope?: string) => readQuery<MemoryResponse>(memoryPath(scope));
+
+// The full retros of the last 30 days and every unfinished one, for one
+// project or all (learning-loop.md section 4). Retros are local, so there is
+// no `host`.
+export const RETROS_PREFIX = "/api/v1/retros";
+export const retrosQuery = (project?: string) =>
+  readQuery<RetrosResponse>(withParams(RETROS_PREFIX, { project }));
 
 export const revisionQuery = (id: string) =>
   readQuery<MemoryRevision>(`/api/v1/memory/revisions/${id}`);

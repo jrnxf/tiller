@@ -330,13 +330,15 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
     case "eval_run":
     case "change_set":
     case "memory_repo":
+    case "retro":
       // The memory view joins the file at `HEAD` with its rows, open
       // proposals and their eval results, so any of them moving refetches
       // every memory read. `memory_repo` is an edit made in the repo
-      // outside the board: an editor's save, a pull or a commit by hand.
+      // outside the board: an editor's save, a pull or a commit by hand. A
+      // retro and the proposal it filed show in the Retros list too.
       queryClient.invalidateQueries({
         queryKey: API_KEY_PREFIX,
-        predicate: (query) => String(query.queryKey[1] ?? "").startsWith("/api/v1/memory"),
+        predicate: (query) => /^\/api\/v1\/(memory|retros)/.test(String(query.queryKey[1] ?? "")),
         refetchType: "active",
       });
       break;

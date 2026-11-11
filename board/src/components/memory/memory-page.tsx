@@ -32,6 +32,7 @@ import { EvalDialog, EvalRun } from "./holdout";
 import { ClockIcon, EditIcon, LinesIcon, PlusIcon, SparkIcon, TrashIcon } from "./icons";
 import { inlineDiff } from "./inline-diff";
 import { Inline, day, oneLine, plural, sentence, useMemoryRefresh, when } from "./parts";
+import { Retros } from "./retros";
 import "../shell/project-stage.css";
 import "./memory.css";
 import { useMachineRows, useNamedProjects } from "../board/peer-state";
@@ -1519,6 +1520,8 @@ function Doc({ data }: { data: MemoryResponse }) {
         refusalFor={ctl.refusalFor}
         onUndo={undo}
       />
+      {/* A project's retros feed its document; the shared one has none. */}
+      {shared ? null : <Retros project={doc.project_id} doc={docName(doc)} />}
       {evaluating ? <EvalDialog proposal={evaluating} onClose={() => setEvaluating(null)} /> : null}
       {removal && removing ? (
         <RemoveDialog

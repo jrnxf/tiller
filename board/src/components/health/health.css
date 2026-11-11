@@ -734,3 +734,79 @@
     flex-basis: 100%;
   }
 }
+
+/* ---------- health: the Learning panel (learning-loop.md section 4) ---------- */
+.ln-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+.ln-list li {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  gap: 2px 10px;
+  align-items: center;
+  padding: 10px 0;
+  border-top: 1px solid var(--line-1);
+}
+.ln-list li:first-child {
+  border-top: 0;
+}
+.ln-list .si {
+  grid-row: 1 / span 2;
+  display: inline-flex;
+  align-self: start;
+  margin-top: 2px;
+  color: var(--fg-3);
+}
+.ln-list .si svg {
+  width: 16px;
+  height: 16px;
+}
+.ln-list .si.bad {
+  color: var(--red-text);
+}
+.ln-list .si.ok {
+  color: var(--green-text);
+}
+.ln-list .si.acc {
+  color: var(--accent-text);
+}
+.ln-list .t {
+  grid-column: 2;
+  font-size: var(--fs-small);
+  font-weight: var(--w-medium);
+  color: var(--fg-1);
+}
+.ln-list .m {
+  grid-column: 2;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+  overflow-wrap: anywhere;
+}
+.ln-list .acts {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.ln-list .acts .r {
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+.ln-refusal {
+  grid-column: 2 / -1;
+}
+@media (max-width: 820px) {
+  .ln-list li {
+    grid-template-columns: 16px minmax(0, 1fr);
+  }
+  .ln-list .acts {
+    grid-column: 2;
+    grid-row: auto;
+    justify-self: end;
+    margin-top: 6px;
+  }
+}

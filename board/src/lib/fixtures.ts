@@ -42,6 +42,7 @@ import {
   workerActivity,
 } from "./fixtures-federated.ts";
 import { memoryResource } from "./fixtures-memory.ts";
+import { retrosResource, settleRetros } from "./fixtures-retros.ts";
 import { recapFor } from "./fixtures-recap.ts";
 import { signalsFor } from "./fixtures-signals.ts";
 import { isPeerRow } from "./peers.ts";
@@ -1701,8 +1702,10 @@ export function fixtureResource(
   if (url.pathname === "/api/v1/doctor") return doctorFor(served, now);
   if (url.pathname === "/api/v1/projects/checkout") return checkoutFor(url);
   if (url.pathname.startsWith("/api/v1/memory")) {
+    settleRetros(now);
     return memoryResource(url, quotaFor(served, now).windows, now);
   }
+  if (url.pathname === "/api/v1/retros") return retrosResource(url, now);
   // No project starts archived; the stand-in server adds the ones archived since.
   if (url.pathname === projectsPath && url.searchParams.has("retired")) return { projects: [] };
   return undefined;

@@ -1193,6 +1193,36 @@ export interface MemoryEvalPlan {
   refusal: string | null;
 }
 
+// One full retro, as Memory's Retros list and Health's Learning panel show it
+// (`GET /api/v1/retros`, learning-loop.md section 4).
+export interface RetroView {
+  id: string;
+  card_id: string;
+  // The card's display id, `alpha-14`.
+  card: string;
+  title: string;
+  project_id: string;
+  status: "running" | "unfinished" | "done" | "pending";
+  // `nothing`, `evidence`, `proposed` or `unfinished`, once done.
+  outcome: string | null;
+  // The learning it kept, or for an unfinished retro why it did not finish.
+  learning: string | null;
+  created_at: string;
+  curator_started_at: string | null;
+  // `owner`, `board` or `daemon`.
+  started_by: string | null;
+  finished_at: string | null;
+  proposal: { id: string; state: string; section: string | null } | null;
+  // Why Run again is refused now; absent when it would start.
+  run_refusal: string | null;
+}
+
+export interface RetrosResponse {
+  // The last 30 days and every unfinished one, newest first.
+  retros: RetroView[];
+  curator_timeout_minutes: number;
+}
+
 // A session that loaded a revision.
 interface MemoryLoad {
   session_id: string;

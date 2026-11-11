@@ -19,6 +19,7 @@ import type {
 import { awayBrief } from "./fixtures-away.ts";
 import { grantMutation, grantsFor } from "./fixtures-grants.ts";
 import { memoryMutation } from "./fixtures-memory.ts";
+import { RUN_MS, retroMutation } from "./fixtures-retros.ts";
 import {
   FIXTURE_HEAD_SHA,
   fixtureResource,
@@ -1332,6 +1333,26 @@ function handle(
           },
         },
       ],
+    };
+  }
+  const retro = retroMutation(method, path);
+  if (retro) {
+    if (!retro.ok) return refusal(retro.status, retro.code, retro.message);
+    const changed = (kind: string, delayMs: number) => ({
+      delayMs,
+      event: {
+        kind,
+        txn: kind === "retro.started" ? "retro.start" : "retro.finish",
+        entity: "retro",
+        entity_id: retro.data.id,
+        rev_after: null,
+        card_id: null,
+        entity_state: null,
+      },
+    });
+    return {
+      reply: recorded(retro.data, null, null),
+      followUps: [changed("retro.started", 100), changed("retro.finished", RUN_MS + 200)],
     };
   }
   // A holdout eval plans against the scenario's quota, as the daemon's does.

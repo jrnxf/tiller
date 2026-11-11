@@ -1117,3 +1117,23 @@ export function memoryMutation(
   if (reverse?.[1]) return undo(s, reverse[1], body);
   return null;
 }
+
+// A curator's proposal from a stand-in retro, filed as a suggestion on
+// `section` of `project`'s document. Answers its id, or `null` when the
+// document or section is not there.
+export function curatorSuggestion(
+  project: string,
+  card: string,
+  section: string,
+  text: string,
+  at: string,
+): string | null {
+  const s = current();
+  const target = s.docs
+    .find((doc) => doc.project_id === project)
+    ?.sections.find((each) => each.title === section);
+  if (!target) return null;
+  const sug = suggestion(s, "add", { text, by: "the curator", card, at });
+  target.suggestions.push(sug);
+  return sug.proposal_id;
+}
