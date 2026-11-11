@@ -538,24 +538,31 @@ export function EditFields({
 }) {
   const [title, setTitle] = useState(firstTitle);
   const [body, setBody] = useState(firstBody);
-  const changed = title.trim() !== firstTitle || body.trim() !== firstBody.trim();
+  const titleChanged = title.trim() !== firstTitle;
+  const bodyChanged = body.trim() !== firstBody.trim();
+  const changed = titleChanged || bodyChanged;
   const send = useCallback(
     (idempotency_key: string) =>
       sendMutation("PATCH", `/api/v1/cards/${card.id}`, {
         rev,
-        ...(title.trim() !== firstTitle ? { title: title.trim() } : {}),
-        ...(body.trim() !== firstBody.trim() ? { body: body.trim() } : {}),
+        ...(titleChanged ? { title: title.trim() } : {}),
+        ...(bodyChanged ? { body: body.trim() } : {}),
         ...hostField(card),
         idempotency_key,
       }),
-    [card, rev, title, body, firstTitle, firstBody],
+    [card, rev, title, body, titleChanged, bodyChanged],
   );
   const action = useAction({
     binding: `${card.id}:${rev}:edit:${title.trim()}:${body.trim()}`,
     send,
     onRecorded: onDone,
   });
-  const over = isTooLong(title.trim(), LIMITS.cardTitle) || isTooLong(body.trim(), LIMITS.cardBody);
+  // Only a field that changed is sent, so only its length can stop the save.
+  // A card from before the limits keeps its long body while its title is
+  // edited.
+  const over =
+    (titleChanged && isTooLong(title.trim(), LIMITS.cardTitle)) ||
+    (bodyChanged && isTooLong(body.trim(), LIMITS.cardBody));
   return (
     <>
       <Field label="Title" htmlFor={`edit-title-${card.id}`}>
@@ -577,8 +584,8 @@ export function EditFields({
           onChange={(event) => setBody(event.target.value)}
         />
       </Field>
-      <LimitNote what="title" text={title.trim()} limit={LIMITS.cardTitle} />
-      <LimitNote what="body" text={body.trim()} limit={LIMITS.cardBody} />
+      {titleChanged ? <LimitNote what="title" text={title.trim()} limit={LIMITS.cardTitle} /> : null}
+      {bodyChanged ? <LimitNote what="body" text={body.trim()} limit={LIMITS.cardBody} /> : null}
       <ActionFailure error={action.error} host={ownerOf(card)} />
       <div className="edit-acts">
         <button type="button" className="btn" disabled={action.pending} onClick={onDone}>

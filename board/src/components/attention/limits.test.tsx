@@ -201,3 +201,23 @@ test("Edit refuses a title over 1,000 or a body over 100,000 characters", async 
   expect(screen.getByText("The body is 100,001 characters. The limit is 100,000.")).toBeTruthy();
   expect(save.disabled).toBe(true);
 });
+
+test("Edit saves a new title on a card whose body was over the limit before the limit came", () => {
+  const board = fixtureResource(boardPath(), "default") as BoardResponse;
+  const card = board.rows[0];
+  if (!card) throw new Error("no fixture card");
+  const oldBody = long(LIMITS.cardBody);
+  render(
+    <EditFields card={card} rev={card.rev} title="Old title" body={oldBody} onDone={() => {}} />,
+  );
+  const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+  // The body is not sent, so its length does not stop the save.
+  fireEvent.change(screen.getByLabelText("Title"), { target: { value: "New title" } });
+  expect(save.disabled).toBe(false);
+  expect(screen.queryByText(/The body is 100,001 characters/)).toBeNull();
+
+  // A changed body is sent, and must fit.
+  fireEvent.change(screen.getByLabelText("Body"), { target: { value: `${oldBody}!` } });
+  expect(screen.getByText("The body is 100,002 characters. The limit is 100,000.")).toBeTruthy();
+  expect(save.disabled).toBe(true);
+});
