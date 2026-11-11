@@ -22,6 +22,7 @@ Project names in examples (`alpha`, `beta`, `gamma`, card ids like `alpha-42`) a
 | [`design-basis.html`](design-basis.html) | The design basis: Linear tokens and a working mock. Open it in a browser |
 | [`mocks.html`](mocks.html) | The UI mocks the developer approved at CP-UI. Open it in a browser. The board shell is checked against it |
 | [`herdr-layout.md`](herdr-layout.md) | How orchestrators and workers are laid out in herdr |
+| [`terminal-holder.md`](terminal-holder.md) | Tiller's own terminal holder, which replaces herdr: the protocol, the screen model, upgrades, `tiller attach`, the cutover and the build plan (proposed, ADR 0004) |
 | [`host-capabilities.md`](host-capabilities.md) | The minimum common behavior across hosts, from the capability probe (T0.3) |
 | [`parity.md`](parity.md) | The Firstmate parity matrix: the checklist for "comparable" (T0.6) |
 | [`pre-launch-validation.md`](pre-launch-validation.md) | Pre-launch stage: a weekly batched review in place of per-change validation, decided 2026-11-03 |
