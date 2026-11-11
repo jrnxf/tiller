@@ -490,7 +490,7 @@ ADR 0003, accepted Tuesday 2026-11-03. The owner approved it; runs in one or two
 
 ## Terminal holder (ADR 0004)
 
-ADR 0004, accepted Wednesday 2026-11-11. A holder process per host owns the agent PTYs, in place of herdr. The briefs are the task table in `docs/design/terminal-holder.md` section 13, which wins over the short lines here; `build-plan.md` M5H gives the groups. H00 to H08, HA1, S1a and S1b merge to `main`. S1c and H09 to H14 merge to `holder-port`, which the owner merges into `main` once, before H15.
+ADR 0004, accepted Wednesday 2026-11-11. A holder process per host owns the agent PTYs, in place of herdr. The briefs are the task table in `docs/design/terminal-holder.md` section 13, which wins over the short lines here; `build-plan.md` M5H gives the groups. H00 to H08, S1a and S1b merge to `main`. S1P, HA1 and H15 change no file. S1c and H09 to H14 merge to `holder-port`, which the owner merges into `main` once, before H15.
 
 ### H00 Freeze today's parser results
 `sonnet` medium - 30 min - beside H01
@@ -556,13 +556,12 @@ the orchestrator - 30 min - after S1b and S1c
 ### HA1 Handover audit
 `sonnet` medium - 30 min - after H03
 
-- [ ] The `alacritty_terminal` state the handover carries, each field with its public read and write path; a gap stops H05 for the owner
-- [ ] Delivered
+- [ ] The `alacritty_terminal` state the handover carries, each field with its public read and write path, reported to the owner; a gap stops H05 for the owner
 
 ### H05 Live upgrade
 `opus` high - 6 h - after H04 and HA1
 
-- [ ] The model state check, the handover record, preflight, dry run, re-exec and resume
+- [ ] From HA1's field list: the handover record, preflight, dry run, re-exec and resume
 - [ ] Check: the upgrade tests of 9.3
 - [ ] Delivered
 

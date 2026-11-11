@@ -805,7 +805,7 @@ ADR 0004 (accepted Wednesday 2026-11-11) makes Tiller own its terminals: a holde
 |---|---|---|
 | Spec | H01 (the spec amendments, ADR 0004 accepted), H00 (today's parser results frozen as snapshots) | `main` |
 | First slice | S1a (protocol and client), S1b (the minimal holder), S1c (the minimal daemon wiring), S1P (the owner's preview on a test home) | S1a and S1b on `main`, S1c on `holder-port` |
-| Holder | H02 to H05 (crates, core, live output, live upgrade), HA1 (handover audit), H06 (service), H07 (`tiller attach`), H08 (raw fixtures) | `main` |
+| Holder | H02 to H05 (crates, core, live output, live upgrade), HA1 (handover audit, a report to the owner), H06 (service), H07 (`tiller attach`), H08 (raw fixtures) | `main` |
 | Port | H09 to H14 (agents, reconcile, API and peers, board, herdr removed, soak) | `holder-port`, merged into `main` once by the owner |
 | Holder cutover | H15, with the owner: steps on the running Tiller, no PR | - |
 

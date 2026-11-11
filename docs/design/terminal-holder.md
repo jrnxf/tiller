@@ -446,7 +446,7 @@ The owner chose live upgrades at any time. The holder replaces its own program i
 
 What the handover loses: nothing in the PTYs, the children or the metadata. The parser is in its ground state (section 3.4.1), so it has no private state to lose. The leases end and are taken again.
 
-**The model state needs proof first.** `alacritty_terminal` serializes its grids with its `serde` feature. Not every other field above may have a public read and write path in 0.26. H05 starts by checking each field. When one has no path, the builder stops and asks the owner, with two options: an upstream change, or a small patch on the pinned version kept in `nix/patches/`, as the repo does for `bun2nix`.
+**The model state needs proof first.** `alacritty_terminal` serializes its grids with its `serde` feature. Not every other field above may have a public read and write path in 0.26. HA1 checks each field before H05 starts (section 13). When one has no path, HA1 stops and asks the owner, with two options: an upstream change, or a small patch on the pinned version kept in `nix/patches/`, as the repo does for `bun2nix`.
 
 **Rollback.** An upgrade to the old store path, by the same steps.
 
@@ -565,7 +565,7 @@ The doc rows land in H01, before the code, so that each builder builds against a
 
 | File | Change |
 |---|---|
-| `docs/spec/protocol.md` | 6.1: an agent's name, called the herdr name before the cutover. 3.1 and 3.3: "typed through the holder", target check by pane key, composer read by `screen`. 3.4: notifications through `[notify] command`, opened with `tiller attach`. 4.5: the `herdr` poller rows become `holder` (exit and screen). 6.4: `tiller attach`, `tiller holder` and `tiller holder upgrade`, `agent focus` as Open in terminal, `peer add` without `--herdr-machine`, and doctor's `holder` check. 7.3: `tools.holder`. 7.4: rewrite Open in herdr and the Terminal mirror for the holder, and drop Tail for saved machines. 9: drop herdr-only machines and `herdr_link_down`. 10.1 and 10.7: peers only, link on the holder. 12: coverage rows |
+| `docs/spec/protocol.md` | 6.1: an agent's name, called the herdr name before the cutover. 6.2: `unavailable` for an unreachable holder. 10: a harness with no adapter is observed through the holder. 3.1 and 3.3: "typed through the holder", target check by pane key, composer read by `screen`. 3.4: notifications through `[notify] command`, opened with `tiller attach`. 4.5: the `herdr` poller rows become `holder` (exit and screen). 6.4: `tiller attach`, `tiller holder` and `tiller holder upgrade`, `agent focus` as Open in terminal, `peer add` without `--herdr-machine`, and doctor's `holder` check. 7.3: `tools.holder`. 7.4: rewrite Open in herdr and the Terminal mirror for the holder, and drop Tail for saved machines. 9: drop herdr-only machines and `herdr_link_down`. 10.1 and 10.7: peers only, link on the holder. 12: coverage rows |
 | `docs/spec/recovery.md` | Sources: `holder` in place of herdr. The ladder: step 2 is the holder's `list` and the pane key, step 3 is `state` and the exit code. R04: drop the layout step. R05: peers only. R18: rewrite as "Holder unreachable" (no tokens to re-report). New R21: holder lost. New R22: holder upgrade failed (the old holder runs on, `upgrade_refused` is a Health warning) |
 | `docs/spec/state.md`, `docs/spec/schema.sql` | `panes` table owned by the holder (section 11.1). `hosts.herdr_machine` dropped. Observation source `holder`. `meta.holder_instance`. Poller name `holder`. Events `holder.upgraded` and `holder.lost` |
 | `docs/spec/authority.md` | Agents are denied `tiller holder`, `tiller attach` and `$TILLER_HOME/run`, in place of the `herdr` CLI. The owner's input through `tiller attach` is the owner's, as a board tap is (G29) |
@@ -640,7 +640,7 @@ Each step is done by the owner, or by a builder with the owner present, at a che
 
 ## 13. Build plan
 
-Each task but S1P and H15 is one builder, one branch, one worktree and one PR, with a `/code-review` before the PR and `no-mistakes` as the gate. S1P (a preview) and H15 (steps on the live tiller with the owner) change no file. Times are agent wall-clock time, with review and CI included.
+Each task but S1P, HA1 and H15 is one builder, one branch, one worktree and one PR, with a `/code-review` before the PR and `no-mistakes` as the gate. Those three change no file in the repo: S1P (the preview and its steps for the other hosts) and HA1 (the field list) report to the owner, and H15 is steps on the live tiller with the owner. Times are agent wall-clock time, with review and CI included.
 
 **Where the port lands.** H00 to H08, S1a and S1b add code or docs that nothing uses yet, so they merge to `main`. The port (S1c, then H09 to H14) cannot land on `main` piece by piece without a fallback, and the owner ruled out a fallback. So those tasks merge into an integration branch, `holder-port`, and the owner merges `holder-port` into `main` once, at cutover. S1c creates `holder-port` from `main`. The builder of each later port task merges `main` into `holder-port` first. The live tiller is never deployed from `holder-port`. The S1P preview runs on a test home, not on the live tiller.
 
@@ -660,7 +660,7 @@ Each task but S1P and H15 is one builder, one branch, one worktree and one PR, w
 | H03 | Finish the `tiller-holder` core: env, the requests other than `subscribe` and `upgrade` that the slice left out, and the model gate of 9.1 | H02 | 4 h |
 | H04 | Repaint renderer, query answers and filter, sync buffering, leases, back-pressure in place of the slice's fixed cap, limits. Round-trip proptest and fault tests of 9.4 | H03 | 4.5 h |
 | HA1 | A read-only audit: list the `alacritty_terminal` state that the handover of 6.2 must carry, with its public read and write path. A field with no such path stops H05 until the owner picks an upstream change or a patch in `nix/patches/` | H03 | 30 min |
-| H05 | Live upgrade: first the model state check of 6.2, then the handover record, preflight, dry run, re-exec and resume. The tests of 9.3 | H04, HA1 | 6 h |
+| H05 | Live upgrade, from HA1's field list: the handover record, preflight, dry run, re-exec and resume. The tests of 9.3 | H04, HA1 | 6 h |
 | H06 | `tiller holder` service: `--detach`, `upgrade`, the Nix module service and launchd agent, the doctor `holder` check | H03 | 3 h |
 | H07 | `tiller attach`: raw mode, prefix (both encodings), detach restore, many clients, read-only, switcher. The tests of 9.5 | H04 | 5 h |
 | H08 | Raw fixture recording (owner's go): recorder, about 20 min of real sessions, scrub, marks, raw stream gate | H04 | 3 h |
