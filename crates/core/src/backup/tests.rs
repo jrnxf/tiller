@@ -17,6 +17,11 @@ fn at(text: &str) -> Timestamp {
     Timestamp::from_jiff(text.parse().unwrap())
 }
 
+/// The nightly pass as the daemon runs it, on a host whose clock is UTC.
+fn nightly(store: &mut Store, paths: &Paths, now: Timestamp) -> Result<Nightly> {
+    super::nightly(store, paths, now, &jiff::tz::TimeZone::UTC)
+}
+
 fn owner() -> Ctx {
     Ctx::new(Actor::Owner)
 }
@@ -386,7 +391,7 @@ fn restore_refuses_while_daemon_runs_and_another_hosts_backup() {
     let other = self::host();
     let mut other_store = Store::open(&other.paths.db).unwrap();
     setup(&mut other_store, "other-host", Boundary::Personal);
-    nightly(&mut other_store, &other.paths, at("2026-11-02T04:00:00Z")).unwrap();
+    nightly(&mut other_store, &other.paths, at("2026-11-02T03:00:00Z")).unwrap();
     drop(other_store);
     fs::remove_dir_all(&paths.backups).unwrap();
     fs::create_dir_all(&paths.backups).unwrap();
@@ -711,9 +716,7 @@ fn manual_backup_and_a_late_timer_never_move_the_nightly_schedule() {
     nightly(&mut store, paths, night).unwrap();
 
     let manual = backup(store.conn(), paths, at("2026-11-01T15:00:00Z")).unwrap();
-    let Nightly::Done { entry, .. } = manual else {
-        panic!("{manual:?}");
-    };
+    let Taken { entry, .. } = manual;
     assert_eq!(entry.kind, EntryKind::Manual);
     let next = night.plus_minutes(24 * 60);
     assert_eq!(next_due(&Manifest::load(paths).unwrap()), Some(next));
@@ -755,9 +758,7 @@ fn retention_finishes_a_cleanup_an_earlier_pass_left() {
     let mut store = Store::open(&paths.db).unwrap();
     setup(&mut store, "test-host", Boundary::Personal);
     let first = backup(store.conn(), paths, at("2026-11-01T03:00:00Z")).unwrap();
-    let Nightly::Done { entry: stale, .. } = first else {
-        panic!("{first:?}");
-    };
+    let Taken { entry: stale, .. } = first;
     // As if a pass marked it superseded and died before deleting the file.
     let mut manifest = Manifest::load(paths).unwrap();
     manifest.entries[0].superseded = true;
@@ -830,9 +831,7 @@ fn a_restored_database_is_owner_only_whatever_the_backup_mode() {
     let mut store = Store::open(&paths.db).unwrap();
     setup(&mut store, "test-host", Boundary::Personal);
     let made = backup(store.conn(), paths, at("2026-11-01T15:00:00Z")).unwrap();
-    let Nightly::Done { entry, .. } = made else {
-        panic!("{made:?}");
-    };
+    let Taken { entry, .. } = made;
     drop(store);
     fs::set_permissions(
         paths.resolve(&entry.file),
@@ -1225,4 +1224,79 @@ fn the_holder_line_names_the_subcommand_and_takes_any_program_path() {
             "pid 7 (tiller daemon)\n"
         );
     }
+}
+
+/// The first pass of the daemon's timer sets the first night, the next
+/// 03:00 host time, and takes nothing; the pass at that hour takes the
+/// first nightly backup.
+#[test]
+fn the_first_pass_schedules_the_first_night_at_three() {
+    let host = host();
+    let paths = &host.paths;
+    let mut store = Store::open(&paths.db).unwrap();
+    setup(&mut store, "test-host", Boundary::Personal);
+
+    let first = nightly(&mut store, paths, at("2026-11-11T16:00:00Z")).unwrap();
+    let tonight = at("2026-11-12T03:00:00Z");
+    assert_eq!(first, Nightly::NotDue { next: tonight });
+    let manifest = Manifest::load(paths).unwrap();
+    assert!(manifest.entries.is_empty(), "{manifest:?}");
+    assert_eq!(next_due(&manifest), Some(tonight));
+
+    let early = nightly(&mut store, paths, at("2026-11-12T02:59:00Z")).unwrap();
+    assert_eq!(early, Nightly::NotDue { next: tonight });
+    let done = nightly(&mut store, paths, at("2026-11-12T03:00:40Z")).unwrap();
+    let Nightly::Done { entry, .. } = done else {
+        panic!("{done:?}");
+    };
+    assert_eq!(entry.kind, EntryKind::Nightly);
+    assert_eq!(
+        next_due(&Manifest::load(paths).unwrap()),
+        Some(at("2026-11-13T03:00:00Z"))
+    );
+}
+
+/// A daemon that was down for nights takes one backup at its next pass,
+/// not one per missed night, and the next night is again at 03:00.
+#[test]
+fn missed_nights_are_made_up_by_one_backup_at_the_next_pass() {
+    let host = host();
+    let paths = &host.paths;
+    let mut store = Store::open(&paths.db).unwrap();
+    setup(&mut store, "test-host", Boundary::Personal);
+    nightly(&mut store, paths, at("2026-11-01T03:00:00Z")).unwrap();
+
+    // Down from the 1st until 09:00 on the 4th.
+    let back = at("2026-11-04T09:00:00Z");
+    let done = nightly(&mut store, paths, back).unwrap();
+    assert!(matches!(done, Nightly::Done { .. }), "{done:?}");
+    let again = nightly(&mut store, paths, back.plus_minutes(1)).unwrap();
+    let next = at("2026-11-05T03:00:00Z");
+    assert_eq!(again, Nightly::NotDue { next });
+    let nightly_entries = Manifest::load(paths)
+        .unwrap()
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == EntryKind::Nightly)
+        .count();
+    assert_eq!(nightly_entries, 2);
+}
+
+/// The night stays at 03:00 host time across a clock change: in Lisbon,
+/// 03:00 is 03:00 UTC in winter and 02:00 UTC in summer.
+#[test]
+fn the_night_follows_the_host_clock_across_a_clock_change() {
+    let lisbon = jiff::tz::TimeZone::posix("WET0WEST,M3.5.0/1,M10.5.0").unwrap();
+    // Summer time starts at 01:00 UTC on Sunday 29 March 2026.
+    let saturday = at("2026-03-28T03:00:00Z");
+    assert_eq!(
+        night_from(saturday, &lisbon, true),
+        at("2026-03-29T02:00:00Z")
+    );
+    assert_eq!(night_from(saturday, &lisbon, false), saturday);
+    // It ends at 01:00 UTC on Sunday 25 October 2026.
+    assert_eq!(
+        night_from(at("2026-10-24T02:00:00Z"), &lisbon, true),
+        at("2026-10-25T03:00:00Z")
+    );
 }

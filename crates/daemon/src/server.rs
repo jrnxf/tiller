@@ -518,11 +518,12 @@ async fn start_workers(
             );
             return Vec::new();
         }
-        let (home_, lock_, tools_, registry_, stop_) = (
+        let (home_, lock_, tools_, registry_, damage_, stop_) = (
             home.clone(),
             Arc::clone(&lock),
             tools.clone(),
             registry.clone(),
+            damage.clone(),
             stop.clone(),
         );
         // Blocking-pool threads keep the runtime context, so the workers
@@ -533,7 +534,7 @@ async fn start_workers(
                 return Ok(None);
             }
             Store::open(&db)?;
-            workers::start(&home_, lock_, &tools_, &registry_, &stop_).map(Some)
+            workers::start(&home_, lock_, &tools_, &registry_, &damage_, &stop_).map(Some)
         })
         .await;
         match started {

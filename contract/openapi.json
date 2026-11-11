@@ -1963,7 +1963,7 @@
         },
         "responses": {
           "200": {
-            "description": "`data` is the `BackupRow` the run left: `verified`, or `failed` with the reason. A failed run keeps the previous verified backup",
+            "description": "`data` is the `BackupRow` the run left: `verified`, or `failed` with the reason. A failed run keeps the previous verified backup. A retry with the last run's key gets its row again, `replayed`",
             "content": {
               "application/json": {
                 "schema": {

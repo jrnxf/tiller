@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use jiff::tz::TimeZone;
 use tiller_agents::control::{self, Waits};
 use tiller_agents::intake::{HostConfig, IntakeSource};
 use tiller_agents::land::app::{APP_DIR, HostApp};
@@ -20,6 +21,7 @@ use tiller_agents::land::{DaemonLock, Landed, Lander};
 use tiller_agents::spawn::config::SpawnConfig;
 use tiller_agents::spawn::pool::{Pool as _, Treehouse};
 use tiller_agents::spawn::readings;
+use tiller_core::backup::{self, Nightly};
 use tiller_core::domain::{Host, HostKind, PipelineState, Session};
 use tiller_core::state::list;
 use tiller_core::{Actor, Ctx, Store, Timestamp};
@@ -39,6 +41,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::owner::Gated;
+use crate::readonly::Damage;
 
 /// What the daemon reads from `<home>/config.toml` beyond intake.
 #[derive(Clone, Debug)]
@@ -425,6 +428,54 @@ impl Source for Publish {
     }
 }
 
+// -- nightly backup ---------------------------------------------------------------
+
+/// The nightly backup (`recovery.md` R10): every minute it asks
+/// [`backup::nightly`] whether a backup is due, which takes it at
+/// [`backup::NIGHT_HOUR`] host local time, retries a failed night an hour
+/// later and raises the alarm from the second failed night. The manifest
+/// keeps the schedule and the failures, so a restart or a sleeping host
+/// misses nothing: a night that passed while the daemon was down is made up
+/// by one backup at the next pass. A failed copy can be the first sign of a
+/// damaged live database, so the live one is checked then. While the daemon
+/// is read-only it takes nothing.
+pub struct Backups {
+    store: Store,
+    paths: backup::Paths,
+    zone: TimeZone,
+    db: PathBuf,
+    damage: Damage,
+}
+
+impl Source for Backups {
+    fn name(&self) -> String {
+        "backup".to_owned()
+    }
+
+    fn interval(&self) -> Duration {
+        Duration::from_secs(60)
+    }
+
+    fn poll(&mut self, now: Timestamp) -> Result<(), PollError> {
+        if self.damage.reason().is_some() {
+            return Ok(());
+        }
+        let pass = backup::nightly(&mut self.store, &self.paths, now, &self.zone)
+            .inspect_err(|error| self.damage.suspect(&self.db, error))?;
+        match pass {
+            Nightly::NotDue { .. } => {}
+            Nightly::Done { entry, .. } => {
+                tracing::info!(file = entry.file, "took the nightly backup");
+            }
+            Nightly::Failed { error, next, alarm } => {
+                tracing::warn!(error, %next, alarm = alarm.is_some(), "the nightly backup failed");
+                self.damage.check(&self.db);
+            }
+        }
+        Ok(())
+    }
+}
+
 // -- finished runs ----------------------------------------------------------------
 
 /// Stops the agent of each local run that ended `landed` or `reported`, so
@@ -687,6 +738,7 @@ pub fn start(
     lock: Arc<DaemonLock>,
     tools: &Tools,
     registry: &Registry,
+    damage: &Damage,
     stop: &watch::Receiver<bool>,
 ) -> tiller_core::Result<Vec<JoinHandle<()>>> {
     let db = home.join("state.db");
@@ -787,6 +839,13 @@ pub fn start(
     );
     let quota = crate::quota::Feed::new(open()?, tools.quota.clone(), settings.quota_providers);
     let memory = crate::memory::watch::Watcher::new(home, open()?);
+    let backups = Backups {
+        store: open()?,
+        paths: backup::Paths::in_home(home),
+        zone: TimeZone::system(),
+        db: db.clone(),
+        damage: damage.clone(),
+    };
 
     let mut handles = Vec::new();
     // Every worker but reconcile holds its polls while the owner marker
@@ -806,6 +865,7 @@ pub fn start(
     spawn(registry, Gated::new(home, loads), stop, &mut handles);
     spawn(registry, Gated::new(home, quota), stop, &mut handles);
     spawn(registry, Gated::new(home, pages), stop, &mut handles);
+    spawn(registry, Gated::new(home, backups), stop, &mut handles);
     spawn(registry, memory, stop, &mut handles);
     Ok(handles)
 }
@@ -1350,5 +1410,51 @@ esac
         Transcript::interrupt(&new, "n2");
         source.poll(ended.plus_minutes(2)).unwrap();
         assert_eq!(t.recorded(), ["u1", "n1", "n2"], "the old file is let go");
+    }
+
+    /// The nightly backup on an injected clock: the first pass schedules
+    /// 03:00, the pass at 03:00 takes the backup, and two nights missed while
+    /// the daemon was down are made up by one backup at the next pass.
+    #[test]
+    fn the_backup_worker_takes_the_night_on_the_clock() {
+        let fleet = tiller_herdr::testing::Fleet::new();
+        let home = fleet.dir.path();
+        let paths = backup::Paths::in_home(home);
+        let mut worker = Backups {
+            store: fleet.open(),
+            paths: paths.clone(),
+            zone: TimeZone::UTC,
+            db: fleet.db.clone(),
+            damage: Damage::default(),
+        };
+        let at = |text: &str| text.parse::<Timestamp>().unwrap();
+        let nightly = |manifest: &backup::Manifest| {
+            manifest
+                .live()
+                .into_iter()
+                .filter(|entry| entry.kind == backup::EntryKind::Nightly)
+                .count()
+        };
+
+        worker.poll(at("2026-11-02T10:00:00Z")).unwrap();
+        let manifest = backup::Manifest::load(&paths).unwrap();
+        assert_eq!(manifest.next_night, Some(at("2026-11-03T03:00:00Z")));
+        assert_eq!(nightly(&manifest), 0, "the first pass takes nothing");
+
+        worker.poll(at("2026-11-03T02:59:00Z")).unwrap();
+        assert_eq!(nightly(&backup::Manifest::load(&paths).unwrap()), 0);
+
+        worker.poll(at("2026-11-03T03:00:00Z")).unwrap();
+        let manifest = backup::Manifest::load(&paths).unwrap();
+        assert_eq!(nightly(&manifest), 1, "03:00 takes the night");
+        assert_eq!(manifest.next_night, Some(at("2026-11-04T03:00:00Z")));
+
+        // Down from before 03:00 on the 4th until 09:00 on the 6th.
+        worker.poll(at("2026-11-06T09:00:00Z")).unwrap();
+        let manifest = backup::Manifest::load(&paths).unwrap();
+        assert_eq!(nightly(&manifest), 2, "one backup makes up both nights");
+        assert_eq!(manifest.next_night, Some(at("2026-11-07T03:00:00Z")));
+        worker.poll(at("2026-11-06T09:01:00Z")).unwrap();
+        assert_eq!(nightly(&backup::Manifest::load(&paths).unwrap()), 2);
     }
 }

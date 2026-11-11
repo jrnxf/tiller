@@ -36,8 +36,8 @@ pub use export::{
 };
 pub use manifest::{Entry, EntryKind, ExportRecord, Failure, Manifest};
 pub use nightly::{
-    KEEP_DAILY, KEEP_WEEKLY, MIN_VERIFIED, Nightly, RETRY_AFTER_MINUTES, Retention, backup,
-    next_due, nightly,
+    KEEP_DAILY, KEEP_WEEKLY, MIN_VERIFIED, NIGHT_HOUR, Nightly, RETRY_AFTER_MINUTES, Retention,
+    Taken, backup, next_due, night_from, nightly,
 };
 pub use restore::{Restored, Skipped, restore};
 pub(crate) use schema::migrate_on_open;

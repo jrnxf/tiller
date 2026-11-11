@@ -304,6 +304,21 @@ esac"#,
     until("one more reconcile pass", || {
         (passes(&daemon.health()) != seen).then_some(())
     });
+    // The running daemon also runs the nightly backup (`recovery.md` R10):
+    // its first pass schedules the first night in the manifest.
+    let backup = daemon.health()["pollers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|poller| poller["source"] == "backup")
+        .cloned();
+    assert!(backup.is_some(), "the daemon runs the backup worker");
+    until("the first night scheduled", || {
+        std::fs::read_to_string(fleet.dir.path().join("backups/manifest.json"))
+            .ok()
+            .and_then(|manifest| serde_json::from_str::<Value>(&manifest).ok())
+            .filter(|manifest| manifest["next_night"].is_string())
+    });
 
     assert_eq!(
         calls(),

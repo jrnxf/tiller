@@ -636,10 +636,7 @@ async fn host_check(State(state): State<AppState>, request: Request, next: Next)
 /// The checks every mutation passes before its body is read.
 pub(crate) async fn guard(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     same_origin(state, headers)?;
-    if owner_cookie(state, headers).await.is_none() {
-        return Err(not_owner());
-    }
-    Ok(())
+    owner_only(state, headers).await
 }
 
 /// Refuses a read unless the request carries a live owner cookie. Most reads

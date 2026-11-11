@@ -55,6 +55,17 @@ impl Damage {
         }
     }
 
+    /// After a failure whose error need not name corruption (a backup copy
+    /// that did not verify): the check runs, and a database that fails it
+    /// makes the daemon read-only.
+    pub fn check(&self, db: &Path) {
+        if self.reason().is_none()
+            && let Err(reason) = quick_check(db)
+        {
+            self.mark(db, reason);
+        }
+    }
+
     fn mark(&self, db: &Path, reason: String) {
         tracing::error!(
             reason,
@@ -244,6 +255,51 @@ async fn corruption_found_while_serving_makes_the_daemon_read_only() {
         damage.reason().is_some(),
         "the corruption error ran quick_check"
     );
+
+    let refused = send(&app, create(&[("cookie", &cookie)])).await;
+    assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(refused.body.contains("read only"), "{}", refused.body);
+}
+
+/// R10 through Settings > Backups: Back up now meets a damaged page in the
+/// live database. The run fails, the check runs on the live database, and
+/// the daemon turns read-only.
+#[cfg(test)]
+#[tokio::test]
+async fn corruption_found_by_back_up_now_makes_the_daemon_read_only() {
+    use axum::http::StatusCode;
+    use serde_json::{Value, json};
+    use tiller_herdr::testing::Fleet;
+
+    use crate::api::tests::{Fixture, app_with, create, mutation, owner_cookie, send};
+    use crate::assets::Assets;
+
+    let fleet = Fleet::new();
+    let home = fleet.dir.path();
+    let cookie = owner_cookie(home);
+    let damage = Damage::default();
+    damage.check_at_start(&home.join("state.db"));
+    assert_eq!(damage.reason(), None);
+    let app = app_with(home, Assets::of::<Fixture>(), damage.clone());
+
+    // `handoffs` is read by no board endpoint, so only the copy meets it.
+    fixtures::damage_table(&home.join("state.db"), "handoffs");
+    let taken = send(
+        &app,
+        mutation(
+            "POST",
+            "/api/v1/backups",
+            json!({"idempotency_key": "k-1"}),
+            &[("cookie", cookie.as_str())],
+        ),
+    )
+    .await;
+    assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
+    let taken: Value = serde_json::from_str(&taken.body).unwrap();
+    assert_eq!(taken["data"]["status"], "failed", "{taken}");
+    let reason = damage.reason().expect("the failed copy ran quick_check");
+    assert!(reason.starts_with("quick_check:"), "{reason}");
+    assert!(home.join(READ_ONLY_MARKER).exists(), "hooks spool");
 
     let refused = send(&app, create(&[("cookie", &cookie)])).await;
     assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
