@@ -613,6 +613,11 @@ pub fn landed_evidence(conn: &rusqlite::Connection, card: &Card) -> Result<bool>
 /// Whether the owner answered "Superseded" to an R07 outside-merge
 /// `recovery` item on the card since it was created or last reopened: the
 /// evidence the daemon needs to close the card `superseded`.
+///
+/// Who answered is not checked here, as `landed_evidence` does not check it
+/// for "Mark landed": `attention.answer` takes an answer from any
+/// principal, so a guard on who may answer an R07 item belongs there, for
+/// both answers at once.
 fn superseded_answer(conn: &rusqlite::Connection, card: &Card) -> Result<bool> {
     let since = reopened_seq(conn, card)?;
     Ok(conn.query_row(
