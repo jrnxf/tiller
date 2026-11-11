@@ -147,15 +147,30 @@ impl DaemonLock {
 /// so when the daemon and a CLI command open an old database at once, one
 /// migrates and the other finds nothing to do. The lock is the operating
 /// system's, so it ends with the process that held it, even on a crash.
+///
+/// A waiter gives up after [`MIGRATION_LOCK_WAIT`] and refuses with the
+/// holder's pid and command, which the holder writes into the lock file.
 #[derive(Debug)]
 pub(crate) struct MigrationLock {
-    _file: File,
+    file: File,
 }
 
+/// How long a process waits for another's [`MigrationLock`] before it
+/// refuses. A migration and its copy take as long as the database is big; a
+/// holder past this is stuck, and a waiter names it instead of waiting for
+/// ever.
+const MIGRATION_LOCK_WAIT: Duration = Duration::from_secs(60);
+
+/// How often a waiter tries the [`MigrationLock`] again.
+const LOCK_POLL: Duration = Duration::from_millis(50);
+
 impl MigrationLock {
-    /// Waits for the lock. A migration and its copy are bounded by the size
-    /// of the database, so the wait is too.
+    /// Waits up to [`MIGRATION_LOCK_WAIT`] for the lock, then refuses.
     pub(crate) fn acquire(paths: &Paths) -> Result<Self> {
+        #[cfg(test)]
+        let wait = MIGRATION_WAIT.get();
+        #[cfg(not(test))]
+        let wait = MIGRATION_LOCK_WAIT;
         let path = paths.migration_lock();
         let mut options = OpenOptions::new();
         options.create(true).truncate(false).read(true).write(true);
@@ -164,10 +179,77 @@ impl MigrationLock {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let file = options.open(&path).map_err(io_error("open", &path))?;
-        file.lock().map_err(io_error("lock", &path))?;
-        Ok(Self { _file: file })
+        let mut file = options.open(&path).map_err(io_error("open", &path))?;
+        let deadline = Instant::now() + wait;
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(LOCK_POLL);
+                }
+                Err(TryLockError::WouldBlock) => {
+                    return Err(migration_lock_held(&mut file, &path, wait));
+                }
+                Err(TryLockError::Error(error)) => return Err(io_error("lock", &path)(error)),
+            }
+        }
+        // Who holds it, for a waiter that gives up. Best effort: the lock,
+        // not this line, keeps a migration one process's work.
+        let _ = file
+            .set_len(0)
+            .and_then(|()| file.write_all(holder_line().as_bytes()));
+        Ok(Self { file })
     }
+}
+
+impl Drop for MigrationLock {
+    /// Clears the holder line before the lock goes, so a later waiter never
+    /// names a process that has let go (a holder that crashed leaves its
+    /// line, but its lock is gone with it, so no waiter reads it).
+    fn drop(&mut self) {
+        let _ = self.file.set_len(0);
+    }
+}
+
+/// The refusal of a waiter that gave up: names the holder the lock file
+/// records, or "another process" when it records none (a holder that has
+/// not written yet, or an older tiller).
+fn migration_lock_held(file: &mut File, path: &Path, wait: Duration) -> Error {
+    let mut holder = String::new();
+    let _ = file.read_to_string(&mut holder);
+    let holder = match holder.trim() {
+        "" => "another process",
+        holder => holder,
+    };
+    Error::refused(
+        "migration lock",
+        path.display().to_string(),
+        format!(
+            "{holder} has held it for over {} s: a migration of state.db is running or stuck \
+             there; try again once it ends",
+            wait.as_secs().max(1)
+        ),
+    )
+}
+
+/// This process as a lock holder, `pid <pid> (<program> <subcommand>)`, for
+/// example `pid 4242 (tiller daemon)`. Only the first argument that is not
+/// a flag: the rest of a command line can carry text the owner typed.
+fn holder_line() -> String {
+    let mut args = std::env::args();
+    let program = args
+        .next()
+        .and_then(|arg| {
+            Path::new(&arg)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "tiller".to_owned());
+    let command = match args.find(|arg| !arg.starts_with('-')) {
+        Some(sub) => format!("{program} {sub}"),
+        None => program,
+    };
+    format!("pid {} ({command})\n", std::process::id())
 }
 
 /// The lock that makes a change to `backups/manifest.json` one writer's work.
@@ -175,6 +257,10 @@ impl MigrationLock {
 /// manifest, do their work and save it back. Held across that whole span, it
 /// stops two of them losing each other's entry. The lock is the operating
 /// system's, so it ends with the process that held it, even on a crash.
+///
+/// Every temporary file the backup code writes ([`unique_tmp`]) is written
+/// while this lock is held, so one found by a new holder belongs to a writer
+/// that died: taking the lock removes them ([`remove_stale_tmps`]).
 #[derive(Debug)]
 pub(crate) struct ManifestLock {
     _file: File,
@@ -194,8 +280,56 @@ impl ManifestLock {
         }
         let file = options.open(&path).map_err(io_error("open", &path))?;
         file.lock().map_err(io_error("lock", &path))?;
-        Ok(Self { _file: file })
+        let lock = Self { _file: file };
+        remove_stale_tmps(paths, &lock);
+        Ok(lock)
     }
+}
+
+/// Removes what a crash left of [`unique_tmp`] files: in `backups/`, and
+/// beside `state.db` (a pre-migration copy's). Only names of that shape,
+/// with SQLite's `-journal`, `-wal` and `-shm` files of a copy in progress.
+/// Best effort: a leftover that cannot be removed now is tried again by the
+/// next holder.
+fn remove_stale_tmps(paths: &Paths, _held: &ManifestLock) {
+    let db_name = paths.db.file_name().unwrap_or_default().to_string_lossy();
+    let db_prefix = format!("{db_name}.");
+    let db_dir = paths.db.parent().unwrap_or(Path::new("."));
+    let dirs = [(paths.backups.as_path(), ""), (db_dir, db_prefix.as_str())];
+    for (dir, prefix) in dirs {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(prefix) && is_unique_tmp(&name) {
+                match fs::remove_file(entry.path()) {
+                    Ok(()) => {
+                        tracing::info!(file = %name, "removed a crashed write's temporary file")
+                    }
+                    Err(error) => {
+                        tracing::warn!(file = %name, %error, "cannot remove a stale temporary file");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Whether `name` is a [`unique_tmp`] name, `<file>.<ulid>.tmp`, or one of
+/// SQLite's files beside it.
+fn is_unique_tmp(name: &str) -> bool {
+    let name = ["-journal", "-wal", "-shm"]
+        .iter()
+        .find_map(|suffix| name.strip_suffix(suffix))
+        .unwrap_or(name);
+    let Some(stem) = name.strip_suffix(".tmp") else {
+        return false;
+    };
+    stem.rsplit_once('.').is_some_and(|(file, ulid)| {
+        !file.is_empty() && ulid.parse::<ulid::Ulid>().is_ok() && ulid.len() == 26
+    })
 }
 
 /// Whether a daemon holds its lock right now.
@@ -246,8 +380,8 @@ struct Copied {
 /// source's, then its size and sha256. The copy is written to a temporary
 /// file of its own ([`unique_tmp`]) and renamed into place only once it
 /// verifies, so `dest` never holds a partial file.
-fn copy_verified(src: &Connection, dest: &Path) -> Result<Copied> {
-    let tmp = unique_tmp(dest);
+fn copy_verified(src: &Connection, dest: &Path, held: &ManifestLock) -> Result<Copied> {
+    let tmp = unique_tmp(dest, held);
     #[cfg(test)]
     if FAIL_COPIES.get() {
         return Err(Error::Internal(format!(
@@ -413,8 +547,9 @@ fn stamp(now: Timestamp) -> String {
 /// A temporary name beside `path` that no other writer uses,
 /// `<path>.<ulid>.tmp`: two processes that write the same file at once each
 /// write their own temporary file, so neither removes or overwrites the
-/// other's.
-fn unique_tmp(path: &Path) -> PathBuf {
+/// other's. It takes the [`ManifestLock`] it is written under, so a later
+/// holder may treat any such name as a crashed writer's and remove it.
+fn unique_tmp(path: &Path, _held: &ManifestLock) -> PathBuf {
     with_suffix(path, &format!(".{}.tmp", crate::ids::new_ulid()))
 }
 
@@ -434,8 +569,8 @@ fn remove_if_exists(path: &Path) -> Result<()> {
 
 /// Writes `bytes` to `path` atomically: a temporary file of its own
 /// ([`unique_tmp`]), synced, renamed, and the rename synced.
-fn write_synced(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = unique_tmp(path);
+fn write_synced(path: &Path, bytes: &[u8], held: &ManifestLock) -> Result<()> {
+    let tmp = unique_tmp(path, held);
     let written = File::create(&tmp)
         .and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()))
         .and_then(|()| fs::rename(&tmp, path))
@@ -479,6 +614,11 @@ thread_local! {
     /// While set, every [`copy_verified`] on this thread fails, as a full
     /// disk would. The temporary name is unique, so a test cannot block it.
     static FAIL_COPIES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// How long a [`MigrationLock::acquire`] on this thread waits: a test
+    /// that holds the lock sets it short.
+    static MIGRATION_WAIT: std::cell::Cell<Duration> =
+        const { std::cell::Cell::new(MIGRATION_LOCK_WAIT) };
 }
 
 #[cfg(test)]

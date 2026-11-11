@@ -7,7 +7,7 @@ use std::io;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Paths, create_private_dir, io_error, write_synced};
+use super::{ManifestLock, Paths, create_private_dir, io_error, write_synced};
 use crate::error::{Error, Result};
 use crate::time::Timestamp;
 
@@ -94,12 +94,12 @@ impl Manifest {
     }
 
     /// Replaces the manifest atomically: a temporary file, synced, renamed.
-    pub fn save(&self, paths: &Paths) -> Result<()> {
+    pub(crate) fn save(&self, paths: &Paths, held: &ManifestLock) -> Result<()> {
         create_private_dir(&paths.backups)?;
         let path = paths.manifest();
         let mut text = serde_json::to_string_pretty(self)?;
         text.push('\n');
-        write_synced(&path, text.as_bytes())
+        write_synced(&path, text.as_bytes(), held)
     }
 
     /// Whether a backup, a pre-migration copy or an export ever recorded

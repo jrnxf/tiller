@@ -283,7 +283,9 @@ fn retention_never_deletes_pre_restore_file() {
         at: at("2026-10-01T00:00:00Z"),
         superseded: false,
     });
-    manifest.save(paths).unwrap();
+    manifest
+        .save(paths, &ManifestLock::acquire(paths).unwrap())
+        .unwrap();
 
     // Seventy nights: past 14 daily and 8 weekly.
     let start = at("2026-07-01T03:00:00Z");
@@ -759,7 +761,9 @@ fn retention_finishes_a_cleanup_an_earlier_pass_left() {
     // As if a pass marked it superseded and died before deleting the file.
     let mut manifest = Manifest::load(paths).unwrap();
     manifest.entries[0].superseded = true;
-    manifest.save(paths).unwrap();
+    manifest
+        .save(paths, &ManifestLock::acquire(paths).unwrap())
+        .unwrap();
 
     let done = nightly(&mut store, paths, at("2026-11-02T03:00:00Z")).unwrap();
     let Nightly::Done { retention, .. } = done else {
@@ -1047,5 +1051,103 @@ fn two_backups_at_once_both_land_in_the_manifest() {
             })
             .count();
         assert_eq!(files, 2, "trial {trial}");
+    }
+}
+
+/// A process that holds the migration lock and never lets go (stuck in a
+/// copy, or stopped in a debugger) must not block every other `Store::open`
+/// for ever. The open waits its limit, then refuses with the holder's pid,
+/// and writes nothing. Once the holder lets go, the open migrates.
+#[test]
+fn an_open_refuses_with_the_holder_once_the_migration_lock_wait_ends() {
+    let host = host();
+    let paths = &host.paths;
+    let mut store = Store::open(&paths.db).unwrap();
+    setup(&mut store, "test-host", Boundary::Personal);
+    drop(store);
+    let old = crate::migrate::LATEST - 1;
+    migrate(paths, old, Timestamp::now()).unwrap();
+
+    let held = MigrationLock::acquire(paths).unwrap();
+    let wait = Duration::from_millis(200);
+    MIGRATION_WAIT.set(wait);
+    let started = Instant::now();
+    let error = Store::open(&paths.db).map(drop).unwrap_err();
+    let waited = started.elapsed();
+    assert!(waited >= wait, "gave up after {waited:?}");
+    assert!(waited < Duration::from_secs(5), "waited {waited:?}");
+    assert_eq!(error.code(), "refused", "{error}");
+    let text = error.to_string();
+    assert!(
+        text.contains(&format!("pid {} (", std::process::id())),
+        "{text}"
+    );
+    assert!(text.contains("state.db.migrate.lock"), "{text}");
+    let conn = Connection::open(&paths.db).unwrap();
+    assert_eq!(crate::migrate::current_version(&conn).unwrap(), old);
+    drop(conn);
+
+    // A holder that writes no line (an older tiller) is not named after the
+    // one that let go.
+    drop(held);
+    let raw = File::open(paths.migration_lock()).unwrap();
+    raw.lock().unwrap();
+    let error = Store::open(&paths.db).map(drop).unwrap_err();
+    assert!(
+        error.to_string().contains(": another process has held it"),
+        "{error}"
+    );
+
+    drop(raw);
+    drop(Store::open(&paths.db).unwrap());
+    MIGRATION_WAIT.set(MIGRATION_LOCK_WAIT);
+}
+
+/// A crash between a temporary file's create and its rename leaves
+/// `<file>.<ulid>.tmp` behind: a partial backup copy or manifest in
+/// `backups/`, or a partial pre-migration copy beside `state.db`, as big as
+/// the database. The next writer removes them when it takes the manifest
+/// lock, and leaves every other file alone.
+#[test]
+fn the_next_backup_removes_temporary_files_a_crash_left() {
+    let host = host();
+    let paths = &host.paths;
+    let mut store = Store::open(&paths.db).unwrap();
+    setup(&mut store, "test-host", Boundary::Personal);
+    backup(store.conn(), paths, at("2026-11-10T03:00:00Z")).unwrap();
+
+    let ulid = crate::ids::new_ulid();
+    let stale = [
+        paths
+            .backups
+            .join(format!("20261111T030000000Z.db.{ulid}.tmp")),
+        paths
+            .backups
+            .join(format!("20261111T030000000Z.db.{ulid}.tmp-journal")),
+        paths.backups.join(format!("manifest.json.{ulid}.tmp")),
+        paths.home.join(format!("state.db.pre-15-16.{ulid}.tmp")),
+    ];
+    let kept = [
+        paths.backups.join("notes.tmp"),
+        paths.backups.join(format!("{ulid}.tmp")),
+        paths.home.join("state.db.restore.tmp"),
+        paths.home.join(format!("config.toml.{ulid}.tmp")),
+        paths.home.join(format!(".{ulid}.tmp")),
+    ];
+    for path in stale.iter().chain(&kept) {
+        fs::write(path, b"partial").unwrap();
+    }
+
+    backup(store.conn(), paths, at("2026-11-11T03:00:00Z")).unwrap();
+    for path in &stale {
+        assert!(!path.exists(), "{} is left", path.display());
+    }
+    for path in &kept {
+        assert!(path.exists(), "{} was removed", path.display());
+    }
+    let manifest = Manifest::load(paths).unwrap();
+    assert_eq!(manifest.entries.len(), 2);
+    for entry in &manifest.entries {
+        assert!(verify(paths, entry).is_ok());
     }
 }

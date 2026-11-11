@@ -77,7 +77,7 @@ pub fn export_jsonl(
 ) -> Result<ExportManifest> {
     // An unreadable manifest refuses before any file is written: the export
     // could not be recorded.
-    let _lock = super::ManifestLock::acquire(paths)?;
+    let lock = super::ManifestLock::acquire(paths)?;
     let mut backups = Manifest::load(paths)?;
     if fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_some()) {
         return Err(Error::refused(
@@ -140,14 +140,14 @@ pub fn export_jsonl(
     };
     let mut text = serde_json::to_string_pretty(&manifest)?;
     text.push('\n');
-    write_synced(&dir.join(MANIFEST), text.as_bytes())?;
+    write_synced(&dir.join(MANIFEST), text.as_bytes(), &lock)?;
     backups.exports.push(ExportRecord {
         host_id: manifest.host_id.clone(),
         boundary: manifest.boundary.clone(),
         max_seq: manifest.max_seq,
         at: now,
     });
-    backups.save(paths)?;
+    backups.save(paths, &lock)?;
     Ok(manifest)
 }
 

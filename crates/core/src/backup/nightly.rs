@@ -86,7 +86,7 @@ fn advance_night(manifest: &mut Manifest, now: Timestamp) {
 /// cannot be read is an alarm at once, since no failure can be recorded in
 /// it.
 pub fn nightly(store: &mut Store, paths: &Paths, now: Timestamp) -> Result<Nightly> {
-    let _lock = ManifestLock::acquire(paths)?;
+    let lock = ManifestLock::acquire(paths)?;
     let mut manifest = match Manifest::load(paths) {
         Ok(manifest) => manifest,
         Err(error) => {
@@ -111,9 +111,9 @@ pub fn nightly(store: &mut Store, paths: &Paths, now: Timestamp) -> Result<Night
     }
     let mut after = manifest.clone();
     advance_night(&mut after, now);
-    match take(store.conn(), paths, &after, EntryKind::Nightly, now) {
+    match take(store.conn(), paths, &lock, &after, EntryKind::Nightly, now) {
         Ok((entry, mut manifest)) => {
-            let retention = retain(paths, &mut manifest, Some(&entry.file))?;
+            let retention = retain(paths, &lock, &mut manifest, Some(&entry.file))?;
             Ok(Nightly::Done { entry, retention })
         }
         Err(error) => {
@@ -127,7 +127,7 @@ pub fn nightly(store: &mut Store, paths: &Paths, now: Timestamp) -> Result<Night
                 error: error.to_string(),
                 retry,
             });
-            manifest.save(paths)?;
+            manifest.save(paths, &lock)?;
             let failed_nights = manifest.failures.iter().filter(|f| f.retry).count();
             let alarm = if retry && failed_nights >= 2 {
                 Some(Box::new(failed_nights_alarm(store, paths, &manifest, now)?))
@@ -147,10 +147,10 @@ pub fn nightly(store: &mut Store, paths: &Paths, now: Timestamp) -> Result<Night
 /// `tiller backup`: takes a verified backup now and runs retention. It does
 /// not move the nightly schedule.
 pub fn backup(conn: &rusqlite::Connection, paths: &Paths, now: Timestamp) -> Result<Nightly> {
-    let _lock = ManifestLock::acquire(paths)?;
+    let lock = ManifestLock::acquire(paths)?;
     let manifest = Manifest::load(paths)?;
-    let (entry, mut manifest) = take(conn, paths, &manifest, EntryKind::Manual, now)?;
-    let retention = retain(paths, &mut manifest, Some(&entry.file))?;
+    let (entry, mut manifest) = take(conn, paths, &lock, &manifest, EntryKind::Manual, now)?;
+    let retention = retain(paths, &lock, &mut manifest, Some(&entry.file))?;
     Ok(Nightly::Done { entry, retention })
 }
 
@@ -160,6 +160,7 @@ pub fn backup(conn: &rusqlite::Connection, paths: &Paths, now: Timestamp) -> Res
 fn take(
     conn: &rusqlite::Connection,
     paths: &Paths,
+    lock: &ManifestLock,
     manifest: &Manifest,
     kind: EntryKind,
     now: Timestamp,
@@ -172,7 +173,7 @@ fn take(
         dest = paths.backups.join(format!("{base}-{n}.db"));
         n += 1;
     }
-    let copied = copy_verified(conn, &dest)?;
+    let copied = copy_verified(conn, &dest, lock)?;
     let entry = Entry {
         file: paths.relative(&dest)?,
         kind,
@@ -188,7 +189,7 @@ fn take(
     let mut manifest = manifest.clone();
     manifest.entries.push(entry.clone());
     manifest.failures.clear();
-    if let Err(error) = manifest.save(paths) {
+    if let Err(error) = manifest.save(paths, lock) {
         // Unlisted, the copy could never be verified or retained.
         let _ = remove_if_exists(&dest);
         return Err(error);
@@ -203,7 +204,12 @@ fn take(
 /// deletes it, deletes only files its manifest lists, and never deletes a
 /// `state.db.pre-restore-*` file. `fresh` names the copy just taken and
 /// verified, which is not checked again.
-fn retain(paths: &Paths, manifest: &mut Manifest, fresh: Option<&str>) -> Result<Retention> {
+fn retain(
+    paths: &Paths,
+    lock: &ManifestLock,
+    manifest: &mut Manifest,
+    fresh: Option<&str>,
+) -> Result<Retention> {
     let live = manifest.live();
     let nightly: Vec<&Entry> = live
         .iter()
@@ -293,7 +299,7 @@ fn retain(paths: &Paths, manifest: &mut Manifest, fresh: Option<&str>) -> Result
             entry.superseded = true;
         }
     }
-    manifest.save(paths)?;
+    manifest.save(paths, lock)?;
     for file in &doomed {
         remove_if_exists(&paths.resolve(file))?;
         retention.deleted.push(file.clone());
@@ -301,7 +307,7 @@ fn retain(paths: &Paths, manifest: &mut Manifest, fresh: Option<&str>) -> Result
     manifest
         .entries
         .retain(|entry| !doomed.contains(&entry.file));
-    manifest.save(paths)?;
+    manifest.save(paths, lock)?;
     Ok(retention)
 }
 

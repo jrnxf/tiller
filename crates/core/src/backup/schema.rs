@@ -115,10 +115,10 @@ fn take_copy(
     to: usize,
     now: Timestamp,
 ) -> Result<String> {
-    let _lock = super::ManifestLock::acquire(paths)?;
+    let lock = super::ManifestLock::acquire(paths)?;
     let mut manifest = Manifest::load(paths)?;
     let dest = paths.beside_db(&format!(".pre-{from}-{to}"));
-    let copied = copy_verified(conn, &dest)?;
+    let copied = copy_verified(conn, &dest, &lock)?;
     let file = paths.relative(&dest)?;
     // A second migration between the same versions replaces the first copy.
     manifest.entries.retain(|entry| entry.file != file);
@@ -134,6 +134,6 @@ fn take_copy(
         at: now,
         superseded: false,
     });
-    manifest.save(paths)?;
+    manifest.save(paths, &lock)?;
     Ok(file)
 }
