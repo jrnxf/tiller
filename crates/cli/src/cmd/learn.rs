@@ -373,11 +373,8 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
         Ok(ran) => ran,
         Err(failure) => {
             let id = &claimed.retro.value.id;
-            let noted = &note("the curator could not be started", &failure);
-            return Err(match unfinished(&mut store, &ctx, id, noted) {
-                Ok(_) => failure,
-                Err(error) => still_claimed(failure, id, error),
-            });
+            let what = "the curator could not be started";
+            return Err(end_unstarted(&mut store, &ctx, id, what, failure).0);
         }
     };
     let ended = end(
@@ -494,13 +491,16 @@ pub(crate) fn claim(
                 now: tiller_core::Timestamp::now(),
                 ..ctx.unkeyed()
             };
-            let id = &claimed.value.id;
-            let noted = &note("the curator could not be prepared", &failure);
-            return Err(match unfinished(store, &end, id, noted) {
-                Ok(_) => failure,
-                Err(error) => still_claimed(failure, id, error),
-            }
-            .into());
+            let what = "the curator could not be prepared";
+            return Err(
+                match end_unstarted(store, &end, &claimed.value.id, what, failure) {
+                    (failure, None) => failure.into(),
+                    (failure, Some(error)) => ClaimError::Unended {
+                        error: Box::new(error),
+                        failure,
+                    },
+                },
+            );
         }
     };
     Ok(Claimed {
@@ -519,6 +519,13 @@ pub(crate) fn claim(
 pub(crate) enum ClaimError {
     State(tiller_core::Error),
     Refused(Failure),
+    /// The run could not be prepared and its retro could not be ended
+    /// `unfinished` either: `failure` names both, and `error` is the store's
+    /// own, which the daemon checks for damage.
+    Unended {
+        error: Box<tiller_core::Error>,
+        failure: Failure,
+    },
 }
 
 impl From<Failure> for ClaimError {
@@ -531,7 +538,7 @@ impl From<ClaimError> for Failure {
     fn from(error: ClaimError) -> Self {
         match error {
             ClaimError::State(error) => error.into(),
-            ClaimError::Refused(failure) => failure,
+            ClaimError::Refused(failure) | ClaimError::Unended { failure, .. } => failure,
         }
     }
 }
@@ -612,16 +619,29 @@ fn note(what: &str, failure: &Failure) -> String {
     }
 }
 
-/// `failure`, the reason a run never reached its curator, with why `retro`
-/// could not then be ended `unfinished`: the cause and its hint stay what
-/// the owner sees, and the message says the retro stays claimed.
-fn still_claimed(mut failure: Failure, retro: &str, error: tiller_core::Error) -> Failure {
-    let error = Failure::from(error);
-    failure.message = format!(
-        "{}; {retro} also could not be ended unfinished ({}), so it stays claimed until its timeout passes",
-        failure.message, error.message
-    );
-    failure
+/// Ends `retro` `unfinished` after `failure` kept its run from reaching the
+/// curator (`what` says how), and returns the failure to report. When that
+/// end fails too, the failure keeps its cause and hint, and its message adds
+/// the store's error and that the retro stays claimed until its timeout
+/// passes; the store's error comes back beside it, for the daemon to check
+/// for damage.
+fn end_unstarted(
+    store: &mut Store,
+    ctx: &tiller_core::Ctx,
+    retro: &str,
+    what: &str,
+    mut failure: Failure,
+) -> (Failure, Option<tiller_core::Error>) {
+    match unfinished(store, ctx, retro, &note(what, &failure)) {
+        Ok(_) => (failure, None),
+        Err(error) => {
+            failure.message = format!(
+                "{}; {retro} also could not be ended unfinished ({error}), so it stays claimed until its timeout passes",
+                failure.message
+            );
+            (failure, Some(error))
+        }
+    }
 }
 
 /// Ends a claimed retro whose curator did not finish it as `unfinished`,
@@ -673,13 +693,9 @@ pub(crate) fn board_run(
                     .map_err(|failure| failure.message.clone()),
                 Err(failure) => {
                     let id = &claimed.retro.value.id;
-                    let noted = &note("the curator could not be started", &failure);
-                    Err(match unfinished(&mut store, &ctx, id, noted) {
-                        Ok(_) => failure,
-                        Err(error) => still_claimed(failure, id, error),
-                    }
-                    .message
-                    .clone())
+                    let what = "the curator could not be started";
+                    let (failure, _) = end_unstarted(&mut store, &ctx, id, what, failure);
+                    Err(failure.message.clone())
                 }
             }
         }),

@@ -540,6 +540,14 @@ impl tiller_daemon::api::OrchestratorStart for BoardStart {
         super::learn::board_run(&self.app, store, ctx, retro).map_err(|error| match error {
             super::learn::ClaimError::State(error) => StartError::from(error),
             super::learn::ClaimError::Refused(failure) => refused(failure),
+            // The store's error leads, and the cause and hint follow it.
+            super::learn::ClaimError::Unended { error, failure } => StartError::State {
+                notes: Some(match &failure.hint {
+                    Some(hint) => format!("{}; {hint}", failure.message),
+                    None => failure.message.clone(),
+                }),
+                error,
+            },
         })
     }
 }
