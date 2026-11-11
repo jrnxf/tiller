@@ -82,7 +82,7 @@ export function Learning() {
         </div>
       </div>
       <ul className="ln-list">
-        {newest ? <Unfinished newest={newest} count={unfinished.length} /> : null}
+        {newest ? <Unfinished key={newest.id} newest={newest} count={unfinished.length} /> : null}
         {running.map((retro) => (
           <li key={retro.id} data-kind="running">
             <span className="si acc">
