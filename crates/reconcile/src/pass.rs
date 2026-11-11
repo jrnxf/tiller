@@ -393,11 +393,18 @@ impl Reconciler {
             .optional()?)
     }
 
-    /// Whether a mutation under `key` already ran (its key is remembered).
+    /// Whether the pass's own mutation under `key` already ran: the key is
+    /// remembered, stored by the daemon, or by no recorded actor (a key from
+    /// before schema 15). A key another actor stored is not the pass's write
+    /// (`protocol.md` 6.3): the pass writes, and the store refuses the key,
+    /// so a session cannot silence a pass's breach by using its key first.
     pub(crate) fn key_used(&self, key: &str) -> Result<bool> {
+        // The actor of every pass write (`Reconciler::ctx`).
+        let actor = Actor::Daemon.to_string();
         Ok(self.conn().query_row(
-            "SELECT EXISTS (SELECT 1 FROM idempotency_keys WHERE key = ?1)",
-            [key],
+            "SELECT EXISTS (SELECT 1 FROM idempotency_keys
+                             WHERE key = ?1 AND (actor IS NULL OR actor = ?2))",
+            [key, actor.as_str()],
             |row| row.get(0),
         )?)
     }

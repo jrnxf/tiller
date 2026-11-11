@@ -106,6 +106,63 @@ fn leaking_body_blocks_grant_match_and_request() {
     assert_eq!(w.breaches("G30").len(), 1, "once per head");
 }
 
+/// Stores `key` in `idempotency_keys` as `actor` stored it (`None`: a key
+/// from before schema 15, which records no actor).
+fn plant_key(w: &World, key: &str, actor: Option<&str>) {
+    w.store()
+        .conn()
+        .execute(
+            "INSERT INTO idempotency_keys (key, command, entity, entity_id, response, created_at, actor)
+             VALUES (?1, 'guard.breach', 'card', 'x', '{}', ?2, ?3)",
+            rusqlite::params![key, now(), actor],
+        )
+        .unwrap();
+}
+
+/// G30 (`protocol.md` 6.3): the pass's breach key, already used by another
+/// actor, is not the pass's own write. A worker that stores
+/// `reconcile:G30:<pr>:<head>` first must not silence the breach on its own
+/// PR: the pass tries the write, the store refuses the key, and the pass
+/// reports the refusal. A key from before schema 15 has no actor and still
+/// counts as written.
+#[test]
+fn a_breach_key_another_actor_used_does_not_silence_the_breach() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    w.forge.pr(REPO, 7, open_pr("a1a1a1a1"));
+    w.pass(now());
+
+    let mut leaking = open_pr("b2b2b2b2");
+    leaking.body_leaks = vec!["> a line the owner wrote in chat".into()];
+    w.forge.pr(REPO, 7, leaking.clone());
+    let key = format!("reconcile:G30:{pr}:b2b2b2b2");
+    plant_key(&w, &key, Some(&format!("session:{worker}")));
+    let report = w.pass(now().plus_minutes(1));
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains(&key) && error.contains("not daemon")),
+        "{report:?}"
+    );
+    assert!(!report.did("G30"), "{report:?}");
+
+    // The same key with no actor, as schema 14 stored it: already written.
+    let old = format!("reconcile:G30:{pr}:c3c3c3c3");
+    plant_key(&w, &old, None);
+    leaking.fetch.head_sha = Some("c3c3c3c3".into());
+    w.forge.pr(REPO, 7, leaking);
+    w.forge.descends("b2b2b2b2", "c3c3c3c3");
+    let report = w.pass(now().plus_minutes(2));
+    assert!(!report.did("G30"), "{report:?}");
+    assert!(
+        report.errors.iter().all(|error| !error.contains(&old)),
+        "{report:?}"
+    );
+}
+
 /// R19, G11: a force-push after approval is flagged (the breach names the
 /// staled approvals), the approval is stale, and the developer is asked.
 #[test]
