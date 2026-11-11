@@ -1583,7 +1583,7 @@ fn memory_loaded_text(payload: &Value) -> String {
     match (loaded, skipped.is_empty()) {
         (_, true) => "loaded approved memory into the session".to_owned(),
         (true, false) => format!("loaded approved memory into the session and skipped {skips}"),
-        (false, false) => format!("loaded no memory into the session and skipped {skips}"),
+        (false, false) => format!("skipped {skips}"),
     }
 }
 
@@ -2370,7 +2370,7 @@ mod tests {
                 "session.memory_loaded",
                 serde_json::json!({"trigger": "startup", "revision_ids": [], "skipped": [skip]})
             ),
-            "loaded no memory into the session and skipped projects/alpha.md, as it has no approved revision"
+            "skipped projects/alpha.md, as it has no approved revision"
         );
         assert_eq!(
             text(

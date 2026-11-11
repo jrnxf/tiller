@@ -255,8 +255,9 @@ fn approve(app: &App, args: ApproveArgs) -> Done {
                     ));
                 }
                 // Each one is counted on the approved set as it is now, not
-                // after the ones before it in this run. An error is that
-                // proposal's, as the real run records it, and the rest go on.
+                // after the ones before it in this run. An error in the count
+                // is that proposal's, as the real run records it, and the
+                // rest go on.
                 let counted = repo
                     .state(&document_path(&p.project_id), &list)
                     .and_then(|file| store.mem_keep_budget(&p.id, &file, &|sha| repo.blob(sha)));

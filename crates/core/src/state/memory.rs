@@ -1032,9 +1032,6 @@ fn measured_after(
     Ok(true)
 }
 
-/// Holds a Keep of `proposal`, which leaves `text` in the document at
-/// `path`, to the startup budget, and records the count it leaves on it. A
-/// refusal names `kept`, the proposal the owner decided.
 /// The document's text once `diff` is applied to `text`, for the startup
 /// budget count. A diff the strict reader cannot apply refuses the Keep of
 /// `kept`, even one `git apply` would take: a change that cannot be counted
@@ -1045,11 +1042,14 @@ fn after_keep(text: &str, diff: &str, kept: &str) -> Result<String> {
             "proposal",
             kept,
             "its diff does not apply exactly to the current text, so its startup memory cannot \
-             be counted; re-propose it on the current text",
+             be counted; discard it and propose the change again",
         )
     })
 }
 
+/// Holds a Keep of `proposal`, which leaves `text` in the document at
+/// `path`, to the startup budget, and records the count it leaves on it. A
+/// refusal names `kept`, the proposal the owner decided.
 fn budget(
     tx: &mut Tx<'_>,
     proposal: &Proposal,
@@ -1571,7 +1571,13 @@ impl Store {
             let rows = mapped(tx.conn(), &source.id, &sections)?;
             let (diff, mut fields) = rebased_diff(&proposal, &path, file, &sections, &rows)?;
             fields["rebased_from"] = json!(proposal.id);
-            let text = after_keep(&file.text, &diff, &proposal.id)?;
+            // Tiller wrote this diff from the current text, so it applies.
+            let text = doc::apply_diff(&file.text, &diff).ok_or_else(|| {
+                Error::Internal(format!(
+                    "the diff rebased from proposal {} does not apply to the text it was made from",
+                    proposal.id
+                ))
+            })?;
             let old = decide(tx, &proposal, true)?;
             let rebased = insert_proposal(
                 tx,

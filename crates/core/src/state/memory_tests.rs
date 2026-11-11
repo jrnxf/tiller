@@ -476,7 +476,7 @@ fn a_keep_whose_diff_cannot_be_counted_is_refused() {
     assert!(
         error
             .to_string()
-            .ends_with("its diff does not apply exactly to the current text, so its startup memory cannot be counted; re-propose it on the current text"),
+            .ends_with("its diff does not apply exactly to the current text, so its startup memory cannot be counted; discard it and propose the change again"),
         "{error}"
     );
     assert_eq!(proposal(&store, &suggested).state, "proposed");
