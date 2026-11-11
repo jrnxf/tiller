@@ -99,6 +99,8 @@ record!(Project in "projects" {
     stage: Stage,
     reviewed_through_sha: Option<String>,
     stage_changed_at: Option<Timestamp>,
+    /// When `rev` last moved; set in the statement that bumps it.
+    edited_at: Timestamp,
 });
 
 impl Project {

@@ -904,6 +904,50 @@ fn a_spool_file_that_fails_to_apply_does_not_block_the_rest() {
     assert_eq!(session(&store, &fleet.worker).activity, Activity::Errored);
 }
 
+/// A spool write that stops partway never leaves a `.json` file: the daemon
+/// would read the half and move it aside as bad. The test runs itself in a
+/// child under a small file size limit, with `SIGXFSZ` ignored, so the write
+/// fails after its first few KiB.
+#[test]
+fn a_spool_write_that_stops_partway_leaves_no_spool_file() {
+    const CHILD: &str = "TILLER_TEST_SPOOL_HOME";
+    if let Some(home) = std::env::var_os(CHILD) {
+        let env = Env {
+            tiller_home: home.into(),
+            user_home: None,
+            tiller_session_id: None,
+        };
+        let mut observed = observe("Stop", &input("claude-worker", json!({})), &env, tick())
+            .unwrap()
+            .unwrap();
+        observed.payload = json!({"filler": "x".repeat(256 * 1024)});
+        let outcome = spool(&env, &observed, "test");
+        assert!(matches!(outcome, Outcome::Failed(_)), "{outcome:?}");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join(".tiller");
+    fs::create_dir_all(&home).unwrap();
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("trap '' XFSZ; ulimit -f 8; exec \"$0\" \"$@\"")
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "hooks::tests::a_spool_write_that_stops_partway_leaves_no_spool_file",
+            "--nocapture",
+        ])
+        .env(CHILD, &home)
+        .status()
+        .unwrap();
+    assert!(status.success(), "the child failed: {status}");
+    let left: Vec<String> = fs::read_dir(home.join("hook-spool"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(left.is_empty(), "the failed write left {left:?}");
+}
+
 /// `hook.log` rotates at its limit into `hook.log.1`, one generation kept.
 #[test]
 fn the_hook_log_rotates_at_its_limit() {

@@ -34,10 +34,10 @@ use tiller_core::domain::{
 };
 use tiller_core::domain::{Boundary, Delivery, GrantKind, InterventionKind, Stage};
 use tiller_core::host_config;
-use tiller_core::limits::{
-    ANSWER_MAX_CHARS, ASK_NOTE_MAX_CHARS, BODY_MAX_CHARS, COMMENT_MAX_CHARS, TITLE_MAX_CHARS,
-    within,
-};
+// The store checks every cap. The API checks them again before a mutation
+// is forwarded, so text over a cap is refused here, not after a trip over
+// the link to a peer.
+use tiller_core::limits::{self, ANSWER_MAX_CHARS, COMMENT_MAX_CHARS, STEER_MAX_CHARS, within};
 use tiller_core::state::approvals::{Decision, NewGrant};
 use tiller_core::state::asks::NewAsk;
 use tiller_core::state::cards::{CardEdit, NewCard};
@@ -481,6 +481,7 @@ impl From<Error> for ApiError {
                 id,
                 current_rev,
                 field,
+                edited_at,
                 ..
             } => {
                 api.body.error.entity = Some((*entity).to_owned());
@@ -488,6 +489,9 @@ impl From<Error> for ApiError {
                 let mut current = json!({"rev": current_rev});
                 if let Some((name, value)) = field {
                     current[name] = value.clone();
+                }
+                if let Some(at) = edited_at {
+                    current["edited_at"] = json!(at);
                 }
                 api.body.error.current = Some(current);
             }
@@ -515,20 +519,11 @@ impl IntoResponse for ApiError {
 
 pub(crate) type ApiResult<T> = Result<Json<T>, ApiError>;
 
-/// The commands that make `state.db`, one per line, in the order to run them,
-/// named in every answer before it exists. `tiller init` refuses while the
-/// owner marker names another system, so the owner hands the host to Tiller
-/// first (`tiller owner set tiller` is a no-op when the marker already says so).
-/// The board's setup screen shows each line as its own command.
-pub const INIT_HINT: &str =
-    "tiller owner set tiller\ntiller init --host-label <label> --lane-capacity <n>";
+pub use tiller_core::INIT_HINT;
 
 /// The 503 every read and write answers before `tiller init`.
 pub(crate) fn uninitialized() -> ApiError {
-    ApiError::from(Error::Unavailable(
-        "state.db is not initialized; run tiller owner set tiller, then tiller init".into(),
-    ))
-    .hint(INIT_HINT)
+    ApiError::from(Error::Unavailable(tiller_core::not_initialized())).hint(INIT_HINT)
 }
 
 /// The 503 every mutation answers while `state.db` is damaged.
@@ -641,10 +636,7 @@ async fn host_check(State(state): State<AppState>, request: Request, next: Next)
 /// The checks every mutation passes before its body is read.
 pub(crate) async fn guard(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     same_origin(state, headers)?;
-    if owner_cookie(state, headers).await.is_none() {
-        return Err(not_owner());
-    }
-    Ok(())
+    owner_only(state, headers).await
 }
 
 /// Refuses a read unless the request carries a live owner cookie. Most reads
@@ -816,6 +808,23 @@ pub(crate) fn request_args() -> Option<Value> {
     REQUEST_ARGS.try_with(Clone::clone).ok()
 }
 
+/// Runs `work` in its own task, so a browser that goes away does not stop
+/// it halfway, with this request's arguments still bound ([`bind_args`]): a
+/// new task does not inherit the task-local, and without it the key would
+/// replay another request's answer.
+pub(crate) async fn detached<T: Send + 'static>(
+    work: impl Future<Output = ApiResult<T>> + Send + 'static,
+) -> ApiResult<T> {
+    let task = match request_args() {
+        Some(args) => tokio::spawn(REQUEST_ARGS.scope(args, work)),
+        None => tokio::spawn(work),
+    };
+    match task.await {
+        Ok(result) => result,
+        Err(error) => Err(Error::Internal(error.to_string()).into()),
+    }
+}
+
 /// The board's context for a write under `key`, bound to `args`.
 pub(crate) fn board_ctx(key: &str, args: Option<&Value>) -> Ctx {
     let ctx = Ctx::new(Actor::Board).with_key(key.to_owned());
@@ -891,7 +900,7 @@ impl Done {
         })
     }
 
-    fn with_warning(mut self, warning: Option<String>) -> Self {
+    pub(crate) fn with_warning(mut self, warning: Option<String>) -> Self {
         self.warning = warning;
         self
     }
@@ -958,6 +967,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/agents/{session}/stop", post(stop_agent))
         .route("/api/v1/agents/{session}/pause", post(pause_agent))
         .route("/api/v1/agents/{session}/resume", post(resume_agent))
+        .route("/api/v1/agents/{session}/unpause", post(unpause_agent))
         .route("/api/v1/agents/{session}/relaunch", post(relaunch_agent))
         .route("/api/v1/agents/{session}/prompt", post(prompt_read))
         .route(
@@ -1568,12 +1578,7 @@ async fn doctor(
     let Some(report) = report else {
         return Err(Error::Unavailable("this daemon cannot run its checks".into()).into());
     };
-    Ok(Json(Doctor {
-        checked_at: checked_at.to_string(),
-        ok: report.ok,
-        checks: report.checks,
-        merge_gates: report.merge_gates,
-    }))
+    Ok(Json(Doctor::from_report(report, checked_at)))
 }
 
 /// Run now: ends one poller's wait so it polls at once, then answers with
@@ -1846,12 +1851,7 @@ impl Mutation {
             Op::CreateCard => {
                 let request: CreateCard = body(bytes)?;
                 let kind: CardKind = request.kind.parse()?;
-                within("title", &request.title, TITLE_MAX_CHARS)?;
-                within(
-                    "body",
-                    request.body.as_deref().unwrap_or(""),
-                    BODY_MAX_CHARS,
-                )?;
+                limits::card_text(Some(&request.title), request.body.as_deref())?;
                 (
                     request.idempotency_key.clone(),
                     request.host.clone(),
@@ -1860,16 +1860,7 @@ impl Mutation {
             }
             Op::EditCard => {
                 let request: EditCard = body(bytes)?;
-                within(
-                    "title",
-                    request.title.as_deref().unwrap_or(""),
-                    TITLE_MAX_CHARS,
-                )?;
-                within(
-                    "body",
-                    request.body.as_deref().unwrap_or(""),
-                    BODY_MAX_CHARS,
-                )?;
+                limits::card_text(request.title.as_deref(), request.body.as_deref())?;
                 (
                     request.idempotency_key.clone(),
                     request.host.clone(),
@@ -1959,7 +1950,7 @@ impl Mutation {
             }
             Op::AskNote => {
                 let request: AskNote = body(bytes)?;
-                within("an ask", request.text.trim(), ASK_NOTE_MAX_CHARS)?;
+                limits::ask(&request.text)?;
                 (
                     request.idempotency_key.clone(),
                     request.host.clone(),
@@ -2796,11 +2787,7 @@ async fn add_project(
     writable(&state)?;
     // Its own task: a browser that goes away mid-clone does not leave a
     // clone with no project, or a project with no checkout.
-    let task = tokio::spawn(add_with_checkout(state, key, new, checkout));
-    match task.await {
-        Ok(result) => result,
-        Err(error) => Err(Error::Internal(error.to_string()).into()),
-    }
+    detached(add_with_checkout(state, key, new, checkout)).await
 }
 
 /// Add project with a Local checkout: the folder checked, the clone it
@@ -2939,10 +2926,7 @@ async fn add_numbered(
             match write_checkout(&home, &config_key, &path) {
                 Ok(false) => {}
                 Ok(true) => match store.config_changed(
-                    &Ctx {
-                        key: None,
-                        ..ctx.clone()
-                    },
+                    &ctx.unkeyed(),
                     &config_key,
                     json!(path),
                 ) {
@@ -3093,11 +3077,7 @@ async fn add_peer(
     writable(&state)?;
     // Its own task: a browser that goes away mid-ssh does not cut a pairing
     // off between the new host's accept and this host's record of it.
-    let task = tokio::spawn(pair_host(state, key, request.label, request.ssh, scope));
-    match task.await {
-        Ok(result) => result,
-        Err(error) => Err(Error::Internal(error.to_string()).into()),
-    }
+    detached(pair_host(state, key, request.label, request.ssh, scope)).await
 }
 
 /// Add a host's steps 2 to 4 (`protocol.md` 10.1), one pairing at a time.
@@ -3171,7 +3151,7 @@ async fn pair_host(
     }
     if start.paired.is_some() {
         return Err(label_taken(format!(
-            "{label} is already paired; pick another label, or run tiller peer remove {label} in a terminal first"
+            "{label} is already paired; pick another label, or Unpair it first in its Settings > Hosts card (or run tiller peer remove {label})"
         )));
     }
     // A host paired again under a new label would take the new key in
@@ -3187,9 +3167,10 @@ async fn pair_host(
     // This host's label is a word on the new host's command line.
     check_label(&start.this.label)?;
     let host_id = start.host_id.ok_or_else(|| {
-        ApiError::from(Error::Unavailable(
-            "state.db has no host id; run tiller init".into(),
-        ))
+        ApiError::from(Error::Unavailable(format!(
+            "state.db has no host id; {}",
+            tiller_core::RUN_INIT
+        )))
     })?;
 
     // Step 2: the key, under a pending name until the new host accepts it.
@@ -3255,14 +3236,7 @@ async fn pair_host(
             )?;
             // The key went with `peer.pair`; this event is its own write.
             let recorded = changed.then(|| {
-                store.config_changed(
-                    &Ctx {
-                        key: None,
-                        ..ctx.clone()
-                    },
-                    &format!("peers.{label}.ssh"),
-                    json!(alias),
-                )
+                store.config_changed(&ctx.unkeyed(), &format!("peers.{label}.ssh"), json!(alias))
             });
             Ok(paired_done(
                 &alias,
@@ -4630,6 +4604,29 @@ async fn read_dialog(
     Ok(prompt::read(&screen, &wait))
 }
 
+/// How long an answer holds its session's turn for the dialog to leave the
+/// screen, and how often it looks.
+const DIALOG_LEFT_WAIT: std::time::Duration = std::time::Duration::from_millis(800);
+const DIALOG_LEFT_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Waits, a short while at most, for the dialog an answer went to to leave
+/// the pane: the agent redraws a moment after it reads the keys. A second
+/// answer waits on this turn, so it reads the redrawn screen. A read that
+/// fails, or one still running at the bound, ends the wait; the answer was
+/// sent either way. The turn is the daemon's own: the endpoint's contract
+/// (`protocol.md` 7.4) is unchanged.
+async fn dialog_left(state: &AppState, pane: &str, wait: prompt::Wait, screen: &str) {
+    let until = tokio::time::Instant::now() + DIALOG_LEFT_WAIT;
+    while tokio::time::Instant::now() + DIALOG_LEFT_EVERY < until {
+        tokio::time::sleep(DIALOG_LEFT_EVERY).await;
+        let read = tokio::time::timeout_at(until, read_dialog(state, pane, wait.clone()));
+        match read.await {
+            Ok(Ok(Some(dialog))) if dialog.prompt.screen == screen => continue,
+            _ => return,
+        }
+    }
+}
+
 /// The dialog on a waiting agent's screen, for the board's answer buttons
 /// (`protocol.md` 7.4): a permission dialog, or a cursor menu of a known
 /// layout. The screen is read only while the agent's session says it waits.
@@ -4704,6 +4701,10 @@ async fn prompt_answer(
     .await?;
     let (session_id, pane) = local_pane(&state, session).await?;
     spend_input(&state)?;
+    // Two taps on one dialog (two tabs, two devices) take turns: the second
+    // reads the screen only after the first one's keys went and the dialog
+    // left it, so it finds the screen changed and types nothing.
+    let _turn = state.0.mirrors.answer_turn(&session_id).await;
     let changed = || {
         ApiError::new(
             StatusCode::CONFLICT,
@@ -4715,7 +4716,7 @@ async fn prompt_answer(
     let wait = waiting_on(&state, session_id.clone())
         .await?
         .ok_or_else(changed)?;
-    let dialog = read_dialog(&state, &pane, wait)
+    let dialog = read_dialog(&state, &pane, wait.clone())
         .await?
         .filter(|dialog| dialog.prompt.screen == request.screen)
         .ok_or_else(changed)?;
@@ -4732,6 +4733,7 @@ async fn prompt_answer(
     .await
     .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
     .map_err(|error| pane_error(&pane, &error))?;
+    dialog_left(&state, &pane, wait, &request.screen).await;
     Ok(Json(MutationResponse {
         ok: true,
         replayed: false,
@@ -4952,7 +4954,7 @@ async fn steer_agent(
             "a steer is one line; send each line on its own",
         ));
     }
-    within("the message", &text, COMMENT_MAX_CHARS)?;
+    within("the message", &text, STEER_MAX_CHARS)?;
     mutate(
         &state,
         key(&request.idempotency_key)?,
@@ -5145,6 +5147,39 @@ async fn pause_agent(
         move |store, ctx, _| {
             let (_, run) = session_run(store, &session, "pause")?;
             Done::of(store.run_pause(ctx, &run.id, until, Some(&reason))?)
+        },
+    )
+    .await
+}
+
+/// Clears the dated pause on the session's run, as a manual resume does:
+/// the board's Resume on a paused agent (`protocol.md` 7.4).
+#[utoipa::path(post, path = "/api/v1/agents/{session}/unpause", tag = "mutations", request_body = AgentControlBody,
+    params(("session" = String, Path)),
+    responses((status = 200, body = MutationResponse, description = "`data` is the run"),
+              (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "`refused`: an orchestrator or an ended run"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn unpause_agent(
+    State(state): State<AppState>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers).await?;
+    let request: AgentControlBody = body(&bytes)?;
+    not_forwarded(
+        &state,
+        request.host.as_deref(),
+        "a resume (a peer's run is resumed on its own host)",
+    )
+    .await?;
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| {
+            let (_, run) = session_run(store, &session, "resume")?;
+            Done::of(store.run_unpause(ctx, &run.id)?)
         },
     )
     .await
@@ -5545,7 +5580,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health, doctor, run_poller,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, add_dep, remove_dep, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stop_agent, pause_agent, resume_agent, relaunch_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, host_config_read, set_config,
+        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stop_agent, pause_agent, unpause_agent, resume_agent, relaunch_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, host_config_read, set_config,
         project_grants, create_grant, revoke_grant,
         away_start, away_edit, away_end, away_brief, host_fields, edit_host, crate::backups::list, crate::backups::take, pick_bug_project, recap, mark_recap_seen, project_replies, mark_reply_read, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, memory::repropose, memory::eval::eval_plan,
@@ -5817,6 +5852,8 @@ pub(crate) mod tests {
     /// text at the cap is taken.
     #[tokio::test]
     async fn long_text_is_refused_at_its_cap() {
+        use tiller_core::limits::{ANSWER_MAX_CHARS, BODY_MAX_CHARS, TITLE_MAX_CHARS};
+
         let fleet = Fleet::new();
         let home = fleet.dir.path();
         let app = app(home, Assets::of::<Fixture>());
@@ -5884,6 +5921,51 @@ pub(crate) mod tests {
         .await;
         assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
         assert_eq!(cards(&fleet), before + 1);
+    }
+
+    /// An empty body on an edit clears the body, as `tiller card edit --body
+    /// ""` does: the store decides, so the two paths cannot differ.
+    #[tokio::test]
+    async fn an_empty_body_on_an_edit_clears_it() {
+        let mut fleet = Fleet::new();
+        let card = fleet
+            .store
+            .card_create(
+                &Ctx::new(Actor::Owner),
+                None,
+                tiller_core::state::cards::NewCard {
+                    project_id: "alpha".into(),
+                    kind: tiller_core::domain::CardKind::Ship,
+                    title: "Clear me".into(),
+                    body: Some("Old notes".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap()
+            .value;
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let cookie = owner_cookie(fleet.dir.path());
+        let headers = [("cookie", cookie.as_str())];
+        let edited = send(
+            &app,
+            mutation(
+                "PATCH",
+                &format!("/api/v1/cards/{}", card.id),
+                json!({"idempotency_key": "k-clear", "rev": card.rev, "body": ""}),
+                &headers,
+            ),
+        )
+        .await;
+        assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+        let stored: Option<String> = fleet
+            .store
+            .conn()
+            .query_row("SELECT body FROM cards WHERE id = ?1", [&card.id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored, None);
     }
 
     /// The owner check reads `board-owner` on the blocking pool: a slow
@@ -7527,7 +7609,16 @@ pub(crate) mod tests {
         assert_eq!(body["replayed"], true, "{body}");
 
         // The rev the board read is stale now: a conflict that names the
-        // stored value of the field it tried to change.
+        // stored value of the field it tried to change, and when the other
+        // edit happened.
+        let listed = get(&app, "/api/v1/projects").await;
+        let listed: Value = serde_json::from_str(&listed.body).unwrap();
+        let edited_at = listed["projects"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["id"] == "alpha"))
+            .map(|row| row["edited_at"].clone())
+            .unwrap();
+        assert!(edited_at.is_string(), "{listed}");
         let stale = send(
             &app,
             edit("k-edit-10", json!({"rev": rev, "capacity": 3}), &cookie),
@@ -7537,7 +7628,13 @@ pub(crate) mod tests {
         let body: Value = serde_json::from_str(&stale.body).unwrap();
         assert_eq!(
             body["error"]["current"],
-            json!({"rev": rev + 1, "capacity": 2})
+            json!({"rev": rev + 1, "capacity": 2, "edited_at": edited_at})
+        );
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("; it changed ")),
+            "{body}"
         );
 
         let cleared = send(
@@ -8306,8 +8403,9 @@ pub(crate) mod tests {
             paired.body
         );
         assert_eq!(error_of(&paired)["code"], "label_taken", "{}", paired.body);
-        assert!(
-            paired.body.contains("host-b is already paired"),
+        assert_eq!(
+            error_of(&paired)["message"],
+            "host-b is already paired; pick another label, or Unpair it first in its Settings > Hosts card (or run tiller peer remove host-b)",
             "{}",
             paired.body
         );
@@ -9106,7 +9204,12 @@ esac"#,
             r#"echo "$*" >> '{dir}/calls'
 case "$*" in
 *"pane read"*)
+  [ -e '{dir}/slow' ] && sleep 0.3
+  [ -e '{dir}/hang' ] && sleep 2
   if [ -e '{dir}/screen' ]; then cat '{dir}/screen'; else printf 'one\n\033[34mtwo\033[0m\n'; fi;;
+*"pane send-keys"*)
+  mv '{dir}/hang-after-keys' '{dir}/hang' 2>/dev/null
+  mv '{dir}/after-keys' '{dir}/screen' 2>/dev/null || true;;
 *"pane layout"*)
   read cols rows < '{dir}/size'
   for pane; do :; done
@@ -9372,6 +9475,15 @@ esac"#,
         let answer = format!("/api/v1/agents/{session}/prompt/answer");
         let press = |screen: &str, option: u8| json!({"option": option, "screen": screen});
         let calls = || std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
+        // The keys sent, in order: an answer also reads the screen after it
+        // sent them, for the dialog to leave.
+        let keys = || {
+            calls()
+                .lines()
+                .filter(|line| line.contains("send-keys"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
 
         // Both pass every mirror guard.
         for (path, body) in [(&read, json!({})), (&answer, press("x", 1))] {
@@ -9425,7 +9537,10 @@ esac"#,
         assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
         let sent: Value = serde_json::from_str(&sent.body).unwrap();
         assert_eq!(sent["data"]["sent"]["option"], 4);
-        assert_eq!(calls().lines().last(), Some("pane send-keys w2:p1 4"));
+        assert_eq!(
+            keys().last().map(String::as_str),
+            Some("pane send-keys w2:p1 4")
+        );
 
         // A parallel tool call observed after the dialog opened leaves the
         // tool it asks about alone.
@@ -9463,6 +9578,15 @@ esac"#,
         let answer = format!("/api/v1/agents/{session}/prompt/answer");
         let press = |screen: &str, option: u8| json!({"option": option, "screen": screen});
         let calls = || std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
+        // The keys sent, in order: an answer also reads the screen after it
+        // sent them, for the dialog to leave.
+        let keys = || {
+            calls()
+                .lines()
+                .filter(|line| line.contains("send-keys"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
         let trust = include_str!("../../herdr/tests/fixtures/claude/trust-dialog.ansi");
         std::fs::write(dir.join("screen"), trust).unwrap();
 
@@ -9504,12 +9628,15 @@ esac"#,
         let sent = send(&app, mutation("POST", &answer, press(screen, 2), &owner)).await;
         assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
         assert_eq!(
-            calls().lines().last(),
+            keys().last().map(String::as_str),
             Some("pane send-keys w2:p1 down enter")
         );
         let sent = send(&app, mutation("POST", &answer, press(screen, 1), &owner)).await;
         assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
-        assert_eq!(calls().lines().last(), Some("pane send-keys w2:p1 enter"));
+        assert_eq!(
+            keys().last().map(String::as_str),
+            Some("pane send-keys w2:p1 enter")
+        );
 
         // A permission wait never reads the trust dialog.
         waiting(&fleet, &session, "Bash");
@@ -9518,6 +9645,109 @@ esac"#,
         assert_eq!(other["reason"], "no_dialog", "{other}");
         let late = send(&app, mutation("POST", &answer, press(screen, 2), &owner)).await;
         assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
+    }
+
+    #[tokio::test]
+    async fn an_answer_waits_for_its_dialog_to_leave_no_longer_than_its_bound() {
+        let mut fleet = Fleet::new();
+        let session = fleet.worker("w2:p1");
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+        let app = mirror_app(&fleet, dir);
+        let cookie = owner_cookie(fleet.dir.path());
+        let owner = [("cookie", cookie.as_str())];
+        let read = format!("/api/v1/agents/{session}/prompt");
+        let answer = format!("/api/v1/agents/{session}/prompt/answer");
+        let trust = include_str!("../../herdr/tests/fixtures/claude/trust-dialog.ansi");
+        std::fs::write(dir.join("screen"), trust).unwrap();
+        fleet
+            .open()
+            .conn()
+            .execute(
+                "UPDATE sessions SET activity = 'waiting_input', activity_observed_at = ?2
+                 WHERE id = ?1",
+                rusqlite::params![session, at(0)],
+            )
+            .unwrap();
+        let shown = send(&app, mutation("POST", &read, json!({}), &owner)).await;
+        let shown: Value = serde_json::from_str(&shown.body).unwrap();
+        let screen = shown["prompt"]["screen"].as_str().unwrap().to_owned();
+
+        // Once the keys went, every screen read hangs.
+        std::fs::write(dir.join("hang-after-keys"), "").unwrap();
+        let started = std::time::Instant::now();
+        let sent = send(
+            &app,
+            mutation(
+                "POST",
+                &answer,
+                json!({"option": 2, "screen": screen}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
+        assert!(
+            started.elapsed() < DIALOG_LEFT_WAIT + std::time::Duration::from_millis(900),
+            "the answer took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn two_answers_to_one_dialog_take_turns_and_only_the_first_types() {
+        let mut fleet = Fleet::new();
+        let session = fleet.worker("w2:p1");
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+        let app = mirror_app(&fleet, dir);
+        let cookie = owner_cookie(fleet.dir.path());
+        let owner = [("cookie", cookie.as_str())];
+        let read = format!("/api/v1/agents/{session}/prompt");
+        let answer = format!("/api/v1/agents/{session}/prompt/answer");
+        let calls = || std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
+        let trust = include_str!("../../herdr/tests/fixtures/claude/trust-dialog.ansi");
+        std::fs::write(dir.join("screen"), trust).unwrap();
+        fleet
+            .open()
+            .conn()
+            .execute(
+                "UPDATE sessions SET activity = 'waiting_input', activity_observed_at = ?2
+                 WHERE id = ?1",
+                rusqlite::params![session, at(0)],
+            )
+            .unwrap();
+        let shown = send(&app, mutation("POST", &read, json!({}), &owner)).await;
+        let shown: Value = serde_json::from_str(&shown.body).unwrap();
+        let screen = shown["prompt"]["screen"].as_str().unwrap().to_owned();
+
+        // The agent redraws once it reads the keys. Each screen read takes a
+        // while, so two answers that did not take turns would both read the
+        // dialog before either typed.
+        std::fs::write(dir.join("after-keys"), "Working on it\n").unwrap();
+        std::fs::write(dir.join("slow"), "").unwrap();
+        let tap = || {
+            send(
+                &app,
+                mutation(
+                    "POST",
+                    &answer,
+                    json!({"option": 2, "screen": screen}),
+                    &owner,
+                ),
+            )
+        };
+        let (first, second) = tokio::join!(tap(), tap());
+        let mut statuses = [first.status, second.status];
+        statuses.sort();
+        assert_eq!(
+            statuses,
+            [StatusCode::OK, StatusCode::CONFLICT],
+            "{} / {}",
+            first.body,
+            second.body
+        );
+        assert_eq!(calls().matches("send-keys").count(), 1, "{}", calls());
     }
 
     #[tokio::test]
@@ -9596,13 +9826,31 @@ esac"#,
         home: &std::path::Path,
         starter: Arc<dyn OrchestratorStart>,
     ) -> Router {
-        app_polling(home, Some(starter), Registry::new())
+        app_retros(home, starter, crate::retros::Retros::default())
+    }
+
+    /// The board API with this starter, running retros through `retros`.
+    pub(crate) fn app_retros(
+        home: &std::path::Path,
+        starter: Arc<dyn OrchestratorStart>,
+        retros: crate::retros::Retros,
+    ) -> Router {
+        app_running(home, Some(starter), Registry::new(), retros)
     }
 
     fn app_polling(
         home: &std::path::Path,
         starter: Option<Arc<dyn OrchestratorStart>>,
         pollers: Registry,
+    ) -> Router {
+        app_running(home, starter, pollers, crate::retros::Retros::default())
+    }
+
+    fn app_running(
+        home: &std::path::Path,
+        starter: Option<Arc<dyn OrchestratorStart>>,
+        pollers: Registry,
+        retros: crate::retros::Retros,
     ) -> Router {
         let (_newest_tx, newest) = watch::channel(0);
         let (_stop_tx, stop) = watch::channel(false);
@@ -9627,7 +9875,7 @@ esac"#,
             ssh: vec!["ssh".into()],
             evals: memory::eval::Evals::default(),
             backups: crate::backups::BackupJobs::default(),
-            retros: crate::retros::Retros::default(),
+            retros,
         }))
     }
 
@@ -12282,6 +12530,45 @@ esac"#,
             )
             .unwrap();
         assert_eq!(paused_events, 1, "the retry replays");
+
+        // The board's Resume clears the pause, and the row drops it.
+        let unpause = format!("/api/v1/agents/{worker}/unpause");
+        let orchestrated = pause(
+            json!({"idempotency_key": "k-2"}),
+            format!("/api/v1/agents/{orchestrator}/unpause"),
+        )
+        .await;
+        assert_eq!(
+            orchestrated.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            orchestrated.body
+        );
+        let cleared = pause(json!({"idempotency_key": "k-3"}), unpause.clone()).await;
+        assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.body);
+        let cleared: Value = serde_json::from_str(&cleared.body).unwrap();
+        assert!(cleared["data"]["pause_until"].is_null(), "{cleared}");
+        let natural = pause(json!({"idempotency_key": "k-4"}), unpause).await;
+        assert_eq!(natural.status, StatusCode::OK, "{}", natural.body);
+        let read: Value = serde_json::from_str(&get(&app, "/api/v1/agents").await.body).unwrap();
+        let row = read["orchestrators"][0]["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["session_id"] == worker.as_str())
+            .unwrap()
+            .clone();
+        assert!(row["pause"].is_null(), "{row}");
+        let unpaused_events: i64 = fleet
+            .open()
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind = 'run.unpaused' AND actor = 'board'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unpaused_events, 1, "a run with no pause writes nothing");
     }
 
     /// P11: Restart on the board is `tiller orchestrator start --restart`

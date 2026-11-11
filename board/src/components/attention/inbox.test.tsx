@@ -1,12 +1,17 @@
+import { readFileSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
+
 import { QueryClientProvider } from "@tanstack/react-query";
+import type { QueryClient } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import type {
   AgentRow,
   AgentsResponse,
   AttentionResponse,
+  BoardResponse,
   PromptDialog,
 } from "../../lib/api-types";
 import { hydrateFromSnapshot } from "../../lib/boot";
@@ -19,7 +24,7 @@ import {
 } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
-import { agentsQuery, attentionQuery } from "../../lib/queries";
+import { agentsQuery, attentionQuery, boardPath, queryKeyFor } from "../../lib/queries";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
 import { applyChange } from "../../lib/sse";
@@ -30,6 +35,7 @@ import { createTestQueryClient, loadRouteChunks } from "../../test-app";
 await loadRouteChunks();
 
 const RETRY = "01JATTN0000000000000000000";
+const RETRY_CARD = "01JCARD0000000000000000041";
 const MERGE = "01JATTN0000000000000000001";
 const QUIET = "01JATTN0000000000000000002";
 const CAPACITY = "01JATTN0000000000000000003";
@@ -53,6 +59,12 @@ let reads: string[] = [];
 let screens: PromptDialog[] = [];
 // A tail read finds herdr down.
 let tailFails = false;
+// A prompt read is refused: the agent runs on a saved machine.
+let promptRefused = false;
+// The agents list never answers, so the board does not know who runs where.
+let agentsHang = false;
+// The agents list fails.
+let agentsFail = false;
 
 const DIALOG: PromptDialog = {
   layout: "permission",
@@ -92,6 +104,11 @@ function stubDaemon(scenario: Scenario, hold = false) {
   vi.stubGlobal("fetch", async (path: string, init?: RequestInit) => {
     const method = init?.method ?? "GET";
     if (method === "GET") {
+      if (agentsHang && path === "/api/v1/agents") return new Promise<Response>(() => {});
+      if (agentsFail && path === "/api/v1/agents") {
+        const error = { code: "internal", message: "the store is locked" };
+        return new Response(JSON.stringify({ ok: false, error }), { status: 500 });
+      }
       const data =
         (serverResponses(scenario) as Record<string, unknown>)[path] ??
         fixtureResource(path, scenario);
@@ -111,6 +128,13 @@ function stubDaemon(scenario: Scenario, hold = false) {
     const read = /^\/api\/v1\/agents\/([^/]+)\/prompt$/.exec(path);
     if (read?.[1]) {
       reads.push(read[1]);
+      if (promptRefused) {
+        const error = {
+          code: "refused",
+          message: "the agent runs on the saved machine host-b; nothing was read",
+        };
+        return new Response(JSON.stringify({ ok: false, error }), { status: 422 });
+      }
       const prompt = (screens.length > 1 ? screens.shift() : screens[0]) ?? null;
       const body = {
         session_id: read[1],
@@ -128,12 +152,18 @@ function stubDaemon(scenario: Scenario, hold = false) {
   });
 }
 
-async function renderInbox(scenario: Scenario = "default", item?: string) {
+async function renderInbox(
+  scenario: Scenario = "default",
+  item?: string,
+  prepare?: (queryClient: QueryClient) => void,
+) {
   const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot(scenario, Date.parse("2026-11-02T12:00:00Z")));
   const path = item ? `/inbox?item=${item}` : "/inbox";
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: [path] }));
   await router.load();
+  // After the load, so what it changes is not read again first.
+  prepare?.(queryClient);
   render(
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
@@ -155,6 +185,9 @@ beforeEach(() => {
   reads = [];
   screens = [DIALOG];
   tailFails = false;
+  promptRefused = false;
+  agentsHang = false;
+  agentsFail = false;
   vi.stubGlobal("matchMedia", (query: string) => ({
     matches: false,
     media: query,
@@ -207,9 +240,11 @@ test("an item shows its question, evidence, recommendation, consequence and that
 
 test("a recommendation says who made it, never always the orchestrator", async () => {
   stubDaemon("default");
-  // Opened by the owner: no session behind it.
+  // Opened by Tiller itself (the reconciler, a gate, the nightly backup): no
+  // session behind it. The owner never opens an item with a recommendation.
   await renderInbox("default", CAPACITY);
-  expect(screen.getByText("You recommended")).toBeTruthy();
+  expect(screen.getByText("Tiller recommended")).toBeTruthy();
+  expect(screen.queryByText("You recommended")).toBeNull();
   expect(screen.queryByText(/The orchestrator recommend/)).toBeNull();
   cleanup();
 
@@ -588,6 +623,90 @@ test("a changed screen types nothing, and the new options show", async () => {
   expect(calls).toHaveLength(1);
 });
 
+test("a later prompt of the same session answered elsewhere never shows the earlier receipt", async () => {
+  stubDaemon("default");
+  const { queryClient } = await renderInbox("default", `perm-${SESSION_C}`);
+  fireEvent.click(await screen.findByRole("button", { name: "Answer 1: Yes" }));
+  await flush();
+  const key = attentionQuery().queryKey;
+  const first = queryClient.getQueryData<AttentionResponse>(key);
+  const prompt = first?.permission_prompts.find((row) => row.session_id === SESSION_C);
+  if (!first || !prompt) throw new Error("no prompt in the fixture");
+  const setPrompts = (permission_prompts: AttentionResponse["permission_prompts"]) =>
+    act(() => {
+      queryClient.setQueryData<AttentionResponse>(key, { ...first, permission_prompts });
+    });
+  // Prompt A leaves the inbox: this tab answered it.
+  setPrompts([]);
+  expect(await screen.findByText("Answered")).toBeTruthy();
+  // The same session asks prompt B, and the owner answers it in the pane.
+  setPrompts([{ ...prompt, since: "2026-11-02T12:01:00.000Z" }]);
+  expect(await screen.findByRole("button", { name: "Answer 1: Yes" })).toBeTruthy();
+  setPrompts([]);
+  expect(await screen.findByText("Not in the inbox any more")).toBeTruthy();
+  expect(screen.getByText("It was answered or withdrawn.")).toBeTruthy();
+  expect(screen.queryByText(/Sent 1 · Yes/)).toBeNull();
+});
+
+test("a prompt answered here and gone while the Inbox was closed claims no answer later", async () => {
+  stubDaemon("default");
+  const { router, queryClient } = await renderInbox("default", `perm-${SESSION_C}`);
+  fireEvent.click(await screen.findByRole("button", { name: "Answer 1: Yes" }));
+  await flush();
+  // The owner leaves the Inbox. Meanwhile the prompt leaves, a later one of
+  // the same session comes, and it is answered in the pane.
+  await act(() => router.navigate({ to: "/" }));
+  act(() => {
+    queryClient.setQueryData<AttentionResponse>(attentionQuery().queryKey, (attention) =>
+      attention ? { ...attention, permission_prompts: [] } : attention,
+    );
+  });
+  await act(() => router.navigate({ to: "/inbox", search: { item: `perm-${SESSION_C}` } }));
+  expect(await screen.findByText("Not in the inbox any more")).toBeTruthy();
+  expect(screen.queryByText(/Sent 1 · Yes/)).toBeNull();
+});
+
+test("a permission prompt reads the screen only once the board knows the agent's machine", async () => {
+  stubDaemon("default");
+  agentsHang = true;
+  await renderInbox("default", `perm-${SESSION_C}`, (queryClient) =>
+    queryClient.removeQueries({ queryKey: agentsQuery().queryKey }),
+  );
+  expect(await screen.findByText("What the pane is asking")).toBeTruthy();
+  await flush();
+  expect(reads).toEqual([]);
+  expect(screen.queryByRole("button", { name: /^Answer \d/ })).toBeNull();
+});
+
+test("an answer that lands after the Inbox closed claims no answer later", async () => {
+  stubDaemon("default", true);
+  const { router, queryClient } = await renderInbox("default", `perm-${SESSION_C}`);
+  fireEvent.click(await screen.findByRole("button", { name: "Answer 1: Yes" }));
+  await flush();
+  // The owner leaves while the answer is on its way, and it lands after.
+  await act(() => router.navigate({ to: "/" }));
+  await act(async () => release?.());
+  act(() => {
+    queryClient.setQueryData<AttentionResponse>(attentionQuery().queryKey, (attention) =>
+      attention ? { ...attention, permission_prompts: [] } : attention,
+    );
+  });
+  await act(() => router.navigate({ to: "/inbox", search: { item: `perm-${SESSION_C}` } }));
+  expect(await screen.findByText("Not in the inbox any more")).toBeTruthy();
+  expect(screen.queryByText(/Sent 1 · Yes/)).toBeNull();
+});
+
+test("a permission prompt still gets its buttons when the agents list fails", async () => {
+  stubDaemon("default");
+  agentsFail = true;
+  await renderInbox("default", `perm-${SESSION_C}`, (queryClient) =>
+    queryClient.removeQueries({ queryKey: agentsQuery().queryKey }),
+  );
+  expect(
+    await screen.findByRole("button", { name: "Answer 1: Yes" }, { timeout: 4000 }),
+  ).toBeTruthy();
+});
+
 test("with no dialog on the screen, the detail shows what the hook recorded", async () => {
   stubDaemon("default");
   screens = [];
@@ -605,6 +724,9 @@ test("an agent waiting on a dialog no hook asked for is a row in Permission prom
   const prompts = screen.getByRole("region", { name: "Permission prompts" });
   expect(within(prompts).getByText("alpha-42-build waits on a dialog")).toBeTruthy();
   expect(within(prompts).getByText("beta-7-build waits on a dialog")).toBeTruthy();
+  // beta-7's worker waits on a menu, so the scenario has no stale "went
+  // quiet" decision for it beside the dialog row.
+  expect(screen.queryByText(/went quiet/)).toBeNull();
 });
 
 test("the folder trust dialog is answered from its detail, with no digits", async () => {
@@ -665,7 +787,42 @@ test("an answered dialog that left the inbox says it was sent from here", async 
   });
   expect(await screen.findByText("Answered")).toBeTruthy();
   expect(screen.getByText("Sent Yes. The agent went on, so it left the inbox.")).toBeTruthy();
-  expect(screen.queryByText("It was answered or withdrawn elsewhere.")).toBeNull();
+  expect(screen.queryByText("It was answered or withdrawn.")).toBeNull();
+});
+
+test("a later dialog with no other verdict between never shows the earlier receipt", async () => {
+  stubDaemon("dialog");
+  screens = [{ ...DIALOG, layout: "trust", tool: "", command: null, screen: "t1" }];
+  const { queryClient } = await renderInbox("dialog", `dialog-${SESSION_TRUST}`);
+  fireEvent.click(await screen.findByRole("button", { name: "Yes" }));
+  await flush();
+  // A read in flight would put the fixture's agents back over a change.
+  const settled = () => waitFor(() => expect(queryClient.isFetching()).toBe(0));
+  await settled();
+  const worker = (change: Partial<AgentRow>) =>
+    act(() => {
+      queryClient.setQueryData<AgentsResponse>(agentsQuery().queryKey, (agents) =>
+        agents
+          ? {
+              ...agents,
+              orchestrators: agents.orchestrators.map((orchestrator) => ({
+                ...orchestrator,
+                workers: orchestrator.workers.map((row) =>
+                  row.session_id === SESSION_TRUST ? { ...row, ...change } : row,
+                ),
+              })),
+            }
+          : agents,
+      );
+    });
+  // herdr sees the next dialog before it ever sees the agent work, so the
+  // run of waits keeps its start, but the observation is a later one.
+  worker({ activity_observed_at: "2026-11-02T12:01:00.000Z" });
+  await settled();
+  // The owner answers that one in the pane, and the agent goes on.
+  worker({ activity: "working" });
+  expect(await screen.findByText("Not in the inbox any more")).toBeTruthy();
+  expect(screen.queryByText(/Sent Yes/)).toBeNull();
 });
 
 test("a dialog the board cannot read shows no buttons, only the pane and View live", async () => {
@@ -683,6 +840,16 @@ test("a dialog the board cannot read shows no buttons, only the pane and View li
   expect(screen.getByTestId("pane-tail").textContent).toContain("Select a model for this session:");
   expect(screen.queryByRole("button", { name: /^Answer \d/ })).toBeNull();
   expect(screen.queryByText("Trust this folder?")).toBeNull();
+});
+
+test("a pane tail keeps each terminal row whole and scrolls inside its box", () => {
+  // jsdom lays nothing out, so this holds the rules. A wrapped row breaks a
+  // dialog's box on a phone; the tail scrolls sideways, never the page.
+  const css = readFileSync(resolvePath(import.meta.dirname, "inbox.css"), "utf8");
+  const term = css.match(/\n\.term\s*\{([^}]*)\}/)?.[1] ?? "";
+  expect(term).toMatch(/white-space:\s*pre;/);
+  expect(term).toMatch(/overflow-x:\s*auto/);
+  expect(term).not.toMatch(/overflow-wrap/);
 });
 
 test("a pane that cannot be read still offers View live", async () => {
@@ -742,6 +909,62 @@ test("the pane button says where to find a remote agent's pane", async () => {
   expect(screen.getByRole("status").textContent).toMatch(
     /^Focused on host-b - select host-b in herdr's sidebar,/,
   );
+});
+
+// Moves a session's agent to host-b, a saved remote machine.
+function onSavedMachine(sessionId: string) {
+  const moved = (row: AgentRow) =>
+    row.session_id === sessionId ? { ...row, host_id: HOST_B } : row;
+  return (queryClient: QueryClient) =>
+    queryClient.setQueryData<AgentsResponse>(agentsQuery().queryKey, (agents) => {
+      const rows = agents?.orchestrators ?? [];
+      const found = rows.some(
+        (row) =>
+          row.session_id === sessionId ||
+          row.workers.some((worker) => worker.session_id === sessionId),
+      );
+      const [first, ...rest] = rows;
+      if (!first) throw new Error("no orchestrator in the fixture");
+      if (!found) {
+        const worker: AgentRow = { ...first, session_id: sessionId, host_id: HOST_B, workers: [] };
+        return { orchestrators: [{ ...first, workers: [...first.workers, worker] }, ...rest] };
+      }
+      return {
+        orchestrators: rows.map((row) => ({ ...moved(row), workers: row.workers.map(moved) })),
+      };
+    });
+}
+
+test("a refused prompt read is not tried again", async () => {
+  stubDaemon("default");
+  promptRefused = true;
+  await renderInbox("default", `perm-${SESSION_C}`);
+  expect(await screen.findByText("What the pane is asking", {}, { timeout: 4000 })).toBeTruthy();
+  expect(reads).toEqual([SESSION_C]);
+});
+
+test("a permission prompt on a saved machine says to answer it in herdr there", async () => {
+  stubDaemon("default");
+  await renderInbox("default", `perm-${SESSION_C}`, onSavedMachine(SESSION_C));
+  expect(
+    screen.getByText(/runs on the saved machine host-b\. Answer it in herdr on host-b\./),
+  ).toBeTruthy();
+  expect(screen.getByText("What the pane is asking")).toBeTruthy();
+  await flush();
+  expect(reads).toEqual([]);
+  expect(screen.queryByRole("button", { name: /^Answer \d/ })).toBeNull();
+});
+
+test("a dialog on a saved machine says to answer it in herdr there, not in the live view", async () => {
+  stubDaemon("dialog");
+  await renderInbox("dialog", `dialog-${SESSION_MENU}`, onSavedMachine(SESSION_MENU));
+  expect(
+    screen.getByText(/runs on the saved machine host-b\. Answer it in herdr on host-b\./),
+  ).toBeTruthy();
+  expect(screen.queryByText(/Look at the live terminal and answer there/)).toBeNull();
+  expect(await screen.findByText("What the pane shows")).toBeTruthy();
+  await flush();
+  expect(reads).toEqual([]);
 });
 
 test("pressing O twice while the first focus is in flight focuses once", async () => {
@@ -947,4 +1170,59 @@ test("an item's back link is a bordered button, not a ghost", async () => {
   const back = screen.getByRole("link", { name: "Back to the inbox" });
   expect([...back.classList]).toContain("btn");
   expect([...back.classList]).not.toContain("ghost");
+});
+
+// P31: an undated wait is an open decision, not a hold. A month after it
+// opened it still sits under Needs you and in Decisions as current, and the
+// board shows no alarm for its age: no stale mark, no amber age, nothing set
+// apart. The snapshot's server clock reads 2026-11-02 12:00.
+test("an undated hold a month old shows under Needs you and never alarms", async () => {
+  stubDaemon("default");
+  const { router, queryClient } = await renderInbox();
+  act(() => {
+    queryClient.setQueryData<AttentionResponse>(attentionQuery().queryKey, (attention) =>
+      attention
+        ? {
+            ...attention,
+            items: attention.items.map((item) =>
+              item.id === RETRY ? { ...item, opened_at: "2026-10-03T12:00:00.000Z" } : item,
+            ),
+          }
+        : attention,
+    );
+    // The waiting session is still observed on every pass.
+    queryClient.setQueryData<BoardResponse>(queryKeyFor(boardPath()), (board) =>
+      board
+        ? {
+            ...board,
+            rows: board.rows.map((row) =>
+              row.id === RETRY_CARD ? { ...row, observed_at: "2026-11-02T11:59:50.000Z" } : row,
+            ),
+          }
+        : board,
+    );
+  });
+
+  const decisions = screen.getByRole("region", { name: "Decisions" });
+  const row = within(decisions).getByTestId(`inbox-row-${RETRY}`);
+  expect(row.querySelector(".old, .warn")).toBeNull();
+  const gone = screen.queryByRole("region", { name: "No longer current" });
+  expect(gone ? within(gone).queryByTestId(`inbox-row-${RETRY}`) : null).toBeNull();
+
+  await act(async () => {
+    await router.navigate({ to: "/inbox", search: { item: RETRY } });
+  });
+  expect((await screen.findByTestId("current")).textContent).toContain("Still waiting");
+  expect(screen.getByText(/30d 0h ago/)).toBeTruthy();
+
+  await act(async () => {
+    await router.navigate({ to: "/", search: { filter: "needs" } });
+  });
+  const tile = (await screen.findByText("Pick the retry policy for the export job")).closest("a");
+  if (!tile) throw new Error("no tile for the held card");
+  expect(tile.dataset.attn).toBe("true");
+  expect(tile.querySelector(".obs")).toBeTruthy();
+  expect(tile.querySelector(".obs.old")).toBeNull();
+  expect(tile.textContent).toContain("Decision");
+  expect(tile.textContent).not.toMatch(/stale/i);
 });

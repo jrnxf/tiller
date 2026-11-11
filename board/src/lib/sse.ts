@@ -104,7 +104,7 @@ function writeBoard(queryClient: QueryClient, row: BoardRow) {
     upsertBoardRow(old, row),
   );
   queryClient.invalidateQueries({
-    queryKey: ["api"],
+    queryKey: API_KEY_PREFIX,
     predicate: (query) => {
       const path = String(query.queryKey[1] ?? "");
       return path.startsWith("/api/v1/board") && path !== "/api/v1/board?filter=all";
@@ -187,6 +187,52 @@ function refetchMatching(queryClient: QueryClient, matches: (path: string) => bo
   });
 }
 
+// Reads that many kinds of event move, such as the Health signals and the
+// contributions. Each event marks them stale at once, so a screen that opens
+// reads them fresh. The ones on screen fetch again a second after the first
+// event of a run, so at most once a second on a busy fleet, not once per event.
+const COALESCE_MS = 1000;
+const due = new WeakMap<
+  QueryClient,
+  { timer: ReturnType<typeof setTimeout>; matchers: Map<string, (path: string) => boolean> }
+>();
+
+function refetchSoon(queryClient: QueryClient, name: string, matches: (path: string) => boolean) {
+  void queryClient.invalidateQueries({
+    queryKey: API_KEY_PREFIX,
+    predicate: (query) => matches(String(query.queryKey[1] ?? "")),
+    refetchType: "none",
+  });
+  const waiting = due.get(queryClient);
+  if (waiting) {
+    waiting.matchers.set(name, matches);
+    return;
+  }
+  const matchers = new Map([[name, matches]]);
+  const timer = setTimeout(() => {
+    due.delete(queryClient);
+    for (const matcher of matchers.values()) {
+      // Every one on screen, even one a fetch begun before the event has
+      // answered since: that answer can be older than the event.
+      void queryClient.refetchQueries({
+        queryKey: API_KEY_PREFIX,
+        type: "active",
+        predicate: (query) => matcher(String(query.queryKey[1] ?? "")),
+      });
+    }
+  }, COALESCE_MS);
+  due.set(queryClient, { timer, matchers });
+}
+
+// Drops the refetches still waiting, when the stream stops.
+function dropRefetches(queryClient: QueryClient) {
+  clearTimeout(due.get(queryClient)?.timer);
+  due.delete(queryClient);
+}
+
+const isSignals = (path: string) => path === signalsPath;
+const isContributions = (path: string) => path.startsWith(CONTRIBUTIONS_PREFIX);
+
 // `/api/v1/projects/<id>/setup`, whatever the project.
 const PROJECT_SETUP_PATH = /^\/api\/v1\/projects\/[^/?]+\/setup$/;
 
@@ -232,10 +278,14 @@ const RECAP_KINDS = new Set([
   "recap.seen",
 ]);
 
-// The mutations that add or end a pairing on a host row (state.md section 8).
-const PAIRING_TXNS = new Set(["peer.pair", "peer.remove"]);
-
-export function applyChange(queryClient: QueryClient, event: ChangeEvent): void {
+// `peer` is set for a peer's change: the rules for this host's own reads (its
+// settings, its project setup, its Health signals and its contributions) do
+// not run, since the peer's config, cards and runs do not move them.
+export function applyChange(
+  queryClient: QueryClient,
+  event: ChangeEvent,
+  { peer = false }: { peer?: boolean } = {},
+): void {
   const state = event.entity_state;
 
   if (RECAP_KINDS.has(event.kind)) {
@@ -246,16 +296,18 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
   const list = ENTITY_LISTS[event.entity];
   if (!state && list !== undefined && !gone) refetchPaths(queryClient, list);
 
-  if (SIGNAL_ENTITIES.has(event.entity)) refetchPaths(queryClient, signalsPath);
-  if (event.entity === "pr" || event.entity === "card") {
+  // Health numbers are this host's own (protocol.md section 7.3).
+  if (!peer && SIGNAL_ENTITIES.has(event.entity)) refetchSoon(queryClient, "signals", isSignals);
+  if (!peer && (event.entity === "pr" || event.entity === "card")) {
     // The contributions list names each PR with its card's title.
-    refetchMatching(queryClient, (path) => path.startsWith(CONTRIBUTIONS_PREFIX));
+    refetchSoon(queryClient, "contributions", isContributions);
   }
 
   switch (event.entity) {
     case "config":
       // `tiller config set` in a terminal moves what Settings and the project
       // detail show, and no screen of the board sent it.
+      if (peer) break;
       refetchPaths(queryClient, startSettingsPath);
       refetchPaths(queryClient, hostConfigPath);
       refetchMatching(queryClient, (path) => PROJECT_SETUP_PATH.test(path));
@@ -272,9 +324,9 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
       });
       // A boundary edit moves what the host keys show.
       refetchPaths(queryClient, hostConfigPath);
-      // A pairing added or removed moves Settings' peer link block; other
-      // host edits, like a last hello, leave it.
-      if (PAIRING_TXNS.has(event.txn)) refetchPaths(queryClient, peersPath);
+      // Any host event may move Settings' peer link block: a pairing added or
+      // ended, or a key file read again (protocol.md section 7.3).
+      refetchPaths(queryClient, peersPath);
       break;
     case "peer_key":
       // An accepted or revoked key moves Boards that reach this host.
@@ -287,6 +339,8 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
       if (gone) {
         onProjectGone(queryClient, event.entity_id);
       } else if (state) writeProject(queryClient, state as Project);
+      // These read this host's project of that id, not the peer's.
+      if (peer) break;
       queryClient.invalidateQueries({
         queryKey: queryKeyFor(projectSetupPath(event.entity_id)),
         refetchType: "active",
@@ -364,7 +418,7 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
     default:
       if (REFETCH_ENTITIES.has(event.entity)) {
         queryClient.invalidateQueries({
-          queryKey: ["api"],
+          queryKey: API_KEY_PREFIX,
           predicate: (query) => {
             const path = String(query.queryKey[1] ?? "");
             return path.startsWith("/api/v1/agents") || path.startsWith("/api/v1/runs/");
@@ -440,7 +494,7 @@ function applyPeerChange(queryClient: QueryClient, event: PeerEvent): void {
     });
     return;
   }
-  applyChange(queryClient, change);
+  applyChange(queryClient, change, { peer: true });
 }
 
 function ofHost<T extends { host?: string; link?: Machine["link"] }>(host: string) {
@@ -591,9 +645,13 @@ export function connectEvents(options: EventsOptions): () => void {
   let resyncTimer: ReturnType<typeof setTimeout> | undefined;
   let resyncing = false;
   // A `reset` came while a snapshot was in flight: that snapshot may be older
-  // than the reset, so it is fetched again.
+  // than the reset, so it is not written and is fetched again. Only a reset
+  // sets it: a reopened stream waits for the snapshot in flight.
   let again = false;
   let failures = 0;
+  // Whether a peer's message moved a read while the snapshot was in flight.
+  // Its seq is not this host's, so `floor` cannot say.
+  let peerMoved = false;
 
   // Refresh every query from a new snapshot while the UI stays put: only the
   // degraded pill shows, never a spinner or an empty state. A snapshot that
@@ -607,18 +665,36 @@ export function connectEvents(options: EventsOptions): () => void {
     }
     resyncing = true;
     again = false;
+    peerMoved = false;
     try {
       const snapshot = await fetchSnapshot();
       if (stopped) return;
-      // Exact, not max: after a restored database the newest seq goes down.
-      // Changes applied meanwhile can be newer than the snapshot, and those
-      // are not replayed.
-      lastSeq = Math.max(refreshFromSnapshot(queryClient, snapshot), floor ?? -1);
-      pending = false;
-      floor = null;
       failures = 0;
-    } catch {
-      if (!stopped) {
+      // A `reset` came while this snapshot was in flight, and it may be older
+      // than that reset (a restored database). It is not written, and the
+      // resync stays pending, with the cursor where it was, until the next
+      // snapshot lands.
+      if (!again) {
+        // A change applied while the snapshot was in flight can be newer than
+        // it, and the snapshot just wrote the older row back: its reads are
+        // fetched again too.
+        const undone = peerMoved || (floor !== null && floor > snapshot.last_event_seq);
+        const seq = refreshFromSnapshot(queryClient, snapshot, undone);
+        // The max is against `floor` (the changes applied since the reset),
+        // never against the old cursor: after a restored database the newest
+        // seq goes down.
+        lastSeq = Math.max(seq, floor ?? -1);
+        pending = false;
+        floor = null;
+      }
+    } catch (error) {
+      if (stopped) {
+        // Nothing more to do.
+      } else if (isSignedOut(error)) {
+        // This browser's cookie is gone: no snapshot will land.
+        stop();
+        signedOutStore.set(true);
+      } else {
         failures += 1;
         resyncTimer = setTimeout(() => void resync(), Math.min(1000 * 2 ** (failures - 1), 30_000));
       }
@@ -640,7 +716,9 @@ export function connectEvents(options: EventsOptions): () => void {
 
     next.addEventListener("open", () => {
       connectionStore.set("live");
-      if (pending) void resync();
+      // A snapshot already in flight still lands: the reopen lost nothing,
+      // and a `reset` says when it did.
+      if (pending && !resyncing) void resync();
     });
     next.addEventListener("error", () => {
       connectionStore.set("reconnecting");
@@ -665,17 +743,22 @@ export function connectEvents(options: EventsOptions): () => void {
     // A peer's messages carry no `id`: its `seq` is not this host's, so they
     // never touch `lastSeq` and are not replayed. A reconnect sends `peer_reset`.
     next.addEventListener("peer", (message) => {
+      if (resyncing) peerMoved = true;
       applyPeerChange(queryClient, JSON.parse(message.data) as PeerEvent);
     });
     next.addEventListener("peer_reset", (message) => {
+      if (resyncing) peerMoved = true;
       applyPeerReset(queryClient, JSON.parse(message.data) as PeerResetEvent);
     });
     next.addEventListener("link", (message) => {
+      if (resyncing) peerMoved = true;
       applyLink(queryClient, JSON.parse(message.data) as LinkEvent);
     });
     next.addEventListener("reset", (message) => {
       pending = true;
       floor = (JSON.parse(message.data) as { seq: number }).seq;
+      // A new reason to try: the wait starts short again.
+      failures = 0;
       void resync();
     });
   }
@@ -684,6 +767,7 @@ export function connectEvents(options: EventsOptions): () => void {
     stopped = true;
     clearTimeout(retryTimer);
     clearTimeout(resyncTimer);
+    dropRefetches(queryClient);
     source?.close();
   }
 

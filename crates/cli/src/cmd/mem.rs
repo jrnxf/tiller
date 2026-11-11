@@ -238,6 +238,8 @@ fn approve(app: &App, args: ApproveArgs) -> Done {
         item
     };
     if args.dry_run {
+        let repo = Repo::at(&app.home);
+        let list = scrub::terms(&app.home);
         let results = chosen
             .iter()
             .map(|p| {
@@ -245,10 +247,26 @@ fn approve(app: &App, args: ApproveArgs) -> Done {
                     return Ok(with(p, "skipped", json!({"reason": not_proposed(p)})));
                 }
                 let gate = store.learning_gate(&p.id)?;
-                Ok(if gate.ok {
-                    with(p, "would_approve", json!({}))
-                } else {
-                    with(p, "would_refuse", json!({"reason": gate_reason(&gate)}))
+                if !gate.ok {
+                    return Ok(with(
+                        p,
+                        "would_refuse",
+                        json!({"reason": gate_reason(&gate)}),
+                    ));
+                }
+                // Each one is counted on the approved set as it is now, not
+                // after the ones before it in this run. An error in the count
+                // is that proposal's, as the real run records it, and the
+                // rest go on.
+                let counted = repo
+                    .state(&document_path(&p.project_id), &list)
+                    .and_then(|file| store.mem_keep_budget(&p.id, &file, &|sha| repo.blob(sha)));
+                Ok(match counted {
+                    Ok(_) => with(p, "would_approve", json!({})),
+                    Err(error @ tiller_core::Error::Refused { .. }) => {
+                        with(p, "would_refuse", json!({"reason": refusal(p, error)?}))
+                    }
+                    Err(error) => with(p, "would_fail", json!({"reason": error.to_string()})),
                 })
             })
             .collect::<Result<Vec<Value>, Failure>>()?;
@@ -257,6 +275,7 @@ fn approve(app: &App, args: ApproveArgs) -> Done {
             "dry_run": true,
             "would_approve": count("would_approve"),
             "would_refuse": count("would_refuse"),
+            "would_fail": count("would_fail"),
             "skipped": count("skipped"),
             "results": results,
         })));
@@ -266,12 +285,20 @@ fn approve(app: &App, args: ApproveArgs) -> Done {
     let mut writer = Writer::open(store, &app.home)?;
     let mut results = Vec::new();
     let mut kept: Vec<(String, String)> = Vec::new();
-    for (at, p) in chosen.iter().enumerate() {
+    for p in &chosen {
         if p.state != "proposed" {
             results.push(with(p, "skipped", json!({"reason": not_proposed(p)})));
             continue;
         }
-        let ctx = app.ctx().with_key(format!("{}:{at}", keyed.key));
+        // Each proposal is decided under a key of its own, named by its id
+        // and bound to it: a later run under the same `--key` that finds
+        // another proposal pending decides that one, and never replays an
+        // earlier proposal's answer (protocol.md 6.3).
+        let key = format!("{}:{}", keyed.key, p.id);
+        let ctx = app
+            .ctx()
+            .with_key(key.clone())
+            .with_args(key, &json!({"approve": p.id}));
         let after: Vec<String> = kept
             .iter()
             .filter(|(project, _)| *project == p.project_id)
@@ -287,7 +314,7 @@ fn approve(app: &App, args: ApproveArgs) -> Done {
                 ));
             }
             Err(error @ tiller_core::Error::Refused { .. }) => {
-                results.push(with(p, "refused", json!({"reason": error.to_string()})));
+                results.push(with(p, "refused", json!({"reason": refusal(p, error)?})));
             }
             Err(error) => results.push(with(p, "failed", json!({"reason": error.to_string()}))),
         }
@@ -310,6 +337,21 @@ fn approve(app: &App, args: ApproveArgs) -> Done {
     .with_key(&keyed);
     outcome.mutation = Some((std::mem::take(&mut writer.events), writer.replayed));
     Ok(outcome)
+}
+
+/// A refusal's reason as the line about `proposal` shows it: the fact
+/// alone when it is about that proposal, whose id the line already has.
+/// An error that is not a refusal stays the error.
+fn refusal(proposal: &Proposal, error: tiller_core::Error) -> Result<String, Failure> {
+    match error {
+        tiller_core::Error::Refused { entity, id, fact }
+            if entity == "proposal" && id == proposal.id =>
+        {
+            Ok(fact)
+        }
+        error @ tiller_core::Error::Refused { .. } => Ok(error.to_string()),
+        error => Err(error.into()),
+    }
 }
 
 fn not_proposed(proposal: &Proposal) -> String {

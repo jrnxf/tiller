@@ -85,6 +85,22 @@ test("the dot colour is explained on the card", () => {
   expect(quotaFooterView(quotaFor("quota-grey"), NOW)?.reason).toBe("Reading is out of date");
 });
 
+test("the red stand-in week shows its runway on every day of any week", () => {
+  // Monday 9 November 2026 21:00 and Tuesday 10 November 13:00 Lisbon time,
+  // the gap a week after the first reset; Tuesday 10 November 14:00, the
+  // reset itself; and Tuesday 13 July 2027 14:30 Lisbon time, in summer.
+  for (const at of [
+    "2026-11-09T21:00:00.000Z",
+    "2026-11-10T13:00:00.000Z",
+    "2026-11-10T14:00:00.000Z",
+    "2027-07-13T13:30:00.000Z",
+  ]) {
+    const now = Date.parse(at);
+    const quota = fixtureSnapshot("quota-red", now).queries[quotaPath] as QuotaResponse;
+    expect(quotaFooterView(quota, now)?.runway, at).toMatch(/^empty in /);
+  }
+});
+
 test("a stale reading shows no runway countdown", () => {
   const stale = quotaFor("quota-grey").windows.map((window) => ({
     ...window,

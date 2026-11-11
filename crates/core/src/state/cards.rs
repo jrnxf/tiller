@@ -17,6 +17,7 @@ use crate::domain::lifecycle::{allowed_outcomes, outcome_satisfies_dependants};
 use crate::domain::*;
 use crate::error::{Error, Result};
 use crate::ids::{self, HOST_HEALTH_CARD};
+use crate::limits::{self, COMMENT_MAX_CHARS};
 use crate::store::{Actor, Applied, Ctx, NewEvent, Store, Tx};
 use crate::time::Timestamp;
 
@@ -103,6 +104,13 @@ fn check_priority(priority: i64) -> Result<()> {
 /// `card.create` inside a mutation: mints the display id from the project's
 /// counter in this transaction, and links the ask that created it.
 pub(crate) fn create_card(tx: &mut Tx<'_>, new: &NewCard, ask_id: Option<&str>) -> Result<Card> {
+    limits::card_text(Some(&new.title), new.body.as_deref())?;
+    insert_card(tx, new, ask_id)
+}
+
+/// `create_card` for a caller that checks the caps on its own terms:
+/// `bug.file` caps what the filer wrote, not the evidence block it adds.
+fn insert_card(tx: &mut Tx<'_>, new: &NewCard, ask_id: Option<&str>) -> Result<Card> {
     required("title", &new.title)?;
     let priority = new.priority.unwrap_or(2);
     check_priority(priority)?;
@@ -116,8 +124,9 @@ pub(crate) fn create_card(tx: &mut Tx<'_>, new: &NewCard, ask_id: Option<&str>) 
     };
     let seq = project.next_card_seq;
     tx.conn().execute(
-        "UPDATE projects SET next_card_seq = next_card_seq + 1, rev = rev + 1 WHERE id = ?1",
-        [&project.id],
+        "UPDATE projects SET next_card_seq = next_card_seq + 1, rev = rev + 1, edited_at = ?2
+         WHERE id = ?1",
+        params![project.id, tx.now()],
     )?;
     let id = ids::new_ulid();
     let display_id = ids::display_id(&project.id, seq);
@@ -689,6 +698,8 @@ impl Store {
     ) -> Result<Applied<FiledBug>> {
         required("title", &bug.title)?;
         required("body", &bug.body)?;
+        // The cap is on what the filer wrote; the evidence block is ours.
+        limits::card_text(Some(&bug.title), Some(&bug.body))?;
         let body = bug_body(&bug)?;
         self.write(ctx, "bug.file", key, |tx| {
             let host = local_host(tx.conn())?;
@@ -708,7 +719,7 @@ impl Store {
                 Some(id) => find::<Session>(tx.conn(), "id = ?1", &[&id])?,
                 None => None,
             };
-            let card = create_card(
+            let card = insert_card(
                 tx,
                 &NewCard {
                     project_id: project_id.clone(),
@@ -751,8 +762,21 @@ impl Store {
         key: Option<&str>,
         card: &str,
         expected_rev: i64,
-        edit: CardEdit,
+        mut edit: CardEdit,
     ) -> Result<Applied<Card>> {
+        // An empty body clears it, from every writer alike: the CLI's
+        // `--body ""` and the API's `"body": ""` (`protocol.md` 7.4).
+        if edit
+            .body
+            .as_ref()
+            .is_some_and(|body| body.as_deref().is_some_and(str::is_empty))
+        {
+            edit.body = Some(None);
+        }
+        limits::card_text(
+            edit.title.as_deref(),
+            edit.body.as_ref().and_then(|body| body.as_deref()),
+        )?;
         if edit.dispatch_override.is_some() && !ctx.actor.is_owner() {
             return Err(Error::Forbidden(format!(
                 "the dispatch override is owner only; {} may not set it",
@@ -806,6 +830,7 @@ impl Store {
                 card.rev,
                 expected_rev,
                 Some((first, current[first].clone())),
+                None,
             )?;
             if changed.is_empty() {
                 return Ok(card);
@@ -1180,6 +1205,7 @@ impl Store {
         text: &str,
     ) -> Result<Applied<OutboxMessage>> {
         required("comment", text)?;
+        limits::within("a comment", text, COMMENT_MAX_CHARS)?;
         self.write(ctx, "outbox.enqueue", key, |tx| {
             let card = resolve_card(tx.conn(), card)?;
             let Some(orchestrator) = live_orchestrator(tx.conn(), &card.project_id)? else {

@@ -1,6 +1,6 @@
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import type { CSSProperties, ReactNode } from "react";
 
 import type {
@@ -35,7 +35,14 @@ import { useAmbiguousIds, useStanding, useNamedProjects } from "../board/peer-st
 import { readPane, terminalTailPath } from "../board/terminal-stream";
 import type { Tail } from "../board/terminal-stream";
 import { AwayBriefDetail, AwayBriefRow } from "./away-brief";
-import { answeredStore, markSent, sentStore, withdrawnStore } from "./answered";
+import {
+  answeredStore,
+  dropStaleSent,
+  markSent,
+  openInbox,
+  sentStore,
+  withdrawnStore,
+} from "./answered";
 import type { Withdrawn } from "./answered";
 import { AnswerForm } from "./answer";
 import { ApproveBlock } from "./approve";
@@ -66,6 +73,7 @@ import {
 } from "./icons";
 import { Terminal } from "./terminal";
 import { ViewLive } from "./view-live";
+import { agentName, useSavedMachine, useSessionAgent } from "./agent-name";
 import { WithdrawButton } from "./withdraw";
 import "./inbox.css";
 
@@ -102,6 +110,15 @@ function dialogId(agent: AgentRow): string {
 function cardOfEntry(entry: Entry): string | null {
   if (entry.type === "decision") return entry.item.card_id;
   return entry.type === "permission" ? entry.prompt.card_id : entry.agent.card_id;
+}
+
+// What names the wait an answer from here went to, as the answer strip names
+// it (protocol.md 7.4, Prompt): a permission prompt by when it began, a dialog
+// by the newest observation when the answer went, the strip's `seen`. A later
+// observation while the agent still waits is the next wait.
+function waitKey(entry: Entry): string | null {
+  if (entry.type === "decision") return null;
+  return entry.type === "permission" ? entry.prompt.since : entry.agent.activity_observed_at;
 }
 
 // When the entry began to wait on the owner.
@@ -397,20 +414,17 @@ function DecisionDetail({
   );
 }
 
-// The agent a session runs, by its herdr name; a generic one before the
-// agents list has it.
-function agentName(sessionId: string, agents: AgentRow[]): string {
-  const agent = agents
-    .flatMap((row) => [row, ...row.workers])
-    .find((row) => row.session_id === sessionId);
-  return agent?.herdr_name ?? "A worker";
+// What the detail says for an agent on a saved machine: the board cannot
+// type into its pane, and its live view is a read-only tail.
+function onSaved(name: string, what: string, machine: string): string {
+  return `${name} is stopped on ${what}. It runs on the saved machine ${machine}. Answer it in herdr on ${machine}.`;
 }
 
 function PermissionDetail({ prompt, ctx }: { prompt: PermissionPrompt; ctx: Context }) {
-  const agents = useQuery(agentsQuery()).data?.orchestrators ?? [];
+  const { agent, saved, known } = useSessionAgent(prompt.session_id);
   const owner = ctx.cards.get(prompt.card_id) ?? prompt;
   const peer = ownerOf(owner);
-  const name = agentName(prompt.session_id, agents);
+  const name = agentName(agent);
   const chip = (
     <span className="lab sm warn">
       <LockIcon />
@@ -455,20 +469,31 @@ function PermissionDetail({ prompt, ctx }: { prompt: PermissionPrompt; ctx: Cont
           </p>
           {asking}
         </>
+      ) : saved ? (
+        <>
+          <p className="d-ctx">{onSaved(name, "a permission dialog", saved)}</p>
+          {asking}
+        </>
       ) : (
         <>
           <p className="d-ctx">
             {name} is stopped on a permission dialog. Press an answer, and the board types it in the
             pane.
           </p>
-          <AnswerStrip
-            key={prompt.session_id}
-            sessionId={prompt.session_id}
-            waiting
-            observedAt={prompt.since}
-            fallback={asking}
-            onSent={(receipt) => markSent(promptId(prompt), receipt)}
-          />
+          {/* Until the agents list says which machine runs it, a read could go
+              to a saved machine's pane, which the daemon refuses. */}
+          {known ? (
+            <AnswerStrip
+              key={prompt.session_id}
+              sessionId={prompt.session_id}
+              waiting
+              observedAt={prompt.since}
+              fallback={asking}
+              onSent={(receipt) => markSent(promptId(prompt), prompt.since, receipt)}
+            />
+          ) : (
+            asking
+          )}
         </>
       )}
       <CardActions card={ctx.cards.get(prompt.card_id) ?? null} sessionId={null} />
@@ -531,7 +556,8 @@ function DialogDetail({ agent, ctx }: { agent: AgentRow; ctx: Context }) {
   const peer = ownerOf(owner);
   const off = focusReason(peer);
   const ambiguous = useAmbiguousIds();
-  const name = agent.herdr_name ?? "A worker";
+  const saved = useSavedMachine(agent.host_id);
+  const name = agentName(agent);
   const since = agent.state_since ?? agent.activity_observed_at;
   const chip = (
     <span className="lab sm warn">
@@ -563,8 +589,9 @@ function DialogDetail({ agent, ctx }: { agent: AgentRow; ctx: Context }) {
       ) : (
         <>
           <p className="d-ctx">
-            The board cannot read this dialog, so it shows no buttons. Look at the live terminal and
-            answer there.
+            {saved
+              ? onSaved(name, "a dialog", saved)
+              : "The board cannot read this dialog, so it shows no buttons. Look at the live terminal and answer there."}
           </p>
           <PaneShows
             sessionId={agent.session_id}
@@ -598,7 +625,7 @@ function DialogDetail({ agent, ctx }: { agent: AgentRow; ctx: Context }) {
   return (
     <>
       <BackLink />
-      {peer ? (
+      {peer || saved ? (
         unknown
       ) : (
         <AnswerStrip
@@ -612,7 +639,10 @@ function DialogDetail({ agent, ctx }: { agent: AgentRow; ctx: Context }) {
             runId: agent.run_id ?? null,
           }}
           lead={lead}
-          onSent={(receipt) => markSent(dialogId(agent), receipt)}
+          onSent={(receipt) => {
+            const entry: Entry = { type: "dialog", id: dialogId(agent), agent };
+            markSent(entry.id, waitKey(entry) ?? "", receipt);
+          }}
           reading={
             <>
               {top(false)}
@@ -645,7 +675,7 @@ function Row({ entry, selected, ctx }: { entry: Entry; selected: boolean; ctx: C
       ? entry.item.question
       : entry.type === "permission"
         ? `${entry.prompt.tool}: ${entry.prompt.detail ?? "waiting for a keypress"}`
-        : `${entry.agent.herdr_name ?? "A worker"} waits on a dialog`;
+        : `${agentName(entry.agent)} waits on a dialog`;
   const link = (
     <Link
       to="/inbox"
@@ -809,11 +839,12 @@ export function Inbox({
   const current = decisions.filter((entry) => entry.item.still_current || entry.answered !== null);
   const stale = decisions.filter((entry) => !entry.item.still_current && entry.answered === null);
   // The prompts group: permission prompts, then agents that wait on a dialog.
+  const waiting = agents ? dialogWaits(agents) : [];
   const prompts: Entry[] = [
     ...attention.permission_prompts
       .filter((prompt) => inScope(prompt.card_id))
       .map((prompt) => ({ type: "permission" as const, id: promptId(prompt), prompt })),
-    ...(agents ? dialogWaits(agents) : [])
+    ...waiting
       .filter(scope.agent)
       .map((agent) => ({ type: "dialog" as const, id: dialogId(agent), agent })),
   ];
@@ -826,7 +857,21 @@ export function Inbox({
   ];
   // The brief leads the list, so it is what shows when nothing is chosen.
   const sent = useStore(sentStore);
-  const sentHere = selected ? sent[selected] : undefined;
+  const sentHere = selected ? sent[selected]?.receipt : undefined;
+  // A prompt or dialog back for a later wait, in scope or not, drops the mark
+  // of the one answered from here, so a later "Answered" never shows its
+  // receipt. It runs after each render and changes the store only when a mark
+  // is stale.
+  const waits = [
+    ...attention.permission_prompts.map((prompt): Entry => ({
+      type: "permission",
+      id: promptId(prompt),
+      prompt,
+    })),
+    ...waiting.map((agent): Entry => ({ type: "dialog", id: dialogId(agent), agent })),
+  ].map((entry) => ({ id: entry.id, since: waitKey(entry) ?? "" }));
+  useEffect(() => dropStaleSent(waits));
+  useEffect(openInbox, []);
   const briefChosen = brief !== null && (selected === AWAY_BRIEF_ID || !selected);
   const picked = briefChosen
     ? undefined
@@ -902,7 +947,7 @@ export function Inbox({
               {selected
                 ? sentHere
                   ? `Sent ${sentHere}. The agent went on, so it left the inbox.`
-                  : "It was answered or withdrawn elsewhere."
+                  : "It was answered or withdrawn."
                 : "Nothing in the shown projects needs you."}
             </div>
           </div>

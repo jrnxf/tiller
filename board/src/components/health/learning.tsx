@@ -4,10 +4,11 @@ import { Link } from "@tanstack/react-router";
 import type { RetroView } from "../../lib/api-types";
 import { serverNow } from "../../lib/clock";
 import { WarnIcon } from "../board/icons";
-import { Inline, plural, when } from "../memory/parts";
+import { plural, sentence, when } from "../memory/parts";
 import {
   Elapsed,
   RunAgain,
+  RunAgainNote,
   retrosQueryWhileRunning,
   startedLine,
   useRunAgain,
@@ -30,12 +31,36 @@ function thisWeek(iso: string | null, now: number): boolean {
 
 const KEPT = new Set(["accepted", "applied"]);
 
+// The newest retro that did not finish, with Open in Memory and Run again.
+function Unfinished({ newest, count }: { newest: RetroView; count: number }) {
+  const run = useRunAgain(newest);
+  return (
+    <li data-kind="unfinished">
+      <span className="si bad">
+        <WarnIcon />
+      </span>
+      <span className="t">{plural(count, "retro")} did not finish</span>
+      <span className="m">
+        {newest.card} · {whyShort(newest.learning)}, {when(newest.finished_at ?? newest.created_at)}
+        {count > 1 ? ` · and ${count - 1} more in Memory` : ""}
+        {newest.run_refusal ? `. Run again is off: ${sentence(newest.run_refusal)}` : ""}
+      </span>
+      <span className="acts">
+        <Link className="btn" to="/memory" search={{ doc: newest.project_id }}>
+          Open in Memory
+        </Link>
+        <RunAgain retro={newest} run={run} />
+      </span>
+      <RunAgainNote run={run} className="ln-refusal" />
+    </li>
+  );
+}
+
 // The Learning panel (learning-loop.md section 4): a retro whose curator did
 // not finish, with Open in Memory and Run again, what runs now, and what the
 // retros of this week came to.
 export function Learning() {
   const read = useQuery(retrosQueryWhileRunning());
-  const ctl = useRunAgain();
   if (!read.data) return null;
   const { retros, curator_timeout_minutes: limit } = read.data;
   const now = serverNow();
@@ -47,7 +72,6 @@ export function Learning() {
   const suggested = done.filter((retro) => retro.proposal !== null);
   const kept = suggested.filter((retro) => KEPT.has(retro.proposal?.state ?? ""));
   const newest: RetroView | undefined = unfinished[0];
-  const refusal = newest ? ctl.refusalFor(newest) : null;
 
   return (
     <section className="cpanel learning" aria-labelledby="learning-title">
@@ -58,30 +82,7 @@ export function Learning() {
         </div>
       </div>
       <ul className="ln-list">
-        {newest ? (
-          <li data-kind="unfinished">
-            <span className="si bad">
-              <WarnIcon />
-            </span>
-            <span className="t">{plural(unfinished.length, "retro")} did not finish</span>
-            <span className="m">
-              {newest.card} · {whyShort(newest.learning)},{" "}
-              {when(newest.finished_at ?? newest.created_at)}
-              {unfinished.length > 1 ? ` · and ${unfinished.length - 1} more in Memory` : ""}
-            </span>
-            <span className="acts">
-              <Link className="btn" to="/memory" search={{ doc: newest.project_id }}>
-                Open in Memory
-              </Link>
-              <RunAgain retro={newest} ctl={ctl} />
-            </span>
-            {refusal ? (
-              <div className="ln-refusal">
-                <Inline error={refusal} />
-              </div>
-            ) : null}
-          </li>
-        ) : null}
+        {newest ? <Unfinished key={newest.id} newest={newest} count={unfinished.length} /> : null}
         {running.map((retro) => (
           <li key={retro.id} data-kind="running">
             <span className="si acc">

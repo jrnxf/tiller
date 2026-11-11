@@ -18,6 +18,7 @@ pub mod deletion;
 pub mod interventions;
 pub mod learning;
 pub mod memory;
+pub mod memory_budget;
 pub mod memory_load;
 pub mod memory_repo;
 pub mod notifications;
@@ -125,13 +126,15 @@ pub fn resolve_card(conn: &Connection, input: &str) -> Result<Card> {
 }
 
 /// Refuses an edit made against a stale `rev`, naming the first field the
-/// caller meant to change and its current value.
+/// caller meant to change and its current value, and when the entity last
+/// changed if it keeps that time.
 pub(crate) fn check_rev(
     entity: &'static str,
     id: &str,
     current_rev: i64,
     expected_rev: i64,
     field: Option<(&str, Value)>,
+    edited_at: Option<crate::time::Timestamp>,
 ) -> Result<()> {
     if current_rev == expected_rev {
         return Ok(());
@@ -142,6 +145,7 @@ pub(crate) fn check_rev(
         current_rev,
         sent_rev: expected_rev,
         field: field.map(|(name, value)| (name.to_owned(), value)),
+        edited_at: edited_at.map(Box::new),
     })
 }
 

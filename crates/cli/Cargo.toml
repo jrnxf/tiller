@@ -40,6 +40,7 @@ nix.workspace = true
 rsa.workspace = true
 tempfile.workspace = true
 tiller-core = { workspace = true, features = ["test-owner"] }
+tiller-herdr = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

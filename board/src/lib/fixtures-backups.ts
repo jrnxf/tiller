@@ -1,5 +1,5 @@
 import type { BackupList, BackupRow } from "./api-types.ts";
-import type { Scenario } from "./fixtures.ts";
+import { FixtureRefusal, type Scenario } from "./fixtures.ts";
 
 const FOLDER = "/home/user/.tiller/backups";
 const MB = 1024 * 1024;
@@ -15,7 +15,8 @@ const verified = (id: string, kind: BackupRow["kind"], at: string, mb: number): 
 
 // What the stand-in server holds for a fresh page: a nightly and a hand-made
 // copy, both verified. A `backup-failed` page also shows the attempt that did
-// not verify; `backing-up` shows a run in progress; `empty` has none yet.
+// not verify and a listed copy whose file is gone; `backing-up` shows a run in
+// progress; `empty` has none yet.
 function held(scenario: Scenario): BackupRow[] {
   if (scenario === "empty" || scenario === "new-install") return [];
   const rows = [
@@ -32,6 +33,11 @@ function held(scenario: Scenario): BackupRow[] {
       size: null,
       error: "the copy failed its integrity check",
     });
+    rows[3] = {
+      ...verified("20261109T030000000Z.db", "nightly", "2026-11-09T03:00:03.000Z", 47),
+      status: "failed",
+      error: "the file cannot be read: No such file or directory (os error 2)",
+    };
   }
   return rows;
 }
@@ -45,7 +51,18 @@ export function forgetTakenBackups() {
   taken = [];
 }
 
-export function backupsFor(scenario: Scenario): BackupList {
+// `GET /api/v1/backups`; a `backups-unread` page finds a manifest that does
+// not parse.
+export function backupsFor(scenario: Scenario): BackupList | FixtureRefusal {
+  if (scenario === "backups-unread") {
+    return new FixtureRefusal(500, {
+      ok: false,
+      error: {
+        code: "internal",
+        message: "internal: the backup manifest does not parse: expected value at line 1 column 1",
+      },
+    });
+  }
   return {
     folder: FOLDER,
     running: scenario === "backing-up",

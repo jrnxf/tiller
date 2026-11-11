@@ -9,14 +9,13 @@
 
 mod common;
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use common::World;
+use common::{Running, World, first_line, listening_port};
 use serde_json::Value;
 
 const WAIT: Duration = Duration::from_secs(20);
@@ -26,32 +25,8 @@ struct Daemon {
     port: u16,
 }
 
-/// A daemon process that is killed and reaped when it goes out of scope, so a
-/// test that fails before it stops the daemon leaves none behind.
-struct Running(Child);
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-impl std::ops::Deref for Running {
-    type Target = Child;
-    fn deref(&self) -> &Child {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for Running {
-    fn deref_mut(&mut self) -> &mut Child {
-        &mut self.0
-    }
-}
-
 fn spawn(world: &World, args: &[&str]) -> Running {
-    Running(
+    Running::new(
         daemon_command(world)
             .args(args)
             .env("TILLER_HERDR", "/nonexistent/herdr")
@@ -64,10 +39,9 @@ fn spawn(world: &World, args: &[&str]) -> Running {
 fn daemon_command(world: &World) -> Command {
     let empty = world.dir.path().join("empty-path");
     std::fs::create_dir_all(&empty).unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tiller"));
+    let mut command = world.bare_command();
     command
         .args(["daemon", "--port", "0"])
-        .env("TILLER_HOME", world.home())
         .env("PATH", &empty)
         .env_remove("TILLER_HERDR")
         .env("TILLER_QUOTA_AXI", "/nonexistent/quota-axi")
@@ -78,18 +52,6 @@ fn daemon_command(world: &World) -> Command {
     command
 }
 
-/// The first stdout line, or `None` when stdout closes first.
-fn first_line(child: &mut Child) -> Option<String> {
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        let read = BufReader::new(stdout).read_line(&mut line).unwrap_or(0);
-        let _ = tx.send((read > 0).then_some(line));
-    });
-    rx.recv_timeout(WAIT).expect("the daemon said nothing")
-}
-
 fn start(world: &World) -> Daemon {
     start_with(world, &[])
 }
@@ -97,13 +59,7 @@ fn start(world: &World) -> Daemon {
 /// `start` with extra `tiller daemon` arguments.
 fn start_with(world: &World, args: &[&str]) -> Daemon {
     let mut child = spawn(world, args);
-    let line = first_line(&mut child).expect("the daemon exited before listening");
-    let port = line
-        .trim()
-        .strip_prefix("listening on http://127.0.0.1:")
-        .unwrap_or_else(|| panic!("unexpected first line {line:?}"))
-        .parse()
-        .unwrap();
+    let port = listening_port(&mut child, WAIT);
     Daemon { child, port }
 }
 
@@ -113,12 +69,8 @@ fn wait(child: &mut Child) -> ExitStatus {
         if let Some(status) = child.try_wait().unwrap() {
             return status;
         }
-        if Instant::now() >= deadline {
-            // A failed test leaves no daemon behind.
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("the daemon did not exit");
-        }
+        // The guard stops it, with what it started, as the panic unwinds.
+        assert!(Instant::now() < deadline, "the daemon did not exit");
         std::thread::sleep(Duration::from_millis(50));
     }
 }
@@ -184,7 +136,7 @@ fn a_db_other_than_the_home_database_is_refused() {
     assert!(!world.home().exists(), "the daemon created a default home");
 
     // The environment variable is the same flag.
-    let mut child = Running(
+    let mut child = Running::new(
         daemon_command(&world)
             .env("TILLER_HERDR", "/nonexistent/herdr")
             .env("TILLER_DB", &other)
@@ -213,7 +165,7 @@ fn a_second_daemon_names_the_first_and_exits_zero() {
     assert_eq!(info(&world).unwrap()["port"], u64::from(first.port));
 
     let mut second = spawn(&world, &[]);
-    let line = first_line(&mut second);
+    let line = first_line(&mut second, WAIT);
     assert!(wait(&mut second).success());
     assert_eq!(
         line.as_deref().map(str::trim),
@@ -526,7 +478,7 @@ fn the_daemon_drives_the_herdr_spawn_names() {
     ]);
 
     // Every failed call logs; nothing reads stderr here, so it must not fill.
-    let child = Running(
+    let child = Running::new(
         daemon_command(&world)
             .stderr(Stdio::null())
             .spawn()
@@ -587,7 +539,7 @@ fn the_daemon_follows_a_changed_spawn_herdr_without_a_restart() {
         ]);
     };
     set(&first);
-    let child = Running(
+    let child = Running::new(
         daemon_command(&world)
             .stderr(Stdio::null())
             .spawn()
@@ -629,7 +581,7 @@ fn the_daemon_reads_only_spawn_and_needs_its_herdr() {
     assert!(terminate(&mut daemon).success());
 
     std::fs::write(world.home().join("config.toml"), "[spawn]\nherdr = []\n").unwrap();
-    let mut daemon = Running(daemon_command(&world).spawn().unwrap());
+    let mut daemon = Running::new(daemon_command(&world).spawn().unwrap());
     let status = wait(&mut daemon);
     assert_eq!(status.code(), Some(1));
     let mut stderr = String::new();
@@ -714,7 +666,7 @@ fn the_login_link_signs_in_once_at_an_allowed_host() {
 #[test]
 fn the_login_code_signs_in_at_an_allowed_host_until_sign_out() {
     let world = World::initialized();
-    let mut child = Running(
+    let mut child = Running::new(
         daemon_command(&world)
             .args(["--allow-host", "tiller.example.com"])
             .env("TILLER_HERDR", "/nonexistent/herdr")
@@ -722,13 +674,7 @@ fn the_login_code_signs_in_at_an_allowed_host_until_sign_out() {
             .spawn()
             .unwrap(),
     );
-    let line = first_line(&mut child).expect("the daemon exited before listening");
-    let port = line
-        .trim()
-        .strip_prefix("listening on http://127.0.0.1:")
-        .unwrap_or_else(|| panic!("unexpected first line {line:?}"))
-        .parse()
-        .unwrap();
+    let port = listening_port(&mut child, WAIT);
     let mut daemon = Daemon { child, port };
     let read = |cookie: &str| {
         exchange(
@@ -924,9 +870,59 @@ fn curator_home(world: &World, body: &str) -> (std::path::PathBuf, String) {
     (fake, retro)
 }
 
-/// A stand-in curator that exits `code` without finishing its retro.
-fn exiting(code: i32) -> String {
-    format!("#!/bin/sh\nexit {code}\n")
+/// A log the stand-in curators add a line to on each run, so a test counts
+/// the runs.
+struct RunLog(std::path::PathBuf);
+
+impl RunLog {
+    fn new(world: &World) -> Self {
+        Self(world.dir.path().join("curator-runs"))
+    }
+
+    /// A stand-in curator that records its run, then runs `rest`.
+    fn curator(&self, rest: &str) -> String {
+        let path = self.0.display().to_string().replace('\'', "'\\''");
+        format!("#!/bin/sh\necho run >> '{path}'\n{rest}")
+    }
+
+    fn count(&self) -> usize {
+        std::fs::read_to_string(&self.0)
+            .map(|text| text.lines().count())
+            .unwrap_or(0)
+    }
+}
+
+/// Asks for a reconcile pass with Run now, and waits until one that
+/// started at or after `asked` is over. Run now answers with the poller's
+/// health after the pass, or as it stands when the pass takes longer; then
+/// `GET /api/v1/health` is read until it shows the pass.
+fn reconciled_after(world: &World, port: u16, asked: tiller_core::Timestamp) {
+    let after = |poller: &Value| {
+        poller["last_attempt_at"]
+            .as_str()
+            .and_then(|at| at.parse::<tiller_core::Timestamp>().ok())
+            .is_some_and(|at| at.as_millis() >= asked.as_millis())
+    };
+    let key = format!(r#"{{"idempotency_key":"reconcile-{}"}}"#, asked.as_millis());
+    let (status, answer) = post_as_board(world, port, "/api/v1/pollers/reconcile/run", &key);
+    assert_eq!(status, "HTTP/1.0 200 OK", "{answer}");
+    if after(&answer["data"]) {
+        return;
+    }
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let (_, body) = get(port, "/api/v1/health");
+        let health: Value = serde_json::from_str(&body).unwrap();
+        let passed = health["pollers"]
+            .as_array()
+            .and_then(|pollers| pollers.iter().find(|p| p["source"] == "reconcile"))
+            .is_some_and(after);
+        if passed {
+            return;
+        }
+        assert!(Instant::now() < deadline, "no reconcile pass ran: {body}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// The board's view of `retro` from `GET /api/v1/retros`.
@@ -971,7 +967,8 @@ fn run_again(world: &World, port: u16, retro: &str, key: &str) -> (String, Value
 #[test]
 fn the_board_runs_an_unfinished_retro_again() {
     let world = World::initialized();
-    let (fake, retro) = curator_home(&world, &exiting(3));
+    let runs = RunLog::new(&world);
+    let (fake, retro) = curator_home(&world, &runs.curator("exit 3\n"));
     let ran = world.must(&["retro", "run", &retro]);
     assert_eq!(ran.data()["retro"]["outcome"], "unfinished", "{}", ran.json);
     let mut daemon = start(&world);
@@ -983,7 +980,9 @@ fn the_board_runs_an_unfinished_retro_again() {
     );
     assert!(view["run_refusal"].is_null(), "{view}");
 
-    std::fs::write(&fake, exiting(4)).unwrap();
+    assert_eq!(runs.count(), 1);
+
+    std::fs::write(&fake, runs.curator("exit 4\n")).unwrap();
     let (status, answer) = run_again(&world, daemon.port, &retro, "again-1");
     assert_eq!(status, "HTTP/1.0 200 OK", "{answer}");
     assert_eq!(answer["data"]["state"], "pending", "{answer}");
@@ -994,18 +993,25 @@ fn the_board_runs_an_unfinished_retro_again() {
         "curator exited 4 without finishing the retro"
     );
     assert_eq!(view["started_by"], "board", "{view}");
-    // Nothing runs it again by itself.
-    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(runs.count(), 2, "one click ran one curator");
+    // Nothing runs it again by itself. Only Run again starts a curator, and
+    // its thread ends with the run. The one worker that comes back to retros
+    // on its own is the learning sweep in the reconcile pass, which only
+    // schedules them, so a whole pass that started after the run ended is
+    // the proof, not a wait. A start there would claim the retro in the
+    // store first, so the status and the start would show it.
+    reconciled_after(&world, daemon.port, tiller_core::Timestamp::now());
     let later = retro_view(daemon.port, &retro);
     assert_eq!(later["status"], "unfinished", "{later}");
     assert_eq!(later["curator_started_at"], view["curator_started_at"]);
+    assert_eq!(runs.count(), 2, "a curator ran that no click started");
 
     std::fs::write(
         &fake,
-        format!(
-            "#!/bin/sh\n\"{tiller}\" retro finish \"$TILLER_RETRO_ID\" --nothing >/dev/null\n",
+        runs.curator(&format!(
+            "\"{tiller}\" retro finish \"$TILLER_RETRO_ID\" --nothing >/dev/null\n",
             tiller = env!("CARGO_BIN_EXE_tiller")
-        ),
+        )),
     )
     .unwrap();
     let (status, answer) = run_again(&world, daemon.port, &retro, "again-2");
@@ -1017,6 +1023,105 @@ fn the_board_runs_an_unfinished_retro_again() {
     assert!(view["run_refusal"].is_string(), "{view}");
     let (status, answer) = run_again(&world, daemon.port, &retro, "again-3");
     assert_eq!(status, "HTTP/1.0 422 Unprocessable Entity", "{answer}");
+    assert!(terminate(&mut daemon).success());
+    assert_eq!(runs.count(), 3, "one curator for each click that ran one");
+}
+
+/// A retried Run again answers the same retro after the daemon restarts
+/// (`protocol.md` 7.4): the store keeps the key, so no second curator runs
+/// for one click.
+#[test]
+fn a_replayed_run_again_after_a_restart_starts_no_second_curator() {
+    let world = World::initialized();
+    let runs = RunLog::new(&world);
+    let (_fake, retro) = curator_home(&world, &runs.curator("exit 4\n"));
+    let mut daemon = start(&world);
+    let (status, first) = run_again(&world, daemon.port, &retro, "click-1");
+    assert_eq!(status, "HTTP/1.0 200 OK", "{first}");
+    assert_eq!(first["replayed"], false, "{first}");
+    let view = settled(daemon.port, &retro);
+    assert_eq!(view["status"], "unfinished", "{view}");
+    assert_eq!(runs.count(), 1);
+    assert!(terminate(&mut daemon).success());
+    // A start clears the curator's scratch directory and writes its launch
+    // there before it answers, and a curator starts only from a written
+    // launch. So a marker that is still there once the answer is in proves
+    // that the replay neither prepared nor started a curator.
+    let marker = world
+        .dir
+        .path()
+        .join("scratch")
+        .join("retros")
+        .join(&retro)
+        .join("first-run-marker");
+    std::fs::write(&marker, "first run").unwrap();
+
+    let mut daemon = start(&world);
+    let (status, again) = run_again(&world, daemon.port, &retro, "click-1");
+    assert_eq!(status, "HTTP/1.0 200 OK", "{again}");
+    assert_eq!(again["replayed"], true, "{again}");
+    assert_eq!(again["data"]["id"], retro.as_str(), "{again}");
+    assert_eq!(again["events"], serde_json::json!([]), "{again}");
+    assert!(marker.exists(), "the replay prepared the curator again");
+    let later = settled(daemon.port, &retro);
+    assert_eq!(runs.count(), 1, "a second curator ran for one click");
+    assert_eq!(later["status"], "unfinished", "{later}");
+    assert_eq!(later["curator_started_at"], view["curator_started_at"]);
+    // A new click runs it again.
+    let (status, fresh) = run_again(&world, daemon.port, &retro, "click-2");
+    assert_eq!(status, "HTTP/1.0 200 OK", "{fresh}");
+    assert_eq!(fresh["replayed"], false, "{fresh}");
+    settled(daemon.port, &retro);
+    assert_eq!(runs.count(), 2);
+    assert!(terminate(&mut daemon).success());
+}
+
+/// A Run again whose curator cannot be prepared ends the retro
+/// `unfinished` with why, so it can run again at once. The end is not
+/// refused for reusing the click's key.
+#[test]
+fn a_run_again_that_cannot_prepare_its_curator_ends_unfinished() {
+    let world = World::initialized();
+    let (_fake, retro) = curator_home(&world, "#!/bin/sh\nexit 0\n");
+    // A file where the curator's scratch directories go.
+    std::fs::create_dir_all(world.dir.path().join("scratch")).unwrap();
+    std::fs::write(world.dir.path().join("scratch").join("retros"), "").unwrap();
+    let mut daemon = start(&world);
+    let (status, answer) = run_again(&world, daemon.port, &retro, "click-1");
+    assert_ne!(status, "HTTP/1.0 200 OK", "{answer}");
+    let view = retro_view(daemon.port, &retro);
+    assert_eq!(view["status"], "unfinished", "{view}");
+    let learning = view["learning"].as_str().unwrap();
+    assert!(
+        learning.starts_with("the curator could not be prepared: "),
+        "{view}"
+    );
+    assert!(learning.len() > "the curator could not be prepared: ".len());
+    assert!(terminate(&mut daemon).success());
+}
+
+/// A Run again whose curator cannot be started keeps the cause and its
+/// hint on the retro: the board answered before the start failed, so the
+/// row is the only place the owner sees them.
+#[test]
+fn a_run_again_that_cannot_start_its_curator_says_why() {
+    let world = World::initialized();
+    let (fake, retro) = curator_home(&world, "#!/bin/sh\nexit 0\n");
+    std::fs::remove_file(&fake).unwrap();
+    let mut daemon = start(&world);
+    let (status, answer) = run_again(&world, daemon.port, &retro, "click-1");
+    assert_eq!(status, "HTTP/1.0 200 OK", "{answer}");
+    let view = settled(daemon.port, &retro);
+    assert_eq!(view["status"], "unfinished", "{view}");
+    let learning = view["learning"].as_str().unwrap();
+    assert!(
+        learning.starts_with("the curator could not be started: cannot start "),
+        "{view}"
+    );
+    assert!(
+        learning.ends_with("; set spawn.claude in config.toml"),
+        "{view}"
+    );
     assert!(terminate(&mut daemon).success());
 }
 
@@ -1044,42 +1149,19 @@ fn a_stopping_daemon_stops_the_curator_the_board_started() {
     let mut daemon = start(&world);
     let (status, answer) = run_again(&world, daemon.port, &retro, "run-1");
     assert_eq!(status, "HTTP/1.0 200 OK", "{answer}");
-    let written =
-        |name: &str| std::fs::read_to_string(pid_file(name)).is_ok_and(|text| text.ends_with('\n'));
-    let deadline = Instant::now() + WAIT;
-    while !(written("curator.pid") && written("grandchild.pid")) {
-        assert!(
-            Instant::now() < deadline,
-            "the stand-in curator never started"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let read = |name: &str| {
-        std::fs::read_to_string(pid_file(name))
-            .unwrap()
-            .trim()
-            .to_owned()
-    };
-    let (curator, grandchild) = (read("curator.pid"), read("grandchild.pid"));
+    let curator = written_pid(&pid_file("curator.pid"));
+    let grandchild = written_pid(&pid_file("grandchild.pid"));
     let view = retro_view(daemon.port, &retro);
     assert_eq!(view["status"], "running", "{view}");
     // Run again is off while it runs.
     assert!(view["run_refusal"].is_string(), "{view}");
 
     let stopped = terminate(&mut daemon);
-    let gone = |pid: &str| {
-        let out = Command::new("ps")
-            .args(["-o", "stat=", "-p", pid])
-            .output()
-            .unwrap();
-        let stat = String::from_utf8_lossy(&out.stdout);
-        stat.trim().is_empty() || stat.trim_start().starts_with('Z')
-    };
-    let ended = gone(&curator) && gone(&grandchild);
+    // The daemon reaps its curator before it exits, so the curator is gone
+    // the moment it has. Its child got SIGKILL with the curator's group.
+    let ended = gone(&curator, Duration::ZERO) && gone(&grandchild, DYING);
     // Whatever happened, take every process this test started down with it.
-    for pid in [&curator, &grandchild] {
-        let _ = Command::new("kill").args(["-KILL", pid]).status();
-    }
+    reap_all(&[&curator, &grandchild]);
     assert!(stopped.success());
     assert!(ended, "the curator or its child outlived the daemon");
     let shown = world.must(&["retro", "show", &retro]);
@@ -1088,5 +1170,179 @@ fn a_stopping_daemon_stops_the_curator_the_board_started() {
     assert_eq!(
         row["learning"],
         "curator stopped: the daemon stopped before the retro was finished"
+    );
+}
+
+/// The pid a stand-in wrote to `path`, once the whole line is there.
+fn written_pid(path: &std::path::Path) -> String {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        if text.ends_with('\n') {
+            return text.trim().to_owned();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} was never written",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// How long a process killed with SIGKILL may still show in `ps`: the
+/// signal arrives a moment after `kill` returns.
+const DYING: Duration = Duration::from_secs(5);
+
+/// Whether `pid` is gone, or only a zombie, within `within`: a process
+/// stopped after its parent is reaped by whatever adopted it.
+fn gone(pid: &str, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    loop {
+        let out = Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&out.stdout);
+        if stat.trim().is_empty() || stat.trim_start().starts_with('Z') {
+            return true;
+        }
+        if Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Kills each of `pids` that still runs, so a failed check leaves none
+/// behind. A pid that has ended already is not signalled.
+fn reap_all(pids: &[&str]) {
+    for pid in pids {
+        if !gone(pid, Duration::ZERO) {
+            let _ = Command::new("kill").args(["-KILL", pid]).status();
+        }
+    }
+}
+
+/// A test that fails while the board's curator runs leaves nothing behind:
+/// dropping the guard stops the daemon, which stops the curator and the
+/// `sleep` it started, though the curator leads a process group of its own.
+#[test]
+fn a_dropped_daemon_leaves_no_curator_behind() {
+    let world = World::initialized();
+    let which = Command::new("sh")
+        .args(["-c", "command -v sleep"])
+        .output()
+        .unwrap();
+    let sleep = String::from_utf8(which.stdout).unwrap().trim().to_owned();
+    let pid_file = |name: &str| world.dir.path().join(name);
+    let (_fake, retro) = curator_home(
+        &world,
+        &format!(
+            "#!/bin/sh\n\"{sleep}\" 300 &\necho $! > '{grandchild}'\necho $$ > '{curator}'\nwait\n",
+            grandchild = pid_file("grandchild.pid").display(),
+            curator = pid_file("curator.pid").display(),
+        ),
+    );
+    let daemon = start(&world);
+    let (status, answer) = run_again(&world, daemon.port, &retro, "run-1");
+    assert_eq!(status, "HTTP/1.0 200 OK", "{answer}");
+    let curator = written_pid(&pid_file("curator.pid"));
+    let grandchild = written_pid(&pid_file("grandchild.pid"));
+    drop(daemon);
+    let ended = (gone(&curator, DYING), gone(&grandchild, DYING));
+    reap_all(&[&curator, &grandchild]);
+    assert_eq!(
+        ended,
+        (true, true),
+        "the curator or its child outlived the guard"
+    );
+}
+
+/// Set in the copy of this test binary that
+/// `a_guard_kills_a_child_that_ignores_sigterm_and_its_groups` starts: the
+/// folder it writes its children's pids to.
+const GUARD_CHILD: &str = "TILLER_GUARD_CHILD";
+
+/// The guard kills a child that ignores SIGTERM, with what it started: a
+/// process that leads a group of its own, as a curator does, and one whose
+/// parent exits during the grace, which leaves it under no one.
+///
+/// A shell without a terminal cannot give a job its own group (`set -m`
+/// turns job control off), so the child is a copy of this test binary,
+/// started through a shell that ignores SIGTERM, which `exec` keeps.
+#[test]
+fn a_guard_kills_a_child_that_ignores_sigterm_and_its_groups() {
+    if let Some(dir) = std::env::var_os(GUARD_CHILD) {
+        use std::os::unix::process::CommandExt;
+        let dir = std::path::PathBuf::from(dir);
+        let mut leader = Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        std::fs::write(dir.join("leader"), format!("{}\n", leader.id())).unwrap();
+        let mut plain = Command::new("sleep").arg("300").spawn().unwrap();
+        std::fs::write(dir.join("plain"), format!("{}\n", plain.id())).unwrap();
+        // It exits once `go` is there, which leaves the shell it started an
+        // orphan. Half a second later the orphan starts a `sleep` of its own.
+        let mut parent = Command::new("sh")
+            .args([
+                "-c",
+                "sh -c 'while [ ! -e go ]; do sleep 0.05; done; sleep 0.5; sleep 300 & echo $! > late; wait' &
+                 echo $! > orphan
+                 while [ ! -e go ]; do sleep 0.05; done",
+            ])
+            .current_dir(&dir)
+            .spawn()
+            .unwrap();
+        // Waits until the guard kills them all.
+        let _ = parent.wait();
+        let _ = plain.wait();
+        let _ = leader.wait();
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let child = Command::new("sh")
+        .args([
+            "-c",
+            "trap '' TERM; exec \"$0\" --exact \"$1\" --test-threads 1",
+        ])
+        .arg(std::env::current_exe().unwrap())
+        .arg("a_guard_kills_a_child_that_ignores_sigterm_and_its_groups")
+        .env(GUARD_CHILD, dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let running = Running::with_grace(child, Duration::from_secs(3));
+    let leader = written_pid(&dir.path().join("leader"));
+    let plain = written_pid(&dir.path().join("plain"));
+    let orphan = written_pid(&dir.path().join("orphan"));
+    let group = Command::new("ps")
+        .args(["-o", "pgid=", "-p", &leader])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&group.stdout).trim(),
+        leader,
+        "the stand-in does not lead a group of its own"
+    );
+    // The orphan's parent exits a second into the 3 s grace. The guard reads
+    // the processes under the child every 50 ms, so it has seen the orphan
+    // there many times by then.
+    let go = dir.path().join("go");
+    let timer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(1));
+        std::fs::write(go, "").unwrap();
+    });
+    drop(running);
+    timer.join().unwrap();
+    let late = written_pid(&dir.path().join("late"));
+    let ended = [&leader, &plain, &orphan, &late].map(|pid| gone(pid, DYING));
+    reap_all(&[&leader, &plain, &orphan, &late]);
+    assert_eq!(
+        ended, [true; 4],
+        "a process the child started outlived the guard (leader, plain, orphan, late)"
     );
 }

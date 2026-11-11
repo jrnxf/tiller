@@ -16,7 +16,7 @@
 //! list as the repo's admin; the App answers only whether it is installed.
 //! A read that fails changes nothing: the check tries again next pass.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -156,11 +156,25 @@ fn checked(project: &Project) -> bool {
         && project.delivery != Delivery::LocalOnly
 }
 
+/// Where and when the check last judged one project: its repo and default
+/// branch then, and the instant the next check counts from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Judged {
+    pub repo: String,
+    pub branch: String,
+    pub at: Instant,
+}
+
+/// The last check of each project, keyed by project id.
+pub type LastChecks = HashMap<String, Judged>;
+
 /// One pass over the projects whose check is due: each never checked by this
-/// daemon (a project just added) or last checked an hour ago. A check that
+/// daemon (a project just added), whose repo or default branch changed since
+/// its last check, or last checked an hour ago. A check that
 /// cannot read the forge or the App changes nothing and runs again after
 /// [`RETRY`]; one whose write the store refuses (a project retired
-/// meanwhile) is skipped, so neither stops the pass. Writes the
+/// meanwhile) is skipped and also runs again after [`RETRY`], so neither
+/// stops the pass. Writes the
 /// verdict through `project.merge_gate`, which changes nothing when the
 /// value holds and raises the degraded event and the recovery item on a move
 /// to `detect`.
@@ -169,25 +183,40 @@ pub fn check_due(
     forge: &dyn RulesetForge,
     app: &dyn AppTokens,
     ctx: &Ctx,
-    last: &mut HashMap<String, Instant>,
+    last: &mut LastChecks,
     now: Instant,
 ) -> tiller_core::Result<Vec<(String, Verdict)>> {
     let mut judged = Vec::new();
-    for project in store.projects()?.into_iter().filter(checked) {
-        if last
-            .get(&project.id)
-            .is_some_and(|at| now.duration_since(*at) < RECHECK)
-        {
-            continue;
-        }
+    let projects: Vec<Project> = store.projects()?.into_iter().filter(checked).collect();
+    // A project no longer checked (retired, or with no repo) keeps no entry.
+    let ids: HashSet<&str> = projects.iter().map(|project| project.id.as_str()).collect();
+    last.retain(|id, _| ids.contains(id.as_str()));
+    for project in projects {
         let Some(repo) = project.repo.as_deref() else {
             continue;
         };
+        // A verdict holds for the repo and branch it judged: an edit that
+        // moves either is judged again at once, also when it moves back.
+        let branch = &project.default_branch;
+        if last.get(&project.id).is_some_and(|judged| {
+            // GitHub names ignore case.
+            judged.repo.eq_ignore_ascii_case(repo)
+                && judged.branch == *branch
+                && now.duration_since(judged.at) < RECHECK
+        }) {
+            continue;
+        }
+        let judged_at = |at: Instant| Judged {
+            repo: repo.to_owned(),
+            branch: branch.clone(),
+            at,
+        };
+        let retry_at = || judged_at(now.checked_sub(RECHECK - RETRY).unwrap_or(now));
         let verdict = match judge(forge, app, repo, &project.default_branch) {
             Ok(verdict) => verdict,
             Err(error) => {
                 tracing::warn!(project = %project.id, %error, "ruleset check not run");
-                last.insert(project.id, now.checked_sub(RECHECK - RETRY).unwrap_or(now));
+                last.insert(project.id.clone(), retry_at());
                 continue;
             }
         };
@@ -195,11 +224,14 @@ pub fn check_due(
             Verdict::Enforced => (MergeGate::Enforced, "the ruleset check holds"),
             Verdict::Detect(why) => (MergeGate::Detect, why.as_str()),
         };
-        last.insert(project.id.clone(), now);
         if let Err(error) = store.project_set_merge_gate(ctx, &project.id, gate, reason) {
+            // A verdict not recorded is tried again after RETRY, as an
+            // unread forge is.
             tracing::warn!(project = %project.id, %error, "merge gate not recorded");
+            last.insert(project.id.clone(), retry_at());
             continue;
         }
+        last.insert(project.id.clone(), judged_at(now));
         judged.push((project.id, verdict));
     }
     Ok(judged)
@@ -231,7 +263,7 @@ pub struct Gate {
     /// The App directory, watched through [`app_files`].
     pub app_dir: PathBuf,
     pub app_files: AppFiles,
-    pub last: HashMap<String, Instant>,
+    pub last: LastChecks,
 }
 
 impl Source for Gate {

@@ -117,7 +117,9 @@ CREATE TABLE projects (
   -- pre-launch validation (docs/design/pre-launch-validation.md; migration 0002)
   stage          TEXT NOT NULL DEFAULT 'launched' CHECK (stage IN ('pre-launch', 'launched')),
   reviewed_through_sha TEXT,               -- last commit a batched review covered
-  stage_changed_at TEXT
+  stage_changed_at TEXT,
+  -- when rev last moved (migration 0018); a trigger fills it from added_at on insert
+  edited_at      TEXT
 ) STRICT;
 
 -- ---------------------------------------------------------------------------

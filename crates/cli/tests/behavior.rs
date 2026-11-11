@@ -746,6 +746,18 @@ fn a_command_before_init_names_owner_set_before_init() {
 }
 
 #[test]
+fn a_session_before_init_names_the_same_setup_steps_as_every_other_refusal() {
+    let world = World::new();
+    let out = world.run_as("sess-1", &["project", "list"]);
+    assert!(!out.ok(), "{}", out.json);
+    let hint = out.json["error"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.ends_with("the owner must run tiller owner set tiller, then tiller init"),
+        "{hint}"
+    );
+}
+
+#[test]
 fn init_refuses_while_another_system_owns_the_host_and_names_owner_set() {
     let world = World::new();
     std::fs::create_dir_all(world.home()).unwrap();

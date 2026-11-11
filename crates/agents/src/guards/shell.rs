@@ -26,6 +26,9 @@ pub struct Word {
     pub quoted: bool,
     /// The word starts with an unquoted `~`.
     pub tilde: bool,
+    /// The word holds an unquoted brace list `{a,b}` or sequence `{a..c}`,
+    /// which makes several words.
+    pub braces: bool,
 }
 
 impl Word {
@@ -164,6 +167,8 @@ fn assignment(word: &Word, raw_prefix_quoted: bool) -> Option<(String, Word)> {
                 dynamic: word.dynamic,
                 quoted: false,
                 tilde: word.text[eq + 1..].starts_with('~'),
+                // Bash does not expand braces in an assignment value.
+                braces: false,
             },
         )
     })
@@ -272,6 +277,7 @@ impl Parser {
                     dynamic: true,
                     quoted: true,
                     tilde: false,
+                    braces: false,
                 }))
             }
             '(' => op(1, "(", self),
@@ -653,12 +659,14 @@ impl Parser {
                     any = true;
                 }
                 '{' => {
-                    // Brace expansion `a{b,c}` makes several words.
+                    // Brace expansion `a{b,c}` or `a{1..3}` makes several
+                    // words.
                     let rest: String = self.chars[self.pos..].iter().take(256).collect();
                     if let Some(close) = rest.find('}')
-                        && rest[..close].contains(',')
+                        && (rest[..close].contains(',') || rest[..close].contains(".."))
                     {
                         word.dynamic = true;
+                        word.braces = true;
                     }
                     word.text.push('{');
                     word.quoted = false;

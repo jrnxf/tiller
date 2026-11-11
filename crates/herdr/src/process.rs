@@ -11,9 +11,8 @@
 
 use std::io;
 use std::process::{Child, Command, ExitStatus};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::JoinHandle;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Puts the child `command` spawns in a new process group, led by the child.
@@ -124,24 +123,43 @@ fn try_wait_all(child: &mut Child) -> io::Result<Option<ExitStatus>> {
 /// a child in its own group: a child outside the terminal's foreground group
 /// no longer gets the owner's Ctrl-C itself.
 ///
-/// The handlers stay installed after it is dropped (tokio never removes
-/// them), so those signals no longer end the process: hold one only in a
-/// command that exits soon after the child ends.
+/// tokio never removes a signal handler, so the handlers stay installed for
+/// the rest of the process. While no `Interrupt` from [`Interrupt::catch`]
+/// lives, SIGINT and SIGTERM end the process as they would with no
+/// handlers: the signal's default action is put back and the signal raised
+/// again, so a shell sees a command the signal killed (exit code 130 for
+/// SIGINT, 143 for SIGTERM). SIGHUP is then ignored: the child it was caught
+/// for has ended, and what is left (recording how the child ended) is worth
+/// finishing after the terminal closes, as it is under `nohup`.
 pub struct Interrupt {
     caught: Arc<AtomicBool>,
-    done: Option<tokio::sync::oneshot::Sender<()>>,
-    listener: Option<JoinHandle<()>>,
+    /// Whether this one came from [`Interrupt::catch`] and is in [`HELD`].
+    held: bool,
 }
 
-impl Interrupt {
-    /// Installs the handlers. They are in place when this returns.
-    pub fn catch() -> io::Result<Self> {
-        use tokio::signal::unix::{SignalKind, signal};
-        let caught = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&caught);
-        let (ready_tx, ready) = std::sync::mpsc::channel::<io::Result<()>>();
-        let (done, done_rx) = tokio::sync::oneshot::channel::<()>();
-        let listener = std::thread::spawn(move || {
+/// The flags of the [`Interrupt`]s from [`Interrupt::catch`] that live now.
+/// A signal raises each one, or ends the process when there are none.
+static HELD: Mutex<Vec<Arc<AtomicBool>>> = Mutex::new(Vec::new());
+
+/// Whether the handlers' listener runs. The first [`Interrupt::catch`]
+/// that starts it keeps it for the rest of the process, as the handlers
+/// are; a start that failed is tried again by the next one.
+static LISTENING: Mutex<bool> = Mutex::new(false);
+
+/// The held flags, even after a thread panicked while holding the lock.
+fn held() -> std::sync::MutexGuard<'static, Vec<Arc<AtomicBool>>> {
+    HELD.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Starts the thread that waits for the signals, and returns once the
+/// handlers are installed.
+fn listen() -> io::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let (ready_tx, ready) = std::sync::mpsc::channel::<io::Result<()>>();
+    std::thread::Builder::new()
+        .name("interrupt".to_owned())
+        .spawn(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_io()
                 .build()
@@ -170,22 +188,53 @@ impl Interrupt {
                         return;
                     }
                 };
-                tokio::select! {
-                    _ = int.recv() => flag.store(true, Ordering::SeqCst),
-                    _ = term.recv() => flag.store(true, Ordering::SeqCst),
-                    _ = hup.recv() => flag.store(true, Ordering::SeqCst),
-                    _ = done_rx => {}
+                loop {
+                    let number = tokio::select! {
+                        _ = int.recv() => signal_hook::consts::SIGINT,
+                        _ = term.recv() => signal_hook::consts::SIGTERM,
+                        _ = hup.recv() => signal_hook::consts::SIGHUP,
+                    };
+                    let held = held();
+                    if held.is_empty() {
+                        if number == signal_hook::consts::SIGHUP {
+                            continue;
+                        }
+                        // It aborts the process when the default action
+                        // cannot be put back, and returns only for a signal
+                        // it does not know.
+                        let _ = signal_hook::low_level::emulate_default_handler(number);
+                        std::process::exit(128 + number);
+                    }
+                    for flag in held.iter() {
+                        flag.store(true, Ordering::SeqCst);
+                    }
                 }
             });
-        });
-        ready
-            .recv()
-            .map_err(|_| io::Error::other("the signal listener ended before it started"))??;
-        Ok(Self {
-            caught,
-            done: Some(done),
-            listener: Some(listener),
-        })
+        })?;
+    ready
+        .recv()
+        .map_err(|_| io::Error::other("the signal listener ended before it started"))?
+}
+
+impl Interrupt {
+    /// Installs the handlers, the first time, and holds the signals for
+    /// this `Interrupt` until it is dropped. They are in place when this
+    /// returns.
+    pub fn catch() -> io::Result<Self> {
+        let caught = Arc::new(AtomicBool::new(false));
+        // Held before the handlers exist, so no signal falls between them.
+        held().push(Arc::clone(&caught));
+        let mut listening = LISTENING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !*listening {
+            if let Err(error) = listen() {
+                held().retain(|flag| !Arc::ptr_eq(flag, &caught));
+                return Err(error);
+            }
+            *listening = true;
+        }
+        Ok(Self { caught, held: true })
     }
 
     /// An interrupt the caller raises by setting `flag`, with no signal
@@ -194,8 +243,7 @@ impl Interrupt {
     pub fn flag(flag: Arc<AtomicBool>) -> Self {
         Self {
             caught: flag,
-            done: None,
-            listener: None,
+            held: false,
         }
     }
 
@@ -207,11 +255,8 @@ impl Interrupt {
 
 impl Drop for Interrupt {
     fn drop(&mut self) {
-        if let Some(done) = self.done.take() {
-            let _ = done.send(());
-        }
-        if let Some(listener) = self.listener.take() {
-            let _ = listener.join();
+        if self.held {
+            held().retain(|flag| !Arc::ptr_eq(flag, &self.caught));
         }
     }
 }
@@ -221,30 +266,8 @@ impl Drop for Interrupt {
 pub(crate) mod tests_support {
     use std::path::Path;
     use std::process::Command;
-    use std::time::{Duration, Instant};
 
-    /// Whether `pid` has exited: no such process, or one only waiting to be
-    /// reaped.
-    pub(crate) fn gone(pid: &str) -> bool {
-        let out = Command::new("ps")
-            .args(["-o", "stat=", "-p", pid])
-            .output()
-            .expect("ps runs");
-        let stat = String::from_utf8_lossy(&out.stdout);
-        stat.trim().is_empty() || stat.trim_start().starts_with('Z')
-    }
-
-    /// Polls `what` for up to five seconds.
-    pub(crate) fn eventually(what: impl Fn() -> bool) -> bool {
-        let started = Instant::now();
-        while started.elapsed() < Duration::from_secs(5) {
-            if what() {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        false
-    }
+    pub(crate) use crate::testing::{eventually, gone};
 
     /// The pid a stand-in wrote to `file`, once it is there.
     pub(crate) fn pid_in(file: &Path) -> String {
@@ -380,6 +403,51 @@ mod tests {
             stopped,
             "the grandchild {grandchild} outlived the interrupt"
         );
+    }
+
+    /// Set in the copy of this test binary that
+    /// `a_signal_after_the_interrupt_ends_the_process` runs.
+    const SIGNALLED_CHILD: &str = "TILLER_TEST_SIGNALLED_CHILD";
+
+    /// Once no `Interrupt` holds the signals, SIGTERM kills the process, as
+    /// it would with no handlers, and SIGHUP does not; while a later one
+    /// holds them, it catches them again. Run in a copy of this test binary,
+    /// since the signal ends the process it reaches.
+    #[test]
+    fn a_signal_after_the_interrupt_ends_the_process() {
+        use rustix::process::{Signal, getpid, kill_process};
+        if std::env::var_os(SIGNALLED_CHILD).is_some() {
+            drop(Interrupt::catch().unwrap());
+            let again = Interrupt::catch().unwrap();
+            kill_process(getpid(), Signal::INT).unwrap();
+            assert!(eventually(|| again.caught()));
+            drop(again);
+            // The terminal closing after the run does not cut its record.
+            kill_process(getpid(), Signal::HUP).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            kill_process(getpid(), Signal::TERM).unwrap();
+            std::thread::sleep(Duration::from_secs(10));
+            return;
+        }
+        let started = Instant::now();
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "process::tests::a_signal_after_the_interrupt_ends_the_process",
+                "--nocapture",
+            ])
+            .env(SIGNALLED_CHILD, "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            status.signal(),
+            Some(signal_hook::consts::SIGTERM),
+            "{status:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[test]

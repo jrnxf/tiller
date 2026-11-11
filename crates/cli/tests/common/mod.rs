@@ -5,6 +5,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -13,6 +14,22 @@ use tempfile::TempDir;
 use tiller_core::domain::{Effort, RunRole};
 use tiller_core::state::runs::{NewOrchestrator, NewRun, SpawnChecks};
 use tiller_core::{Actor, Ctx, Store};
+
+/// What a caller's shell may set that changes what `tiller` does, removed
+/// from every command a test runs. Run from a Claude Code shell, over ssh or
+/// neither, the owner checks see the same caller: no `CLAUDECODE`, no
+/// `SSH_CONNECTION`, and the test stand-in for a terminal with no Claude Code
+/// behind it only where a test asks for it (`authority::principal`).
+pub const CALLER_ENV: &[&str] = &[
+    "TILLER_DB",
+    "TILLER_SESSION_ID",
+    "TILLER_RUN_ID",
+    "TILLER_SSH",
+    "TILLER_GH",
+    "TILLER_TEST_OWNER",
+    "CLAUDECODE",
+    "SSH_CONNECTION",
+];
 
 /// What one command printed and how it exited.
 pub struct Out {
@@ -98,24 +115,23 @@ impl World {
         self.home().join("state.db")
     }
 
-    fn command(&self, session: Option<&str>) -> Command {
+    /// `tiller` against this home and nothing the caller's shell carries:
+    /// none of [`CALLER_ENV`], so a developer's `TILLER_DB` or session never
+    /// reaches the command.
+    pub fn bare_command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_tiller"));
+        command.env("TILLER_HOME", self.home());
+        for name in CALLER_ENV {
+            command.env_remove(name);
+        }
         command
-            .env("TILLER_HOME", self.home())
-            // A launch records workspace trust in Claude's config; keep the
-            // owner's own config out of reach.
-            .env("CLAUDE_CONFIG_DIR", self.dir.path().join("claude"))
-            .env_remove("TILLER_DB")
-            .env_remove("TILLER_SESSION_ID")
-            .env_remove("TILLER_RUN_ID")
-            .env_remove("TILLER_SSH")
-            .env_remove("TILLER_GH")
-            // Run from a Claude Code shell, over ssh or neither, the owner
-            // checks see the same caller: no `CLAUDECODE`, no
-            // `SSH_CONNECTION`, and the test stand-in for a terminal with no
-            // Claude Code behind it (`authority::principal`).
-            .env_remove("CLAUDECODE")
-            .env_remove("SSH_CONNECTION");
+    }
+
+    fn command(&self, session: Option<&str>) -> Command {
+        let mut command = self.bare_command();
+        // A launch records workspace trust in Claude's config; keep the
+        // owner's own config out of reach.
+        command.env("CLAUDE_CONFIG_DIR", self.dir.path().join("claude"));
         if self.terminal.get() {
             command.env("TILLER_TEST_OWNER", "1");
         }
@@ -135,6 +151,20 @@ impl World {
     /// Sets `key` for every later command.
     pub fn set_env(&self, key: &str, value: &str) {
         self.env.borrow_mut().push((key.into(), value.into()));
+    }
+
+    /// Starts `tiller --json <args>` as the owner and returns at once, for a
+    /// run the test acts on while it runs. Its stdout is piped.
+    pub fn spawn(&self, args: &[&str]) -> std::process::Child {
+        use std::process::Stdio;
+        self.command(None)
+            .arg("--json")
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
     }
 
     /// Runs `tiller --json <args>` as the owner.
@@ -174,7 +204,18 @@ impl World {
         self.exec(None, args, Some(stdin))
     }
 
-    fn exec(&self, session: Option<&str>, args: &[&str], stdin: Option<&str>) -> Out {
+    /// Runs as the owner with arguments that need not be UTF-8, as a shell
+    /// passes a path.
+    pub fn run_os(&self, args: &[&OsStr]) -> Out {
+        self.exec(None, args, None)
+    }
+
+    fn exec<A: AsRef<OsStr> + std::fmt::Debug>(
+        &self,
+        session: Option<&str>,
+        args: &[A],
+        stdin: Option<&str>,
+    ) -> Out {
         use std::io::Write;
         use std::process::Stdio;
         let mut command = self.command(session);
@@ -398,7 +439,9 @@ pub fn snap(world: &World, name: &str, out: &Out) {
 
 /// CPU time (user plus system) of every child this process has reaped. The
 /// difference across one call is that call's own work: unlike wall time it
-/// does not grow when other processes compete for the cores.
+/// does not grow while the call waits for a core. It still grows when the
+/// call runs on a slower core, so a test that gates it first calls
+/// [`pin_to_performance_cores`].
 pub fn children_cpu() -> std::time::Duration {
     use nix::sys::resource::{UsageWho, getrusage};
     use std::time::Duration;
@@ -406,4 +449,325 @@ pub fn children_cpu() -> std::time::Duration {
     let timeval =
         |t: nix::sys::time::TimeVal| Duration::new(t.tv_sec() as u64, t.tv_usec() as u32 * 1000);
     timeval(usage.user_time()) + timeval(usage.system_time())
+}
+
+/// Pins this thread, and so every child it starts from here on, to the
+/// host's performance cores when its CPU mixes two kinds of core, and
+/// returns them. A budget on CPU time needs it: an Intel hybrid CPU's
+/// efficient cores do the same work in about 1.5 times the CPU time (`tiller
+/// card show` measured 6.9 ms pinned to a performance core and 10.6 ms pinned
+/// to an efficient one, with the same page faults), and the scheduler moves a
+/// child onto them as soon as load fills the performance cores. Linux names
+/// the performance cores in `/sys/devices/cpu_core/cpus`. On any other CPU,
+/// or when none of them is allowed, nothing changes and the answer is `None`.
+pub fn pin_to_performance_cores() -> Option<Vec<usize>> {
+    #[cfg(target_os = "linux")]
+    {
+        use nix::sched::{CpuSet, sched_getaffinity, sched_setaffinity};
+        use nix::unistd::Pid;
+        let listed = std::fs::read_to_string("/sys/devices/cpu_core/cpus").ok()?;
+        let allowed = sched_getaffinity(Pid::from_raw(0)).ok()?;
+        let fast: Vec<usize> = parse_cpu_list(&listed)
+            .into_iter()
+            .filter(|&cpu| allowed.is_set(cpu).unwrap_or(false))
+            .collect();
+        if fast.is_empty() {
+            return None;
+        }
+        let mut set = CpuSet::new();
+        for &cpu in &fast {
+            set.set(cpu).ok()?;
+        }
+        sched_setaffinity(Pid::from_raw(0), &set).ok()?;
+        Some(fast)
+    }
+    #[cfg(not(target_os = "linux"))]
+    None
+}
+
+/// The CPUs a sysfs CPU list names, such as `0-2,6-13,15`.
+pub fn parse_cpu_list(text: &str) -> Vec<usize> {
+    text.trim()
+        .split(',')
+        .filter(|part| !part.is_empty())
+        .flat_map(|part| match part.split_once('-') {
+            Some((first, last)) => match (first.parse::<usize>(), last.parse::<usize>()) {
+                (Ok(first), Ok(last)) => (first..=last).collect(),
+                _ => Vec::new(),
+            },
+            None => part.parse().into_iter().collect(),
+        })
+        .collect()
+}
+
+/// A child, such as a daemon, that is stopped with everything it started
+/// when it goes out of scope, so a test that fails before it stops the
+/// child leaves no process behind.
+///
+/// The child first gets SIGTERM and `grace` to stop the way it does for
+/// the owner: a daemon then stops its curators and herdr calls itself.
+/// When it is still running after that, it and every process under it are
+/// frozen with SIGSTOP, so none starts another, then killed with SIGKILL,
+/// with the whole process group of each one that leads a group of its own
+/// (a curator does). A process seen under the child while it stopped that
+/// still runs after a clean stop is killed the same way.
+pub struct Running {
+    child: std::process::Child,
+    grace: std::time::Duration,
+}
+
+impl Running {
+    /// The grace a daemon gets to stop on SIGTERM.
+    pub const GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+    pub fn new(child: std::process::Child) -> Self {
+        Self::with_grace(child, Self::GRACE)
+    }
+
+    pub fn with_grace(child: std::process::Child, grace: std::time::Duration) -> Self {
+        Self { child, grace }
+    }
+
+    fn runs(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+}
+
+impl std::ops::Deref for Running {
+    type Target = std::process::Child;
+    fn deref(&self) -> &std::process::Child {
+        &self.child
+    }
+}
+
+impl std::ops::DerefMut for Running {
+    fn deref_mut(&mut self) -> &mut std::process::Child {
+        &mut self.child
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+        // A reaped child's pid may belong to another process by now.
+        if !self.runs() {
+            return;
+        }
+        let Ok(raw) = i32::try_from(self.child.id()) else {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            return;
+        };
+        let root = Pid::from_raw(raw);
+        let mut seen = descendants(&[raw]);
+        let _ = kill(root, Signal::SIGTERM);
+        let deadline = std::time::Instant::now() + self.grace;
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            // Read only while the child is unreaped: until then its pid is
+            // its own, and so are the children `ps` names under it.
+            if !self.runs() {
+                break;
+            }
+            add_new(&mut seen, descendants(&[raw]));
+        }
+        // A process seen under the child whose parent exited since, or that
+        // outlived a child that stopped by itself, has another parent now,
+        // so it is frozen as a root of its own, with what it started.
+        let mut doomed = still_running(&seen);
+        let mut roots: Vec<i32> = doomed.iter().map(|p| p.pid).collect();
+        let running = self.runs();
+        if running {
+            roots.push(raw);
+        }
+        add_new(&mut doomed, freeze(&roots));
+        kill_all(&doomed);
+        if running {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+/// One row of the process table.
+#[derive(Clone)]
+struct Process {
+    pid: i32,
+    ppid: i32,
+    pgid: i32,
+    /// When it started, as `ps` prints it, to the second. `exec`, a new
+    /// parent and a new group keep it, while a pid reused in a later second
+    /// gets another.
+    started: String,
+}
+
+impl Process {
+    /// The same process: its parent, group and command may have changed.
+    fn same(&self, other: &Process) -> bool {
+        self.pid == other.pid && self.started == other.started
+    }
+}
+
+/// Every process on the host, from `ps`, which Linux and macOS share.
+fn processes() -> Vec<Process> {
+    let Ok(out) = Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,pgid=,lstart="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let ppid = fields.next()?.parse().ok()?;
+            let pgid = fields.next()?.parse().ok()?;
+            let started = fields.collect::<Vec<_>>().join(" ");
+            Some(Process {
+                pid,
+                ppid,
+                pgid,
+                started,
+            })
+        })
+        .collect()
+}
+
+/// Every process under any of `roots`.
+fn descendants(roots: &[i32]) -> Vec<Process> {
+    let table = processes();
+    let mut found: Vec<Process> = Vec::new();
+    let mut parents = roots.to_vec();
+    while let Some(parent) = parents.pop() {
+        for process in table.iter().filter(|p| p.ppid == parent) {
+            if !found.iter().any(|seen| seen.pid == process.pid) {
+                parents.push(process.pid);
+                found.push(process.clone());
+            }
+        }
+    }
+    found
+}
+
+/// The processes of `seen` that still run, as the process table shows them
+/// now, with the group they lead by now.
+fn still_running(seen: &[Process]) -> Vec<Process> {
+    processes()
+        .into_iter()
+        .filter(|now| seen.iter().any(|p| p.same(now)))
+        .collect()
+}
+
+/// Adds to `seen` each process of `found` it does not hold yet, and
+/// returns how many it added.
+fn add_new(seen: &mut Vec<Process>, found: Vec<Process>) -> usize {
+    let before = seen.len();
+    for process in found {
+        if !seen.iter().any(|p| p.same(&process)) {
+            seen.push(process);
+        }
+    }
+    seen.len() - before
+}
+
+/// SIGSTOP to each of `roots` and every process under them, read again
+/// until a read finds none it had not stopped, so none of them starts
+/// another. Returns every process under them.
+fn freeze(roots: &[i32]) -> Vec<Process> {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    for &root in roots {
+        let _ = kill(Pid::from_raw(root), Signal::SIGSTOP);
+    }
+    let mut tree = Vec::new();
+    for _ in 0..20 {
+        let before = tree.len();
+        if add_new(&mut tree, descendants(roots)) == 0 {
+            break;
+        }
+        for process in &tree[before..] {
+            let _ = kill(Pid::from_raw(process.pid), Signal::SIGSTOP);
+        }
+    }
+    tree
+}
+
+/// SIGKILL to each process, and to the group of each one that leads its
+/// own. The test's own group is never signalled.
+fn kill_all(processes: &[Process]) {
+    use nix::sys::signal::{Signal, kill, killpg};
+    use nix::unistd::{Pid, getpgrp};
+    let own = getpgrp().as_raw();
+    for process in processes {
+        if process.pgid == process.pid && process.pgid != own {
+            let _ = killpg(Pid::from_raw(process.pgid), Signal::SIGKILL);
+        }
+        let _ = kill(Pid::from_raw(process.pid), Signal::SIGKILL);
+    }
+}
+
+/// The first line a child writes to its piped stdout, or `None` when stdout
+/// closes first. Panics when nothing comes within `wait`.
+pub fn first_line(child: &mut std::process::Child, wait: std::time::Duration) -> Option<String> {
+    use std::io::BufRead;
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let read = std::io::BufReader::new(stdout)
+            .read_line(&mut line)
+            .unwrap_or(0);
+        let _ = tx.send((read > 0).then_some(line));
+    });
+    rx.recv_timeout(wait).expect("the daemon said nothing")
+}
+
+/// The port a `tiller daemon --port 0` child listens on, from the first line
+/// it writes within `wait`.
+pub fn listening_port(child: &mut std::process::Child, wait: std::time::Duration) -> u16 {
+    let line = first_line(child, wait).expect("the daemon exited before listening");
+    line.trim()
+        .strip_prefix("listening on http://127.0.0.1:")
+        .unwrap_or_else(|| panic!("unexpected first line {line:?}"))
+        .parse()
+        .unwrap()
+}
+
+/// The real daemon on a free port, with a `PATH` that holds `git` and
+/// nothing else, so no poller reaches a real herdr, `gh` or `quota-axi`.
+/// Returns its guard and its port.
+pub fn git_only_daemon(world: &World) -> (Running, u16) {
+    use std::process::Stdio;
+    let bin = world.dir.path().join("git-only");
+    std::fs::create_dir_all(&bin).unwrap();
+    let found = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let git = String::from_utf8(found.stdout).unwrap();
+    // A second daemon on the same home finds the link there already.
+    match std::os::unix::fs::symlink(git.trim(), bin.join("git")) {
+        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
+            panic!("cannot link git: {error}")
+        }
+        _ => {}
+    }
+    let mut child = Running::new(
+        world
+            .bare_command()
+            .args(["daemon", "--port", "0"])
+            .env("PATH", &bin)
+            .env("TILLER_HERDR", "/nonexistent/herdr")
+            .env("TILLER_QUOTA_AXI", "/nonexistent/quota-axi")
+            .env("TILLER_LOG", "warn")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let port = listening_port(&mut child, std::time::Duration::from_secs(30));
+    (child, port)
 }

@@ -9,7 +9,7 @@ exit: 0
     "format": "tiller-export/v1",
     "host_id": "<id1>",
     "max_seq": 5,
-    "schema_version": 17,
+    "schema_version": 19,
     "tables": [
       {
         "file": "approvals.jsonl",

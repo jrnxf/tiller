@@ -10,7 +10,7 @@ use tiller_core::domain::{Activity, Card, ObservationSource, Role, Run, Session}
 use tiller_core::state::attention::NewAttention;
 use tiller_core::state::runs::{Bind, NewObservation, live_session};
 use tiller_core::state::{find, get, list};
-use tiller_core::{Result, Timestamp};
+use tiller_core::{Actor, Result, Timestamp};
 use tiller_observe::liveness::Probe;
 
 use crate::ladder::{self, Death, Verdict};
@@ -191,7 +191,9 @@ impl Reconciler {
         }
         let note_key = format!("reconcile:R12:note:{run_id}:{}:{stamp}", session.id);
         let last_tool = self.last_tool_call(&session.id, now)?;
-        if !self.key_used(&note_key)? {
+        // A key another actor holds is refused again, so the pane is not
+        // read for it either.
+        if !self.key_used(&note_key)? && !self.still_planted(&note_key)? {
             let tail = session
                 .pane_id
                 .as_deref()
@@ -219,10 +221,12 @@ impl Reconciler {
         }
         // The developer: an hour after the note with no action, or the second
         // silence of the same run in the window.
+        // Only the daemon's own notes count: any actor may send under a
+        // key of this shape (`protocol.md` 6.3).
         let note_at = self.message_at(&note_key)?;
         let earlier_silences: i64 = self.conn().query_row(
-            "SELECT count(*) FROM outbox WHERE idempotency_key LIKE ?1 AND idempotency_key != ?2 AND created_at >= ?3",
-            rusqlite::params![format!("reconcile:R12:note:{run_id}:%"), note_key, now.plus_minutes(-t.repeat_window_hours * 60)],
+            "SELECT count(*) FROM outbox WHERE idempotency_key LIKE ?1 AND idempotency_key != ?2 AND created_at >= ?3 AND created_by = ?4",
+            rusqlite::params![format!("reconcile:R12:note:{run_id}:%"), note_key, now.plus_minutes(-t.repeat_window_hours * 60), Actor::Daemon.to_string()],
             |row| row.get(0),
         )?;
         let overdue = note_at.is_some_and(|at| at.plus_minutes(t.silent_developer) <= now);

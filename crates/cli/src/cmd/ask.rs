@@ -4,7 +4,6 @@
 use clap::{Args, Subcommand};
 use serde_json::json;
 use tiller_core::domain::{Ask, AskCard, AskSource, Card};
-use tiller_core::limits::{ASK_NOTE_MAX_CHARS, within};
 use tiller_core::state::asks::{NewAsk, Resolution};
 use tiller_core::state::{get, list, resolve_id};
 
@@ -92,7 +91,6 @@ pub fn run(app: &App, cmd: Cmd) -> Done {
 
 fn note(app: &App, args: Note) -> Done {
     let text = text_input(args.text.clone(), args.stdin.clone(), "the note")?;
-    within("an ask", text.trim(), ASK_NOTE_MAX_CHARS)?;
     let mut store = app.write()?;
     let keyed = app.key(
         &store,
@@ -175,9 +173,17 @@ fn link(app: &App, args: Link) -> Done {
             "ask link takes new or followup:<card>; chat and cancelled create no card",
         ));
     }
-    let normalized =
-        json!({"ask": args.ask, "target": args.target, "card": args.card.normalized()});
-    let resolution = resolution(target, args.card, None)?;
+    // A followup ignores the card fields, so its body is never read.
+    let (card, fields) = match target {
+        Target::New => {
+            let card = args.card.read_body()?;
+            let fields = card.normalized();
+            (card, fields)
+        }
+        _ => (args.card, serde_json::Value::Null),
+    };
+    let normalized = json!({"ask": args.ask, "target": args.target, "card": fields});
+    let resolution = resolution(target, card, None)?;
     let mut store = app.write()?;
     let keyed = app.key(&store, "ask.link", &normalized, &args.key.key)?;
     let applied = store.ask_link(&app.ctx(), Some(&keyed.key), &args.ask, resolution)?;

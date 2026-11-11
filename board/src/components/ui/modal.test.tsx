@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useRef, useState } from "react";
 import { afterEach, expect, test, vi } from "vitest";
 
+import { holdInert } from "../../lib/inert";
 import { Modal } from "./modal";
 
 afterEach(() => {
@@ -268,4 +269,226 @@ test("a dialog that takes another's place gives focus back to the first one's op
   fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(document.activeElement).toBe(opener);
+});
+
+// Two dialogs side by side, the second opened over the first: either can
+// close first.
+function Pair() {
+  const [lower, setLower] = useState(true);
+  return (
+    <>
+      <button type="button">Board</button>
+      {lower ? (
+        <Modal className="dialog" label="Lower" onClose={() => setLower(false)}>
+          <button type="button">Lower</button>
+        </Modal>
+      ) : null}
+      <Modal className="dialog" label="Upper" onClose={() => {}}>
+        <button type="button" onClick={() => setLower(false)}>
+          Close the lower one
+        </button>
+      </Modal>
+    </>
+  );
+}
+
+test("the board stays inert while any dialog is open, whichever closes first", () => {
+  render(<Pair />);
+  const board = screen.getByRole("button", { name: "Board", hidden: true });
+  expect(board.closest("[inert]")).not.toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Close the lower one" }));
+  expect(screen.queryByRole("dialog", { name: "Lower", hidden: true })).toBeNull();
+  expect(board.closest("[inert]")).not.toBeNull();
+});
+
+test("the page stays inert while a dialog is open, after the drawer under it lets go", () => {
+  // The phone drawer holds the screen beside it inert, then a dialog opens
+  // from the drawer.
+  const main = document.body.appendChild(document.createElement("div"));
+  render(<Page />);
+  const drawer = holdInert([main]);
+  openDialog();
+  drawer();
+  expect(main.hasAttribute("inert")).toBe(true);
+
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+  expect(document.querySelector("[inert]")).toBeNull();
+  main.remove();
+});
+
+test("a dialog opened by a click that does not focus its button gives focus back to it", () => {
+  // Safari, and Firefox on macOS, never focus a button that is clicked.
+  render(<Page />);
+  (document.activeElement as HTMLElement | null)?.blur();
+  const opener = screen.getByRole("button", { name: "Open" });
+  fireEvent.pointerDown(opener);
+  fireEvent.mouseDown(opener);
+  fireEvent.click(opener);
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "First" }));
+
+  fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+  expect(document.activeElement).toBe(opener);
+});
+
+test("a dialog opened by a key after a click has no opener to go back to", () => {
+  render(<Page />);
+  (document.activeElement as HTMLElement | null)?.blur();
+  const opener = screen.getByRole("button", { name: "Open" });
+  fireEvent.pointerDown(opener);
+  // A key moves on from the click: what it opens was not the button's.
+  fireEvent.keyDown(document.body, { key: "x" });
+  fireEvent.click(opener);
+  fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+  expect(document.activeElement).toBe(document.body);
+});
+
+// A dialog the page opens by itself, as a stream event or a timer would.
+function Pushed({ open }: { open: boolean }) {
+  return (
+    <>
+      <button type="button">Mark</button>
+      {open ? (
+        <Modal className="dialog" label="Pushed dialog" onClose={() => {}}>
+          <button type="button">Inside</button>
+        </Modal>
+      ) : null}
+    </>
+  );
+}
+
+test("a dialog that opens long after a click that moved no focus does not go back to that button", async () => {
+  const { rerender } = render(<Pushed open={false} />);
+  (document.activeElement as HTMLElement | null)?.blur();
+  const mark = screen.getByRole("button", { name: "Mark" });
+  // Safari: the click leaves focus on the page.
+  fireEvent.pointerDown(mark);
+  fireEvent.mouseDown(mark);
+  fireEvent.pointerUp(mark);
+  fireEvent.click(mark);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  rerender(<Pushed open />);
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Inside" }));
+  rerender(<Pushed open={false} />);
+  expect(document.activeElement).not.toBe(mark);
+});
+
+test("a tap whose click comes a moment after the finger lifts still finds its button", async () => {
+  // iOS Safari can send the click in a later task than pointerup.
+  render(<Page />);
+  (document.activeElement as HTMLElement | null)?.blur();
+  const opener = screen.getByRole("button", { name: "Open" });
+  fireEvent.pointerDown(opener);
+  fireEvent.pointerUp(opener);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  fireEvent.click(opener);
+  fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+  expect(document.activeElement).toBe(opener);
+});
+
+test("a second tap on the same button within a second keeps it as the opener", async () => {
+  vi.useFakeTimers();
+  try {
+    render(<Page />);
+    (document.activeElement as HTMLElement | null)?.blur();
+    const opener = screen.getByRole("button", { name: "Open" });
+    // A first tap whose click went nowhere.
+    fireEvent.pointerDown(opener);
+    fireEvent.pointerUp(opener);
+    await vi.advanceTimersByTimeAsync(900);
+    // A second tap, whose click comes late: the first tap's wait ends first.
+    fireEvent.pointerDown(opener);
+    fireEvent.pointerUp(opener);
+    await vi.advanceTimersByTimeAsync(200);
+    fireEvent.click(opener);
+    fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+    expect(document.activeElement).toBe(opener);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a press with no click is forgotten a second after the lift", async () => {
+  vi.useFakeTimers();
+  try {
+    const { rerender } = render(<Pushed open={false} />);
+    (document.activeElement as HTMLElement | null)?.blur();
+    const mark = screen.getByRole("button", { name: "Mark" });
+    fireEvent.pointerDown(mark);
+    fireEvent.pointerUp(mark);
+    await vi.advanceTimersByTimeAsync(1000);
+    rerender(<Pushed open />);
+    rerender(<Pushed open={false} />);
+    expect(document.activeElement).not.toBe(mark);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+// A page whose dialog opens from a button in a card that takes focus only from
+// script. Safari and Firefox on macOS focus the card, not the button, on a click.
+function Card() {
+  const [isOpen, setOpen] = useState(false);
+  return (
+    <div tabIndex={-1} data-testid="card">
+      <p>Some text</p>
+      <button type="button" onClick={() => setOpen(true)}>
+        Run
+      </button>
+      {isOpen ? (
+        <Modal className="dialog" label="Card dialog" onClose={() => setOpen(false)}>
+          <button type="button">Inside</button>
+        </Modal>
+      ) : null}
+    </div>
+  );
+}
+
+test("a click that focuses the card around a button gives focus back to the button", () => {
+  render(<Card />);
+  const run = screen.getByRole("button", { name: "Run" });
+  fireEvent.pointerDown(run);
+  // What the browser does on that mousedown.
+  screen.getByTestId("card").focus();
+  fireEvent.click(run);
+  fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+  expect(document.activeElement).toBe(run);
+});
+
+// A dialog opened from a button that holds a script-only part, in a card the
+// owner can Tab to.
+function Tabbable() {
+  const [isOpen, setOpen] = useState(false);
+  return (
+    <div tabIndex={0} data-testid="tile">
+      <button type="button" onClick={() => setOpen(true)}>
+        <span tabIndex={-1}>Go</span>
+      </button>
+      {isOpen ? (
+        <Modal className="dialog" label="Tile dialog" onClose={() => setOpen(false)}>
+          <button type="button">Inside</button>
+        </Modal>
+      ) : null}
+    </div>
+  );
+}
+
+test("a press on a script-only part inside a button makes the button the opener", () => {
+  render(<Tabbable />);
+  (document.activeElement as HTMLElement | null)?.blur();
+  const go = screen.getByRole("button", { name: "Go" });
+  fireEvent.pointerDown(screen.getByText("Go"));
+  fireEvent.click(go);
+  fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+  expect(document.activeElement).toBe(go);
+});
+
+test("a click that focuses a card the owner can Tab to gives focus back to the button", () => {
+  render(<Tabbable />);
+  const go = screen.getByRole("button", { name: "Go" });
+  fireEvent.pointerDown(go);
+  screen.getByTestId("tile").focus();
+  fireEvent.click(go);
+  fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+  expect(document.activeElement).toBe(go);
 });

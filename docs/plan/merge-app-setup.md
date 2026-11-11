@@ -50,14 +50,15 @@ Rulesets on a private repo of a personal account need GitHub Pro. A public repo 
 
 ## 4. Place the key and the App ID
 
-Run these on the host, in a terminal of your own (not in an agent session). Replace the download path and the App ID with yours:
+Run these on the host, in a terminal of your own (not in an agent session). Replace `<APP_ID>` with your App ID and `<DOWNLOADED_KEY.pem>` with the full path of the key GitHub downloaded, inside its quotes and starting with `/` or `$HOME` (a `~` does not expand inside quotes). Until you do, those lines fail and change nothing: bash and zsh refuse the `<APP_ID>` line, and `mv` finds no file by the placeholder name. The first line takes `<home>` from `$TILLER_HOME`, or the default `~/.tiller` when it is unset, so check that your shell sets it as the daemon's does:
 
 ```sh
-mkdir -p ~/.tiller/forge-app
-chmod 700 ~/.tiller/forge-app
-echo 1234567 > ~/.tiller/forge-app/app-id
-mv /path/to/tiller-merge.*.private-key.pem ~/.tiller/forge-app/private-key.pem
-chmod 600 ~/.tiller/forge-app/private-key.pem
+dir="${TILLER_HOME:-$HOME/.tiller}/forge-app"
+mkdir -p "$dir"
+chmod 700 "$dir"
+echo <APP_ID> > "$dir/app-id"
+mv "<DOWNLOADED_KEY.pem>" "$dir/private-key.pem"
+chmod 600 "$dir/private-key.pem"
 ```
 
 The file names are fixed: `app-id` holds the numeric App ID, and `private-key.pem` holds the key as GitHub downloaded it. Tiller refuses a key that the group or others can read. The daemon reads both files on each use, so no restart is needed. Every fleet role is denied `<home>/forge-app/` by its deny rules and its sandbox (G20). The key never appears in a prompt, a log line or command output.
@@ -66,7 +67,7 @@ Do this step last, after the ruleset exists. The daemon checks every project aga
 
 ## 5. Confirm with `tiller doctor`
 
-The board's Settings page shows the same state in its Merge App section: the host's two steps, then one block per gated repo, with a link to the GitHub page for each step GitHub owns. It only reads and links. It never reads or moves the key, and the key step stays a terminal step.
+The board's Settings page shows the same state in its Merge App section, in this doc's order: the host's Create the App step, one block per gated repo with its install and its ruleset, then the host's key step last, with a link to the GitHub page for each step GitHub owns and one Check again for the section. A key file on the host, usable or not, counts as a created App; when Tiller cannot open the folder or the file, the board says it cannot tell. For a repo on detect the board cannot tell whether the install or the ruleset is missing, so it asks the owner to check both. The board shows the commands to run, with the folder set to the one health names, or to the `$TILLER_HOME` line above when it names none: the full block above while there is no key, on a `warn` only the lines for the file Tiller cannot use (the `app-id` line, or the `mv` and `chmod 600` lines), or `ls -la` on the folder when Tiller cannot open the file and writing it again would not help, and on a `fail` only `chmod 600` with the rotation note. It only reads and links. It never reads or moves the key, and the key step stays a terminal step.
 
 Within a minute, run `tiller doctor`:
 

@@ -77,10 +77,10 @@ impl Reconciler {
                 ..NewAttention::default()
             };
             let key = format!("nm-ask-user:{}", review.id);
-            let applied = self
-                .store
-                .attention_open(&self.ctx(now), Some(&key), item)?;
-            if !applied.replayed {
+            // A key another actor stored first is reported once, and the
+            // findings after it are still raised.
+            let applied = self.store.attention_open(&self.ctx(now), Some(&key), item);
+            if self.planted(&key, applied)?.is_some_and(|a| !a.replayed) {
                 report.repair(format!(
                     "G33 no-mistakes ask-user finding on {} opened for the owner",
                     card.display_id

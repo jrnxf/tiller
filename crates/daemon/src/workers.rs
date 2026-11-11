@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use jiff::tz::TimeZone;
 use tiller_agents::control::{self, Waits};
 use tiller_agents::intake::{HostConfig, IntakeSource};
 use tiller_agents::land::app::{APP_DIR, HostApp};
@@ -20,8 +21,10 @@ use tiller_agents::land::{DaemonLock, Landed, Lander};
 use tiller_agents::spawn::config::SpawnConfig;
 use tiller_agents::spawn::pool::{Pool as _, Treehouse};
 use tiller_agents::spawn::readings;
+use tiller_core::backup::{self, Nightly};
 use tiller_core::domain::{Host, HostKind, PipelineState, Session};
 use tiller_core::state::list;
+use tiller_core::state::memory_load::CopyMark;
 use tiller_core::{Actor, Ctx, Store, Timestamp};
 use tiller_delivery::notify::Notifier;
 use tiller_delivery::outbox::Deliverer;
@@ -39,6 +42,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::owner::Gated;
+use crate::readonly::Damage;
 
 /// What the daemon reads from `<home>/config.toml` beyond intake.
 #[derive(Clone, Debug)]
@@ -425,6 +429,62 @@ impl Source for Publish {
     }
 }
 
+// -- nightly backup ---------------------------------------------------------------
+
+/// The nightly backup (`recovery.md` R10): every minute it asks
+/// [`backup::nightly`] whether a backup is due, which takes it at
+/// [`backup::NIGHT_HOUR`] host local time, retries a failed night an hour
+/// later and raises the alarm from the second failed night. The manifest
+/// keeps the schedule and the failures, so a restart or a sleeping host
+/// misses nothing: a night that passed while the daemon was down is made up
+/// by one backup at the next pass. A failed copy can be the first sign of a
+/// damaged live database, so the live one is checked then. While the daemon
+/// is read-only it takes nothing.
+pub struct Backups {
+    store: Store,
+    paths: backup::Paths,
+    zone: TimeZone,
+    db: PathBuf,
+    damage: Damage,
+    /// The next time a pass is due, from the last pass. Polls before it do
+    /// not take the manifest lock, so a manifest that cannot be read or a
+    /// failed night is looked at again only when its retry is due.
+    not_before: Option<Timestamp>,
+}
+
+impl Source for Backups {
+    fn name(&self) -> String {
+        "backup".to_owned()
+    }
+
+    fn interval(&self) -> Duration {
+        Duration::from_secs(60)
+    }
+
+    fn poll(&mut self, now: Timestamp) -> Result<(), PollError> {
+        if self.damage.reason().is_some() || self.not_before.is_some_and(|due| now < due) {
+            return Ok(());
+        }
+        let pass = backup::nightly(&mut self.store, &self.paths, now, &self.zone)
+            .inspect_err(|error| self.damage.suspect(&self.db, error))?;
+        self.not_before = match &pass {
+            Nightly::NotDue { next } | Nightly::Failed { next, .. } => Some(*next),
+            Nightly::Done(_) => None,
+        };
+        match pass {
+            Nightly::NotDue { .. } => {}
+            Nightly::Done(backup::Taken { entry, .. }) => {
+                tracing::info!(file = entry.file, "took the nightly backup");
+            }
+            Nightly::Failed { error, next, alarm } => {
+                tracing::warn!(error, %next, alarm = alarm.is_some(), "the nightly backup failed");
+                self.damage.check(&self.db);
+            }
+        }
+        Ok(())
+    }
+}
+
 // -- finished runs ----------------------------------------------------------------
 
 /// Stops the agent of each local run that ended `landed` or `reported`, so
@@ -578,6 +638,77 @@ impl Source for Transcripts {
     }
 }
 
+// -- memory loads -----------------------------------------------------------------
+
+/// Copies a session's load set on each `SessionStart` observation for a
+/// resume, `/clear` or `/compact` (`memory.md` section 7, `protocol.md`
+/// 4.2). The hook only records the observation, so it stays in its budget.
+/// Each pass reads only the observations recorded since the last one
+/// (`mark`); the first pass after a start reads them all. A copy this pass
+/// cannot write is logged, the pass goes on to the others, and the
+/// poller's health shows the failure; the mark stays at or before it, so
+/// the next pass tries it again, until an hour after its observation was
+/// recorded or its session ended. The first pass past that hour logs that it
+/// gave the copy up, and its health line counts it.
+pub struct MemoryLoads {
+    store: Store,
+    mark: Option<CopyMark>,
+}
+
+impl Source for MemoryLoads {
+    fn name(&self) -> String {
+        "memory_loads".to_owned()
+    }
+
+    fn interval(&self) -> Duration {
+        Duration::from_secs(5)
+    }
+
+    fn poll(&mut self, now: Timestamp) -> Result<(), PollError> {
+        let pass = self
+            .store
+            .mem_load_owed(&Ctx::at(Actor::Daemon, now), self.mark)?;
+        self.mark = Some(pass.mark);
+        for loaded in pass.made {
+            tracing::info!(
+                session = loaded.session_id,
+                trigger = loaded.trigger,
+                revisions = loaded.revision_ids.len(),
+                "copied a session's memory load"
+            );
+        }
+        let failed = pass.failed.len();
+        let given_up = pass.failed.iter().filter(|f| f.given_up).count();
+        let Some(first) = pass.failed.first().map(|f| f.error.to_string()) else {
+            return Ok(());
+        };
+        for copy in pass.failed {
+            let what = if copy.given_up {
+                "gave up copying a session's memory load: its window passed, \
+                 so its Loaded by record lacks this load"
+            } else {
+                "could not copy a session's memory load"
+            };
+            tracing::warn!(
+                session = copy.session_id,
+                trigger = copy.trigger,
+                observed_at = %copy.observed_at,
+                given_up = copy.given_up,
+                error = %copy.error,
+                "{what}"
+            );
+        }
+        let given_up = if given_up > 0 {
+            format!(" ({given_up} given up, past their window)")
+        } else {
+            String::new()
+        };
+        Err(PollError::State(tiller_core::Error::Internal(format!(
+            "{failed} memory load copies failed{given_up}; the first: {first}"
+        ))))
+    }
+}
+
 // -- remote machines ----------------------------------------------------------------
 
 /// Gives every saved remote machine its own cache poller, including one the
@@ -653,6 +784,7 @@ pub fn start(
     lock: Arc<DaemonLock>,
     tools: &Tools,
     registry: &Registry,
+    damage: &Damage,
     stop: &watch::Receiver<bool>,
 ) -> tiller_core::Result<Vec<JoinHandle<()>>> {
     let db = home.join("state.db");
@@ -664,7 +796,10 @@ pub fn start(
         .find(|host| host.kind == HostKind::Local)
         .map(|host| host.id.clone())
         .ok_or_else(|| {
-            tiller_core::Error::Unavailable("state.db has no local host; run tiller init".into())
+            tiller_core::Error::Unavailable(format!(
+                "state.db has no local host; {}",
+                tiller_core::RUN_INIT
+            ))
         })?;
     let settings = Settings::load(home);
 
@@ -743,12 +878,24 @@ pub fn start(
         store: open()?,
         herdr: tools.herdr.clone(),
     };
+    let loads = MemoryLoads {
+        store: open()?,
+        mark: None,
+    };
     let pages = PageAnswers::new(
         open()?,
         Lavish::new(tools.lavish.clone(), tools.review_hosts.clone()),
     );
     let quota = crate::quota::Feed::new(open()?, tools.quota.clone(), settings.quota_providers);
     let memory = crate::memory::watch::Watcher::new(home, open()?);
+    let backups = Backups {
+        store: open()?,
+        paths: backup::Paths::in_home(home),
+        zone: TimeZone::system(),
+        db: db.clone(),
+        damage: damage.clone(),
+        not_before: None,
+    };
 
     let mut handles = Vec::new();
     // Every worker but reconcile holds its polls while the owner marker
@@ -765,8 +912,10 @@ pub fn start(
     spawn(registry, Gated::new(home, gate), stop, &mut handles);
     spawn(registry, Gated::new(home, finished), stop, &mut handles);
     spawn(registry, Gated::new(home, transcripts), stop, &mut handles);
+    spawn(registry, Gated::new(home, loads), stop, &mut handles);
     spawn(registry, Gated::new(home, quota), stop, &mut handles);
     spawn(registry, Gated::new(home, pages), stop, &mut handles);
+    spawn(registry, Gated::new(home, backups), stop, &mut handles);
     spawn(registry, memory, stop, &mut handles);
     Ok(handles)
 }
@@ -1311,5 +1460,80 @@ esac
         Transcript::interrupt(&new, "n2");
         source.poll(ended.plus_minutes(2)).unwrap();
         assert_eq!(t.recorded(), ["u1", "n1", "n2"], "the old file is let go");
+    }
+
+    /// The nightly backup on an injected clock: the first pass schedules
+    /// 03:00, the pass at 03:00 takes the backup, and two nights missed while
+    /// the daemon was down are made up by one backup at the next pass.
+    #[test]
+    fn the_backup_worker_takes_the_night_on_the_clock() {
+        let fleet = tiller_herdr::testing::Fleet::new();
+        let home = fleet.dir.path();
+        let paths = backup::Paths::in_home(home);
+        let mut worker = Backups {
+            store: fleet.open(),
+            paths: paths.clone(),
+            zone: TimeZone::UTC,
+            db: fleet.db.clone(),
+            damage: Damage::default(),
+            not_before: None,
+        };
+        let at = |text: &str| text.parse::<Timestamp>().unwrap();
+        let nightly = |manifest: &backup::Manifest| {
+            manifest
+                .live()
+                .into_iter()
+                .filter(|entry| entry.kind == backup::EntryKind::Nightly)
+                .count()
+        };
+
+        worker.poll(at("2026-11-02T10:00:00Z")).unwrap();
+        let manifest = backup::Manifest::load(&paths).unwrap();
+        assert_eq!(manifest.next_night, Some(at("2026-11-03T03:00:00Z")));
+        assert_eq!(nightly(&manifest), 0, "the first pass takes nothing");
+
+        worker.poll(at("2026-11-03T02:59:00Z")).unwrap();
+        assert_eq!(nightly(&backup::Manifest::load(&paths).unwrap()), 0);
+
+        worker.poll(at("2026-11-03T03:00:00Z")).unwrap();
+        let manifest = backup::Manifest::load(&paths).unwrap();
+        assert_eq!(nightly(&manifest), 1, "03:00 takes the night");
+        assert_eq!(manifest.next_night, Some(at("2026-11-04T03:00:00Z")));
+
+        // Down from before 03:00 on the 4th until 09:00 on the 6th.
+        worker.poll(at("2026-11-06T09:00:00Z")).unwrap();
+        let manifest = backup::Manifest::load(&paths).unwrap();
+        assert_eq!(nightly(&manifest), 2, "one backup makes up both nights");
+        assert_eq!(manifest.next_night, Some(at("2026-11-07T03:00:00Z")));
+        worker.poll(at("2026-11-06T09:01:00Z")).unwrap();
+        assert_eq!(nightly(&backup::Manifest::load(&paths).unwrap()), 2);
+    }
+
+    #[test]
+    fn the_backup_worker_waits_for_the_retry_after_a_failed_pass() {
+        let fleet = tiller_herdr::testing::Fleet::new();
+        let paths = backup::Paths::in_home(fleet.dir.path());
+        let mut worker = Backups {
+            store: fleet.open(),
+            paths: paths.clone(),
+            zone: TimeZone::UTC,
+            db: fleet.db.clone(),
+            damage: Damage::default(),
+            not_before: None,
+        };
+        let at = |text: &str| text.parse::<Timestamp>().unwrap();
+        std::fs::create_dir_all(&paths.backups).unwrap();
+        std::fs::write(paths.manifest(), "not json").unwrap();
+
+        worker.poll(at("2026-11-03T03:00:00Z")).unwrap();
+        assert_eq!(worker.not_before, Some(at("2026-11-03T04:00:00Z")));
+
+        // Polls before the retry do not look at the manifest again.
+        std::fs::remove_file(paths.manifest()).unwrap();
+        worker.poll(at("2026-11-03T03:30:00Z")).unwrap();
+        assert!(!paths.manifest().exists());
+
+        worker.poll(at("2026-11-03T04:00:00Z")).unwrap();
+        assert!(paths.manifest().exists(), "the retry schedules the night");
     }
 }

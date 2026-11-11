@@ -18,6 +18,7 @@ pub mod retros;
 pub mod server;
 pub mod sse;
 pub mod stale;
+mod threads;
 pub mod views;
 pub mod workers;
 

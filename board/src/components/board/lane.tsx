@@ -227,7 +227,7 @@ export function Lane({
               {orchestrator ? (
                 <button
                   type="button"
-                  className="btn ghost"
+                  className="btn"
                   disabled={health.kind === "disconnected" || off !== null}
                   title={off ?? "Focus this agent's terminal in herdr"}
                   onClick={() => focus(orchestrator)}

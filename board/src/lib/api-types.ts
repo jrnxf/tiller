@@ -50,7 +50,8 @@ export interface BoardRow extends Federated {
   filed_from?: string | null;
 }
 
-export interface AskedRow {
+// A peer's ask carries the federated fields, like its cards.
+export interface AskedRow extends Federated {
   id: string;
   project_id: string;
   session_id: string | null;
@@ -518,6 +519,9 @@ export interface Project extends Federated {
   reviewed_through_sha: string | null;
   reviewed_at: string | null;
   stage_changed_at: string | null;
+  // When `rev` last moved: an edit, a stage change, a new card. Null only on a
+  // peer row from a tiller that predates it.
+  edited_at: string | null;
   // The next weekly review, only while pre-launch.
   next_review_due: string | null;
   // A weekly review came due 24 hours ago or more and no pass started.
@@ -688,10 +692,26 @@ export interface AcceptedKey {
   rev: number;
 }
 
+// An accepted key's row, as `DELETE /api/v1/peer-keys/{id}` answers it.
+export interface PeerKey {
+  id: string;
+  viewer_label: string;
+  viewer_host_id: string;
+  // The OpenSSH public key text this host checks that board against.
+  public_key: string;
+  scope: PeerScope;
+  accepted_at: string;
+  revoked_at: string | null;
+  rev: number;
+}
+
 // `GET /api/v1/peers` (owner only): both ends of this host's links.
 export interface PeerList {
   paired: PairedPeer[];
   accepted: AcceptedKey[];
+  // Hosts no longer paired whose key file is still here: an Unpair whose
+  // delete failed. Unpair again deletes it.
+  key_files_left: string[];
 }
 
 // GET /api/v1/host: the fields `tiller host edit` sets on this host, what it
@@ -1147,6 +1167,9 @@ export interface MemoryDocSummary {
   lines: number;
   // Open agent proposals against it.
   suggestions: number;
+  // Why a launch goes on without it, such as "it has no approved revision";
+  // null when a launch loads it or it has nothing to load.
+  skipped: string | null;
 }
 
 // The revision that last changed a line.
@@ -1273,7 +1296,7 @@ export interface MemoryResponse {
   docs: MemoryDocSummary[];
   doc: MemoryDocument;
   // The holdout evals the board started that are running, or that failed
-  // since the daemon started.
+  // with no later recorded run of their change set, across restarts.
   evals: MemoryEvalJob[];
 }
 

@@ -30,7 +30,6 @@ use clap::Args;
 use serde_json::Value;
 use tiller_core::Store;
 use tiller_core::domain::{Card, CardKind, Effort, Run, RunRole, Session, Size};
-use tiller_core::limits::{BODY_MAX_CHARS, TITLE_MAX_CHARS, within};
 use tiller_core::state::{find, get, list, resolve_card, resolve_id};
 
 use crate::app::{Failure, body_input};
@@ -75,50 +74,56 @@ pub struct CardFields {
     /// The card this one fixes
     #[arg(long)]
     pub fixes: Option<String>,
+    /// Set once [`CardFields::read_body`] has put the body text in `body`.
+    #[arg(skip)]
+    pub body_read: bool,
 }
 
 impl CardFields {
+    /// Reads the body once, from `--body`, `--body-file` or standard input,
+    /// and keeps the text in `body`: the key hash and the card then both see
+    /// the body that was read, and standard input is read only once.
+    pub fn read_body(mut self) -> Result<Self, Failure> {
+        if !self.body_read {
+            self.body = body_input(self.body.take(), self.body_file.take().as_deref())?;
+            self.body_read = true;
+        }
+        Ok(self)
+    }
+
     pub fn into_new(self, project_id: &str) -> Result<tiller_core::state::cards::NewCard, Failure> {
-        let kind = self
+        let fields = self.read_body()?;
+        let kind = fields
             .kind
             .ok_or_else(|| Failure::usage("a new card needs --kind ship|scout|question|ops"))?;
-        let title = self
+        let title = fields
             .title
             .ok_or_else(|| Failure::usage("a new card needs --title"))?;
-        let body = body_input(self.body, self.body_file.as_deref())?;
-        card_text(Some(&title), body.as_deref())?;
         Ok(tiller_core::state::cards::NewCard {
             project_id: project_id.to_owned(),
             kind,
             title,
-            body,
-            priority: self.priority,
-            category: self.category,
-            size: self.size,
-            acceptance: self.acceptance,
-            fixes_card: self.fixes,
+            body: fields.body,
+            priority: fields.priority,
+            category: fields.category,
+            size: fields.size,
+            acceptance: fields.acceptance,
+            fixes_card: fields.fixes,
             legacy_id: None,
         })
     }
 
-    /// The arguments as the key derivation sees them.
+    /// The arguments as the key derivation sees them. Call it after
+    /// [`CardFields::read_body`], so the body is the text that was read.
     pub fn normalized(&self) -> Value {
+        debug_assert!(self.body_read, "normalized before read_body");
         serde_json::json!({
             "kind": self.kind, "title": self.title, "priority": self.priority,
             "body": self.body,
-            "body_file": self.body_file.as_ref().map(|path| std::fs::read_to_string(path).ok()),
             "size": self.size,
             "acceptance": self.acceptance, "category": self.category, "fixes": self.fixes,
         })
     }
-}
-
-/// A usage error when a card's title or body runs past the API's caps
-/// (`protocol.md` 7.4, "Length caps"), so the CLI takes what the board takes.
-pub fn card_text(title: Option<&str>, body: Option<&str>) -> Result<(), Failure> {
-    within("title", title.unwrap_or_default(), TITLE_MAX_CHARS)?;
-    within("body", body.unwrap_or_default(), BODY_MAX_CHARS)?;
-    Ok(())
 }
 
 /// An edit flag as the core takes it: empty clears, anything else sets.

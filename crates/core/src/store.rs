@@ -188,6 +188,17 @@ impl Ctx {
         self
     }
 
+    /// This context with no key and no keyed arguments, for a follow-up
+    /// write after the keyed one: the key is the first write's alone, and
+    /// another write under it would be refused.
+    pub fn unkeyed(&self) -> Self {
+        Self {
+            key: None,
+            args: None,
+            ..self.clone()
+        }
+    }
+
     /// Records the normalized arguments of the request that carries `key`
     /// ([`KeyArgs`]).
     pub fn with_args(mut self, key: impl Into<String>, normalized: &Value) -> Self {

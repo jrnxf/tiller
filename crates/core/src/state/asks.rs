@@ -12,6 +12,7 @@ use crate::authority::{CardAction, require_card_scope};
 use crate::domain::*;
 use crate::error::{Error, Result};
 use crate::ids;
+use crate::limits;
 use crate::store::{Applied, Ctx, NewEvent, Store, Tx};
 
 /// The warning an ask's response carries when nobody was told about it.
@@ -200,6 +201,7 @@ impl Store {
                 new.source
             )));
         }
+        limits::ask(&new.text)?;
         self.write(ctx, "ask.record", key, |tx| {
             let session = match &new.session_id {
                 Some(id) => Some(get::<Session>(tx.conn(), "session", id)?),

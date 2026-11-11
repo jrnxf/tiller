@@ -291,6 +291,61 @@ const RUNNER: &str = "evals/run.sh";
 /// Where the runner leaves its result, under `out`.
 const RESULT: &str = "sealed/result.json";
 
+/// Where the runner's stdout and stderr go, under `out`.
+const LOG: &str = "runner.log";
+
+/// The longest piece of the runner's last line a failure quotes.
+const QUOTED: usize = 200;
+
+/// How much of the log's end [`last_line`] reads.
+const TAIL: u64 = 16 * 1024;
+
+/// The last line with text in the runner's log, as a terminal would show
+/// it, cut to [`QUOTED`] characters: what a failed runner said last, often
+/// its reason. Only the log's last [`TAIL`] bytes are read, as text even
+/// where they are not UTF-8; a carriage return starts the line again, and
+/// colours and other control bytes are left out.
+fn last_line(log: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(log).ok()?;
+    let length = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(length.saturating_sub(TAIL)))
+        .ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let line = text
+        .lines()
+        .rev()
+        .map(|line| plain(line.rsplit('\r').next().unwrap_or(line)))
+        .find(|line| !line.is_empty())?;
+    Some(match line.char_indices().nth(QUOTED) {
+        Some((at, _)) => format!("{}...", &line[..at]),
+        None => line,
+    })
+}
+
+/// `line` without its ANSI escapes (`ESC [ ... letter`) and other control
+/// characters, trimmed.
+fn plain(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else if !c.is_control() {
+            out.push(c);
+        }
+    }
+    out.trim().to_owned()
+}
+
 /// How often a run checks whether it was interrupted.
 const POLL: Duration = Duration::from_millis(100);
 
@@ -302,7 +357,10 @@ const NO_DEADLINE: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 /// `members` (the set's members hash, taken before the run) and to the
 /// candidate's hash. The runner leads its own process group, and the group
 /// goes when the runner ends or `interrupt` is caught, so nothing it
-/// started outlives the run. A runner that cannot start, exits non-zero,
+/// started outlives the run. Its stdin is null and its output goes to
+/// `runner.log` under `out`: never to the caller's stdout, where
+/// `tiller --json` answers, and never to a terminal, where a group outside
+/// the foreground would stop on its first write. A runner that cannot start, exits non-zero,
 /// is interrupted or leaves no `sealed/result.json` is `Unavailable`, and
 /// nothing is to be recorded. Errors name the runner and the result
 /// relative to the checkout and `out`, never a full path.
@@ -321,6 +379,7 @@ pub fn run(
     }
     let candidate_path = out.join("candidate.md");
     std::fs::write(&candidate_path, candidate)?;
+    let log = std::fs::File::create(out.join(LOG))?;
     let mut command = Command::new(evals(evals_dir).join("run.sh"));
     command
         .args(["--split", "holdout", "--candidate"])
@@ -328,7 +387,9 @@ pub fn run(
         .arg("--out")
         .arg(out)
         .current_dir(evals_dir)
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
     process::own_group(&mut command);
     let mut child = command
         .spawn()
@@ -358,12 +419,15 @@ pub fn run(
         // run.sh exits non-zero when a case failed to load even when the
         // rest scored, so a result is recorded only from a clean run.
         return Err(HoldoutError::Unavailable(format!(
-            "{RUNNER} exited {} and left {}{RESULT}; nothing recorded",
+            "{RUNNER} exited {} and left {}{RESULT}; nothing recorded{}",
             status.code().map_or_else(
                 || "on a signal".to_owned(),
                 |code| format!("with code {code}")
             ),
             if result_path.exists() { "" } else { "no " },
+            last_line(&out.join(LOG))
+                .map(|line| format!(" ({LOG} ends: {line})"))
+                .unwrap_or_default(),
         )));
     }
     let mut result = parse_named(&result_path, RESULT)

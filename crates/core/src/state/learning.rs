@@ -109,6 +109,75 @@ pub struct EvalResult {
     pub result_path: Option<String>,
 }
 
+/// A holdout eval the board started that recorded nothing, as its
+/// `eval_run.failed` event keeps it (learning-loop.md, section 9).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EvalFailure {
+    /// The suggestion the board ran it for.
+    pub proposal_id: String,
+    pub cases: u64,
+    pub started_at: String,
+    /// The estimated minutes it would run.
+    pub minutes: f64,
+    /// Why it recorded nothing.
+    pub error: String,
+}
+
+/// An [`EvalFailure`] read back, with its change set's name and when it
+/// ended.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FailedEval {
+    pub failure: EvalFailure,
+    pub change_set: String,
+    pub finished_at: String,
+}
+
+/// The longest failure reason an `eval_run.failed` event keeps, in
+/// characters.
+pub const EVAL_ERROR_MAX_CHARS: usize = 2_000;
+
+/// The newest failed holdout eval of each proposal that is still proposed,
+/// newest first and at most `limit`. A failure is left out once any set
+/// holding its proposal records a run after it.
+pub fn failed_evals(conn: &Connection, limit: usize) -> Result<Vec<FailedEval>> {
+    let mut statement = conn.prepare(
+        "SELECT failed.payload, failed.at FROM events AS failed
+         JOIN proposals ON proposals.id = json_extract(failed.payload, '$.proposal_id')
+         WHERE failed.kind = 'eval_run.failed'
+           AND proposals.state = 'proposed'
+           AND failed.seq = (
+               SELECT max(newer.seq) FROM events AS newer
+               WHERE newer.kind = 'eval_run.failed'
+                 AND json_extract(newer.payload, '$.proposal_id') = proposals.id)
+           AND NOT EXISTS (
+               SELECT 1 FROM events AS recorded
+               JOIN change_set_members AS member
+                 ON member.change_set_id = json_extract(recorded.payload, '$.change_set')
+               WHERE recorded.kind = 'eval_run.recorded' AND recorded.seq > failed.seq
+                 AND member.proposal_id = proposals.id)
+         ORDER BY failed.seq DESC LIMIT ?1",
+    )?;
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let rows = statement.query_map([limit], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut failed = Vec::new();
+    for row in rows {
+        let (payload, at) = row?;
+        let payload: Value = serde_json::from_str(&payload)?;
+        let change_set = payload["change_set_name"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        failed.push(FailedEval {
+            failure: serde_json::from_value(payload)?,
+            change_set,
+            finished_at: at,
+        });
+    }
+    Ok(failed)
+}
+
 /// The gate's verdict on one proposal (learning-loop.md, section 7).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Gate {
@@ -686,7 +755,7 @@ impl Store {
     /// and 6). Owner, daemon.
     pub fn learning_sweep(&mut self, ctx: &Ctx, config: &Learning) -> Result<Applied<Swept>> {
         self.write(ctx, "learning.sweep", None, |tx| {
-            require_owner_or_daemon(tx.actor(), "the learning sweep")?;
+            require_owner_or_daemon(tx.actor(), "tiller retro sweep")?;
             let mut swept = Swept::default();
 
             // Closed cards with no retro for their close.
@@ -1068,6 +1137,34 @@ impl Store {
         })
     }
 
+    /// `eval_run.fail` (daemon): a holdout eval the board started for the
+    /// set recorded nothing. Only its `eval_run.failed` event keeps it, so
+    /// the board still shows why after the daemon restarts. The reason is
+    /// cut to [`EVAL_ERROR_MAX_CHARS`].
+    pub fn eval_run_fail(
+        &mut self,
+        ctx: &Ctx,
+        set: &str,
+        failure: EvalFailure,
+    ) -> Result<Applied<ChangeSet>> {
+        super::projects::require_daemon(&ctx.actor, "eval_run.fail")?;
+        self.write(ctx, "eval_run.fail", None, |tx| {
+            let set = resolve_set(tx.conn(), set)?;
+            let error: String = failure.error.chars().take(EVAL_ERROR_MAX_CHARS).collect();
+            tx.event(
+                NewEvent::new("change_set", &set.id, "eval_run.failed").payload(json!({
+                    "proposal_id": failure.proposal_id,
+                    "change_set_name": set.name,
+                    "cases": failure.cases,
+                    "started_at": failure.started_at,
+                    "minutes": failure.minutes,
+                    "error": error,
+                })),
+            )?;
+            Ok(set)
+        })
+    }
+
     /// `config.manifest_record` (`tiller spawn`): the parts behind a
     /// `config_hash`, written on first sight. Returns whether it was new.
     pub fn config_manifest_record(
@@ -1189,7 +1286,6 @@ fn capture_learning(
     )
 }
 
-/// A retro by id or short form, or the newest retro of a card reference.
 /// Whether a curator may start on `retro` now, the rule `retro.start`
 /// applies. Refuses a retro that is done with any outcome but `unfinished`,
 /// and a pending retro whose curator started less than `timeout_minutes`
@@ -1224,6 +1320,7 @@ pub fn check_start(retro: &Retro, now: Timestamp, timeout_minutes: i64) -> Resul
     Ok(false)
 }
 
+/// A retro by id or short form, or the newest retro of a card reference.
 pub fn resolve_retro(conn: &Connection, input: &str) -> Result<Retro> {
     if let Ok(id) = resolve_id(conn, "retros", "retro", input) {
         return get(conn, "retro", &id);

@@ -19,6 +19,8 @@ struct Fake {
     rulesets: HashMap<u64, Value>,
     /// Set: every read fails, as on a network error.
     down: bool,
+    /// Repos whose default branch has no rules at all.
+    open: Vec<&'static str>,
     reads: RefCell<Vec<String>>,
 }
 
@@ -27,6 +29,9 @@ impl RulesetForge for Fake {
         self.reads.borrow_mut().push(format!("{repo}@{branch}"));
         if self.down {
             return Err(GateError("connection refused".into()));
+        }
+        if self.open.contains(&repo) {
+            return Ok(Vec::new());
         }
         Ok(self.rules.clone())
     }
@@ -349,6 +354,106 @@ fn ruleset_check_sets_merge_gate() {
     assert!(events(&fresh, "project.merge_gate_changed").is_empty());
     assert!(events(&fresh, "host.degraded").is_empty());
     assert!(recovery(&fresh).is_empty());
+}
+
+/// A verdict holds for the repo it judged: a project whose repo moves is
+/// judged again on the next pass, not an hour later.
+#[test]
+fn a_moved_repo_is_checked_again_at_once() {
+    let mut store = store();
+    let daemon = Ctx::new(Actor::Daemon);
+    let forge = gated();
+    let mut last = HashMap::new();
+    let start = Instant::now();
+    check_due(&mut store, &forge, &APP, &daemon, &mut last, start).unwrap();
+    assert_eq!(*forge.reads.borrow(), ["example/alpha@main"]);
+
+    let rev = store.project("alpha").unwrap().rev;
+    store
+        .project_edit(
+            &Ctx::new(Actor::Owner),
+            "alpha",
+            rev,
+            tiller_core::state::projects::ProjectEdit {
+                repo: Some(Some("example/moved".into())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let soon = start + Duration::from_secs(60);
+    let judged = check_due(&mut store, &forge, &APP, &daemon, &mut last, soon).unwrap();
+    assert_eq!(judged.len(), 1);
+    assert_eq!(
+        *forge.reads.borrow(),
+        ["example/alpha@main", "example/moved@main"]
+    );
+}
+
+/// A project that moves to another repo and back within the hour is judged
+/// again for its first repo, not left with the other repo's verdict. The
+/// check keeps one entry per project, so the map does not grow with edits.
+#[test]
+fn a_repo_moved_back_is_checked_again_at_once() {
+    let mut store = store();
+    let daemon = Ctx::new(Actor::Daemon);
+    let owner = Ctx::new(Actor::Owner);
+    // The moved-to repo has no ruleset, so each pass's verdict shows.
+    let forge = Fake {
+        open: vec!["example/moved"],
+        ..gated()
+    };
+    let mut last = HashMap::new();
+    let start = Instant::now();
+    let move_to = |store: &mut Store, repo: &str| {
+        let rev = store.project("alpha").unwrap().rev;
+        store
+            .project_edit(
+                &owner,
+                "alpha",
+                rev,
+                tiller_core::state::projects::ProjectEdit {
+                    repo: Some(Some(repo.into())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    };
+    check_due(&mut store, &forge, &APP, &daemon, &mut last, start).unwrap();
+    assert_eq!(gate_of(&store, "alpha"), MergeGate::Enforced);
+    move_to(&mut store, "example/moved");
+    let soon = start + Duration::from_secs(10 * 60);
+    check_due(&mut store, &forge, &APP, &daemon, &mut last, soon).unwrap();
+    assert_eq!(gate_of(&store, "alpha"), MergeGate::Detect);
+    move_to(&mut store, "example/alpha");
+    let later = start + Duration::from_secs(20 * 60);
+    let judged = check_due(&mut store, &forge, &APP, &daemon, &mut last, later).unwrap();
+    assert_eq!(judged.len(), 1, "the repo moved back is judged again");
+    assert_eq!(gate_of(&store, "alpha"), MergeGate::Enforced);
+    assert_eq!(
+        *forge.reads.borrow(),
+        [
+            "example/alpha@main",
+            "example/moved@main",
+            "example/alpha@main"
+        ]
+    );
+    assert_eq!(last.len(), 1, "one entry per project");
+
+    // A project the check no longer looks at keeps no entry.
+    let rev = store.project("alpha").unwrap().rev;
+    store
+        .project_edit(
+            &owner,
+            "alpha",
+            rev,
+            tiller_core::state::projects::ProjectEdit {
+                repo: Some(None),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    check_due(&mut store, &forge, &APP, &daemon, &mut last, later).unwrap();
+    assert!(last.is_empty(), "{last:?}");
 }
 
 #[test]

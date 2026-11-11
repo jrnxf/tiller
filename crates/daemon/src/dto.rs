@@ -592,6 +592,10 @@ pub struct Project {
     pub delivery: String,
     pub capacity: i64,
     pub rev: i64,
+    /// When `rev` last moved: an edit, a stage change, a new card. Null only
+    /// on a peer row from a tiller that predates it.
+    #[serde(default)]
+    pub edited_at: Option<String>,
     /// `pre-launch` or `launched`.
     pub stage: String,
     /// The mode builders and the land loop follow: `delivery`, or
@@ -904,6 +908,19 @@ pub struct Doctor {
     pub ok: bool,
     pub checks: Vec<DoctorCheck>,
     pub merge_gates: Vec<DoctorGate>,
+}
+
+impl Doctor {
+    /// The board's shape of a report whose checks began at `checked_at`:
+    /// this host's own read and a peer's answer to a `doctor` query.
+    pub fn from_report(report: DoctorReport, checked_at: tiller_core::Timestamp) -> Self {
+        Self {
+            checked_at: checked_at.to_string(),
+            ok: report.ok,
+            checks: report.checks,
+            merge_gates: report.merge_gates,
+        }
+    }
 }
 
 /// The inlined `<script id="tiller-boot">` body and `GET /api/v1/snapshot`.
@@ -1253,7 +1270,8 @@ pub struct EditCard {
     pub title: Option<String>,
     #[serde(default)]
     pub priority: Option<i64>,
-    /// At most 100,000 characters (`protocol.md` 7.4).
+    /// At most 100,000 characters (`protocol.md` 7.4). An empty body clears
+    /// it, as `tiller card edit --body ""` does.
     #[schema(max_length = 100000)]
     #[serde(default)]
     pub body: Option<String>,

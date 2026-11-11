@@ -237,13 +237,7 @@ pub(crate) fn local_host_id(conn: &rusqlite::Connection) -> Result<String> {
         row.get(0)
     })
     .optional()?
-    .ok_or_else(|| {
-        Error::refused(
-            "host",
-            "local",
-            "state.db is not initialized; run tiller init",
-        )
-    })
+    .ok_or_else(|| Error::refused("host", "local", crate::not_initialized()))
 }
 
 /// This host's own row, refused like [`local_host_id`] before `tiller init`.
@@ -322,6 +316,7 @@ pub(crate) fn edit_project(
         project.rev,
         expected_rev,
         Some((first, current[first].clone())),
+        Some(project.edited_at),
     )?;
     if changed.is_empty() {
         return Ok(project);
@@ -331,13 +326,33 @@ pub(crate) fn edit_project(
     }
     required("project name", &next.name)?;
     required("default branch", &next.default_branch)?;
+    let mut forge = None;
     if changed.contains_key("remote") || changed.contains_key("delivery") {
         // The forge check of an add: the repo a GitHub remote names, and no
         // delivery mode Gerrit cannot run.
-        let mut repo = next.repo.clone();
-        detect_forge(&next.id, next.remote.as_deref(), next.delivery, &mut repo)?;
-        // Only a new remote names a repo; a delivery change leaves it be.
-        if changed.contains_key("remote") && repo != next.repo {
+        // Only a new remote names a repo. A repo that was empty or named by
+        // the old remote follows a new GitHub remote. A repo set in the same
+        // edit, or one set apart from its remote (a fork whose PRs go
+        // upstream), stays, and so does any repo when the new remote names
+        // no GitHub repo. GitHub names ignore case, so the match does too.
+        let followed = match (&project.repo, github_repo(project.remote.as_deref())) {
+            (None, _) => true,
+            (Some(repo), Some(named)) => repo.eq_ignore_ascii_case(&named),
+            (Some(_), None) => false,
+        };
+        let rederive = changed.contains_key("remote") && edit.repo.is_none() && followed;
+        let mut repo = if rederive { None } else { next.repo.clone() };
+        forge = Some(detect_forge(
+            &next.id,
+            next.remote.as_deref(),
+            next.delivery,
+            &mut repo,
+        )?);
+        // A repo that names the same GitHub repo in another case keeps the
+        // case the owner chose.
+        let same =
+            matches!((&repo, &next.repo), (Some(new), Some(old)) if new.eq_ignore_ascii_case(old));
+        if rederive && repo.is_some() && !same {
             next.repo = repo;
             changed.insert("repo".into(), json!(next.repo));
         }
@@ -348,7 +363,7 @@ pub(crate) fn edit_project(
     tx.conn().execute(
         "UPDATE projects SET name = ?2, repo = ?3, remote = ?4, default_branch = ?5, delivery = ?6,
                     checks = ?7, capacity = ?8, deploy_workflow = ?9, deploy_environment = ?10,
-                    deploy_timeout_minutes = ?11, rev = rev + 1
+                    deploy_timeout_minutes = ?11, rev = rev + 1, edited_at = ?12
              WHERE id = ?1",
         params![
             next.id,
@@ -362,12 +377,19 @@ pub(crate) fn edit_project(
             next.deploy_workflow,
             next.deploy_environment,
             next.deploy_timeout_minutes,
+            tx.now(),
         ],
     )?;
+    // An edit that ran the forge check records the forge it found, as
+    // `project.added` does.
+    let mut payload = json!({"changed": changed, "expected_rev": expected_rev});
+    if let Some(forge) = forge {
+        payload["forge"] = json!(forge);
+    }
     tx.event(
         NewEvent::new("project", &project.id, "project.edited")
             .rev(project.rev + 1)
-            .payload(json!({"changed": changed, "expected_rev": expected_rev})),
+            .payload(payload),
     )?;
     if next.capacity > project.capacity {
         super::runs::note_slot_open(
@@ -582,7 +604,7 @@ impl Store {
                 "boundary" => json!(kept),
                 field => serde_json::to_value(&host)?[field].clone(),
             };
-            check_rev("host", &host.id, host.rev, expected_rev, Some((first, now)))?;
+            check_rev("host", &host.id, host.rev, expected_rev, Some((first, now)), None)?;
             if changed.is_empty() {
                 return Ok(host);
             }
@@ -682,10 +704,15 @@ impl Store {
             )));
         }
         required("project name", &new.name)?;
-        if let Some(branch) = &new.default_branch {
+        let mut new = new;
+        // A run branches from the default branch, so it is stored trimmed.
+        if let Some(branch) = &mut new.default_branch {
+            *branch = branch.trim().to_owned();
             required("default branch", branch)?;
         }
-        let (new, forge) = resolve_forge(new)?;
+        // Done before the write, so a replay of the same add compares
+        // against what was stored.
+        let forge = detect_forge(&new.id, new.remote.as_deref(), new.delivery, &mut new.repo)?;
         self.write(ctx, "project.add", None, |tx| {
             let host_id = local_host_id(tx.conn())?;
             if let Some(existing) = find::<Project>(tx.conn(), "id = ?1", &[&new.id])? {
@@ -706,9 +733,13 @@ impl Store {
         ctx: &Ctx,
         project_id: &str,
         expected_rev: i64,
-        edit: ProjectEdit,
+        mut edit: ProjectEdit,
     ) -> Result<Applied<Project>> {
         require_owner(&ctx.actor, "project.edit")?;
+        // A run branches from the default branch, so it is stored trimmed.
+        if let Some(branch) = &mut edit.default_branch {
+            *branch = branch.trim().to_owned();
+        }
         self.write(ctx, "project.edit", None, |tx| {
             edit_project(tx, project_id, expected_rev, &edit)
         })
@@ -742,7 +773,7 @@ impl Store {
                 return Err(Error::refused("project", &project.id, fact));
             }
             tx.conn().execute(
-                "UPDATE projects SET retired_at = ?2, rev = rev + 1 WHERE id = ?1",
+                "UPDATE projects SET retired_at = ?2, rev = rev + 1, edited_at = ?2 WHERE id = ?1",
                 params![project.id, tx.now()],
             )?;
             tx.event(
@@ -772,8 +803,8 @@ impl Store {
                 return Err(Error::refused("project", &project.id, "project is retired"));
             }
             tx.conn().execute(
-                "UPDATE projects SET merge_gate = ?2, rev = rev + 1 WHERE id = ?1",
-                params![project.id, gate],
+                "UPDATE projects SET merge_gate = ?2, rev = rev + 1, edited_at = ?3 WHERE id = ?1",
+                params![project.id, gate, tx.now()],
             )?;
             tx.event(
                 NewEvent::new("project", &project.id, "project.merge_gate_changed")
@@ -811,20 +842,12 @@ fn check_plan(checks: &Value) -> Result<()> {
     CheckPlan::parse(checks).map(drop).map_err(Error::Usage)
 }
 
-/// Forge detection at `project.add` (P10): reads the remote URL, fills in
-/// `repo` from a GitHub remote when none was given, and refuses a delivery
-/// mode Tiller cannot run against a Gerrit remote. Returns the project to
-/// add and the forge's name for the `project.added` event. Done before the
-/// write so a replay of the same add compares against what was stored.
-fn resolve_forge(mut new: NewProject) -> Result<(NewProject, &'static str)> {
-    let forge = detect_forge(&new.id, new.remote.as_deref(), new.delivery, &mut new.repo)?;
-    Ok((new, forge))
-}
-
-/// The forge check `project.add` and `project.edit` share: fills `repo` from
-/// a GitHub remote when none is set, and refuses a delivery mode Tiller cannot
-/// run against a Gerrit remote. Returns the forge's name.
-fn detect_forge(
+/// The forge check (P10) that `project.add`, `project.edit` and
+/// `import.apply` share: fills `repo` from a GitHub remote when none is set,
+/// and refuses a delivery mode Tiller cannot run against a Gerrit remote.
+/// Returns the forge's name for the `project.added` or `project.edited`
+/// event.
+pub(crate) fn detect_forge(
     id: &str,
     remote: Option<&str>,
     delivery: Delivery,
@@ -852,11 +875,21 @@ fn detect_forge(
     }
 }
 
+/// The `owner/name` a GitHub remote names; `None` for any other remote or
+/// none.
+fn github_repo(remote: Option<&str>) -> Option<String> {
+    match forge::detect(remote.filter(|remote| !remote.is_empty())?) {
+        Forge::Github { repo } => Some(repo),
+        _ => None,
+    }
+}
+
 fn project_matches(existing: &Project, new: &NewProject) -> bool {
     existing.name == new.name
         && existing.repo == new.repo
         && existing.remote == new.remote
-        && Some(existing.default_branch.as_str()) == new.default_branch.as_deref().or(Some("main"))
+        // A row stored before default branches were trimmed still matches.
+        && Some(existing.default_branch.trim()) == new.default_branch.as_deref().or(Some("main"))
         && existing.delivery == new.delivery
         && new
             .checks

@@ -12,6 +12,7 @@ exit: 0
     "deploy_environment": null,
     "deploy_timeout_minutes": 60,
     "deploy_workflow": null,
+    "edited_at": "<time>",
     "id": "alpha",
     "merge_gate": "detect",
     "name": "Alpha",

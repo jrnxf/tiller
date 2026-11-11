@@ -862,6 +862,13 @@
   color: var(--fg-2);
 }
 
+/* The command that runs a waiting retro, inside its meta line. */
+.docs .h-list .m code {
+  font-family: var(--mono);
+  font-size: var(--fs-mini);
+  color: var(--fg-1);
+}
+
 .docs .h-list .r {
   font-variant-numeric: tabular-nums;
 }

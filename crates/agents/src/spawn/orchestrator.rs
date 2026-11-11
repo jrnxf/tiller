@@ -126,10 +126,7 @@ pub fn start(
         .into());
     }
     let keyed = ctx.clone();
-    let ctx = &Ctx {
-        key: None,
-        ..ctx.clone()
-    };
+    let ctx = &ctx.unkeyed();
     let project: Project = get(store.conn(), "project", project)?;
     let label = layout::orchestrator_label(&project.id);
     // A start this key made already replays while its orchestrator lives.
@@ -154,34 +151,27 @@ pub fn start(
     };
     let mut events = Vec::new();
     let mut leftover = None;
-    if let Some(live) = live_orchestrator(store.conn(), &project.id)? {
-        let Some(waits) = restart else {
-            return Ok(existing(world.herdr, live, label));
-        };
-        // Refused before the stop: a restart that cannot start a new one
-        // must leave the live orchestrator running.
-        refuse_retired(&project)?;
-        // The board is the owner signed in on this host, so its Restart and
-        // its stale restart record the board all the way through (T6). A
-        // peer's board, the daemon and a session may not.
-        if !matches!(ctx.actor, Actor::Owner | Actor::Board) {
-            return Err(tiller_core::Error::Forbidden(format!(
-                "{} may not restart an orchestrator; the owner does",
-                ctx.actor
-            ))
-            .into());
+    let restarting = match (live_orchestrator(store.conn(), &project.id)?, restart) {
+        (Some(live), None) => return Ok(existing(world.herdr, live, label)),
+        (Some(live), Some(waits)) => {
+            // The board is the owner signed in on this host, so its Restart
+            // and its stale restart record the board all the way through
+            // (T6). A peer's board, the daemon and a session may not.
+            refuse_retired(&project)?;
+            if !matches!(ctx.actor, Actor::Owner | Actor::Board) {
+                return Err(tiller_core::Error::Forbidden(format!(
+                    "{} may not restart an orchestrator; the owner does",
+                    ctx.actor
+                ))
+                .into());
+            }
+            Some((live, waits))
         }
-        let stopped = control::stop_orchestrator(store, ctx, world.herdr, waits, &live, RESTARTED)?;
-        events.extend(stopped.events);
-        leftover = stopped.warning;
-    }
+        (None, _) => None,
+    };
     refuse_retired(&project)?;
     let host = local_host(store)?;
     let places = places(world, home_root, &project.id)?;
-    let fresh_home = !places.home.exists();
-    fs::create_dir_all(&places.home)?;
-    fs::set_permissions(&places.home, fs::Permissions::from_mode(0o700))?;
-
     let role = Role::Orchestrator;
     let front = role.frontmatter()?;
     let effort: Effort = front.effort.parse().map_err(|_| {
@@ -190,10 +180,29 @@ pub fn start(
             front.effort
         ))
     })?;
+    let memory = memory::render(store, world.tiller_home, &project.id, role)?;
+    // Every check comes before the stop: a restart refused by a check
+    // leaves the live one running. The writes after the stop (the home, the
+    // launch files, the manifest, the herdr workspace) can still fail and
+    // leave the project with no orchestrator.
+    if let Some((live, waits)) = restarting {
+        let stopped = control::stop_orchestrator(store, ctx, world.herdr, waits, &live, RESTARTED)?;
+        events.extend(stopped.events);
+        leftover = stopped.warning;
+    }
+    let fresh_home = !places.home.exists();
+    fs::create_dir_all(&places.home)?;
+    fs::set_permissions(&places.home, fs::Permissions::from_mode(0o700))?;
+
     let session_id = ids::new_ulid();
     let scratch = world.scratch_root.join(&session_id);
+    let opened = Opened {
+        herdr: world.herdr,
+        scratch: &scratch,
+        home: fresh_home.then_some(places.home.as_path()),
+    };
+    let unwind = |pane: Option<&str>, error: SpawnError| opened.undo(pane, error);
     let claude_version = launch::claude_version(&world.config.spawn.claude);
-    let memory = memory::render(store, world.tiller_home, &project.id, role)?;
     let launched = launch::write(&LaunchSpec {
         role,
         session_id: &session_id,
@@ -220,13 +229,11 @@ pub fn start(
         claude_version: claude_version.as_deref(),
         memory: &memory,
         note: None,
-    })?;
-    let opened = Opened {
-        herdr: world.herdr,
-        scratch: &scratch,
-        home: fresh_home.then_some(places.home.as_path()),
+    });
+    let launched = match launched {
+        Ok(launched) => launched,
+        Err(e) => return Err(unwind(None, e)),
     };
-    let unwind = |pane: Option<&str>, error: SpawnError| opened.undo(pane, error);
     let recorded =
         match store.config_manifest_record(ctx, &launched.config_hash, &launched.manifest) {
             Ok(recorded) => recorded,
@@ -288,14 +295,6 @@ pub fn start(
             "recording the launch of session {session_id} failed: {e}"
         )),
     };
-    // The memory it was given, which the revision's "Loaded by" lists.
-    let loaded = match store.mem_load(ctx, &session_id, &memory.revisions) {
-        Ok(_) => None,
-        Err(e) => Some(format!(
-            "recording the memory session {session_id} loaded failed: {e}"
-        )),
-    };
-
     let launch = || -> Result<Option<String>> {
         let bindings = layout::bindings(store.conn(), &host)?;
         // The tokens name the session before anything else reads the pane.
@@ -330,6 +329,9 @@ pub fn start(
             });
         }
     };
+    // The memory it was given, which the revision's "Loaded by" lists, once
+    // the line went in. Its event is not the start's, as with the stamp.
+    let (_, loaded) = memory::record_load(store, ctx, &session_id, &memory);
     let warning = [warning, launched.mode_note, leftover, stamped, loaded]
         .into_iter()
         .flatten()
@@ -460,8 +462,12 @@ impl Opened<'_> {
         {
             notes.push(format!("closing pane {pane} failed: {e}"));
         }
-        if let Err(e) = fs::remove_dir_all(self.scratch) {
-            notes.push(format!("removing {} failed: {e}", self.scratch.display()));
+        // A launch refused before its files were written left no scratch.
+        match fs::remove_dir_all(self.scratch) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                notes.push(format!("removing {} failed: {e}", self.scratch.display()));
+            }
+            _ => {}
         }
         // `remove_dir` leaves a home that holds anything.
         if let Some(home) = self.home {

@@ -248,7 +248,7 @@ const TITLES: Record<string, string> = {
 };
 
 // The report's details are lower-case clauses; a line reads as a sentence.
-function sentence(text: string): string {
+export function sentence(text: string): string {
   const trimmed = text.trim();
   if (!trimmed) return trimmed;
   // A file or tool name keeps its case: "config.toml", "gh".

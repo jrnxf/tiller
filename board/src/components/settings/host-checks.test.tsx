@@ -2,7 +2,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
-import type { DaemonHealth, PollerHealth } from "../../lib/api-types";
+import type { DaemonHealth, DoctorReport, Machine, PollerHealth } from "../../lib/api-types";
 import type { Scenario } from "../../lib/fixtures";
 import { FixtureRefusal, fixtureResource } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
@@ -18,12 +18,25 @@ function serve(
     owner = true,
     doctor = true,
     startedAt,
-  }: { owner?: boolean; doctor?: boolean; startedAt?: string } = {},
+    peer,
+  }: {
+    owner?: boolean;
+    doctor?: boolean;
+    startedAt?: string;
+    // Answers a peer's checks in place of the fixture: the read's number,
+    // from 1, and the fixture's report.
+    peer?: (read: number, report: DoctorReport) => Response;
+  } = {},
 ) {
   const ran = new Map<string, PollerHealth>();
+  let peerReads = 0;
   const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
     if (path === "/api/v1/session") return new Response(JSON.stringify({ owner }));
+    if (peer && path === "/api/v1/doctor?host=host-d") {
+      peerReads += 1;
+      return peer(peerReads, fixtureResource(path, scenario) as DoctorReport);
+    }
     if (path.startsWith("/api/v1/doctor?")) {
       const read = fixtureResource(path, scenario);
       if (read instanceof FixtureRefusal) {
@@ -194,9 +207,14 @@ test("a peer's card shows the checks it sends, read-only, and a herdr machine's 
     "gamma, fleet (enforced): the ruleset check holds.",
   );
   expect(peer.textContent).toMatch(/Read from host-d, last run \w{3} \d{1,2} \w{3}, \d{2}:\d{2}/);
-  // Read-only: no Check again, no Run now.
+  // It says where the checks ran: the link's SSH session, not the daemon.
+  expect(within(peer).getByTestId("check-environment").textContent).toContain(
+    "They ran in the SSH session of host-d's link, not in its daemon.",
+  );
+  // Read-only: no Run now, no fix. Check again only reads the checks again.
   expect(within(within(peer).getByTestId("peer-checks")).queryByRole("button")).toBeNull();
-  expect(within(peer).queryByRole("button", { name: "Check again" })).toBeNull();
+  fireEvent.click(within(peer).getByRole("button", { name: "Check again" }));
+  await waitFor(() => expect(calls(fetch, "/api/v1/doctor?host=host-d")).toBe(2));
   expect(peer.textContent).not.toMatch(/firstmate/i);
 
   const down = (await openHost("host-e")).card;
@@ -247,4 +265,84 @@ test("the Merge App problem shows once, in its own section, not again in the hos
   expect(within(card).queryByTestId("check-check:merge app")).toBeNull();
   expect(within(card).queryByTestId("check-merge-gates")).toBeNull();
   expect(screen.getAllByTestId("merge-app")).toHaveLength(1);
+});
+
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+
+test("a peer's missing tool says to check again, and the card can", async () => {
+  const fetch = serve("federated", {
+    peer: (_read, report) =>
+      json({
+        ...report,
+        checks: report.checks.map((check) =>
+          check.name === "gh"
+            ? { ...check, status: "fail", version: null, detail: "gh is not on PATH" }
+            : check,
+        ),
+      }),
+  });
+  renderSettings();
+  const { card } = await openHost("host-d");
+  const gh = await within(card).findByTestId("check-tool:gh");
+  expect(gh.textContent).toContain("Add it to the host's Nix config, then check again.");
+  fireEvent.click(within(card).getByRole("button", { name: "Check again" }));
+  await waitFor(() => expect(calls(fetch, "/api/v1/doctor?host=host-d")).toBe(2));
+});
+
+test("a peer's failed read again keeps its last report, marked as the last good read", async () => {
+  serve("federated", {
+    peer: (read, report) =>
+      read === 1
+        ? json(report)
+        : json(
+            {
+              ok: false,
+              error: {
+                code: "peer_unreachable",
+                message: "host-d is unreachable; its link is not live",
+              },
+            },
+            503,
+          ),
+  });
+  renderSettings();
+  const { card } = await openHost("host-d");
+  await within(card).findByTestId("check-tools:found");
+  fireEvent.click(within(card).getByRole("button", { name: "Check again" }));
+  const line = await within(card).findByTestId("check-unreadable", undefined, { timeout: 3000 });
+  expect(line.textContent).toContain("The lines below are its last good read.");
+  expect(card.textContent).toMatch(/Last good read from host-d, \w{3} \d{1,2} \w{3}, \d{2}:\d{2}/);
+  expect(card.textContent).not.toMatch(/Read from host-d, last run/);
+  expect(within(card).getByTestId("check-tools:found")).toBeTruthy();
+});
+
+test("a peer on an older tiller that cannot send its checks says so, not the parser's words", async () => {
+  serve("federated", {
+    peer: () =>
+      json(
+        {
+          ok: false,
+          error: {
+            code: "usage",
+            message: "a query is cards/{id}, cards/{id}/timeline or runs/{id}",
+          },
+        },
+        400,
+      ),
+  });
+  renderSettings();
+  const { card } = await openHost("host-d");
+  const line = await within(card).findByTestId("check-unreadable", undefined, { timeout: 3000 });
+  expect(line.textContent).toBe(
+    "Checkshost-d runs an older tiller that cannot send its checks. Run tiller doctor in a shell on that host.",
+  );
+});
+
+test("the stand-in server answers a peer's checks by its id as by its label", () => {
+  const machines = fixtureResource("/api/v1/machines", "federated") as { machines: Machine[] };
+  const id = machines.machines.find((machine) => machine.label === "host-d")?.id ?? "";
+  expect(id).not.toBe("host-d");
+  const byId = fixtureResource(`/api/v1/doctor?host=${id}`, "federated") as DoctorReport;
+  expect(byId?.checks.length).toBeGreaterThan(0);
+  expect(byId.merge_gates.map((gate) => gate.project)).toEqual(["gamma", "fleet"]);
 });

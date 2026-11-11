@@ -113,10 +113,17 @@ function CardDrawer({ cardId, owner }: { cardId: string; owner: string | undefin
   const navigate = useNavigate();
   const router = useRouter();
   // "Open the full page" is a link to the card route. Fetch that route's code
-  // once now, so the click does not wait for it on a slow network.
+  // once now, so the click does not wait for it on a slow network. Only the
+  // code: the drawer reads the card itself, so the route's loader would read
+  // it (and, for a card that cannot be read, fail) a second time.
   useEffect(() => {
-    void router.preloadRoute({ to: "/cards/$cardId", params: { cardId }, search: { owner } });
-  }, [router, cardId, owner]);
+    // Only a head start: a chunk that fails here loads (or says why it
+    // cannot) when the full page opens, and the stale board banner hears it.
+    // It returns nothing when the code is in already.
+    void Promise.resolve(router.loadRouteChunk(router.routesById["/cards/$cardId"])).catch(
+      () => {},
+    );
+  }, [router]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented || shortcutsBlocked(event)) return;

@@ -11,6 +11,7 @@ use super::{find, get, list, refuse, required, resolve_id};
 use crate::domain::*;
 use crate::error::{Error, Result};
 use crate::ids::{self, HOST_HEALTH_CARD};
+use crate::limits::{STEER_MAX_CHARS, within};
 use crate::store::{Actor, Applied, Ctx, NewEvent, Store, Tx};
 use crate::time::Timestamp;
 
@@ -151,6 +152,9 @@ impl Store {
             return Err(Error::Usage(format!(
                 "a send is a steer or a note, not {kind}"
             )));
+        }
+        if kind == OutboxKind::Steer {
+            within("the message", &body, STEER_MAX_CHARS)?;
         }
         let session: Session = get(self.conn(), "session", session_id)?;
         let card_id = match &session.run_id {

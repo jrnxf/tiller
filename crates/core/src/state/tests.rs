@@ -495,6 +495,79 @@ fn stale_rev_with_matching_values_conflicts_unless_its_key_replays() {
     assert_eq!(error.code(), "conflict");
 }
 
+/// A project keeps when its `rev` last moved, and a stale-rev conflict on it
+/// says when that was, in Lisbon time with the weekday: an edit, a new card
+/// and a stage change each move it.
+#[test]
+fn a_project_conflict_says_when_the_other_change_happened() {
+    let (mut store, _) = memory_store();
+    let at = |text: &str| Ctx {
+        now: text.parse::<Timestamp>().unwrap(),
+        ..owner()
+    };
+    let added = store.project("alpha").unwrap();
+    assert_eq!(added.edited_at, added.added_at, "a new project");
+
+    // Summer time: 14:05 UTC is 15:05 in Lisbon.
+    let edited = store
+        .project_edit(
+            &at("2026-07-14T14:05:09.000Z"),
+            "alpha",
+            added.rev,
+            ProjectEdit {
+                capacity: Some(5),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap()
+        .value;
+    assert_eq!(edited.edited_at.to_string(), "2026-07-14T14:05:09.000Z");
+    let error = store
+        .project_edit(
+            &owner(),
+            "alpha",
+            added.rev,
+            ProjectEdit {
+                capacity: Some(6),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "conflict: project alpha is at rev {}, you sent {}; it changed Tue 2026-07-14 15:05; capacity is now 5",
+            edited.rev, added.rev
+        )
+    );
+    let Error::Conflict { edited_at, .. } = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(edited_at.as_deref(), Some(&edited.edited_at));
+
+    // Winter time: Lisbon is UTC. A new card moves the project's rev.
+    store
+        .card_create(
+            &at("2026-11-03T14:00:00.000Z"),
+            None,
+            card(CardKind::Ship, "moves the rev"),
+            None,
+        )
+        .unwrap();
+    let carded = store.project("alpha").unwrap();
+    assert_eq!(carded.rev, edited.rev + 1);
+    assert_eq!(carded.edited_at.to_string(), "2026-11-03T14:00:00.000Z");
+    let error = store
+        .project_stage(&owner(), "alpha", edited.rev, Stage::PreLaunch, None)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("; it changed Tue 2026-11-03 14:00;"),
+        "{error}"
+    );
+}
+
 /// The dispatch override is owner only (`authority.md` section 3).
 #[test]
 fn dispatch_override_is_owner_only() {
@@ -2906,6 +2979,100 @@ fn project_edit_refuses_a_gerrit_remote_unless_local_only() {
     assert!(error.to_string().contains("Gerrit"), "{error}");
 }
 
+/// The default branch is stored trimmed, on an add and on an edit, so a run
+/// never branches from ` main `.
+#[test]
+fn project_add_and_edit_store_the_default_branch_trimmed() {
+    let (mut store, _) = memory_store();
+    let mut new = project_input("kappa", None, Delivery::DirectPush);
+    new.default_branch = Some(" main ".into());
+    let added = store.project_add(&owner(), new.clone()).unwrap();
+    assert_eq!(added.value.default_branch, "main");
+    assert!(store.project_add(&owner(), new.clone()).unwrap().replayed);
+    // A row stored padded, before this rule, still replays the same add.
+    store
+        .conn()
+        .execute(
+            "UPDATE projects SET default_branch = ' main ' WHERE id = 'kappa'",
+            [],
+        )
+        .unwrap();
+    assert!(store.project_add(&owner(), new).unwrap().replayed);
+
+    let rev = store.project("kappa").unwrap().rev;
+    let edited = store
+        .project_edit(
+            &owner(),
+            "kappa",
+            rev,
+            ProjectEdit {
+                default_branch: Some(" trunk\t".into()),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(edited.value.default_branch, "trunk");
+    let error = store
+        .project_edit(
+            &owner(),
+            "kappa",
+            edited.value.rev,
+            ProjectEdit {
+                default_branch: Some("   ".into()),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::Usage(_)), "{error}");
+}
+
+/// An edit that changes the remote records the forge it found, as
+/// `project.added` does. An edit that leaves the remote and delivery alone
+/// records none.
+#[test]
+fn project_edit_records_the_forge_of_a_new_remote() {
+    let (mut store, _) = memory_store();
+    store
+        .project_add(&owner(), project_input("lambda", None, Delivery::DirectPr))
+        .unwrap();
+    let rev = store.project("lambda").unwrap().rev;
+    let edited = store
+        .project_edit(
+            &owner(),
+            "lambda",
+            rev,
+            ProjectEdit {
+                remote: Some(Some("https://github.com/example/lambda.git".into())),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap();
+    store
+        .project_edit(
+            &owner(),
+            "lambda",
+            edited.value.rev,
+            ProjectEdit {
+                name: Some("Lambda".into()),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap();
+    let events: Vec<String> = store
+        .conn()
+        .prepare(
+            "SELECT payload FROM events WHERE kind = 'project.edited' AND entity_id = ?1 ORDER BY seq",
+        )
+        .unwrap()
+        .query_map(["lambda"], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events[0].contains("\"forge\":\"github\""), "{}", events[0]);
+    assert!(!events[1].contains("\"forge\""), "{}", events[1]);
+}
+
 /// P16: an edit that sets a GitHub remote fills `repo` from it, as an add does.
 #[test]
 fn project_edit_reads_the_repo_from_a_github_remote() {
@@ -2926,6 +3093,123 @@ fn project_edit_reads_the_repo_from_a_github_remote() {
         )
         .unwrap();
     assert_eq!(edited.value.repo.as_deref(), Some("example/iota"));
+}
+
+/// P16: a new GitHub remote names the repo again when the old remote named
+/// it, so the repo follows a moved remote. A repo set in the same edit wins,
+/// a repo set apart from its remote stays, and a remote that names no GitHub
+/// repo leaves the repo as it was.
+#[test]
+fn project_edit_reads_the_repo_again_when_the_remote_changes() {
+    let (mut store, _) = memory_store();
+    let input = project_input(
+        "lambda",
+        Some("https://github.com/example/lambda.git"),
+        Delivery::DirectPush,
+    );
+    store.project_add(&owner(), input).unwrap();
+    assert_eq!(
+        store.project("lambda").unwrap().repo.as_deref(),
+        Some("example/lambda")
+    );
+    let edit = |store: &mut crate::Store, edit: ProjectEdit| {
+        let rev = store.project("lambda").unwrap().rev;
+        store
+            .project_edit(&owner(), "lambda", rev, edit)
+            .unwrap()
+            .value
+    };
+
+    let moved = edit(
+        &mut store,
+        ProjectEdit {
+            remote: Some(Some("https://github.com/other/lambda-moved".into())),
+            ..ProjectEdit::default()
+        },
+    );
+    assert_eq!(moved.repo.as_deref(), Some("other/lambda-moved"));
+
+    let named = edit(
+        &mut store,
+        ProjectEdit {
+            remote: Some(Some("https://github.com/third/lambda.git".into())),
+            repo: Some(Some("example/mirror".into())),
+            ..ProjectEdit::default()
+        },
+    );
+    assert_eq!(named.repo.as_deref(), Some("example/mirror"));
+
+    // A repo set apart from its remote (a fork whose PRs go upstream) stays
+    // when only the remote's address changes.
+    let fork = edit(
+        &mut store,
+        ProjectEdit {
+            remote: Some(Some("ssh://github.com/third/lambda.git".into())),
+            ..ProjectEdit::default()
+        },
+    );
+    assert_eq!(
+        fork.remote.as_deref(),
+        Some("ssh://github.com/third/lambda.git")
+    );
+    assert_eq!(fork.repo.as_deref(), Some("example/mirror"));
+
+    let other = edit(
+        &mut store,
+        ProjectEdit {
+            remote: Some(Some("https://git.example.com/lambda.git".into())),
+            ..ProjectEdit::default()
+        },
+    );
+    assert_eq!(other.repo.as_deref(), Some("example/mirror"));
+}
+
+/// P16: GitHub names ignore case, so a repo that differs from the one its
+/// remote names only in case still counts as named by the remote, and
+/// follows a moved remote.
+#[test]
+fn project_edit_follows_a_remote_that_names_the_repo_in_another_case() {
+    let (mut store, _) = memory_store();
+    let input = project_input(
+        "lambda",
+        Some("https://github.com/example/lambda.git"),
+        Delivery::DirectPush,
+    );
+    store.project_add(&owner(), input).unwrap();
+    let edit = |store: &mut crate::Store, edit: ProjectEdit| {
+        let rev = store.project("lambda").unwrap().rev;
+        store
+            .project_edit(&owner(), "lambda", rev, edit)
+            .unwrap()
+            .value
+    };
+    let typed = edit(
+        &mut store,
+        ProjectEdit {
+            repo: Some(Some("Example/Lambda".into())),
+            ..ProjectEdit::default()
+        },
+    );
+    assert_eq!(typed.repo.as_deref(), Some("Example/Lambda"));
+
+    // A new address of the same repo keeps the case the owner chose.
+    let same = edit(
+        &mut store,
+        ProjectEdit {
+            remote: Some(Some("ssh://github.com/example/lambda.git".into())),
+            ..ProjectEdit::default()
+        },
+    );
+    assert_eq!(same.repo.as_deref(), Some("Example/Lambda"));
+
+    let moved = edit(
+        &mut store,
+        ProjectEdit {
+            remote: Some(Some("https://github.com/other/lambda-moved".into())),
+            ..ProjectEdit::default()
+        },
+    );
+    assert_eq!(moved.repo.as_deref(), Some("other/lambda-moved"));
 }
 
 /// P16: an add refuses an empty default branch, as an edit does.

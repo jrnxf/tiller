@@ -284,8 +284,12 @@ pub fn quota_floor(config: &SpawnConfig, role: RunRole) -> Option<f64> {
 }
 
 pub(crate) fn local_host(store: &Store) -> Result<String> {
-    meta(store.conn(), "host_id")?
-        .ok_or_else(|| SpawnError::Usage("this host is not initialized; run tiller init".into()))
+    meta(store.conn(), "host_id")?.ok_or_else(|| {
+        SpawnError::Usage(format!(
+            "this host is not initialized; {}",
+            tiller_core::RUN_INIT
+        ))
+    })
 }
 
 /// A start the quota floor refused: holds the card until the weekly reset
@@ -557,8 +561,6 @@ fn launch_in(
     // The manifest first, so a hash on a run always resolves to its parts.
     let recorded = store.config_manifest_record(ctx, &launched.config_hash, &launched.manifest)?;
     made.events.extend(recorded.events);
-    let loaded = store.mem_load(ctx, &session.id, &memory.revisions)?;
-    made.events.extend(loaded.events);
     let placed = store.run_place(
         ctx,
         &run.id,
@@ -596,6 +598,13 @@ fn launch_in(
     let warning = relayout(world.herdr, &bindings).err();
     world.herdr.send_text(&created.pane_id, &launched.line)?;
     world.herdr.send_enter(&created.pane_id)?;
+    // The memory it was given, once the line went in.
+    let (loads, loaded) = memory::record_load(store, ctx, &session.id, &memory);
+    made.events.extend(loads);
+    let warning = [warning, loaded]
+        .into_iter()
+        .flatten()
+        .reduce(|all, next| format!("{all}; {next}"));
 
     Ok(Spawned {
         name: agent_name(&card.display_id, run.role, run.attempt),

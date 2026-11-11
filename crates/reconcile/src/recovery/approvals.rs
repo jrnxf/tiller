@@ -19,10 +19,10 @@ use tiller_core::state::attention::NewAttention;
 use tiller_core::state::cards::{MARK_LANDED, reopened_seq};
 use tiller_core::state::runs::EndRun;
 use tiller_core::state::{find, get, list};
-use tiller_core::{Result, Timestamp};
+use tiller_core::{Actor, Result, Timestamp};
 
 use crate::grants;
-use crate::pass::{Reconciler, Report};
+use crate::pass::{Breach, Reconciler, Report};
 use crate::sources::PrRead;
 
 /// The answers R07's item offers. The two landed ones start with
@@ -34,6 +34,19 @@ pub const LANDED_NOT_ME: &str = "Mark landed, not me";
 pub const KEEP_OPEN: &str = "Keep open";
 pub use tiller_core::state::cards::SUPERSEDED;
 
+/// The key of the item an execution the forge or the remote would not
+/// answer opens while it is `uncertain`.
+fn unreadable_key(approval: &str) -> String {
+    format!("reconcile:R08:execution:{approval}")
+}
+
+/// The key of the item a `failed` execution opens. It is not
+/// [`unreadable_key`], so an item opened while the approval was
+/// `uncertain` does not stand in for it.
+fn failed_key(approval: &str) -> String {
+    format!("reconcile:R08:failed:{approval}")
+}
+
 impl Reconciler {
     pub(crate) fn approvals(&mut self, now: Timestamp, report: &mut Report) -> Result<()> {
         let projects: Vec<Project> = list(self.conn(), "retired_at IS NULL ORDER BY id", &[])?;
@@ -44,6 +57,9 @@ impl Reconciler {
             if let Err(error) = self.default_branch(project, now, report) {
                 report.error(&format!("default branch of {}", project.id), &error);
             }
+        }
+        if let Err(error) = self.failed_executions(now, report) {
+            report.error("failed executions", &error);
         }
         // The detector runs even when an answer fails to apply: it raises
         // the rollback trigger, so nothing else may hold it back.
@@ -76,47 +92,79 @@ impl Reconciler {
              ORDER BY number",
             &[&project.id],
         )?;
+        // Each PR under its own guard: a refused write on one (a pass key
+        // another actor stored first) is reported, and the PRs after it are
+        // still refreshed.
         for pr in prs {
-            let read = self.sources.forge.pr(&repo, pr.number);
-            let fetch = match &read {
-                Ok(read) => read.fetch.clone(),
-                Err(error) => PrFetch {
-                    state: pr.state,
-                    head_sha: pr.head_sha.clone(),
-                    base_ref: pr.base_ref.clone(),
-                    checks: pr.checks,
-                    review_decision: pr.review_decision,
-                    mergeable: pr.mergeable,
-                    merged_at: pr.merged_at,
-                    merge_sha: pr.merge_sha.clone(),
-                    pipeline_state: pr.pipeline_state,
-                    fetch_error: Some(error.clone()),
-                },
-            };
-            // Uncertain executions first, from the same read.
-            if let Ok(read) = &read {
-                self.resolve_uncertain_merges(&pr, read, project, now, report)?;
-            } else {
-                self.uncertain_unreadable(&pr, now, report)?;
+            if let Err(error) = self.one_pr(&pr, &repo, project, now, report) {
+                report.error(&format!("PR #{} of {}", pr.number, project.id), &error);
             }
-            let refreshed = self.store.pr_refresh(&self.ctx(now), &pr.id, fetch)?.value;
-            let Ok(read) = read else {
-                continue;
-            };
-            self.scrub(&pr, &refreshed, &read, project, now, report)?;
-            // Both transitions are read from the records as they stand, not
-            // from this pass's memory of the row before the refresh: a pass
-            // that dies between the refresh and the repair, or a forge read
-            // that fails once, loses nothing. Every repair is keyed.
-            if refreshed.state != PrState::Open {
-                self.outside_merge(&refreshed, &read, project, now, report)?;
-            }
-            if refreshed.state == PrState::Open
-                && let Some(new) = refreshed.head_sha.as_deref()
-                && let Some(moved) = self.moved_from(&refreshed, new)?
-            {
-                self.head_moved(&pr, &refreshed, &read, &moved, project, new, now, report)?;
-            }
+        }
+        Ok(())
+    }
+
+    /// One PR of [`Self::project_prs`]: the forge read, `uncertain`
+    /// executions and the refresh, then the scrub, an outside merge and a
+    /// head move, each of those three under its own guard.
+    fn one_pr(
+        &mut self,
+        pr: &Pr,
+        repo: &str,
+        project: &Project,
+        now: Timestamp,
+        report: &mut Report,
+    ) -> Result<()> {
+        let read = self.sources.forge.pr(repo, pr.number);
+        let fetch = match &read {
+            Ok(read) => read.fetch.clone(),
+            Err(error) => PrFetch {
+                state: pr.state,
+                head_sha: pr.head_sha.clone(),
+                base_ref: pr.base_ref.clone(),
+                checks: pr.checks,
+                review_decision: pr.review_decision,
+                mergeable: pr.mergeable,
+                merged_at: pr.merged_at,
+                merge_sha: pr.merge_sha.clone(),
+                pipeline_state: pr.pipeline_state,
+                fetch_error: Some(error.clone()),
+            },
+        };
+        // Uncertain executions first, from the same read, under their own
+        // guard: a refused write there still lets the PR refresh.
+        let uncertain = match &read {
+            Ok(read) => self.resolve_uncertain_merges(pr, read, project, now, report),
+            Err(_) => self.uncertain_unreadable(pr, now, report),
+        };
+        if let Err(error) = uncertain {
+            report.error(
+                &format!("uncertain executions of PR #{}", pr.number),
+                &error,
+            );
+        }
+        let refreshed = self.store.pr_refresh(&self.ctx(now), &pr.id, fetch)?.value;
+        let Ok(read) = read else {
+            return Ok(());
+        };
+        if let Err(error) = self.scrub(pr, &refreshed, &read, project, now, report) {
+            report.error(&format!("scrub of PR #{}", pr.number), &error);
+        }
+        // Both transitions are read from the records as they stand, not
+        // from this pass's memory of the row before the refresh: a pass
+        // that dies between the refresh and the repair, or a forge read
+        // that fails once, loses nothing. Every repair is keyed.
+        if refreshed.state != PrState::Open
+            && let Err(error) = self.outside_merge(&refreshed, &read, project, now, report)
+        {
+            report.error(&format!("outside merge of PR #{}", pr.number), &error);
+        }
+        if refreshed.state == PrState::Open
+            && let Some(new) = refreshed.head_sha.as_deref()
+            && let Some(moved) = self.moved_from(&refreshed, new)?
+            && let Err(error) =
+                self.head_moved(pr, &refreshed, &read, &moved, project, new, now, report)
+        {
+            report.error(&format!("head move of PR #{}", pr.number), &error);
         }
         Ok(())
     }
@@ -163,31 +211,46 @@ impl Reconciler {
             "pr_id = ?1 AND state = 'uncertain' AND kind = 'merge' ORDER BY id",
             &[&pr.id],
         )?;
+        // Each approval under its own guard: a failed write for one is
+        // reported, and the ones after it are still resolved.
         for approval in uncertain {
-            let merged_at_bound = read.fetch.state == PrState::Merged
-                && read.fetch.head_sha.as_deref() == approval.head_sha.as_deref();
-            let (finish, result) = if merged_at_bound {
-                (
-                    Finish::Succeeded,
-                    json!({"sha": read.fetch.merge_sha.clone().or(approval.head_sha.clone()), "resolved_by": "reconcile"}),
-                )
-            } else {
-                (
-                    Finish::Failed,
-                    json!({"error": format!("the forge shows PR #{} {} at head {}", pr.number, read.fetch.state, read.fetch.head_sha.as_deref().unwrap_or("unknown")), "resolved_by": "reconcile"}),
-                )
-            };
-            let finished =
-                self.store
-                    .approval_finish(&self.ctx(now), &approval.id, finish, result)?;
-            report.repair(format!(
-                "R08 uncertain approval {} resolved from the forge: {}",
-                approval.id, finished.value.approval.state
-            ));
-            if finish == Finish::Failed {
-                self.failed_execution_item(&approval, "the merge did not happen", now, report)?;
+            if let Err(error) = self.resolve_uncertain_merge(&approval, pr, read, now, report) {
+                report.error(&format!("uncertain approval {}", approval.id), &error);
             }
         }
+        Ok(())
+    }
+
+    fn resolve_uncertain_merge(
+        &mut self,
+        approval: &Approval,
+        pr: &Pr,
+        read: &PrRead,
+        now: Timestamp,
+        report: &mut Report,
+    ) -> Result<()> {
+        let merged_at_bound = read.fetch.state == PrState::Merged
+            && read.fetch.head_sha.as_deref() == approval.head_sha.as_deref();
+        let (finish, result) = if merged_at_bound {
+            (
+                Finish::Succeeded,
+                json!({"sha": read.fetch.merge_sha.clone().or(approval.head_sha.clone()), "resolved_by": "reconcile"}),
+            )
+        } else {
+            (
+                Finish::Failed,
+                json!({"error": format!("the forge shows PR #{} {} at head {}", pr.number, read.fetch.state, read.fetch.head_sha.as_deref().unwrap_or("unknown")), "resolved_by": "reconcile"}),
+            )
+        };
+        let finished = self
+            .store
+            .approval_finish(&self.ctx(now), &approval.id, finish, result)?;
+        report.repair(format!(
+            "R08 uncertain approval {} resolved from the forge: {}",
+            approval.id, finished.value.approval.state
+        ));
+        // A `failed` one goes to the developer from
+        // [`Self::failed_executions`], later in this pass.
         Ok(())
     }
 
@@ -203,13 +266,78 @@ impl Reconciler {
             let Some(executed_at) = approval.executed_at else {
                 continue;
             };
-            if executed_at.plus_minutes(self.config.thresholds.uncertain_merge) <= now {
-                self.failed_execution_item(
+            if executed_at.plus_minutes(self.config.thresholds.uncertain_merge) <= now
+                && let Err(error) = self.failed_execution_item(
                     &approval,
+                    &unreadable_key(&approval.id),
                     "the forge has been unreadable since it executed",
                     now,
                     report,
-                )?;
+                )
+            {
+                report.error(&format!("uncertain approval {}", approval.id), &error);
+            }
+        }
+        Ok(())
+    }
+
+    /// R08: every `failed` execution the pass resolved goes to the
+    /// developer, once. The item opens apart from the transaction that
+    /// finished the approval, so a pass whose item failed to open after the
+    /// finish leaves it to this sweep on a later pass. It has its own key,
+    /// not the one of the item an unreadable forge opened while the
+    /// approval was `uncertain`, so the developer sees the final state; its
+    /// question then says that the forge answers now.
+    ///
+    /// Only the newest approval of its kind on an open card is asked about:
+    /// one a newer approval followed is settled, so the sweep reads at most
+    /// one approval per kind and open card. An approval a recovery item
+    /// already shows as `failed` (one an earlier version opened under the
+    /// unreadable key) is not asked about again. A key another actor holds
+    /// is still tried, so its refusal is reported ([`Reconciler::planted`]).
+    fn failed_executions(&mut self, now: Timestamp, report: &mut Report) -> Result<()> {
+        // The actor of every pass write (`Reconciler::ctx`), as in
+        // `Reconciler::key_used`.
+        let actor = Actor::Daemon.to_string();
+        let failed: Vec<Approval> = list(
+            self.conn(),
+            "state = 'failed' AND kind IN ('merge', 'land_direct')
+               AND json_extract(result, '$.resolved_by') = 'reconcile'
+               AND card_id IN (SELECT id FROM cards WHERE state = 'open')
+               AND NOT EXISTS (SELECT 1 FROM approvals newer
+                               WHERE newer.card_id = approvals.card_id
+                                 AND newer.kind = approvals.kind
+                                 AND (newer.requested_at, newer.id)
+                                     > (approvals.requested_at, approvals.id))
+               AND NOT EXISTS (SELECT 1 FROM idempotency_keys k
+                               WHERE k.key = 'reconcile:R08:failed:' || approvals.id
+                                 AND (k.actor IS NULL OR k.actor = ?1))
+               AND NOT EXISTS (
+                   SELECT 1 FROM attention i
+                   WHERE i.card_id = approvals.card_id AND i.kind = 'recovery'
+                     AND CASE WHEN json_valid(i.evidence)
+                              THEN json_extract(i.evidence, '$.approval_id') = approvals.id
+                                   AND json_extract(i.evidence, '$.state') = 'failed'
+                              ELSE 0 END)
+             ORDER BY id",
+            &[&actor],
+        )?;
+        for approval in failed {
+            let key = failed_key(&approval.id);
+            if self.still_planted(&key)? {
+                continue;
+            }
+            let what = match approval.kind {
+                ApprovalKind::LandDirect => "the push did not land",
+                _ => "the merge did not happen",
+            };
+            let why = if self.key_used(&unreadable_key(&approval.id))? {
+                format!("{what}; the forge answers now, after the earlier question about it")
+            } else {
+                what.to_owned()
+            };
+            if let Err(error) = self.failed_execution_item(&approval, &key, &why, now, report) {
+                report.error(&format!("failed approval {}", approval.id), &error);
             }
         }
         Ok(())
@@ -218,6 +346,7 @@ impl Reconciler {
     fn failed_execution_item(
         &mut self,
         approval: &Approval,
+        key: &str,
         why: &str,
         now: Timestamp,
         report: &mut Report,
@@ -226,10 +355,9 @@ impl Reconciler {
             return Ok(());
         };
         let card: Card = get(self.conn(), "card", &card_id)?;
-        let key = format!("reconcile:R08:execution:{}", approval.id);
         if self.recovery(
             now,
-            &key,
+            key,
             NewAttention {
                 card: card.id.clone(),
                 run_id: approval.run_id.clone(),
@@ -268,14 +396,14 @@ impl Reconciler {
         }
         let head = refreshed.head_sha.clone().unwrap_or_default();
         let card: Card = get(self.conn(), "card", &pr.card_id)?;
-        let breach_key = format!("reconcile:G30:{}:{head}", pr.id);
-        if !self.key_used(&breach_key)? {
-            self.store.guard_breach(
-                &self.ctx(now).with_key(breach_key),
-                "G30",
-                Some(&card.id),
-                json!({"pr_id": pr.id, "number": pr.number, "head_sha": head, "lines": read.body_leaks, "repo_public": read.repo_public}),
-            )?;
+        if self.breach(
+            now,
+            format!("reconcile:G30:{}:{head}", pr.id),
+            "G30",
+            &card.id,
+            json!({"pr_id": pr.id, "number": pr.number, "head_sha": head, "lines": read.body_leaks, "repo_public": read.repo_public}),
+            report,
+        ).written() {
             report.repair(format!(
                 "R19 PR #{} body fails the scrub at {head}: G30 breach",
                 pr.number
@@ -461,14 +589,14 @@ impl Reconciler {
         let descends = self.sources.forge.is_ancestor(project, old, new);
         match descends {
             Ok(false) => {
-                let breach_key = format!("reconcile:G11:{}:{new}", pr.id);
-                if !self.key_used(&breach_key)? {
-                    self.store.guard_breach(
-                        &self.ctx(now).with_key(breach_key),
-                        "G11",
-                        Some(&card.id),
-                        json!({"pr_id": pr.id, "number": pr.number, "from": old, "to": new, "approvals_staled": open_before.iter().map(|a| a.id.clone()).collect::<Vec<_>>()}),
-                    )?;
+                if self.breach(
+                    now,
+                    format!("reconcile:G11:{}:{new}", pr.id),
+                    "G11",
+                    &card.id,
+                    json!({"pr_id": pr.id, "number": pr.number, "from": old, "to": new, "approvals_staled": open_before.iter().map(|a| a.id.clone()).collect::<Vec<_>>()}),
+                    report,
+                ).written() {
                     report.repair(format!(
                         "R19 PR #{} force-pushed from {old} to {new}: G11 breach",
                         pr.number
@@ -603,113 +731,148 @@ impl Reconciler {
                 for approval in &uncertain {
                     if approval.executed_at.is_some_and(|at| {
                         at.plus_minutes(self.config.thresholds.uncertain_merge) <= now
-                    }) {
-                        self.failed_execution_item(
-                            approval,
-                            "the remote has been unreadable since it executed",
-                            now,
-                            report,
-                        )?;
+                    }) && let Err(error) = self.failed_execution_item(
+                        approval,
+                        &unreadable_key(&approval.id),
+                        "the remote has been unreadable since it executed",
+                        now,
+                        report,
+                    ) {
+                        report.error(&format!("uncertain land_direct {}", approval.id), &error);
                     }
                 }
                 tracing::debug!(%error, project = %project.id, "default branch head unreadable");
                 return Ok(());
             }
         };
+        // Each approval and each run under its own guard: a refused write
+        // for one is reported, and the ones after it are still checked.
         for approval in uncertain {
-            let Some(bound) = approval.head_sha.clone() else {
-                continue;
-            };
-            let landed = self.sources.forge.is_ancestor(project, &bound, &head);
-            let (finish, result) = match landed {
-                Ok(true) => (
-                    Finish::Succeeded,
-                    json!({"sha": bound, "default_head": head, "resolved_by": "reconcile"}),
-                ),
-                Ok(false) => (
-                    Finish::Failed,
-                    json!({"error": format!("{bound} is not on {} ({head})", project.default_branch), "resolved_by": "reconcile"}),
-                ),
-                Err(error) => {
-                    report.error(&format!("ancestry on {}", project.id), &error);
-                    continue;
-                }
-            };
-            self.store
-                .approval_finish(&self.ctx(now), &approval.id, finish, result)?;
-            report.repair(format!(
-                "R08 uncertain land_direct {} resolved from the default branch: {finish:?}",
-                approval.id
-            ));
-            if finish == Finish::Failed {
-                self.failed_execution_item(&approval, "the push did not land", now, report)?;
+            if let Err(error) = self.uncertain_land(&approval, project, &head, now, report) {
+                report.error(&format!("uncertain land_direct {}", approval.id), &error);
             }
         }
         for run in runs {
-            let Some(path) = run.worktree_path.clone() else {
-                continue;
-            };
-            let scan = self.scan_of(Path::new(&path), project);
-            let Some(run_head) = scan.head_sha.clone() else {
-                continue;
-            };
-            // A worktree still at its base has landed nothing, and one at the
-            // default head with no known base is a fresh checkout, not a
-            // landing: only a head the run moved past its base counts.
-            if run.base_sha.as_deref() == Some(run_head.as_str()) {
-                continue;
+            let id = run.id.clone();
+            if let Err(error) = self.direct_run(run, project, &head, now, report) {
+                report.error(&format!("default branch of run {id}"), &error);
             }
-            if run_head == head && run.base_sha.is_none() {
-                continue;
+        }
+        Ok(())
+    }
+
+    /// R08 for one `uncertain` `land_direct` of [`Self::default_branch`]:
+    /// settled from whether its bound head is on the default branch.
+    fn uncertain_land(
+        &mut self,
+        approval: &Approval,
+        project: &Project,
+        head: &str,
+        now: Timestamp,
+        report: &mut Report,
+    ) -> Result<()> {
+        let Some(bound) = approval.head_sha.clone() else {
+            return Ok(());
+        };
+        let landed = self.sources.forge.is_ancestor(project, &bound, head);
+        let (finish, result) = match landed {
+            Ok(true) => (
+                Finish::Succeeded,
+                json!({"sha": bound, "default_head": head, "resolved_by": "reconcile"}),
+            ),
+            Ok(false) => (
+                Finish::Failed,
+                json!({"error": format!("{bound} is not on {} ({head})", project.default_branch), "resolved_by": "reconcile"}),
+            ),
+            Err(error) => {
+                report.error(&format!("ancestry on {}", project.id), &error);
+                return Ok(());
             }
-            if run_head != head
-                && !self
-                    .sources
-                    .forge
-                    .is_ancestor(project, &run_head, &head)
-                    .unwrap_or(false)
-            {
-                continue;
-            }
-            let card: Card = get(self.conn(), "card", &run.card_id)?;
-            if self.land_direct_covers(&card)? {
-                continue;
-            }
-            let breach_key = format!("reconcile:G10:{}:{run_head}", run.id);
-            if !self.key_used(&breach_key)? {
-                self.store.guard_breach(
-                    &self.ctx(now).with_key(breach_key),
-                    "G10",
-                    Some(&card.id),
-                    json!({"run_id": run.id, "branch": run.branch, "head": run_head, "default_head": head}),
-                )?;
-                report.repair(format!(
-                    "R19 run {} landed on {} without tiller land: G10 breach",
-                    run.id, project.default_branch
-                ));
-            }
-            let key = format!("reconcile:R07:direct:{}:{run_head}", run.id);
-            if self.recovery(
-                now,
-                &key,
-                NewAttention {
-                    card: card.id.clone(),
-                    run_id: Some(run.id.clone()),
-                    question: format!(
-                        "{} {} run {}: its head {run_head} is on {} ({head}) with no land_direct approval. Was that you? Close {} as landed?",
-                        card.display_id,
-                        run.role.short_name(),
-                        run.id,
-                        project.default_branch,
-                        card.display_id
-                    ),
-                    evidence: Self::json_text(json!({"r07_direct_run": run.id, "head": run_head, "default_head": head})),
-                    options: Some(json!([LANDED_BY_ME, LANDED_NOT_ME, KEEP_OPEN])),
-                    ..NewAttention::default()
-                },
-            )? {
-                report.repair(format!("R07 run {} landed outside tiller land: recovery item on {}", run.id, card.display_id));
-            }
+        };
+        self.store
+            .approval_finish(&self.ctx(now), &approval.id, finish, result)?;
+        report.repair(format!(
+            "R08 uncertain land_direct {} resolved from the default branch: {finish:?}",
+            approval.id
+        ));
+        // A `failed` one goes to the developer from
+        // [`Self::failed_executions`], later in this pass.
+        Ok(())
+    }
+
+    /// R07 for one run of [`Self::default_branch`]: a head the run moved
+    /// onto the default branch with no `land_direct` that covers it.
+    fn direct_run(
+        &mut self,
+        run: Run,
+        project: &Project,
+        head: &str,
+        now: Timestamp,
+        report: &mut Report,
+    ) -> Result<()> {
+        let Some(path) = run.worktree_path.clone() else {
+            return Ok(());
+        };
+        let scan = self.scan_of(Path::new(&path), project);
+        let Some(run_head) = scan.head_sha.clone() else {
+            return Ok(());
+        };
+        // A worktree still at its base has landed nothing, and one at the
+        // default head with no known base is a fresh checkout, not a
+        // landing: only a head the run moved past its base counts.
+        if run.base_sha.as_deref() == Some(run_head.as_str()) {
+            return Ok(());
+        }
+        if run_head == head && run.base_sha.is_none() {
+            return Ok(());
+        }
+        if run_head != head
+            && !self
+                .sources
+                .forge
+                .is_ancestor(project, &run_head, head)
+                .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        let card: Card = get(self.conn(), "card", &run.card_id)?;
+        if self.land_direct_covers(&card)? {
+            return Ok(());
+        }
+        if self.breach(
+            now,
+            format!("reconcile:G10:{}:{run_head}", run.id),
+            "G10",
+            &card.id,
+            json!({"run_id": run.id, "branch": run.branch, "head": run_head, "default_head": head}),
+            report,
+        ).written() {
+            report.repair(format!(
+                "R19 run {} landed on {} without tiller land: G10 breach",
+                run.id, project.default_branch
+            ));
+        }
+        let key = format!("reconcile:R07:direct:{}:{run_head}", run.id);
+        if self.recovery(
+            now,
+            &key,
+            NewAttention {
+                card: card.id.clone(),
+                run_id: Some(run.id.clone()),
+                question: format!(
+                    "{} {} run {}: its head {run_head} is on {} ({head}) with no land_direct approval. Was that you? Close {} as landed?",
+                    card.display_id,
+                    run.role.short_name(),
+                    run.id,
+                    project.default_branch,
+                    card.display_id
+                ),
+                evidence: Self::json_text(json!({"r07_direct_run": run.id, "head": run_head, "default_head": head})),
+                options: Some(json!([LANDED_BY_ME, LANDED_NOT_ME, KEEP_OPEN])),
+                ..NewAttention::default()
+            },
+        )? {
+            report.repair(format!("R07 run {} landed outside tiller land: recovery item on {}", run.id, card.display_id));
         }
         Ok(())
     }
@@ -767,15 +930,23 @@ impl Reconciler {
             let evidence: Value = serde_json::from_str(item.evidence.as_deref().unwrap_or("{}"))
                 .unwrap_or(Value::Null);
             if landed && lower.contains("not me") {
-                let breach_key = format!("reconcile:R07:not-me:{}", item.id);
-                if !self.key_used(&breach_key)? {
-                    self.store.guard_breach(
-                        &self.ctx(now).with_key(breach_key),
-                        "G10",
-                        Some(&card.id),
-                        json!({"attention_id": item.id, "answer": answer, "evidence": evidence}),
-                    )?;
-                    report.repair(format!("R07 {}: the owner says the merge was not theirs: unauthorized-action trigger", card.display_id));
+                match self.breach(
+                    now,
+                    format!("reconcile:R07:not-me:{}", item.id),
+                    "G10",
+                    &card.id,
+                    json!({"attention_id": item.id, "answer": answer, "evidence": evidence}),
+                    report,
+                ) {
+                    Breach::Written => report.repair(format!(
+                        "R07 {}: the owner says the merge was not theirs: unauthorized-action trigger",
+                        card.display_id
+                    )),
+                    Breach::Recorded => {}
+                    // The breach is not recorded yet: the card stays open,
+                    // so the next pass reads this answer and tries again.
+                    // A closed card's answer is never read again.
+                    Breach::Failed => continue,
                 }
             }
             let outcome = if landed {

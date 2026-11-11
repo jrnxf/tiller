@@ -10,6 +10,7 @@ use std::process::Command;
 
 use common::{Out, World, snap};
 use serde_json::{Value, json};
+use tiller_herdr::testing::gone;
 
 const PROPOSAL: &str = "01JC00000000000000000000P1";
 const OTHER: &str = "01JC00000000000000000000P2";
@@ -409,6 +410,107 @@ fn an_unfinished_retro_runs_again() {
     );
 }
 
+/// A dry run claims nothing and writes nothing of the real run: an
+/// unfinished retro keeps the failed run's output, where the warning tells
+/// the owner to look first.
+#[test]
+fn a_dry_run_keeps_the_failed_runs_output() {
+    let (world, _fake, retro) = curator_world("#!/bin/sh\necho 'the reason it failed'\nexit 3\n");
+    let ran = world.must(&["retro", "run", &retro]);
+    assert_eq!(ran.data()["retro"]["outcome"], "unfinished", "{}", ran.json);
+    let scratch = world.dir.path().join("scratch/retros").join(&retro);
+    let output = std::fs::read_to_string(scratch.join("output.json")).unwrap();
+    assert!(output.contains("the reason it failed"), "{output}");
+
+    let dry = world.must(&["retro", "run", &retro, "--dry-run"]);
+    assert_eq!(dry.data()["dry_run"], true);
+    assert_eq!(
+        std::fs::read_to_string(scratch.join("output.json")).unwrap(),
+        output
+    );
+    // The dry run's launch files are still there to read.
+    let prompt = std::fs::read_to_string(dry.data()["prompt"].as_str().unwrap()).unwrap();
+    assert!(prompt.starts_with("# Curator"), "{prompt}");
+    assert_ne!(
+        std::path::Path::new(dry.data()["prompt"].as_str().unwrap()).parent(),
+        Some(scratch.as_path()),
+        "{}",
+        dry.json
+    );
+}
+
+/// An unfinished end is stamped when the run ended, not when it was
+/// claimed: Memory and Health show that time.
+#[test]
+fn an_unfinished_run_ends_at_the_time_it_ended() {
+    let (world, _fake, retro) = curator_world("#!/bin/sh\nsleep 1\nexit 3\n");
+    let ran = world.must(&["retro", "run", &retro]);
+    let row = &ran.data()["retro"];
+    assert_eq!(row["outcome"], "unfinished", "{}", ran.json);
+    let started = row["curator_started_at"].as_str().unwrap().to_owned();
+    let finished = row["finished_at"].as_str().unwrap().to_owned();
+    let millis = |at: &str| at.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+    assert!(
+        millis(&finished) - millis(&started) >= 1000,
+        "finished {finished}, started {started}"
+    );
+}
+
+/// A curator that cannot be started says why in the retro itself, with
+/// the hint, so the owner need not read a log.
+#[test]
+fn a_run_that_cannot_start_says_why_in_the_retro() {
+    let (world, fake, retro) = curator_world(&finishing_curator());
+    std::fs::remove_file(&fake).unwrap();
+    let failed = world.run(&["retro", "run", &retro]);
+    assert_ne!(failed.code, 0, "{}", failed.json);
+    let shown = world.must(&["retro", "show", &retro]);
+    let learning = shown.data()["retro"]["learning"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        learning.starts_with("the curator could not be started: cannot start "),
+        "{learning}"
+    );
+    assert!(
+        learning.ends_with("; set spawn.claude in config.toml"),
+        "{learning}"
+    );
+}
+
+/// When the run cannot start and the retro cannot be marked unfinished
+/// either, the error still names why the run failed, with its hint.
+#[test]
+fn a_run_that_cannot_start_keeps_its_cause_when_the_end_fails_too() {
+    let (world, fake, retro) = curator_world(&finishing_curator());
+    std::fs::remove_file(&fake).unwrap();
+    world
+        .store()
+        .conn()
+        .execute_batch(
+            "CREATE TRIGGER no_unfinished BEFORE UPDATE OF outcome ON retros
+             WHEN NEW.outcome = 'unfinished'
+             BEGIN SELECT RAISE(ABORT, 'the test refuses the end'); END;",
+        )
+        .unwrap();
+    let failed = world.run(&["retro", "run", &retro]);
+    assert_ne!(failed.code, 0, "{}", failed.json);
+    let error = &failed.json["error"];
+    let message = error["message"].as_str().unwrap();
+    assert!(message.starts_with("cannot start "), "{}", failed.json);
+    assert!(
+        message.contains("the test refuses the end"),
+        "{}",
+        failed.json
+    );
+    assert_eq!(
+        error["hint"], "set spawn.claude in config.toml",
+        "{}",
+        failed.json
+    );
+}
+
 #[test]
 fn a_refused_run_leaves_the_running_curators_files_alone() {
     let (world, _fake, retro) = curator_world(&finishing_curator());
@@ -476,17 +578,6 @@ fn a_run_that_cannot_start_leaves_the_retro_ready_to_run_again() {
     );
 }
 
-/// Whether `pid` has exited: no such process, or one only waiting to be
-/// reaped.
-fn gone(pid: &str) -> bool {
-    let out = Command::new("ps")
-        .args(["-o", "stat=", "-p", pid])
-        .output()
-        .unwrap();
-    let stat = String::from_utf8_lossy(&out.stdout);
-    stat.trim().is_empty() || stat.trim_start().starts_with('Z')
-}
-
 fn wait_for(what: impl Fn() -> bool) -> bool {
     let started = std::time::Instant::now();
     while started.elapsed() < std::time::Duration::from_secs(10) {
@@ -506,25 +597,7 @@ fn an_interrupted_run_stops_the_curator_and_what_it_started() {
         "#!/bin/sh\nsleep 300 &\necho $! > \"$(dirname \"$0\")/grandchild.pid\"\n\
          echo $$ > \"$(dirname \"$0\")/curator.pid\"\nwait\n",
     );
-    let tiller = Command::new(env!("CARGO_BIN_EXE_tiller"))
-        .env("TILLER_HOME", world.home())
-        // The environment `World` gives the owner, built here because the
-        // run must not block the test.
-        .env("CLAUDE_CONFIG_DIR", world.dir.path().join("claude"))
-        .env("TILLER_TEST_OWNER", "1")
-        .env_remove("TILLER_DB")
-        .env_remove("TILLER_SESSION_ID")
-        .env_remove("TILLER_RUN_ID")
-        .env_remove("TILLER_SSH")
-        .env_remove("TILLER_GH")
-        .env_remove("CLAUDECODE")
-        .env_remove("SSH_CONNECTION")
-        .args(["--json", "retro", "run", &retro])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+    let tiller = world.spawn(&["retro", "run", &retro]);
     let pid_file = |name: &str| world.dir.path().join(name);
     assert!(
         wait_for(|| pid_file("curator.pid").exists() && pid_file("grandchild.pid").exists()),
@@ -565,6 +638,48 @@ fn an_interrupted_run_stops_the_curator_and_what_it_started() {
             .contains("interrupted"),
         "{out}"
     );
+}
+
+/// A Ctrl-C that comes while tiller records the curator's end, here
+/// waiting on a busy database, does not cut that record: the retro ends
+/// `unfinished` and can run again at once, not only after its claim runs
+/// out.
+#[test]
+fn a_ctrl_c_while_the_end_is_recorded_still_records_it() {
+    use std::os::unix::process::ExitStatusExt;
+    let (world, _fake, retro) = curator_world(
+        "#!/bin/sh\necho $$ > \"$(dirname \"$0\")/curator.pid\"\n\
+         while [ ! -e \"$(dirname \"$0\")/go\" ]; do sleep 0.05; done\nexit 3\n",
+    );
+    let tiller = world.spawn(&["retro", "run", &retro]);
+    let pid_file = world.dir.path().join("curator.pid");
+    assert!(
+        wait_for(|| std::fs::read_to_string(&pid_file).is_ok_and(|s| s.ends_with('\n'))),
+        "the stand-in curator never started"
+    );
+    let curator = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .to_owned();
+    // Hold the database, so tiller waits to record the end.
+    let lock = rusqlite::Connection::open(world.db()).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    std::fs::write(world.dir.path().join("go"), "").unwrap();
+    assert!(wait_for(|| gone(&curator)), "the curator did not end");
+    // Past tiller's 200 ms look at the curator, so it waits on the lock.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let sent = Command::new("kill")
+        .args(["-INT", &tiller.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success());
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    lock.execute_batch("ROLLBACK").unwrap();
+    drop(lock);
+    let output = tiller.wait_with_output().unwrap();
+    assert_eq!(output.status.signal(), None, "{:?}", output.status);
+    let out: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(out["data"]["retro"]["outcome"], "unfinished", "{out}");
 }
 
 #[test]
@@ -783,6 +898,8 @@ fn the_eval_runner_appends_the_candidate_and_records_the_run() {
         "#!/bin/sh\nset -e\n[ \"$1\" = --split ] && [ \"$2\" = holdout ] && [ \"$3\" = --candidate ] || exit 9\n\
          grep -q 'say which branch was pushed' \"$4\" || exit 8\n\
          [ \"$5\" = --out ] || exit 7\n\
+         echo \"holdout: 2 of 2 cases\"\n\
+         echo \"a note\" >&2\n\
          mkdir -p \"$6/sealed\"\n\
          printf '%s' '{\"aggregates\":{\"casesTotal\":2,\"casesPassed\":2,\"overallScore\":0.9},\"costUsd\":0.4,\"partial\":false}' > \"$6/sealed/result.json\"\n",
     )
@@ -824,6 +941,11 @@ fn the_eval_runner_appends_the_candidate_and_records_the_run() {
             .as_str()
             .unwrap()
             .ends_with("sealed/result.json")
+    );
+    // What the runner printed is in the run's log, not in tiller's answer.
+    assert_eq!(
+        std::fs::read_to_string(out.join("runner.log")).unwrap(),
+        "holdout: 2 of 2 cases\na note\n"
     );
     assert_eq!(world.must(&["learn", "gate", PROPOSAL]).data()["ok"], true);
 

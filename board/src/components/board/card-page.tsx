@@ -62,7 +62,15 @@ import {
   UserIcon,
   WarnIcon,
 } from "./icons";
-import { PausedNote, RunDialogs, RunMenu, runStateOf, useGoOn, useResumeSession } from "./run-menu";
+import {
+  PausedNote,
+  ResumedNote,
+  RunDialogs,
+  RunMenu,
+  runStateOf,
+  useGoOn,
+  useResumeSession,
+} from "./run-menu";
 import type { RunDialog, RunTarget } from "./run-menu";
 import { KindLabel, ModelChip } from "./tile";
 import { BugTriage } from "./triage";
@@ -262,6 +270,8 @@ function RunCard({ run, owner, name }: { run: CardRun; owner: string | undefined
       ) : null}
       {local && pause && target.state === "paused" ? (
         <PausedNote pause={pause} receiptKey={goOn.sent} />
+      ) : local && goOn.sent ? (
+        <ResumedNote receiptKey={goOn.sent} />
       ) : null}
       {local ? (
         <RunDialogs

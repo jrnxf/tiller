@@ -156,3 +156,50 @@ fn backup_restore_export_and_migrate_commands() {
         ],
     );
 }
+
+/// R11: a path the shell passes need not be UTF-8, and the migration lock's
+/// holder line must not panic on one. `tiller --db <path>` on an old
+/// database whose name is not UTF-8 refuses with the reason: the manifest
+/// cannot record the pre-migration copy's name. It writes no copy, leaves
+/// the database as it was and lets the lock go.
+#[cfg(unix)]
+#[test]
+fn an_open_of_a_db_path_that_is_not_utf8_refuses_and_does_not_panic() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let world = World::initialized();
+    let old = tiller_core::migrate::LATEST - 1;
+    world.must(&["migrate", "down", "--to", &old.to_string()]);
+    let path = world.home().join(OsStr::from_bytes(b"state-\xff.db"));
+    std::fs::rename(world.db(), &path).unwrap();
+    let before: Vec<_> = std::fs::read_dir(world.home())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+
+    let out = world.run_os(&[OsStr::new("--db"), path.as_os_str(), OsStr::new("board")]);
+    assert_eq!(out.code, 5, "{}", out.json);
+    assert!(
+        out.json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not UTF-8"),
+        "{}",
+        out.json
+    );
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(tiller_core::migrate::current_version(&conn).unwrap(), old);
+    drop(conn);
+    for entry in std::fs::read_dir(world.home()).unwrap() {
+        let name = entry.unwrap().file_name();
+        assert!(
+            before.contains(&name) || name.as_bytes().ends_with(b".migrate.lock"),
+            "{name:?} was written"
+        );
+    }
+
+    // Under a UTF-8 name the same database migrates.
+    std::fs::rename(&path, world.db()).unwrap();
+    world.must(&["board"]);
+}

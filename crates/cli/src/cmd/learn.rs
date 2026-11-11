@@ -53,7 +53,8 @@ pub enum RetroCmd {
 pub struct RetroRun {
     /// A retro id, or a card reference for its newest retro
     pub retro: String,
-    /// Write the launch files and print the command without running it
+    /// Write the launch files in <retro>.dry-run beside the run's scratch directory and print
+    /// the command without running it
     #[arg(long)]
     pub dry_run: bool,
 }
@@ -339,7 +340,11 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
         // A dry run claims nothing but is refused by the same rule.
         learning::check_start(&retro, app.ctx().now, timeout_minutes(&config))?;
         let session_id = new_session_id()?;
-        let launch = prepare(&tools, &config, &store, &retro, &session_id)?;
+        // Its launch goes beside the real scratch directory, which may hold
+        // an unfinished run's `output.json`: the warning sends the owner
+        // there first.
+        let scratch = scratch_of(&tools, &retro.id).with_file_name(format!("{}.dry-run", retro.id));
+        let launch = prepare(&tools, &config, &store, &retro, &session_id, &scratch)?;
         return Ok(Outcome::read(json!({
             "retro": retro.id,
             "argv": launch.argv,
@@ -359,18 +364,17 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
             format!("cannot watch for interrupts: {error}"),
         )
     })?;
-    let ctx = app.ctx();
-    let claimed = claim(&tools, &config, &mut store, &ctx, &retro.id)?;
-    let ran = match launch(&claimed, &interrupt) {
+    let claimed = claim(&tools, &config, &mut store, &app.ctx(), &retro.id)?;
+    let ran = launch(&claimed, &interrupt);
+    // The end is its own write, at the time the run ended: the claim's
+    // context holds the claim's time and key.
+    let ctx = app.ctx().unkeyed();
+    let ran = match ran {
         Ok(ran) => ran,
         Err(failure) => {
-            unfinished(
-                &mut store,
-                &ctx,
-                &claimed.retro.value.id,
-                "the curator could not be started",
-            )?;
-            return Err(failure);
+            let id = &claimed.retro.value.id;
+            let what = "the curator could not be started";
+            return Err(end_unstarted(&mut store, &ctx, id, what, failure).0);
         }
     };
     let ended = end(
@@ -399,7 +403,7 @@ fn timeout_minutes(config: &Learning) -> i64 {
     i64::try_from(config.curator_timeout_minutes).unwrap_or(i64::MAX)
 }
 
-/// Writes the curator's launch files for `retro` in a fresh scratch
+/// Writes the curator's launch files for `retro` in a fresh `scratch`
 /// directory: a second run of the same retro gets its own.
 fn prepare(
     tools: &Tools,
@@ -407,8 +411,8 @@ fn prepare(
     store: &Store,
     retro: &Retro,
     session_id: &str,
+    scratch: &Path,
 ) -> Result<curator::Launch, Failure> {
-    let scratch = scratch_of(tools, &retro.id);
     let brief = brief(store, retro)?;
     let brief_text = format!(
         "Retro `{}` of card {}.\n\n```json\n{}\n```\n",
@@ -417,11 +421,11 @@ fn prepare(
         serde_json::to_string_pretty(&brief)?
     );
     if scratch.exists() {
-        let _ = std::fs::remove_dir_all(&scratch);
+        let _ = std::fs::remove_dir_all(scratch);
     }
     let mut launch = curator::write(&curator::LaunchSpec {
         retro_id: &retro.id,
-        scratch: &scratch,
+        scratch,
         tiller: tools.tiller(),
         tiller_home: tools.tiller_home(),
         claude: &tools.config.spawn.claude,
@@ -461,29 +465,88 @@ pub(crate) fn claim(
     store: &mut Store,
     ctx: &tiller_core::Ctx,
     retro: &str,
-) -> Result<Claimed, Failure> {
+) -> Result<Claimed, ClaimError> {
     let session_id = new_session_id()?;
-    let claimed = store.retro_start(ctx, retro, Some(&session_id), timeout_minutes(config))?;
-    let launch = match prepare(tools, config, store, &claimed.value, &session_id) {
+    let claimed = store
+        .retro_start(ctx, retro, Some(&session_id), timeout_minutes(config))
+        .map_err(ClaimError::State)?;
+    if claimed.replayed {
+        // A replayed key claimed this retro before. Its run was launched
+        // then, so nothing is prepared or launched again: preparing would
+        // clear the scratch directory a curator may still be using.
+        return Err(Failure::refused(format!(
+            "retro {} was already claimed under this key; it is not run again",
+            claimed.value.id
+        ))
+        .into());
+    }
+    let scratch = scratch_of(tools, &claimed.value.id);
+    let launch = match prepare(tools, config, store, &claimed.value, &session_id, &scratch) {
         Ok(launch) => launch,
         Err(failure) => {
-            unfinished(
-                store,
-                ctx,
-                &claimed.value.id,
-                "the curator could not be prepared",
-            )?;
-            return Err(failure);
+            // The end is its own write, at the time it ended. The claim
+            // stored the caller's key, so the end is unkeyed: the same key
+            // on another write would be refused.
+            let end = tiller_core::Ctx {
+                now: tiller_core::Timestamp::now(),
+                ..ctx.unkeyed()
+            };
+            let what = "the curator could not be prepared";
+            let id = &claimed.value.id;
+            let notes = format!(
+                "{}; {id} stays claimed until its timeout passes",
+                note(what, &failure)
+            );
+            return Err(match end_unstarted(store, &end, id, what, failure) {
+                (failure, None) => failure.into(),
+                (failure, Some(error)) => ClaimError::Unended {
+                    error: Box::new(error),
+                    failure,
+                    notes,
+                },
+            });
         }
     };
     Ok(Claimed {
-        scratch: scratch_of(tools, &claimed.value.id),
+        scratch,
         retro: claimed,
         session_id,
         argv: launch.argv,
         env: launch.env,
-        timeout_minutes: config.curator_timeout_minutes,
+        // The curator is cut after at least a minute.
+        timeout_minutes: config.curator_timeout_minutes.max(1),
     })
+}
+
+/// Why a claim failed: the store's own error, which the daemon checks for
+/// damage, or any other refusal.
+pub(crate) enum ClaimError {
+    State(tiller_core::Error),
+    Refused(Failure),
+    /// The run could not be prepared and its retro could not be ended
+    /// `unfinished` either: `failure` names both, for the CLI. `error` is the
+    /// store's own, which the daemon checks for damage, and `notes` the
+    /// cause and hint it shows after that error.
+    Unended {
+        error: Box<tiller_core::Error>,
+        failure: Failure,
+        notes: String,
+    },
+}
+
+impl From<Failure> for ClaimError {
+    fn from(failure: Failure) -> Self {
+        Self::Refused(failure)
+    }
+}
+
+impl From<ClaimError> for Failure {
+    fn from(error: ClaimError) -> Self {
+        match error {
+            ClaimError::State(error) => error.into(),
+            ClaimError::Refused(failure) | ClaimError::Unended { failure, .. } => failure,
+        }
+    }
 }
 
 /// Runs a claimed retro's curator until it exits, its timeout passes or
@@ -494,7 +557,7 @@ pub(crate) fn launch(claimed: &Claimed, interrupt: &Interrupt) -> Result<Ran, Fa
         &claimed.argv,
         &claimed.env,
         &claimed.scratch,
-        Duration::from_secs(claimed.timeout_minutes.max(1) * 60),
+        Duration::from_secs(claimed.timeout_minutes * 60),
         interrupt,
     )
 }
@@ -529,8 +592,11 @@ pub(crate) fn end(
     }
     let note = match (&ran.stopped, ran.exit) {
         (Some(Stopped::Cut), _) => format!(
-            "curator cut after {} minutes without finishing the retro",
-            claimed.timeout_minutes
+            "curator cut after {} without finishing the retro",
+            match claimed.timeout_minutes {
+                1 => "1 minute".to_owned(),
+                minutes => format!("{minutes} minutes"),
+            }
         ),
         (Some(Stopped::Interrupted), _) => {
             format!("curator stopped: {interrupted} before the retro was finished")
@@ -549,6 +615,41 @@ pub(crate) fn end(
     })
 }
 
+/// The learning of a run that never reached its curator: `what` happened,
+/// with the cause and its hint, so the owner sees them where the retro is
+/// shown, not only in a log.
+fn note(what: &str, failure: &Failure) -> String {
+    match &failure.hint {
+        Some(hint) => format!("{what}: {}; {hint}", failure.message),
+        None => format!("{what}: {}", failure.message),
+    }
+}
+
+/// Ends `retro` `unfinished` after `failure` kept its run from reaching the
+/// curator (`what` says how), and returns the failure to report. When that
+/// end fails too, the failure keeps its cause and hint, and its message adds
+/// the store's error and that the retro stays claimed until its timeout
+/// passes; the store's error comes back beside it, for the daemon to check
+/// for damage.
+fn end_unstarted(
+    store: &mut Store,
+    ctx: &tiller_core::Ctx,
+    retro: &str,
+    what: &str,
+    mut failure: Failure,
+) -> (Failure, Option<tiller_core::Error>) {
+    match unfinished(store, ctx, retro, &note(what, &failure)) {
+        Ok(_) => (failure, None),
+        Err(error) => {
+            failure.message = format!(
+                "{}; {retro} also could not be ended unfinished ({error}), so it stays claimed until its timeout passes",
+                failure.message
+            );
+            (failure, Some(error))
+        }
+    }
+}
+
 /// Ends a claimed retro whose curator did not finish it as `unfinished`,
 /// with `note` as its learning, so the owner can run it again.
 pub(crate) fn unfinished(
@@ -556,7 +657,7 @@ pub(crate) fn unfinished(
     ctx: &tiller_core::Ctx,
     retro: &str,
     note: &str,
-) -> Result<Retro, Failure> {
+) -> tiller_core::Result<Retro> {
     let finished = store.retro_finish(
         ctx,
         None,
@@ -580,7 +681,7 @@ pub(crate) fn board_run(
     store: &mut Store,
     ctx: &tiller_core::Ctx,
     retro: &str,
-) -> Result<tiller_daemon::api::CuratorRun, Failure> {
+) -> Result<tiller_daemon::api::CuratorRun, ClaimError> {
     let config = learning_config(app)?;
     let tools = Tools::load(app)?;
     let claimed = claim(&tools, &config, store, ctx, retro)?;
@@ -597,13 +698,9 @@ pub(crate) fn board_run(
                     .map(|ended| ended.retro)
                     .map_err(|failure| failure.message.clone()),
                 Err(failure) => {
-                    unfinished(
-                        &mut store,
-                        &ctx,
-                        &claimed.retro.value.id,
-                        "the curator could not be started",
-                    )
-                    .map_err(|failure| failure.message.clone())?;
+                    let id = &claimed.retro.value.id;
+                    let what = "the curator could not be started";
+                    let (failure, _) = end_unstarted(&mut store, &ctx, id, what, failure);
                     Err(failure.message.clone())
                 }
             }
@@ -631,6 +728,10 @@ enum Stopped {
     /// Waiting for it failed, with this error.
     Lost(String),
 }
+
+/// How long a stopped curator's output is read for: its group is killed,
+/// so only a process that left the group can keep the pipe open longer.
+const STOPPED_OUTPUT_WAIT: Duration = Duration::from_secs(1);
 
 /// Runs the curator in a process group of its own and stops the whole
 /// group when the curator exits, at `timeout`, when `interrupt` is caught,
@@ -681,14 +782,14 @@ fn run_with_timeout(
         process::Ended::Failed(error) => (None, Some(Stopped::Lost(error.to_string()))),
     };
     // A process that left the curator's group can still hold stdout open
-    // past its exit, so the read shares the deadline; after a stop it is
-    // not waited for at all.
-    let stdout = match stopped {
-        None => reader
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .unwrap_or_default(),
-        Some(_) => String::new(),
+    // past its exit, so the read shares the deadline. After a stop the group
+    // is gone and the pipe ends at once, so what the curator wrote before it
+    // is kept, waiting [`STOPPED_OUTPUT_WAIT`] at most.
+    let wait = match stopped {
+        None => deadline.saturating_duration_since(Instant::now()),
+        Some(_) => STOPPED_OUTPUT_WAIT,
     };
+    let stdout = reader.recv_timeout(wait).unwrap_or_default();
     Ok(Ran {
         exit,
         stopped,
@@ -931,22 +1032,13 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
+    use tiller_herdr::testing::{eventually, gone};
+
     use super::*;
 
     /// An interrupt nothing raises.
     fn idle() -> Interrupt {
         Interrupt::flag(Arc::new(AtomicBool::new(false)))
-    }
-
-    /// Whether `pid` has exited: no such process, or one only waiting to be
-    /// reaped.
-    fn gone(pid: &str) -> bool {
-        let out = Command::new("ps")
-            .args(["-o", "stat=", "-p", pid])
-            .output()
-            .unwrap();
-        let stat = String::from_utf8_lossy(&out.stdout);
-        stat.trim().is_empty() || stat.trim_start().starts_with('Z')
     }
 
     #[test]
@@ -961,12 +1053,7 @@ mod tests {
             run_with_timeout(&argv, &[], dir.path(), Duration::from_millis(500), &idle()).unwrap();
         assert!(started.elapsed() < Duration::from_secs(5));
         let grandchild = std::fs::read_to_string(&file).unwrap().trim().to_owned();
-        let mut stopped = gone(&grandchild);
-        let waited = Instant::now();
-        while !stopped && waited.elapsed() < Duration::from_secs(5) {
-            std::thread::sleep(Duration::from_millis(20));
-            stopped = gone(&grandchild);
-        }
+        let stopped = eventually(|| gone(&grandchild));
         let _ = Command::new("kill").args(["-KILL", &grandchild]).status();
         assert_eq!((ran.exit, ran.stopped), (None, Some(Stopped::Cut)));
         assert!(stopped, "the grandchild {grandchild} outlived the cut");
@@ -984,5 +1071,21 @@ mod tests {
             run_with_timeout(&argv, &[], dir.path(), Duration::from_secs(60), &idle()).unwrap();
         assert_eq!((ran.exit, ran.stopped), (Some(2), None));
         assert_eq!(ran.stdout.trim(), "{\"done\":true}");
+    }
+
+    /// What a curator wrote before its cut is kept, for the owner to read
+    /// before running it again.
+    #[test]
+    fn a_cut_curator_keeps_what_it_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv = [
+            "sh".to_owned(),
+            "-c".to_owned(),
+            "echo 'half way'; exec sleep 300".to_owned(),
+        ];
+        let ran =
+            run_with_timeout(&argv, &[], dir.path(), Duration::from_millis(500), &idle()).unwrap();
+        assert_eq!(ran.stopped, Some(Stopped::Cut));
+        assert_eq!(ran.stdout.trim(), "half way");
     }
 }

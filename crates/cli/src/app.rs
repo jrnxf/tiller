@@ -234,14 +234,19 @@ impl From<Error> for Failure {
                 current_rev,
                 sent_rev,
                 field,
+                edited_at,
             } => {
                 failure.entity = Some(entity.to_owned());
                 failure.id = Some(id);
-                failure.current = Some(json!({
+                let mut current = json!({
                     "rev": current_rev,
                     "sent_rev": sent_rev,
                     "field": field.map(|(name, value)| json!({"name": name, "value": value})),
-                }));
+                });
+                if let Some(at) = edited_at {
+                    current["edited_at"] = json!(at);
+                }
+                failure.current = Some(current);
                 failure.hint = Some(format!("read the {entity} again and retry with its rev"));
             }
             Error::Refused { entity, id, .. } => {
@@ -415,16 +420,16 @@ impl App {
                         .into(),
                 })
                 .hint(format!(
-                    "run tiller as one command on its own, typed as `{packaged} <command>`: not after cd, in a pipe, after && or with a redirect. If it already ran that way, the Tiller home has no state.db yet (tiller init)"
+                    "run tiller as one command on its own, typed as `{packaged} <command>`: not after cd, in a pipe, after && or with a redirect. If it already ran that way, the Tiller home has no state.db yet, and the owner must {}",
+                    tiller_core::RUN_INIT
                 )));
             }
             return Err(Failure::from(Error::Refused {
                 entity: "host",
                 id: String::new(),
-                fact: "state.db is not initialized; run tiller owner set tiller, then tiller init"
-                    .into(),
+                fact: tiller_core::not_initialized(),
             })
-            .hint(tiller_daemon::api::INIT_HINT));
+            .hint(tiller_core::INIT_HINT));
         }
         Ok(Store::open(&self.db)?)
     }

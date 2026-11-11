@@ -163,7 +163,10 @@ fn poll_changes<S>(
         };
         let now = probe(held);
         if now.is_none() {
+            // `data_version` is per connection, so the next store's first
+            // value is not comparable with this one's: start over.
             store = None;
+            version = None;
         } else if now != version {
             version = now;
             if changed(held) {
@@ -408,6 +411,38 @@ mod tests {
             },
         );
         assert_eq!(naps.take(), vec![super::POLL; 5]);
+    }
+
+    /// `PRAGMA data_version` is per connection: a reopened store's first
+    /// value says nothing about the dropped one's, so the pass after a
+    /// reopen counts as a change even when the two numbers happen to match.
+    #[test]
+    fn a_reopened_store_counts_as_a_change() {
+        use std::cell::{Cell, RefCell};
+        let passes = Cell::new(0_u32);
+        let changes = RefCell::new(Vec::new());
+        // Store 1 reads version 7, then its probe fails; store 2 also reads 7.
+        let opens = Cell::new(0_u32);
+        super::poll_changes(
+            || passes.get() >= 4,
+            || {
+                opens.set(opens.get() + 1);
+                Some(opens.get())
+            },
+            |store: &u32| {
+                passes.set(passes.get() + 1);
+                match (*store, passes.get()) {
+                    (1, 2) => None,
+                    _ => Some(7),
+                }
+            },
+            |store: &u32| {
+                changes.borrow_mut().push(*store);
+                false
+            },
+            |_| {},
+        );
+        assert_eq!(changes.into_inner(), vec![1, 2]);
     }
 
     use super::*;

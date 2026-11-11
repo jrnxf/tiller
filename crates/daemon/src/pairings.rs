@@ -4,7 +4,8 @@
 //!
 //! Unpair is `tiller peer remove` started by the board, through the same
 //! core path ([`peers::unpair`]): the host row stops being paired, then its
-//! key file is deleted. Revoke key is `tiller peer revoke`: the key ends at
+//! key file is deleted. A key file the delete missed is listed until an
+//! unpair of the label deletes it. Revoke key is `tiller peer revoke`: the key ends at
 //! once and the next frame signed with it is refused. Each side cuts the end
 //! it owns. Both need the owner cookie and are never forwarded: a pairing is
 //! the owner's, on the host that keeps it.
@@ -18,7 +19,8 @@ use tiller_core::state::peers;
 use utoipa::ToSchema;
 
 use crate::api::{
-    ApiResult, AppState, Done, body, guard, key, mutate, not_forwarded, owner_only, read,
+    ApiResult, AppState, Done, body, detached, guard, key, mutate, not_forwarded, owner_only, read,
+    writable,
 };
 use crate::dto::{ErrorBody, MutationResponse};
 
@@ -68,6 +70,9 @@ pub struct PeerList {
     pub paired: Vec<PairedPeer>,
     /// Oldest first, revoked keys too.
     pub accepted: Vec<AcceptedKey>,
+    /// The labels of hosts no longer paired whose key file is still here,
+    /// by label: an unpair whose delete failed. Unpair again deletes it.
+    pub key_files_left: Vec<String>,
 }
 
 fn accepted(key: &PeerKey) -> AcceptedKey {
@@ -89,27 +94,25 @@ pub(crate) async fn list(State(state): State<AppState>, headers: HeaderMap) -> A
     owner_only(&state, &headers).await?;
     let home = state.0.home.clone();
     let listed = read(&state, move |store| {
-        let paired = store
-            .paired_hosts()?
+        let paired = peers::paired(store, &home)?
             .into_iter()
-            .map(|host| {
-                let fingerprint = peers::key_path(&home, &host.label)
-                    .and_then(|path| peers::read_key_file(&path))
-                    .ok()
-                    .map(|file| peers::fingerprint(&file.public_key));
-                PairedPeer {
-                    scope: host
-                        .peer_scope
-                        .map(|scope| scope.to_string())
-                        .unwrap_or_default(),
-                    label: host.label,
-                    peer_host_id: host.peer_host_id,
-                    fingerprint,
-                }
+            .map(|host| PairedPeer {
+                label: host.label,
+                peer_host_id: host.peer_host_id,
+                scope: host
+                    .scope
+                    .map(|scope| scope.to_string())
+                    .unwrap_or_default(),
+                fingerprint: host.fingerprint,
             })
             .collect();
         let accepted = store.peer_keys()?.iter().map(accepted).collect();
-        Ok(PeerList { paired, accepted })
+        let key_files_left = peers::leftover_key_files(store, &home)?;
+        Ok(PeerList {
+            paired,
+            accepted,
+            key_files_left,
+        })
     })
     .await?;
     Ok(Json(listed))
@@ -117,9 +120,10 @@ pub(crate) async fn list(State(state): State<AppState>, headers: HeaderMap) -> A
 
 #[utoipa::path(delete, path = "/api/v1/peers/{label}", tag = "mutations", request_body = PairingEnd,
     params(("label" = String, Path, description = "The paired host's label")),
-    responses((status = 200, body = MutationResponse, description = "`data` is the host row, no longer paired; a host not paired is a no-op"),
+    responses((status = 200, body = MutationResponse, description = "`data` is the host row, no longer paired; a host not paired is a no-op that deletes a key file left behind. `warning` says when the row is unpaired but the key file was not deleted"),
               (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
+              (status = 503, body = ErrorBody, description = "`state.db` is read only")))]
 pub(crate) async fn unpair(
     State(state): State<AppState>,
     Path(label): Path<String>,
@@ -129,15 +133,24 @@ pub(crate) async fn unpair(
     guard(&state, &headers).await?;
     let request: PairingEnd = body(&bytes)?;
     not_forwarded(&state, request.host.as_deref(), "an unpair").await?;
-    let home = state.0.home.clone();
-    // One pairing change at a time, as Add a host holds it: an unpair never
-    // races a pairing of the same label for the row or its key file.
+    // Refused before the lock, so a bad key or a read-only `state.db` never
+    // waits behind an ssh pairing.
+    let key = key(&request.idempotency_key)?;
+    writable(&state)?;
+    // Its own task, as Add a host's: a browser that goes away does not drop
+    // the lock while the commit and the key file delete still run.
+    detached(unpair_alone(state, key, label)).await
+}
+
+/// One pairing change at a time, as Add a host holds it: an unpair never
+/// races a pairing of the same label for the row or its key file.
+async fn unpair_alone(state: AppState, key: String, label: String) -> ApiResult<MutationResponse> {
     let _alone = crate::peer::pair::PAIRING.lock().await;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| Done::of(peers::unpair(store, ctx, &home, &label)?),
-    )
+    let home = state.0.home.clone();
+    mutate(&state, key, move |store, ctx, _| {
+        let unpaired = peers::unpair(store, ctx, &home, &label)?;
+        Ok(Done::of(unpaired.applied)?.with_warning(unpaired.key_file_left))
+    })
     .await
 }
 
@@ -191,21 +204,7 @@ mod tests {
     /// `host-b` paired from this board, its key file written; `host-c`'s
     /// board accepted here. Returns the accepted key's id.
     fn paired(fleet: &mut Fleet) -> String {
-        fleet
-            .store
-            .peer_pair(
-                &owner(),
-                NewPairing {
-                    label: "host-b".into(),
-                    herdr_machine: None,
-                    scope: PeerScope::Act,
-                    peer_host_id: PEER.into(),
-                },
-            )
-            .unwrap();
-        let key = peers::generate_key().unwrap();
-        let path = peers::key_path(fleet.dir.path(), "host-b").unwrap();
-        peers::write_key_file(&path, &KeyFile::new("host-b", PeerScope::Act, &key)).unwrap();
+        paired_again(fleet);
         fleet
             .store
             .peer_accept(
@@ -222,6 +221,26 @@ mod tests {
             .unwrap()
             .value
             .id
+    }
+
+    /// `host-b` paired and its key file written, as `tiller peer add` leaves
+    /// them.
+    fn paired_again(fleet: &mut Fleet) {
+        fleet
+            .store
+            .peer_pair(
+                &owner(),
+                NewPairing {
+                    label: "host-b".into(),
+                    herdr_machine: None,
+                    scope: PeerScope::Act,
+                    peer_host_id: PEER.into(),
+                },
+            )
+            .unwrap();
+        let key = peers::generate_key().unwrap();
+        let path = peers::key_path(fleet.dir.path(), "host-b").unwrap();
+        peers::write_key_file(&path, &KeyFile::new("host-b", PeerScope::Act, &key)).unwrap();
     }
 
     async fn list(app: &Router, cookie: Option<&str>) -> Answer {
@@ -338,6 +357,154 @@ mod tests {
         );
         let unknown = send(&app, end("DELETE", "/api/v1/peers/host-z", "k-5", &headers)).await;
         assert_eq!(unknown.status, StatusCode::NOT_FOUND, "{}", unknown.body);
+    }
+
+    /// A bad idempotency key is refused at once, not after the pairing an
+    /// Add a host holds the lock for.
+    #[tokio::test]
+    async fn an_unpair_is_checked_before_it_waits_for_a_pairing() {
+        let mut fleet = Fleet::new();
+        paired(&mut fleet);
+        let home = fleet.dir.path().to_owned();
+        let app = app_with(&home, Assets::of::<Fixture>(), Damage::default());
+        let cookie = owner_cookie(&home);
+        let headers = [("cookie", cookie.as_str())];
+
+        let _pairing = crate::peer::pair::PAIRING.lock().await;
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            send(&app, end("DELETE", "/api/v1/peers/host-b", "", &headers)),
+        )
+        .await
+        .expect("an unpair with no key waited for the pairing lock");
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{}", answer.body);
+    }
+
+    /// An unpair runs in a task of its own: a client that goes away while
+    /// it waits for the lock does not stop it, and so never frees the lock
+    /// while the commit and the key file delete still run.
+    #[tokio::test]
+    async fn an_unpair_outlives_the_request_that_sent_it() {
+        let mut fleet = Fleet::new();
+        paired(&mut fleet);
+        let home = fleet.dir.path().to_owned();
+        let app = app_with(&home, Assets::of::<Fixture>(), Damage::default());
+        let cookie = owner_cookie(&home);
+        let headers = [("cookie", cookie.as_str())];
+        let key_file = peers::key_path(&home, "host-b").unwrap();
+
+        let pairing = crate::peer::pair::PAIRING.lock().await;
+        let gone = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            send(&app, end("DELETE", "/api/v1/peers/host-b", "k-1", &headers)),
+        )
+        .await;
+        assert!(gone.is_err(), "the unpair did not wait for the pairing");
+        drop(pairing);
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while key_file.exists() || !fleet.store.paired_hosts().unwrap().is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the unpair stopped with its request"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        // The lock is free again once the work is done.
+        let _again = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            crate::peer::pair::PAIRING.lock(),
+        )
+        .await
+        .expect("the unpair kept the pairing lock");
+    }
+
+    /// The row commits first. A key file the delete missed is a success with
+    /// a warning, stays listed, and an Unpair of the label deletes it.
+    #[tokio::test]
+    async fn a_key_file_left_by_an_unpair_is_listed_and_unpair_deletes_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut fleet = Fleet::new();
+        paired(&mut fleet);
+        let home = fleet.dir.path().to_owned();
+        let app = app_with(&home, Assets::of::<Fixture>(), Damage::default());
+        let cookie = owner_cookie(&home);
+        let headers = [("cookie", cookie.as_str())];
+        let key_file = peers::key_path(&home, "host-b").unwrap();
+        let dir = key_file.parent().unwrap().to_owned();
+        let path = "/api/v1/peers/host-b";
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let unpaired = send(&app, end("DELETE", path, "k-1", &headers)).await;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(unpaired.status, StatusCode::OK, "{}", unpaired.body);
+        let body: Value = serde_json::from_str(&unpaired.body).unwrap();
+        assert!(body["data"]["peer_scope"].is_null(), "{body}");
+        let warning = body["warning"].as_str().unwrap_or_default();
+        assert!(
+            warning.starts_with("host-b is unpaired, but its key file was not deleted"),
+            "{body}"
+        );
+        assert!(key_file.exists());
+        let listed: PeerList = serde_json::from_str(&list(&app, Some(&cookie)).await.body).unwrap();
+        assert!(listed.paired.is_empty());
+        assert_eq!(listed.key_files_left, ["host-b"]);
+
+        // The board's retry: a new key, a natural no-op on the row.
+        let retried = send(&app, end("DELETE", path, "k-2", &headers)).await;
+        assert_eq!(retried.status, StatusCode::OK, "{}", retried.body);
+        let body: Value = serde_json::from_str(&retried.body).unwrap();
+        assert!(body["warning"].is_null(), "{body}");
+        assert!(!key_file.exists());
+        let listed: PeerList = serde_json::from_str(&list(&app, Some(&cookie)).await.body).unwrap();
+        assert!(listed.key_files_left.is_empty());
+    }
+
+    /// A retry with the stored key is a replay: it does not delete the key
+    /// file a `tiller peer add` of the same label wrote since.
+    #[tokio::test]
+    async fn a_replayed_unpair_keeps_a_new_pairings_key_file() {
+        let mut fleet = Fleet::new();
+        paired(&mut fleet);
+        let home = fleet.dir.path().to_owned();
+        let app = app_with(&home, Assets::of::<Fixture>(), Damage::default());
+        let cookie = owner_cookie(&home);
+        let headers = [("cookie", cookie.as_str())];
+        let key_file = peers::key_path(&home, "host-b").unwrap();
+        let path = "/api/v1/peers/host-b";
+
+        let first = send(&app, end("DELETE", path, "k-1", &headers)).await;
+        assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+        assert!(!key_file.exists());
+        paired_again(&mut fleet);
+        let retry = send(&app, end("DELETE", path, "k-1", &headers)).await;
+        assert_eq!(retry.status, StatusCode::OK, "{}", retry.body);
+        let body: Value = serde_json::from_str(&retry.body).unwrap();
+        assert_eq!(body["replayed"], true, "{body}");
+        assert!(key_file.exists(), "the replay deleted the new key file");
+        assert_eq!(fleet.store.paired_hosts().unwrap().len(), 1);
+    }
+
+    /// The unpair runs in its own task, and its key stays bound to the
+    /// label: the same key on another label is refused, not replayed.
+    #[tokio::test]
+    async fn an_unpair_key_stays_bound_to_its_label() {
+        let mut fleet = Fleet::new();
+        paired(&mut fleet);
+        let home = fleet.dir.path().to_owned();
+        let app = app_with(&home, Assets::of::<Fixture>(), Damage::default());
+        let cookie = owner_cookie(&home);
+        let headers = [("cookie", cookie.as_str())];
+
+        let first = send(&app, end("DELETE", "/api/v1/peers/host-b", "k-1", &headers)).await;
+        assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+        let other = send(&app, end("DELETE", "/api/v1/peers/host-z", "k-1", &headers)).await;
+        assert_eq!(
+            other.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            other.body
+        );
     }
 
     /// Revoke key runs `tiller peer revoke`'s path: `peer.revoked`, and a

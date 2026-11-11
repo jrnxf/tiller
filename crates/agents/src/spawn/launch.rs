@@ -35,6 +35,9 @@ use crate::roles::{self, MCP_CONFIG, Placeholders, Role};
 /// What ends the role body in a prompt file and starts the brief.
 const BRIEF_HEADING: &str = "# Your brief\n\n";
 
+/// The file in a run's scratch that holds its brief alone.
+const BRIEF_FILE: &str = "brief.md";
+
 /// The first prompt a worker gets; the brief itself is in its instructions.
 pub const FIRST_PROMPT: &str = "Start on the brief at the end of your instructions.";
 
@@ -479,8 +482,9 @@ fn render(spec: &LaunchSpec<'_>) -> Result<Rendered, SpawnError> {
 
     let front = spec.role.frontmatter()?;
     let body = spec.role.prompt_body()?;
-    // The memory goes before the brief, so [`brief_of`] still finds the
-    // brief after the last part of the prompt.
+    // The memory goes before the brief. A relaunch reads the brief back
+    // from its own file ([`brief_in`]), never from this text, so a memory
+    // line can hold any heading.
     let mut prompt = format!("{}\n", body.trim_end());
     if !spec.memory.text.is_empty() {
         prompt.push_str(&format!("\n{}\n", spec.memory.text.trim_end()));
@@ -568,6 +572,9 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
         mode_note: rendered.mode_note,
     };
     write_new(&launch.prompt, rendered.prompt.as_bytes(), 0o600)?;
+    if let Some(brief) = spec.brief {
+        write_new(&dir.join(BRIEF_FILE), brief_bytes(brief).as_bytes(), 0o600)?;
+    }
     write_new(&launch.settings, &rendered.fragment, 0o600)?;
     write_new(&launch.mcp, MCP_CONFIG.as_bytes(), 0o600)?;
 
@@ -594,11 +601,26 @@ pub fn write(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
     Ok(launch)
 }
 
-/// The brief inside a prompt file [`write`] made, or `None` when the file
-/// has none (an orchestrator's).
-pub fn brief_of(prompt: &str) -> Option<&str> {
+/// The brief of the launch in `scratch`, or `None` when it has none (an
+/// orchestrator's) or the files are missing. [`write`] keeps the brief in
+/// its own `brief.md`, so the memory text in `prompt.md` cannot be taken
+/// for it. A run launched before `brief.md` existed has only `prompt.md`,
+/// whose brief follows the first brief heading. A `brief.md` that is there
+/// but cannot be read gives `None`, not that fallback.
+pub fn brief_in(scratch: &Path) -> Option<String> {
+    match fs::read_to_string(scratch.join(BRIEF_FILE)) {
+        Ok(brief) => return Some(brief.trim().to_owned()),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return None,
+        Err(_) => {}
+    }
+    let prompt = fs::read_to_string(scratch.join("prompt.md")).ok()?;
     let (_, brief) = prompt.split_once(BRIEF_HEADING)?;
-    Some(brief.trim())
+    Some(brief.trim().to_owned())
+}
+
+/// The bytes of `brief.md` for `brief`.
+fn brief_bytes(brief: &str) -> String {
+    format!("{}\n", brief.trim())
 }
 
 /// Replaces `path` with `bytes`, never leaving it half written.
@@ -616,7 +638,7 @@ fn replace(path: &Path, bytes: &[u8], mode: u32) -> Result<(), SpawnError> {
 /// A same-run relaunch: renders the prompt, the fragment and the MCP config
 /// again from the current binary and config, over the run's own files in
 /// `spec.scratch`, which must exist. `spec.brief` is the run's brief, read
-/// back with [`brief_of`], so the session keeps its task but not the hook
+/// back with [`brief_in`], so the session keeps its task but not the hook
 /// and command paths, the role prompt or the settings of its first launch.
 /// The script is `relaunch-<session>.sh`, as [`write_again`] names it.
 pub fn write_refreshed(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
@@ -639,6 +661,9 @@ pub fn write_refreshed(spec: &LaunchSpec<'_>) -> Result<Launch, SpawnError> {
         mode_note: rendered.mode_note,
     };
     replace(&launch.prompt, rendered.prompt.as_bytes(), 0o600)?;
+    if let Some(brief) = spec.brief {
+        replace(&dir.join(BRIEF_FILE), brief_bytes(brief).as_bytes(), 0o600)?;
+    }
     replace(&launch.settings, &rendered.fragment, 0o600)?;
     replace(&launch.mcp, MCP_CONFIG.as_bytes(), 0o600)?;
     let command = Command {
@@ -741,6 +766,24 @@ mod tests {
 
     const HELP_WITH_AUTO: &str = "  --permission-mode <mode>   Permission mode\n                             (choices: \"acceptEdits\", \"auto\",\n                             \"dontAsk\", \"plan\")\n";
     const HELP_WITHOUT_AUTO: &str = "  --permission-mode <mode>   Permission mode\n                             (choices: \"acceptEdits\", \"default\",\n                             \"dontAsk\", \"plan\")\n  --other   an \"auto\" thing\n";
+
+    /// Only a missing `brief.md` falls back to the heading split of
+    /// `prompt.md`; one that is there but cannot be read gives no brief, so
+    /// a memory heading is never taken for it.
+    #[test]
+    fn an_unreadable_brief_file_does_not_fall_back_to_the_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("prompt.md"),
+            format!("# Memory\n\n{BRIEF_HEADING}not the brief\n"),
+        )
+        .unwrap();
+        assert_eq!(brief_in(dir.path()).as_deref(), Some("not the brief"));
+        fs::write(dir.path().join(BRIEF_FILE), [0xff, 0xfe]).unwrap();
+        assert_eq!(brief_in(dir.path()), None);
+        fs::write(dir.path().join(BRIEF_FILE), "the brief\n").unwrap();
+        assert_eq!(brief_in(dir.path()).as_deref(), Some("the brief"));
+    }
 
     #[test]
     fn help_parser_reads_the_permission_mode_choices() {

@@ -240,9 +240,11 @@ fn propose_line(world: &World, project: &str, section: &str, text: &str) -> Stri
 }
 
 /// Puts `proposals` in one change set whose holdout run passed, so the keep
-/// gate lets them through.
+/// gate lets them through. The set is named after its first proposal, so a
+/// test can open more than one.
 fn open_gate(world: &World, proposals: &[&String]) {
-    let mut args = vec!["learn", "bundle", "placement"];
+    let name = format!("placement-{}", proposals[0].to_lowercase());
+    let mut args = vec!["learn", "bundle", name.as_str()];
     args.extend(proposals.iter().map(|p| p.as_str()));
     world.must(&args);
     let result = world.dir.path().join("result.json");
@@ -251,13 +253,7 @@ fn open_gate(world: &World, proposals: &[&String]) {
         r#"{"aggregates": {"casesTotal": 4, "casesPassed": 4, "overallScore": 0.97}, "costUsd": 1.0, "partial": false}"#,
     )
     .unwrap();
-    world.must(&[
-        "learn",
-        "eval",
-        "placement",
-        "--result",
-        result.to_str().unwrap(),
-    ]);
+    world.must(&["learn", "eval", &name, "--result", result.to_str().unwrap()]);
 }
 
 fn states(world: &World) -> Vec<(String, String)> {
@@ -502,6 +498,42 @@ fn approve_refuses_what_the_holdout_gate_holds_and_goes_on() {
     );
 }
 
+/// A Keep that would put a role's startup memory over the budget is refused
+/// with the numbers, in the dry run and the run, and the line says them
+/// plainly: the reason alone, since the line already names the proposal.
+#[test]
+fn approve_refuses_a_keep_over_the_startup_budget_with_the_numbers() {
+    let world = two_projects();
+    let long = propose_line(&world, "alpha", "How we work here", &"w".repeat(29_600));
+    open_gate(&world, &[&long]);
+    world.must(&["mem", "approve", &long]);
+    let over = propose_line(&world, "alpha", "How we work here", &"o".repeat(600));
+    open_gate(&world, &[&over]);
+
+    let dry = world.must(&["mem", "approve", &over, "--dry-run"]);
+    assert_eq!(dry.data()["would_refuse"], 1, "{}", dry.json);
+    let reason = dry.data()["results"][0]["reason"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        reason.starts_with(
+            "it would put every role's startup memory in alpha over the 7,500-token budget: "
+        ) && reason.contains(" tokens now, ")
+            && reason.contains(" from this change, ")
+            && reason.ends_with(" after"),
+        "{reason}"
+    );
+
+    let done = world.must(&["mem", "approve", &over]);
+    assert_eq!(done.data()["refused"], 1, "{}", done.json);
+    assert_eq!(done.data()["results"][0]["reason"], reason.as_str());
+    assert_eq!(
+        states(&world).iter().find(|(id, _)| *id == over).unwrap().1,
+        "proposed"
+    );
+}
+
 #[test]
 fn approve_takes_several_proposals_for_one_document_in_one_pass() {
     let world = two_projects();
@@ -526,5 +558,78 @@ fn approve_takes_several_proposals_for_one_document_in_one_pass() {
         text.contains("Run the formatter before a commit."),
         "{text}"
     );
+    assert!(text.contains("Keep commits small and focused."), "{text}");
+}
+
+/// One `--key` names one request. A later run of the same command under that
+/// key must not replay an earlier proposal's answer for a new proposal: each
+/// proposal is decided under its own key, bound to its own id.
+#[test]
+fn approve_under_a_reused_key_never_replays_another_proposals_answer() {
+    let world = two_projects();
+    let first = propose_line(
+        &world,
+        "alpha",
+        "How we work here",
+        "Run the formatter before a commit.",
+    );
+    let second = propose_line(
+        &world,
+        "beta",
+        "How we work here",
+        "Never edit the vendored copy.",
+    );
+    open_gate(&world, &[&first, &second]);
+    let done = world.must(&["mem", "approve", "--class", "rule", "--key", "k"]);
+    assert_eq!(done.data()["approved"], 2, "{}", done.json);
+
+    // A true retry of the same request replays and writes nothing more.
+    let retry = world.must(&["mem", "approve", &first, &second, "--key", "k"]);
+    assert_eq!(retry.data()["skipped"], 2, "{}", retry.json);
+
+    // Later, only a new proposal is pending, and the owner runs the same
+    // command with the same key.
+    let third = propose_line(
+        &world,
+        "alpha",
+        "How we work here",
+        "Keep commits small and focused.",
+    );
+    world.must(&["learn", "bundle", "later", &third]);
+    let result = world.dir.path().join("later.json");
+    std::fs::write(
+        &result,
+        r#"{"aggregates": {"casesTotal": 4, "casesPassed": 4, "overallScore": 0.97}, "costUsd": 1.0, "partial": false}"#,
+    )
+    .unwrap();
+    world.must(&[
+        "learn",
+        "eval",
+        "later",
+        "--result",
+        result.to_str().unwrap(),
+    ]);
+
+    let again = world.must(&["mem", "approve", "--class", "rule", "--key", "k"]);
+    assert_eq!(
+        results(&again),
+        vec![(third.clone(), "approved".to_owned())],
+        "{}",
+        again.json
+    );
+    assert_eq!(
+        again.data()["results"][0]["proposal_id"],
+        third,
+        "{}",
+        again.json
+    );
+    let after = states(&world);
+    assert_eq!(
+        after.iter().find(|(id, _)| *id == third).unwrap().1,
+        "applied",
+        "{}",
+        again.json
+    );
+    let text = std::fs::read_to_string(world.home().join("memory/projects/alpha.md")).unwrap();
     assert!(text.contains("Keep commits small and focused."), "{text}");
 }

@@ -1118,10 +1118,12 @@ button.chip:active {
   font-size: 12px;
   line-height: 1.55;
   color: var(--term-fg);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  /* A pane tail is a fixed-width grid: a wrapped row breaks a dialog's box
+     and its rules. Rows stay whole and scroll inside the tail. */
+  white-space: pre;
   max-height: 228px;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .ev[data-open="true"] .term {

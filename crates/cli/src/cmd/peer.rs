@@ -269,8 +269,12 @@ fn add(
     }
     // This host's label is a word on the peer's command line.
     check_label(&this.label)?;
-    let host_id = meta(store.conn(), "host_id")?
-        .ok_or_else(|| Failure::refused("state.db has no host id; run tiller init"))?;
+    let host_id = meta(store.conn(), "host_id")?.ok_or_else(|| {
+        Failure::refused(format!(
+            "state.db has no host id; {}",
+            tiller_core::RUN_INIT
+        ))
+    })?;
     // The peer an earlier pairing under this label reached. Only the same
     // peer may renew it, which the answer's host id shows (`peer.pair`).
     let paired_to = store
@@ -595,20 +599,18 @@ fn federation_accept(config: &toml::Table) -> bool {
 fn list(app: &App) -> Done {
     let store = app.read()?;
     let config = load_config(app)?;
-    let paired = store
-        .paired_hosts()?
+    let paired = peers::paired(&store, &app.home)?
         .into_iter()
         .map(|host| {
             let ssh = get_path(&config, &format!("peers.{}.ssh", host.label))
                 .and_then(toml::Value::as_str)
                 .map(str::to_owned);
-            let key_file = peers::key_path(&app.home, &host.label).is_ok_and(|path| path.exists());
             json!({
                 "label": host.label,
-                "scope": host.peer_scope,
+                "scope": host.scope,
                 "peer_host_id": host.peer_host_id,
                 "ssh": ssh,
-                "key_file": key_file,
+                "key_file": host.key_file,
                 // The daemon's link state and `as_of` arrive with the peer
                 // link (`protocol.md` 10.2).
                 "link": null,
@@ -625,10 +627,9 @@ fn list(app: &App) -> Done {
 }
 
 fn remove(app: &App, label: &str) -> Done {
-    check_label(label)?;
     let mut store = app.write()?;
-    let applied = peers::unpair(&mut store, &app.ctx(), &app.home, label)?;
-    Ok(Outcome::applied(applied))
+    let unpaired = peers::unpair(&mut store, &app.ctx(), &app.home, label)?;
+    Ok(Outcome::applied(unpaired.applied).with_warning(unpaired.key_file_left))
 }
 
 fn key_json(key: &tiller_core::domain::PeerKey) -> Value {

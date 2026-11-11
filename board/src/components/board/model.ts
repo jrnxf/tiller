@@ -22,7 +22,10 @@ export interface Tile {
   // Set for cards; asks have no card page.
   row: BoardRow | null;
   // Set for asks.
-  ask: Pick<AskedRow, "id" | "age_seconds" | "received_at" | "source" | "summary"> | null;
+  ask: Pick<
+    AskedRow,
+    "id" | "age_seconds" | "received_at" | "source" | "summary" | "host" | "as_of" | "link"
+  > | null;
 }
 
 export function tilesOf(board: BoardResponse): Tile[] {
@@ -37,7 +40,8 @@ export function tilesOf(board: BoardResponse): Tile[] {
   const asks = board.asked.map<Tile>((ask) => ({
     key: ask.id,
     column: "asked",
-    projectId: ask.project_id,
+    // A peer's ask is in that host's lane: `fleet` is on every host.
+    projectId: ownerKey(ask.project_id, ask),
     hostId: null,
     row: null,
     ask,

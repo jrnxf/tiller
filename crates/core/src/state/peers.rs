@@ -131,26 +131,29 @@ impl Store {
     /// `peer.revoke`, on the peer: `viewer` is the board host's label, or a
     /// key id. A key already revoked is a natural no-op (`protocol.md` 6.4).
     pub fn peer_revoke(&mut self, ctx: &Ctx, viewer: &str) -> Result<Applied<PeerKey>> {
-        require_owner(&ctx.actor, "peer.revoke")?;
-        required("viewer", viewer)?;
-        self.write(ctx, "peer.revoke", None, |tx| {
-            let key = revoke_target(tx, viewer)?;
-            if key.revoked_at.is_some() {
-                return Ok(key);
-            }
-            revoke(tx, &key, "owner")?;
-            get(tx.conn(), "peer key", &key.id)
-        })
+        self.revoke_found(ctx, "viewer", viewer, revoke_target)
     }
 
     /// Revokes the accepted key with this id, and only that key: the board
     /// names a row, so a label never stands in for it. `NotFound` when no
     /// key has the id; revoking a revoked key returns it.
     pub fn peer_revoke_key(&mut self, ctx: &Ctx, id: &str) -> Result<Applied<PeerKey>> {
+        self.revoke_found(ctx, "id", id, |tx, id| get(tx.conn(), "peer key", id))
+    }
+
+    /// `peer.revoke` of the key `target` finds by `name`: the owner's, and a
+    /// natural no-op on a key already revoked.
+    fn revoke_found(
+        &mut self,
+        ctx: &Ctx,
+        field: &str,
+        name: &str,
+        target: impl FnOnce(&Tx<'_>, &str) -> Result<PeerKey>,
+    ) -> Result<Applied<PeerKey>> {
         require_owner(&ctx.actor, "peer.revoke")?;
-        required("id", id)?;
+        required(field, name)?;
         self.write(ctx, "peer.revoke", None, |tx| {
-            let key: PeerKey = get(tx.conn(), "peer key", id)?;
+            let key = target(tx, name)?;
             if key.revoked_at.is_some() {
                 return Ok(key);
             }
@@ -625,15 +628,100 @@ pub fn remove_key_file(path: &Path) -> Result<()> {
     }
 }
 
+/// What [`unpair`] did.
+#[derive(Debug)]
+pub struct Unpaired {
+    /// `peer.remove`'s row and events.
+    pub applied: Applied<Host>,
+    /// Set when the row is unpaired but its key file could not be deleted:
+    /// the owner's message. [`leftover_key_files`] lists the label until an
+    /// unpair of it deletes the file.
+    pub key_file_left: Option<String>,
+}
+
 /// `tiller peer remove` and the board's Unpair, one path for both:
 /// `peer.remove`, then the key file, after the commit (`state.md` section 8).
-/// A crash between the two leaves a key file for an unpaired label, which the
-/// next `peer add` replaces.
-pub fn unpair(store: &mut Store, ctx: &Ctx, home: &Path, label: &str) -> Result<Applied<Host>> {
-    check_label(label)?;
+///
+/// A replay of a stored idempotency key deletes nothing: the first request
+/// did, and a pairing made since then owns the file now. A label paired
+/// again by the time the commit returns keeps its file for the same reason.
+/// A delete that fails, or a crash between the two steps, leaves a key file
+/// for an unpaired label: [`leftover_key_files`] lists it, and an unpair of
+/// that label (a natural no-op on the row) deletes it.
+pub fn unpair(store: &mut Store, ctx: &Ctx, home: &Path, label: &str) -> Result<Unpaired> {
+    let path = key_path(home, label)?;
+    let replay = store.key_recorded(ctx)?;
     let applied = store.peer_remove(ctx, label)?;
-    remove_key_file(&key_path(home, label)?)?;
-    Ok(applied)
+    let paired_again = store
+        .host_labelled(label)?
+        .is_some_and(|host| host.peer_scope.is_some());
+    let key_file_left = if replay || paired_again {
+        None
+    } else {
+        remove_key_file(&path).err().map(|error| {
+            format!(
+                "{label} is unpaired, but its key file was not deleted ({error}); \
+                 Unpair it again from its Settings > Hosts card, or run tiller peer remove {label}"
+            )
+        })
+    };
+    Ok(Unpaired {
+        applied,
+        key_file_left,
+    })
+}
+
+/// A host this board host is paired with, as `tiller peer list` and the
+/// board's Settings > Hosts both read it; each adds its own fields.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PairedHost {
+    pub label: String,
+    /// The peer's `meta.host_id`.
+    pub peer_host_id: Option<String>,
+    pub scope: Option<PeerScope>,
+    /// Whether `~/.tiller/peers/<label>.key` exists.
+    pub key_file: bool,
+    /// The key file's public key [`fingerprint`]; `None` when the file is
+    /// missing or does not read.
+    pub fingerprint: Option<String>,
+}
+
+/// Every paired host, by label, with what its key file says.
+pub fn paired(store: &Store, home: &Path) -> Result<Vec<PairedHost>> {
+    Ok(store
+        .paired_hosts()?
+        .into_iter()
+        .map(|host| {
+            let path = key_path(home, &host.label);
+            let key_file = path.as_ref().is_ok_and(|path| path.exists());
+            let fingerprint = path
+                .and_then(|path| read_key_file(&path))
+                .ok()
+                .map(|file| fingerprint(&file.public_key));
+            PairedHost {
+                label: host.label,
+                peer_host_id: host.peer_host_id,
+                scope: host.peer_scope,
+                key_file,
+                fingerprint,
+            }
+        })
+        .collect())
+}
+
+/// The labels of host rows no longer paired whose key file is still on
+/// disk, by label: an unpair whose delete failed or did not run. Its private
+/// key still signs as this host on that peer until it goes.
+pub fn leftover_key_files(store: &Store, home: &Path) -> Result<Vec<String>> {
+    let mut labels: Vec<String> = store
+        .hosts()?
+        .into_iter()
+        .filter(|host| host.peer_scope.is_none())
+        .filter(|host| key_path(home, &host.label).is_ok_and(|path| path.exists()))
+        .map(|host| host.label)
+        .collect();
+    labels.sort();
+    Ok(labels)
 }
 
 #[cfg(test)]
@@ -1041,6 +1129,8 @@ mod tests {
         assert!(path.exists(), "a refused unpair keeps the key file");
 
         let removed = unpair(&mut store, &owner(), home.path(), "host-b").unwrap();
+        assert_eq!(removed.key_file_left, None);
+        let removed = removed.applied;
         assert_eq!(kinds(&store, &removed.events), ["host.edited"]);
         assert_eq!(removed.value.peer_scope, None);
         assert!(!path.exists(), "the key file goes after the commit");
@@ -1049,6 +1139,7 @@ mod tests {
         assert!(
             unpair(&mut store, &owner(), home.path(), "host-b")
                 .unwrap()
+                .applied
                 .replayed
         );
         assert_eq!(
@@ -1056,6 +1147,99 @@ mod tests {
                 .unwrap_err()
                 .code(),
             "usage"
+        );
+    }
+
+    /// A retry of an unpair with its stored key replays: it never deletes
+    /// the key file a pairing made since then wrote.
+    #[test]
+    fn a_replayed_unpair_keeps_the_key_file_of_a_new_pairing() {
+        let mut store = store();
+        let home = tempfile::tempdir().unwrap();
+        let path = key_path(home.path(), "host-b").unwrap();
+        let pair = |store: &mut Store| {
+            store
+                .peer_pair(&owner(), pairing("host-b", PEER_HOST))
+                .unwrap();
+            let key = generate_key().unwrap();
+            write_key_file(&path, &KeyFile::new("host-b", PeerScope::Act, &key)).unwrap();
+        };
+        pair(&mut store);
+        let keyed = owner().with_key("k-unpair");
+        let first = unpair(&mut store, &keyed, home.path(), "host-b").unwrap();
+        assert!(!first.applied.replayed);
+        assert!(!path.exists());
+
+        // `tiller peer add host-b` in a terminal, then the board's retry.
+        pair(&mut store);
+        let retry = unpair(&mut store, &keyed, home.path(), "host-b").unwrap();
+        assert!(retry.applied.replayed);
+        assert_eq!(retry.key_file_left, None);
+        assert!(path.exists(), "a replay deleted the new pairing's key file");
+        assert_eq!(store.paired_hosts().unwrap().len(), 1);
+    }
+
+    /// The row commits before the key file goes. When the delete fails, the
+    /// unpair still succeeds and says so, the leftover is listed, and an
+    /// unpair of the unpaired label deletes it.
+    #[test]
+    fn a_key_file_the_unpair_could_not_delete_is_listed_and_retried() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut store = store();
+        let home = tempfile::tempdir().unwrap();
+        store
+            .peer_pair(&owner(), pairing("host-b", PEER_HOST))
+            .unwrap();
+        let path = key_path(home.path(), "host-b").unwrap();
+        let key = generate_key().unwrap();
+        write_key_file(&path, &KeyFile::new("host-b", PeerScope::Act, &key)).unwrap();
+        assert!(leftover_key_files(&store, home.path()).unwrap().is_empty());
+
+        let dir = path.parent().unwrap().to_owned();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let unpaired = unpair(&mut store, &owner(), home.path(), "host-b");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let unpaired = unpaired.unwrap();
+        assert_eq!(unpaired.applied.value.peer_scope, None);
+        let left = unpaired.key_file_left.unwrap();
+        assert!(
+            left.starts_with("host-b is unpaired, but its key file was not deleted"),
+            "{left}"
+        );
+        assert!(path.exists());
+        assert_eq!(leftover_key_files(&store, home.path()).unwrap(), ["host-b"]);
+
+        let again = unpair(&mut store, &owner(), home.path(), "host-b").unwrap();
+        assert!(again.applied.replayed, "the row was already unpaired");
+        assert_eq!(again.key_file_left, None);
+        assert!(!path.exists(), "the retry deleted the leftover key file");
+        assert!(leftover_key_files(&store, home.path()).unwrap().is_empty());
+    }
+
+    /// Both surfaces list a pairing from one row: the CLI and the board.
+    #[test]
+    fn a_paired_host_row_reads_its_key_file() {
+        let mut store = store();
+        let home = tempfile::tempdir().unwrap();
+        store
+            .peer_pair(&owner(), pairing("host-b", PEER_HOST))
+            .unwrap();
+        let rows = paired(&store, home.path()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "host-b");
+        assert_eq!(rows[0].scope, Some(PeerScope::Act));
+        assert_eq!(rows[0].peer_host_id.as_deref(), Some(PEER_HOST));
+        assert!(!rows[0].key_file);
+        assert_eq!(rows[0].fingerprint, None);
+
+        let key = generate_key().unwrap();
+        let path = key_path(home.path(), "host-b").unwrap();
+        write_key_file(&path, &KeyFile::new("host-b", PeerScope::Act, &key)).unwrap();
+        let rows = paired(&store, home.path()).unwrap();
+        assert!(rows[0].key_file);
+        assert_eq!(
+            rows[0].fingerprint.as_deref(),
+            Some(fingerprint(&public_key_text(&key)).as_str())
         );
     }
 

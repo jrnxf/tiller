@@ -334,6 +334,7 @@ fn test_project() -> Project {
         "stage": "pre-launch",
         "reviewed_through_sha": null,
         "stage_changed_at": null,
+        "edited_at": "2026-11-02T10:00:00Z",
     }))
     .unwrap()
 }

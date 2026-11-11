@@ -16,6 +16,9 @@ pub struct MemoryDocSummary {
     pub lines: usize,
     /// Open agent proposals against it.
     pub suggestions: usize,
+    /// Why a launch goes on without it, such as "it has no approved
+    /// revision"; null when a launch loads it or it has nothing to load.
+    pub skipped: Option<String>,
 }
 
 /// Where a line came from: the revision that last changed it.
@@ -172,7 +175,7 @@ pub struct MemoryResponse {
     pub docs: Vec<MemoryDocSummary>,
     pub doc: MemoryDocument,
     /// The holdout evals the board started that are running, or that failed
-    /// since the daemon started.
+    /// with no later recorded run of their change set, across restarts.
     pub evals: Vec<MemoryEvalJob>,
 }
 

@@ -113,8 +113,9 @@ fn write_plan(tx: &mut Tx<'_>, bundle: &Bundle, plan: &Plan) -> Result<()> {
     }
     for (project_id, created) in &created_per_project {
         tx.conn().execute(
-            "UPDATE projects SET next_card_seq = next_card_seq + ?2, rev = rev + 1 WHERE id = ?1",
-            params![project_id, created],
+            "UPDATE projects SET next_card_seq = next_card_seq + ?2, rev = rev + 1, edited_at = ?3
+             WHERE id = ?1",
+            params![project_id, created, now],
         )?;
     }
 
@@ -147,7 +148,7 @@ fn write_plan(tx: &mut Tx<'_>, bundle: &Bundle, plan: &Plan) -> Result<()> {
 
     for project in plan.projects.iter().filter(|p| p.retire) {
         let rev: i64 = tx.conn().query_row(
-            "UPDATE projects SET retired_at = ?2, rev = rev + 1 WHERE id = ?1 RETURNING rev",
+            "UPDATE projects SET retired_at = ?2, rev = rev + 1, edited_at = ?2 WHERE id = ?1 RETURNING rev",
             params![project.id, now],
             |row| row.get(0),
         )?;
@@ -302,7 +303,11 @@ fn write_wait(tx: &mut Tx<'_>, card_id: &str, wait: &Wait) -> Result<()> {
 
 fn write_memory(tx: &mut Tx<'_>, plan: &Plan) -> Result<()> {
     let boundary = meta(tx.conn(), "boundary")?.ok_or_else(|| {
-        Error::refused("host", "local", "state.db has no boundary; run tiller init")
+        Error::refused(
+            "host",
+            "local",
+            format!("state.db has no boundary; {}", crate::RUN_INIT),
+        )
     })?;
     // (source id, base revision id) per target document.
     let mut targets: HashMap<String, (String, String)> = HashMap::new();

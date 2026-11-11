@@ -362,7 +362,7 @@ test.each([
   [
     422,
     "label_taken",
-    "host-z is already paired; pick another label, or run tiller peer remove host-z in a terminal first",
+    "host-z is already paired; pick another label, or Unpair it first in its Settings > Hosts card (or run tiller peer remove host-z)",
     undefined,
     null,
   ],

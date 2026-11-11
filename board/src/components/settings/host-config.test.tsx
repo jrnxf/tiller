@@ -66,7 +66,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const section = async (name: string) => within(await screen.findByRole("region", { name }));
+// The first render of the whole settings page took 1.3 s at a load average
+// of 25, past the default 1 s, so the wait gets the bound retros.test.tsx
+// gives the same query. A passing run does not wait longer.
+const section = async (name: string) =>
+  within(await screen.findByRole("region", { name }, { timeout: 3000 }));
 
 test("the host keys sit in three sections under Starting agents, one row per key with Save on the right", async () => {
   serve(true);

@@ -12,7 +12,7 @@ use tiller_core::state::projects::{Init, NewProject};
 use tiller_core::state::runs::NewOrchestrator;
 use tiller_core::{Actor, Ctx, Store};
 
-use common::children_cpu;
+use common::{children_cpu, pin_to_performance_cores};
 
 /// A home with an initialized `state.db` and a live orchestrator; returns
 /// its session id.
@@ -125,11 +125,13 @@ const MEASURED: usize = 200;
 /// call gets more work. The lower quartile of wall time must stay inside a
 /// ceiling that only a wait reaches, which fails if the hook blocks on a
 /// daemon. SQLite checkpoint stalls (about 5% of calls) and the percentiles
-/// are printed, not asserted.
+/// are printed, not asserted. The calls run on the performance cores of a
+/// hybrid CPU, where the budget applies (`pin_to_performance_cores`).
 #[test]
 fn hook_is_inside_the_ten_ms_budget_with_the_daemon_down() {
     let dir = tempfile::tempdir().unwrap();
     let orchestrator = home_with_orchestrator(dir.path());
+    pin_to_performance_cores();
     let mut times = Vec::new();
     let mut cpus = Vec::new();
     for n in 0..WARM_UP + MEASURED {

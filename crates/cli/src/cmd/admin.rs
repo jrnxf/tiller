@@ -566,7 +566,7 @@ pub fn host(app: &App, cmd: HostCmd) -> Done {
         .hosts()?
         .into_iter()
         .find(|host| host.kind == HostKind::Local)
-        .ok_or_else(|| Failure::refused("state.db is not initialized; run tiller init"))?;
+        .ok_or_else(|| Failure::refused(tiller_core::not_initialized()))?;
     let edit = HostEdit {
         label: args.label,
         lane_capacity: args.lane_capacity,

@@ -1015,3 +1015,53 @@ fn import_carries_a_projects_checks() {
         .unwrap_err();
     assert!(error.to_string().contains("checks"), "{error}");
 }
+
+/// A bundle project gets the forge check of `project.add`: a Gerrit remote
+/// with a delivery mode Tiller cannot publish with stops the plan, naming the
+/// project, so the dry run shows it before anything is stored.
+#[test]
+fn a_gerrit_remote_that_would_publish_stops_the_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut records = self::records();
+    records.projects[1]["remote"] = json!("ssh://review.example.com:29418/beta");
+    write_bundle(dir.path(), &records, "dry");
+    let mut store = store();
+    let bundle = Bundle::read(dir.path()).unwrap();
+    let error = store.import_plan(&bundle, Timestamp::now()).unwrap_err();
+    assert!(error.to_string().contains("Beta-Site"), "{error}");
+    assert!(error.to_string().contains("Gerrit"), "{error}");
+    assert!(store.import_apply(&import_ctx(), &bundle).is_err());
+    assert_eq!(
+        count(&store, "SELECT count(*) FROM projects WHERE id != 'fleet'"),
+        0
+    );
+
+    // local-only is a delivery mode Gerrit can run.
+    let dir = tempfile::tempdir().unwrap();
+    records.projects[1]["delivery"] = json!("local-only");
+    write_bundle(dir.path(), &records, "dry");
+    store
+        .import_apply(&import_ctx(), &Bundle::read(dir.path()).unwrap())
+        .unwrap();
+    let beta: Project = crate::state::get(store.conn(), "project", "betasite").unwrap();
+    assert_eq!(beta.delivery, Delivery::LocalOnly);
+}
+
+/// A bundle's default branch is stored trimmed, and one that is only space
+/// is absent, as an empty one is: the project gets `main`.
+#[test]
+fn a_bundle_default_branch_is_stored_trimmed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut records = self::records();
+    records.projects[0]["default_branch"] = json!(" trunk ");
+    records.projects[1]["default_branch"] = json!("   ");
+    write_bundle(dir.path(), &records, "dry");
+    let mut store = store();
+    store
+        .import_apply(&import_ctx(), &Bundle::read(dir.path()).unwrap())
+        .unwrap();
+    let alpha: Project = crate::state::get(store.conn(), "project", "alpha").unwrap();
+    assert_eq!(alpha.default_branch, "trunk");
+    let beta: Project = crate::state::get(store.conn(), "project", "betasite").unwrap();
+    assert_eq!(beta.default_branch, "main");
+}

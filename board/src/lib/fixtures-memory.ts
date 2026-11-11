@@ -42,6 +42,8 @@ interface Doc {
   blob: string;
   dirty: boolean;
   sections: Section[];
+  // Why a launch goes on without it; unset when a launch loads it.
+  skipped?: string;
 }
 
 // One landed change, and for a discard the suggestion an undo brings back.
@@ -65,6 +67,10 @@ interface State {
   // The change set each suggestion is in, by name.
   sets: Map<string, string>;
   counter: number;
+  // The fixture scenario it was seeded for.
+  scenario: string;
+  // The startup budget refusal a Keep of each proposal gets, by id.
+  over: Map<string, string>;
 }
 
 // The stand-in holdout: eleven cases at two runs each, and one judge run per
@@ -212,7 +218,7 @@ function change(
   };
 }
 
-function seed(now: number): State {
+function seed(now: number, scenario = "default"): State {
   const s: State = {
     docs: [],
     landed: [],
@@ -220,6 +226,8 @@ function seed(now: number): State {
     jobs: [],
     sets: new Map(),
     counter: 0,
+    scenario,
+    over: new Map(),
   };
   const line = (text: string, provenance: MemoryProvenance): Line => ({
     text,
@@ -529,7 +537,32 @@ function seed(now: number): State {
     },
     discarded,
   });
+  if (scenario === "memory-limits") limits(s, now);
   return s;
+}
+
+// `memory-limits`: gamma's text has no approved revision, so a launch goes
+// on without it, and a beta suggestion would put startup memory over the
+// budget, so its Keep is refused with the numbers (memory.md sections 6
+// and 9).
+function limits(s: State, now: number) {
+  const gamma = s.docs.find((doc) => doc.project_id === "gamma");
+  if (gamma) gamma.skipped = "it has no approved revision";
+  const beta = s.docs.find((doc) => doc.project_id === "beta");
+  const section = beta?.sections.find((each) => each.class === "note");
+  if (!section) return;
+  const long = suggestion(s, "add", {
+    text: "Before a release build, read the whole build log and list every warning with its crate.",
+    by: "the curator",
+    card: "beta-31",
+    at: minutes(now, -50),
+    why: "Two release builds shipped with new warnings no one read.",
+  });
+  section.suggestions.push(long);
+  s.over.set(
+    long.proposal_id,
+    "it would put every role's startup memory in beta over the 7,500-token budget: 7,412 tokens now, 164 from this change, 7,576 after",
+  );
 }
 
 // The fleet suggestion that waits for its first holdout run, in a named set.
@@ -566,15 +599,19 @@ function settle(s: State, now: number) {
   }
 }
 
-function current(): State {
-  state ??= seed(Date.now());
+// The documents, seeded for `scenario` when one is given: another
+// scenario seeds them again.
+function current(scenario?: string): State {
+  if (!state || (scenario !== undefined && scenario !== state.scenario)) {
+    state = seed(Date.now(), scenario ?? state?.scenario);
+  }
   settle(state, Date.now());
   return state;
 }
 
 // Tests start each case from the seeded documents.
-export function resetMemoryFixture(now: number = Date.now()): void {
-  state = seed(now);
+export function resetMemoryFixture(now: number = Date.now(), scenario = "default"): void {
+  state = seed(now, scenario);
 }
 
 function fileText(doc: Doc): string {
@@ -641,6 +678,7 @@ function summary(doc: Doc): MemoryDocSummary {
         n + section.suggestions.length + section.lines.filter((l) => l.suggestion).length,
       0,
     ),
+    skipped: doc.skipped ?? null,
   };
 }
 
@@ -741,12 +779,13 @@ function plan(s: State, proposalId: string, windows: QuotaWindow[]): MemoryEvalP
 
 // `GET /api/v1/memory?scope=`, `GET /api/v1/memory/revisions/{id}` and
 // `GET /api/v1/memory/proposals/{id}/eval`, which plans against `quota`;
-// `undefined` is a 404.
+// `undefined` is a 404. `scenario` seeds the documents for it.
 export function memoryResource(
   url: URL,
   quota: QuotaWindow[] = [],
+  scenario?: string,
 ): MemoryResponse | MemoryRevision | MemoryEvalPlan | undefined {
-  const s = current();
+  const s = current(scenario);
   if (url.pathname === "/api/v1/memory") {
     const scope = url.searchParams.get("scope") ?? FLEET;
     const doc = s.docs.find((each) => each.project_id === scope);
@@ -932,6 +971,8 @@ function decideOne(s: State, decision: Record<string, unknown>): MemoryReply {
   if (!sug.gate.ok) {
     return refuse(`proposal ${proposalId}: ${sug.gate.reason}; ${sug.gate.hint}`);
   }
+  const over = s.over.get(proposalId);
+  if (over) return refuse(`proposal ${proposalId}: ${over}`);
   const provenance: MemoryProvenance = {
     revision_id: "",
     card: sug.card,
@@ -1091,15 +1132,16 @@ function undo(s: State, proposalId: string, body: Record<string, unknown>): Memo
 }
 
 // A memory mutation, or `null` when `path` is not one. A holdout eval plans
-// against `quota`.
+// against `quota`, and `scenario` seeds the documents for it.
 export function memoryMutation(
   method: string,
   path: string,
   body: Record<string, unknown>,
   quota: QuotaWindow[] = [],
+  scenario?: string,
 ): MemoryReply | null {
   if (method !== "POST") return null;
-  const s = current();
+  const s = current(scenario);
   if (path === "/api/v1/memory/edits") return edit(s, body);
   if (path === "/api/v1/memory/proposals/decide") return decide(s, body);
   const proposal = /^\/api\/v1\/memory\/proposals\/([^/]+)\/(eval|repropose)$/.exec(path);

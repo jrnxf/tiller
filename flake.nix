@@ -31,9 +31,10 @@
       ...
     }:
     let
+      # The locked nixpkgs (26.11) has dropped x86_64-darwin, so it is not
+      # listed: its dev shell and package cannot evaluate.
       systems = [
         "aarch64-darwin"
-        "x86_64-darwin"
         "aarch64-linux"
         "x86_64-linux"
       ];
@@ -255,7 +256,7 @@
                   else
                     lib.removePrefix "PATH=" (
                       lib.findFirst (lib.hasPrefix "PATH=") "" (
-                        map (lib.removeSuffix "\"" ) (map (lib.removePrefix "\"") service.Service.Environment)
+                        map (lib.removeSuffix "\"") (map (lib.removePrefix "\"") service.Service.Environment)
                       )
                     );
                 hasDir = isDarwin: dir: builtins.elem dir (lib.splitString ":" (pathFor isDarwin));
@@ -287,8 +288,9 @@
                 "nix/module.nix: the systemd unit does not change with the package, so a rebuild leaves the old daemon running";
               assert lib.assertMsg (hasDir true "/opt/homebrew/bin")
                 "nix/module.nix: the launchd agent's PATH lacks /opt/homebrew/bin, so Homebrew tools such as herdr are not found";
-              assert lib.assertMsg (!hasDir false "/opt/homebrew/bin")
-                "nix/module.nix: the systemd unit's PATH has /opt/homebrew/bin, which only macOS has";
+              assert lib.assertMsg (
+                !hasDir false "/opt/homebrew/bin"
+              ) "nix/module.nix: the systemd unit's PATH has /opt/homebrew/bin, which only macOS has";
               assert lib.assertMsg (
                 hasDir true "/run/current-system/sw/bin" && hasDir false "/run/current-system/sw/bin"
               ) "nix/module.nix: a service PATH lacks /run/current-system/sw/bin";
@@ -314,10 +316,10 @@
               pkgs.cargo-nextest
               pkgs.sccache
               pkgs.sqlite
-              # Pixel diff for board screenshots.
-              pkgs.odiff
               bun2nixCli
-            ];
+            ]
+            # Pixel diff for board screenshots, where nixpkgs builds it.
+            ++ lib.optional (lib.meta.availableOn pkgs.stdenv.hostPlatform pkgs.odiff) pkgs.odiff;
             RUSTC_WRAPPER = "sccache";
             CARGO_INCREMENTAL = "0";
           };

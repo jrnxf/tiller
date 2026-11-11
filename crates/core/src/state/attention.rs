@@ -13,6 +13,7 @@ use super::{find, get, list, refuse, required, resolve_card, resolve_id};
 use crate::domain::*;
 use crate::error::{Error, Result};
 use crate::ids;
+use crate::limits::{ANSWER_MAX_CHARS, within};
 use crate::store::{Actor, Applied, Ctx, NewEvent, Store, Tx};
 use crate::time::Timestamp;
 
@@ -838,6 +839,11 @@ impl Store {
         answer: &str,
         via: AnsweredVia,
     ) -> Result<Applied<Answered>> {
+        // An answer cited from chat is the owner's recorded words, so it has
+        // no cap of its own (`protocol.md` 7.4).
+        if via != AnsweredVia::Chat {
+            within("an answer", answer, ANSWER_MAX_CHARS)?;
+        }
         self.write(ctx, "attention.answer", key, |tx| {
             let id = resolve_id(tx.conn(), "attention", "attention", item)?;
             let item: Attention = get(tx.conn(), "attention", &id)?;

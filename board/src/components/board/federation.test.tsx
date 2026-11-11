@@ -141,6 +141,36 @@ test("every card carries the chip of the host that owns it", async () => {
   expect(within(own as HTMLElement).getByTestId("host-chip").textContent).toBe("host-a");
 });
 
+// The ask tiles in a lane: an ask has no card number, its id reads "ask".
+function askTiles(lane: HTMLElement): HTMLElement[] {
+  return [...lane.querySelectorAll<HTMLElement>(".card")].filter(
+    (card) => card.querySelector(".id")?.textContent === "ask",
+  );
+}
+
+test("a peer's ask is a tile in that host's own lane, with its host chip and what it waits for", async () => {
+  stubApi("federated");
+  await renderApp("federated");
+  // host-d's ask is in host-d's `fleet`, not in this host's lane of that slug.
+  const [ask] = askTiles(screen.getByTestId("lane-host-d/fleet"));
+  expect(ask).toBeDefined();
+  expect(within(ask as HTMLElement).getByTestId("host-chip").textContent).toBe("host-d");
+  expect(ask?.textContent).toContain("Waiting for the orchestrator to tag this ask");
+  expect(ask?.className).not.toContain("dim");
+  expect(askTiles(screen.getByTestId("lane-fleet"))).toHaveLength(0);
+});
+
+test("an ask in a peer lane that is down is dimmed and says as of the last frame", async () => {
+  stubApi("federated");
+  await renderApp("federated");
+  const [ask] = askTiles(screen.getByTestId("lane-host-e/ledger"));
+  expect(ask).toBeDefined();
+  expect(ask?.className).toContain("dim");
+  expect(ask?.textContent).toMatch(/as of \w{3} \d{2}:\d{2}, 6 min ago/);
+  const chip = within(ask as HTMLElement).getByTestId("host-chip");
+  expect(chip.className).toContain("off");
+});
+
 test("a peer that is down keeps its lane as of the last frame, dimmed, with the reason", async () => {
   stubApi("federated");
   await renderApp("federated");

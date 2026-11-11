@@ -418,3 +418,18 @@ test("with the projects not read, Ask still opens and says why Send waits", asyn
   expect(reason.getAttribute("data-warn")).toBe("true");
   expect(sendButton().disabled).toBe(true);
 });
+
+test("a stray Escape after the list closed closes the dialog", async () => {
+  const { onClose } = renderDialog();
+  await waitFor(() => expect(prose()).toBeTruthy());
+  act(() => {
+    prose().editor.commands.insertContent("@");
+  });
+  await screen.findByRole("listbox");
+  fireEvent.keyDown(prose(), { key: "Escape" });
+  expect(onClose).not.toHaveBeenCalled();
+  // Focus falls to the page, as when Send disables the focused button.
+  (document.activeElement as HTMLElement | null)?.blur();
+  fireEvent.keyDown(document.body, { key: "Escape" });
+  expect(onClose).toHaveBeenCalled();
+});

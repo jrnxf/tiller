@@ -276,7 +276,11 @@ function editProject(id: string, body: Record<string, unknown>): MutationResult 
         409,
         "stale",
         `conflict: project ${id} is at rev ${fields.rev}, you sent ${String(body.rev)}`,
-        first ? { rev: fields.rev, [first]: fields[first] } : { rev: fields.rev },
+        {
+          rev: fields.rev,
+          ...(first ? { [first]: fields[first] } : {}),
+          ...(project.edited_at ? { edited_at: project.edited_at } : {}),
+        },
       ),
       followUps: [],
     };
@@ -326,6 +330,7 @@ function editProject(id: string, body: Record<string, unknown>): MutationResult 
     delivery: next.delivery,
     capacity: next.capacity,
     rev: next.rev,
+    edited_at: new Date().toISOString(),
     effective_delivery: project.stage === "pre-launch" && direct ? "direct-pr" : next.delivery,
   };
   edited.set(id, next);
@@ -475,6 +480,7 @@ function restaged(project: Project, stage: Project["stage"]): Project {
     effective_delivery: prelaunch && direct ? "direct-pr" : project.delivery,
     reviewed_through_sha: project.reviewed_through_sha ?? FIXTURE_HEAD_SHA,
     stage_changed_at: at.toISOString(),
+    edited_at: at.toISOString(),
     next_review_due: prelaunch ? nextSaturday(at) : null,
     review_overdue: false,
     review_open: prelaunch ? null : "final",
@@ -534,6 +540,7 @@ function addProject(body: Record<string, unknown>): MutationResult {
     reviewed_through_sha: null,
     reviewed_at: null,
     stage_changed_at: null,
+    edited_at: new Date().toISOString(),
     next_review_due: null,
     review_overdue: false,
     review_open: null,
@@ -557,6 +564,10 @@ function addProject(body: Record<string, unknown>): MutationResult {
     ],
   };
 }
+
+// tiller_core::not_initialized(): init-hint.test.ts keeps the two equal.
+const NOT_INITIALIZED =
+  "state.db is not initialized; run tiller owner set tiller, then tiller init";
 
 function refusal(status: number, code: string, message: string): MutationResult {
   return { reply: refused(status, code, message), followUps: [] };
@@ -703,7 +714,7 @@ function floorOf(value: unknown): number | null | undefined | false {
 // checked against its `rev` and refused as the daemon refuses them.
 function editHost(body: Record<string, unknown>, scenario: Scenario): MutationResult {
   const fields = hostFieldsFor(scenario);
-  if (!fields) return refusal(400, "usage", "state.db is not initialized; run tiller init");
+  if (!fields) return refusal(400, "usage", NOT_INITIALIZED);
   if (body.rev !== fields.rev) {
     return {
       reply: refused(
@@ -828,7 +839,10 @@ function linkMutation(method: string, path: string, scenario: Scenario): Mutatio
         },
       ]
     : [];
-  return { reply: recorded(host, null, null), followUps };
+  const done = recorded(host, null, null);
+  // A key file the unpair left: still applied, with why on `warning`.
+  if (reply.warning) done.body = { ...(done.body as object), warning: reply.warning };
+  return { reply: done, followUps };
 }
 
 function cardEvent(kind: string, txn: string, row: BoardRow): FollowUp {
@@ -1146,7 +1160,7 @@ function cancelFixtureCard(card: string, body: Record<string, unknown>): Mutatio
 // `POST /api/v1/bug-project`: this host's pick, checked against its `rev`.
 function pickBugProject(body: Record<string, unknown>, scenario: Scenario): MutationResult {
   const machine = localMachine(scenario);
-  if (!machine) return refusal(400, "usage", "state.db is not initialized; run tiller init");
+  if (!machine) return refusal(400, "usage", NOT_INITIALIZED);
   if (body.rev !== machine.rev) {
     return {
       reply: refused(
@@ -1457,7 +1471,7 @@ function handle(
   const quota = path.startsWith("/api/v1/memory/proposals/")
     ? ((fixtureResource("/api/v1/quota", scenario) as QuotaResponse | undefined)?.windows ?? [])
     : [];
-  const memory = memoryMutation(method, path, body, quota);
+  const memory = memoryMutation(method, path, body, quota, scenario);
   if (memory) {
     if (!memory.ok) {
       return {
@@ -1596,7 +1610,7 @@ function handle(
   if (method === "POST" && control?.[1]) {
     return agentControl(decodeURIComponent(control[1]), control[2] ?? "", body);
   }
-  const lifecycle = /^\/api\/v1\/agents\/([^/]+)\/(stop|pause|resume|relaunch)$/.exec(path);
+  const lifecycle = /^\/api\/v1\/agents\/([^/]+)\/(stop|pause|unpause|resume|relaunch)$/.exec(path);
   if (method === "POST" && lifecycle?.[1]) {
     return agentLifecycle(decodeURIComponent(lifecycle[1]), lifecycle[2] ?? "", body, scenario);
   }
@@ -1662,7 +1676,7 @@ function sessionEvent(session: string, kind: string): FollowUp {
   };
 }
 
-// Stop, pause, resume and relaunch (protocol.md 7.4), with the refusals core
+// Stop, pause, unpause, resume and relaunch (protocol.md 7.4), with the refusals core
 // gives: an orchestrator has no run, and a worker whose run is still open is
 // not stopped.
 function agentLifecycle(
@@ -1723,8 +1737,18 @@ function agentLifecycle(
       followUps: [sessionEvent(session, "run.paused")],
     };
   }
+  if (verb === "unpause") {
+    const paused = agent.pause != null;
+    changeSession(session, { pause: null });
+    return {
+      reply: recorded({ run_id: agent.run_id, pause_until: null }, null, null),
+      followUps: paused ? [sessionEvent(session, "run.unpaused")] : [],
+    };
+  }
   if (verb === "resume") {
+    // A manual resume clears the pause, a live agent left alone too.
     if (!dead) {
+      changeSession(session, { pause: null });
       return {
         reply: recorded({ left_alone: true, pane_id: agent.pane_id }, null, null),
         followUps: [],

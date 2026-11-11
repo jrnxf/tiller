@@ -16,6 +16,9 @@ use crate::error::Error;
 pub struct Timestamp(jiff::Timestamp);
 
 impl Timestamp {
+    /// 1970-01-01T00:00:00.000Z.
+    pub const UNIX_EPOCH: Self = Timestamp(jiff::Timestamp::UNIX_EPOCH);
+
     /// The current time, truncated to the millisecond it is stored with.
     pub fn now() -> Self {
         Self::from_jiff(jiff::Timestamp::now())
@@ -127,6 +130,11 @@ pub mod lisbon {
     /// The instant as a Lisbon wall-clock time.
     pub fn local(ts: jiff::Timestamp) -> civil::DateTime {
         ts.to_zoned(zone(offset_hours(ts))).datetime()
+    }
+
+    /// `Tue 2026-11-03 14:00`: the instant in Lisbon time, with its weekday.
+    pub fn display(ts: jiff::Timestamp) -> String {
+        local(ts).strftime("%a %Y-%m-%d %H:%M").to_string()
     }
 
     /// A Lisbon wall-clock time as an instant, or `None` for the hour that

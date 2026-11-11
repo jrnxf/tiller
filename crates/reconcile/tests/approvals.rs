@@ -5,8 +5,8 @@ mod common;
 
 use common::*;
 use tiller_core::domain::{
-    ApprovalAction, ApprovalKind, ApprovalState, AttentionKind, CardOutcome, Coverage, Delivery,
-    Effort, GrantKind, Reviewer, RunOutcome, RunRole, Verdict,
+    AnsweredVia, ApprovalAction, ApprovalKind, ApprovalState, AttentionKind, CardOutcome, Coverage,
+    Delivery, Effort, GrantKind, Reviewer, RunOutcome, RunRole, Verdict,
 };
 use tiller_core::state::approvals::{NewApproval, NewGrant};
 use tiller_core::state::cards::NewCard;
@@ -97,6 +97,13 @@ fn uncertain_execution_resolves_from_forge() {
     assert!(
         items[0].question.contains("Approve again"),
         "{}",
+        items[0].question
+    );
+    assert!(
+        items[0]
+            .question
+            .contains("is failed: the merge did not happen"),
+        "the item shows the state the pass recorded: {}",
         items[0].question
     );
 }
@@ -524,4 +531,285 @@ fn rematch_needs_a_review_at_the_new_head() {
     assert!(report.did("no grant matched"), "{report:?}");
     let report = rematch(NEW);
     assert!(report.did("rematched to a standing grant"), "{report:?}");
+}
+
+/// R08: a refused write while one `uncertain` merge resolves is reported,
+/// and the next `uncertain` merge on the same PR is still resolved.
+#[test]
+fn a_refused_uncertain_merge_does_not_block_the_next() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let mut uncertain = Vec::new();
+    for _ in 0..2 {
+        let approval = w.approve(&worker, &pr, "a1a1a1a1", true);
+        w.store_mut()
+            .approval_execute(&daemon(), &approval, "a1a1a1a1")
+            .unwrap();
+        w.store()
+            .conn()
+            .execute(
+                "UPDATE approvals SET state = 'uncertain' WHERE id = ?1",
+                [&approval],
+            )
+            .unwrap();
+        uncertain.push(approval);
+    }
+    uncertain.sort();
+    let (first, second) = (&uncertain[0], &uncertain[1]);
+    w.store()
+        .conn()
+        .execute_batch(&format!(
+            "CREATE TRIGGER refuse_first BEFORE UPDATE ON approvals \
+             WHEN OLD.id = '{first}' BEGIN SELECT RAISE(ABORT, 'refused for the test'); END;"
+        ))
+        .unwrap();
+    w.forge
+        .pr(REPO, 7, merged_pr("a1a1a1a1", "e1e1e1e1", now()));
+    let report = w.pass(now());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains(&format!("uncertain approval {first}"))),
+        "{report:?}"
+    );
+    assert_eq!(w.approval(first).state, ApprovalState::Uncertain);
+    assert_eq!(w.approval(second).state, ApprovalState::Succeeded);
+}
+
+/// R08: a `failed` resolution whose recovery item could not be opened in
+/// its pass gets the item from a later pass, once.
+#[test]
+fn a_failed_execution_gets_its_item_on_a_later_pass() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let approval = w.approve(&worker, &pr, "a1a1a1a1", true);
+    w.store_mut()
+        .approval_execute(&daemon(), &approval, "a1a1a1a1")
+        .unwrap();
+    w.forge.pr(REPO, 7, open_pr("a1a1a1a1"));
+    w.store()
+        .conn()
+        .execute_batch(
+            "CREATE TRIGGER no_items BEFORE INSERT ON attention \
+             BEGIN SELECT RAISE(ABORT, 'no items for the test'); END;",
+        )
+        .unwrap();
+    let report = w.pass(now());
+    assert_eq!(w.approval(&approval).state, ApprovalState::Failed);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("no items for the test")),
+        "{report:?}"
+    );
+    let card = w.run_of(&worker).card_id;
+    let failed_items = |w: &World| {
+        w.open_items(&card)
+            .into_iter()
+            .filter(|item| {
+                item.question
+                    .contains("is failed: the merge did not happen")
+            })
+            .count()
+    };
+    assert_eq!(failed_items(&w), 0);
+    w.store()
+        .conn()
+        .execute_batch("DROP TRIGGER no_items;")
+        .unwrap();
+    let report = w.pass(now().plus_minutes(1));
+    assert!(
+        report.did(&format!("R08 approval {approval} failed: recovery item")),
+        "{report:?}"
+    );
+    assert_eq!(failed_items(&w), 1);
+    let report = w.pass(now().plus_minutes(2));
+    assert!(!report.did("R08 approval"), "once: {report:?}");
+    assert_eq!(failed_items(&w), 1);
+}
+
+/// R08: an execution the forge would not answer for ten minutes goes to
+/// the developer as `uncertain`. When the forge answers later and the
+/// execution is `failed`, the developer is told that too.
+#[test]
+fn an_unreadable_execution_that_failed_says_failed() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let approval = w.approve(&worker, &pr, "a1a1a1a1", true);
+    w.store_mut()
+        .approval_execute(&daemon(), &approval, "a1a1a1a1")
+        .unwrap();
+    w.forge.pr_error(REPO, 7, "the forge is down");
+    w.pass(now().plus_minutes(11));
+    assert_eq!(w.approval(&approval).state, ApprovalState::Uncertain);
+    let card = w.run_of(&worker).card_id;
+    let items = w.open_items(&card);
+    assert!(
+        items.iter().any(|item| item
+            .question
+            .contains("is uncertain: the forge has been unreadable")),
+        "{items:?}"
+    );
+
+    w.forge.pr(REPO, 7, open_pr("a1a1a1a1"));
+    w.pass(now().plus_minutes(12));
+    assert_eq!(w.approval(&approval).state, ApprovalState::Failed);
+    let items = w.open_items(&card);
+    assert!(
+        items.iter().any(|item| item
+            .question
+            .contains("is failed: the merge did not happen")),
+        "the item shows the final state: {items:?}"
+    );
+    assert!(
+        items.iter().any(|item| item
+            .question
+            .contains("the forge answers now, after the earlier question")),
+        "it says it follows the uncertain one: {items:?}"
+    );
+}
+
+/// R08: a `failed` approval a newer approval of its kind followed is
+/// settled, so a later pass does not ask about it.
+#[test]
+fn a_failed_execution_a_newer_approval_followed_is_not_asked_about() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let approval = w.approve(&worker, &pr, "a1a1a1a1", true);
+    w.store_mut()
+        .approval_execute(&daemon(), &approval, "a1a1a1a1")
+        .unwrap();
+    w.forge.pr(REPO, 7, open_pr("a1a1a1a1"));
+    w.store()
+        .conn()
+        .execute_batch(
+            "CREATE TRIGGER no_items BEFORE INSERT ON attention \
+             BEGIN SELECT RAISE(ABORT, 'no items for the test'); END;",
+        )
+        .unwrap();
+    w.pass(now());
+    assert_eq!(w.approval(&approval).state, ApprovalState::Failed);
+    w.store()
+        .conn()
+        .execute_batch("DROP TRIGGER no_items;")
+        .unwrap();
+    let newer = w.approve(&worker, &pr, "a1a1a1a1", true);
+    assert_ne!(newer, approval);
+    let report = w.pass(now().plus_minutes(1));
+    assert!(
+        !report.did(&format!("R08 approval {approval}")),
+        "settled: {report:?}"
+    );
+}
+
+/// R08: a `failed` item's key another actor holds is reported, not
+/// skipped without a word.
+#[test]
+fn a_failed_execution_key_another_actor_holds_is_reported() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let approval = w.approve(&worker, &pr, "a1a1a1a1", true);
+    w.store_mut()
+        .approval_execute(&daemon(), &approval, "a1a1a1a1")
+        .unwrap();
+    w.forge.pr(REPO, 7, open_pr("a1a1a1a1"));
+    let key = format!("reconcile:R08:failed:{approval}");
+    plant_key(&w, &key, Some("session:another"));
+    let report = w.pass(now());
+    assert_eq!(w.approval(&approval).state, ApprovalState::Failed);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains(&format!("pass key {key}"))),
+        "{report:?}"
+    );
+}
+
+/// R08: the developer answered the unreadable item, and nothing acted on
+/// it, so the `failed` resolution still gets its own item.
+#[test]
+fn a_failed_execution_whose_unreadable_item_was_answered_says_failed() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let approval = w.approve(&worker, &pr, "a1a1a1a1", true);
+    w.store_mut()
+        .approval_execute(&daemon(), &approval, "a1a1a1a1")
+        .unwrap();
+    w.forge.pr_error(REPO, 7, "the forge is down");
+    w.pass(now().plus_minutes(11));
+    let card = w.run_of(&worker).card_id;
+    let items = w.open_items(&card);
+    let uncertain = items
+        .iter()
+        .find(|item| item.question.contains("is uncertain"))
+        .unwrap_or_else(|| panic!("{items:?}"));
+    w.store_mut()
+        .attention_answer(
+            &owner(),
+            None,
+            &uncertain.id,
+            "Approve again",
+            AnsweredVia::Board,
+        )
+        .unwrap();
+    w.forge.pr(REPO, 7, open_pr("a1a1a1a1"));
+    w.pass(now().plus_minutes(12));
+    assert_eq!(w.approval(&approval).state, ApprovalState::Failed);
+    let items = w.open_items(&card);
+    assert!(
+        items.iter().any(|item| item
+            .question
+            .contains("is failed: the merge did not happen")),
+        "{items:?}"
+    );
+}
+
+/// R08: an unreadable key another actor planted is no earlier question
+/// the pass asked, so the `failed` item does not refer to one.
+#[test]
+fn a_failed_item_does_not_refer_to_a_question_another_actor_planted() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let approval = w.approve(&worker, &pr, "a1a1a1a1", true);
+    w.store_mut()
+        .approval_execute(&daemon(), &approval, "a1a1a1a1")
+        .unwrap();
+    plant_key(
+        &w,
+        &format!("reconcile:R08:execution:{approval}"),
+        Some("session:another"),
+    );
+    w.forge.pr(REPO, 7, open_pr("a1a1a1a1"));
+    w.pass(now());
+    let card = w.run_of(&worker).card_id;
+    let items = w.open_items(&card);
+    let item = items
+        .iter()
+        .find(|item| {
+            item.question
+                .contains("is failed: the merge did not happen")
+        })
+        .unwrap_or_else(|| panic!("{items:?}"));
+    assert!(
+        !item.question.contains("earlier question"),
+        "{}",
+        item.question
+    );
 }

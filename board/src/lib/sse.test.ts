@@ -9,6 +9,7 @@ import type {
   MachinesResponse,
   ProjectsResponse,
   QuotaResponse,
+  Snapshot,
 } from "./api-types";
 import { connectionStore } from "./connection";
 import { fixtureSnapshot } from "./fixtures";
@@ -17,6 +18,7 @@ import type { QueryPath } from "./queries";
 import {
   attentionPath,
   boardPath,
+  hostConfigPath,
   machinesPath,
   peersPath,
   projectsPath,
@@ -785,16 +787,17 @@ test("a config event refetches the open Settings read without a reload", async (
   unsubscribe();
 });
 
-test("only a pairing change on a host row refetches the peer list", async () => {
+test("every host event refetches the peer list", async () => {
   const queryClient = seededClient();
-  const read = vi.fn(async () => ({ paired: [], accepted: [] }));
+  const read = vi.fn(async () => ({ paired: [], accepted: [], key_files_left: [] }));
   const observer = new QueryObserver(queryClient, {
     queryKey: queryKeyFor(peersPath),
     queryFn: read,
     staleTime: Infinity,
   });
   const unsubscribe = observer.subscribe(() => {});
-  await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+  // The first read lands first: a refetch while it runs would join it.
+  await vi.waitFor(() => expect(observer.getCurrentResult().data).toBeDefined());
   const machine = queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath))
     ?.machines[0];
   if (!machine) throw new Error("fixture has no machine");
@@ -810,14 +813,11 @@ test("only a pairing change on a host row refetches the peer list", async () => 
       }),
     );
 
-  edit("peer.hello");
-  edit("host.edit");
-  await Promise.resolve();
-  expect(read).toHaveBeenCalledTimes(1);
-  edit("peer.remove");
-  await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
-  edit("peer.pair");
-  await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(3));
+  // A host edit, a link that moved, a pairing ended and one added.
+  for (const [n, txn] of ["host.edit", "peer.link", "peer.remove", "peer.pair"].entries()) {
+    edit(txn);
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(n + 2));
+  }
   unsubscribe();
 });
 
@@ -969,5 +969,393 @@ test("once a resync after a reset lands, the stream resumes after the snapshot's
   await vi.advanceTimersByTimeAsync(1000);
 
   expect((FakeSource.all[1] as FakeSource).url).toBe("/api/v1/events?since=120");
+  stop();
+});
+
+// A snapshot fetch the test settles by hand, in the order it chooses.
+function heldSnapshots() {
+  const calls: { resolve: (snapshot: Snapshot) => void; reject: (error: unknown) => void }[] = [];
+  const fetchSnapshot = () =>
+    new Promise<Snapshot>((resolve, reject) => {
+      calls.push({ resolve, reject });
+    });
+  return { calls, fetchSnapshot };
+}
+
+test("a second reset while a snapshot is in flight keeps the resync pending until the last one lands", async () => {
+  vi.useFakeTimers();
+  const queryClient = seededClient();
+  const { calls, fetchSnapshot } = heldSnapshots();
+  const stop = connectEvents({
+    queryClient,
+    lastEventSeq: 4181,
+    createEventSource: (url) => new FakeSource(url),
+    fetchSnapshot,
+    fetchSession: () => Promise.resolve({ owner: true }),
+  });
+  const source = FakeSource.all[0] as FakeSource;
+  const hostA = queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath))?.machines[0];
+  if (!hostA) throw new Error("fixture has no machine");
+
+  source.emit("reset", { seq: 5000 });
+  // The database is restored while the first snapshot is in flight.
+  source.emit("reset", { seq: 100 });
+  calls[0]?.resolve({ ...fixtureSnapshot("default", NOW), last_event_seq: 5000 });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(calls).toHaveLength(2);
+
+  // A live change of the restored log, before the second snapshot lands, is
+  // not old: the first snapshot was of the log before the restore.
+  source.emit(
+    "change",
+    event({
+      seq: 101,
+      entity: "host",
+      entity_id: hostA.id,
+      entity_state: { ...hostA, rev: hostA.rev + 1, running_agents: 6 },
+    }),
+  );
+  expect(
+    queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath))?.machines[0]
+      ?.running_agents,
+  ).toBe(6);
+
+  // The second snapshot fails: the stream must not resume after the old 5000.
+  calls[1]?.reject(new Error("daemon is restarting"));
+  await vi.advanceTimersByTimeAsync(0);
+  source.readyState = 2;
+  source.emit("error");
+  await vi.advanceTimersByTimeAsync(1000);
+  expect((FakeSource.all[1] as FakeSource).url).toBe("/api/v1/events?since=4181");
+  stop();
+});
+
+test("a change applied while the snapshot was in flight is not undone by the older snapshot", async () => {
+  const queryClient = seededClient();
+  const { calls, fetchSnapshot } = heldSnapshots();
+  const stop = connectEvents({
+    queryClient,
+    lastEventSeq: 4181,
+    createEventSource: (url) => new FakeSource(url),
+    fetchSnapshot,
+  });
+  const source = FakeSource.all[0] as FakeSource;
+  const item = queryClient.getQueryData<AttentionResponse>(queryKeyFor(attentionPath))?.items[0];
+  if (!item) throw new Error("fixture has no attention item");
+
+  source.emit("reset", { seq: 5000 });
+  // The item is answered after the daemon built the snapshot.
+  source.emit(
+    "change",
+    event({
+      seq: 5001,
+      entity: "attention",
+      entity_id: item.id,
+      entity_state: { ...item, rev: item.rev + 1, answered_at: "2026-11-02T12:00:00.000Z" },
+    }),
+  );
+  calls[0]?.resolve({ ...fixtureSnapshot("default", NOW), last_event_seq: 5000 });
+
+  // The snapshot shows the item open again, so its read is fetched again.
+  await vi.waitFor(() => {
+    expect(queryClient.getQueryState(queryKeyFor(attentionPath))?.isInvalidated).toBe(true);
+  });
+  stop();
+});
+
+test("a snapshot as new as every change applied meanwhile needs no second fetch of its reads", async () => {
+  const queryClient = seededClient();
+  const { calls, fetchSnapshot } = heldSnapshots();
+  const stop = connectEvents({
+    queryClient,
+    lastEventSeq: 4181,
+    createEventSource: (url) => new FakeSource(url),
+    fetchSnapshot,
+  });
+  const source = FakeSource.all[0] as FakeSource;
+  source.emit("reset", { seq: 5000 });
+  source.emit("change", event({ seq: 5001, entity: "x" }));
+  calls[0]?.resolve({ ...fixtureSnapshot("quota-red", NOW), last_event_seq: 5001 });
+  await vi.waitFor(() => {
+    expect(queryClient.getQueryData<QuotaResponse>(queryKeyFor(quotaPath))?.windows[0]?.dot).toBe(
+      "red",
+    );
+  });
+  expect(queryClient.getQueryState(queryKeyFor(attentionPath))?.isInvalidated).toBe(false);
+  stop();
+});
+
+test("a snapshot refused as signed out shows the signed-out screen and stops trying", async () => {
+  vi.useFakeTimers();
+  signedOutStore.set(false);
+  const queryClient = seededClient();
+  const fetchSnapshot = vi.fn(() =>
+    Promise.reject(new ReadError("/api/v1/snapshot", 403, "signed out", null, "signed_out")),
+  );
+  const stop = connectEvents({
+    queryClient,
+    lastEventSeq: 4181,
+    createEventSource: (url) => new FakeSource(url),
+    fetchSnapshot,
+  });
+  (FakeSource.all[0] as FakeSource).emit("reset", { seq: 100 });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(signedOutStore.get()).toBe(true);
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(fetchSnapshot).toHaveBeenCalledTimes(1);
+  stop();
+  signedOutStore.set(false);
+});
+
+test("a new reset starts the snapshot retries again from the shortest wait", async () => {
+  vi.useFakeTimers();
+  const queryClient = seededClient();
+  const fetchSnapshot = vi.fn(() => Promise.reject(new Error("daemon is restarting")));
+  const stop = connectEvents({
+    queryClient,
+    lastEventSeq: 4181,
+    createEventSource: (url) => new FakeSource(url),
+    fetchSnapshot,
+  });
+  const source = FakeSource.all[0] as FakeSource;
+  source.emit("reset", { seq: 100 });
+  // Six tries: the next wait is at its 30 s ceiling.
+  await vi.advanceTimersByTimeAsync(1000 + 2000 + 4000 + 8000 + 16_000);
+  expect(fetchSnapshot).toHaveBeenCalledTimes(6);
+  source.emit("reset", { seq: 120 });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetchSnapshot).toHaveBeenCalledTimes(7);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(fetchSnapshot).toHaveBeenCalledTimes(8);
+  stop();
+});
+
+// A read the test watches, as a screen on the board does.
+async function watched(queryClient: QueryClient, path: string) {
+  const read = vi.fn(async () => ({}));
+  // The snapshot may hold the read already: the first fetch is the screen's.
+  queryClient.removeQueries({ queryKey: queryKeyFor(path as QueryPath) });
+  const observer = new QueryObserver(queryClient, {
+    queryKey: queryKeyFor(path as QueryPath),
+    queryFn: read,
+    staleTime: Infinity,
+  });
+  const unsubscribe = observer.subscribe(() => {});
+  await vi.advanceTimersByTimeAsync(0);
+  expect(read).toHaveBeenCalledTimes(1);
+  return { read, unsubscribe };
+}
+
+test("a burst of events refetches the open Health signals and contributions once, after the burst", async () => {
+  vi.useFakeTimers();
+  const queryClient = seededClient();
+  const signals = await watched(queryClient, signalsPath);
+  const contributions = await watched(queryClient, "/api/v1/contributions?project=alpha");
+
+  for (let seq = 5000; seq < 5020; seq += 1) {
+    const entity = ["card", "run", "pr", "attention"][seq % 4] as string;
+    applyChange(queryClient, event({ seq, entity, entity_id: `e${seq}` }));
+  }
+  // Marked stale at once, so a screen that opens now reads them fresh.
+  expect(queryClient.getQueryState(queryKeyFor(signalsPath))?.isInvalidated).toBe(true);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(signals.read).toHaveBeenCalledTimes(1);
+  expect(contributions.read).toHaveBeenCalledTimes(1);
+
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(signals.read).toHaveBeenCalledTimes(2);
+  expect(contributions.read).toHaveBeenCalledTimes(2);
+
+  // Quiet: nothing more.
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(signals.read).toHaveBeenCalledTimes(2);
+  signals.unsubscribe();
+  contributions.unsubscribe();
+});
+
+test("a peer's change leaves this host's settings, signals and contributions alone", () => {
+  const { queryClient, stop, source } = federatedStream();
+  const paths = [
+    startSettingsPath,
+    hostConfigPath,
+    "/api/v1/projects/alpha/setup",
+    "/api/v1/projects/alpha",
+    signalsPath,
+    "/api/v1/contributions",
+  ];
+  for (const path of paths) queryClient.setQueryData(queryKeyFor(path as QueryPath), {});
+  const peer = (change: Partial<ChangeEvent>) =>
+    source.emit("peer", {
+      host: "host-d",
+      host_id: "01JPEERD0000000000000000D",
+      as_of: null,
+      change: event({ seq: 9000, ...change }),
+    });
+
+  peer({ kind: "config.changed", entity: "config", entity_id: "spawn.pool_root" });
+  peer({ kind: "card.changed", entity: "card", entity_id: "c1" });
+  peer({ kind: "pr.changed", entity: "pr", entity_id: "p1" });
+  peer({ kind: "run.ended", entity: "run", entity_id: "r1" });
+  peer({ kind: "project.changed", entity: "project", entity_id: "alpha" });
+
+  for (const path of paths) {
+    expect(queryClient.getQueryState(queryKeyFor(path as QueryPath))?.isInvalidated, path).toBe(
+      false,
+    );
+  }
+  stop();
+});
+
+test("a peer's change applied while the snapshot was in flight is read again after it lands", async () => {
+  const queryClient = new QueryClient();
+  hydrateFromSnapshot(queryClient, fixtureSnapshot("federated", NOW));
+  const { calls, fetchSnapshot } = heldSnapshots();
+  const stop = connectEvents({
+    queryClient,
+    lastEventSeq: 4181,
+    createEventSource: (url) => new FakeSource(url),
+    fetchSnapshot,
+  });
+  const source = FakeSource.all[0] as FakeSource;
+  const peerRow = queryClient
+    .getQueryData<BoardResponse>(queryKeyFor(boardPath()))
+    ?.rows.find((row) => row.host === "host-d");
+  if (!peerRow) throw new Error("fixture has no host-d card");
+
+  source.emit("reset", { seq: 5000 });
+  source.emit("peer", {
+    host: "host-d",
+    host_id: "01JPEERD0000000000000000D",
+    as_of: "2026-11-02T12:00:01.000Z",
+    change: event({
+      seq: 9000,
+      entity: "card",
+      card_id: peerRow.id,
+      card: { ...peerRow, column: "done" as const },
+    }),
+  });
+  // The snapshot was built before the peer's change, and writes the old row back.
+  calls[0]?.resolve({ ...fixtureSnapshot("federated", NOW), last_event_seq: 5000 });
+  await vi.waitFor(() => {
+    expect(queryClient.getQueryState(queryKeyFor(boardPath()))?.isInvalidated).toBe(true);
+  });
+  stop();
+});
+
+test("a stopped stream sends none of the refetches it had waiting", async () => {
+  vi.useFakeTimers();
+  const queryClient = seededClient();
+  const signals = await watched(queryClient, signalsPath);
+  const stop = connectEvents({
+    queryClient,
+    lastEventSeq: 4181,
+    createEventSource: (url) => new FakeSource(url),
+    fetchSnapshot: () => Promise.reject(new Error("unused")),
+  });
+  (FakeSource.all[0] as FakeSource).emit(
+    "change",
+    event({ seq: 4182, entity: "card", entity_id: "c1" }),
+  );
+  // Signed out, say: the stream stops before the refetch was due.
+  stop();
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(signals.read).toHaveBeenCalledTimes(1);
+  signals.unsubscribe();
+});
+
+test("a coalesced refetch still runs when a fetch begun before the event lands meanwhile", async () => {
+  vi.useFakeTimers();
+  const queryClient = seededClient();
+  const signals = await watched(queryClient, signalsPath);
+  // A fetch from before the event, slow to answer.
+  const held: { answer?: (value: object) => void } = {};
+  signals.read.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        held.answer = resolve;
+      }),
+  );
+  void queryClient.refetchQueries({ queryKey: queryKeyFor(signalsPath) });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(signals.read).toHaveBeenCalledTimes(2);
+
+  applyChange(queryClient, event({ seq: 5000, entity: "card", entity_id: "c1" }));
+  // The old fetch lands with numbers from before the event.
+  held.answer?.({});
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(signals.read).toHaveBeenCalledTimes(3);
+  signals.unsubscribe();
+});
+
+test("a snapshot that a second reset outdated is not written over the live rows", async () => {
+  vi.useFakeTimers();
+  const queryClient = seededClient();
+  const { calls, fetchSnapshot } = heldSnapshots();
+  const stop = connectEvents({
+    queryClient,
+    lastEventSeq: 4181,
+    createEventSource: (url) => new FakeSource(url),
+    fetchSnapshot,
+    fetchSession: () => Promise.resolve({ owner: true }),
+  });
+  const source = FakeSource.all[0] as FakeSource;
+  const hostA = queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath))?.machines[0];
+  if (!hostA) throw new Error("fixture has no machine");
+
+  source.emit("reset", { seq: 50 });
+  source.emit("reset", { seq: 80 });
+  source.emit(
+    "change",
+    event({
+      seq: 81,
+      entity: "host",
+      entity_id: hostA.id,
+      entity_state: { ...hostA, rev: hostA.rev + 1, running_agents: 6 },
+    }),
+  );
+  // The first snapshot is from before the second reset: it holds the old row.
+  calls[0]?.resolve({ ...fixtureSnapshot("default", NOW), last_event_seq: 50 });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(
+    queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath))?.machines[0]
+      ?.running_agents,
+  ).toBe(6);
+  expect(queryClient.getQueryState(queryKeyFor(machinesPath))?.isInvalidated).toBe(false);
+  expect(calls).toHaveLength(2);
+  stop();
+});
+
+test("a snapshot is still written when only a reopened stream asked for another", async () => {
+  vi.useFakeTimers();
+  const queryClient = seededClient();
+  const { calls, fetchSnapshot } = heldSnapshots();
+  const stop = connectEvents({
+    queryClient,
+    lastEventSeq: 4181,
+    createEventSource: (url) => new FakeSource(url),
+    fetchSnapshot,
+    fetchSession: () => Promise.resolve({ owner: true }),
+  });
+  const source = FakeSource.all[0] as FakeSource;
+  const hostA = queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath))?.machines[0];
+  if (!hostA) throw new Error("fixture has no machine");
+
+  source.emit("reset", { seq: 5000 });
+  // The stream drops and opens again while the snapshot is in flight.
+  source.emit("open");
+  const fresh = fixtureSnapshot("default", NOW);
+  const machines = fresh.queries[machinesPath] as MachinesResponse;
+  fresh.queries[machinesPath] = {
+    ...machines,
+    machines: machines.machines.map((row) =>
+      row.id === hostA.id ? { ...row, rev: row.rev + 1, running_agents: 7 } : row,
+    ),
+  };
+  calls[0]?.resolve({ ...fresh, last_event_seq: 5000 });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(
+    queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath))?.machines[0]
+      ?.running_agents,
+  ).toBe(7);
   stop();
 });

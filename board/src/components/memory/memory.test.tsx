@@ -484,6 +484,26 @@ test("Keep waits for the holdout gate, with the reason, and the board offers the
   expect(within(rewrite()).queryByText(/Keep waits/)).toBeNull();
 });
 
+test("a Keep over the startup budget is refused with the numbers, and the suggestion stays", async () => {
+  resetMemoryFixture(NOW, "memory-limits");
+  stubDaemon("memory-limits");
+  await renderMemory("/memory?doc=beta");
+  await settle();
+
+  const text =
+    "Before a release build, read the whole build log and list every warning with its crate.";
+  const row = page().getByText(text).closest<HTMLElement>(".a-sug");
+  if (!row) throw new Error("no suggestion card");
+  fireEvent.click(within(row).getByRole("button", { name: "Keep" }));
+  await settle();
+
+  expect(calls.map((c) => c.path)).toEqual(["/api/v1/memory/proposals/decide"]);
+  expect(within(row).getByRole("alert").textContent).toBe(
+    "It would put every role's startup memory in beta over the 7,500-token budget: 7,412 tokens now, 164 from this change, 7,576 after.",
+  );
+  expect(page().getByText(text).closest(".a-sug")).toBeTruthy();
+});
+
 const editButton = (row: HTMLElement) =>
   within(row).getByRole("button", { name: "Edit this line" });
 

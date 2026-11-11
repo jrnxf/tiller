@@ -24,7 +24,7 @@ const DELIVERIES = [
 const DEFAULT_CAPACITY = 2;
 
 // How long the checkout check waits for typing to stop.
-const CHECK_DELAY_MS = 300;
+export const CHECK_DELAY_MS = 300;
 
 // What happens to the project's local checkout: an existing folder, a clone
 // into a new one, or nothing yet (`tiller config set checkouts.<id>` later).

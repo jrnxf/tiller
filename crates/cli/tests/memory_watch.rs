@@ -11,65 +11,13 @@ mod common;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use common::World;
+use common::{World, git_only_daemon};
 
 const WAIT: Duration = Duration::from_secs(30);
-
-struct Daemon {
-    child: Child,
-    port: u16,
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        // A failed test leaves no daemon behind.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// The daemon with a `PATH` that holds `git` and nothing else.
-fn start(world: &World) -> Daemon {
-    let bin = world.dir.path().join("git-only");
-    std::fs::create_dir_all(&bin).unwrap();
-    let found = Command::new("sh")
-        .args(["-c", "command -v git"])
-        .output()
-        .unwrap();
-    let git = String::from_utf8(found.stdout).unwrap();
-    std::os::unix::fs::symlink(git.trim(), bin.join("git")).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tiller"))
-        .args(["daemon", "--port", "0"])
-        .env("TILLER_HOME", world.home())
-        .env("PATH", &bin)
-        .env("TILLER_HERDR", "/nonexistent/herdr")
-        .env("TILLER_QUOTA_AXI", "/nonexistent/quota-axi")
-        .env("TILLER_LOG", "warn")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        let _ = BufReader::new(stdout).read_line(&mut line);
-        let _ = tx.send(line);
-    });
-    let line = rx.recv_timeout(WAIT).expect("the daemon said nothing");
-    let port = line
-        .trim()
-        .strip_prefix("listening on http://127.0.0.1:")
-        .unwrap_or_else(|| panic!("unexpected first line {line:?}"))
-        .parse()
-        .unwrap();
-    Daemon { child, port }
-}
 
 /// `GET /api/v1/events` read on a thread: each `data:` line of a `change`
 /// message arrives on the channel.
@@ -217,9 +165,9 @@ fn an_edit_made_outside_the_board_reaches_the_stream() {
         &root,
         "# Fleet\n\n## How we work here\n\n- The first line.\n",
     );
-    let daemon = start(&world);
-    let rx = changes(daemon.port);
-    watching(daemon.port);
+    let (_daemon, port) = git_only_daemon(&world);
+    let rx = changes(port);
+    watching(port);
     // The first look is a baseline, not a change.
     let early = drain(&rx, Duration::from_secs(2));
     assert!(
@@ -237,7 +185,7 @@ fn an_edit_made_outside_the_board_reaches_the_stream() {
         change.contains("\"kind\":\"memory_repo.changed\""),
         "{change}"
     );
-    assert!(fleet_text(daemon.port).contains("Edited by hand."));
+    assert!(fleet_text(port).contains("Edited by hand."));
     // One change for one edit: nothing more follows while the repo is still.
     let more = drain(&rx, Duration::from_secs(3));
     assert!(

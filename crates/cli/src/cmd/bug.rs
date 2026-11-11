@@ -4,7 +4,7 @@ use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 use tiller_core::state::cards::{BugRoute, NewBug};
 
-use super::{KeyArg, card_text, tag};
+use super::{KeyArg, tag};
 use crate::app::{App, Done, Failure, Outcome, text_input};
 
 #[derive(Subcommand, Debug)]
@@ -35,7 +35,6 @@ pub fn run(app: &App, cmd: Cmd) -> Done {
 
 fn file(app: &App, args: File) -> Done {
     let body = text_input(Some(args.body), None, "the body")?;
-    card_text(Some(&args.title), Some(&body))?;
     let evidence = match &args.evidence {
         Some(text) => Some(
             serde_json::from_str::<Value>(text)

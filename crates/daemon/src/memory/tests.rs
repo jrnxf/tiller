@@ -16,7 +16,7 @@ use tiller_core::memory::{self as doc, NOTE_SECTION, RULE_SECTION, document_path
 use tiller_core::state::learning::EvalResult;
 use tiller_core::state::peers::NewPairing;
 use tiller_core::{Actor, Ctx, Error, NewEvent, ids};
-use tiller_herdr::testing::{Fleet, owner};
+use tiller_herdr::testing::{Fleet, eventually, gone, owner};
 
 use super::apply::Repo;
 use super::eval::Evals;
@@ -436,6 +436,108 @@ async fn a_batch_keeps_proposals_made_against_the_same_text() {
     assert_eq!(home.git(&["rev-list", "--count", "HEAD"]).trim(), "3");
 }
 
+/// The startup tokens of a launch that renders `docs` (path, text) in this
+/// order, worked out here as `memory.md` section 2 states the form: one
+/// `# Memory` heading, then a `## <path>` heading per document that is not
+/// empty, at four bytes a token, rounded up.
+fn startup_tokens(docs: &[(&str, &str)]) -> i64 {
+    let mut prompt = String::from("# Memory\n\n");
+    for (path, text) in docs {
+        if !text.trim().is_empty() {
+            prompt.push_str(&format!("## {path}\n\n{}\n\n", text.trim_end()));
+        }
+    }
+    i64::try_from(prompt.len().div_ceil(4)).unwrap()
+}
+
+/// `n` with a comma between each group of three digits.
+fn grouped(n: i64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (at, digit) in digits.chars().enumerate() {
+        if at > 0 && (digits.len() - at).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// Keep refuses a change that would put a role's startup memory over the
+/// 7,500-token budget, worked out from the approved set at decide time, and
+/// says the numbers; a Keep under it records the count on the proposal
+/// (`memory.md` section 6, P42).
+#[tokio::test(flavor = "multi_thread")]
+async fn keep_over_the_startup_budget_is_refused_with_the_numbers() {
+    let home = home();
+    home.add("k-1", "fleet", NOTE_SECTION, &"f".repeat(29_500))
+        .await;
+    home.add("k-2", "alpha", RULE_SECTION, "Run the slow suite")
+        .await;
+    let fits = propose(&home, "alpha", "The parser test flakes");
+    let line = "o".repeat(600);
+    let over = propose(&home, "alpha", &line);
+    measured(&home, "budget notes", &[&fits, &over]);
+
+    let (fleet, alpha) = (text(&home, "fleet.md"), text(&home, ALPHA));
+    let now = startup_tokens(&[("fleet.md", &fleet), (ALPHA, &alpha)]);
+    let after = startup_tokens(&[
+        ("fleet.md", &fleet),
+        (ALPHA, &doc::add(&alpha, NOTE_SECTION, &line)),
+    ]);
+    assert!(now <= 7_500 && after > 7_500, "{now} {after}");
+    let head = home.git(&["rev-parse", "HEAD"]);
+    let blob = home.blob("alpha").await;
+    let answer = home
+        .post(
+            "/api/v1/memory/proposals/decide",
+            json!({"idempotency_key": "k-over", "decisions": [
+                {"proposal": over, "decision": "keep", "base_blob": blob},
+            ]}),
+        )
+        .await;
+    let error = refusal(&answer, StatusCode::UNPROCESSABLE_ENTITY);
+    let numbers = format!(
+        "it would put every role's startup memory in alpha over the 7,500-token budget: {} tokens now, {} from this change, {} after",
+        grouped(now),
+        grouped(after - now),
+        grouped(after)
+    );
+    assert_eq!(error.message, format!("proposal {over}: {numbers}"));
+    assert_eq!(home.git(&["rev-parse", "HEAD"]), head);
+
+    // One under the budget keeps, with the count it leaves for each role.
+    let answer = home
+        .post(
+            "/api/v1/memory/proposals/decide",
+            json!({"idempotency_key": "k-fits", "decisions": [
+                {"proposal": fits, "decision": "keep", "base_blob": blob},
+            ]}),
+        )
+        .await;
+    ok(&answer);
+    let kept = startup_tokens(&[("fleet.md", &fleet), (ALPHA, &text(&home, ALPHA))]);
+    let recorded: String = home
+        .fleet
+        .open()
+        .conn()
+        .query_row(
+            "SELECT token_budget_after FROM proposals WHERE id = ?1",
+            [&fits],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let all = ["orchestrator", "scout", "builder", "reviewer", "verifier"];
+    let expected: serde_json::Map<String, Value> = all
+        .iter()
+        .map(|role| ((*role).to_owned(), json!(kept)))
+        .collect();
+    assert_eq!(
+        serde_json::from_str::<Value>(&recorded).unwrap(),
+        Value::Object(expected)
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_batch_keep_after_another_set_moved_the_text_is_stale() {
     let home = home();
@@ -548,6 +650,54 @@ async fn the_document_list_counts_the_lines_at_head() {
         .collect();
     assert_eq!(lines.get("fleet"), Some(&1));
     assert_eq!(lines.get("alpha"), Some(&2));
+}
+
+/// The document list names a document a launch goes on without, and why,
+/// so the board can warn about it (`memory.md` section 9, step 4).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_document_list_names_a_document_a_launch_skips() {
+    let home = home();
+    home.add("k-1", "fleet", RULE_SECTION, "Ask before a sizeable merge")
+        .await;
+    home.add("k-2", "alpha", RULE_SECTION, "Run the slow suite")
+        .await;
+    // The text has no approved revision, as after an edit outside Tiller.
+    home.fleet
+        .open()
+        .conn()
+        .execute(
+            "UPDATE memory_revisions SET review = 'unreviewed'
+              WHERE source_id = (SELECT id FROM memory_sources WHERE project_id = 'alpha')",
+            [],
+        )
+        .unwrap();
+    let view = home.view("fleet").await;
+    let skipped: BTreeMap<&str, Value> = view["docs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (d["project_id"].as_str().unwrap(), d["skipped"].clone()))
+        .collect();
+    assert_eq!(skipped["alpha"], json!("it has no approved revision"));
+    assert_eq!(skipped["fleet"], Value::Null);
+
+    // A document no role loads is not one a launch skips.
+    home.fleet
+        .open()
+        .conn()
+        .execute(
+            "UPDATE memory_sources SET roles = '[]' WHERE project_id = 'alpha'",
+            [],
+        )
+        .unwrap();
+    let view = home.view("fleet").await;
+    let alpha = view["docs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["project_id"] == "alpha")
+        .unwrap();
+    assert_eq!(alpha["skipped"], Value::Null);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1152,13 +1302,37 @@ async fn a_holdout_eval_that_records_nothing_keeps_its_reason() {
     assert_eq!(shown["eval_clears"], true, "it can run again");
 }
 
-fn gone(pid: &str) -> bool {
-    let out = Command::new("ps")
-        .args(["-o", "stat=", "-p", pid])
-        .output()
-        .unwrap();
-    let stat = String::from_utf8_lossy(&out.stdout);
-    stat.trim().is_empty() || stat.trim_start().starts_with('Z')
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_holdout_eval_is_still_shown_after_a_restart() {
+    let mut home = home();
+    home.add("k-1", "alpha", RULE_SECTION, "Run the slow suite")
+        .await;
+    let proposal = propose(&home, "alpha", "The parser test flakes");
+    let checkout = evals_checkout("exit 3");
+    point_at(&home, checkout.path());
+    weekly(&home, 60.0);
+    ok(&home
+        .post(
+            &format!("/api/v1/memory/proposals/{proposal}/eval"),
+            json!({"idempotency_key": "e-1"}),
+        )
+        .await);
+    let before = settled(&home, "alpha").await["evals"][0].clone();
+    // A new daemon on the same home starts with no jobs in memory.
+    home.evals = Evals::default();
+    home.app = app_with_evals(home.path(), home.evals.clone());
+    let view = home.view("alpha").await;
+    let job = &view["evals"][0];
+    assert_eq!(job["proposal_id"], proposal.as_str(), "{view}");
+    assert_eq!(job["error"], before["error"]);
+    assert!(
+        job["error"]
+            .as_str()
+            .unwrap()
+            .contains("evals/run.sh exited with code 3")
+    );
+    assert!(job["finished_at"].is_string(), "{job}");
+    assert_eq!(view["evals"].as_array().unwrap().len(), 1, "{view}");
 }
 
 /// The entries under `<home>/evals`, oldest run first.
@@ -1217,7 +1391,8 @@ async fn stopping_the_daemon_stops_its_holdout_eval_and_what_it_started() {
     tokio::task::spawn_blocking(move || evals.stop(std::time::Duration::from_secs(5)))
         .await
         .unwrap();
-    let stopped = gone(&runner) && gone(&grandchild);
+    // The stop reaps the runner; the rest of its group goes a moment later.
+    let stopped = eventually(|| gone(&runner) && gone(&grandchild));
     // Whatever happened, take every process this test started down with it.
     for pid in [&runner, &grandchild] {
         let _ = Command::new("kill").args(["-KILL", pid]).status();
@@ -1258,6 +1433,37 @@ async fn the_daemon_keeps_only_the_newest_holdout_eval_directories() {
     assert!(dirs.contains(&"notes".to_owned()), "{dirs:?}");
     assert_eq!(dirs.len(), 21, "20 runs and the notes: {dirs:?}");
     assert!(!dirs.contains(&first.unwrap()), "{dirs:?}");
+}
+
+/// A start whose run never begins removes no earlier run's directory.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_that_fails_removes_no_old_holdout_eval_directory() {
+    let home = home();
+    home.add("k-1", "alpha", RULE_SECTION, "Run the slow suite")
+        .await;
+    let proposal = propose(&home, "alpha", "The parser test flakes");
+    let checkout = evals_checkout("exit 3");
+    point_at(&home, checkout.path());
+    weekly(&home, 60.0);
+    let mut old: Vec<String> = (0..25).map(|_| ids::new_ulid()).collect();
+    old.sort();
+    for name in &old {
+        std::fs::create_dir_all(home.path().join("evals").join(name)).unwrap();
+    }
+    home.evals.fail_next_spawn();
+    let answer = home
+        .post(
+            &format!("/api/v1/memory/proposals/{proposal}/eval"),
+            json!({"idempotency_key": "e-1"}),
+        )
+        .await;
+    assert_eq!(
+        answer.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        answer.body
+    );
+    assert_eq!(run_dirs(&home), old);
 }
 
 #[tokio::test(flavor = "multi_thread")]

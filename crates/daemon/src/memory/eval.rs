@@ -6,7 +6,8 @@
 //! A run takes model quota, so a start is refused under this host's quota
 //! floor for new work, and the plan says how many model runs and how much
 //! of the week it will probably take. One eval runs at a time. A run that
-//! records nothing keeps its reason here until the daemon stops. A run the
+//! records nothing keeps its reason here and in an `eval_run.failed` event,
+//! which the memory view still shows after the daemon restarts. A run the
 //! daemon stops is stopped with everything its runner started, and only
 //! the newest runs' directories stay under `<home>/evals`.
 
@@ -14,7 +15,9 @@ use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -27,7 +30,7 @@ use tiller_agents::spawn::quota_floor;
 use tiller_core::domain::{ChangeSet, QuotaWindow, RunRole};
 use tiller_core::memory::document_path;
 use tiller_core::state::approvals::active_away;
-use tiller_core::state::learning::{self, Learning};
+use tiller_core::state::learning::{self, EvalFailure, Learning};
 use tiller_core::state::list;
 use tiller_core::{Actor, Ctx, Error, Store, Timestamp, ids};
 use tiller_herdr::process::Interrupt;
@@ -70,6 +73,9 @@ struct Shared {
     /// Set when the daemon stops: every running eval is stopped with
     /// everything it started.
     stop: Arc<AtomicBool>,
+    /// Set by a test: the next eval's thread does not start.
+    #[cfg(test)]
+    no_thread: AtomicBool,
 }
 
 /// The evals the board started: the running one and the failed ones.
@@ -88,13 +94,37 @@ impl Evals {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// What the memory view shows, newest first.
-    pub fn jobs(&self) -> Vec<MemoryEvalJob> {
-        self.lock()
+    /// What the memory view shows, newest start first and at most [`KEPT`]:
+    /// this daemon's jobs, and the failures its `eval_run.failed` events
+    /// keep for every other proposal, so a failure outlives a restart.
+    pub fn jobs(&self, conn: &rusqlite::Connection) -> tiller_core::Result<Vec<MemoryEvalJob>> {
+        let mut jobs: Vec<MemoryEvalJob> = self
+            .lock()
             .iter()
             .rev()
             .map(|job| job.view.clone())
-            .collect()
+            .collect();
+        for failed in learning::failed_evals(conn, KEPT)? {
+            if jobs
+                .iter()
+                .any(|job| job.proposal_id == failed.failure.proposal_id)
+            {
+                continue;
+            }
+            jobs.push(MemoryEvalJob {
+                proposal_id: failed.failure.proposal_id,
+                change_set: failed.change_set,
+                cases: failed.failure.cases,
+                started_at: failed.failure.started_at,
+                minutes: failed.failure.minutes,
+                error: Some(failed.failure.error),
+                finished_at: Some(failed.finished_at),
+            });
+        }
+        // A stable sort keeps the in-memory order for equal starts.
+        jobs.sort_by_key(|job| std::cmp::Reverse(job.started_at.parse::<Timestamp>().ok()));
+        jobs.truncate(KEPT);
+        Ok(jobs)
     }
 
     fn running(&self) -> Option<MemoryEvalJob> {
@@ -124,7 +154,14 @@ impl Evals {
 
     /// Runs `run` on a thread of its own, which the daemon stops with it.
     /// `run` gets the interrupt the stop raises.
-    fn spawn(&self, run: impl FnOnce(&Interrupt) + Send + 'static) -> std::io::Result<()> {
+    pub(crate) fn spawn(
+        &self,
+        run: impl FnOnce(&Interrupt) + Send + 'static,
+    ) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self.0.no_thread.swap(false, Ordering::SeqCst) {
+            return Err(std::io::Error::other("no thread for the test"));
+        }
         let interrupt = Interrupt::flag(Arc::clone(&self.0.stop));
         let handle = std::thread::Builder::new()
             .name("holdout-eval".into())
@@ -135,6 +172,12 @@ impl Evals {
         Ok(())
     }
 
+    /// Makes the next [`Evals::spawn`] fail, as a host out of threads would.
+    #[cfg(test)]
+    pub(crate) fn fail_next_spawn(&self) {
+        self.0.no_thread.store(true, Ordering::SeqCst);
+    }
+
     /// Whether the daemon is stopping.
     fn stopping(&self) -> bool {
         self.0.stop.load(Ordering::SeqCst)
@@ -142,18 +185,23 @@ impl Evals {
 
     /// Stops every running eval, with everything its runner started, and
     /// waits up to `wait` for each to say how it ended.
+    #[cfg(test)]
     pub fn stop(&self, wait: Duration) {
+        self.signal();
+        self.wait(Instant::now() + wait);
+    }
+
+    /// Raises the stop flag, which stops every running eval with
+    /// everything its runner started.
+    pub fn signal(&self) {
         self.0.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Waits until `deadline` for each eval [`Evals::signal`] stopped to
+    /// say how it ended.
+    pub fn wait(&self, deadline: Instant) {
         let threads: Vec<JoinHandle<()>> = self.threads().drain(..).collect();
-        let deadline = Instant::now() + wait;
-        for thread in threads {
-            while !thread.is_finished() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            if thread.is_finished() {
-                let _ = thread.join();
-            }
-        }
+        crate::threads::join_until(threads, deadline);
     }
 
     /// A run that recorded: the suggestion's holdout shows it from now on.
@@ -161,10 +209,30 @@ impl Evals {
         self.lock().retain(|job| job.key != key);
     }
 
-    fn failed(&self, key: &str, error: String) {
-        if let Some(job) = self.lock().iter_mut().find(|job| job.key == key) {
-            job.view.error = Some(error);
-            job.view.finished_at = Some(Timestamp::now().to_string());
+    /// A run that recorded nothing: the job keeps why, and so does an
+    /// `eval_run.failed` event on `set`, which the view reads after a
+    /// restart.
+    fn failed(&self, store: Option<&mut Store>, set: &str, key: &str, error: String) {
+        let mut jobs = self.lock();
+        let Some(job) = jobs.iter_mut().find(|job| job.key == key) else {
+            return;
+        };
+        job.view.error = Some(error.clone());
+        job.view.finished_at = Some(Timestamp::now().to_string());
+        let failure = EvalFailure {
+            proposal_id: job.view.proposal_id.clone(),
+            cases: job.view.cases,
+            started_at: job.view.started_at.clone(),
+            minutes: job.view.minutes,
+            error,
+        };
+        drop(jobs);
+        let Some(store) = store else {
+            tracing::warn!(change_set = %set, "the failed holdout eval is kept until the daemon stops only: state.db did not open");
+            return;
+        };
+        if let Err(error) = store.eval_run_fail(&Ctx::new(Actor::Daemon), set, failure) {
+            tracing::warn!(%error, change_set = %set, "the failed holdout eval is kept until the daemon stops only");
         }
     }
 }
@@ -470,9 +538,7 @@ pub(crate) async fn eval_start(
             let members = learning::members_sha256_of(w.store.conn(), &set.id)?;
             let candidate = holdout::render_candidate(w.store.conn(), &set, &home)
                 .map_err(|error| holdout_error(&proposal, error))?;
-            // The newest runs' results stay, this one's among them.
             let runs = home.join("evals");
-            prune(&runs, KEPT.saturating_sub(1));
             let out = runs.join(ids::new_ulid());
             let job = MemoryEvalJob {
                 proposal_id: proposal,
@@ -486,8 +552,12 @@ pub(crate) async fn eval_start(
             evals.start(key, job.clone());
             let registry = evals.clone();
             let job_key = key.to_owned();
+            let set_id = set.id.clone();
             let key = key.to_owned();
             let started = registry.spawn(move |interrupt| {
+                // The newest runs' results stay, this one's among them. Done
+                // here, off the writer, and only for a run that started.
+                prune(&runs, KEPT.saturating_sub(1));
                 let recorded = holdout::run(&evals_dir, &out, &candidate, members, interrupt)
                     .map_err(|error| {
                         if evals.stopping() {
@@ -507,13 +577,14 @@ pub(crate) async fn eval_start(
                     Ok(_) => evals.recorded(&key),
                     Err(error) => {
                         tracing::warn!(%error, change_set = %set.name, "the holdout eval recorded nothing");
-                        evals.failed(&key, error);
+                        let mut store = Store::open_current(&db).ok();
+                        evals.failed(store.as_mut(), &set.id, &key, error);
                     }
                 }
             });
             if let Err(error) = started {
                 let error = format!("start the holdout eval: {error}");
-                registry.failed(&job_key, error.clone());
+                registry.failed(Some(&mut w.store), &set_id, &job_key, error.clone());
                 return Err(Error::Internal(error));
             }
             Ok(json!(job))

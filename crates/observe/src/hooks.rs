@@ -555,32 +555,15 @@ fn apply_with(
                         claude_session_id: claude_id.clone(),
                         pane_id: None,
                         transcript_path: observed.transcript_path.clone(),
-                        source: source.clone(),
+                        source,
                     },
                 );
+                // A resume, `/clear` or `/compact` keeps the memory the
+                // launch rendered; the daemon copies that set from this
+                // observation (`memory.md` section 7), so the hook writes
+                // nothing more.
                 match bound {
-                    Ok(applied) => {
-                        // The appended prompt survives a resume, `/clear`
-                        // and `/compact`, so the session keeps the memory
-                        // its launch rendered: copy that set under the new
-                        // trigger (`memory.md` section 7). The launch wrote
-                        // the `startup` rows itself.
-                        if matches!(source.as_str(), "resume" | "clear" | "compact")
-                            && let Err(error) = store.mem_load_again(
-                                &ctx,
-                                &applied.value.id,
-                                &source,
-                                observed.observed_at,
-                            )
-                        {
-                            insert(
-                                &mut payload,
-                                "memory_load_refused",
-                                json!(error.to_string()),
-                            );
-                        }
-                        session = Some(applied.value);
-                    }
+                    Ok(applied) => session = Some(applied.value),
                     Err(error) => {
                         insert(&mut payload, "bind_refused", json!(error.to_string()));
                     }
@@ -756,12 +739,20 @@ fn owner_is_tiller(home: &Path) -> bool {
     }
 }
 
+/// Writes `observed` to `<ulid>.json.tmp` and renames it to `<ulid>.json`, so
+/// [`import_spool`], which lists only `.json`, never reads half a file.
 fn spool(env: &Env, observed: &Observed, why: &str) -> Outcome {
     let dir = env.tiller_home.join("hook-spool");
-    let path = dir.join(format!("{}.json", tiller_core::ids::new_ulid()));
+    let id = tiller_core::ids::new_ulid();
+    let path = dir.join(format!("{id}.json"));
+    let partial = dir.join(format!("{id}.json.tmp"));
     let written = fs::create_dir_all(&dir)
         .and_then(|()| serde_json::to_vec(observed).map_err(std::io::Error::other))
-        .and_then(|bytes| fs::write(&path, bytes));
+        .and_then(|bytes| fs::write(&partial, bytes))
+        .and_then(|()| fs::rename(&partial, &path))
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&partial);
+        });
     match written {
         Ok(()) => {
             log(env, &format!("spooled {} ({why})", observed.hook_event));

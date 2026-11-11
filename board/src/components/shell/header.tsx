@@ -120,11 +120,15 @@ export function Header({ activeHost, menuOpen, onOpenMenu, onOpenAsk }: HeaderPr
         {narrowed ? (
           <button
             type="button"
-            className="btn ghost"
+            className="btn"
+            // At phone width the label would squeeze the crumb, so the
+            // button keeps only its icon and names itself.
+            aria-label="Show all projects"
+            title="Show all projects"
             onClick={() => updatePrefs({ view: "all", hiddenProjects: [] })}
           >
             <LayersIcon />
-            Show all projects
+            <span className="hide-sm">Show all projects</span>
           </button>
         ) : null}
         {pathname === "/" ? (

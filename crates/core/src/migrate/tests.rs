@@ -263,6 +263,116 @@ fn reviews_keep_their_rows_across_0016() {
     assert_eq!(current_version(&conn).unwrap(), 16);
 }
 
+/// Migration 18: a project from before it reads the newest of when it was
+/// added, its newest project event and its newest card; a row inserted
+/// without the column takes `added_at`; going back down keeps every project.
+#[test]
+fn projects_learn_when_they_last_changed_across_0018() {
+    let mut conn = connection();
+    to_version(&mut conn, 17).unwrap();
+    conn.execute_batch(&format!("BEGIN; {FIXTURE_V1} COMMIT;"))
+        .unwrap();
+    conn.execute_batch(
+        "INSERT INTO events (id, at, txn, actor, entity, entity_id, kind, rev_after, payload)
+         VALUES ('01JC00000000000000000EVP17', '2026-11-04T10:00:00.000Z', 'project.edit', 'owner',
+                 'project', 'fleet', 'project.edited', 2, '{}');",
+    )
+    .unwrap();
+    to_version(&mut conn, 18).unwrap();
+    let edited = |conn: &Connection| -> Vec<(String, String, String)> {
+        conn.prepare("SELECT id, added_at, edited_at FROM projects ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let newest_card = |conn: &Connection, project: &str| -> Option<String> {
+        conn.query_row(
+            "SELECT max(created_at) FROM cards WHERE project_id = ?1",
+            [project],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    for (id, added, at) in edited(&conn) {
+        let expected = match id.as_str() {
+            "fleet" => "2026-11-04T10:00:00.000Z".to_owned(),
+            _ => newest_card(&conn, &id).map_or(added.clone(), |card| card.max(added)),
+        };
+        assert_eq!(at, expected, "{id}");
+    }
+
+    conn.execute(
+        "INSERT INTO projects (id, name, delivery, owner_host_id, added_at)
+         SELECT 'gamma', 'Gamma', 'local-only', owner_host_id, '2026-11-05T09:00:00.000Z'
+         FROM projects WHERE id = 'fleet'",
+        [],
+    )
+    .unwrap();
+    let gamma: String = conn
+        .query_row(
+            "SELECT edited_at FROM projects WHERE id = 'gamma'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(gamma, "2026-11-05T09:00:00.000Z");
+
+    let before = edited(&conn).len();
+    to_version(&mut conn, 17).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM projects", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count as usize, before);
+    assert!(
+        conn.prepare("SELECT edited_at FROM projects").is_err(),
+        "down drops the column"
+    );
+    to_version(&mut conn, 18).unwrap();
+    assert_eq!(current_version(&conn).unwrap(), 18);
+}
+
+/// Migration 19: load rows keep their order across the rebuild, a second
+/// trigger in the same millisecond gets its own row, and going back down
+/// keeps the row written first.
+#[test]
+fn load_rows_are_keyed_by_trigger_across_0019() {
+    let mut conn = connection();
+    to_version(&mut conn, 18).unwrap();
+    conn.execute_batch(&format!("BEGIN; {FIXTURE_V1} COMMIT;"))
+        .unwrap();
+    let loads = |conn: &Connection| -> Vec<(String, String)> {
+        conn.prepare("SELECT trigger, loaded_at FROM session_loads ORDER BY rowid")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let same_ms = "INSERT INTO session_loads (session_id, revision_id, trigger, loaded_at)
+                   VALUES ('01JC0000000000000000000SW1', '01JC0000000000000000000MR1', 'clear',
+                           '2026-11-02T09:10:02.000Z')";
+    assert!(
+        conn.execute(same_ms, []).is_err(),
+        "before 19 the key has no trigger"
+    );
+    let before = loads(&conn);
+    to_version(&mut conn, 19).unwrap();
+    assert_eq!(loads(&conn), before);
+    conn.execute(same_ms, []).unwrap();
+    let both = [
+        ("startup".to_owned(), "2026-11-02T09:10:02.000Z".to_owned()),
+        ("clear".to_owned(), "2026-11-02T09:10:02.000Z".to_owned()),
+    ];
+    assert_eq!(loads(&conn), both);
+
+    to_version(&mut conn, 18).unwrap();
+    assert_eq!(loads(&conn), both[..1]);
+    to_version(&mut conn, 19).unwrap();
+    assert_eq!(current_version(&conn).unwrap(), 19);
+}
+
 /// Migration 2 lowers no project's rigor: every project that existed before
 /// it reads `launched`, with nothing reviewed yet.
 #[test]
@@ -276,6 +386,9 @@ fn existing_projects_read_launched_after_0002() {
         .unwrap();
     assert!(before > 0);
     to_version(&mut conn, 2).unwrap();
+    // Read through today's record, which needs every later column; no later
+    // migration touches the stage.
+    to_version(&mut conn, LATEST).unwrap();
     let projects: Vec<crate::domain::Project> =
         crate::state::list(&conn, "1 ORDER BY id", &[]).unwrap();
     assert_eq!(projects.len() as i64, before);

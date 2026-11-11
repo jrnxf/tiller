@@ -1390,6 +1390,94 @@
         }
       }
     },
+    "/api/v1/agents/{session}/unpause": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "summary": "Clears the dated pause on the session's run, as a manual resume does:\nthe board's Resume on a paused agent (`protocol.md` 7.4).",
+        "operationId": "unpause_agent",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentControlBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`refused`: an orchestrator or an ended run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/approvals/{id}/decide": {
       "post": {
         "tags": [
@@ -1875,7 +1963,7 @@
         },
         "responses": {
           "200": {
-            "description": "`data` is the `BackupRow` the run left: `verified`, or `failed` with the reason. A failed run keeps the previous verified backup",
+            "description": "`data` is the `BackupRow` the run left: `verified`, or `failed` with the reason. A failed run keeps the previous verified backup. A retry with the last run's key gets its row again, `replayed`, and waits for it while that run is going",
             "content": {
               "application/json": {
                 "schema": {
@@ -1923,7 +2011,7 @@
             }
           },
           "503": {
-            "description": "`unavailable`: before `tiller init`",
+            "description": "`unavailable`: before `tiller init`, or read only",
             "content": {
               "application/json": {
                 "schema": {
@@ -4221,7 +4309,7 @@
         },
         "responses": {
           "200": {
-            "description": "`data` is the host row, no longer paired; a host not paired is a no-op",
+            "description": "`data` is the host row, no longer paired; a host not paired is a no-op that deletes a key file left behind. `warning` says when the row is unpaired but the key file was not deleted",
             "content": {
               "application/json": {
                 "schema": {
@@ -4259,6 +4347,16 @@
           },
           "502": {
             "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`state.db` is read only",
             "content": {
               "application/json": {
                 "schema": {
@@ -5581,7 +5679,7 @@
             }
           },
           "503": {
-            "description": "this daemon cannot run retros",
+            "description": "this daemon cannot run retros, or it is stopping",
             "content": {
               "application/json": {
                 "schema": {
@@ -7769,7 +7867,7 @@
               "string",
               "null"
             ],
-            "description": "At most 100,000 characters (`protocol.md` 7.4).",
+            "description": "At most 100,000 characters (`protocol.md` 7.4). An empty body clears\nit, as `tiller card edit --body \"\"` does.",
             "maxLength": 100000
           },
           "host": {
@@ -8831,6 +8929,13 @@
             "type": "string",
             "description": "`fleet` for \"All projects (shared)\"."
           },
+          "skipped": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why a launch goes on without it, such as \"it has no approved\nrevision\"; null when a launch loads it or it has nothing to load."
+          },
           "suggestions": {
             "type": "integer",
             "description": "Open agent proposals against it.",
@@ -9408,7 +9513,7 @@
             "items": {
               "$ref": "#/components/schemas/MemoryEvalJob"
             },
-            "description": "The holdout evals the board started that are running, or that failed\nsince the daemon started."
+            "description": "The holdout evals the board started that are running, or that failed\nwith no later recorded run of their change set, across restarts."
           }
         },
         "additionalProperties": false
@@ -9941,7 +10046,8 @@
         "description": "`GET /api/v1/peers`.",
         "required": [
           "paired",
-          "accepted"
+          "accepted",
+          "key_files_left"
         ],
         "properties": {
           "accepted": {
@@ -9950,6 +10056,13 @@
               "$ref": "#/components/schemas/AcceptedKey"
             },
             "description": "Oldest first, revoked keys too."
+          },
+          "key_files_left": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The labels of hosts no longer paired whose key file is still here,\nby label: an unpair whose delete failed. Unpair again deletes it."
           },
           "paired": {
             "type": "array",
@@ -10142,6 +10255,13 @@
           },
           "delivery": {
             "type": "string"
+          },
+          "edited_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When `rev` last moved: an edit, a stage change, a new card. Null only\non a peer row from a tiller that predates it."
           },
           "effective_delivery": {
             "type": "string",

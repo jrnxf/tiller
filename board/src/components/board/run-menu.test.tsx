@@ -150,7 +150,7 @@ test("Cancel on the lane restart sends nothing and leaves the lane open", async 
   expect(posted).toEqual([]);
 });
 
-test("a paused run's primary is Resume, which sends one go on line", async () => {
+test("a paused run's primary is Resume, which clears the pause and sends one go on line", async () => {
   const posted = stubDaemon();
   const acts = await stageOf(BETA_7, "beta-7");
   const note = screen.getByText(/^Paused until /).closest<HTMLElement>(".run-paused");
@@ -167,10 +167,18 @@ test("a paused run's primary is Resume, which sends one go on line", async () =>
   ]);
   fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
   fireEvent.click(resume);
-  await waitFor(() => expect(posted).toHaveLength(1));
-  expect(posted[0]?.path).toBe(`/api/v1/agents/${BETA_7}/steer`);
-  expect(posted[0]?.body.text).toBe("go on");
-  await waitFor(() => expect(resume.disabled).toBe(true));
+  await waitFor(() => expect(posted).toHaveLength(2));
+  expect(posted[0]?.path).toBe(`/api/v1/agents/${BETA_7}/unpause`);
+  expect(posted[1]?.path).toBe(`/api/v1/agents/${BETA_7}/steer`);
+  expect(posted[1]?.body.text).toBe("go on");
+  expect(posted[0]?.body.idempotency_key).not.toBe(posted[1]?.body.idempotency_key);
+  // The pause is gone: the note says so, and the primary opens the pane.
+  const resumed = await screen.findByText("Resumed. The pause is cleared.");
+  expect(resumed.closest(".run-paused")?.textContent).toContain("go on");
+  expect(screen.queryByText(/^Paused until /)).toBeNull();
+  await waitFor(() =>
+    expect(within(acts).getAllByRole("button").at(-1)?.textContent).toContain("Open in herdr"),
+  );
 });
 
 test("one agent's Resume does not hold the next paused agent's Resume", async () => {
@@ -187,7 +195,7 @@ test("one agent's Resume does not hold the next paused agent's Resume", async ()
   const acts = await stageOf(BETA_7, "beta-7");
   const first = within(acts).getAllByRole("button").at(-1) as HTMLButtonElement;
   fireEvent.click(first);
-  await waitFor(() => expect(first.disabled).toBe(true));
+  await waitFor(() => expect(posted).toHaveLength(2));
   const row = [...document.querySelectorAll<HTMLElement>(".av-row")].find(
     (item) => item.querySelector(".nm .l")?.textContent === "alpha-42",
   );
@@ -200,8 +208,9 @@ test("one agent's Resume does not hold the next paused agent's Resume", async ()
   expect(next.textContent).toBe("Resume");
   expect(next.disabled).toBe(false);
   fireEvent.click(next);
-  await waitFor(() => expect(posted).toHaveLength(2));
-  expect(posted[1]?.path).toBe(`/api/v1/agents/${ALPHA_42}/steer`);
+  await waitFor(() => expect(posted).toHaveLength(4));
+  expect(posted[2]?.path).toBe(`/api/v1/agents/${ALPHA_42}/unpause`);
+  expect(posted[3]?.path).toBe(`/api/v1/agents/${ALPHA_42}/steer`);
 });
 
 test("Pause until asks for a reason and pauses the run", async () => {

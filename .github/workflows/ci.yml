@@ -75,6 +75,10 @@ jobs:
       # clippy, fmt, nextest and the board checks run in the rust and board jobs.
       - name: Generated bun.nix is fresh
         run: nix build --print-build-logs .#checks.x86_64-linux.bunNixFresh
+      # Evaluation alone catches a package the locked nixpkgs does not offer
+      # on one listed system, so nothing for the other systems is built.
+      - name: Every output of every listed system evaluates
+        run: nix flake check --no-build --all-systems
       - name: Build
         run: nix build --print-build-logs
       - name: Smoke test

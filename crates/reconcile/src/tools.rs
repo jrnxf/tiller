@@ -34,9 +34,26 @@ pub fn run_first_line(
     rest: &[OsString],
     arg: &str,
 ) -> Result<Option<String>, String> {
+    let text = run_within(first, rest, arg.split_whitespace(), PROBE_TIMEOUT)?;
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_owned))
+}
+
+/// Runs `first rest... args...` and returns its whole stdout, or why not: a
+/// process still running after `timeout` is killed, and one that exits with
+/// a failure is an error.
+pub fn run_within<'a>(
+    first: &OsStr,
+    rest: &[OsString],
+    args: impl IntoIterator<Item = &'a str>,
+    timeout: Duration,
+) -> Result<String, String> {
     let mut child = Command::new(first)
         .args(rest)
-        .args(arg.split_whitespace())
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -45,20 +62,20 @@ pub fn run_first_line(
     let mut stdout = child.stdout.take();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut text = String::new();
+        let mut text = Vec::new();
         if let Some(pipe) = stdout.as_mut() {
-            let _ = pipe.read_to_string(&mut text);
+            let _ = pipe.read_to_end(&mut text);
         }
         let _ = tx.send(text);
     });
-    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("did not answer within {PROBE_TIMEOUT:?}"));
+                return Err(format!("did not answer within {timeout:?}"));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
             Err(error) => return Err(error.to_string()),
@@ -70,11 +87,7 @@ pub fn run_first_line(
     let text = rx
         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         .map_err(|_| "kept its output open".to_owned())?;
-    Ok(text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_owned))
+    Ok(String::from_utf8_lossy(&text).into_owned())
 }
 
 /// `program --version`: the first line of stdout.
@@ -222,19 +235,19 @@ pub fn read_all(programs: &Programs, process_args: impl Fn(u32) -> Option<String
     Versions { tools, skew }
 }
 
-/// The command line of `pid` from the process list.
+/// The command line of `pid` from the process list, read within
+/// [`PROBE_TIMEOUT`].
 pub fn ps_args(pid: u32) -> Option<String> {
-    let output = Command::new("ps")
-        .args(["-o", "args=", "-p", &pid.to_string()])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        .filter(|args| !args.is_empty())
+    let pid = pid.to_string();
+    run_within(
+        OsStr::new("ps"),
+        &[],
+        ["-o", "args=", "-p", pid.as_str()],
+        PROBE_TIMEOUT,
+    )
+    .ok()
+    .map(|args| args.trim().to_owned())
+    .filter(|args| !args.is_empty())
 }
 
 #[cfg(test)]

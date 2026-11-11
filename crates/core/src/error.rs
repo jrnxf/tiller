@@ -5,6 +5,8 @@
 
 use serde_json::Value;
 
+use crate::time::Timestamp;
+
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, thiserror::Error)]
@@ -30,6 +32,9 @@ pub enum Error {
         sent_rev: i64,
         /// The first field the caller meant to change, with its current value.
         field: Option<(String, Value)>,
+        /// When the entity last changed, for an entity that keeps the time
+        /// (a project's `edited_at`), boxed to keep `Error` small.
+        edited_at: Option<Box<Timestamp>>,
     },
 
     /// A precondition failed; `fact` names it.
@@ -128,12 +133,19 @@ fn conflict_message(error: &Error) -> String {
         current_rev,
         sent_rev,
         field,
+        edited_at,
     } = error
     else {
         return String::new();
     };
     let mut message =
         format!("conflict: {entity} {id} is at rev {current_rev}, you sent {sent_rev}");
+    if let Some(at) = edited_at {
+        message.push_str(&format!(
+            "; it changed {}",
+            crate::time::lisbon::display(at.as_jiff())
+        ));
+    }
     if let Some((name, value)) = field {
         let shown = match value {
             Value::String(text) => format!("{text:?}"),

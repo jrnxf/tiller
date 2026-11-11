@@ -23,13 +23,14 @@ cp -R "$root/scripts/fixtures/firstmate-home" "$home"
 
 # What a fixture cannot carry: real git checkouts, a symlink, a nested dir, an oversized
 # file, a secret-named file and a secret-looking line.
-for p in widget gizmo notes; do
+for p in widget gizmo notes review; do
   mkdir -p "$home/projects/$p"
   git -C "$home/projects/$p" init -q
 done
 at=@
 git -C "$home/projects/gizmo" remote add origin "https://user:pw${at}github.com/example-org/gizmo.git"
 git -C "$home/projects/notes" remote add origin "ssh://git${at}git.example.com/example-org/notes.git"
+git -C "$home/projects/review" remote add origin "ssh://git${at}review.example.com:29418/example-org/review"
 task=$home/data/widget-fix-login
 ln -s brief.md "$task/link.md"
 mkdir -p "$task/checkout/src"
@@ -68,6 +69,7 @@ ln -s "$outside/status" "$home/state/widget-linked.status"
 
 cat >> "$home/data/projects.md" <<'MD'
 - plain [local-only] - A plain directory that is not a checkout (added 2026-04-01)
+- review [no-mistakes] - A checkout whose origin is Gerrit (added 2026-04-02)
 - widget [local-only] - A second row for widget
 - zero [local-only] - A project whose capacity is zero (added 2026-02-30)
 - ../etc [local-only] - An id that climbs out
@@ -220,6 +222,8 @@ check(card('widget-cycle-a').depends_on.length + card('widget-cycle-b').depends_
 check(questions.includes('block each other'), 'a cycle is an open question')
 check(project('zero').capacity === null && questions.includes('capacity 0'), 'capacity 0 becomes null with a question')
 check(project('zero').added === null, 'an impossible project date becomes null')
+check(project('review').delivery === 'local-only' && questions.includes('Gerrit remote'), 'a Gerrit origin makes delivery local-only with a question')
+check(!questions.includes("review: the checkout's origin is not a GitHub remote"), 'a Gerrit origin asks no repo question')
 check(projects.filter((p) => p.id === 'widget').length === 1 && project('widget').capacity === 2, 'a duplicate project row is dropped')
 check(card('widget-baddate').since === null && card('widget-baddate').hold.until === null, 'impossible and free-text dates become null')
 check(card('widget-baddate').hold.reason === 'hold until next week', 'a free-text hold-until is kept in the reason')

@@ -56,7 +56,7 @@ pub fn backup(app: &App) -> Done {
     app.require_owner("tiller backup")?;
     let store = app.read()?;
     let done = backup::backup(store.conn(), &paths(app), Timestamp::now())?;
-    Ok(Outcome::read(done))
+    Ok(Outcome::read(backup::Nightly::Done(done)))
 }
 
 /// `tiller export --jsonl <dir>`.

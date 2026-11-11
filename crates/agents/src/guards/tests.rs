@@ -894,10 +894,31 @@ fn owner_retro_learn_and_agent_commands_denied() {
         ),
         ("sh -c 'tiller agent focus alpha-1'", Some(Code::OwnerOnly)),
         ("echo run | xargs tiller retro", Some(Code::OwnerOnly)),
-        ("tiller retro list", None),
-        ("tiller retro show 01JABC", None),
-        ("tiller learn status", None),
+        // A second word not known before the command runs may be the
+        // owner's one, so it is denied like an unseen one.
+        ("tiller agent \"$SUB\" alpha-1", Some(Code::OwnerOnly)),
+        ("tiller retro $(echo run) 01JABC", Some(Code::OwnerOnly)),
+        ("tiller learn $VERB 01JABC", Some(Code::OwnerOnly)),
+        ("tiller mem \"$X\" --class rule", Some(Code::OwnerOnly)),
+        ("tiller config ${OP} k v", Some(Code::OwnerOnly)),
+        ("tiller migrate \"$WAY\"", Some(Code::OwnerOnly)),
+        // The CLI refuses these to every session (`refuse_fleet`), or core
+        // takes them only from the owner or the daemon.
+        ("tiller retro list", Some(Code::OwnerOnly)),
+        ("tiller retro show 01JABC", Some(Code::OwnerOnly)),
+        ("tiller retro sweep", Some(Code::OwnerOnly)),
+        ("tiller learn status", Some(Code::OwnerOnly)),
+        (
+            "tiller learn bundle placement 01JABC",
+            Some(Code::OwnerOnly),
+        ),
+        ("tiller learn add placement 01JABC", Some(Code::OwnerOnly)),
+        ("tiller learn abandon placement", Some(Code::OwnerOnly)),
+        ("tiller learn gate 01JABC", None),
         ("tiller agent relaunch alpha-1", None),
+        ("tiller agent interrupt \"$SESSION\"", None),
+        ("tiller mem note alpha --text \"$T\"", None),
+        ("tiller config get \"$KEY\"", None),
     ];
     for role in Role::ALL {
         for (command, verdict) in CASES {
@@ -909,9 +930,11 @@ fn owner_retro_learn_and_agent_commands_denied() {
     }
 }
 
-/// Every `require_owner` call site in the CLI, as `(label, file)`. Each call
-/// passes a string literal that names the command; a call that does not is
-/// a failure, so a new owner command cannot hide from the cross-check.
+/// Every call site of a gate that refuses a command to the fleet, as
+/// `(label, file)`: `require_owner` and `refuse_fleet` in the CLI, and
+/// `require_owner_or_daemon` in core's learning state. Each call passes a
+/// string literal that names the command; a call that does not is a failure,
+/// so a new owner command cannot hide from the cross-check.
 fn cli_owner_labels() -> Vec<(String, String)> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         for entry in fs::read_dir(dir).unwrap() {
@@ -923,24 +946,34 @@ fn cli_owner_labels() -> Vec<(String, String)> {
             }
         }
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../cli/src");
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let mut files = Vec::new();
-    walk(&root, &mut files);
+    walk(&crates.join("cli/src"), &mut files);
+    files.push(crates.join("core/src/state/learning.rs"));
     let mut labels = Vec::new();
     for file in files {
         let source = fs::read_to_string(&file).unwrap();
-        let shown = file.strip_prefix(&root).unwrap().display().to_string();
-        for (at, _) in source.match_indices("require_owner(") {
-            if source[..at].ends_with("fn ") {
-                continue;
+        let shown = file.strip_prefix(&crates).unwrap().display().to_string();
+        let gates: &[&str] = if shown.starts_with("cli/") {
+            &["require_owner(", "refuse_fleet("]
+        } else {
+            &["require_owner_or_daemon("]
+        };
+        for gate in gates {
+            for (at, _) in source.match_indices(gate) {
+                if source[..at].ends_with("fn ") {
+                    continue;
+                }
+                // The label is the call's first string literal.
+                let call = &source[at + gate.len()..];
+                let call = &call[..call.find(';').unwrap_or(call.len())];
+                let label = call
+                    .split_once('"')
+                    .and_then(|(_, rest)| rest.split_once('"'))
+                    .map(|(label, _)| label.to_owned())
+                    .unwrap_or_else(|| panic!("{shown}: {gate} takes a string literal"));
+                labels.push((label, shown.clone()));
             }
-            let rest = source[at + "require_owner(".len()..].trim_start();
-            let label = rest
-                .strip_prefix('"')
-                .and_then(|rest| rest.split_once('"'))
-                .map(|(label, _)| label.to_owned())
-                .unwrap_or_else(|| panic!("{shown}: require_owner takes a string literal"));
-            labels.push((label, shown.clone()));
         }
     }
     labels
@@ -1348,6 +1381,276 @@ fn more_shells_run_their_command_string() {
         ("pwsh -c 'Get-ChildItem'", None),
         ("pwsh -File build.ps1", None),
         ("pwsh build.ps1", None),
+    ]);
+}
+
+/// A word the guard cannot read where a runner reads its options may be an
+/// operand or an option: every reading gets the inner command's checks.
+#[test]
+fn runner_variable_operand_keeps_the_inner_checks() {
+    const MERGE: Option<Code> = Some(Code::Merge);
+    const ID: Option<Code> = Some(Code::Identity);
+    verdicts(&[
+        ("timeout \"$T\" env -i true", ID),
+        ("flock \"$L\" env -u TILLER_SESSION_ID true", ID),
+        ("chroot \"$DIR\" gh pr merge 12", MERGE),
+        ("taskset \"$MASK\" gh pr merge 12", MERGE),
+        ("timeout $T gh pr merge 12", MERGE),
+        ("timeout \"$OPTS\" 30 gh pr merge 12", MERGE),
+        ("timeout \"$A\" \"$B\" 30 gh pr merge 12", MERGE),
+        ("timeout -s \"$SIG\" \"$T\" env -i true", ID),
+        ("timeout --signal=\"$SIG\" 30 gh pr merge 12", MERGE),
+        ("timeout -$X 30 gh pr merge 12", MERGE),
+        ("setpriv \"$X\" tiller status x", Some(Code::OwnerOnly)),
+        ("timeout \"$T\" git status", None),
+        ("timeout \"$T\" cargo test", None),
+        ("flock \"$LOCK\" git fetch", None),
+        ("taskset \"$MASK\" gh pr view 1", None),
+        ("timeout --signal=\"$SIG\" 30 git status", None),
+    ]);
+}
+
+/// A runner's output file is a write, and a strace output that starts with
+/// `|` or `!` is a command strace runs.
+#[test]
+fn runner_output_files_are_writes() {
+    const STATE: Option<Code> = Some(Code::StateWrite);
+    verdicts(&[
+        ("strace -o /home/user/.tiller/state.db true", STATE),
+        ("strace -o/home/user/.tiller/state.db true", STATE),
+        ("strace --output=/home/user/.tiller/state.db true", STATE),
+        ("ltrace -o /home/user/.tiller/state.db true", STATE),
+        ("/usr/bin/time -o /home/user/.tiller/state.db true", STATE),
+        ("flock /home/user/.tiller/state.db true", STATE),
+        ("flock -w 5 /home/user/.tiller/state.db -c true", STATE),
+        ("strace -o '|gh pr merge 12' true", Some(Code::Merge)),
+        ("strace -o '!gh pr merge 12' true", Some(Code::Merge)),
+        ("strace -fo'|gh pr merge 12' true", Some(Code::Merge)),
+        ("strace -o /tmp/trace cargo test", None),
+        ("strace -o '|grep open' cargo test", None),
+        ("/usr/bin/time -o /tmp/time.txt cargo build", None),
+        ("flock /tmp/l cargo build", None),
+        ("flock 9", None),
+    ]);
+}
+
+/// BSD `time` (macOS `/usr/bin/time`) takes `-l` and `-h`.
+#[test]
+fn bsd_time_options_are_read() {
+    verdicts(&[
+        ("/usr/bin/time -l git status", None),
+        ("/usr/bin/time -lh cargo build", None),
+        ("/usr/bin/time -l gh pr merge 12", Some(Code::Merge)),
+    ]);
+}
+
+/// `pwsh` parameters: a `:` value stays in its word, `-CommandWithArgs` is
+/// a command, an unknown parameter fails closed, and an encoded command the
+/// guard cannot decode is a deny.
+#[test]
+fn pwsh_parameters_fail_closed() {
+    const MERGE: Option<Code> = Some(Code::Merge);
+    verdicts(&[
+        ("pwsh -ep:Bypass -c 'gh pr merge 12'", MERGE),
+        (
+            "pwsh -ExecutionPolicy:Bypass -NoProfile -c 'gh pr merge 12'",
+            MERGE,
+        ),
+        ("pwsh -cwa 'gh pr merge 12'", MERGE),
+        ("pwsh -CommandWithArgs 'gh pr merge 12' a b", MERGE),
+        ("pwsh -Bogus -c 'gh pr merge 12'", MERGE),
+        ("echo 'gh pr merge 12' | pwsh -File -", MERGE),
+        (
+            "pwsh -ec 'ZwBoACAA cAByACAAbQBlAHIAZwBlACAAMQAyAA=='",
+            MERGE,
+        ),
+        ("pwsh -ec \"$B\"", Some(Code::GuardTamper)),
+        ("pwsh -ec 'not base64!'", Some(Code::GuardTamper)),
+        ("echo x | xargs pwsh -ec", Some(Code::GuardTamper)),
+        ("pwsh -ec", None),
+        ("pwsh -ep:Bypass -c 'Get-ChildItem'", None),
+        ("pwsh -NoLogo -NonInteractive -c 'Get-ChildItem'", None),
+        ("pwsh -wd /home/user/pool/3/alpha -File build.ps1", None),
+        ("pwsh -ec RwBlAHQALQBDAGgAaQBsAGQASQB0AGUAbQA=", None),
+    ]);
+}
+
+/// A runner with no command starts a shell, and that shell reads the
+/// script on standard input, as bare `sh` does.
+#[test]
+fn runners_with_no_command_start_a_shell() {
+    const MERGE: Option<Code> = Some(Code::Merge);
+    verdicts(&[
+        ("echo 'gh pr merge 12' | fakeroot", MERGE),
+        ("echo 'gh pr merge 12' | unshare -r", MERGE),
+        ("echo 'gh pr merge 12' | chroot /", MERGE),
+        ("echo 'gh pr merge 12' | nsenter -t 1 -m", MERGE),
+        ("echo 'gh pr merge 12' | runuser user", MERGE),
+        ("echo 'gh pr merge 12' | sudo -s", MERGE),
+        ("echo 'gh pr merge 12' | sudo -i", MERGE),
+        ("echo 'gh pr merge 12' | doas -s", MERGE),
+        ("echo 'gh pr merge 12' | su", MERGE),
+        ("echo 'gh pr merge 12' | su user", MERGE),
+        ("fakeroot < /home/user/merge.sh", None),
+        ("echo hi | fakeroot", None),
+        ("unshare -r", None),
+        ("chroot /", None),
+    ]);
+}
+
+/// util-linux `su` and `runuser` read their options anywhere before `--`,
+/// also after the user.
+#[test]
+fn runuser_reads_options_after_the_user() {
+    const ID: Option<Code> = Some(Code::Identity);
+    verdicts(&[
+        ("runuser user -l -c true", ID),
+        ("runuser user -P -c true", ID),
+        ("runuser user --login -c true", ID),
+        ("runuser user -c 'gh pr merge 12' -l", ID),
+        (
+            "runuser user -s /bin/sh -c 'gh pr merge 12'",
+            Some(Code::Merge),
+        ),
+        ("runuser user -- -c 'gh pr merge 12'", Some(Code::Merge)),
+        ("runuser user -c true", None),
+        ("runuser user -m -c 'cargo test'", None),
+    ]);
+}
+
+/// `sudo`, `doas` and `su` read their options like getopt: bundles,
+/// attached values and long options.
+#[test]
+fn sudo_and_su_options_parse_like_getopt() {
+    const MERGE: Option<Code> = Some(Code::Merge);
+    verdicts(&[
+        ("sudo -iu root gh pr merge 12", MERGE),
+        ("sudo -Eu root gh pr merge 12", MERGE),
+        ("sudo -uroot gh pr merge 12", MERGE),
+        ("sudo --user=root gh pr merge 12", MERGE),
+        ("sudo --preserve-env=PATH -u root gh pr merge 12", MERGE),
+        ("sudo -u root -- gh pr merge 12", MERGE),
+        ("sudo -u root FOO=1 gh pr merge 12", MERGE),
+        ("sudo PATH=/tmp tiller status x", Some(Code::GuardTamper)),
+        ("sudo --bogus gh pr merge 12", MERGE),
+        (
+            "sudo -e /home/user/.tiller/state.db",
+            Some(Code::StateWrite),
+        ),
+        ("doas -u root gh pr merge 12", MERGE),
+        ("doas -nu root gh pr merge 12", MERGE),
+        ("su -lc 'gh pr merge 12'", Some(Code::Identity)),
+        ("su - user -c true", Some(Code::Identity)),
+        ("su -c'gh pr merge 12'", MERGE),
+        ("su --command='gh pr merge 12'", MERGE),
+        ("su --command 'gh pr merge 12' user", MERGE),
+        ("su user -c 'gh pr merge 12'", MERGE),
+        ("sudo -u root cargo test", None),
+        ("sudo -iu root ls", None),
+        ("sudo -k true", None),
+        ("doas -u root ls", None),
+        ("su -c 'echo hi'", None),
+        ("su -c'cargo test' user", None),
+    ]);
+}
+
+/// `xargs` and the shells read their long options from a full table.
+#[test]
+fn xargs_and_shell_long_options_are_read() {
+    const MERGE: Option<Code> = Some(Code::Merge);
+    verdicts(&[
+        ("xargs --max-chars 100 gh pr merge 12", MERGE),
+        ("xargs --process-slot-var V gh pr merge 12", MERGE),
+        ("xargs -s100 gh pr merge 12", MERGE),
+        ("xargs -0rn1 gh pr merge 12", MERGE),
+        ("xargs --bogus gh pr merge 12", MERGE),
+        ("echo merge | xargs -I@ gh pr @ 12", MERGE),
+        ("echo merge | xargs -J @ gh pr @ 12", MERGE),
+        ("fish --command 'gh pr merge 12'", MERGE),
+        ("fish --command='gh pr merge 12'", MERGE),
+        ("fish -C 'gh pr merge 12'", MERGE),
+        ("fish --init-command='gh pr merge 12' -c true", MERGE),
+        ("bash --bogus gh pr merge 12", MERGE),
+        ("bash --norc --noprofile -c 'gh pr merge 12'", MERGE),
+        ("bash --rcfile /home/user/rc -c 'gh pr merge 12'", MERGE),
+        ("git ls-files -z | xargs -0 --max-args=20 cat", None),
+        ("xargs --max-chars 100 cargo test", None),
+        ("fish --command 'echo hi'", None),
+        ("bash --norc -c 'cargo test'", None),
+        ("bash -C script.sh", None),
+    ]);
+}
+
+/// A brace word is not known before it runs: past the positional, it can
+/// only be a flag.
+#[test]
+fn gh_brace_word_is_unread() {
+    verdicts(&[
+        ("gh pr close 5 {-d,}", Some(Code::Merge)),
+        ("gh pr close 5 --{delete-branch,}", Some(Code::Merge)),
+        ("gh pr close 5 -c {done,}", None),
+    ]);
+}
+
+/// A brace sequence makes several words as a brace list does, and a quoted
+/// brace is literal text.
+#[test]
+fn brace_sequences_are_unread_and_quoted_braces_are_text() {
+    verdicts(&[
+        ("gh pr close 5 -{d..d}", Some(Code::Merge)),
+        ("gh pr close 5 \"$HOME{-d,}\"", None),
+        ("mkdir -p src/{1..3}", None),
+    ]);
+}
+
+/// A shell reads `-` as the end of its options, and a word it cannot read
+/// where its options are may be `-c`.
+#[test]
+fn shell_dash_and_unread_options_fail_closed() {
+    const MERGE: Option<Code> = Some(Code::Merge);
+    verdicts(&[
+        ("echo 'gh pr merge 12' | bash -", MERGE),
+        ("echo 'gh pr merge 12' | sh -", MERGE),
+        ("echo 'gh pr merge 12' | su root -s /bin/sh -", MERGE),
+        ("bash -$O 'gh pr merge 12'", MERGE),
+        ("bash $O 'gh pr merge 12'", MERGE),
+        ("su root -- -$O 'gh pr merge 12'", MERGE),
+        ("bash - ./build.sh", None),
+        ("bash \"$SCRIPT\"", None),
+        ("bash -$O ./build.sh", None),
+    ]);
+}
+
+/// A guessed reading of a runner's options that the program would reject
+/// adds no place for the command to start, and the guesses are capped.
+#[test]
+fn runner_guesses_drop_rejected_readings_and_stop() {
+    verdicts(&[
+        ("timeout $T git -C repo status", None),
+        // `nice` takes no operand, so `$N` may be the program, as with
+        // `$CMD git status`.
+        ("nice $N git -C repo status", Some(Code::GuardTamper)),
+    ]);
+    let nested = format!("{}gh pr merge 12", "nice $X ".repeat(30));
+    let started = std::time::Instant::now();
+    for role in Role::ALL {
+        assert!(bash(role, &nested).is_some(), "{role}: {nested}: allowed");
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+}
+
+/// `sudo -l COMMAND` and the other listing options run no command, and
+/// `doas -a STYLE` is read.
+#[test]
+fn sudo_listing_runs_no_command() {
+    verdicts(&[
+        ("sudo -l gh pr merge 12", None),
+        ("sudo -V", None),
+        ("doas -C /etc/doas.conf gh pr merge 12", None),
+        ("doas -a passwd gh pr view 1", None),
+        ("doas -a passwd gh pr merge 12", Some(Code::Merge)),
+        ("sudo -k gh pr merge 12", Some(Code::Merge)),
+        ("sudo -hexample.com gh pr merge 12", Some(Code::Merge)),
     ]);
 }
 

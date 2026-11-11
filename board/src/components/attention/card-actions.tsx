@@ -245,7 +245,7 @@ function AddCardControl({
               options={KINDS.map((k) => ({ value: k, label: k }))}
             />
             <span className="sp" />
-            <button type="button" className="btn ghost" onClick={() => setOpen(false)}>
+            <button type="button" className="btn" onClick={() => setOpen(false)}>
               Cancel
             </button>
             <button

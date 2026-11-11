@@ -224,6 +224,128 @@ pub fn added_entries(diff: &str) -> Vec<String> {
         .collect()
 }
 
+/// The `# Memory` part of a launch's prompt (`memory.md` section 2, L3):
+/// one `# Memory` heading, then a `## <path>` heading and the text of each
+/// document in `docs` (path, text), in the order given. A document whose
+/// text is empty renders nothing, and with nothing to render the part is
+/// empty. The launcher renders the prompt with it and `mem.decide` counts
+/// the budget with it, so the count is of what launches.
+pub fn render_loaded<'a>(docs: impl IntoIterator<Item = (&'a str, &'a str)>) -> String {
+    let mut out = String::new();
+    for (path, text) in docs {
+        if text.trim().is_empty() {
+            continue;
+        }
+        if out.is_empty() {
+            out.push_str("# Memory\n\n");
+        }
+        out.push_str(&format!("## {path}\n\n{}\n\n", text.trim_end()));
+    }
+    out
+}
+
+/// The estimated tokens of `text`: four bytes a token, rounded up, the
+/// estimate the role files' budget uses too.
+pub fn tokens(text: &str) -> i64 {
+    i64::try_from(text.len().div_ceil(4)).unwrap_or(i64::MAX)
+}
+
+/// `n` with a comma between each group of three digits, as an error shows
+/// a token count.
+pub fn grouped(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
+    if n < 0 {
+        out.push('-');
+    }
+    for (at, digit) in digits.chars().enumerate() {
+        if at > 0 && (digits.len() - at).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// `old` with `diff` (one file's unified diff, as [`unified_diff`] writes
+/// it) applied exactly: every hunk at its stated line, its context and
+/// removed lines matching. `None` when the diff does not apply to `old`.
+/// The `---` and `+++` header lines are skipped.
+pub fn apply_diff(old: &str, diff: &str) -> Option<String> {
+    let a: Vec<&str> = old.split_inclusive('\n').collect();
+    let mut out = String::with_capacity(old.len() + diff.len());
+    let mut at = 0;
+    // The old lines the open hunk still has to read.
+    let mut owed: Option<usize> = None;
+    let mut last = ' ';
+    for line in diff.split_inclusive('\n') {
+        if let Some(header) = line.strip_prefix("@@ -") {
+            if owed.is_some_and(|n| n > 0) {
+                return None;
+            }
+            let range = header.split(' ').next()?;
+            let (start, len) = match range.split_once(',') {
+                Some((start, len)) => (start.parse::<usize>().ok()?, len.parse::<usize>().ok()?),
+                None => (range.parse::<usize>().ok()?, 1),
+            };
+            let begin = if len == 0 {
+                start
+            } else {
+                start.checked_sub(1)?
+            };
+            if begin < at || begin > a.len() {
+                return None;
+            }
+            for kept in &a[at..begin] {
+                out.push_str(kept);
+            }
+            at = begin;
+            owed = Some(len);
+            continue;
+        }
+        let Some(left) = owed else {
+            // The file headers before the first hunk.
+            continue;
+        };
+        if line.starts_with('\\') {
+            // The line before has no final newline.
+            if last == '+' && out.ends_with('\n') {
+                out.pop();
+            }
+            continue;
+        }
+        let mut chars = line.chars();
+        let mark = chars.next()?;
+        let body = chars.as_str();
+        let same = |old: &str| {
+            old.strip_suffix('\n').unwrap_or(old) == body.strip_suffix('\n').unwrap_or(body)
+        };
+        match mark {
+            ' ' | '-' => {
+                let old = a.get(at).filter(|old| same(old))?;
+                if left == 0 {
+                    return None;
+                }
+                if mark == ' ' {
+                    out.push_str(old);
+                }
+                at += 1;
+                owed = Some(left - 1);
+            }
+            '+' => out.push_str(body),
+            _ => return None,
+        }
+        last = mark;
+    }
+    if owed.is_some_and(|n| n > 0) {
+        return None;
+    }
+    for kept in &a[at..] {
+        out.push_str(kept);
+    }
+    Some(out)
+}
+
 const CONTEXT: usize = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -418,6 +540,60 @@ mod tests {
         let entry = &parse(DOC)[0].entries[0];
         let diff = unified_diff("fleet.md", DOC, &rewrite(DOC, entry, "Rebase daily."));
         assert_eq!(added_entries(&diff), ["Rebase daily."]);
+    }
+
+    #[test]
+    fn a_diff_applies_back_to_the_text_it_was_made_to() {
+        let entry = &parse(DOC)[0].entries[1];
+        let cases = [
+            (String::new(), add("", RULE_SECTION, "Rebase often.")),
+            (DOC.to_owned(), add(DOC, NOTE_SECTION, "Clocks drift.")),
+            (DOC.to_owned(), rewrite(DOC, entry, "Keep diffs small.")),
+            (DOC.to_owned(), remove(DOC, &parse(DOC)[0].entries[0])),
+            (
+                "a\nb\nc\nd\ne\nf\ng\nh".to_owned(),
+                "a\nb\nc\nd\nE\nf\ng\nh\n".to_owned(),
+            ),
+            ("a\nb\n".to_owned(), "a\nb".to_owned()),
+            ("x\n".to_owned(), String::new()),
+            (
+                "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n".to_owned(),
+                "one\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\ntwelve\n".to_owned(),
+            ),
+        ];
+        for (old, new) in cases {
+            let diff = unified_diff("x.md", &old, &new);
+            assert_eq!(
+                apply_diff(&old, &diff).as_deref(),
+                Some(new.as_str()),
+                "{diff}"
+            );
+        }
+        let diff = unified_diff("x.md", DOC, &add(DOC, NOTE_SECTION, "Clocks drift."));
+        assert_eq!(apply_diff("## Other\n\n- Text.\n", &diff), None);
+        assert_eq!(
+            apply_diff(DOC, "--- a/x.md\n+++ b/x.md\n@@ -90,1 +90,1 @@\n-z\n+y\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn the_loaded_part_renders_each_document_under_its_path() {
+        assert_eq!(render_loaded([("fleet.md", " \n")]), "");
+        assert_eq!(
+            render_loaded([
+                ("fleet.md", "- One.\n\n"),
+                ("projects/a.md", ""),
+                ("projects/b.md", "- Two.")
+            ]),
+            "# Memory\n\n## fleet.md\n\n- One.\n\n## projects/b.md\n\n- Two.\n\n"
+        );
+        assert_eq!(tokens("abcde"), 2);
+        assert_eq!(tokens(""), 0);
+        assert_eq!(grouped(7_500), "7,500");
+        assert_eq!(grouped(1_234_567), "1,234,567");
+        assert_eq!(grouped(150), "150");
+        assert_eq!(grouped(-1_200), "-1,200");
     }
 
     #[test]

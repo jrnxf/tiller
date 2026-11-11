@@ -903,3 +903,103 @@ fn learning_config_reads_its_table() {
     let bad: toml::Table = "[learning]\nsamples = 3\n".parse().unwrap();
     assert!(matches!(Learning::from_table(&bad), Err(Error::Usage(_))));
 }
+
+fn failure(proposal: &str, error: &str) -> EvalFailure {
+    EvalFailure {
+        proposal_id: proposal.into(),
+        cases: 4,
+        started_at: "2026-11-03T14:00:00Z".into(),
+        minutes: 12.0,
+        error: error.into(),
+    }
+}
+
+#[test]
+fn a_failed_eval_is_kept_until_its_set_records_a_run() {
+    let (mut store, _) = memory_store();
+    proposal(&store, P1, "--- a\n+++ b\n@@ -0,0 +1 @@\n+one\n");
+    let set = store
+        .change_set_create(&owner(), "tighter briefs", &[P1.into()], 10)
+        .unwrap()
+        .value;
+    let daemon = Ctx::new(Actor::Daemon);
+
+    // Only the daemon writes it.
+    let error = store
+        .eval_run_fail(&owner(), &set.id, failure(P1, "x"))
+        .unwrap_err();
+    assert!(matches!(error, Error::Forbidden(_)), "{error}");
+
+    store
+        .eval_run_fail(&daemon, &set.id, failure(P1, "first"))
+        .unwrap();
+    let long = "y".repeat(EVAL_ERROR_MAX_CHARS + 50);
+    store
+        .eval_run_fail(&daemon, "tighter briefs", failure(P1, &long))
+        .unwrap();
+    // The newest failure of a proposal stands for it, cut to the cap.
+    let failed = failed_evals(store.conn(), 20).unwrap();
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].change_set, "tighter briefs");
+    assert_eq!(failed[0].failure.proposal_id, P1);
+    assert_eq!(failed[0].failure.cases, 4);
+    assert_eq!(
+        failed[0].failure.error.chars().count(),
+        EVAL_ERROR_MAX_CHARS
+    );
+    assert!(!failed[0].finished_at.is_empty());
+
+    // A run recorded after it supersedes it.
+    store.eval_run_record(&owner(), &set.id, passing()).unwrap();
+    assert!(failed_evals(store.conn(), 20).unwrap().is_empty());
+
+    // A failure after the run shows again.
+    store
+        .eval_run_fail(&daemon, &set.id, failure(P1, "again"))
+        .unwrap();
+    let failed = failed_evals(store.conn(), 20).unwrap();
+    assert_eq!(failed[0].failure.error, "again");
+    assert!(failed_evals(store.conn(), 0).unwrap().is_empty());
+}
+
+/// A failure stops showing once its proposal is decided, and once any set
+/// that holds the proposal records a run, not only the set it failed in.
+#[test]
+fn a_failed_eval_clears_when_its_proposal_moves_on() {
+    let (mut store, _) = memory_store();
+    proposal(&store, P1, "--- a\n+++ b\n@@ -0,0 +1 @@\n+one\n");
+    let first = store
+        .change_set_create(&owner(), "tighter briefs", &[P1.into()], 10)
+        .unwrap()
+        .value;
+    let daemon = Ctx::new(Actor::Daemon);
+    store
+        .eval_run_fail(&daemon, &first.id, failure(P1, "first"))
+        .unwrap();
+    store.change_set_abandon(&owner(), &first.id).unwrap();
+    assert_eq!(failed_evals(store.conn(), 20).unwrap().len(), 1);
+
+    // A passing run of the same proposal in a new set clears it.
+    let second = store
+        .change_set_create(&owner(), "tighter briefs again", &[P1.into()], 10)
+        .unwrap()
+        .value;
+    store
+        .eval_run_record(&owner(), &second.id, passing())
+        .unwrap();
+    assert!(failed_evals(store.conn(), 20).unwrap().is_empty());
+
+    // A proposal that is no longer proposed shows no failure.
+    store
+        .eval_run_fail(&daemon, &second.id, failure(P1, "again"))
+        .unwrap();
+    assert_eq!(failed_evals(store.conn(), 20).unwrap().len(), 1);
+    store
+        .conn()
+        .execute(
+            "UPDATE proposals SET state = 'discarded' WHERE id = ?1",
+            [P1],
+        )
+        .unwrap();
+    assert!(failed_evals(store.conn(), 20).unwrap().is_empty());
+}

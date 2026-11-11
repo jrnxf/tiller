@@ -8,6 +8,12 @@ fn no_list(paths: &[String]) -> Result<Vec<String>> {
     Ok(vec![String::new(); paths.len()])
 }
 
+/// The blob texts the budget counts, which these tests leave empty.
+#[allow(clippy::unnecessary_wraps)]
+fn no_blobs(_: &str) -> Result<Option<String>> {
+    Ok(Some(String::new()))
+}
+
 fn file(text: &str) -> FileState {
     let blob = if text.is_empty() {
         EMPTY_BLOB.to_owned()
@@ -250,7 +256,15 @@ fn keep_waits_for_a_passing_holdout_run() {
     let hint = format!("tiller learn eval --proposal {suggested}");
     assert_eq!(gate.hint.as_deref(), Some(hint.as_str()));
     let error = store
-        .mem_decide(&owner(), &suggested, true, EMPTY_BLOB, &file(""), &[])
+        .mem_decide(
+            &owner(),
+            &suggested,
+            true,
+            EMPTY_BLOB,
+            &file(""),
+            &[],
+            &no_blobs,
+        )
         .unwrap_err();
     assert!(
         error
@@ -266,7 +280,15 @@ fn keep_waits_for_a_passing_holdout_run() {
         .unwrap();
     assert!(notes(&view).suggestions[0].gate.ok);
     let kept = store
-        .mem_decide(&owner(), &suggested, true, EMPTY_BLOB, &file(""), &[])
+        .mem_decide(
+            &owner(),
+            &suggested,
+            true,
+            EMPTY_BLOB,
+            &file(""),
+            &[],
+            &no_blobs,
+        )
         .unwrap()
         .value;
     assert_eq!(kept.proposal_id, suggested);
@@ -312,6 +334,7 @@ fn keep_on_an_old_base_is_refused_as_stale() {
             &file(now).head_blob,
             &file(now),
             &[],
+            &no_blobs,
         )
         .unwrap_err();
     assert!(error.to_string().contains("the text moved"), "{error}");
@@ -334,7 +357,15 @@ fn a_bundle_kept_in_one_batch_applies_in_order_on_one_text() {
     measured(&mut store, "other", &[&other]);
 
     let kept = store
-        .mem_decide(&owner(), &first, true, EMPTY_BLOB, &file(""), &[])
+        .mem_decide(
+            &owner(),
+            &first,
+            true,
+            EMPTY_BLOB,
+            &file(""),
+            &[],
+            &no_blobs,
+        )
         .unwrap()
         .value;
     let now = doc::add("", doc::NOTE_SECTION, "The staging DB resets at midnight");
@@ -344,7 +375,15 @@ fn a_bundle_kept_in_one_batch_applies_in_order_on_one_text() {
     let head = file(&now).head_blob;
     for after in [Vec::new(), vec![other.clone()]] {
         let error = store
-            .mem_decide(&owner(), &second, true, &head, &file(&now), &after)
+            .mem_decide(
+                &owner(),
+                &second,
+                true,
+                &head,
+                &file(&now),
+                &after,
+                &no_blobs,
+            )
             .unwrap_err();
         assert!(error.to_string().contains("the text moved"), "{error}");
     }
@@ -356,6 +395,7 @@ fn a_bundle_kept_in_one_batch_applies_in_order_on_one_text() {
             &head,
             &file(&now),
             std::slice::from_ref(&first),
+            &no_blobs,
         )
         .unwrap()
         .value;
@@ -370,21 +410,131 @@ fn a_bundle_kept_in_one_batch_applies_in_order_on_one_text() {
     );
 }
 
+/// The budget is counted at decide time, not taken from the proposal: a
+/// stored count under it does not let an over-budget Keep through.
 #[test]
 fn keep_over_the_startup_budget_is_refused() {
     let (mut store, _) = memory_store();
-    let suggested = agent_proposal(
-        &mut store,
-        "alpha",
-        "",
-        "Long",
-        Some(json!({"builder": 7_600})),
-    );
+    let line = "x".repeat(30_100);
+    let suggested = agent_proposal(&mut store, "alpha", "", &line, Some(json!({"builder": 10})));
+    measured(&mut store, "long", &[&suggested]);
     let error = store
-        .mem_decide(&owner(), &suggested, true, EMPTY_BLOB, &file(""), &[])
+        .mem_decide(
+            &owner(),
+            &suggested,
+            true,
+            EMPTY_BLOB,
+            &file(""),
+            &[],
+            &no_blobs,
+        )
         .unwrap_err();
     assert!(matches!(error, Error::Refused { .. }), "{error:?}");
+    let after = doc::tokens(&doc::render_loaded([(
+        document_path("alpha").as_str(),
+        doc::add("", doc::NOTE_SECTION, &line).as_str(),
+    )]));
+    assert!(
+        error.to_string().ends_with(&format!(
+            "it would put every role's startup memory in alpha over the 7,500-token budget: 0 tokens now, {0} from this change, {0} after",
+            doc::grouped(after)
+        )),
+        "{error}"
+    );
     assert_eq!(proposal(&store, &suggested).state, "proposed");
+}
+
+/// A diff that does not apply exactly cannot be counted, so its Keep is
+/// refused, not let past the budget for `git apply` to take.
+#[test]
+fn a_keep_whose_diff_cannot_be_counted_is_refused() {
+    let (mut store, _) = memory_store();
+    let suggested = agent_proposal(&mut store, "alpha", "", "Run the slow suite", None);
+    let diff = doc::unified_diff(&document_path("alpha"), "- other\n", "- other\n- new\n");
+    store
+        .write(&Ctx::new(Actor::Daemon), "test.tamper", None, |tx| {
+            tx.conn().execute(
+                "UPDATE proposals SET diff = ?2, diff_sha256 = ?3 WHERE id = ?1",
+                params![suggested, diff, doc::sha256_hex(diff.as_bytes())],
+            )?;
+            tx.event(NewEvent::new("proposal", &suggested, "proposal.created").rev(2))?;
+            Ok(())
+        })
+        .unwrap();
+    measured(&mut store, "short", &[&suggested]);
+    let error = store
+        .mem_decide(
+            &owner(),
+            &suggested,
+            true,
+            EMPTY_BLOB,
+            &file(""),
+            &[],
+            &no_blobs,
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .ends_with("its diff does not apply exactly to the current text, so its startup memory cannot be counted; discard it and propose the change again"),
+        "{error}"
+    );
+    assert_eq!(proposal(&store, &suggested).state, "proposed");
+    assert!(
+        store
+            .mem_keep_budget(&suggested, &file(""), &no_blobs)
+            .is_err()
+    );
+}
+
+/// A fleet document loads in every project, and alone in one with no
+/// document of its own: its Keep is counted there too.
+#[test]
+fn a_fleet_keep_over_the_startup_budget_names_where_it_loads() {
+    let (mut store, _) = memory_store();
+    let line = "x".repeat(30_100);
+    let suggested = agent_proposal(&mut store, FLEET_PROJECT, "", &line, None);
+    measured(&mut store, "long", &[&suggested]);
+    let error = store
+        .mem_decide(
+            &owner(),
+            &suggested,
+            true,
+            EMPTY_BLOB,
+            &file(""),
+            &[],
+            &no_blobs,
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().contains(
+            "it would put every role's startup memory in a project with no document of its own over the 7,500-token budget: 0 tokens now"
+        ),
+        "{error}"
+    );
+
+    // Under it, the Keep records the count it leaves for each role.
+    let short = agent_proposal(&mut store, FLEET_PROJECT, "", "Run the slow suite", None);
+    measured(&mut store, "short", &[&short]);
+    store
+        .mem_decide(
+            &owner(),
+            &short,
+            true,
+            EMPTY_BLOB,
+            &file(""),
+            &[],
+            &no_blobs,
+        )
+        .unwrap();
+    let tokens = doc::tokens(&doc::render_loaded([(
+        document_path(FLEET_PROJECT).as_str(),
+        doc::add("", doc::NOTE_SECTION, "Run the slow suite").as_str(),
+    )]));
+    let recorded = proposal(&store, &short).token_budget_after.unwrap();
+    for role in ["orchestrator", "scout", "builder", "reviewer", "verifier"] {
+        assert_eq!(recorded[role], json!(tokens), "{recorded}");
+    }
 }
 
 #[test]
@@ -392,7 +542,15 @@ fn discard_then_undo_proposes_it_again() {
     let (mut store, _) = memory_store();
     let suggested = agent_proposal(&mut store, "alpha", "", "Flaky on Mondays", None);
     let out = store
-        .mem_decide(&owner(), &suggested, false, EMPTY_BLOB, &file(""), &[])
+        .mem_decide(
+            &owner(),
+            &suggested,
+            false,
+            EMPTY_BLOB,
+            &file(""),
+            &[],
+            &no_blobs,
+        )
         .unwrap()
         .value;
     assert_eq!(out.approval_id, None);
@@ -742,13 +900,29 @@ fn a_proposal_is_filed_with_its_evidence_and_kept_only_through_the_gate() {
     assert!(!suggestion.gate.ok);
 
     let error = store
-        .mem_decide(&owner(), &filed.id, true, EMPTY_BLOB, &file(""), &[])
+        .mem_decide(
+            &owner(),
+            &filed.id,
+            true,
+            EMPTY_BLOB,
+            &file(""),
+            &[],
+            &no_blobs,
+        )
         .unwrap_err();
     assert!(matches!(error, Error::Refused { .. }), "{error:?}");
     assert_eq!(proposal(&store, &filed.id).state, "proposed");
     measured(&mut store, "staging notes", &[&filed.id]);
     let kept = store
-        .mem_decide(&owner(), &filed.id, true, EMPTY_BLOB, &file(""), &[])
+        .mem_decide(
+            &owner(),
+            &filed.id,
+            true,
+            EMPTY_BLOB,
+            &file(""),
+            &[],
+            &no_blobs,
+        )
         .unwrap()
         .value;
     assert!(kept.approval_id.is_some());
@@ -823,7 +997,7 @@ fn a_contradicting_note_marks_the_memory_due_and_backs_a_rewrite() {
     measured(&mut store, "deploy days", &[&filed.id]);
     let head = file(v1).head_blob;
     let kept = store
-        .mem_decide(&owner(), &filed.id, true, &head, &file(v1), &[])
+        .mem_decide(&owner(), &filed.id, true, &head, &file(v1), &[], &no_blobs)
         .unwrap()
         .value;
     let v2 = "## How we work here\n\n- Deploys go out on Thursdays\n";
@@ -999,8 +1173,9 @@ fn deleting_a_project_removes_its_memory_and_unlinks_the_fleet_one() {
     assert_eq!(broken, 0);
 }
 
-/// U14: a proposal whose document moved after it was made is stale. Its
-/// hint names the act that clears it, which the memory view offers.
+/// A re-proposed member leaves its open change set: a set of one closes
+/// abandoned, and a bundle keeps the other members, whose earlier run no
+/// longer clears the gate.
 #[test]
 fn a_reproposed_member_leaves_its_open_change_set() {
     let (mut store, _) = memory_store();
@@ -1077,6 +1252,8 @@ fn a_reproposed_member_leaves_its_open_change_set() {
     assert!(removed[1].contains(&first), "{removed:?}");
 }
 
+/// U14: a proposal whose document moved after it was made is stale. Its
+/// hint names the act that clears it, which the memory view offers.
 #[test]
 fn a_stale_proposal_is_reproposed_on_the_current_text() {
     let (mut store, _) = memory_store();

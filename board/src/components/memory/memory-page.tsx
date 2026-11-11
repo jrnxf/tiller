@@ -663,7 +663,7 @@ function SuggestionCard({
         {budget ? <span className="bud"> {budget}</span> : null}
       </div>
       {gateBox}
-      {refusal ? <Inline error={refusal} /> : null}
+      {refusal ? <Inline error={refusal} about={`proposal ${suggestion.proposal_id}`} /> : null}
       <div className="sug-f">
         {lead}
         {note ? <span className="note">{note}</span> : <span className="sp" />}

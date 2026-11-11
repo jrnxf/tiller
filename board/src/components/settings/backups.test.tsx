@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { fixtureMutation, withoutDeleted } from "../../lib/fixture-mutations";
-import type { Scenario } from "../../lib/fixtures";
+import { FixtureRefusal, type Scenario } from "../../lib/fixtures";
 import { forgetTakenBackups } from "../../lib/fixtures-backups";
 import { Backups, sizeText } from "./backups";
 import { createTestQueryClient } from "../../test-app";
@@ -16,7 +16,11 @@ function serve(scenario: Scenario, post?: () => Response) {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       return new Response(JSON.stringify(fixtureMutation("POST", path, body, scenario).reply.body));
     }
-    return new Response(JSON.stringify(withoutDeleted(path, undefined, scenario)));
+    const read = withoutDeleted(path, undefined, scenario);
+    if (read instanceof FixtureRefusal) {
+      return new Response(JSON.stringify(read.body), { status: read.status });
+    }
+    return new Response(JSON.stringify(read));
   });
   vi.stubGlobal("fetch", fetch);
   return fetch;
@@ -54,7 +58,12 @@ test("lists each backup with its Lisbon time, size, maker and verdict, and the f
   expect(rows[1]?.textContent).toContain("By hand");
   expect(rows[1]?.textContent).toContain("by you");
   expect(within(section).getByText("/home/user/.tiller/backups")).toBeTruthy();
-  expect(within(section).getByText("tiller restore <file>")).toBeTruthy();
+  const commands = within(section).getByTestId("backup-commands");
+  expect(commands.textContent).toContain("tiller restore --dry-run");
+  expect(commands.textContent).toContain(
+    "tiller restore /home/user/.tiller/backups/<file> --dry-run",
+  );
+  expect(section.textContent).toContain("Stop the daemon before a restore");
   expect(within(section).getByRole("button", { name: "Back up now" })).toBeTruthy();
 });
 
@@ -104,6 +113,56 @@ test("a failed verify says so and that the previous backup is kept", async () =>
     "Not verified: the copy failed its integrity check. The previous verified backup is kept. Try again.",
   );
   expect(rows[1]?.getAttribute("data-status")).toBe("verified");
+});
+
+test("a listed copy whose file is gone says it cannot be restored", async () => {
+  serve("backup-failed");
+  renderBackups();
+  const rows = await screen.findAllByTestId("backup-row");
+  expect(rows[3]?.getAttribute("data-status")).toBe("failed");
+  expect(rows[3]?.textContent).toContain("This copy is missing or changed and cannot be restored.");
+  expect(rows[3]?.textContent).not.toContain("The previous verified backup is kept");
+});
+
+test("a list that does not load says so and keeps Back up now", async () => {
+  serve("backups-unread");
+  renderBackups();
+  const unread = await screen.findByTestId("backups-unread");
+  expect(unread.textContent).toBe(
+    "The backups did not load: the backup manifest does not parse: expected value at line 1 column 1.",
+  );
+  const button = screen.getByRole("button", { name: "Back up now" });
+  expect((button as HTMLButtonElement).disabled).toBe(false);
+  expect(screen.getByTestId("backup-commands").textContent).toContain("tiller restore --dry-run");
+});
+
+test("a failed Back up now shows its reason when the list did not load", async () => {
+  const failed = {
+    id: "failed-1",
+    kind: "manual",
+    at: "2026-11-11T10:00:00Z",
+    status: "failed",
+    size: null,
+    error: "internal: the backup manifest does not parse",
+  };
+  serve(
+    "backups-unread",
+    () =>
+      new Response(
+        JSON.stringify({
+          ok: true,
+          replayed: false,
+          events: [],
+          receipt: { recorded_at: "2026-11-11T10:00:01Z" },
+          data: failed,
+        }),
+      ),
+  );
+  renderBackups();
+  fireEvent.click(await screen.findByRole("button", { name: "Back up now" }));
+  expect((await screen.findByTestId("backup-run-failed")).textContent).toBe(
+    "Not verified: internal: the backup manifest does not parse. The previous verified backup is kept. Try again.",
+  );
 });
 
 test("a refusal from the daemon shows in the section", async () => {

@@ -14,6 +14,7 @@ const project = (id: string): Project => ({
   reviewed_through_sha: null,
   reviewed_at: null,
   stage_changed_at: null,
+  edited_at: null,
   next_review_due: null,
   review_overdue: false,
   review_open: null,

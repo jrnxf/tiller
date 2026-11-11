@@ -129,6 +129,72 @@ fn unreachable_herdr_fails_the_check() {
     );
 }
 
+/// Hung tools cost one timeout together, not one each, and a hung process
+/// list is cut at the report's deadline: a peer's report reaches its board
+/// host inside the 10 s the board waits.
+#[test]
+fn hung_tools_do_not_hold_the_report_past_its_deadline() {
+    let world = World::initialized();
+    let bin = world_with_tools(&world);
+    // The world's PATH is its fake tools only: `sleep` is named in full.
+    let sleep = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join("sleep"))
+        .find(|path| path.is_file())
+        .unwrap();
+    script(&bin, "hang", &format!("exec '{}' 30", sleep.display()));
+    let hang = bin.join("hang");
+    world.set_env("TILLER_GH", hang.to_str().unwrap());
+    world.set_env("TILLER_QUOTA_AXI", hang.to_str().unwrap());
+    world.set_env("TILLER_HERDR", hang.to_str().unwrap());
+    world.set_env("TILLER_PS", hang.to_str().unwrap());
+    let started = std::time::Instant::now();
+    let out = world.run(&["doctor"]);
+    let took = started.elapsed();
+    // Before, the probes ran one after another: 15 s for the three tools,
+    // then 30 s for the process list. Now they end at the 7 s deadline,
+    // inside the 10 s a board host waits for a peer's answer; two probe
+    // timeouts one after another would pass that.
+    assert!(
+        took < std::time::Duration::from_secs(10),
+        "took {took:?}: {}",
+        out.json
+    );
+    assert_eq!(out.code, 5, "{}", out.json);
+    let report = &out.json["error"]["current"];
+    for name in ["gh", "quota-axi"] {
+        let detail = check(report, name)["detail"].as_str().unwrap().to_owned();
+        assert!(
+            detail.contains("did not answer within 5s"),
+            "{name}: {detail}"
+        );
+    }
+    assert_eq!(check(report, "herdr")["status"], "fail");
+    assert_eq!(check(report, "git")["status"], "ok");
+    let list = check(report, "firstmate");
+    assert_eq!(list["code"], "processes_unreadable", "{list}");
+    // The order is the report's, not the order the probes answered in.
+    let names: Vec<&str> = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        &names[..9],
+        [
+            "git",
+            "treehouse",
+            "herdr",
+            "claude",
+            "gh",
+            "gh-axi",
+            "quota-axi",
+            "no-mistakes",
+            "no-mistakes daemon"
+        ]
+    );
+}
+
 #[test]
 fn a_no_mistakes_daemon_older_than_its_cli_warns_with_the_fix() {
     let world = World::initialized();

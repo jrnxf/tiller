@@ -52,13 +52,24 @@ pub fn pane_readings(snapshot: &Snapshot, bindings: &[Binding]) -> Vec<PaneReadi
 
 impl Reconciler {
     pub(crate) fn evidence(&mut self, now: Timestamp, report: &mut Report) -> Result<()> {
-        self.leaked_reservations(now, report)?;
-        self.reown_runs(now, report)?;
-        self.retarget_orphaned_messages(now, report)?;
-        self.orphan_panes(now, report)?;
-        self.run_worktrees(now, report)?;
-        self.done_without_evidence(now, report)?;
-        self.cuts(now, report)?;
+        type Step = fn(&mut Reconciler, Timestamp, &mut Report) -> Result<()>;
+        // Each check under its own guard: a refused write in one (a pass key
+        // another actor stored first) is reported, and the checks after it
+        // still run.
+        let steps: [(&str, Step); 7] = [
+            ("leaked reservations", Self::leaked_reservations),
+            ("run owners", Self::reown_runs),
+            ("orphaned messages", Self::retarget_orphaned_messages),
+            ("orphan panes", Self::orphan_panes),
+            ("run worktrees", Self::run_worktrees),
+            ("done without evidence", Self::done_without_evidence),
+            ("cuts", Self::cuts),
+        ];
+        for (what, step) in steps {
+            if let Err(error) = step(self, now, report) {
+                report.error(what, &error);
+            }
+        }
         Ok(())
     }
 
@@ -359,222 +370,65 @@ impl Reconciler {
         // `/private/var`) still matches.
         let mut listed: Option<Option<Vec<PathBuf>>> = None;
         let mut rescanned = false;
+        // Each run under its own guard: a refused write for one is
+        // reported, and the runs after it are still checked.
         for run in runs {
-            let Some(path) = run.worktree_path.clone() else {
-                continue;
-            };
-            let card: Card = get(self.conn(), "card", &run.card_id)?;
-            let project = self.project(&card.project_id)?;
-            let cached = find::<tiller_core::domain::Worktree>(
-                self.conn(),
-                "host_id = ?1 AND path = ?2",
-                &[&host, &path],
-            )?;
-            let scan = self.scan_of(Path::new(&path), &project);
-            if run.ended_at.is_none() {
-                if scan.exists {
-                    continue;
-                }
-                // Missing: lost work, or a question.
-                let last_known_work = cached.as_ref().is_some_and(|w| {
-                    w.dirty == Some(true)
-                        || w.unlanded_commits.is_some_and(|n| n > 0)
-                        || w.unlanded_commits.is_none()
-                });
-                let had_cleaned = self.last_event("run", &run.id, "run.cleaned")?.is_some();
-                if last_known_work && !had_cleaned {
-                    let breach_key = format!("reconcile:G19:{}", run.id);
-                    if !self.key_used(&breach_key)? {
-                        self.store.guard_breach(
-                            &self.ctx(now).with_key(breach_key),
-                            "G19",
-                            Some(&card.id),
-                            json!({"run_id": run.id, "worktree_path": path, "last_scan": cached.as_ref().map(|w| json!({"dirty": w.dirty, "unlanded_commits": w.unlanded_commits}))}),
-                        )?;
-                    }
-                    let key = format!("reconcile:R15:lost:{}", run.id);
-                    if self.recovery(
-                        now,
-                        &key,
-                        NewAttention {
-                            card: card.id.clone(),
-                            run_id: Some(run.id.clone()),
-                            question: format!(
-                                "{} {} run {}: worktree {path} is gone and its last scan showed unlanded or uncommitted work ({:?} unlanded, dirty {:?}). This is lost work. Abandon the run, or recreate it from the branch?",
-                                card.display_id,
-                                run.role.short_name(),
-                                run.id,
-                                cached.as_ref().and_then(|w| w.unlanded_commits),
-                                cached.as_ref().and_then(|w| w.dirty)
-                            ),
-                            evidence: Self::json_text(json!({"run_id": run.id, "worktree_path": path, "branch": run.branch})),
-                            options: Some(json!(["Abandon", "Recreate from the branch"])),
-                            ..NewAttention::default()
-                        },
-                    )? {
-                        report.repair(format!("R15 run {} worktree gone with unlanded work: recovery item and G19 breach", run.id));
-                    }
-                } else {
-                    let key = format!("reconcile:R15:missing:{}", run.id);
-                    let body = format!(
-                        "[{}] {} run {}: worktree {path} is missing (last scan: clean). Abandon the run, or recreate it from branch {}?",
-                        card.display_id,
-                        run.role.short_name(),
-                        run.id,
-                        run.branch.as_deref().unwrap_or("(unknown)")
-                    );
-                    if self.note(now, &card.project_id, &key, body, Some(card.id.clone()))? {
-                        report.repair(format!(
-                            "R15 run {} worktree missing: note to the orchestrator",
-                            run.id
-                        ));
-                    }
-                    if let Some(at) = self.message_at(&key)?
-                        && at.plus_minutes(self.config.thresholds.orphan_note_developer) <= now
-                    {
-                        let item = format!("reconcile:R15:missing-recovery:{}", run.id);
-                        if self.recovery(
-                            now,
-                            &item,
-                            NewAttention {
-                                card: card.id.clone(),
-                                run_id: Some(run.id.clone()),
-                                question: format!(
-                                    "{} {} run {}: worktree {path} is missing and the orchestrator has not acted for {} minutes. Abandon, or recreate from the branch?",
-                                    card.display_id,
-                                    run.role.short_name(),
-                                    run.id,
-                                    minutes_since(at, now)
-                                ),
-                                evidence: Self::json_text(json!({"run_id": run.id, "worktree_path": path})),
-                                options: Some(json!(["Abandon", "Recreate from the branch"])),
-                                ..NewAttention::default()
-                            },
-                        )? {
-                            report.repair(format!("R15 run {} worktree missing: recovery item", run.id));
-                        }
-                    }
-                }
-                continue;
+            let id = run.id.clone();
+            if let Err(error) =
+                self.run_worktree(run, &host, &mut listed, &mut rescanned, now, report)
+            {
+                report.error(&format!("worktree of run {id}"), &error);
             }
-            // An ended run.
-            let Some(ended_at) = run.ended_at else {
-                continue;
-            };
-            if cached.as_ref().is_some_and(|w| w.gone_at.is_some()) || !scan.exists {
-                continue;
+        }
+        Ok(())
+    }
+
+    /// One run of [`Self::run_worktrees`]. `listed` is the worktree list,
+    /// read once per pass when an ended run needs it; `rescanned` says
+    /// whether this pass has scanned the worktrees again.
+    fn run_worktree(
+        &mut self,
+        run: Run,
+        host: &str,
+        listed: &mut Option<Option<Vec<PathBuf>>>,
+        rescanned: &mut bool,
+        now: Timestamp,
+        report: &mut Report,
+    ) -> Result<()> {
+        let Some(path) = run.worktree_path.clone() else {
+            return Ok(());
+        };
+        let card: Card = get(self.conn(), "card", &run.card_id)?;
+        let project = self.project(&card.project_id)?;
+        let cached = find::<tiller_core::domain::Worktree>(
+            self.conn(),
+            "host_id = ?1 AND path = ?2",
+            &[&host, &path],
+        )?;
+        let scan = self.scan_of(Path::new(&path), &project);
+        if run.ended_at.is_none() {
+            if scan.exists {
+                return Ok(());
             }
-            if self.last_event("run", &run.id, "run.cleaned")?.is_some() {
-                // Returned already; treehouse may still be removing it.
-                continue;
-            }
-            // A new attempt works on in its predecessor's worktree: the
-            // newest run on the path is the one that returns it. `run.clean`
-            // refuses only an active successor, so this check is still
-            // needed: it keeps a predecessor from returning the worktree
-            // after its successor ended and, while the successor runs, from
-            // a `run.clean` refusal on every pass or a "still holds work"
-            // note about the successor's work.
-            let succeeded: bool = self.conn().query_row(
-                "SELECT EXISTS (SELECT 1 FROM runs WHERE host_id = ?1 AND worktree_path = ?2
-                                AND id != ?3 AND (ended_at IS NULL OR started_at > ?4))",
-                rusqlite::params![host, path, run.id, run.started_at],
-                |row| row.get(0),
-            )?;
-            if succeeded {
-                continue;
-            }
-            let pane_closed = self.run_pane_closed(&run);
-            let listed = listed.get_or_insert_with(|| match self.sources.scanner.listed() {
-                Ok(paths) => Some(paths.iter().map(|p| canonical(p)).collect()),
-                Err(error) => {
-                    // Nothing is returned this pass; say why.
-                    report.error("worktree list", &error);
-                    None
-                }
+            // Missing: lost work, or a question.
+            let last_known_work = cached.as_ref().is_some_and(|w| {
+                w.dirty == Some(true)
+                    || w.unlanded_commits.is_some_and(|n| n > 0)
+                    || w.unlanded_commits.is_none()
             });
-            let listed_here = listed
-                .as_ref()
-                .is_some_and(|l| l.contains(&canonical(Path::new(&path))));
-            if scan.provably_clean() && listed_here && pane_closed {
-                // The reading `run.clean` checks is the cache row, which must
-                // be newer than the run's end: scan now when this pass has
-                // not yet.
-                if !rescanned && cached.as_ref().is_none_or(|w| w.fetched_at < ended_at) {
-                    self.scan_worktrees(now)?;
-                    rescanned = true;
-                }
-                let holder = match lease_holder(self.conn(), &run) {
-                    Ok(holder) => holder,
-                    Err(error) => {
-                        report.error(&format!("lease holder of run {}", run.id), &error);
-                        continue;
-                    }
-                };
-                match self.store.run_clean(&self.ctx(now), &run.id, true) {
-                    Ok(applied) if !applied.replayed => {
-                        report.repair(format!("R15 run {} worktree {path} returned: ended, clean, nothing unlanded, pane closed", run.id));
-                        if let Err(error) = self.sources.scanner.release(Path::new(&path), &holder)
-                        {
-                            report.error(&format!("treehouse return of {path}"), &error);
-                            // The records say returned, so no later pass
-                            // tries again: hand the return to the developer.
-                            let key = format!("reconcile:R15:return-failed:{}", run.id);
-                            if self.recovery(
-                                now,
-                                &key,
-                                NewAttention {
-                                    card: if card.state == CardState::Open { card.id.clone() } else { String::new() },
-                                    run_id: Some(run.id.clone()),
-                                    question: format!(
-                                        "{} {} run {}: worktree {path} is clean and recorded as returned, but treehouse did not take it back ({error}). Return it with: treehouse return {path} --if-lease-holder {holder}",
-                                        card.display_id,
-                                        run.role.short_name(),
-                                        run.id,
-                                    ),
-                                    evidence: Self::json_text(json!({"run_id": run.id, "worktree_path": path, "holder": holder, "error": error})),
-                                    ..NewAttention::default()
-                                },
-                            )? {
-                                report.repair(format!("R15 run {} worktree return failed: recovery item", run.id));
-                            }
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(error) => report.error(&format!("run.clean {}", run.id), &error),
-                }
-                continue;
-            }
-            let holds_work = scan.dirty != Some(false) || scan.unlanded_commits != Some(0);
-            // A builder that ended `reported` with its head on an open PR
-            // left the work to the PR, which the card tracks to landing.
-            let on_pr = run.outcome == Some(RunOutcome::Reported)
-                && run.role == RunRole::Builder
-                && published_head(self.conn(), &run)?.is_some();
-            if holds_work && !on_pr {
-                let key = format!(
-                    "reconcile:R15:unlanded:{}:{}",
-                    run.id,
-                    scan.head_sha.as_deref().unwrap_or("unknown")
+            let had_cleaned = self.last_event("run", &run.id, "run.cleaned")?.is_some();
+            if last_known_work && !had_cleaned {
+                // A refused breach still lets the recovery item open:
+                // the repair line below names both.
+                self.breach(
+                    now,
+                    format!("reconcile:G19:{}", run.id),
+                    "G19",
+                    &card.id,
+                    json!({"run_id": run.id, "worktree_path": path, "last_scan": cached.as_ref().map(|w| json!({"dirty": w.dirty, "unlanded_commits": w.unlanded_commits}))}),
+                    report,
                 );
-                let body = format!(
-                    "[{}] {} run {} ended {:?} but worktree {path} still holds work: {:?} unlanded commits, dirty {:?}. Land it, relaunch, or abandon it?",
-                    card.display_id,
-                    run.role.short_name(),
-                    run.id,
-                    run.outcome,
-                    scan.unlanded_commits,
-                    scan.dirty
-                );
-                if self.note(now, &card.project_id, &key, body, Some(card.id.clone()))? {
-                    report.repair(format!(
-                        "R15 run {} ended with unlanded work: note to the orchestrator",
-                        run.id
-                    ));
-                }
-            }
-            if ended_at.plus_minutes(self.config.thresholds.unreturned_days * 24 * 60) <= now {
-                let key = format!("reconcile:R15:unreturned:{}", run.id);
+                let key = format!("reconcile:R15:lost:{}", run.id);
                 if self.recovery(
                     now,
                     &key,
@@ -582,21 +436,202 @@ impl Reconciler {
                         card: card.id.clone(),
                         run_id: Some(run.id.clone()),
                         question: format!(
-                            "{} {} run {} ended {} days ago and worktree {path} is still there ({:?} unlanded commits, dirty {:?}). Keep it, or return it?",
+                            "{} {} run {}: worktree {path} is gone and its last scan showed unlanded or uncommitted work ({:?} unlanded, dirty {:?}). This is lost work. Abandon the run, or recreate it from the branch?",
                             card.display_id,
                             run.role.short_name(),
                             run.id,
-                            minutes_since(ended_at, now) / (24 * 60),
-                            scan.unlanded_commits,
-                            scan.dirty
+                            cached.as_ref().and_then(|w| w.unlanded_commits),
+                            cached.as_ref().and_then(|w| w.dirty)
                         ),
-                        evidence: Self::json_text(json!({"run_id": run.id, "worktree_path": path})),
-                        options: Some(json!(["Keep", "Return"])),
+                        evidence: Self::json_text(json!({"run_id": run.id, "worktree_path": path, "branch": run.branch})),
+                        options: Some(json!(["Abandon", "Recreate from the branch"])),
                         ..NewAttention::default()
                     },
                 )? {
-                    report.repair(format!("R15 run {} worktree unreturned for a week: recovery item", run.id));
+                    report.repair(format!("R15 run {} worktree gone with unlanded work: recovery item and G19 breach", run.id));
                 }
+            } else {
+                let key = format!("reconcile:R15:missing:{}", run.id);
+                let body = format!(
+                    "[{}] {} run {}: worktree {path} is missing (last scan: clean). Abandon the run, or recreate it from branch {}?",
+                    card.display_id,
+                    run.role.short_name(),
+                    run.id,
+                    run.branch.as_deref().unwrap_or("(unknown)")
+                );
+                if self.note(now, &card.project_id, &key, body, Some(card.id.clone()))? {
+                    report.repair(format!(
+                        "R15 run {} worktree missing: note to the orchestrator",
+                        run.id
+                    ));
+                }
+                if let Some(at) = self.message_at(&key)?
+                    && at.plus_minutes(self.config.thresholds.orphan_note_developer) <= now
+                {
+                    let item = format!("reconcile:R15:missing-recovery:{}", run.id);
+                    if self.recovery(
+                        now,
+                        &item,
+                        NewAttention {
+                            card: card.id.clone(),
+                            run_id: Some(run.id.clone()),
+                            question: format!(
+                                "{} {} run {}: worktree {path} is missing and the orchestrator has not acted for {} minutes. Abandon, or recreate from the branch?",
+                                card.display_id,
+                                run.role.short_name(),
+                                run.id,
+                                minutes_since(at, now)
+                            ),
+                            evidence: Self::json_text(json!({"run_id": run.id, "worktree_path": path})),
+                            options: Some(json!(["Abandon", "Recreate from the branch"])),
+                            ..NewAttention::default()
+                        },
+                    )? {
+                        report.repair(format!("R15 run {} worktree missing: recovery item", run.id));
+                    }
+                }
+            }
+            return Ok(());
+        }
+        // An ended run.
+        let Some(ended_at) = run.ended_at else {
+            return Ok(());
+        };
+        if cached.as_ref().is_some_and(|w| w.gone_at.is_some()) || !scan.exists {
+            return Ok(());
+        }
+        if self.last_event("run", &run.id, "run.cleaned")?.is_some() {
+            // Returned already; treehouse may still be removing it.
+            return Ok(());
+        }
+        // A new attempt works on in its predecessor's worktree: the
+        // newest run on the path is the one that returns it. `run.clean`
+        // refuses only an active successor, so this check is still
+        // needed: it keeps a predecessor from returning the worktree
+        // after its successor ended and, while the successor runs, from
+        // a `run.clean` refusal on every pass or a "still holds work"
+        // note about the successor's work.
+        let succeeded: bool = self.conn().query_row(
+            "SELECT EXISTS (SELECT 1 FROM runs WHERE host_id = ?1 AND worktree_path = ?2
+                            AND id != ?3 AND (ended_at IS NULL OR started_at > ?4))",
+            rusqlite::params![host, path, run.id, run.started_at],
+            |row| row.get(0),
+        )?;
+        if succeeded {
+            return Ok(());
+        }
+        let pane_closed = self.run_pane_closed(&run);
+        let listed = listed.get_or_insert_with(|| match self.sources.scanner.listed() {
+            Ok(paths) => Some(paths.iter().map(|p| canonical(p)).collect()),
+            Err(error) => {
+                // Nothing is returned this pass; say why.
+                report.error("worktree list", &error);
+                None
+            }
+        });
+        let listed_here = listed
+            .as_ref()
+            .is_some_and(|l| l.contains(&canonical(Path::new(&path))));
+        if scan.provably_clean() && listed_here && pane_closed {
+            // The reading `run.clean` checks is the cache row, which must
+            // be newer than the run's end: scan now when this pass has
+            // not tried yet. Marked first, so a failing scan runs once a
+            // pass, not once for each ended run.
+            if !*rescanned && cached.as_ref().is_none_or(|w| w.fetched_at < ended_at) {
+                *rescanned = true;
+                self.scan_worktrees(now)?;
+            }
+            let holder = match lease_holder(self.conn(), &run) {
+                Ok(holder) => holder,
+                Err(error) => {
+                    report.error(&format!("lease holder of run {}", run.id), &error);
+                    return Ok(());
+                }
+            };
+            match self.store.run_clean(&self.ctx(now), &run.id, true) {
+                Ok(applied) if !applied.replayed => {
+                    report.repair(format!("R15 run {} worktree {path} returned: ended, clean, nothing unlanded, pane closed", run.id));
+                    if let Err(error) = self.sources.scanner.release(Path::new(&path), &holder) {
+                        report.error(&format!("treehouse return of {path}"), &error);
+                        // The records say returned, so no later pass
+                        // tries again: hand the return to the developer.
+                        let key = format!("reconcile:R15:return-failed:{}", run.id);
+                        if self.recovery(
+                            now,
+                            &key,
+                            NewAttention {
+                                card: if card.state == CardState::Open { card.id.clone() } else { String::new() },
+                                run_id: Some(run.id.clone()),
+                                question: format!(
+                                    "{} {} run {}: worktree {path} is clean and recorded as returned, but treehouse did not take it back ({error}). Return it with: treehouse return {path} --if-lease-holder {holder}",
+                                    card.display_id,
+                                    run.role.short_name(),
+                                    run.id,
+                                ),
+                                evidence: Self::json_text(json!({"run_id": run.id, "worktree_path": path, "holder": holder, "error": error})),
+                                ..NewAttention::default()
+                            },
+                        )? {
+                            report.repair(format!("R15 run {} worktree return failed: recovery item", run.id));
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => report.error(&format!("run.clean {}", run.id), &error),
+            }
+            return Ok(());
+        }
+        let holds_work = scan.dirty != Some(false) || scan.unlanded_commits != Some(0);
+        // A builder that ended `reported` with its head on an open PR
+        // left the work to the PR, which the card tracks to landing.
+        let on_pr = run.outcome == Some(RunOutcome::Reported)
+            && run.role == RunRole::Builder
+            && published_head(self.conn(), &run)?.is_some();
+        if holds_work && !on_pr {
+            let key = format!(
+                "reconcile:R15:unlanded:{}:{}",
+                run.id,
+                scan.head_sha.as_deref().unwrap_or("unknown")
+            );
+            let body = format!(
+                "[{}] {} run {} ended {:?} but worktree {path} still holds work: {:?} unlanded commits, dirty {:?}. Land it, relaunch, or abandon it?",
+                card.display_id,
+                run.role.short_name(),
+                run.id,
+                run.outcome,
+                scan.unlanded_commits,
+                scan.dirty
+            );
+            if self.note(now, &card.project_id, &key, body, Some(card.id.clone()))? {
+                report.repair(format!(
+                    "R15 run {} ended with unlanded work: note to the orchestrator",
+                    run.id
+                ));
+            }
+        }
+        if ended_at.plus_minutes(self.config.thresholds.unreturned_days * 24 * 60) <= now {
+            let key = format!("reconcile:R15:unreturned:{}", run.id);
+            if self.recovery(
+                now,
+                &key,
+                NewAttention {
+                    card: card.id.clone(),
+                    run_id: Some(run.id.clone()),
+                    question: format!(
+                        "{} {} run {} ended {} days ago and worktree {path} is still there ({:?} unlanded commits, dirty {:?}). Keep it, or return it?",
+                        card.display_id,
+                        run.role.short_name(),
+                        run.id,
+                        minutes_since(ended_at, now) / (24 * 60),
+                        scan.unlanded_commits,
+                        scan.dirty
+                    ),
+                    evidence: Self::json_text(json!({"run_id": run.id, "worktree_path": path})),
+                    options: Some(json!(["Keep", "Return"])),
+                    ..NewAttention::default()
+                },
+            )? {
+                report.repair(format!("R15 run {} worktree unreturned for a week: recovery item", run.id));
             }
         }
         Ok(())

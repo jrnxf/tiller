@@ -27,7 +27,8 @@ pub const KEEP_WEEKLY: usize = 8;
 /// ...and never fewer than this many that verify.
 pub const MIN_VERIFIED: usize = 2;
 
-const NIGHT_MINUTES: i64 = 24 * 60;
+/// The nightly backup is due at this hour, host local time (03:00).
+pub const NIGHT_HOUR: i8 = 3;
 
 /// What one nightly pass did.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -36,10 +37,7 @@ pub enum Nightly {
     NotDue {
         next: Timestamp,
     },
-    Done {
-        entry: Entry,
-        retention: Retention,
-    },
+    Done(Taken),
     Failed {
         error: String,
         next: Timestamp,
@@ -59,8 +57,8 @@ pub struct Retention {
     pub unverified: Vec<String>,
 }
 
-/// When the next nightly attempt is due, or `None` when one is due now
-/// because there has never been one.
+/// When the next nightly attempt is due, or `None` before the first pass
+/// has scheduled the first night.
 pub fn next_due(manifest: &Manifest) -> Option<Timestamp> {
     match manifest.failures.last() {
         Some(failure) if !failure.retry => Some(failure.at.plus_minutes(RETRY_AFTER_MINUTES)),
@@ -68,24 +66,57 @@ pub fn next_due(manifest: &Manifest) -> Option<Timestamp> {
     }
 }
 
-/// The night after the one that just ended. Slots advance by whole days
-/// from the first night, so a late timer or a manual backup never moves the
-/// schedule.
-fn advance_night(manifest: &mut Manifest, now: Timestamp) {
-    let mut next = manifest.next_night.unwrap_or(now);
-    while next <= now {
-        next = next.plus_minutes(NIGHT_MINUTES);
+/// The first [`NIGHT_HOUR`] in `zone` at or after `now` (`strictly` false),
+/// or after it (`strictly` true). A day whose hour falls in a clock change
+/// takes the nearest time that exists.
+pub fn night_from(now: Timestamp, zone: &TimeZone, strictly: bool) -> Timestamp {
+    let mut date = now.as_jiff().to_zoned(zone.clone()).date();
+    loop {
+        let slot = date
+            .at(NIGHT_HOUR, 0, 0, 0)
+            .to_zoned(zone.clone())
+            .map(|zoned| Timestamp::from_jiff(zoned.timestamp()))
+            .ok();
+        if let Some(slot) = slot
+            && (slot > now || (!strictly && slot == now))
+        {
+            return slot;
+        }
+        match date.tomorrow() {
+            Ok(next) => date = next,
+            // The end of the calendar: no later night exists.
+            Err(_) => return now,
+        }
     }
-    manifest.next_night = Some(next);
 }
 
-/// The daemon's nightly timer: when a backup is due, takes it, verifies it
-/// and runs retention; on failure records it for the hour-later retry, and
-/// from the second failed night in a row opens a `recovery` item on
-/// `fleet-1` with what failed and which backups verify. A manifest that
-/// cannot be read is an alarm at once, since no failure can be recorded in
-/// it.
-pub fn nightly(store: &mut Store, paths: &Paths, now: Timestamp) -> Result<Nightly> {
+/// The night after the one that just ended: the first [`NIGHT_HOUR`] at
+/// least [`NIGHT_GAP_MINUTES`] after `now`. Slots are fixed hours, so a late
+/// timer or a manual backup never moves the schedule, and nights the daemon
+/// missed (it was down, or the host slept) are made up by one backup, not
+/// one per night. The gap keeps a make-up backup taken just before the hour
+/// from being followed by a second one at it.
+fn advance_night(manifest: &mut Manifest, now: Timestamp, zone: &TimeZone) {
+    manifest.next_night = Some(night_from(now.plus_minutes(NIGHT_GAP_MINUTES), zone, true));
+}
+
+/// The least time from one nightly backup to the next night.
+const NIGHT_GAP_MINUTES: i64 = 12 * 60;
+
+/// The daemon's nightly timer, called on every pass of its backup worker.
+/// The first pass on a manifest with no schedule sets the first night (the
+/// next [`NIGHT_HOUR`] in `zone`) and takes nothing. When a backup is due,
+/// it takes it, verifies it and runs retention; on failure it records it
+/// for the hour-later retry, and from the second failed night in a row
+/// opens a `recovery` item on `fleet-1` with what failed and which backups
+/// verify. A manifest that cannot be read is an alarm at once, since no
+/// failure can be recorded in it.
+pub fn nightly(
+    store: &mut Store,
+    paths: &Paths,
+    now: Timestamp,
+    zone: &TimeZone,
+) -> Result<Nightly> {
     let lock = ManifestLock::acquire(paths)?;
     let mut manifest = match Manifest::load(paths) {
         Ok(manifest) => manifest,
@@ -104,17 +135,25 @@ pub fn nightly(store: &mut Store, paths: &Paths, now: Timestamp) -> Result<Night
             });
         }
     };
+    if manifest.next_night.is_none() && manifest.failures.is_empty() {
+        let first = night_from(now, zone, false);
+        if first > now {
+            manifest.next_night = Some(first);
+            manifest.save(paths, &lock)?;
+            return Ok(Nightly::NotDue { next: first });
+        }
+    }
     if let Some(next) = next_due(&manifest)
         && next > now
     {
         return Ok(Nightly::NotDue { next });
     }
     let mut after = manifest.clone();
-    advance_night(&mut after, now);
+    advance_night(&mut after, now, zone);
     match take(store.conn(), paths, &lock, &after, EntryKind::Nightly, now) {
         Ok((entry, mut manifest)) => {
             let retention = retain(paths, &lock, &mut manifest, Some(&entry.file))?;
-            Ok(Nightly::Done { entry, retention })
+            Ok(Nightly::Done(Taken { entry, retention }))
         }
         Err(error) => {
             let retry = matches!(manifest.failures.last(), Some(last) if !last.retry);
@@ -144,14 +183,22 @@ pub fn nightly(store: &mut Store, paths: &Paths, now: Timestamp) -> Result<Night
     }
 }
 
+/// A verified copy and what retention did: what [`backup`] returns and what
+/// a nightly pass that took its backup holds ([`Nightly::Done`]).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Taken {
+    pub entry: Entry,
+    pub retention: Retention,
+}
+
 /// `tiller backup`: takes a verified backup now and runs retention. It does
 /// not move the nightly schedule.
-pub fn backup(conn: &rusqlite::Connection, paths: &Paths, now: Timestamp) -> Result<Nightly> {
+pub fn backup(conn: &rusqlite::Connection, paths: &Paths, now: Timestamp) -> Result<Taken> {
     let lock = ManifestLock::acquire(paths)?;
     let manifest = Manifest::load(paths)?;
     let (entry, mut manifest) = take(conn, paths, &lock, &manifest, EntryKind::Manual, now)?;
     let retention = retain(paths, &lock, &mut manifest, Some(&entry.file))?;
-    Ok(Nightly::Done { entry, retention })
+    Ok(Taken { entry, retention })
 }
 
 /// Takes one verified copy into `backups/` and records it in a copy of
@@ -173,9 +220,12 @@ fn take(
         dest = paths.backups.join(format!("{base}-{n}.db"));
         n += 1;
     }
+    // Read before the copy is written, so a name the manifest cannot record
+    // leaves no copy behind.
+    let file = paths.relative(&dest)?;
     let copied = copy_verified(conn, &dest, lock)?;
     let entry = Entry {
-        file: paths.relative(&dest)?,
+        file,
         kind,
         size: copied.size,
         sha256: copied.sha256,
@@ -188,7 +238,11 @@ fn take(
     };
     let mut manifest = manifest.clone();
     manifest.entries.push(entry.clone());
-    manifest.failures.clear();
+    // A night is over only when a nightly copy verifies: a copy by hand
+    // neither ends the hour-later retry nor the run of failed nights.
+    if kind == EntryKind::Nightly {
+        manifest.failures.clear();
+    }
     if let Err(error) = manifest.save(paths, lock) {
         // Unlisted, the copy could never be verified or retained.
         let _ = remove_if_exists(&dest);

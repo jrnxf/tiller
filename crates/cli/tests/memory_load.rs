@@ -9,8 +9,11 @@ mod common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
-use common::World;
+use common::{World, git_only_daemon};
+
+const WAIT: Duration = Duration::from_secs(30);
 
 /// An executable shell script at `path`.
 fn script(path: &Path, body: &str) {
@@ -156,22 +159,35 @@ fn a_launch_loads_the_approved_memory_into_the_prompt_and_the_loads() {
         vec![(revision.clone(), "startup".to_owned())]
     );
 
-    // The appended prompt survives `/clear`, `/compact` and a resume, so
-    // each SessionStart observation copies the set under its trigger. The
-    // startup bind writes nothing: the launch already did.
+    // The appended prompt survives `/clear`, `/compact` and a resume. The
+    // hook only records each SessionStart as an observation: the startup
+    // row came from the launch, and the copies are the daemon's work.
     for source in ["startup", "clear", "compact", "resume"] {
         world.hook(
             Some(&session),
             "SessionStart",
             &format!(r#"{{"session_id":"claude-orchestrator","source":"{source}"}}"#),
         );
-        // Each copy gets its own `loaded_at`.
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        // Each observation gets its own `observed_at`.
+        std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(
         loads(&world, &session),
-        ["startup", "clear", "compact", "resume"]
-            .map(|trigger| (revision.clone(), trigger.to_owned()))
-            .to_vec()
+        vec![(revision.clone(), "startup".to_owned())]
     );
+
+    // The daemon copies the set under each later trigger, once.
+    let _daemon = git_only_daemon(&world);
+    let want = ["startup", "clear", "compact", "resume"]
+        .map(|trigger| (revision.clone(), trigger.to_owned()))
+        .to_vec();
+    let deadline = Instant::now() + WAIT;
+    while loads(&world, &session) != want {
+        assert!(
+            Instant::now() < deadline,
+            "the daemon never copied the loads: {:?}",
+            loads(&world, &session)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }

@@ -906,6 +906,7 @@ fn project_shape(
         reviewed_through_sha: project.reviewed_through_sha,
         reviewed_at: at_opt(reviewed_at),
         stage_changed_at: at_opt(project.stage_changed_at),
+        edited_at: Some(at(project.edited_at)),
         next_review_due: at_opt(next),
         review_overdue,
         review_open,
@@ -1459,6 +1460,9 @@ fn timeline_text(event: &Event) -> String {
     if event.kind == "card.routed" {
         return routed_text(&event.payload);
     }
+    if event.kind == "session.memory_loaded" {
+        return memory_loaded_text(&event.payload);
+    }
     let field = |name: &str| event.payload.get(name).and_then(Value::as_str);
     let sentence = match event.kind.as_str() {
         "card.created" => "created the card".to_owned(),
@@ -1480,6 +1484,7 @@ fn timeline_text(event: &Event) -> String {
         "run.placed" => "placed the run on a machine".to_owned(),
         "run.status" => "reported the run status".to_owned(),
         "run.paused" => "paused the run".to_owned(),
+        "run.unpaused" => "cleared the pause".to_owned(),
         "run.ended" => "ended the run".to_owned(),
         "run.cleaned" => "cleaned up the run".to_owned(),
         "run.relaunched" => "relaunched the run".to_owned(),
@@ -1491,7 +1496,6 @@ fn timeline_text(event: &Event) -> String {
         "session.stamped" => "stamped the session".to_owned(),
         "session.ended" => "ended the session".to_owned(),
         "session.resume_attempted" => "tried to resume the session".to_owned(),
-        "session.memory_loaded" => "loaded approved memory into the session".to_owned(),
         "approval.requested" => "asked for an approval".to_owned(),
         "approval.decided" => "decided an approval".to_owned(),
         "approval.executing" => "started the approved action".to_owned(),
@@ -1552,6 +1556,34 @@ fn timeline_text(event: &Event) -> String {
     match field("reason") {
         Some(reason) => format!("{sentence}: {reason}"),
         None => sentence,
+    }
+}
+
+/// What a launch loaded into a session, and the memory documents it went
+/// on without (`memory.md` section 9, step 4).
+fn memory_loaded_text(payload: &Value) -> String {
+    let loaded = payload
+        .get("revision_ids")
+        .and_then(Value::as_array)
+        .is_some_and(|ids| !ids.is_empty());
+    let skipped: Vec<String> = payload
+        .get("skipped")
+        .and_then(Value::as_array)
+        .map(|skips| {
+            skips
+                .iter()
+                .map(|skip| {
+                    let field = |name: &str| skip.get(name).and_then(Value::as_str).unwrap_or("?");
+                    format!("{}, as {}", field("path"), field("reason"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let skips = skipped.join("; ");
+    match (loaded, skipped.is_empty()) {
+        (_, true) => "loaded approved memory into the session".to_owned(),
+        (true, false) => format!("loaded approved memory into the session and skipped {skips}"),
+        (false, false) => format!("skipped {skips}"),
     }
 }
 
@@ -2314,6 +2346,31 @@ mod tests {
         assert_eq!(
             text("card.created", serde_json::json!({})),
             "created the card"
+        );
+        let skip = serde_json::json!({
+            "source_id": "s1", "project_id": "alpha", "path": "projects/alpha.md",
+            "reason": "it has no approved revision"
+        });
+        assert_eq!(
+            text(
+                "session.memory_loaded",
+                serde_json::json!({"trigger": "startup", "revision_ids": ["r1"], "skipped": []})
+            ),
+            "loaded approved memory into the session"
+        );
+        assert_eq!(
+            text(
+                "session.memory_loaded",
+                serde_json::json!({"trigger": "startup", "revision_ids": ["r1"], "skipped": [skip]})
+            ),
+            "loaded approved memory into the session and skipped projects/alpha.md, as it has no approved revision"
+        );
+        assert_eq!(
+            text(
+                "session.memory_loaded",
+                serde_json::json!({"trigger": "startup", "revision_ids": [], "skipped": [skip]})
+            ),
+            "skipped projects/alpha.md, as it has no approved revision"
         );
         assert_eq!(
             text(

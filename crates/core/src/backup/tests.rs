@@ -17,6 +17,11 @@ fn at(text: &str) -> Timestamp {
     Timestamp::from_jiff(text.parse().unwrap())
 }
 
+/// The nightly pass as the daemon runs it, on a host whose clock is UTC.
+fn nightly(store: &mut Store, paths: &Paths, now: Timestamp) -> Result<Nightly> {
+    super::nightly(store, paths, now, &jiff::tz::TimeZone::UTC)
+}
+
 fn owner() -> Ctx {
     Ctx::new(Actor::Owner)
 }
@@ -215,7 +220,7 @@ fn truncated_backup_is_refused_and_previous_one_restores() {
         .card_create(&owner(), None, new_card("second"), None)
         .unwrap()
         .value;
-    let Nightly::Done { entry: newest, .. } =
+    let Nightly::Done(Taken { entry: newest, .. }) =
         nightly(&mut store, paths, at("2026-11-02T03:00:00Z")).unwrap()
     else {
         panic!("the second night did not back up");
@@ -356,7 +361,7 @@ fn retention_keeps_an_older_verified_backup_when_kept_ones_rot() {
     // its own copy verifies, so the first night's, which no rule keeps,
     // stays as the second verified backup.
     let done = nightly(&mut store, paths, start.plus_minutes(20 * 24 * 60)).unwrap();
-    let Nightly::Done { retention, .. } = done else {
+    let Nightly::Done(Taken { retention, .. }) = done else {
         panic!("{done:?}");
     };
     assert!(retention.kept.contains(&oldest.file), "{retention:?}");
@@ -386,7 +391,7 @@ fn restore_refuses_while_daemon_runs_and_another_hosts_backup() {
     let other = self::host();
     let mut other_store = Store::open(&other.paths.db).unwrap();
     setup(&mut other_store, "other-host", Boundary::Personal);
-    nightly(&mut other_store, &other.paths, at("2026-11-02T04:00:00Z")).unwrap();
+    nightly(&mut other_store, &other.paths, at("2026-11-02T03:00:00Z")).unwrap();
     drop(other_store);
     fs::remove_dir_all(&paths.backups).unwrap();
     fs::create_dir_all(&paths.backups).unwrap();
@@ -690,7 +695,7 @@ fn migration_copy_is_kept_until_the_next_nightly_backup_verifies() {
     assert!(host_id.is_some());
 
     let done = nightly(&mut store, paths, at("2026-11-03T03:00:00Z")).unwrap();
-    let Nightly::Done { retention, .. } = done else {
+    let Nightly::Done(Taken { retention, .. }) = done else {
         panic!("{done:?}");
     };
     assert_eq!(retention.deleted, vec![copy.clone()]);
@@ -711,9 +716,7 @@ fn manual_backup_and_a_late_timer_never_move_the_nightly_schedule() {
     nightly(&mut store, paths, night).unwrap();
 
     let manual = backup(store.conn(), paths, at("2026-11-01T15:00:00Z")).unwrap();
-    let Nightly::Done { entry, .. } = manual else {
-        panic!("{manual:?}");
-    };
+    let Taken { entry, .. } = manual;
     assert_eq!(entry.kind, EntryKind::Manual);
     let next = night.plus_minutes(24 * 60);
     assert_eq!(next_due(&Manifest::load(paths).unwrap()), Some(next));
@@ -755,9 +758,7 @@ fn retention_finishes_a_cleanup_an_earlier_pass_left() {
     let mut store = Store::open(&paths.db).unwrap();
     setup(&mut store, "test-host", Boundary::Personal);
     let first = backup(store.conn(), paths, at("2026-11-01T03:00:00Z")).unwrap();
-    let Nightly::Done { entry: stale, .. } = first else {
-        panic!("{first:?}");
-    };
+    let Taken { entry: stale, .. } = first;
     // As if a pass marked it superseded and died before deleting the file.
     let mut manifest = Manifest::load(paths).unwrap();
     manifest.entries[0].superseded = true;
@@ -766,7 +767,7 @@ fn retention_finishes_a_cleanup_an_earlier_pass_left() {
         .unwrap();
 
     let done = nightly(&mut store, paths, at("2026-11-02T03:00:00Z")).unwrap();
-    let Nightly::Done { retention, .. } = done else {
+    let Nightly::Done(Taken { retention, .. }) = done else {
         panic!("{done:?}");
     };
     assert_eq!(retention.deleted, vec![stale.file.clone()]);
@@ -830,9 +831,7 @@ fn a_restored_database_is_owner_only_whatever_the_backup_mode() {
     let mut store = Store::open(&paths.db).unwrap();
     setup(&mut store, "test-host", Boundary::Personal);
     let made = backup(store.conn(), paths, at("2026-11-01T15:00:00Z")).unwrap();
-    let Nightly::Done { entry, .. } = made else {
-        panic!("{made:?}");
-    };
+    let Taken { entry, .. } = made;
     drop(store);
     fs::set_permissions(
         paths.resolve(&entry.file),
@@ -1103,11 +1102,25 @@ fn an_open_refuses_with_the_holder_once_the_migration_lock_wait_ends() {
     MIGRATION_WAIT.set(MIGRATION_LOCK_WAIT);
 }
 
+/// Writes `path` as a file last written `age` ago.
+fn write_aged(path: &Path, age: Duration) {
+    fs::write(path, b"partial").unwrap();
+    let at = std::time::SystemTime::now() - age;
+    File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(at)
+        .unwrap();
+}
+
 /// A crash between a temporary file's create and its rename leaves
 /// `<file>.<ulid>.tmp` behind: a partial backup copy or manifest in
 /// `backups/`, or a partial pre-migration copy beside `state.db`, as big as
 /// the database. The next writer removes them when it takes the manifest
-/// lock, and leaves every other file alone.
+/// lock, once they have gone unwritten for an hour, and leaves every other
+/// file alone. A younger one may be an older tiller's copy in flight, which
+/// writes without the manifest lock (R11).
 #[test]
 fn the_next_backup_removes_temporary_files_a_crash_left() {
     let host = host();
@@ -1134,15 +1147,25 @@ fn the_next_backup_removes_temporary_files_a_crash_left() {
         paths.home.join(format!("config.toml.{ulid}.tmp")),
         paths.home.join(format!(".{ulid}.tmp")),
     ];
+    let in_flight = [
+        paths
+            .backups
+            .join(format!("20261111T040000000Z.db.{ulid}.tmp")),
+        paths.home.join(format!("state.db.pre-16-17.{ulid}.tmp")),
+    ];
+    let old = STALE_TMP_AGE + Duration::from_secs(60);
     for path in stale.iter().chain(&kept) {
-        fs::write(path, b"partial").unwrap();
+        write_aged(path, old);
+    }
+    for path in &in_flight {
+        write_aged(path, STALE_TMP_AGE - Duration::from_secs(60));
     }
 
     backup(store.conn(), paths, at("2026-11-11T03:00:00Z")).unwrap();
     for path in &stale {
         assert!(!path.exists(), "{} is left", path.display());
     }
-    for path in &kept {
+    for path in kept.iter().chain(&in_flight) {
         assert!(path.exists(), "{} was removed", path.display());
     }
     let manifest = Manifest::load(paths).unwrap();
@@ -1150,4 +1173,188 @@ fn the_next_backup_removes_temporary_files_a_crash_left() {
     for entry in &manifest.entries {
         assert!(verify(paths, entry).is_ok());
     }
+}
+
+/// Every name [`unique_tmp`] writes is one the sweep reads as its own, with
+/// SQLite's files beside it: the format lives in one place.
+#[test]
+fn every_unique_tmp_name_is_one_the_sweep_removes() {
+    let host = host();
+    let held = ManifestLock::acquire(&host.paths).unwrap();
+    for dest in [
+        host.paths.backups.join("manifest.json"),
+        host.paths.home.join("state.db.pre-16-17"),
+    ] {
+        let tmp = unique_tmp(&dest, &held);
+        let name = tmp.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(is_unique_tmp(&name), "{name}");
+        assert!(is_unique_tmp(&format!("{name}-journal")), "{name}");
+        assert_eq!(tmp.parent(), dest.parent());
+    }
+}
+
+/// A bare relative `--db state.db` has the empty path as its parent: the
+/// sweep reads `.` for it, not nothing.
+#[test]
+fn a_bare_relative_db_sits_in_the_current_directory() {
+    assert_eq!(db_dir(Path::new("state.db")), Path::new("."));
+    assert_eq!(db_dir(Path::new("x/state.db")), Path::new("x"));
+    assert_eq!(
+        db_dir(Path::new("/home/user/state.db")),
+        Path::new("/home/user")
+    );
+}
+
+/// The holder line names the program and the parsed subcommand, never a
+/// flag's value such as the `--db` path, and takes a program path that is
+/// not UTF-8.
+#[test]
+fn the_holder_line_names_the_subcommand_and_takes_any_program_path() {
+    assert_eq!(
+        holder_line_of(4242, Some("/home/user/bin/tiller".into()), Some("migrate")),
+        "pid 4242 (tiller migrate)\n"
+    );
+    assert_eq!(holder_line_of(7, None, None), "pid 7 (tiller)\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let program = std::ffi::OsStr::from_bytes(b"/home/user/\xff/tiller").to_os_string();
+        assert_eq!(
+            holder_line_of(7, Some(program), Some("daemon")),
+            "pid 7 (tiller daemon)\n"
+        );
+    }
+}
+
+/// The first pass of the daemon's timer sets the first night, the next
+/// 03:00 host time, and takes nothing; the pass at that hour takes the
+/// first nightly backup.
+#[test]
+fn the_first_pass_schedules_the_first_night_at_three() {
+    let host = host();
+    let paths = &host.paths;
+    let mut store = Store::open(&paths.db).unwrap();
+    setup(&mut store, "test-host", Boundary::Personal);
+
+    let first = nightly(&mut store, paths, at("2026-11-11T16:00:00Z")).unwrap();
+    let tonight = at("2026-11-12T03:00:00Z");
+    assert_eq!(first, Nightly::NotDue { next: tonight });
+    let manifest = Manifest::load(paths).unwrap();
+    assert!(manifest.entries.is_empty(), "{manifest:?}");
+    assert_eq!(next_due(&manifest), Some(tonight));
+
+    let early = nightly(&mut store, paths, at("2026-11-12T02:59:00Z")).unwrap();
+    assert_eq!(early, Nightly::NotDue { next: tonight });
+    let done = nightly(&mut store, paths, at("2026-11-12T03:00:40Z")).unwrap();
+    let Nightly::Done(Taken { entry, .. }) = done else {
+        panic!("{done:?}");
+    };
+    assert_eq!(entry.kind, EntryKind::Nightly);
+    assert_eq!(
+        next_due(&Manifest::load(paths).unwrap()),
+        Some(at("2026-11-13T03:00:00Z"))
+    );
+}
+
+/// A daemon that was down for nights takes one backup at its next pass,
+/// not one per missed night, and the next night is again at 03:00.
+#[test]
+fn missed_nights_are_made_up_by_one_backup_at_the_next_pass() {
+    let host = host();
+    let paths = &host.paths;
+    let mut store = Store::open(&paths.db).unwrap();
+    setup(&mut store, "test-host", Boundary::Personal);
+    nightly(&mut store, paths, at("2026-11-01T03:00:00Z")).unwrap();
+
+    // Down from the 1st until 09:00 on the 4th.
+    let back = at("2026-11-04T09:00:00Z");
+    let done = nightly(&mut store, paths, back).unwrap();
+    assert!(matches!(done, Nightly::Done { .. }), "{done:?}");
+    let again = nightly(&mut store, paths, back.plus_minutes(1)).unwrap();
+    let next = at("2026-11-05T03:00:00Z");
+    assert_eq!(again, Nightly::NotDue { next });
+    let nightly_entries = Manifest::load(paths)
+        .unwrap()
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == EntryKind::Nightly)
+        .count();
+    assert_eq!(nightly_entries, 2);
+}
+
+/// A make-up backup taken just before 03:00 is that night's: the next one
+/// is the following night, not 30 minutes later.
+#[test]
+fn a_make_up_just_before_the_hour_is_that_nights_backup() {
+    let host = host();
+    let paths = &host.paths;
+    let mut store = Store::open(&paths.db).unwrap();
+    setup(&mut store, "test-host", Boundary::Personal);
+    nightly(&mut store, paths, at("2026-11-01T03:00:00Z")).unwrap();
+
+    let back = at("2026-11-04T02:30:00Z");
+    let done = nightly(&mut store, paths, back).unwrap();
+    assert!(matches!(done, Nightly::Done { .. }), "{done:?}");
+    let next = at("2026-11-05T03:00:00Z");
+    assert_eq!(
+        nightly(&mut store, paths, at("2026-11-04T03:00:00Z")).unwrap(),
+        Nightly::NotDue { next }
+    );
+}
+
+/// A copy by hand after a failed night does not end that night: the retry
+/// an hour later still runs, and the failure stays on record until a
+/// nightly copy verifies.
+#[test]
+fn a_backup_by_hand_does_not_end_a_failed_night() {
+    let host = host();
+    let paths = &host.paths;
+    let mut store = Store::open(&paths.db).unwrap();
+    setup(&mut store, "test-host", Boundary::Personal);
+    nightly(&mut store, paths, at("2026-11-01T03:00:00Z")).unwrap();
+
+    // The night of the 2nd fails: the backups folder cannot take a file.
+    let night = at("2026-11-02T03:00:00Z");
+    let mut failure = Manifest::load(paths).unwrap();
+    failure.failures.push(Failure {
+        at: night,
+        error: "disk full".into(),
+        retry: false,
+    });
+    failure
+        .save(paths, &ManifestLock::acquire(paths).unwrap())
+        .unwrap();
+
+    backup(store.conn(), paths, night.plus_minutes(10)).unwrap();
+    let manifest = Manifest::load(paths).unwrap();
+    assert_eq!(manifest.failures.len(), 1, "the night is not over");
+    assert_eq!(
+        nightly(&mut store, paths, night.plus_minutes(11)).unwrap(),
+        Nightly::NotDue {
+            next: night.plus_minutes(60)
+        },
+        "no second copy before the retry"
+    );
+    let retried = nightly(&mut store, paths, night.plus_minutes(60)).unwrap();
+    assert!(matches!(retried, Nightly::Done { .. }), "{retried:?}");
+    assert!(Manifest::load(paths).unwrap().failures.is_empty());
+}
+
+/// The night stays at 03:00 host time across a clock change: in Lisbon,
+/// 03:00 is 03:00 UTC in winter and 02:00 UTC in summer.
+#[test]
+fn the_night_follows_the_host_clock_across_a_clock_change() {
+    let lisbon = jiff::tz::TimeZone::posix("WET0WEST,M3.5.0/1,M10.5.0").unwrap();
+    // Summer time starts at 01:00 UTC on Sunday 29 March 2026.
+    let saturday = at("2026-03-28T03:00:00Z");
+    assert_eq!(
+        night_from(saturday, &lisbon, true),
+        at("2026-03-29T02:00:00Z")
+    );
+    assert_eq!(night_from(saturday, &lisbon, false), saturday);
+    // It ends at 01:00 UTC on Sunday 25 October 2026.
+    assert_eq!(
+        night_from(at("2026-10-24T02:00:00Z"), &lisbon, true),
+        at("2026-10-25T03:00:00Z")
+    );
 }

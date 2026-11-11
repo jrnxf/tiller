@@ -12,13 +12,15 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
-use tiller_core::domain::{Retro, RetroDepth, RetroOutcome, RetroState};
+use tiller_core::domain::{Retro, RetroOutcome, RetroState};
 use tiller_core::state::learning::{self, Learning};
 use tiller_core::state::{get, list};
 use tiller_core::{Error, Store, Timestamp};
@@ -34,11 +36,9 @@ use crate::dto::{ErrorBody, MutationResponse, Receipt};
 /// is: the sweep never runs it again.
 const WINDOW_DAYS: i64 = 30;
 
-/// The most rows one read returns.
+/// The most rows one read returns besides the unfinished retros, which
+/// are all listed.
 const MOST: i64 = 200;
-
-/// The runs kept for a retried Run again to find by its key.
-const KEPT: usize = 50;
 
 /// `POST /api/v1/retros/{id}/run`.
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
@@ -121,18 +121,14 @@ pub struct RetrosResponse {
     pub curator_timeout_minutes: u64,
 }
 
-struct Run {
-    key: String,
-    retro: String,
-    handle: Option<JoinHandle<()>>,
-}
-
 #[derive(Default)]
 struct Shared {
     /// Held while a Run again claims, so two at once cannot both pass the
     /// same-card check.
     claims: Mutex<()>,
-    runs: Mutex<Vec<Run>>,
+    /// The threads of the curator runs not yet seen to end. A retry of a
+    /// Run again is answered from the key its claim stored, not from here.
+    runs: Mutex<Vec<JoinHandle<()>>>,
     /// Set when the daemon stops: every running curator is stopped.
     stop: Arc<AtomicBool>,
 }
@@ -142,7 +138,7 @@ struct Shared {
 pub struct Retros(Arc<Shared>);
 
 impl Retros {
-    fn runs(&self) -> MutexGuard<'_, Vec<Run>> {
+    fn runs(&self) -> MutexGuard<'_, Vec<JoinHandle<()>>> {
         self.0.runs.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -150,15 +146,8 @@ impl Retros {
         self.0.claims.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn by_key(&self, key: &str) -> Option<String> {
-        self.runs()
-            .iter()
-            .find(|run| run.key == key)
-            .map(|run| run.retro.clone())
-    }
-
     /// Runs `run` on a thread of its own, to be stopped with the daemon.
-    fn start(&self, key: &str, retro: &str, run: crate::api::CuratorRun) -> std::io::Result<()> {
+    fn start(&self, retro: &str, run: crate::api::CuratorRun) -> std::io::Result<()> {
         let stop = Arc::clone(&self.0.stop);
         let id = retro.to_owned();
         let handle = std::thread::Builder::new()
@@ -171,57 +160,57 @@ impl Retros {
                 Err(error) => tracing::warn!(retro = %id, %error, "the curator run failed"),
             })?;
         let mut runs = self.runs();
-        runs.push(Run {
-            key: key.to_owned(),
-            retro: retro.to_owned(),
-            handle: Some(handle),
-        });
-        // The oldest finished runs go first; a running one is always kept,
-        // so the daemon can stop it.
-        while runs.len() > KEPT {
-            let Some(oldest) = runs
-                .iter()
-                .position(|run| run.handle.as_ref().is_none_or(JoinHandle::is_finished))
-            else {
-                break;
-            };
-            if let Some(handle) = runs.remove(oldest).handle {
-                let _ = handle.join();
-            }
-        }
+        // A finished run is dropped; a running one is always kept, so the
+        // daemon can stop it.
+        runs.retain(|run| !run.is_finished());
+        runs.push(handle);
         Ok(())
+    }
+
+    /// Whether the daemon is stopping: a claim then starts nothing.
+    fn stopping(&self) -> bool {
+        self.0.stop.load(Ordering::SeqCst)
     }
 
     /// Stops every running curator and waits up to `wait` for each run to
     /// record how it ended.
+    #[cfg(test)]
     pub fn stop(&self, wait: Duration) {
+        self.signal();
+        self.wait(Instant::now() + wait);
+    }
+
+    /// Raises the stop flag, which stops every running curator. It is set
+    /// under the claims lock, so a Run again still claiming has started its
+    /// run before [`Retros::wait`] takes the runs, and one that claims later
+    /// is refused.
+    pub fn signal(&self) {
+        let _claiming = self.claiming();
         self.0.stop.store(true, Ordering::SeqCst);
-        let handles: Vec<JoinHandle<()>> = self
-            .runs()
-            .iter_mut()
-            .filter_map(|run| run.handle.take())
-            .collect();
-        let deadline = Instant::now() + wait;
-        for handle in handles {
-            while !handle.is_finished() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            if handle.is_finished() {
-                let _ = handle.join();
-            }
-        }
+    }
+
+    /// Waits until `deadline` for each run [`Retros::signal`] stopped to
+    /// record how it ended.
+    pub fn wait(&self, deadline: Instant) {
+        let handles: Vec<JoinHandle<()>> = self.runs().drain(..).collect();
+        crate::threads::join_until(handles, deadline);
     }
 }
 
 /// `[learning]` from `config.toml`, read on every call so an edit needs no
-/// restart. A table that does not parse reads as the defaults here; Run
-/// again refuses it with the error.
-fn learning_of(state: &AppState) -> Learning {
-    let table = std::fs::read_to_string(state.0.home.join("config.toml"))
-        .ok()
-        .and_then(|text| text.parse::<toml::Table>().ok())
-        .unwrap_or_default();
-    Learning::from_table(&table).unwrap_or_default()
+/// restart, through the loader the claim uses. A file that cannot be read
+/// gives the defaults and why: the claim refuses it with the same error.
+fn learning_of(home: &std::path::Path) -> (Learning, Option<String>) {
+    let read = tiller_core::config_file::load(&home.join("config.toml"))
+        .map_err(|error| error.to_string())
+        .and_then(|table| Learning::from_table(&table).map_err(|error| error.to_string()));
+    match read {
+        Ok(learning) => (learning, None),
+        Err(error) => (
+            Learning::default(),
+            Some(format!("config.toml cannot be used: {error}")),
+        ),
+    }
 }
 
 fn status(retro: &Retro, now: Timestamp, timeout: i64) -> RetroStatus {
@@ -349,19 +338,24 @@ fn views(
     timeout: i64,
 ) -> tiller_core::Result<Vec<RetroView>> {
     let since = now.plus_minutes(-WINDOW_DAYS * 24 * 60);
-    let recent = "depth = 'full'
-        AND (?1 IS NULL OR project_id = ?1)
-        AND (outcome = 'unfinished' OR created_at >= ?2 OR finished_at >= ?2 OR curator_started_at >= ?2)";
+    // Every unfinished retro is listed; only the others are capped, so an
+    // old unfinished one is never cut for sorting last.
+    let newest = "max(created_at, coalesce(finished_at, ''), coalesce(curator_started_at, '')) DESC, id DESC";
     let retros: Vec<Retro> = list(
         store.conn(),
         &format!(
-            "{recent} ORDER BY max(created_at, coalesce(finished_at, ''), coalesce(curator_started_at, '')) DESC, id DESC LIMIT {MOST}"
+            "depth = 'full' AND (?1 IS NULL OR project_id = ?1)
+             AND (outcome = 'unfinished' OR id IN (
+                 SELECT id FROM retros WHERE depth = 'full' AND (?1 IS NULL OR project_id = ?1)
+                     AND outcome IS NOT 'unfinished'
+                     AND (created_at >= ?2 OR finished_at >= ?2 OR curator_started_at >= ?2)
+                 ORDER BY {newest} LIMIT {MOST}))
+             ORDER BY {newest}"
         ),
         &[&project, &since],
     )?;
     retros
         .into_iter()
-        .filter(|retro| retro.depth == RetroDepth::Full)
         .map(|retro| view(store, retro, now, timeout))
         .collect()
 }
@@ -372,10 +366,19 @@ pub(crate) async fn list_retros(
     State(state): State<AppState>,
     Query(query): Query<RetrosQuery>,
 ) -> ApiResult<RetrosResponse> {
-    let minutes = learning_of(&state).curator_timeout_minutes;
-    let timeout = i64::try_from(minutes).unwrap_or(i64::MAX);
-    let retros = read(&state, move |store| {
-        views(store, query.project.as_deref(), Timestamp::now(), timeout)
+    let home = state.0.home.clone();
+    let (retros, minutes) = read(&state, move |store| {
+        let (learning, config_error) = learning_of(&home);
+        let minutes = learning.curator_timeout_minutes;
+        let timeout = i64::try_from(minutes).unwrap_or(i64::MAX);
+        let mut retros = views(store, query.project.as_deref(), Timestamp::now(), timeout)?;
+        if let Some(error) = config_error {
+            // Run again would be refused for it, so it is off with why.
+            for retro in &mut retros {
+                retro.run_refusal.get_or_insert_with(|| error.clone());
+            }
+        }
+        Ok((retros, minutes))
     })
     .await?;
     Ok(Json(RetrosResponse {
@@ -390,7 +393,7 @@ pub(crate) async fn list_retros(
               (status = 404, body = ErrorBody),
               (status = 422, body = ErrorBody, description = "done with an outcome other than unfinished, its curator still runs, or another retro of the same card runs"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
-              (status = 503, body = ErrorBody, description = "this daemon cannot run retros")))]
+              (status = 503, body = ErrorBody, description = "this daemon cannot run retros, or it is stopping")))]
 pub(crate) async fn run_retro(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -405,7 +408,7 @@ pub(crate) async fn run_retro(
     let Some(starter) = state.0.orchestrators.clone() else {
         return Err(Error::Unavailable("this daemon cannot run retros".into()).into());
     };
-    let timeout = i64::try_from(learning_of(&state).curator_timeout_minutes).unwrap_or(i64::MAX);
+    let home = state.0.home.clone();
     let retros = state.0.retros.clone();
     let db = state.db();
     let damage = state.0.damage.clone();
@@ -414,12 +417,24 @@ pub(crate) async fn run_retro(
         if !db.exists() {
             return Err(uninitialized());
         }
+        // A config that cannot be used is refused by the claim below. It is
+        // read before the claims lock, so a stop does not wait on it.
+        let timeout =
+            i64::try_from(learning_of(&home).0.curator_timeout_minutes).unwrap_or(i64::MAX);
         let _claiming = retros.claiming();
         let mut store = Store::open_current(&db).map_err(ApiError::from)?;
-        // A retry of a Run again answers with the retro it claimed.
-        if let Some(retro) = retros.by_key(&key) {
-            let retro: Retro = get(store.conn(), "retro", &retro)?;
+        let ctx = board_ctx(&key, args.as_ref());
+        // A retry of a Run again answers with the retro its key claimed and
+        // starts nothing, even after a restart or while the daemon stops:
+        // the claim stored the key. A key stored for another write is
+        // refused by the same call.
+        if store.key_recorded(&ctx)? {
+            let claimed = store.retro_start(&ctx, &id, None, timeout)?;
+            let retro: Retro = get(store.conn(), "retro", &claimed.value.id)?;
             return Ok(response(&retro, Vec::new(), true)?);
+        }
+        if retros.stopping() {
+            return Err(Error::Unavailable("the daemon is stopping".into()).into());
         }
         let retro = learning::resolve_retro(store.conn(), &id)?;
         let card: tiller_core::domain::Card = get(store.conn(), "card", &retro.card_id)?;
@@ -434,10 +449,10 @@ pub(crate) async fn run_retro(
             .into());
         }
         let run = starter
-            .retro_run(&mut store, &board_ctx(&key, args.as_ref()), &retro.id)
+            .retro_run(&mut store, &ctx, &retro.id)
             .map_err(|error| start_refusal(error, |error| damage.suspect(&db, error)))?;
         let claimed = run.claimed.clone();
-        if let Err(error) = retros.start(&key, &claimed.value.id, run) {
+        if let Err(error) = retros.start(&claimed.value.id, run) {
             // The claim stands with no curator behind it: end it so it can
             // run again at once.
             let note = format!("the curator could not be started: {error}");
@@ -510,6 +525,9 @@ mod tests {
         Exits(&'static str),
         /// When the daemon stops it.
         UntilStopped,
+        /// Only once the test sets this flag, stop or not, as a curator
+        /// slow to end.
+        Holds(Arc<AtomicBool>),
     }
 
     /// Claims as `tiller retro run` does and plays the next ending; no
@@ -556,6 +574,12 @@ mod tests {
                             }
                             "curator stopped: the daemon stopped before the retro was finished"
                                 .to_owned()
+                        }
+                        Ending::Holds(released) => {
+                            while !released.load(Ordering::SeqCst) {
+                                std::thread::sleep(Duration::from_millis(10));
+                            }
+                            "curator released".to_owned()
                         }
                     };
                     let mut store = Store::open_current(&db).map_err(|e| e.to_string())?;
@@ -674,6 +698,63 @@ mod tests {
         assert!(other.body.contains("\"retros\":[]"), "{}", other.body);
     }
 
+    /// A config.toml that cannot be used turns Run again off, with why: the
+    /// claim would refuse it.
+    #[tokio::test]
+    async fn a_config_that_cannot_be_used_turns_run_again_off() {
+        let fleet = fleet();
+        std::fs::write(
+            fleet.dir.path().join("config.toml"),
+            "[learning]\ncurator_timeout_minutes = \"soon\"\n",
+        )
+        .unwrap();
+        let r1 = one(&app(&fleet, Vec::new()), R1).await;
+        assert_eq!(r1.status, RetroStatus::Unfinished);
+        let refusal = r1.run_refusal.unwrap_or_default();
+        assert!(
+            refusal.starts_with("config.toml cannot be used: "),
+            "{refusal}"
+        );
+    }
+
+    /// The list has every unfinished retro, however many newer ones there
+    /// are (`protocol.md`, `GET /api/v1/retros`).
+    #[tokio::test]
+    async fn an_old_unfinished_retro_is_listed_past_the_cap() {
+        let fleet = fleet();
+        let now = Timestamp::now();
+        let old = now.plus_minutes(-60 * 24 * 60);
+        fleet
+            .store
+            .conn()
+            .execute(
+                &format!("UPDATE retros SET created_at = '{old}', finished_at = '{old}', curator_started_at = '{old}' WHERE id = '{R1}'"),
+                [],
+            )
+            .unwrap();
+        for n in 0..MOST {
+            // One retro per card close.
+            let closed = now.plus_minutes(-(n + 1));
+            fleet
+                .store
+                .conn()
+                .execute(
+                    &format!(
+                        "INSERT INTO retros (id, card_id, project_id, closed_at, depth, reason, state, outcome,
+                                             finished_at, finished_by, created_at)
+                         VALUES ('01JC0000000000000000D{n:05}', 'c44', 'alpha', '{closed}', 'full', 'incident',
+                                 'done', 'nothing', '{now}', 'curator', '{now}')"
+                    ),
+                    [],
+                )
+                .unwrap();
+        }
+        let list = retros(&app(&fleet, Vec::new())).await;
+        // The cap still holds for the others: R2 and the newer done ones.
+        assert_eq!(list.retros.len(), usize::try_from(MOST).unwrap() + 1);
+        assert_eq!(list.retros.last().map(|retro| retro.id.as_str()), Some(R1));
+    }
+
     #[tokio::test]
     async fn run_again_shows_the_new_reason_and_does_not_loop() {
         let fleet = fleet();
@@ -782,7 +863,7 @@ mod tests {
             panic!("the claim is refused");
         };
         let retros = Retros::default();
-        retros.start("k", R1, run).unwrap();
+        retros.start(R1, run).unwrap();
         retros.stop(Duration::from_secs(5));
         let retro: Retro = get(fleet.open().conn(), "retro", R1).unwrap();
         assert_eq!(retro.outcome, Some(RetroOutcome::Unfinished));
@@ -790,5 +871,147 @@ mod tests {
             retro.learning.as_deref(),
             Some("curator stopped: the daemon stopped before the retro was finished")
         );
+    }
+
+    /// A Run again that arrives once the daemon is stopping claims nothing,
+    /// so no curator starts after the runs were taken to be stopped.
+    #[tokio::test]
+    async fn a_stopping_daemon_starts_no_new_curator() {
+        let fleet = fleet();
+        let cookie = owner_cookie(fleet.dir.path());
+        let retros = Retros::default();
+        let app = crate::api::tests::app_retros(
+            fleet.dir.path(),
+            Arc::new(FakeCurator {
+                db: fleet.db.clone(),
+                endings: Mutex::new(VecDeque::from([Ending::UntilStopped])),
+            }),
+            retros.clone(),
+        );
+        retros.stop(Duration::from_secs(1));
+        let (status, body) = run(&app, &cookie, R1, "late").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .ends_with("the daemon is stopping"),
+            "{body}"
+        );
+        let r1 = one(&app, R1).await;
+        assert_eq!(r1.status, RetroStatus::Unfinished);
+        assert!(retros.runs().is_empty());
+    }
+
+    /// A retry of a Run again that arrives once the daemon is stopping
+    /// answers with the retro its key claimed, as any replay does.
+    #[tokio::test]
+    async fn a_stopping_daemon_still_replays_a_run_again() {
+        let fleet = fleet();
+        let cookie = owner_cookie(fleet.dir.path());
+        let retros = Retros::default();
+        let app = crate::api::tests::app_retros(
+            fleet.dir.path(),
+            Arc::new(FakeCurator {
+                db: fleet.db.clone(),
+                endings: Mutex::new(VecDeque::from([Ending::UntilStopped])),
+            }),
+            retros.clone(),
+        );
+        let (status, body) = run(&app, &cookie, R1, "k").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        retros.stop(Duration::from_secs(5));
+        let (status, body) = run(&app, &cookie, R1, "k").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["replayed"], true);
+        assert_eq!(body["data"]["id"], R1);
+        assert_eq!(body["data"]["outcome"], "unfinished");
+        assert!(retros.runs().is_empty());
+    }
+
+    /// A running curator that ends only once `released` is set, and a
+    /// running holdout eval that runs `eval`.
+    fn slow_runs(
+        released: &Arc<AtomicBool>,
+        eval: impl FnOnce(&tiller_herdr::process::Interrupt) + Send + 'static,
+    ) -> (Fleet, Retros, crate::memory::eval::Evals) {
+        let fleet = fleet();
+        let mut store = fleet.open();
+        let curator = FakeCurator {
+            db: fleet.db.clone(),
+            endings: Mutex::new(vec![Ending::Holds(Arc::clone(released))].into()),
+        };
+        let Ok(run) = curator.retro_run(&mut store, &Ctx::new(Actor::Board), R1) else {
+            panic!("the claim is refused");
+        };
+        let retros = Retros::default();
+        retros.start(R1, run).unwrap();
+        let evals = crate::memory::eval::Evals::default();
+        evals.spawn(eval).unwrap();
+        (fleet, retros, evals)
+    }
+
+    /// The daemon's stop raises the eval's flag at once, not after the
+    /// curators' wait, so a running eval spends no quota meanwhile.
+    #[test]
+    fn a_slow_curator_does_not_delay_the_eval_stop() {
+        let released = Arc::new(AtomicBool::new(false));
+        let caught = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&caught);
+        let (_fleet, retros, evals) = slow_runs(&released, move |interrupt| {
+            while !interrupt.caught() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            seen.store(true, Ordering::SeqCst);
+        });
+        let stopper = {
+            let (retros, evals) = (retros.clone(), evals.clone());
+            std::thread::spawn(move || {
+                crate::server::stop_board_runs(&retros, &evals, Duration::from_secs(60));
+            })
+        };
+        let stopped = tiller_herdr::testing::eventually(|| caught.load(Ordering::SeqCst));
+        released.store(true, Ordering::SeqCst);
+        stopper.join().unwrap();
+        assert!(
+            stopped,
+            "the eval was not stopped while a curator still ran"
+        );
+    }
+
+    /// Both waits share one deadline: a stop of runs that never end takes
+    /// the wait once, not once per kind.
+    #[test]
+    fn the_stop_waits_once_for_curators_and_evals() {
+        let released = Arc::new(AtomicBool::new(false));
+        let held = Arc::clone(&released);
+        let (_fleet, retros, evals) = slow_runs(&released, move |_| {
+            while !held.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let wait = Duration::from_secs(2);
+        let started = std::time::Instant::now();
+        crate::server::stop_board_runs(&retros, &evals, wait);
+        let took = started.elapsed();
+        released.store(true, Ordering::SeqCst);
+        assert!(took < wait * 2, "the stop took {took:?}");
+    }
+
+    /// Stopping waits for a Run again that is still claiming, so its run is
+    /// among the ones stopped.
+    #[test]
+    fn stopping_waits_for_a_claim_in_progress() {
+        let retros = Retros::default();
+        let claiming = retros.claiming();
+        let stopper = {
+            let retros = retros.clone();
+            std::thread::spawn(move || retros.stop(Duration::from_secs(1)))
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!retros.stopping(), "stop did not wait for the claim");
+        drop(claiming);
+        stopper.join().unwrap();
+        assert!(retros.stopping());
     }
 }

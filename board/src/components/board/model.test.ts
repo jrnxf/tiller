@@ -56,6 +56,29 @@ test("an ask is a tile in the Asked column and counts as active, never as needin
   expect(countsByFilter(tiles)).toEqual({ all: 5, active: 4, needs: 1 });
 });
 
+test("a peer's ask takes the lane of its own host, as a peer's card does", () => {
+  const tiles = tilesOf({
+    rows: [],
+    asked: [
+      { id: "ask-own", project_id: "fleet", session_id: null, received_at: "x", age_seconds: 5 },
+      {
+        id: "ask-peer",
+        project_id: "fleet",
+        session_id: null,
+        received_at: "x",
+        age_seconds: 5,
+        host: "host-d",
+        as_of: null,
+        link: "live",
+      },
+    ],
+  });
+  expect(tiles.map((tile) => [tile.key, tile.projectId])).toEqual([
+    ["ask-own", "fleet"],
+    ["ask-peer", "host-d/fleet"],
+  ]);
+});
+
 test("the filters keep the cards the tabs name", () => {
   const tiles = tilesOf(board);
   const keys = (filter: "all" | "active" | "needs") =>

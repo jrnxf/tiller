@@ -358,3 +358,43 @@ test("the screen behind the palette is inert while it is open", async () => {
   fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" });
   expect(nav.closest("[inert]")).toBeNull();
 });
+
+test("no shortcut acts on the screen behind the open phone drawer", async () => {
+  await renderApp();
+  fireEvent.click(screen.getByRole("button", { name: "Open the sidebar" }));
+  await vi.waitFor(() => expect(document.activeElement?.className).toBe("search"));
+
+  fireEvent.keyDown(document.body, { key: "a" });
+  expect(screen.queryByRole("dialog", { name: "Ask orchestrators" })).toBeNull();
+  // Escape still closes the drawer, and the keys work again.
+  fireEvent.keyDown(document.body, { key: "Escape" });
+  expect(document.querySelector(".main")?.hasAttribute("inert")).toBe(false);
+  fireEvent.keyDown(document.body, { key: "a" });
+  expect(screen.getByRole("dialog", { name: "Ask orchestrators" })).toBeTruthy();
+});
+
+test("a dialog opened from the drawer keeps the screen inert when widening closes the drawer", async () => {
+  const listeners: ((event: { matches: boolean }) => void)[] = [];
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: false,
+    media: query,
+    addEventListener: (_type: string, listener: (event: { matches: boolean }) => void) => {
+      if (query.includes("max-width")) listeners.push(listener);
+    },
+    removeEventListener: () => {},
+    addListener: () => {},
+    removeListener: () => {},
+  }));
+  await renderApp();
+  fireEvent.click(screen.getByRole("button", { name: "Open the sidebar" }));
+  fireEvent.click(screen.getByRole("button", { name: "Add project" }));
+  const dialog = screen.getByRole("dialog", { name: "Add project" });
+
+  act(() => {
+    for (const listener of listeners) listener({ matches: false });
+  });
+  expect(document.querySelector(".main")?.hasAttribute("inert")).toBe(true);
+
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  expect(document.querySelector(".main")?.hasAttribute("inert")).toBe(false);
+});

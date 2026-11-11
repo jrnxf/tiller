@@ -35,6 +35,7 @@ import type {
 } from "./api-types.ts";
 import {
   peerAgents,
+  peerAsks,
   peerAttention,
   peerMachines,
   peerProjects,
@@ -84,15 +85,22 @@ export type Scenario =
   | "blocked"
   | "backing-up"
   | "backup-failed"
+  // Settings > Backups when the manifest does not parse (P20).
+  | "backups-unread"
   // A paused run, a dead pane and a silent orchestrator (P11).
   | "lifecycle"
   // A project delete blocked by a live run, then by a live session (P15).
   | "delete-blocked"
   // The merge App ready, two repos enforced and one still on detect (P24).
   | "merge-ready"
+  // The merge App key on the host but readable by others (P24).
+  | "merge-exposed"
   // Two agents on a dialog no hook asked for: the folder trust dialog, and
   // one the board cannot read (P7).
-  | "dialog";
+  | "dialog"
+  // A memory document a launch goes on without, and a Keep over the startup
+  // budget (memory.md sections 6 and 9).
+  | "memory-limits";
 
 // The scenarios with paired peers. `stale-sessions` has them so a peer's older
 // sessions show on this host's board.
@@ -121,10 +129,13 @@ export const SCENARIOS: readonly Scenario[] = [
   "blocked",
   "backing-up",
   "backup-failed",
+  "backups-unread",
   "lifecycle",
   "delete-blocked",
   "merge-ready",
+  "merge-exposed",
   "dialog",
+  "memory-limits",
 ];
 
 const WEEKLY_FLOOR_PERCENT = 3;
@@ -149,15 +160,24 @@ const minutes = (now: number, delta: number) => new Date(now + delta * 60_000).t
 
 const WEEK = 7 * 24 * 60 * 60_000;
 
-// The stand-in week resets on Tuesdays at 14:00 Lisbon time: the first such
-// reset after `now`, so every screen that names it (the sidebar, Health and
-// the holdout plan) names the same future time on any day.
+// The stand-in week resets on Tuesdays at 14:00 Lisbon time in winter (15:00
+// in summer, as the reset is whole weeks after Tuesday 3 November 2026 at
+// 14:00): the first such reset after `now`, so every screen that names it
+// (the sidebar, Health and the holdout plan) names the same future time on
+// any day.
 const WEEK_RESET = Date.parse("2026-11-03T14:00:00.000Z");
 function weekOffset(now: number): number {
-  return Math.max(0, Math.ceil((now - WEEK_RESET) / WEEK)) * WEEK;
+  return now < WEEK_RESET ? 0 : (Math.floor((now - WEEK_RESET) / WEEK) + 1) * WEEK;
 }
-const weekly = (now: number, at: string) =>
-  new Date(Date.parse(at) + weekOffset(now)).toISOString();
+const weekReset = (now: number) => WEEK_RESET + weekOffset(now);
+
+// The red stand-in week runs out at the same share of the time to its reset
+// on any day: 8 of the 26 hours that Monday 2 November 2026 at 12:00 Lisbon
+// time has left. So the runway always ends after `now` and before the reset.
+function weeklyExhaustion(now: number): string {
+  const reset = weekReset(now);
+  return new Date(now + Math.round(((reset - now) * 8) / 26)).toISOString();
+}
 
 function weeklyWindow(
   now: number,
@@ -165,7 +185,7 @@ function weeklyWindow(
 ): QuotaWindow {
   const base = {
     percent_remaining: 27,
-    resets_at: weekly(now, "2026-11-03T14:00:00.000Z"),
+    resets_at: new Date(weekReset(now)).toISOString(),
     pace: "behind",
     reserve: 8,
     burn_multiple: 0.8,
@@ -214,7 +234,7 @@ function modelWindow(now: number): QuotaWindow {
     title: "Fable week",
     kind: "model",
     percent_remaining: 94,
-    resets_at: weekly(now, "2026-11-03T14:00:00.000Z"),
+    resets_at: new Date(weekReset(now)).toISOString(),
     pace: "behind",
     reserve: 22,
     burn_multiple: 0.4,
@@ -249,7 +269,7 @@ function quotaFor(scenario: Scenario, now: number): QuotaResponse {
             pace: "ahead",
             burn_multiple: 2.2,
             reserve: -31,
-            projected_exhaustion_at: weekly(now, "2026-11-02T20:00:00.000Z"),
+            projected_exhaustion_at: weeklyExhaustion(now),
           }),
           sessionWindow(now),
           modelWindow(now),
@@ -342,6 +362,7 @@ function launched(
     reviewed_through_sha: null,
     reviewed_at: null,
     stage_changed_at: null,
+    edited_at: "2026-11-02T10:00:00.000Z",
     next_review_due: null,
     review_overdue: false,
     review_open: null,
@@ -366,6 +387,7 @@ const DELTA = launched("delta", "direct-pr", 2, 1, {
   reviewed_through_sha: "5b7d20e9c4a1f386d02e8b57a9c3140f6e2d8a71",
   reviewed_at: "2026-10-31T07:12:00.000Z",
   stage_changed_at: "2026-11-02T16:05:00.000Z",
+  edited_at: "2026-11-02T16:05:00.000Z",
   review_open: "final",
 });
 
@@ -799,7 +821,10 @@ function boardFor(scenario: Scenario, now: number): BoardResponse {
   if (scenario === "blocked") return { rows: blockedRows(now), asked: [] };
   if (scenario === "degraded") return { rows: degradedRows(now), asked: [] };
   if (hasPeers(scenario)) {
-    return { rows: [...defaultRows(now), ...bugRows(now), ...peerRows(now)], asked: [] };
+    return {
+      rows: [...defaultRows(now), ...bugRows(now), ...peerRows(now)],
+      asked: peerAsks(now),
+    };
   }
   if (scenario === "busy") {
     return {
@@ -1018,6 +1043,11 @@ function attentionFor(
       },
     ],
   };
+  // The `dialog` scenario's beta-7 worker waits on a menu, so it has not gone
+  // quiet: the stale recovery decision about it would contradict that.
+  if (scenario === "dialog") {
+    local.items = local.items.filter((item) => item.id !== "01JATTN0000000000000000002");
+  }
   if (!hasPeers(scenario)) return local;
   const peer = peerAttention(now, board.rows);
   return {
@@ -1819,12 +1849,12 @@ function doctorRead(
       ok: false,
       error: {
         code: "peer_unreachable",
-        message: `${host} is unreachable; its link is not live`,
+        message: `${machine.label} is unreachable; its link is not live`,
         hint: "the board shows its cached row; try again once the link is live",
       },
     });
   }
-  return peerDoctorFor(host, now);
+  return peerDoctorFor(machine.label, now);
 }
 
 export function fixtureResource(
@@ -1869,7 +1899,7 @@ export function fixtureResource(
   if (url.pathname === "/api/v1/projects/checkout") return checkoutFor(url);
   if (url.pathname.startsWith("/api/v1/memory")) {
     settleRetros(now);
-    return memoryResource(url, quotaFor(served, now).windows);
+    return memoryResource(url, quotaFor(served, now).windows, served);
   }
   if (url.pathname === "/api/v1/retros") return retrosResource(url, now);
   // No project starts archived; the stand-in server adds the ones archived since.

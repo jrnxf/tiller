@@ -161,11 +161,21 @@ fn serve_with_starter(
     from: &str,
     orchestrators: Option<Arc<dyn OrchestratorStart>>,
 ) -> UnixStream {
+    serve_timed(home, from, orchestrators, quick())
+}
+
+/// [`serve_with_starter`] on other timings.
+fn serve_timed(
+    home: &Path,
+    from: &str,
+    orchestrators: Option<Arc<dyn OrchestratorStart>>,
+    timing: Timing,
+) -> UnixStream {
     let (ours, theirs) = UnixStream::pair().unwrap();
     let config = ServeConfig {
         home: home.to_owned(),
         from: from.to_owned(),
-        timing: quick(),
+        timing,
         herdr: None,
         orchestrators,
     };
@@ -204,16 +214,21 @@ impl SyncLink {
     /// The next frame that is not a `beat`.
     fn next(&mut self) -> Frame {
         loop {
-            let mut line = String::new();
-            assert!(
-                self.reader.read_line(&mut line).unwrap() > 0,
-                "the link closed"
-            );
-            match serde_json::from_str(&line).unwrap() {
+            match self.any() {
                 Frame::Beat { .. } => continue,
                 frame => return frame,
             }
         }
+    }
+
+    /// The next frame, a `beat` too.
+    fn any(&mut self) -> Frame {
+        let mut line = String::new();
+        assert!(
+            self.reader.read_line(&mut line).unwrap() > 0,
+            "the link closed"
+        );
+        serde_json::from_str(&line).unwrap()
     }
 }
 
@@ -1047,6 +1062,25 @@ fn revoked_key_refused() {
     );
 }
 
+/// A revoke closes a live link before any frame after it goes out, its own
+/// `peer.revoked` event among them, not on the next tick (`protocol.md`
+/// 10.1: "an open link from that key closes at once").
+#[test]
+fn a_revoke_closes_the_link_before_its_next_frame() {
+    let pair = pair();
+    let slow_tick = Timing {
+        tick: Duration::from_secs(60),
+        ..quick()
+    };
+    let socket = serve_timed(pair.peer.dir.path(), "test-host", None, slow_tick);
+    let mut link = welcomed(&pair, SyncLink::on(socket));
+    pair.peer.open().peer_revoke(&owner(), "test-host").unwrap();
+    match link.next() {
+        Frame::Refused { reason, .. } => assert_eq!(reason, "revoked"),
+        frame => panic!("the revoked key got {frame:?} first"),
+    }
+}
+
 /// A captured `hello` sent again is refused, even inside its skew window:
 /// the peer keeps the nonces it took (`protocol.md` 10.2). Each `peer
 /// serve` is its own process, so the set lives on disk, not in memory.
@@ -1136,6 +1170,86 @@ async fn a_refused_link_tries_again_slowly() {
             .windows(2)
             .all(|pair| pair[0] <= pair[1])
     );
+}
+
+/// A peer that refuses the first `before` hellos, then welcomes one link
+/// and refuses it mid-session, then refuses every hello after. It records
+/// when each connection began.
+struct Scripted {
+    home: PathBuf,
+    before: usize,
+    began: Arc<Mutex<Vec<Instant>>>,
+}
+
+impl Connector for Scripted {
+    fn connect(&self, _target: &Target) -> Connecting {
+        let n = {
+            let mut began = self.began.lock().unwrap();
+            began.push(Instant::now());
+            began.len()
+        };
+        let refused = |reason: &str| Frame::Refused {
+            reason: reason.into(),
+            message: None,
+        };
+        let opening = (|| {
+            if n != self.before + 1 {
+                return Ok::<_, std::io::Error>(refused("accept_off").line()?);
+            }
+            let store =
+                Store::open_current(self.home.join("state.db")).map_err(std::io::Error::other)?;
+            let host = store.this_host().map_err(std::io::Error::other)?;
+            let welcome = Frame::Welcome(Welcome {
+                host_id: host.id,
+                label: host.label,
+                schema_version: tiller_core::migrate::LATEST,
+                tiller_version: "test".into(),
+                server_time: Timestamp::now().to_string(),
+            });
+            Ok(welcome.line()? + &refused("revoked").line()?)
+        })();
+        Box::pin(async move {
+            let (mut peer, ours) = tokio::io::duplex(1 << 16);
+            peer.write_all(opening?.as_bytes()).await?;
+            Ok(Connection {
+                reader: Box::new(tokio::io::BufReader::new(ours)),
+                writer: Box::new(tokio::io::sink()),
+                child: None,
+            })
+        })
+    }
+}
+
+/// protocol.md: the refused backoff starts over once a link is welcomed.
+/// A welcomed session that the peer then refuses waits the first step, not
+/// the step the refusals before the welcome had reached.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_welcomed_link_starts_the_refused_backoff_over() {
+    let pair = pair();
+    let began = Arc::new(Mutex::new(Vec::new()));
+    let (stop_tx, stop) = watch::channel(false);
+    let mut timing = quick();
+    timing.refused_backoff = [ms(50), ms(50), ms(50), Duration::from_secs(5)];
+    let _peers = Peers::start(
+        pair.board.dir.path().to_owned(),
+        Arc::new(Scripted {
+            home: pair.peer.dir.path().to_owned(),
+            before: 3,
+            began: began.clone(),
+        }),
+        timing,
+        Damage::default(),
+        stop,
+    );
+    // Three refused hellos, the welcomed session, and the try after it.
+    until("the try after the welcomed session", || {
+        (began.lock().unwrap().len() >= 5).then_some(())
+    })
+    .await;
+    let began = began.lock().unwrap().clone();
+    let gap = began[4] - began[3];
+    assert!(gap < Duration::from_secs(2), "waited {gap:?}");
+    drop(stop_tx);
 }
 
 #[test]
@@ -2009,6 +2123,105 @@ async fn a_peers_checks_are_read_over_the_link() {
     assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
 }
 
+/// A peer's binary whose checks hang until the test lets them finish, and
+/// count how often they ran.
+struct HeldDoctor {
+    runs: Arc<AtomicUsize>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl OrchestratorStart for HeldDoctor {
+    fn start(
+        &self,
+        store: &mut Store,
+        ctx: &tiller_core::Ctx,
+        project: &str,
+        restart: bool,
+    ) -> Result<tiller_core::Applied<tiller_agents::spawn::orchestrator::Orchestrator>, StartError>
+    {
+        PeerDoctor.start(store, ctx, project, restart)
+    }
+
+    fn doctor(&self) -> Option<crate::dto::DoctorReport> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        let _ = self
+            .release
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(20));
+        PeerDoctor.doctor()
+    }
+}
+
+/// The peer runs its checks off the link: while they run (a hung tool can
+/// take seconds), the link keeps beating and answers other queries. Two
+/// `doctor` queries in flight share one run.
+#[test]
+fn a_peers_checks_run_off_the_link_one_run_at_a_time() {
+    let pair = pair();
+    let (release, held) = std::sync::mpsc::channel();
+    let runs = Arc::new(AtomicUsize::new(0));
+    let doctor = Arc::new(HeldDoctor {
+        runs: runs.clone(),
+        release: Mutex::new(held),
+    });
+    let mut link = SyncLink::on(serve_with_starter(
+        pair.peer.dir.path(),
+        "test-host",
+        Some(doctor),
+    ));
+    link.send(&hello(&pair, None));
+    assert!(matches!(link.next(), Frame::Welcome(_)));
+    assert!(matches!(link.next(), Frame::Snapshot(_)));
+    for id in ["d1", "d2"] {
+        link.send(&Frame::Query {
+            id: id.into(),
+            path: "doctor".into(),
+        });
+    }
+    link.send(&Frame::Query {
+        id: "c1".into(),
+        path: "cards/no-such-card".into(),
+    });
+
+    // The checks are held: the card query is answered and beats still come.
+    let (mut beat, mut card) = (false, false);
+    while !(beat && card) {
+        match link.any() {
+            Frame::Beat { .. } => beat = true,
+            Frame::Result {
+                id, http_status, ..
+            } => {
+                assert_eq!((id.as_str(), http_status), ("c1", 404));
+                card = true;
+            }
+            Frame::Event(_) => {}
+            frame => panic!("expected a beat or the card's result, got {frame:?}"),
+        }
+    }
+
+    release.send(()).unwrap();
+    let mut answered = Vec::new();
+    while answered.len() < 2 {
+        match link.any() {
+            Frame::Result {
+                id,
+                http_status,
+                body,
+            } => {
+                assert_eq!(http_status, 200, "{body}");
+                assert_eq!(body["checks"][0]["detail"], "gh is not on PATH of the peer");
+                answered.push(id);
+            }
+            Frame::Beat { .. } | Frame::Event(_) => {}
+            frame => panic!("expected the checks, got {frame:?}"),
+        }
+    }
+    answered.sort();
+    assert_eq!(answered, ["d1", "d2"]);
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+}
+
 /// A peer that is not live is 503 `peer_unreachable` at once. A peer whose
 /// binary has no checks to run says so in its own words.
 #[tokio::test(flavor = "multi_thread")]
@@ -2379,6 +2592,50 @@ fn pane_open(pair: &Pair, session: &str, kind: PaneKind) -> PaneOpen {
         Some(10),
         Timestamp::now(),
     )
+}
+
+/// A revoke ends a pane stream that is open at once, not on the next tick:
+/// the board host stops getting the pane's bytes as its link stops getting
+/// frames.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoke_ends_an_open_pane_stream_at_once() {
+    let mut pair = pair();
+    let session = pair.peer.worker("w2:p1");
+    let scratch = tempfile::tempdir().unwrap();
+    let config = ServeConfig {
+        home: pair.peer.dir.path().to_owned(),
+        from: "test-host".into(),
+        timing: Timing {
+            tick: Duration::from_secs(60),
+            ..quick()
+        },
+        herdr: Some(mirror_herdr(scratch.path())),
+        orchestrators: None,
+    };
+    let (mut board_out, peer_in) = tokio::io::duplex(1 << 16);
+    let (peer_out, board_in) = tokio::io::duplex(1 << 16);
+    tokio::spawn(async move {
+        let _ = pane::serve(&config, tokio::io::BufReader::new(peer_in), peer_out).await;
+    });
+    let open = Frame::PaneOpen(Box::new(pane_open(&pair, &session, PaneKind::Stream)));
+    board_out
+        .write_all(open.line().unwrap().as_bytes())
+        .await
+        .unwrap();
+    let mut lines = tokio::io::BufReader::new(board_in).lines();
+    let first = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(first.is_some(), "the stream never began");
+
+    pair.peer.open().peer_revoke(&owner(), "test-host").unwrap();
+    let ended = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Ok(Some(_)) = lines.next_line().await {}
+    })
+    .await;
+    assert!(ended.is_ok(), "the revoked key's pane stream stayed open");
+    drop(board_out);
 }
 
 #[tokio::test(flavor = "multi_thread")]
