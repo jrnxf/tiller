@@ -106,25 +106,13 @@ fn leaking_body_blocks_grant_match_and_request() {
     assert_eq!(w.breaches("G30").len(), 1, "once per head");
 }
 
-/// Stores `key` in `idempotency_keys` as `actor` stored it (`None`: a key
-/// from before schema 15, which records no actor).
-fn plant_key(w: &World, key: &str, actor: Option<&str>) {
-    w.store()
-        .conn()
-        .execute(
-            "INSERT INTO idempotency_keys (key, command, entity, entity_id, response, created_at, actor)
-             VALUES (?1, 'guard.breach', 'card', 'x', '{}', ?2, ?3)",
-            rusqlite::params![key, now(), actor],
-        )
-        .unwrap();
-}
-
 /// G30 (`protocol.md` 6.3): the pass's breach key, already used by another
 /// actor, is not the pass's own write. A worker that stores
 /// `reconcile:G30:<pr>:<head>` first must not silence the breach on its own
 /// PR: the pass tries the write, the store refuses the key, and the pass
-/// reports the refusal. A key from before schema 15 has no actor and still
-/// counts as written.
+/// records the breach without the key, naming it and who held it, and
+/// reports the refusal once. A key from before schema 15 has no actor and
+/// still counts as written.
 #[test]
 fn a_breach_key_another_actor_used_does_not_silence_the_breach() {
     let mut w = World::new();
@@ -147,7 +135,11 @@ fn a_breach_key_another_actor_used_does_not_silence_the_breach() {
             .any(|error| error.contains(&key) && error.contains("not daemon")),
         "{report:?}"
     );
-    assert!(!report.did("G30"), "{report:?}");
+    assert!(report.did("G30"), "{report:?}");
+    let breaches = w.breaches("G30");
+    assert_eq!(breaches.len(), 1, "{breaches:?}");
+    assert_eq!(breaches[0]["pass_key"], key.as_str());
+    assert_eq!(breaches[0]["key_held_by"], format!("session:{worker}"));
 
     // The same key with no actor, as schema 14 stored it: already written.
     let old = format!("reconcile:G30:{pr}:c3c3c3c3");
@@ -158,15 +150,20 @@ fn a_breach_key_another_actor_used_does_not_silence_the_breach() {
     let report = w.pass(now().plus_minutes(2));
     assert!(!report.did("G30"), "{report:?}");
     assert!(
-        report.errors.iter().all(|error| !error.contains(&old)),
+        report
+            .errors
+            .iter()
+            .all(|error| !error.contains(&old) && !error.contains(&key)),
         "{report:?}"
     );
+    assert_eq!(w.breaches("G30").len(), 1);
 }
 
 /// A pass key another actor planted makes one write fail, and only that
 /// write: the pass reports the refusal and carries on. PR 7's refused G30
-/// breach still lets its scrub note reach the orchestrator, and PR 8, which
-/// sorts after it, still gets its refresh and its G11 breach.
+/// key still lets its breach be recorded and its scrub note reach the
+/// orchestrator, and PR 8, which sorts after it, still gets its refresh and
+/// its G11 breach.
 #[test]
 fn a_planted_pass_key_stops_only_its_own_write() {
     let mut w = World::new();
@@ -193,7 +190,8 @@ fn a_planted_pass_key_stops_only_its_own_write() {
         report.errors.iter().any(|error| error.contains(&key)),
         "{report:?}"
     );
-    assert!(!report.did("G30"), "{report:?}");
+    assert!(report.did("G30"), "{report:?}");
+    assert_eq!(w.breaches("G30").len(), 1);
     assert!(
         w.notes()
             .iter()
@@ -205,6 +203,47 @@ fn a_planted_pass_key_stops_only_its_own_write() {
     assert_eq!(w.pr(&pr8).head_sha.as_deref(), Some("e5e5e5e5"));
     assert_eq!(w.approval(&approval).state, ApprovalState::Stale);
     assert_eq!(w.breaches("G11").len(), 1);
+}
+
+/// R19 (`protocol.md` 6.3): a session that stored the scrub note key first
+/// does not stop the rest of the step. The note is refused and reported
+/// once, and a leak on a public repo still goes to the developer.
+#[test]
+fn a_planted_scrub_note_key_still_asks_about_a_public_leak() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let run = w.run_of(&worker);
+    w.forge.pr(REPO, 7, open_pr("a1a1a1a1"));
+    w.pass(now());
+
+    let mut leaking = open_pr("b2b2b2b2");
+    leaking.body_leaks = vec!["> a line the owner wrote in chat".into()];
+    leaking.repo_public = Some(true);
+    w.forge.pr(REPO, 7, leaking);
+    w.forge.descends("a1a1a1a1", "b2b2b2b2");
+    let key = format!("reconcile:R19:scrub-note:{pr}:b2b2b2b2");
+    plant_key(&w, &key, Some(&format!("session:{worker}")));
+    let refusals = |report: &tiller_reconcile::Report| {
+        report
+            .errors
+            .iter()
+            .filter(|error| error.contains(&key))
+            .count()
+    };
+    let report = w.pass(now().plus_minutes(1));
+    assert_eq!(refusals(&report), 1, "{report:?}");
+    assert!(report.did("leaks on a public repo"), "{report:?}");
+    let items = w.open_items(&run.card_id);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert!(
+        items[0].question.contains("public repo"),
+        "{}",
+        items[0].question
+    );
+    let report = w.pass(now().plus_minutes(2));
+    assert_eq!(refusals(&report), 0, "reported once: {report:?}");
 }
 
 /// R19, G11: a force-push after approval is flagged (the breach names the

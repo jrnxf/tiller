@@ -535,10 +535,11 @@ impl Reconciler {
         if scan.provably_clean() && listed_here && pane_closed {
             // The reading `run.clean` checks is the cache row, which must
             // be newer than the run's end: scan now when this pass has
-            // not yet.
+            // not tried yet. Marked first, so a failing scan runs once a
+            // pass, not once for each ended run.
             if !*rescanned && cached.as_ref().is_none_or(|w| w.fetched_at < ended_at) {
-                self.scan_worktrees(now)?;
                 *rescanned = true;
+                self.scan_worktrees(now)?;
             }
             let holder = match lease_holder(self.conn(), &run) {
                 Ok(holder) => holder,

@@ -881,6 +881,100 @@ fn merge_without_approval_opens_recovery() {
     assert_eq!(w.breaches("G10").len(), 1, "once");
 }
 
+/// R07, G10 (`protocol.md` 6.3): a session that stored the "not me" breach
+/// key first does not lose the owner's answer. The store refuses the key,
+/// so the pass records the breach without it, naming the key and who held
+/// it, and reports the refusal once. Only then does the card close landed;
+/// later passes and a daemon restart record and report nothing more.
+#[test]
+fn a_planted_not_me_key_still_records_the_breach() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    w.link_pr(&worker, 8, "a1a1a1a1");
+    let run = w.run_of(&worker);
+    let t0 = now();
+    w.forge.pr(REPO, 8, merged_pr("a1a1a1a1", "e1e1e1e1", t0));
+    w.pass(t0);
+    let items = w.open_items(&run.card_id);
+    assert_eq!(items.len(), 1, "{items:?}");
+    let key = format!("reconcile:R07:not-me:{}", items[0].id);
+    plant_key(&w, &key, Some(&format!("session:{worker}")));
+    w.store_mut()
+        .attention_answer(
+            &owner(),
+            None,
+            &items[0].id,
+            LANDED_NOT_ME,
+            AnsweredVia::Board,
+        )
+        .unwrap();
+
+    let report = w.pass(t0.plus_minutes(1));
+    assert!(report.did("unauthorized-action trigger"), "{report:?}");
+    let refusals = |report: &tiller_reconcile::Report| {
+        report
+            .errors
+            .iter()
+            .filter(|error| error.contains(&key))
+            .count()
+    };
+    assert_eq!(refusals(&report), 1, "{report:?}");
+    let breaches = w.breaches("G10");
+    assert_eq!(breaches.len(), 1, "{breaches:?}");
+    assert_eq!(breaches[0]["pass_key"], key.as_str());
+    assert_eq!(breaches[0]["key_held_by"], format!("session:{worker}"));
+    assert_eq!(w.card(&run.card_id).outcome, Some(CardOutcome::Landed));
+
+    let report = w.pass(t0.plus_minutes(2));
+    assert_eq!(refusals(&report), 0, "{report:?}");
+    w.restart();
+    let report = w.pass(t0.plus_minutes(3));
+    assert_eq!(refusals(&report), 0, "{report:?}");
+    assert_eq!(w.breaches("G10").len(), 1, "once");
+}
+
+/// R15 (`protocol.md` 6.3): a session that stored the "worktree missing"
+/// note key first does not stop the question. The note is refused and
+/// reported once, the pass goes on, and the developer is asked once the
+/// note's wait has passed, counted from when the key was stored.
+#[test]
+fn a_planted_missing_note_key_still_asks_the_developer() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let run = w.run_of(&worker);
+    let path = run.worktree_path.clone().unwrap();
+    w.scanner
+        .worktree(&path, "fm/work", "aaaa1111", false, Some(0));
+    w.pass(now());
+    let key = format!("reconcile:R15:missing:{}", run.id);
+    plant_key(&w, &key, Some(&format!("session:{worker}")));
+    w.scanner.remove(&path);
+
+    let report = w.pass(now().plus_minutes(6));
+    let refusals = |report: &tiller_reconcile::Report| {
+        report
+            .errors
+            .iter()
+            .filter(|error| error.contains(&key))
+            .count()
+    };
+    assert_eq!(refusals(&report), 1, "{report:?}");
+    assert!(w.open_items(&run.card_id).is_empty());
+
+    let report = w.pass(now().plus_minutes(31));
+    assert_eq!(refusals(&report), 0, "reported once: {report:?}");
+    assert!(report.did("worktree missing: recovery item"), "{report:?}");
+    let items = w.open_items(&run.card_id);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert!(
+        items[0].question.contains("is missing"),
+        "{}",
+        items[0].question
+    );
+}
+
 /// G10 on a direct-push project: a run's branch head that reached the
 /// default branch with no `land_direct` approval is a breach and a question.
 #[test]

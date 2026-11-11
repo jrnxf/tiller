@@ -64,6 +64,20 @@ pub fn session_ctx(id: &str) -> Ctx {
     Ctx::new(Actor::Session(id.to_owned()))
 }
 
+/// Stores `key` in `idempotency_keys` as `actor` stored it (`None`: a key
+/// from before schema 15, which records no actor), as a session that ran
+/// any mutation under the pass's key first would.
+pub fn plant_key(w: &World, key: &str, actor: Option<&str>) {
+    w.store()
+        .conn()
+        .execute(
+            "INSERT INTO idempotency_keys (key, command, entity, entity_id, response, created_at, actor)
+             VALUES (?1, 'guard.breach', 'card', 'x', '{}', ?2, ?3)",
+            rusqlite::params![key, now(), actor],
+        )
+        .unwrap();
+}
+
 impl World {
     /// Links PR `number` at `head` to the worker's card and run. Returns the
     /// PR id.

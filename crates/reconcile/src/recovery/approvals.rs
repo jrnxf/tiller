@@ -22,7 +22,7 @@ use tiller_core::state::{find, get, list};
 use tiller_core::{Result, Timestamp};
 
 use crate::grants;
-use crate::pass::{Reconciler, Report};
+use crate::pass::{Breach, Reconciler, Report};
 use crate::sources::PrRead;
 
 /// The answers R07's item offers. The two landed ones start with
@@ -114,11 +114,17 @@ impl Reconciler {
                 fetch_error: Some(error.clone()),
             },
         };
-        // Uncertain executions first, from the same read.
-        if let Ok(read) = &read {
-            self.resolve_uncertain_merges(pr, read, project, now, report)?;
-        } else {
-            self.uncertain_unreadable(pr, now, report)?;
+        // Uncertain executions first, from the same read, under their own
+        // guard: a refused write there still lets the PR refresh.
+        let uncertain = match &read {
+            Ok(read) => self.resolve_uncertain_merges(pr, read, project, now, report),
+            Err(_) => self.uncertain_unreadable(pr, now, report),
+        };
+        if let Err(error) = uncertain {
+            report.error(
+                &format!("uncertain executions of PR #{}", pr.number),
+                &error,
+            );
         }
         let refreshed = self.store.pr_refresh(&self.ctx(now), &pr.id, fetch)?.value;
         let Ok(read) = read else {
@@ -301,7 +307,7 @@ impl Reconciler {
             &card.id,
             json!({"pr_id": pr.id, "number": pr.number, "head_sha": head, "lines": read.body_leaks, "repo_public": read.repo_public}),
             report,
-        ) {
+        ).written() {
             report.repair(format!(
                 "R19 PR #{} body fails the scrub at {head}: G30 breach",
                 pr.number
@@ -494,7 +500,7 @@ impl Reconciler {
                     &card.id,
                     json!({"pr_id": pr.id, "number": pr.number, "from": old, "to": new, "approvals_staled": open_before.iter().map(|a| a.id.clone()).collect::<Vec<_>>()}),
                     report,
-                ) {
+                ).written() {
                     report.repair(format!(
                         "R19 PR #{} force-pushed from {old} to {new}: G11 breach",
                         pr.number
@@ -744,7 +750,7 @@ impl Reconciler {
             &card.id,
             json!({"run_id": run.id, "branch": run.branch, "head": run_head, "default_head": head}),
             report,
-        ) {
+        ).written() {
             report.repair(format!(
                 "R19 run {} landed on {} without tiller land: G10 breach",
                 run.id, project.default_branch
@@ -827,21 +833,25 @@ impl Reconciler {
             let landed = lower.starts_with(&MARK_LANDED.to_lowercase());
             let evidence: Value = serde_json::from_str(item.evidence.as_deref().unwrap_or("{}"))
                 .unwrap_or(Value::Null);
-            if landed
-                && lower.contains("not me")
-                && self.breach(
+            if landed && lower.contains("not me") {
+                match self.breach(
                     now,
                     format!("reconcile:R07:not-me:{}", item.id),
                     "G10",
                     &card.id,
                     json!({"attention_id": item.id, "answer": answer, "evidence": evidence}),
                     report,
-                )
-            {
-                report.repair(format!(
-                    "R07 {}: the owner says the merge was not theirs: unauthorized-action trigger",
-                    card.display_id
-                ));
+                ) {
+                    Breach::Written => report.repair(format!(
+                        "R07 {}: the owner says the merge was not theirs: unauthorized-action trigger",
+                        card.display_id
+                    )),
+                    Breach::Recorded => {}
+                    // The breach is not recorded yet: the card stays open,
+                    // so the next pass reads this answer and tries again.
+                    // A closed card's answer is never read again.
+                    Breach::Failed => continue,
+                }
             }
             let outcome = if landed {
                 CardOutcome::Landed

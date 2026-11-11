@@ -3,7 +3,7 @@
 //! start. The pass runs its steps in order, each repair in its own
 //! transaction, and records nothing when it repairs nothing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension};
@@ -100,6 +100,23 @@ impl Report {
     }
 }
 
+/// What [`Reconciler::breach`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Breach {
+    /// Recorded by this call: the step reports it.
+    Written,
+    /// Recorded by an earlier pass.
+    Recorded,
+    /// Not recorded, and reported: a later pass tries again.
+    Failed,
+}
+
+impl Breach {
+    pub(crate) fn written(self) -> bool {
+        self == Breach::Written
+    }
+}
+
 /// The engine: one `state.db` connection, the sources, and the little the
 /// pass remembers between runs (cadences, never deadlines).
 pub struct Reconciler {
@@ -116,6 +133,11 @@ pub struct Reconciler {
     /// This pass's herdr snapshot and worktree scans.
     pub(crate) snapshot: Option<Snapshot>,
     pub(crate) scans: HashMap<PathBuf, WorktreeScan>,
+    /// Pass keys another actor stored first that this engine has reported,
+    /// so each refusal is reported once, not on every pass.
+    pub(crate) planted: HashSet<String>,
+    /// Refusals the keyed-write helpers met this pass, for the report.
+    pub(crate) refusals: Vec<String>,
 }
 
 impl Reconciler {
@@ -131,6 +153,8 @@ impl Reconciler {
             was_read_only: false,
             snapshot: None,
             scans: HashMap::new(),
+            planted: HashSet::new(),
+            refusals: Vec::new(),
         }
     }
 
@@ -149,13 +173,24 @@ impl Reconciler {
     /// One pass, every step in order.
     pub fn pass(&mut self, now: Timestamp) -> Result<Report> {
         let mut report = Report::default();
+        let result = self.steps(now, &mut report);
+        // The keyed-write helpers take no report: their refusals join it
+        // here, on every way out of the pass.
+        for line in std::mem::take(&mut self.refusals) {
+            tracing::warn!(%line, "reconcile step failed");
+            report.errors.push(line);
+        }
+        result.map(|()| report)
+    }
+
+    fn steps(&mut self, now: Timestamp, report: &mut Report) -> Result<()> {
         // The store refuses every write under the marker too (R20); the
         // pass stops here so it does no outside work either.
         if let Err(error) = tiller_core::owner::check(&self.config.tiller_home) {
             tracing::info!(%error, "reconcile pass skipped");
             report.read_only = true;
             self.was_read_only = true;
-            return Ok(report);
+            return Ok(());
         }
         let flipped_back = std::mem::take(&mut self.was_read_only);
         self.snapshot = match self.sources.herdr.snapshot() {
@@ -170,9 +205,9 @@ impl Reconciler {
 
         // Step 1: startup, once.
         if self.started_at.is_none() {
-            if let Err(error) = self.startup(now, &mut report) {
+            if let Err(error) = self.startup(now, report) {
                 report.error("startup", &error);
-                return Ok(report);
+                return Ok(());
             }
             self.started_at = Some(now);
         }
@@ -206,12 +241,12 @@ impl Reconciler {
             .is_none_or(|at| at.plus_minutes(self.config.thresholds.host_check) <= now)
         {
             self.last_host_check = Some(now);
-            if let Err(error) = self.host_checks(now, &mut report) {
+            if let Err(error) = self.host_checks(now, report) {
                 report.error("host checks", &error);
             }
         }
         // Step 3: timers.
-        if let Err(error) = self.timers(now, &mut report) {
+        if let Err(error) = self.timers(now, report) {
             report.error("timers", &error);
         }
         // The worktree scan, every five minutes and whenever a resume or a
@@ -228,11 +263,11 @@ impl Reconciler {
             }
         }
         // Step 4: sessions.
-        if let Err(error) = self.sessions(now, &mut report) {
+        if let Err(error) = self.sessions(now, report) {
             report.error("sessions", &error);
         }
         // Step 5: runs and evidence.
-        if let Err(error) = self.evidence(now, &mut report) {
+        if let Err(error) = self.evidence(now, report) {
             report.error("evidence", &error);
         }
         // Step 5a: the learning loop's sweep: a retro per closed card and
@@ -258,12 +293,12 @@ impl Reconciler {
             Err(error) => report.error("learning sweep", &error),
         }
         // Step 6: approvals and PRs.
-        if let Err(error) = self.approvals(now, &mut report) {
+        if let Err(error) = self.approvals(now, report) {
             report.error("approvals", &error);
         }
         // Step 6a: ask-user findings and event obligations, read from the
         // PR cache and review records this pass just refreshed.
-        self.gates(now, &mut report);
+        self.gates(now, report);
         // Step 7, delivery, is the delivery poller's pass (`tiller_delivery`),
         // which runs every two seconds beside this loop and owns R09.
         // Step 8: layout.
@@ -281,7 +316,7 @@ impl Reconciler {
                 Err(error) => report.error("layout bindings", &error),
             }
         }
-        Ok(report)
+        Ok(())
     }
 
     fn import_spool(&mut self) -> Result<()> {
@@ -313,7 +348,8 @@ impl Reconciler {
     }
 
     /// A keyed note to the project's live orchestrator. Returns whether one
-    /// was written now (false: no orchestrator, or already sent).
+    /// was written now (false: no orchestrator, already sent, or the key is
+    /// another actor's, which [`Self::planted`] reports).
     pub(crate) fn note(
         &mut self,
         now: Timestamp,
@@ -335,11 +371,12 @@ impl Reconciler {
                 card_id,
                 reply_to: None,
             },
-        )?;
-        Ok(!applied.replayed)
+        );
+        Ok(self.planted(key, applied)?.is_some_and(|a| !a.replayed))
     }
 
-    /// A keyed `wake` to one live session.
+    /// A keyed `wake` to one live session. False when already sent, or when
+    /// the key is another actor's ([`Self::planted`]).
     pub(crate) fn wake(
         &mut self,
         now: Timestamp,
@@ -357,12 +394,14 @@ impl Reconciler {
                 card_id: None,
                 reply_to: None,
             },
-        )?;
-        Ok(!applied.replayed)
+        );
+        Ok(self.planted(key, applied)?.is_some_and(|a| !a.replayed))
     }
 
     /// A keyed `recovery` item on a card (or on `fleet-1`). Returns whether
-    /// it was opened now.
+    /// it was opened now (false: the card is not open, the item is already
+    /// open, or the key is another actor's, which [`Self::planted`]
+    /// reports).
     pub(crate) fn recovery(
         &mut self,
         now: Timestamp,
@@ -377,30 +416,74 @@ impl Reconciler {
         if card.state != tiller_core::domain::CardState::Open {
             return Ok(false);
         }
-        let applied = self.store.attention_open(&self.ctx(now), Some(key), item)?;
-        Ok(!applied.replayed)
+        let applied = self.store.attention_open(&self.ctx(now), Some(key), item);
+        Ok(self.planted(key, applied)?.is_some_and(|a| !a.replayed))
+    }
+
+    /// A keyed write's result, with the store's refusal of a pass key
+    /// another actor stored first (`protocol.md` 6.3) turned into `None`.
+    /// The refusal is reported once per key while this engine runs, and the
+    /// pass goes on: the step's later writes still go out. Every other
+    /// error is returned as it was.
+    pub(crate) fn planted<T>(&mut self, key: &str, result: Result<T>) -> Result<Option<T>> {
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(error @ tiller_core::Error::Refused { .. }) => {
+                if self.key_holder(key)?.is_none() {
+                    return Err(error);
+                }
+                if self.planted.insert(key.to_owned()) {
+                    self.refusals.push(format!("pass key {key}: {error}"));
+                }
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Another actor than the pass that stored `key`, and when (`protocol.md`
+    /// 6.3). None when the key is unused, the daemon's, or from before
+    /// schema 15.
+    pub(crate) fn key_holder(&self, key: &str) -> Result<Option<(String, Timestamp)>> {
+        let actor = Actor::Daemon.to_string();
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT actor, created_at FROM idempotency_keys
+                  WHERE key = ?1 AND actor IS NOT NULL AND actor != ?2",
+                [key, actor.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
     }
 
     /// When the pass stored the keyed message, if it did. A row another
     /// actor stored under the key is not the pass's message (`protocol.md`
-    /// 6.3), so it starts no clock.
+    /// 6.3). When another actor holds the key the pass's message is refused,
+    /// so the clock starts when that actor stored the key: a planted key can
+    /// bring the next step forward, never hold it back.
     pub(crate) fn message_at(&self, key: &str) -> Result<Option<Timestamp>> {
         let actor = Actor::Daemon.to_string();
-        Ok(self
+        let own = self
             .conn()
             .query_row(
                 "SELECT created_at FROM outbox WHERE idempotency_key = ?1 AND created_by = ?2",
                 [key, actor.as_str()],
                 |row| row.get(0),
             )
-            .optional()?)
+            .optional()?;
+        match own {
+            Some(at) => Ok(Some(at)),
+            None => Ok(self.key_holder(key)?.map(|(_, at)| at)),
+        }
     }
 
-    /// Records `guard`'s breach once, under the pass key `key`, and says
-    /// whether this call wrote it. A refused write (a key another actor
-    /// stored first, `protocol.md` 6.3) is reported and stops only this
-    /// write: the step's note, its recovery item and the rest of the pass
-    /// still run.
+    /// Records `guard`'s breach once, under the pass key `key`. When
+    /// another actor stored the key first (`protocol.md` 6.3), the store
+    /// refuses it: the breach is then recorded once without the key, its
+    /// details naming the key (`pass_key`) and who held it (`key_held_by`),
+    /// and the refusal is reported with it. Any other failure is reported,
+    /// and the step goes on: its note and recovery item still run.
     pub(crate) fn breach(
         &mut self,
         now: Timestamp,
@@ -409,24 +492,60 @@ impl Reconciler {
         card_id: &str,
         details: Value,
         report: &mut Report,
-    ) -> bool {
-        let written = match self.key_used(&key) {
-            Ok(true) => return false,
-            Ok(false) => self.store.guard_breach(
-                &self.ctx(now).with_key(key.clone()),
-                guard,
-                Some(card_id),
-                details,
-            ),
-            Err(error) => Err(error),
-        };
-        match written {
-            Ok(_) => true,
+    ) -> Breach {
+        match self.try_breach(now, &key, guard, card_id, details) {
+            Ok(breach) => breach,
             Err(error) => {
                 report.error(&format!("{guard} breach {key}"), &error);
-                false
+                Breach::Failed
             }
         }
+    }
+
+    fn try_breach(
+        &mut self,
+        now: Timestamp,
+        key: &str,
+        guard: &str,
+        card_id: &str,
+        details: Value,
+    ) -> Result<Breach> {
+        if self.key_used(key)? || self.breach_recorded_without_key(guard, key)? {
+            return Ok(Breach::Recorded);
+        }
+        let keyed = self.store.guard_breach(
+            &self.ctx(now).with_key(key),
+            guard,
+            Some(card_id),
+            details.clone(),
+        );
+        if self.planted(key, keyed)?.is_some() {
+            return Ok(Breach::Written);
+        }
+        let held_by = self.key_holder(key)?.map(|(actor, _)| actor);
+        let mut details = match details {
+            Value::Object(map) => map,
+            other => serde_json::Map::from_iter([("details".to_owned(), other)]),
+        };
+        details.insert("pass_key".into(), json!(key));
+        details.insert("key_held_by".into(), json!(held_by));
+        self.store
+            .guard_breach(&self.ctx(now), guard, Some(card_id), Value::Object(details))?;
+        Ok(Breach::Written)
+    }
+
+    /// Whether the pass already recorded `guard`'s breach without its key,
+    /// because another actor held `key` (see [`Self::breach`]). Only the
+    /// daemon writes `daemon` events, so no session can fake this record.
+    fn breach_recorded_without_key(&self, guard: &str, key: &str) -> Result<bool> {
+        let actor = Actor::Daemon.to_string();
+        Ok(self.conn().query_row(
+            "SELECT EXISTS (SELECT 1 FROM events
+                             WHERE kind = 'guard.breached' AND entity_id = ?1 AND actor = ?2
+                               AND json_extract(payload, '$.pass_key') = ?3)",
+            [guard, actor.as_str(), key],
+            |row| row.get(0),
+        )?)
     }
 
     /// Whether the pass's own mutation under `key` already ran: the key is
