@@ -536,25 +536,7 @@ fn an_interrupted_run_stops_the_curator_and_what_it_started() {
         "#!/bin/sh\nsleep 300 &\necho $! > \"$(dirname \"$0\")/grandchild.pid\"\n\
          echo $$ > \"$(dirname \"$0\")/curator.pid\"\nwait\n",
     );
-    let tiller = Command::new(env!("CARGO_BIN_EXE_tiller"))
-        .env("TILLER_HOME", world.home())
-        // The environment `World` gives the owner, built here because the
-        // run must not block the test.
-        .env("CLAUDE_CONFIG_DIR", world.dir.path().join("claude"))
-        .env("TILLER_TEST_OWNER", "1")
-        .env_remove("TILLER_DB")
-        .env_remove("TILLER_SESSION_ID")
-        .env_remove("TILLER_RUN_ID")
-        .env_remove("TILLER_SSH")
-        .env_remove("TILLER_GH")
-        .env_remove("CLAUDECODE")
-        .env_remove("SSH_CONNECTION")
-        .args(["--json", "retro", "run", &retro])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+    let tiller = world.spawn(&["retro", "run", &retro]);
     let pid_file = |name: &str| world.dir.path().join(name);
     assert!(
         wait_for(|| pid_file("curator.pid").exists() && pid_file("grandchild.pid").exists()),
@@ -597,34 +579,18 @@ fn an_interrupted_run_stops_the_curator_and_what_it_started() {
     );
 }
 
-/// Once the curator has ended, Ctrl-C ends tiller again, even while it
-/// waits to record the retro's end on a busy database.
+/// A Ctrl-C that comes while tiller records the curator's end, here
+/// waiting on a busy database, does not cut that record: the retro ends
+/// `unfinished` and can run again at once, not only after its claim runs
+/// out.
 #[test]
-fn a_ctrl_c_after_the_curator_ended_ends_tiller() {
+fn a_ctrl_c_while_the_end_is_recorded_still_records_it() {
     use std::os::unix::process::ExitStatusExt;
     let (world, _fake, retro) = curator_world(
         "#!/bin/sh\necho $$ > \"$(dirname \"$0\")/curator.pid\"\n\
          while [ ! -e \"$(dirname \"$0\")/go\" ]; do sleep 0.05; done\nexit 3\n",
     );
-    let mut tiller = Command::new(env!("CARGO_BIN_EXE_tiller"))
-        .env("TILLER_HOME", world.home())
-        // The environment `World` gives the owner, built here because the
-        // run must not block the test.
-        .env("CLAUDE_CONFIG_DIR", world.dir.path().join("claude"))
-        .env("TILLER_TEST_OWNER", "1")
-        .env_remove("TILLER_DB")
-        .env_remove("TILLER_SESSION_ID")
-        .env_remove("TILLER_RUN_ID")
-        .env_remove("TILLER_SSH")
-        .env_remove("TILLER_GH")
-        .env_remove("CLAUDECODE")
-        .env_remove("SSH_CONNECTION")
-        .args(["--json", "retro", "run", &retro])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+    let tiller = world.spawn(&["retro", "run", &retro]);
     let pid_file = world.dir.path().join("curator.pid");
     assert!(
         wait_for(|| std::fs::read_to_string(&pid_file).is_ok_and(|s| s.ends_with('\n'))),
@@ -639,24 +605,20 @@ fn a_ctrl_c_after_the_curator_ended_ends_tiller() {
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();
     std::fs::write(world.dir.path().join("go"), "").unwrap();
     assert!(wait_for(|| gone(&curator)), "the curator did not end");
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    // Past tiller's 200 ms look at the curator, so it waits on the lock.
+    std::thread::sleep(std::time::Duration::from_millis(500));
     let sent = Command::new("kill")
         .args(["-INT", &tiller.id().to_string()])
         .status()
         .unwrap();
     assert!(sent.success());
-    let started = std::time::Instant::now();
-    let mut status = None;
-    while status.is_none() && started.elapsed() < std::time::Duration::from_secs(10) {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        status = tiller.try_wait().unwrap();
-    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    lock.execute_batch("ROLLBACK").unwrap();
     drop(lock);
-    let status = match status {
-        Some(status) => status,
-        None => tiller.wait().unwrap(),
-    };
-    assert_eq!(status.signal(), Some(2), "{status:?}");
+    let output = tiller.wait_with_output().unwrap();
+    assert_eq!(output.status.signal(), None, "{:?}", output.status);
+    let out: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(out["data"]["retro"]["outcome"], "unfinished", "{out}");
 }
 
 #[test]

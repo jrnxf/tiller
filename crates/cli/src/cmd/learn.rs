@@ -361,8 +361,6 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
     })?;
     let claimed = claim(&tools, &config, &mut store, &app.ctx(), &retro.id)?;
     let ran = launch(&claimed, &interrupt);
-    // The curator's group is gone, so Ctrl-C ends tiller again.
-    drop(interrupt);
     // The end is its own write, at the time the run ended: the claim's
     // context holds the claim's time and key.
     let ctx = app.ctx().unkeyed();

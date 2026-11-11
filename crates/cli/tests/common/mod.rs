@@ -138,6 +138,20 @@ impl World {
         self.env.borrow_mut().push((key.into(), value.into()));
     }
 
+    /// Starts `tiller --json <args>` as the owner and returns at once, for a
+    /// run the test acts on while it runs. Its stdout is piped.
+    pub fn spawn(&self, args: &[&str]) -> std::process::Child {
+        use std::process::Stdio;
+        self.command(None)
+            .arg("--json")
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
     /// Runs `tiller --json <args>` as the owner.
     pub fn run(&self, args: &[&str]) -> Out {
         self.exec(None, args, None)
