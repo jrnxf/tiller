@@ -41,6 +41,17 @@ if (typeof document !== "undefined") {
     },
     true,
   );
+  // Only the press's own click opens a dialog from it: after that task, a
+  // dialog that opens (a stream event, a timer) is not the button's.
+  const forget = () => {
+    const was = pressed;
+    setTimeout(() => {
+      if (pressed === was) pressed = null;
+    }, 0);
+  };
+  document.addEventListener("click", forget, true);
+  document.addEventListener("pointerup", forget, true);
+  document.addEventListener("pointercancel", forget, true);
   document.addEventListener(
     "focusin",
     (event) => {

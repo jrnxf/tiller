@@ -341,3 +341,34 @@ test("a dialog opened by a key after a click has no opener to go back to", () =>
   fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
   expect(document.activeElement).toBe(document.body);
 });
+
+// A dialog the page opens by itself, as a stream event or a timer would.
+function Pushed({ open }: { open: boolean }) {
+  return (
+    <>
+      <button type="button">Mark</button>
+      {open ? (
+        <Modal className="dialog" label="Pushed dialog" onClose={() => {}}>
+          <button type="button">Inside</button>
+        </Modal>
+      ) : null}
+    </>
+  );
+}
+
+test("a dialog that opens long after a click that moved no focus does not go back to that button", async () => {
+  const { rerender } = render(<Pushed open={false} />);
+  (document.activeElement as HTMLElement | null)?.blur();
+  const mark = screen.getByRole("button", { name: "Mark" });
+  // Safari: the click leaves focus on the page.
+  fireEvent.pointerDown(mark);
+  fireEvent.mouseDown(mark);
+  fireEvent.pointerUp(mark);
+  fireEvent.click(mark);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  rerender(<Pushed open />);
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Inside" }));
+  rerender(<Pushed open={false} />);
+  expect(document.activeElement).not.toBe(mark);
+});
