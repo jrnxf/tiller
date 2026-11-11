@@ -738,16 +738,7 @@ impl Walker<'_, '_> {
         let shown = texts(words);
         let mut i = 0;
         loop {
-            let Some(program) = words.get(i) else {
-                // A wrapper with no program left runs the words `xargs`
-                // appends (`xargs env --`, `nix develop -c -l`).
-                return match words.first() {
-                    Some(first) if appended => {
-                        self.appended_input(basename(&first.text), command, script)
-                    }
-                    _ => None,
-                };
-            };
+            let program = words.get(i)?;
             if !program.fixed {
                 return self.unknown_program(&words[i..]);
             }
@@ -817,7 +808,14 @@ impl Walker<'_, '_> {
                             _ => {}
                         }
                     }
-                    let tail = words.get(j..).filter(|tail| !tail.is_empty())?;
+                    let Some(tail) = words.get(j..).filter(|tail| !tail.is_empty()) else {
+                        // `xargs xargs`: the input is the inner command.
+                        return if appended {
+                            self.appended_input("xargs", command, script)
+                        } else {
+                            None
+                        };
+                    };
                     // A word that holds the replace string is only known
                     // once xargs reads its input.
                     let tail: Vec<Arg> = tail
@@ -831,6 +829,19 @@ impl Walker<'_, '_> {
                         })
                         .collect();
                     let appended = appended || replace.is_none();
+                    // A wrapper may leave the appended words as its
+                    // command (`xargs sudo`, `xargs timeout 5`, `xargs nix
+                    // develop -c --`), so input that names a protected
+                    // command is not read past one.
+                    if appended
+                        && tail
+                            .first()
+                            .is_some_and(|first| first.fixed && runs_words(basename(&first.text)))
+                        && let Some(found) =
+                            self.appended_input(basename(&tail[0].text), command, script)
+                    {
+                        return Some(found);
+                    }
                     return self.exec(&tail, command, script, false, appended);
                 }
                 "nix" => match self.nix(words, i, command, script, appended, &shown) {
@@ -1222,14 +1233,14 @@ impl Walker<'_, '_> {
                 }
                 break;
             }
+            if !known && !word.text.starts_with('-') {
+                sub.read(&word);
+                // `nix env shell`: `env` takes a subcommand of its own.
+                known = free && !word.is("env");
+            }
             let flag = word.text.clone();
             own.push(word);
             if !flag.starts_with('-') {
-                if !known {
-                    sub.read(&Arg::fixed(&flag));
-                    // `nix env shell`: `env` takes a subcommand of its own.
-                    known = free && flag != "env";
-                }
                 continue;
             }
             let (name, value) = (list.front().map(|w| &w.0), list.get(1).map(|w| &w.0));
@@ -1313,7 +1324,7 @@ impl Walker<'_, '_> {
         // `xargs nix develop` or `xargs nix develop -c`: the input may be
         // nix's flags or the command.
         if appended
-            && sure.is_none()
+            && sure.as_ref().is_none_or(Vec::is_empty)
             && let Some(found) = self.appended_input("nix", command, script)
         {
             return Some(Some(found));
@@ -3837,6 +3848,32 @@ fn piped_texts(command: &Simple, script: &Script) -> Vec<String> {
         }
     }
     texts
+}
+
+/// Whether a program may run the words after its own as a command: a
+/// shell, a wrapper or a command runner.
+fn runs_words(name: &str) -> bool {
+    const WRAPPERS: &[&str] = &[
+        "env",
+        "command",
+        "builtin",
+        "busybox",
+        "exec",
+        "xargs",
+        "sudo",
+        "doas",
+        "su",
+        "nix",
+        "nix-shell",
+        "direnv",
+        "watch",
+        "pwsh",
+        "eval",
+        "ssh",
+        "mosh",
+        "et",
+    ];
+    SHELLS.contains(&name) || WRAPPERS.contains(&name) || options::runner(name).is_some()
 }
 
 /// What the guard knows of nix's subcommand: whether it may start a

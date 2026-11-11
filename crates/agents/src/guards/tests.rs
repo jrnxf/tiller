@@ -2000,6 +2000,32 @@ fn nix_command_forms_are_read() {
             OWNER,
         ),
         ("echo src | xargs nix develop -c --", None),
+        (
+            "printf '%s\\n' tiller approve 01JABC | xargs nix shell nixpkgs#hello -c",
+            OWNER,
+        ),
+        // Any wrapper may leave the appended words as its command.
+        ("printf '%s\\n' tiller approve 01JABC | xargs sudo", OWNER),
+        (
+            "printf '%s\\n' tiller approve 01JABC | xargs sudo --",
+            OWNER,
+        ),
+        ("printf '%s\\n' tiller approve 01JABC | xargs doas", OWNER),
+        (
+            "printf '%s\\n' tiller approve 01JABC | xargs timeout 5",
+            OWNER,
+        ),
+        ("printf '%s\\n' tiller approve 01JABC | xargs nohup", OWNER),
+        ("printf '%s\\n' tiller approve 01JABC | xargs xargs", OWNER),
+        (
+            "printf '%s\\n' tiller approve 01JABC | xargs nix develop -c sudo",
+            OWNER,
+        ),
+        (
+            "printf '%s\\n' tiller approve 01JABC | xargs nix shell nixpkgs#hello -c xargs",
+            OWNER,
+        ),
+        ("echo src | xargs timeout 5 ls", None),
         // `nix shell` runs the first word as the program.
         ("nix shell nixpkgs#hello -c -c true", None),
         // `nix print-dev-env` prints the shell hook for a shell to run.
