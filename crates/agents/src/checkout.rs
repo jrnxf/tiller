@@ -336,13 +336,25 @@ fn finish(
     ) {
         Ended::Exited(status) => Ok(status),
         Ended::TimedOut => Err(format!(
-            "the clone of {remote} took over {} minutes and was stopped",
-            limit.as_secs() / 60
+            "the clone of {remote} took over {} and was stopped",
+            span(limit)
         )),
         Ended::Failed(error) => Err(format!("git clone: {error}")),
         // No interrupt is passed, so none is caught.
         Ended::Interrupted => Err("git clone: interrupted".to_owned()),
     }
+}
+
+/// `limit` in whole minutes, or in seconds (rounded up) under a minute.
+fn span(limit: Duration) -> String {
+    let seconds = limit.as_millis().div_ceil(1000);
+    let (count, unit) = if seconds < 60 {
+        (seconds, "second")
+    } else {
+        (seconds / 60, "minute")
+    };
+    let plural = if count == 1 { "" } else { "s" };
+    format!("{count} {unit}{plural}")
 }
 
 /// Removes what a clone put in a folder that was empty before it.
@@ -807,7 +819,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             why,
-            "the clone of https://example.com/web.git took over 0 minutes and was stopped"
+            "the clone of https://example.com/web.git took over 1 second and was stopped"
         );
         // Gone, or a zombie waiting on whoever reaps orphans here.
         let alive = || {
@@ -838,5 +850,14 @@ mod tests {
         assert_eq!(why, "a clone into /home/user/code/web is running already");
         drop(first);
         assert!(Claim::take(path).is_ok());
+    }
+
+    #[test]
+    fn a_limit_is_said_in_minutes_or_seconds() {
+        assert_eq!(span(Duration::from_secs(600)), "10 minutes");
+        assert_eq!(span(Duration::from_secs(60)), "1 minute");
+        assert_eq!(span(Duration::from_secs(90)), "1 minute");
+        assert_eq!(span(Duration::from_secs(30)), "30 seconds");
+        assert_eq!(span(Duration::from_millis(200)), "1 second");
     }
 }
