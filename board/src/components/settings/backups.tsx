@@ -8,10 +8,6 @@ import { ActionError, sendMutation } from "../attention/api";
 import { ulid } from "../attention/ulid";
 import "./settings.css";
 
-// How many backups the list shows. The daemon keeps more, and sends as many
-// as this.
-const SHOWN = 6;
-
 const MB = 1024 * 1024;
 
 // "48 MB", or "1.2 GB" past a thousand; under one MB, "312 KB".
@@ -37,7 +33,7 @@ function failureText(row: BackupRow): string {
 // Why the list did not load, as a sentence.
 function listErrorText(error: unknown): string {
   const reason = error instanceof ReadError ? error.reason : null;
-  return `The backups did not load${reason ? `: ${reason.replace(/[.\s]+$/, "")}` : ""}. Back up now still works.`;
+  return `The backups did not load${reason ? `: ${reason.replace(/[.\s]+$/, "")}` : ""}.`;
 }
 
 function BackupLine({ row }: { row: BackupRow }) {
@@ -75,9 +71,14 @@ export function Backups({ host }: { host: string | null }) {
     ...backupsQuery(),
     refetchInterval: (read) => (read.state.data?.running ? 2000 : false),
   });
-  const list = query.data;
+  // A refetch that fails keeps the last data in the query; the section says
+  // the list did not load rather than show rows that may be stale.
+  const list = query.isError ? undefined : query.data;
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The row a failed Back up now left. The list shows it; this shows it
+  // when the list did not load.
+  const [failedRun, setFailedRun] = useState<BackupRow | null>(null);
   if (!list && !query.isError) return null;
   const running = starting || (list?.running ?? false);
   const refresh = () => queryClient.invalidateQueries({ queryKey: queryKeyFor(backupsPath) });
@@ -85,7 +86,11 @@ export function Backups({ host }: { host: string | null }) {
     if (running) return;
     setStarting(true);
     setError(null);
+    setFailedRun(null);
     sendMutation<BackupRow>("POST", backupsPath, { idempotency_key: ulid() })
+      .then((reply) => {
+        if (reply.data?.status === "failed") setFailedRun(reply.data);
+      })
       .catch((caught: unknown) => {
         setError(
           caught instanceof ActionError
@@ -118,6 +123,13 @@ export function Backups({ host }: { host: string | null }) {
             </div>
           </div>
         ) : null}
+        {!list && failedRun ? (
+          <div className="set-row" role="alert" data-testid="backup-run-failed">
+            <div className="set-text">
+              <p className="set-error">{failureText(failedRun)}</p>
+            </div>
+          </div>
+        ) : null}
         {!list ? (
           <div className="set-row" data-testid="backups-unread">
             <div className="set-text">
@@ -132,7 +144,7 @@ export function Backups({ host }: { host: string | null }) {
             </div>
           </div>
         ) : (
-          list.backups.slice(0, SHOWN).map((row) => <BackupLine key={row.id} row={row} />)
+          list.backups.map((row) => <BackupLine key={row.id} row={row} />)
         )}
         {list ? (
           <div className="set-row">
@@ -150,8 +162,9 @@ export function Backups({ host }: { host: string | null }) {
             <h2>Export and restore</h2>
             <p>
               They write outside this folder or replace the state, so they stay in a terminal. Stop
-              the daemon before a restore, and run it with --dry-run first. With no file it takes
-              the newest verified backup.
+              the daemon before a restore, and run it with{" "}
+              <code className="set-flag">--dry-run</code> first. With no file it takes the newest
+              verified backup.
             </p>
           </div>
           <div className="set-value set-commands" data-testid="backup-commands">

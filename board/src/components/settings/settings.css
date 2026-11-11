@@ -38,6 +38,11 @@
   color: var(--fg-2);
 }
 
+/* A command-line flag, which must not break at its own hyphens. */
+.set-text code.set-flag {
+  white-space: nowrap;
+}
+
 .set-sec-h .btn {
   flex: none;
   gap: 6px;

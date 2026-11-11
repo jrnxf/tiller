@@ -304,6 +304,23 @@ async fn corruption_found_by_back_up_now_makes_the_daemon_read_only() {
     let refused = send(&app, create(&[("cookie", &cookie)])).await;
     assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(refused.body.contains("read only"), "{}", refused.body);
+    let again = send(
+        &app,
+        mutation(
+            "POST",
+            "/api/v1/backups",
+            json!({"idempotency_key": "k-2"}),
+            &[("cookie", cookie.as_str())],
+        ),
+    )
+    .await;
+    assert_eq!(
+        again.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        again.body
+    );
+    assert!(again.body.contains("read only"), "{}", again.body);
 }
 
 /// A restored database passes the next start's check, which lifts the mode.

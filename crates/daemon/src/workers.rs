@@ -445,6 +445,10 @@ pub struct Backups {
     zone: TimeZone,
     db: PathBuf,
     damage: Damage,
+    /// The next time a pass is due, from the last pass. Polls before it do
+    /// not take the manifest lock, so a manifest that cannot be read or a
+    /// failed night is looked at again only when its retry is due.
+    not_before: Option<Timestamp>,
 }
 
 impl Source for Backups {
@@ -457,14 +461,18 @@ impl Source for Backups {
     }
 
     fn poll(&mut self, now: Timestamp) -> Result<(), PollError> {
-        if self.damage.reason().is_some() {
+        if self.damage.reason().is_some() || self.not_before.is_some_and(|due| now < due) {
             return Ok(());
         }
         let pass = backup::nightly(&mut self.store, &self.paths, now, &self.zone)
             .inspect_err(|error| self.damage.suspect(&self.db, error))?;
+        self.not_before = match &pass {
+            Nightly::NotDue { next } | Nightly::Failed { next, .. } => Some(*next),
+            Nightly::Done(_) => None,
+        };
         match pass {
             Nightly::NotDue { .. } => {}
-            Nightly::Done { entry, .. } => {
+            Nightly::Done(backup::Taken { entry, .. }) => {
                 tracing::info!(file = entry.file, "took the nightly backup");
             }
             Nightly::Failed { error, next, alarm } => {
@@ -845,6 +853,7 @@ pub fn start(
         zone: TimeZone::system(),
         db: db.clone(),
         damage: damage.clone(),
+        not_before: None,
     };
 
     let mut handles = Vec::new();
@@ -1426,6 +1435,7 @@ esac
             zone: TimeZone::UTC,
             db: fleet.db.clone(),
             damage: Damage::default(),
+            not_before: None,
         };
         let at = |text: &str| text.parse::<Timestamp>().unwrap();
         let nightly = |manifest: &backup::Manifest| {
@@ -1456,5 +1466,33 @@ esac
         assert_eq!(manifest.next_night, Some(at("2026-11-07T03:00:00Z")));
         worker.poll(at("2026-11-06T09:01:00Z")).unwrap();
         assert_eq!(nightly(&backup::Manifest::load(&paths).unwrap()), 2);
+    }
+
+    #[test]
+    fn the_backup_worker_waits_for_the_retry_after_a_failed_pass() {
+        let fleet = tiller_herdr::testing::Fleet::new();
+        let paths = backup::Paths::in_home(fleet.dir.path());
+        let mut worker = Backups {
+            store: fleet.open(),
+            paths: paths.clone(),
+            zone: TimeZone::UTC,
+            db: fleet.db.clone(),
+            damage: Damage::default(),
+            not_before: None,
+        };
+        let at = |text: &str| text.parse::<Timestamp>().unwrap();
+        std::fs::create_dir_all(&paths.backups).unwrap();
+        std::fs::write(paths.manifest(), "not json").unwrap();
+
+        worker.poll(at("2026-11-03T03:00:00Z")).unwrap();
+        assert_eq!(worker.not_before, Some(at("2026-11-03T04:00:00Z")));
+
+        // Polls before the retry do not look at the manifest again.
+        std::fs::remove_file(paths.manifest()).unwrap();
+        worker.poll(at("2026-11-03T03:30:00Z")).unwrap();
+        assert!(!paths.manifest().exists());
+
+        worker.poll(at("2026-11-03T04:00:00Z")).unwrap();
+        assert!(paths.manifest().exists(), "the retry schedules the night");
     }
 }

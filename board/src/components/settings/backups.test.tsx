@@ -128,13 +128,41 @@ test("a list that does not load says so and keeps Back up now", async () => {
   serve("backups-unread");
   renderBackups();
   const unread = await screen.findByTestId("backups-unread");
-  expect(unread.textContent).toContain(
-    "The backups did not load: the backup manifest does not parse",
+  expect(unread.textContent).toBe(
+    "The backups did not load: the backup manifest does not parse: expected value at line 1 column 1.",
   );
-  expect(unread.textContent).toContain("Back up now still works.");
   const button = screen.getByRole("button", { name: "Back up now" });
   expect((button as HTMLButtonElement).disabled).toBe(false);
   expect(screen.getByTestId("backup-commands").textContent).toContain("tiller restore --dry-run");
+});
+
+test("a failed Back up now shows its reason when the list did not load", async () => {
+  const failed = {
+    id: "failed-1",
+    kind: "manual",
+    at: "2026-11-11T10:00:00Z",
+    status: "failed",
+    size: null,
+    error: "internal: the backup manifest does not parse",
+  };
+  serve(
+    "backups-unread",
+    () =>
+      new Response(
+        JSON.stringify({
+          ok: true,
+          replayed: false,
+          events: [],
+          receipt: { recorded_at: "2026-11-11T10:00:01Z" },
+          data: failed,
+        }),
+      ),
+  );
+  renderBackups();
+  fireEvent.click(await screen.findByRole("button", { name: "Back up now" }));
+  expect((await screen.findByTestId("backup-run-failed")).textContent).toBe(
+    "Not verified: internal: the backup manifest does not parse. The previous verified backup is kept. Try again.",
+  );
 });
 
 test("a refusal from the daemon shows in the section", async () => {

@@ -220,7 +220,7 @@ fn truncated_backup_is_refused_and_previous_one_restores() {
         .card_create(&owner(), None, new_card("second"), None)
         .unwrap()
         .value;
-    let Nightly::Done { entry: newest, .. } =
+    let Nightly::Done(Taken { entry: newest, .. }) =
         nightly(&mut store, paths, at("2026-11-02T03:00:00Z")).unwrap()
     else {
         panic!("the second night did not back up");
@@ -361,7 +361,7 @@ fn retention_keeps_an_older_verified_backup_when_kept_ones_rot() {
     // its own copy verifies, so the first night's, which no rule keeps,
     // stays as the second verified backup.
     let done = nightly(&mut store, paths, start.plus_minutes(20 * 24 * 60)).unwrap();
-    let Nightly::Done { retention, .. } = done else {
+    let Nightly::Done(Taken { retention, .. }) = done else {
         panic!("{done:?}");
     };
     assert!(retention.kept.contains(&oldest.file), "{retention:?}");
@@ -695,7 +695,7 @@ fn migration_copy_is_kept_until_the_next_nightly_backup_verifies() {
     assert!(host_id.is_some());
 
     let done = nightly(&mut store, paths, at("2026-11-03T03:00:00Z")).unwrap();
-    let Nightly::Done { retention, .. } = done else {
+    let Nightly::Done(Taken { retention, .. }) = done else {
         panic!("{done:?}");
     };
     assert_eq!(retention.deleted, vec![copy.clone()]);
@@ -767,7 +767,7 @@ fn retention_finishes_a_cleanup_an_earlier_pass_left() {
         .unwrap();
 
     let done = nightly(&mut store, paths, at("2026-11-02T03:00:00Z")).unwrap();
-    let Nightly::Done { retention, .. } = done else {
+    let Nightly::Done(Taken { retention, .. }) = done else {
         panic!("{done:?}");
     };
     assert_eq!(retention.deleted, vec![stale.file.clone()]);
@@ -1246,7 +1246,7 @@ fn the_first_pass_schedules_the_first_night_at_three() {
     let early = nightly(&mut store, paths, at("2026-11-12T02:59:00Z")).unwrap();
     assert_eq!(early, Nightly::NotDue { next: tonight });
     let done = nightly(&mut store, paths, at("2026-11-12T03:00:40Z")).unwrap();
-    let Nightly::Done { entry, .. } = done else {
+    let Nightly::Done(Taken { entry, .. }) = done else {
         panic!("{done:?}");
     };
     assert_eq!(entry.kind, EntryKind::Nightly);
@@ -1280,6 +1280,64 @@ fn missed_nights_are_made_up_by_one_backup_at_the_next_pass() {
         .filter(|entry| entry.kind == EntryKind::Nightly)
         .count();
     assert_eq!(nightly_entries, 2);
+}
+
+/// A make-up backup taken just before 03:00 is that night's: the next one
+/// is the following night, not 30 minutes later.
+#[test]
+fn a_make_up_just_before_the_hour_is_that_nights_backup() {
+    let host = host();
+    let paths = &host.paths;
+    let mut store = Store::open(&paths.db).unwrap();
+    setup(&mut store, "test-host", Boundary::Personal);
+    nightly(&mut store, paths, at("2026-11-01T03:00:00Z")).unwrap();
+
+    let back = at("2026-11-04T02:30:00Z");
+    let done = nightly(&mut store, paths, back).unwrap();
+    assert!(matches!(done, Nightly::Done { .. }), "{done:?}");
+    let next = at("2026-11-05T03:00:00Z");
+    assert_eq!(
+        nightly(&mut store, paths, at("2026-11-04T03:00:00Z")).unwrap(),
+        Nightly::NotDue { next }
+    );
+}
+
+/// A copy by hand after a failed night does not end that night: the retry
+/// an hour later still runs, and the failure stays on record until a
+/// nightly copy verifies.
+#[test]
+fn a_backup_by_hand_does_not_end_a_failed_night() {
+    let host = host();
+    let paths = &host.paths;
+    let mut store = Store::open(&paths.db).unwrap();
+    setup(&mut store, "test-host", Boundary::Personal);
+    nightly(&mut store, paths, at("2026-11-01T03:00:00Z")).unwrap();
+
+    // The night of the 2nd fails: the backups folder cannot take a file.
+    let night = at("2026-11-02T03:00:00Z");
+    let mut failure = Manifest::load(paths).unwrap();
+    failure.failures.push(Failure {
+        at: night,
+        error: "disk full".into(),
+        retry: false,
+    });
+    failure
+        .save(paths, &ManifestLock::acquire(paths).unwrap())
+        .unwrap();
+
+    backup(store.conn(), paths, night.plus_minutes(10)).unwrap();
+    let manifest = Manifest::load(paths).unwrap();
+    assert_eq!(manifest.failures.len(), 1, "the night is not over");
+    assert_eq!(
+        nightly(&mut store, paths, night.plus_minutes(11)).unwrap(),
+        Nightly::NotDue {
+            next: night.plus_minutes(60)
+        },
+        "no second copy before the retry"
+    );
+    let retried = nightly(&mut store, paths, night.plus_minutes(60)).unwrap();
+    assert!(matches!(retried, Nightly::Done { .. }), "{retried:?}");
+    assert!(Manifest::load(paths).unwrap().failures.is_empty());
 }
 
 /// The night stays at 03:00 host time across a clock change: in Lisbon,

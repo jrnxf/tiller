@@ -25,6 +25,7 @@ use utoipa::ToSchema;
 
 use crate::api::{
     ApiError, ApiResult, AppState, body, guard, key, not_forwarded, owner_only, uninitialized,
+    writable,
 };
 use crate::dto::{ErrorBody, MutationResponse, Receipt};
 use crate::readonly::Damage;
@@ -32,16 +33,16 @@ use crate::readonly::Damage;
 /// The most rows the list returns: as many as Settings > Backups shows.
 const LISTED: usize = 6;
 
-/// What the board knows of a backup run it started: whether one is running,
-/// why the last one by hand failed, and the last run's key and row, which a
-/// retry with that key gets again. A failed run leaves nothing in the
+/// What the board knows of a backup run it started: the key of the one
+/// running, why the last one by hand failed, and the last run's key and row,
+/// which a retry with that key gets again. A failed run leaves nothing in the
 /// manifest, so the daemon keeps its reason until a newer backup verifies.
 #[derive(Clone, Default)]
 pub struct BackupJobs(Arc<Mutex<Jobs>>);
 
 #[derive(Default)]
 struct Jobs {
-    running: bool,
+    running: Option<String>,
     failed: Option<BackupRow>,
     last: Option<(String, BackupRow)>,
 }
@@ -51,21 +52,35 @@ impl BackupJobs {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Takes the one place to run in, or `None` while a backup runs.
-    fn begin(&self) -> Option<Running> {
+    /// Takes the one place to run in for a run under `key`, or `None` while
+    /// a backup runs.
+    fn begin(&self, key: &str) -> Option<Running> {
         let mut jobs = self.lock();
-        if jobs.running {
+        if jobs.running.is_some() {
             return None;
         }
-        jobs.running = true;
+        jobs.running = Some(key.to_owned());
         Some(Running(self.clone()))
     }
 
-    /// The row the last run left, when it ran under `key`.
-    fn replay(&self, key: &str) -> Option<BackupRow> {
-        let jobs = self.lock();
-        let (last, row) = jobs.last.as_ref()?;
-        (last == key).then(|| row.clone())
+    /// The row the run under `key` left. A retry that arrives while that
+    /// run is still going waits for it. `None` when no run under `key` is
+    /// known, or the one that ran left no row.
+    async fn replay(&self, key: &str) -> Option<BackupRow> {
+        loop {
+            {
+                let jobs = self.lock();
+                if let Some((last, row)) = &jobs.last
+                    && last == key
+                {
+                    return Some(row.clone());
+                }
+                if jobs.running.as_deref() != Some(key) {
+                    return None;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
     }
 }
 
@@ -105,7 +120,7 @@ impl Running {
 
 impl Drop for Running {
     fn drop(&mut self) {
-        self.0.lock().running = false;
+        self.0.lock().running = None;
     }
 }
 
@@ -206,8 +221,9 @@ fn failed_row(kind: &str, at: Timestamp, error: String) -> BackupRow {
     }
 }
 
-/// The rows of a manifest and the daemon's own failed run, newest first. The
-/// failed run shows only until a newer backup verifies, whoever took it.
+/// The rows of a manifest and the failed attempts, newest first. A failed
+/// attempt (the daemon's own run, or a night in the manifest) shows only
+/// until a newer backup verifies, whoever took it.
 fn rows(paths: &Paths, manifest: &Manifest, failed: Option<BackupRow>) -> Vec<BackupRow> {
     let listed: Vec<(&Entry, &'static str)> = manifest
         .live()
@@ -215,7 +231,7 @@ fn rows(paths: &Paths, manifest: &Manifest, failed: Option<BackupRow>) -> Vec<Ba
         .filter_map(|entry| kind_of(entry.kind).map(|kind| (entry, kind)))
         .collect();
     let newest = listed.first().map(|(entry, _)| entry.at);
-    let failed = failed.filter(|row| newest.is_none_or(|newest| Some(newest) < at(row)));
+    let current = |row: &BackupRow| newest.is_none_or(|newest| Some(newest) < at(row));
     let mut rows: Vec<BackupRow> = listed
         .into_iter()
         .take(LISTED)
@@ -225,9 +241,10 @@ fn rows(paths: &Paths, manifest: &Manifest, failed: Option<BackupRow>) -> Vec<Ba
         manifest
             .failures
             .iter()
-            .map(|failure| failed_row("nightly", failure.at, failure.error.clone())),
+            .map(|failure| failed_row("nightly", failure.at, failure.error.clone()))
+            .filter(current),
     );
-    rows.extend(failed);
+    rows.extend(failed.filter(current));
     rows.sort_by(|a, b| at(b).cmp(&at(a)).then_with(|| b.id.cmp(&a.id)));
     rows.truncate(LISTED);
     rows
@@ -253,7 +270,7 @@ pub(crate) async fn list(
         let manifest = Manifest::load(&paths)?;
         let (running, failed) = {
             let jobs = jobs.lock();
-            (jobs.running, jobs.failed.clone())
+            (jobs.running.is_some(), jobs.failed.clone())
         };
         Ok::<_, Error>(BackupList {
             folder: paths.backups.display().to_string(),
@@ -267,11 +284,11 @@ pub(crate) async fn list(
 }
 
 #[utoipa::path(post, path = "/api/v1/backups", tag = "mutations", request_body = TakeBackup,
-    responses((status = 200, body = MutationResponse, description = "`data` is the `BackupRow` the run left: `verified`, or `failed` with the reason. A failed run keeps the previous verified backup. A retry with the last run's key gets its row again, `replayed`"),
+    responses((status = 200, body = MutationResponse, description = "`data` is the `BackupRow` the run left: `verified`, or `failed` with the reason. A failed run keeps the previous verified backup. A retry with the last run's key gets its row again, `replayed`, and waits for it while that run is going"),
               (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
               (status = 409, body = ErrorBody, description = "`conflict`: a backup is running"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
-              (status = 503, body = ErrorBody, description = "`unavailable`: before `tiller init`")))]
+              (status = 503, body = ErrorBody, description = "`unavailable`: before `tiller init`, or read only")))]
 pub(crate) async fn take(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -281,14 +298,15 @@ pub(crate) async fn take(
     let request: TakeBackup = body(&bytes)?;
     key(&request.idempotency_key)?;
     not_forwarded(&state, request.host.as_deref(), "a backup").await?;
-    if let Some(row) = state.0.backups.replay(&request.idempotency_key) {
+    writable(&state)?;
+    if let Some(row) = state.0.backups.replay(&request.idempotency_key).await {
         return answer(&row, true);
     }
     let db = state.db();
     if !db.exists() {
         return Err(uninitialized());
     }
-    let Some(running) = state.0.backups.begin() else {
+    let Some(running) = state.0.backups.begin(&request.idempotency_key) else {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "conflict",
@@ -408,9 +426,20 @@ mod tests {
         assert_eq!(list["running"], true, "the copy still runs: {list}");
         let second = send(&app, back_up_now("k-2", &cookie)).await;
         assert_eq!(second.status, StatusCode::CONFLICT, "{}", second.body);
+        // The board retries the dropped request with its key: it waits for
+        // the run and gets its row, not a conflict.
+        let retry = tokio::spawn({
+            let (app, request) = (app.clone(), back_up_now("k-1", &cookie));
+            async move { send(&app, request).await }
+        });
 
         held.unlock().unwrap();
         drop(held);
+        let retry = retry.await.unwrap();
+        assert_eq!(retry.status, StatusCode::OK, "{}", retry.body);
+        let retry: Value = serde_json::from_str(&retry.body).unwrap();
+        assert_eq!(retry["replayed"], true, "{retry}");
+        assert_eq!(retry["data"]["status"], "verified", "{retry}");
         let list = until_running(&app, &cookie, false).await;
         let rows = list["backups"].as_array().unwrap();
         assert_eq!(rows.len(), 1, "{list}");
@@ -437,6 +466,34 @@ mod tests {
         backup::backup(fleet.store.conn(), &paths, failed_at.plus_minutes(1)).unwrap();
         let shown = rows(&paths, &Manifest::load(&paths).unwrap(), Some(failed));
         assert_eq!(shown.len(), 1, "the failed row is gone: {shown:?}");
+        assert_eq!(shown[0].status, "verified");
+    }
+
+    /// A failed night in the manifest shows until a newer backup verifies,
+    /// also one taken by hand.
+    #[test]
+    fn a_failed_night_goes_once_a_newer_backup_verifies() {
+        let fleet = Fleet::new();
+        let paths = Paths::in_home(fleet.dir.path());
+        let failed_at = "2026-11-03T03:00:00Z".parse::<Timestamp>().unwrap();
+        let with_failure = |mut manifest: Manifest| {
+            manifest.failures.push(backup::Failure {
+                at: failed_at,
+                error: "disk full".into(),
+                retry: false,
+            });
+            manifest
+        };
+        let shown = rows(&paths, &with_failure(Manifest::load(&paths).unwrap()), None);
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(
+            (shown[0].kind.as_str(), shown[0].status.as_str()),
+            ("nightly", "failed")
+        );
+
+        backup::backup(fleet.store.conn(), &paths, failed_at.plus_minutes(5)).unwrap();
+        let shown = rows(&paths, &with_failure(Manifest::load(&paths).unwrap()), None);
+        assert_eq!(shown.len(), 1, "the failed night is gone: {shown:?}");
         assert_eq!(shown[0].status, "verified");
     }
 

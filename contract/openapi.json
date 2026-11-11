@@ -1963,7 +1963,7 @@
         },
         "responses": {
           "200": {
-            "description": "`data` is the `BackupRow` the run left: `verified`, or `failed` with the reason. A failed run keeps the previous verified backup. A retry with the last run's key gets its row again, `replayed`",
+            "description": "`data` is the `BackupRow` the run left: `verified`, or `failed` with the reason. A failed run keeps the previous verified backup. A retry with the last run's key gets its row again, `replayed`, and waits for it while that run is going",
             "content": {
               "application/json": {
                 "schema": {
@@ -2011,7 +2011,7 @@
             }
           },
           "503": {
-            "description": "`unavailable`: before `tiller init`",
+            "description": "`unavailable`: before `tiller init`, or read only",
             "content": {
               "application/json": {
                 "schema": {
