@@ -251,3 +251,34 @@ fn a_record_alone_takes_one_outcome_and_only_one() {
         ]
     );
 }
+
+/// An outcome that cannot be written after a send does not end the pass:
+/// the other new items are still notified in it.
+#[test]
+fn a_failed_outcome_write_does_not_stop_the_pass() {
+    let mut w = World::new();
+    let first = w.open(AttentionKind::Decision, "Raise capacity?", 2);
+    let second = w.open(AttentionKind::Decision, "Which release note?", 3);
+    w.fleet
+        .store
+        .conn()
+        .execute_batch(&format!(
+            "CREATE TRIGGER fault BEFORE INSERT ON events
+             WHEN NEW.kind = 'attention.notify_sent' AND NEW.entity_id = '{}'
+             BEGIN SELECT RAISE(ABORT, 'disk fault'); END;",
+            first.id
+        ))
+        .unwrap();
+
+    let report = w.notifier.pass(at(4)).unwrap();
+    assert_eq!(report.notified, [first.id.clone(), second.id.clone()]);
+    assert_eq!(w.shown().len(), 2);
+    assert_eq!(
+        kinds(&w, &second.id),
+        [
+            "attention.opened",
+            "attention.notified",
+            "attention.notify_sent"
+        ]
+    );
+}
