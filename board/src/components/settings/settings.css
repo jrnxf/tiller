@@ -970,8 +970,15 @@
 
 /* Backups: the terminal commands the board does not run. */
 .set-commands {
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+@media (max-width: 820px) {
+  .set-commands {
+    align-items: flex-start;
+  }
 }
 
 .set-commands code {
