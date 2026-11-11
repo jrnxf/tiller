@@ -2020,6 +2020,36 @@ fn replaying_a_failed_spawn_refuses() {
     assert!(refusal(&error).contains("before a pane opened"), "{error}");
 }
 
+/// An unrecorded lease that goes back is not reported as kept, even when
+/// the cleanup before it fails.
+#[test]
+fn a_failed_spawn_does_not_call_a_returned_worktree_kept() {
+    let mut rig = Rig::new();
+    // `run.place` fails after the lease, and the run cannot be ended, so
+    // cleanup refuses an active run.
+    rig.sql(
+        "CREATE TEMP TRIGGER refuse_placement BEFORE UPDATE OF worktree_path ON runs
+         WHEN NEW.worktree_path IS NOT NULL
+         BEGIN SELECT RAISE(ABORT, 'placement refused'); END",
+    );
+    rig.sql(
+        "CREATE TEMP TRIGGER refuse_end BEFORE UPDATE OF ended_at ON runs
+         WHEN NEW.ended_at IS NOT NULL
+         BEGIN SELECT RAISE(ABORT, 'end refused'); END",
+    );
+    let card = rig.card(CardKind::Ship, None);
+    let ctx = rig.orchestrator();
+    let error = rig
+        .try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
+        .unwrap_err();
+    let SpawnError::Undone { notes, .. } = &error else {
+        panic!("expected an undo note: {error}");
+    };
+    assert!(notes.contains("cleanup failed"), "{notes}");
+    assert!(!notes.contains("was kept"), "{notes}");
+    assert_eq!(rig.pool.returned().len(), 1);
+}
+
 #[test]
 fn a_failed_spawn_keeps_its_own_error_under_the_undo_notes() {
     let mut rig = Rig::new();
