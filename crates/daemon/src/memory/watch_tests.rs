@@ -330,7 +330,20 @@ fn a_rewrite_that_leaves_the_stat_as_it_was_is_still_a_change() {
     let home = tempfile::tempdir().unwrap();
     let root = repo(home.path(), "# Fleet\n\n- One.\n");
     let mut watcher = watcher(home.path());
+    // A document changed within one tick of the look that reads it, however
+    // long making the repo took: its mtime is ahead of every read here.
+    let soon = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(root.join("fleet.md"))
+        .unwrap()
+        .set_modified(soon)
+        .unwrap();
     look(&mut watcher);
+    assert!(
+        watcher.known.as_ref().unwrap().racy.contains("fleet.md"),
+        "the first look did not find fleet.md racy"
+    );
 
     std::fs::write(root.join("fleet.md"), "# Fleet\n\n- Two.\n").unwrap();
     // As a coarse clock would: the stat after the rewrite is the stat the

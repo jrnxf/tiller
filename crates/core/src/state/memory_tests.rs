@@ -999,8 +999,9 @@ fn deleting_a_project_removes_its_memory_and_unlinks_the_fleet_one() {
     assert_eq!(broken, 0);
 }
 
-/// U14: a proposal whose document moved after it was made is stale. Its
-/// hint names the act that clears it, which the memory view offers.
+/// A re-proposed member leaves its open change set: a set of one closes
+/// abandoned, and a bundle keeps the other members, whose earlier run no
+/// longer clears the gate.
 #[test]
 fn a_reproposed_member_leaves_its_open_change_set() {
     let (mut store, _) = memory_store();
@@ -1077,6 +1078,8 @@ fn a_reproposed_member_leaves_its_open_change_set() {
     assert!(removed[1].contains(&first), "{removed:?}");
 }
 
+/// U14: a proposal whose document moved after it was made is stale. Its
+/// hint names the act that clears it, which the memory view offers.
 #[test]
 fn a_stale_proposal_is_reproposed_on_the_current_text() {
     let (mut store, _) = memory_store();
