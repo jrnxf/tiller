@@ -1625,6 +1625,27 @@ fn nested_nix_readings_are_bounded() {
         ),
         (&format!("{timeouts}cargo test"), None),
     ]);
+    // A spent budget still reads what is sure: a direnv directory, a
+    // shell on standard input, and the files nix writes.
+    let spend = "direnv exec /tmp true; ".repeat(70);
+    verdicts(&[
+        (
+            &format!("{spend}direnv exec /tmp bash <<< 'tiller approve 01JABC'"),
+            Some(Code::OwnerOnly),
+        ),
+        (
+            &format!("{spend}chroot / <<< 'tiller approve 01JABC'"),
+            Some(Code::OwnerOnly),
+        ),
+        (
+            &format!(
+                "nix build -o /home/user/.gitconfig{} .#x",
+                " -X -c".repeat(70)
+            ),
+            Some(Code::GuardTamper),
+        ),
+        (&format!("{spend}cargo test"), None),
+    ]);
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }
 
@@ -1823,6 +1844,25 @@ fn nix_command_forms_are_read() {
         ("nix develop -LXc foo -c tiller approve 01JABC", OWNER),
         // A value that holds `-c` may be the flag, if nix takes no value.
         ("nix develop -k -Lc tiller approve 01JABC", OWNER),
+        ("nix develop -k -L-Lc tiller approve 01JABC", OWNER),
+        ("nix develop -k -Li -c true", ID),
+        ("nix develop -k -Lu TILLER_ROLE -c true", ID),
+        // `xargs` input may hold nix's flags.
+        ("echo '-c tiller approve 01JABC' | xargs nix develop", OWNER),
+        (
+            "echo \"--run 'tiller approve 01JABC'\" | xargs nix-shell",
+            OWNER,
+        ),
+        ("echo src | xargs nix develop -c ls", None),
+        // A long flag nix has as `--no-NAME` or `--extra-NAME`.
+        (
+            "nix develop --no-write-lock-file -c grep -i foo data.txt",
+            None,
+        ),
+        (
+            "nix --extra-experimental-features flakes develop -c grep -i foo data.txt",
+            None,
+        ),
         ("nix develop -k -c/bin/sh -c 'tiller approve 01JABC'", OWNER),
         (
             "nix develop --keep-env-var -vc tiller approve 01JABC",
@@ -1894,6 +1934,10 @@ fn direnv_exec_reads_both_shapes() {
     const OWNER: Option<Code> = Some(Code::OwnerOnly);
     verdicts(&[
         ("direnv exec . tiller approve 01JABC", OWNER),
+        // `xargs` appends the command.
+        ("echo 'tiller approve 01JABC' | xargs direnv exec .", OWNER),
+        ("echo 'tiller approve 01JABC' | xargs direnv exec", OWNER),
+        ("echo src | xargs direnv exec . ls", None),
         (
             "direnv exec /home/user/pool/3/alpha tiller approve 01JABC",
             OWNER,
