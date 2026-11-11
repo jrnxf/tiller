@@ -15,12 +15,12 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use serde::Serialize;
 use serde_json::{Value, json};
 use tiller_agents::land::app::{APP_DIR, AppKey, KEY_FILE, KeyError};
 use tiller_agents::roles::Role;
 use tiller_agents::spawn::config::SpawnConfig;
 use tiller_core::Timestamp;
+use tiller_daemon::dto::{CheckStatus, DoctorCheck, DoctorGate, DoctorReport};
 use tiller_herdr::client::{Cli, Herdr};
 use tiller_observe::hooks::{EVENTS, Handler};
 use tiller_reconcile::tools::{self, PROBE_TIMEOUT, read_version, version_parts};
@@ -44,71 +44,12 @@ const FIRSTMATE_SCRIPTS: [&str; 2] = ["fm-supervise-daemon.sh", "fm-watch.sh"];
 /// A config file this much newer than its newest event was edited by hand.
 const CONFIG_SLACK_MS: i64 = 5_000;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum Status {
-    Ok,
-    Warn,
-    Fail,
-}
-
-#[derive(Debug, Serialize)]
-struct Check {
-    name: String,
-    status: Status,
-    /// A failed required check fails the command; a failed optional one is
-    /// a warning.
-    required: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    version: Option<String>,
-    detail: String,
-}
-
-impl Check {
-    fn new(name: &str, required: bool, status: Status, detail: impl Into<String>) -> Self {
-        Self {
-            name: name.to_owned(),
-            status,
-            required,
-            version: None,
-            detail: detail.into(),
-        }
-    }
-
-    fn version(mut self, version: Option<String>) -> Self {
-        self.version = version;
-        self
-    }
-
-    /// A check that did not pass: `fail` when required, else `warn`.
-    fn missing(name: &str, required: bool, detail: impl Into<String>) -> Self {
-        let status = if required { Status::Fail } else { Status::Warn };
-        Self::new(name, required, status, detail)
-    }
-
-    fn failed(&self) -> bool {
-        self.required && self.status == Status::Fail
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct Gate {
-    project: String,
-    merge_gate: String,
-    status: Status,
-    /// The newest `project.merge_gate_changed` event. The hourly ruleset
-    /// check only writes when the value moves, so no check time is stored.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_changed_at: Option<String>,
-    detail: String,
-}
-
-#[derive(Debug, Serialize)]
-struct Report {
-    ok: bool,
-    checks: Vec<Check>,
-    merge_gates: Vec<Gate>,
-}
+// The shapes are the daemon's, so `tiller doctor --json` and the board's
+// `GET /api/v1/doctor` carry the same report.
+type Status = CheckStatus;
+type Check = DoctorCheck;
+type Gate = DoctorGate;
+type Report = DoctorReport;
 
 /// One tool that must (or may) answer `--version`.
 fn tool(name: &str, required: bool, program: &[OsString]) -> Check {
@@ -515,26 +456,30 @@ fn owner_marker(marker: Option<&str>, daemon: bool) -> Check {
                     " when its daemon runs"
                 }
             ),
-        ),
+        )
+        .code("unset"),
         Some("firstmate") if daemon => Check::missing(
             NAME,
             true,
             "the owner marker says firstmate owns this host, but the tiller daemon is running; \
              tiller must not dispatch here. Stop the daemon, or hand the host over with: tiller owner set tiller",
-        ),
+        )
+        .code("other_system_daemon_running"),
         Some("firstmate") => Check::new(
             NAME,
             true,
             Status::Ok,
             "firstmate owns this host and the tiller daemon is not running",
-        ),
-        Some("tiller") => Check::new(NAME, true, Status::Ok, "tiller owns this host"),
+        )
+        .code("other_system"),
+        Some("tiller") => Check::new(NAME, true, Status::Ok, "tiller owns this host").code("tiller"),
         Some(other) => Check::new(
             NAME,
             true,
             Status::Ok,
             format!("the owner marker names {other:?}; tiller is read only here"),
-        ),
+        )
+        .code("named_other"),
     }
 }
 
@@ -552,12 +497,14 @@ fn firstmate(list: Result<String, String>, marker: Option<&str>, daemon: bool) -
                 format!(
                     "cannot list processes, so a running Firstmate was not looked for: {error}"
                 ),
-            );
+            )
+            .code("processes_unreadable");
         }
     };
     let found = firstmate_scripts(&list);
     if found.is_empty() {
-        return Check::new(NAME, false, Status::Ok, "no Firstmate process is running");
+        return Check::new(NAME, false, Status::Ok, "no Firstmate process is running")
+            .code("not_running");
     }
     let running = format!("Firstmate is running ({})", found.join(", "));
     if matches!(marker, None | Some("tiller")) {
@@ -575,6 +522,7 @@ fn firstmate(list: Result<String, String>, marker: Option<&str>, daemon: bool) -
                 }
             ),
         )
+        .code("both_dispatch")
     } else {
         Check::new(
             NAME,
@@ -582,10 +530,13 @@ fn firstmate(list: Result<String, String>, marker: Option<&str>, daemon: bool) -
             Status::Ok,
             format!("{running}, and the owner marker keeps tiller from dispatching"),
         )
+        .code("kept_read_only")
     }
 }
 
-pub fn run(app: &App) -> Done {
+/// Every check, run now: the report `tiller doctor` prints and the board's
+/// host card shows (`GET /api/v1/doctor`).
+pub fn report(app: &App) -> Report {
     let mut checks = Vec::new();
     let table = load_config(app);
     let config = match table
@@ -632,13 +583,16 @@ pub fn run(app: &App) -> Done {
     checks.push(merge_app(&app.home));
     let merge_gates = stored(app, &mut checks);
 
-    let ok = !checks.iter().any(Check::failed);
-    let report = Report {
-        ok,
+    Report {
+        ok: !checks.iter().any(Check::failed),
         checks,
         merge_gates,
-    };
-    if ok {
+    }
+}
+
+pub fn run(app: &App) -> Done {
+    let report = report(app);
+    if report.ok {
         return Ok(Outcome::read(report));
     }
     let failed: Vec<&str> = report

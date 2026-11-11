@@ -56,6 +56,7 @@ import {
   signalsPath,
 } from "./queries.ts";
 import { awayFor } from "./fixtures-away.ts";
+import { doctorFor, pollersFor } from "./fixture-doctor.ts";
 
 export type Scenario =
   | "default"
@@ -1577,7 +1578,18 @@ function checkoutFor(url: URL): CheckoutCheck {
 
 // Anything the stand-in server can answer: the board's lists, a card, its
 // timeline, a run. `undefined` means no such resource (a 404).
-function healthFor(now: number): DaemonHealth {
+function healthFor(scenario: Scenario, now: number): DaemonHealth {
+  const report = doctorFor(scenario, now);
+  const tools = Object.fromEntries(
+    report.checks
+      .filter(
+        (check) =>
+          !["hook registration", "owner marker", "firstmate", "merge app", "config drift"].includes(
+            check.name,
+          ),
+      )
+      .map((check) => [check.name, check.version ?? null]),
+  );
   return {
     ok: true,
     version: FIXTURE_VERSION,
@@ -1591,6 +1603,8 @@ function healthFor(now: number): DaemonHealth {
       detail:
         "Create the merge App and put its app-id and private-key.pem in /home/user/.tiller/forge-app (docs/plan/merge-app-setup.md). Until then every project runs as detect.",
     },
+    pollers: pollersFor(scenario, now),
+    tools,
   };
 }
 
@@ -1623,7 +1637,8 @@ export function fixtureResource(
   const run = /^\/api\/v1\/runs\/([^/]+)$/.exec(url.pathname);
   if (run?.[1]) return runDetailFor(run[1], now);
   if (url.pathname === recapPath) return recapFor(served, now, null);
-  if (url.pathname === "/api/v1/health") return healthFor(now);
+  if (url.pathname === "/api/v1/health") return healthFor(served, now);
+  if (url.pathname === "/api/v1/doctor") return doctorFor(served, now);
   if (url.pathname === "/api/v1/projects/checkout") return checkoutFor(url);
   if (url.pathname.startsWith("/api/v1/memory")) return memoryResource(url);
   // No project starts archived; the stand-in server adds the ones archived since.

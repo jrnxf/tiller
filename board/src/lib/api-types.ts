@@ -829,6 +829,53 @@ export interface DaemonHealth {
   started_at: string;
   // The merge App key, as `tiller doctor`'s `merge app` line reads it.
   merge_app: MergeAppHealth;
+  // Every poller's last attempt and success, by source.
+  pollers: PollerHealth[];
+  // Tool versions read at start and every 5 minutes, by tool name; null when
+  // not found.
+  tools: Record<string, string | null> | null;
+}
+
+// One poller's record in `/api/v1/health`. A failing poller backs off and
+// polls again; it never stops.
+export interface PollerHealth {
+  source: string;
+  last_attempt_at: string | null;
+  last_success_at: string | null;
+  consecutive_failures: number;
+  last_error: string | null;
+}
+
+export type CheckStatus = "ok" | "warn" | "fail";
+
+// One of `tiller doctor`'s checks.
+export interface DoctorCheck {
+  name: string;
+  status: CheckStatus;
+  // A failed required check fails `tiller doctor`; a failed optional one is
+  // a warning.
+  required: boolean;
+  version?: string;
+  detail: string;
+  // The case of the owner marker and other-system checks, which the board
+  // words itself; absent on every other check.
+  code?: string;
+}
+
+export interface DoctorGate {
+  project: string;
+  merge_gate: string;
+  status: CheckStatus;
+  last_changed_at?: string;
+  detail: string;
+}
+
+// `GET /api/v1/doctor`: the checks `tiller doctor` runs, run on this host now.
+export interface DoctorReport {
+  checked_at: string;
+  ok: boolean;
+  checks: DoctorCheck[];
+  merge_gates: DoctorGate[];
 }
 
 export interface MergeAppHealth {

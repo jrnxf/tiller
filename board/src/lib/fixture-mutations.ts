@@ -22,6 +22,7 @@ import {
   orchestratorLive,
   startOrchestratorFixture,
 } from "./fixtures.ts";
+import { runPollerFixture } from "./fixture-doctor.ts";
 import type { Scenario } from "./fixtures.ts";
 import { relabelFixture } from "./fixtures-signals.ts";
 import {
@@ -545,7 +546,8 @@ function forwarded(
     /\/(stage|focus|label|delete|retire|bug-project)$/.test(path) ||
     path === projectsPath ||
     (method === "PATCH" && /^\/api\/v1\/projects\/[^/]+$/.test(path)) ||
-    /\/memory\//.test(path)
+    /\/memory\//.test(path) ||
+    path.startsWith("/api/v1/pollers/")
   ) {
     return refusal(502, "peer_refused", `${method} ${path} is not forwarded to ${host}`);
   }
@@ -1113,6 +1115,14 @@ function handle(
   const control = /^\/api\/v1\/agents\/([^/]+)\/(steer|interrupt)$/.exec(path);
   if (method === "POST" && control?.[1]) {
     return agentControl(decodeURIComponent(control[1]), control[2] ?? "", body);
+  }
+  const poller = /^\/api\/v1\/pollers\/([^/]+)\/run$/.exec(path);
+  if (method === "POST" && poller?.[1]) {
+    const source = decodeURIComponent(poller[1]);
+    const health = runPollerFixture(source, Date.now());
+    if (!health)
+      return { reply: refused(404, "not_found", `no poller reads ${source}`), followUps: [] };
+    return { reply: recorded(health, null, null), followUps: [] };
   }
   if (method === "POST" && /^\/api\/v1\/agents\/[^/]+\/focus$/.test(path)) {
     return { reply: recorded({}, null, null), followUps: [] };

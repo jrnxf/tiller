@@ -763,6 +763,107 @@ pub struct MergeAppHealth {
     pub detail: String,
 }
 
+/// One check's verdict in `tiller doctor` and `GET /api/v1/doctor`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckStatus {
+    Ok,
+    Warn,
+    Fail,
+}
+
+/// One of the host's checks (`tiller doctor`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct DoctorCheck {
+    pub name: String,
+    pub status: CheckStatus,
+    /// A failed required check fails `tiller doctor`; a failed optional one
+    /// is a warning.
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub detail: String,
+    /// Which case of the check this is, for the checks the board words
+    /// itself: the owner marker (`unset`, `tiller`, `named_other`,
+    /// `other_system`, `other_system_daemon_running`) and the other system's
+    /// processes (`not_running`, `kept_read_only`, `both_dispatch`,
+    /// `processes_unreadable`). Absent on every other check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+}
+
+impl DoctorCheck {
+    pub fn new(name: &str, required: bool, status: CheckStatus, detail: impl Into<String>) -> Self {
+        Self {
+            name: name.to_owned(),
+            status,
+            required,
+            version: None,
+            detail: detail.into(),
+            code: None,
+        }
+    }
+
+    #[must_use]
+    pub fn version(mut self, version: Option<String>) -> Self {
+        self.version = version;
+        self
+    }
+
+    #[must_use]
+    pub fn code(mut self, code: &str) -> Self {
+        self.code = Some(code.to_owned());
+        self
+    }
+
+    /// A check that did not pass: `fail` when required, else `warn`.
+    pub fn missing(name: &str, required: bool, detail: impl Into<String>) -> Self {
+        let status = if required {
+            CheckStatus::Fail
+        } else {
+            CheckStatus::Warn
+        };
+        Self::new(name, required, status, detail)
+    }
+
+    /// A required check that failed, which fails the whole report.
+    pub fn failed(&self) -> bool {
+        self.required && self.status == CheckStatus::Fail
+    }
+}
+
+/// One project's stored merge gate, as `tiller doctor` reads it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct DoctorGate {
+    pub project: String,
+    pub merge_gate: String,
+    pub status: CheckStatus,
+    /// The newest `project.merge_gate_changed` event. The hourly ruleset
+    /// check only writes when the value moves, so no check time is stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_changed_at: Option<String>,
+    pub detail: String,
+}
+
+/// `tiller doctor`'s report: `ok` is false when a required check failed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct DoctorReport {
+    pub ok: bool,
+    pub checks: Vec<DoctorCheck>,
+    pub merge_gates: Vec<DoctorGate>,
+}
+
+/// `GET /api/v1/doctor`: the report of the checks `tiller doctor` runs, run
+/// on this host just now.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct Doctor {
+    /// When the checks ran.
+    pub checked_at: String,
+    pub ok: bool,
+    pub checks: Vec<DoctorCheck>,
+    pub merge_gates: Vec<DoctorGate>,
+}
+
 /// The inlined `<script id="tiller-boot">` body and `GET /api/v1/snapshot`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Snapshot {
@@ -1611,6 +1712,18 @@ pub struct RestartStale {
     #[serde(default)]
     pub sessions: Option<Vec<String>>,
     /// A paired peer's label: the peer restarts its own sessions
+    /// (`protocol.md` 7.4).
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
+/// `POST /api/v1/pollers/{source}/run`: poll that source now (the owner's
+/// Run now on a failing poller's check line).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RunPoller {
+    pub idempotency_key: String,
+    /// Always refused with a peer label: each host runs its own pollers
     /// (`protocol.md` 7.4).
     #[serde(default)]
     pub host: Option<String>,

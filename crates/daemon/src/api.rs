@@ -146,6 +146,12 @@ pub trait OrchestratorStart: Send + Sync {
     fn restart(&self, _store: &mut Store, _ctx: &Ctx, _session: &Session) -> Result<(), String> {
         Err("this host cannot restart sessions".to_owned())
     }
+
+    /// Runs the checks `tiller doctor` runs, on this host, now. `None` from a
+    /// binary that has none.
+    fn doctor(&self) -> Option<DoctorReport> {
+        None
+    }
 }
 
 /// A start that failed, as `tiller orchestrator start` reports it.
@@ -835,6 +841,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/machines", get(machines))
         .route("/api/v1/quota", get(quota))
         .route("/api/v1/health", get(health))
+        .route("/api/v1/doctor", get(doctor))
+        .route("/api/v1/pollers/{source}/run", post(run_poller))
         .route("/api/v1/projects", get(projects).post(add_project))
         .route("/api/v1/projects/checkout", get(project_checkout))
         .route("/api/v1/start-settings", get(start_settings))
@@ -1341,6 +1349,95 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
         links: state.0.peers.links(),
         merge_app,
     })
+}
+
+/// How long Run now waits for the poll it asked for.
+const POLL_NOW_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The checks `tiller doctor` runs, run on this host now (`protocol.md`
+/// 7.3). Local only: a peer's checks run on that host.
+#[utoipa::path(get, path = "/api/v1/doctor", tag = "reads",
+    responses((status = 200, body = Doctor), (status = 503, body = ErrorBody)))]
+async fn doctor(State(state): State<AppState>) -> ApiResult<Doctor> {
+    let Some(services) = state.0.orchestrators.clone() else {
+        return Err(Error::Unavailable("this daemon cannot run its checks".into()).into());
+    };
+    let checked_at = Timestamp::now();
+    let report = tokio::task::spawn_blocking(move || services.doctor())
+        .await
+        .map_err(|error| Error::Internal(error.to_string()))?;
+    let Some(report) = report else {
+        return Err(Error::Unavailable("this daemon cannot run its checks".into()).into());
+    };
+    Ok(Json(Doctor {
+        checked_at: checked_at.to_string(),
+        ok: report.ok,
+        checks: report.checks,
+        merge_gates: report.merge_gates,
+    }))
+}
+
+/// Run now: ends one poller's wait so it polls at once, then answers with
+/// its health after that poll, or as it stands when the poll takes longer
+/// than [`POLL_NOW_WAIT`]. A wake writes nothing, so the key is not
+/// replayed: a retry is natural.
+#[utoipa::path(post, path = "/api/v1/pollers/{source}/run", tag = "mutations", request_body = RunPoller,
+    params(("source" = String, Path, description = "A poller's source, as `/api/v1/health` names it")),
+    responses((status = 200, body = MutationResponse, description = "`data` is the poller's `PollerHealth`"),
+              (status = 400, body = ErrorBody), (status = 403, body = ErrorBody),
+              (status = 404, body = ErrorBody), (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn run_poller(
+    State(state): State<AppState>,
+    Path(source): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers).await?;
+    let request: RunPoller = body(&bytes)?;
+    key(&request.idempotency_key)?;
+    not_forwarded(&state, request.host.as_deref(), "a poller run").await?;
+    writable(&state)?;
+    let asked = Timestamp::now();
+    if !state.0.pollers.wake(&source) {
+        return Err(no_poller(source).into());
+    }
+    let deadline = tokio::time::Instant::now() + POLL_NOW_WAIT;
+    let polled = |health: &tiller_herdr::poller::Health| {
+        health
+            .last_attempt_at
+            .is_some_and(|at| at.as_millis() >= asked.as_millis())
+    };
+    let health = loop {
+        let Some(health) = state.0.pollers.health_of(&source) else {
+            return Err(no_poller(source).into());
+        };
+        if polled(&health) || tokio::time::Instant::now() >= deadline {
+            break health;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    let finished = polled(&health);
+    let health = views::poller_health(vec![health]).into_iter().next();
+    Ok(Json(
+        Done {
+            data: serde_json::to_value(health).map_err(Error::from)?,
+            events: Vec::new(),
+            replayed: false,
+            outbox_id: None,
+            approval_id: None,
+            warning: (!finished)
+                .then(|| format!("{source} is still polling; its line updates when the poll ends")),
+        }
+        .response(),
+    ))
+}
+
+fn no_poller(source: String) -> Error {
+    Error::NotFound {
+        entity: "poller",
+        id: source,
+        candidates: Vec::new(),
+    }
 }
 
 /// The merge App key's state, read as `tiller doctor` reads it.
@@ -4612,7 +4709,7 @@ async fn app_shell(
 #[openapi(
     info(title = "Tiller board API", version = "1", description = "The daemon's board API (docs/spec/protocol.md section 7). Every path answers only on 127.0.0.1, localhost or an --allow-host name; at an --allow-host name every path but the signed-out screen and signing in needs the owner cookie; mutations need the owner cookie and the board's own origin."),
     paths(
-        snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
+        snapshot, board, card, timeline, attention, agents, run, machines, quota, health, doctor, run_poller,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
         cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, set_config,
         away_start, away_edit, away_end, away_brief, pick_bug_project, recap, mark_recap_seen, relabel_intervention, memory::view, memory::revision,
@@ -8229,6 +8326,14 @@ esac"#,
     }
 
     fn app_restarting(home: &std::path::Path, starter: Arc<dyn OrchestratorStart>) -> Router {
+        app_polling(home, Some(starter), Registry::new())
+    }
+
+    fn app_polling(
+        home: &std::path::Path,
+        starter: Option<Arc<dyn OrchestratorStart>>,
+        pollers: Registry,
+    ) -> Router {
         let (_newest_tx, newest) = watch::channel(0);
         let (_stop_tx, stop) = watch::channel(false);
         router(AppState::new(Inner {
@@ -8238,14 +8343,14 @@ esac"#,
             assets: Assets::of::<Fixture>(),
             newest,
             stop,
-            pollers: Registry::new(),
+            pollers,
             peers: Peers::idle(),
             herdr: Cli::local(),
             terminal: None,
             started_at: Timestamp::now(),
             tools: Arc::new(Mutex::new(Value::Null)),
             damage: Damage::default(),
-            orchestrators: Some(starter),
+            orchestrators: starter,
             mirrors: Mirrors::new(home),
             sessions: auth::Sessions::default(),
             streams: sse::Streams::default(),
@@ -8387,6 +8492,153 @@ esac"#,
         );
         let remote = send(&app, remote).await;
         assert_ne!(remote.status, StatusCode::OK, "{}", remote.body);
+    }
+
+    /// Services whose checks report one failed required check and the owner
+    /// marker's case.
+    struct FakeDoctor;
+
+    impl OrchestratorStart for FakeDoctor {
+        fn start(
+            &self,
+            _store: &mut Store,
+            _ctx: &Ctx,
+            _project: &str,
+        ) -> Result<Applied<Orchestrator>, StartError> {
+            Err(StartError::Refused {
+                exit: 5,
+                code: "refused",
+                message: "not here".into(),
+                hint: None,
+                current: None,
+            })
+        }
+
+        fn doctor(&self) -> Option<DoctorReport> {
+            Some(DoctorReport {
+                ok: false,
+                checks: vec![
+                    DoctorCheck::missing("gh", true, "gh is not on PATH"),
+                    DoctorCheck::new(
+                        "owner marker",
+                        true,
+                        CheckStatus::Ok,
+                        "tiller owns this host",
+                    )
+                    .code("tiller"),
+                ],
+                merge_gates: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_board_reads_the_doctor_checks_of_its_own_host() {
+        let fleet = Fleet::new();
+        let app = app_restarting(fleet.dir.path(), Arc::new(FakeDoctor));
+        let read = get(&app, "/api/v1/doctor").await;
+        assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+        let read: Value = serde_json::from_str(&read.body).unwrap();
+        assert_eq!(read["ok"], false, "{read}");
+        assert_eq!(read["checks"][0]["name"], "gh", "{read}");
+        assert_eq!(read["checks"][0]["status"], "fail", "{read}");
+        assert_eq!(read["checks"][1]["code"], "tiller", "{read}");
+        assert!(read["checks"][0].get("code").is_none(), "{read}");
+        assert!(
+            read["checked_at"]
+                .as_str()
+                .is_some_and(|at| at.ends_with('Z')),
+            "{read}"
+        );
+
+        // A binary with no checks says so instead of an empty report.
+        let bare = app_polling(fleet.dir.path(), None, Registry::new());
+        let none = get(&bare, "/api/v1/doctor").await;
+        assert_eq!(
+            none.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{}",
+            none.body
+        );
+    }
+
+    /// A source that always fails, so it waits 5 s after its first poll.
+    struct Failing;
+
+    impl tiller_herdr::poller::Source for Failing {
+        fn name(&self) -> String {
+            "ci".to_owned()
+        }
+        fn interval(&self) -> std::time::Duration {
+            std::time::Duration::from_secs(60)
+        }
+        fn poll(&mut self, _now: Timestamp) -> Result<(), tiller_herdr::poller::PollError> {
+            Err(tiller_herdr::poller::PollError::Herdr(
+                HerdrError::Unreachable("checks are not read".into()),
+            ))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_now_polls_a_waiting_poller_at_once_for_the_owner_only() {
+        let fleet = Fleet::new();
+        let pollers = Registry::new();
+        let poller = pollers.register(Failing).unwrap();
+        let (stop_tx, stop) = watch::channel(false);
+        let task = tokio::spawn(poller.run(stop));
+        while pollers.health_of("ci").unwrap().consecutive_failures < 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let app = app_polling(
+            fleet.dir.path(),
+            Some(Arc::new(FakeDoctor)),
+            pollers.clone(),
+        );
+        let cookie = owner_cookie(fleet.dir.path());
+        let owner = [("cookie", cookie.as_str())];
+        let run = |path: &str, key: &str, headers: &[(&str, &str)]| {
+            mutation("POST", path, json!({"idempotency_key": key}), headers)
+        };
+
+        let anon = send(&app, run("/api/v1/pollers/ci/run", "p-0", &[])).await;
+        assert!(
+            anon.status == StatusCode::UNAUTHORIZED || anon.status == StatusCode::FORBIDDEN,
+            "{} {}",
+            anon.status,
+            anon.body
+        );
+        assert_eq!(pollers.health_of("ci").unwrap().consecutive_failures, 1);
+
+        let unknown = send(&app, run("/api/v1/pollers/nope/run", "p-1", &owner)).await;
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND, "{}", unknown.body);
+
+        // The first failure waits 5 s; Run now answers after the next poll.
+        let started = std::time::Instant::now();
+        let ran = send(&app, run("/api/v1/pollers/ci/run", "p-2", &owner)).await;
+        assert_eq!(ran.status, StatusCode::OK, "{}", ran.body);
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        let ran: Value = serde_json::from_str(&ran.body).unwrap();
+        assert_eq!(ran["data"]["source"], "ci", "{ran}");
+        assert_eq!(ran["data"]["consecutive_failures"], 2, "{ran}");
+        assert!(
+            ran["data"]["last_error"]
+                .as_str()
+                .unwrap()
+                .contains("checks are not read")
+        );
+        assert!(ran.get("warning").is_none(), "{ran}");
+
+        // Each host runs its own pollers.
+        let remote = mutation(
+            "POST",
+            "/api/v1/pollers/ci/run",
+            json!({"idempotency_key": "p-3", "host": "elsewhere"}),
+            &owner,
+        );
+        assert_ne!(send(&app, remote).await.status, StatusCode::OK);
+
+        stop_tx.send(true).unwrap();
+        task.await.unwrap();
     }
 
     #[tokio::test]

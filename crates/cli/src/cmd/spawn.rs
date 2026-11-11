@@ -435,6 +435,10 @@ impl tiller_daemon::api::OrchestratorStart for BoardStart {
         )
     }
 
+    fn doctor(&self) -> Option<tiller_daemon::dto::DoctorReport> {
+        Some(super::doctor::report(&self.app))
+    }
+
     fn settings(&self) -> tiller_daemon::dto::StartSettings {
         let mut settings = tiller_daemon::dto::StartSettings {
             pool_root: None,

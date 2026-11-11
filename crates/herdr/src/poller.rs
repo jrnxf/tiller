@@ -6,8 +6,9 @@
 //! 5 s, 15 s, 60 s, then every 5 minutes (the local source holds at 15 s),
 //! and changes nothing a successful
 //! read would: absence of evidence is never `gone` (`recovery.md`, principle
-//! 3). [`Registry`] refuses a second poller for a source and serves each
-//! poller's [`Health`] to `/health` and the board.
+//! 3). [`Registry`] refuses a second poller for a source, serves each
+//! poller's [`Health`] to `/health` and the board, and wakes a waiting poller
+//! when the owner asks for a poll now ([`Registry::wake`]).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -20,7 +21,7 @@ use tiller_core::state::caches::PaneReading;
 use tiller_core::state::get;
 use tiller_core::state::runs::{HOOK_WORKING_HOLD_MS, NewObservation};
 use tiller_core::{Actor, Ctx, Store, Timestamp};
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 
 use crate::client::{Herdr, HerdrError, Snapshot};
 use crate::layout::{self, Binding};
@@ -82,7 +83,14 @@ pub struct Health {
     pub last_error: Option<String>,
 }
 
-type Shared = Arc<Mutex<BTreeMap<String, Arc<Mutex<Health>>>>>;
+/// A registered poller as the registry holds it: its health, and the bell
+/// that ends its wait.
+struct Entry {
+    health: Arc<Mutex<Health>>,
+    wake: Arc<Notify>,
+}
+
+type Shared = Arc<Mutex<BTreeMap<String, Entry>>>;
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -114,11 +122,19 @@ impl Registry {
             source: name.clone(),
             ..Health::default()
         }));
-        pollers.insert(name.clone(), Arc::clone(&health));
+        let wake = Arc::new(Notify::new());
+        pollers.insert(
+            name.clone(),
+            Entry {
+                health: Arc::clone(&health),
+                wake: Arc::clone(&wake),
+            },
+        );
         Ok(Poller {
             source,
             name,
             health,
+            wake,
             registry: Arc::clone(&self.pollers),
         })
     }
@@ -127,8 +143,29 @@ impl Registry {
     pub fn health(&self) -> Vec<Health> {
         lock(&self.pollers)
             .values()
-            .map(|h| lock(h).clone())
+            .map(|entry| lock(&entry.health).clone())
             .collect()
+    }
+
+    /// One poller's health; `None` for a source no poller holds.
+    pub fn health_of(&self, source: &str) -> Option<Health> {
+        lock(&self.pollers)
+            .get(source)
+            .map(|entry| lock(&entry.health).clone())
+    }
+
+    /// Ends the wait of the poller for `source`, so it polls now instead of
+    /// at the end of its interval or backoff. A poller that is polling at
+    /// that moment polls once more as soon as it is done. False for a source
+    /// no poller holds.
+    pub fn wake(&self, source: &str) -> bool {
+        match lock(&self.pollers).get(source) {
+            Some(entry) => {
+                entry.wake.notify_one();
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -137,6 +174,7 @@ pub struct Poller<S: Source> {
     source: S,
     name: String,
     health: Arc<Mutex<Health>>,
+    wake: Arc<Notify>,
     registry: Shared,
 }
 
@@ -185,7 +223,9 @@ impl<S: Source> Poller<S> {
 
     /// Polls until `stop` turns true. Each poll runs on the blocking pool and
     /// the next is scheduled only after it returns, so polls never overlap.
+    /// [`Registry::wake`] ends a wait early.
     pub async fn run(mut self, mut stop: watch::Receiver<bool>) {
+        let wake = Arc::clone(&self.wake);
         loop {
             if *stop.borrow() {
                 return;
@@ -207,6 +247,7 @@ impl<S: Source> Poller<S> {
             };
             tokio::select! {
                 () = tokio::time::sleep(wait) => {}
+                () = wake.notified() => {}
                 changed = stop.changed() => {
                     if changed.is_err() {
                         return;
@@ -626,6 +667,35 @@ mod tests {
         let health = registry.health();
         assert!(health.is_empty(), "the finished poller freed its name");
         assert_eq!(overlapped.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wake_ends_a_backoff_wait_at_once() {
+        let registry = Registry::new();
+        let poller = registry.register(counting("ci", true)).unwrap();
+        assert!(!registry.wake("no-such-poller"));
+        let (stop, stopped) = watch::channel(false);
+        let task = tokio::spawn(poller.run(stopped));
+        let attempts = |registry: &Registry| registry.health_of("ci").unwrap().consecutive_failures;
+        let started = std::time::Instant::now();
+        while attempts(&registry) < 1 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // The first failure waits 5 s; a wake polls again long before that.
+        assert!(registry.wake("ci"));
+        while attempts(&registry) < 2 {
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "the wake did not end the wait"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        stop.send(true).unwrap();
+        task.await.unwrap();
+        assert!(
+            registry.health_of("ci").is_none(),
+            "the finished poller freed its name"
+        );
     }
 
     fn panes(fleet: &Fleet) -> Vec<Pane> {

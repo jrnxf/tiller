@@ -10,6 +10,7 @@ import type {
   CheckoutCheck,
   ContributionsResponse,
   DaemonHealth,
+  DoctorReport,
   MachinesResponse,
   MemoryResponse,
   MemoryRevision,
@@ -145,6 +146,12 @@ export const sessionQuery = () => readQuery<SessionView>(sessionPath);
 // The daemon's own facts (version, start time, merge App), for Settings.
 const healthPath: QueryPath = "/api/v1/health";
 export const healthQuery = () => readQuery<DaemonHealth>(healthPath);
+
+// The checks `tiller doctor` runs, run on the board's host each time the host
+// card opens or the owner asks again, so never cached.
+const doctorPath: QueryPath = "/api/v1/doctor";
+export const doctorQuery = () =>
+  queryOptions({ ...readQuery<DoctorReport>(doctorPath), staleTime: 0 });
 
 export const signalsPath: QueryPath = "/api/v1/signals";
 export const signalsQuery = () => readQuery<SignalsResponse>(signalsPath);

@@ -2375,6 +2375,35 @@
         }
       }
     },
+    "/api/v1/doctor": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "summary": "The checks `tiller doctor` runs, run on this host now (`protocol.md`\n7.3). Local only: a peer's checks run on that host.",
+        "operationId": "doctor",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Doctor"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/events": {
       "get": {
         "tags": [
@@ -2973,6 +3002,85 @@
           },
           "503": {
             "description": "`peer_unreachable`: ssh did not reach the new host, or it gave no answer in 30 s",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/pollers/{source}/run": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "summary": "Run now: ends one poller's wait so it polls at once, then answers with\nits health after that poll, or as it stands when the poll takes longer\nthan [`POLL_NOW_WAIT`]. A wake writes nothing, so the key is not\nreplayed: a retry is natural.",
+        "operationId": "run_poller",
+        "parameters": [
+          {
+            "name": "source",
+            "in": "path",
+            "description": "A poller's source, as `/api/v1/health` names it",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunPoller"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the poller's `PollerHealth`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
             "content": {
               "application/json": {
                 "schema": {
@@ -5366,6 +5474,15 @@
           }
         }
       },
+      "CheckStatus": {
+        "type": "string",
+        "description": "One check's verdict in `tiller doctor` and `GET /api/v1/doctor`.",
+        "enum": [
+          "ok",
+          "warn",
+          "fail"
+        ]
+      },
       "CheckoutCheck": {
         "type": "object",
         "description": "`GET /api/v1/projects/checkout`: what Add project would do with a Local\ncheckout folder, checked as it is typed.",
@@ -5664,6 +5781,106 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "Doctor": {
+        "type": "object",
+        "description": "`GET /api/v1/doctor`: the report of the checks `tiller doctor` runs, run\non this host just now.",
+        "required": [
+          "checked_at",
+          "ok",
+          "checks",
+          "merge_gates"
+        ],
+        "properties": {
+          "checked_at": {
+            "type": "string",
+            "description": "When the checks ran."
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DoctorCheck"
+            }
+          },
+          "merge_gates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DoctorGate"
+            }
+          },
+          "ok": {
+            "type": "boolean"
+          }
+        }
+      },
+      "DoctorCheck": {
+        "type": "object",
+        "description": "One of the host's checks (`tiller doctor`).",
+        "required": [
+          "name",
+          "status",
+          "required",
+          "detail"
+        ],
+        "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which case of the check this is, for the checks the board words\nitself: the owner marker (`unset`, `tiller`, `named_other`,\n`other_system`, `other_system_daemon_running`) and the other system's\nprocesses (`not_running`, `kept_read_only`, `both_dispatch`,\n`processes_unreadable`). Absent on every other check."
+          },
+          "detail": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean",
+            "description": "A failed required check fails `tiller doctor`; a failed optional one\nis a warning."
+          },
+          "status": {
+            "$ref": "#/components/schemas/CheckStatus"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "DoctorGate": {
+        "type": "object",
+        "description": "One project's stored merge gate, as `tiller doctor` reads it.",
+        "required": [
+          "project",
+          "merge_gate",
+          "status",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "last_changed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The newest `project.merge_gate_changed` event. The hourly ruleset\ncheck only writes when the value moves, so no check time is stored."
+          },
+          "merge_gate": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/CheckStatus"
           }
         }
       },
@@ -8190,6 +8407,26 @@
             ]
           }
         }
+      },
+      "RunPoller": {
+        "type": "object",
+        "description": "`POST /api/v1/pollers/{source}/run`: poll that source now (the owner's\nRun now on a failing poller's check line).",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Always refused with a peer label: each host runs its own pollers\n(`protocol.md` 7.4)."
+          },
+          "idempotency_key": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "SessionView": {
         "type": "object",

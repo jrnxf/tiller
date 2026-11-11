@@ -7,15 +7,25 @@ import { machineRowView } from "../../lib/machines";
 import type { MachineRowView, VersionMark } from "../../lib/machines";
 import { prefsStore, updatePrefs } from "../../lib/prefs";
 import type { Density, ThemePreference } from "../../lib/prefs";
-import { healthQuery, machinesQuery, sessionQuery, startSettingsQuery } from "../../lib/queries";
+import {
+  doctorQuery,
+  healthQuery,
+  machinesQuery,
+  sessionQuery,
+  startSettingsQuery,
+} from "../../lib/queries";
 import { signOut } from "../../lib/session";
 import { useStore } from "../../lib/store";
 import { formatAge, secondsSince } from "../board/format";
 import { Segmented } from "../ui/segmented";
 import { WarnIcon } from "../board/icons";
-import { PlusIcon } from "../shell/icons";
+import { ChevronIcon, PlusIcon } from "../shell/icons";
 import { AddHostForm } from "./add-host";
 import type { Paired } from "./add-host";
+import { checkLines, needsYou, whenText } from "./check-lines";
+import type { Tone } from "./check-lines";
+import { HostCard } from "./host-card";
+import { HostChecks } from "./host-checks";
 import { SettingField } from "./setting-field";
 import "./settings.css";
 
@@ -65,17 +75,6 @@ function Fact({ label, hint, children }: { label: string; hint: string; children
     </div>
   );
 }
-
-// Always with the weekday: "Thu 5 Nov, 23:40".
-const startedAt = new Intl.DateTimeFormat("en-GB", {
-  timeZone: "Europe/Lisbon",
-  weekday: "short",
-  day: "numeric",
-  month: "short",
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23",
-});
 
 // The warning above the hosts when the merge App is not ready, as `tiller
 // doctor`'s `merge app` line words it.
@@ -139,62 +138,118 @@ function hostStatus(
 const NOT_REPORTED = "Only the host serving this board reports this";
 
 // One row per host, this one among them: version, start, process and status.
+// A click opens the host's card under it; a row whose checks need the owner
+// says how many in its status.
 function HostRow({
   machine,
   board,
   health,
+  owner,
+  attention,
+  open,
+  onToggle,
 }: {
   machine: Machine;
   board: { label: string; version: string };
   health: DaemonHealth;
+  owner: boolean;
+  attention: { tone: Tone; text: string } | null;
+  open: boolean;
+  onToggle: () => void;
 }) {
   const local = machine.kind === "local";
   const version = local ? health.version : (machine.version ?? null);
   const view = machineRowView(machine, undefined, board.version);
-  const started = new Date(health.started_at);
+  const started = whenText(health.started_at);
   const up = secondsSince(health.started_at);
+  const card = `host-card-${machine.id}`;
   return (
-    <tr data-testid={`host-${machine.label}`}>
-      <th scope="row" className="set-host">
-        {machine.label}
-      </th>
-      <td className="set-ver" data-label="Version">
-        {version ? (
-          <>
-            <span>{version}</span>
-            {view.versionMark ? <span className="set-status warn">{view.versionMark}</span> : null}
-            {local ? <small>Schema {health.schema}</small> : null}
-          </>
-        ) : (
-          <span className="set-muted">Not reported</span>
-        )}
-      </td>
-      <td className="set-start" data-label="Started" data-empty={local ? undefined : "true"}>
-        {local ? (
-          <>
-            {Number.isNaN(started.getTime()) ? "unknown" : startedAt.format(started)}
-            {up === null ? null : <small>up {formatAge(up)}</small>}
-          </>
-        ) : (
-          <span className="set-muted" title={NOT_REPORTED}>
-            -
-          </span>
-        )}
-      </td>
-      <td className="set-pid" data-label="Process" data-empty={local ? undefined : "true"}>
-        {local ? (
-          <code>{health.pid}</code>
-        ) : (
-          <span className="set-muted" title={NOT_REPORTED}>
-            -
-          </span>
-        )}
-      </td>
-      <td className="set-st">
-        <span className={`set-dot ${view.tone}`} aria-hidden="true" />
-        <span title={view.tooltip ?? undefined}>{hostStatus(machine, view, board)}</span>
-      </td>
-    </tr>
+    <>
+      <tr
+        data-testid={`host-${machine.label}`}
+        className="set-host-row"
+        data-open={open || undefined}
+        onClick={onToggle}
+      >
+        <th scope="row" className="set-host">
+          <button
+            type="button"
+            className="set-host-toggle"
+            aria-expanded={open}
+            aria-controls={open ? card : undefined}
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggle();
+            }}
+          >
+            <ChevronIcon />
+            {machine.label}
+          </button>
+        </th>
+        <td className="set-ver" data-label="Version">
+          {version ? (
+            <>
+              <span>{version}</span>
+              {view.versionMark ? (
+                <span className="set-status warn">{view.versionMark}</span>
+              ) : null}
+              {local ? <small>Schema {health.schema}</small> : null}
+            </>
+          ) : (
+            <span className="set-muted">Not reported</span>
+          )}
+        </td>
+        <td className="set-start" data-label="Started" data-empty={local ? undefined : "true"}>
+          {local ? (
+            <>
+              {started ?? "unknown"}
+              {up === null ? null : <small>up {formatAge(up)}</small>}
+            </>
+          ) : (
+            <span className="set-muted" title={NOT_REPORTED}>
+              -
+            </span>
+          )}
+        </td>
+        <td className="set-pid" data-label="Process" data-empty={local ? undefined : "true"}>
+          {local ? (
+            <code>{health.pid}</code>
+          ) : (
+            <span className="set-muted" title={NOT_REPORTED}>
+              -
+            </span>
+          )}
+        </td>
+        <td className="set-st">
+          {attention ? (
+            <>
+              <span className={`set-dot ${attention.tone}`} aria-hidden="true" />
+              <span data-testid="host-needs-you">{attention.text}</span>
+            </>
+          ) : (
+            <>
+              <span className={`set-dot ${view.tone}`} aria-hidden="true" />
+              <span title={view.tooltip ?? undefined}>{hostStatus(machine, view, board)}</span>
+            </>
+          )}
+        </td>
+      </tr>
+      {open ? (
+        <tr className="set-card-row">
+          <td colSpan={5}>
+            <HostCard id={card} host={machine.label}>
+              <HostChecks
+                machine={machine}
+                peer={view.peer}
+                board={board.label}
+                health={health}
+                owner={owner}
+              />
+            </HostCard>
+          </td>
+        </tr>
+      ) : null}
+    </>
   );
 }
 
@@ -228,6 +283,16 @@ function Hosts({
 }) {
   const [adding, setAdding] = useState(false);
   const [paired, setPaired] = useState<Paired | null>(null);
+  const [opened, setOpened] = useState<ReadonlySet<string>>(() => new Set());
+  const toggle = (id: string) =>
+    setOpened((before) => {
+      const next = new Set(before);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  // The serving host's checks, for the count its row shows while closed.
+  const doctor = useQuery(doctorQuery());
+  const attention = needsYou(checkLines(doctor.data, health.pollers ?? []));
   const opener = useRef<HTMLButtonElement>(null);
   const close = useCallback(() => {
     setAdding(false);
@@ -287,7 +352,16 @@ function Hosts({
           </thead>
           <tbody>
             {sorted.map((machine) => (
-              <HostRow key={machine.id} machine={machine} board={board} health={health} />
+              <HostRow
+                key={machine.id}
+                machine={machine}
+                board={board}
+                health={health}
+                owner={owner}
+                attention={machine.kind === "local" ? attention : null}
+                open={opened.has(machine.id)}
+                onToggle={() => toggle(machine.id)}
+              />
             ))}
           </tbody>
         </table>
