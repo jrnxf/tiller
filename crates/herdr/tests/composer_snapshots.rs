@@ -2,6 +2,9 @@
 //!
 //! The snapshots are named by fixture, so a later model gate can classify
 //! the same fixtures through another screen source and assert against them.
+//!
+//! `exited` and `exited-after-popup` freeze as `Unknown` on purpose: a shell
+//! prompt after Claude Code left is no composer, so delivery never types there.
 
 #![allow(clippy::unwrap_used)]
 
