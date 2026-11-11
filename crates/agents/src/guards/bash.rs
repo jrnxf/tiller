@@ -3002,8 +3002,8 @@ impl Walker<'_, '_> {
         // `xargs tiller migrate` takes `down` from its input, and
         // `tiller agent "$SUB"` takes `restart` from the shell: a second word
         // the guard cannot read may be the owner's one.
-        let unseen = (appended && positionals.len() < 2)
-            || positionals.get(1).is_some_and(|arg| !arg.fixed);
+        let unseen =
+            (appended && positionals.len() < 2) || positionals.get(1).is_some_and(|arg| !arg.fixed);
         let second = positionals
             .get(1)
             .map(|arg| arg.text.as_str())

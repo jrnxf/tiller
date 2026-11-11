@@ -570,7 +570,13 @@ fn approve_under_a_reused_key_never_replays_another_proposals_answer() {
         r#"{"aggregates": {"casesTotal": 4, "casesPassed": 4, "overallScore": 0.97}, "costUsd": 1.0, "partial": false}"#,
     )
     .unwrap();
-    world.must(&["learn", "eval", "later", "--result", result.to_str().unwrap()]);
+    world.must(&[
+        "learn",
+        "eval",
+        "later",
+        "--result",
+        result.to_str().unwrap(),
+    ]);
 
     let again = world.must(&["mem", "approve", "--class", "rule", "--key", "k"]);
     assert_eq!(
@@ -580,7 +586,8 @@ fn approve_under_a_reused_key_never_replays_another_proposals_answer() {
         again.json
     );
     assert_eq!(
-        again.data()["results"][0]["proposal_id"], third,
+        again.data()["results"][0]["proposal_id"],
+        third,
         "{}",
         again.json
     );

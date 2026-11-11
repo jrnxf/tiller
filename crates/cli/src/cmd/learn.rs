@@ -53,7 +53,8 @@ pub enum RetroCmd {
 pub struct RetroRun {
     /// A retro id, or a card reference for its newest retro
     pub retro: String,
-    /// Write the launch files and print the command without running it
+    /// Write the launch files in <retro>.dry-run beside the run's scratch directory and print
+    /// the command without running it
     #[arg(long)]
     pub dry_run: bool,
 }
@@ -339,7 +340,11 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
         // A dry run claims nothing but is refused by the same rule.
         learning::check_start(&retro, app.ctx().now, timeout_minutes(&config))?;
         let session_id = new_session_id()?;
-        let launch = prepare(&tools, &config, &store, &retro, &session_id)?;
+        // Its launch goes beside the real scratch directory, which may hold
+        // an unfinished run's `output.json`: the warning sends the owner
+        // there first.
+        let scratch = scratch_of(&tools, &retro.id).with_file_name(format!("{}.dry-run", retro.id));
+        let launch = prepare(&tools, &config, &store, &retro, &session_id, &scratch)?;
         return Ok(Outcome::read(json!({
             "retro": retro.id,
             "argv": launch.argv,
@@ -402,7 +407,7 @@ fn timeout_minutes(config: &Learning) -> i64 {
     i64::try_from(config.curator_timeout_minutes).unwrap_or(i64::MAX)
 }
 
-/// Writes the curator's launch files for `retro` in a fresh scratch
+/// Writes the curator's launch files for `retro` in a fresh `scratch`
 /// directory: a second run of the same retro gets its own.
 fn prepare(
     tools: &Tools,
@@ -410,8 +415,8 @@ fn prepare(
     store: &Store,
     retro: &Retro,
     session_id: &str,
+    scratch: &Path,
 ) -> Result<curator::Launch, Failure> {
-    let scratch = scratch_of(tools, &retro.id);
     let brief = brief(store, retro)?;
     let brief_text = format!(
         "Retro `{}` of card {}.\n\n```json\n{}\n```\n",
@@ -420,11 +425,11 @@ fn prepare(
         serde_json::to_string_pretty(&brief)?
     );
     if scratch.exists() {
-        let _ = std::fs::remove_dir_all(&scratch);
+        let _ = std::fs::remove_dir_all(scratch);
     }
     let mut launch = curator::write(&curator::LaunchSpec {
         retro_id: &retro.id,
-        scratch: &scratch,
+        scratch,
         tiller: tools.tiller(),
         tiller_home: tools.tiller_home(),
         claude: &tools.config.spawn.claude,
@@ -479,7 +484,8 @@ pub(crate) fn claim(
         ))
         .into());
     }
-    let launch = match prepare(tools, config, store, &claimed.value, &session_id) {
+    let scratch = scratch_of(tools, &claimed.value.id);
+    let launch = match prepare(tools, config, store, &claimed.value, &session_id, &scratch) {
         Ok(launch) => launch,
         Err(failure) => {
             // The end is its own write, at the time it ended. The claim
@@ -500,7 +506,7 @@ pub(crate) fn claim(
         }
     };
     Ok(Claimed {
-        scratch: scratch_of(tools, &claimed.value.id),
+        scratch,
         retro: claimed,
         session_id,
         argv: launch.argv,

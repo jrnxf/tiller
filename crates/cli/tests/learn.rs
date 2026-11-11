@@ -410,6 +410,35 @@ fn an_unfinished_retro_runs_again() {
     );
 }
 
+/// A dry run claims nothing and writes nothing of the real run: an
+/// unfinished retro keeps the failed run's output, where the warning tells
+/// the owner to look first.
+#[test]
+fn a_dry_run_keeps_the_failed_runs_output() {
+    let (world, _fake, retro) = curator_world("#!/bin/sh\necho 'the reason it failed'\nexit 3\n");
+    let ran = world.must(&["retro", "run", &retro]);
+    assert_eq!(ran.data()["retro"]["outcome"], "unfinished", "{}", ran.json);
+    let scratch = world.dir.path().join("scratch/retros").join(&retro);
+    let output = std::fs::read_to_string(scratch.join("output.json")).unwrap();
+    assert!(output.contains("the reason it failed"), "{output}");
+
+    let dry = world.must(&["retro", "run", &retro, "--dry-run"]);
+    assert_eq!(dry.data()["dry_run"], true);
+    assert_eq!(
+        std::fs::read_to_string(scratch.join("output.json")).unwrap(),
+        output
+    );
+    // The dry run's launch files are still there to read.
+    let prompt = std::fs::read_to_string(dry.data()["prompt"].as_str().unwrap()).unwrap();
+    assert!(prompt.starts_with("# Curator"), "{prompt}");
+    assert_ne!(
+        std::path::Path::new(dry.data()["prompt"].as_str().unwrap()).parent(),
+        Some(scratch.as_path()),
+        "{}",
+        dry.json
+    );
+}
+
 /// An unfinished end is stamped when the run ended, not when it was
 /// claimed: Memory and Health show that time.
 #[test]

@@ -908,7 +908,10 @@ fn owner_retro_learn_and_agent_commands_denied() {
         ("tiller retro show 01JABC", Some(Code::OwnerOnly)),
         ("tiller retro sweep", Some(Code::OwnerOnly)),
         ("tiller learn status", Some(Code::OwnerOnly)),
-        ("tiller learn bundle placement 01JABC", Some(Code::OwnerOnly)),
+        (
+            "tiller learn bundle placement 01JABC",
+            Some(Code::OwnerOnly),
+        ),
         ("tiller learn add placement 01JABC", Some(Code::OwnerOnly)),
         ("tiller learn abandon placement", Some(Code::OwnerOnly)),
         ("tiller learn gate 01JABC", None),
