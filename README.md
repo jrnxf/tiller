@@ -30,7 +30,7 @@ nix build
 ## Develop
 
 ```sh
-nix develop                       # Rust toolchain, bun, nodejs, sccache, sqlite3, cargo-nextest
+nix develop                       # Rust toolchain, bun, nodejs, sccache, sqlite3, cargo-nextest, odiff
 cargo nextest run --workspace
 bun install --cwd board
 bun run --cwd board build         # the daemon embeds board/dist in release builds

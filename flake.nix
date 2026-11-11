@@ -314,6 +314,8 @@
               pkgs.cargo-nextest
               pkgs.sccache
               pkgs.sqlite
+              # Pixel diff for board screenshots.
+              pkgs.odiff
               bun2nixCli
             ];
             RUSTC_WRAPPER = "sccache";
