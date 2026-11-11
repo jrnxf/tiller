@@ -7,7 +7,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::thread::{self, JoinHandle};
 
-use tiller_panes::frame::{Frame, MAX_FRAME_LEN, read_frame, write_frame};
+use tiller_panes::frame::{Frame, FrameError, MAX_FRAME_LEN, read_frame, write_frame};
 use tiller_panes::handshake::{ProtoRange, Refused, SUPPORTED, Welcome, negotiate};
 use tiller_panes::message::{ErrorCode, HolderMessage, Request, SyncMode};
 use tiller_panes::{
@@ -29,8 +29,13 @@ impl Peer {
         }
     }
 
+    /// The next frame, or `None` once the client closed. A client that
+    /// closes with frames it never read resets the connection on Linux.
     fn frame(&mut self) -> Option<Frame> {
-        read_frame(&mut self.reader).unwrap()
+        match read_frame(&mut self.reader) {
+            Err(FrameError::Io(err)) if err.kind() == std::io::ErrorKind::ConnectionReset => None,
+            other => other.unwrap(),
+        }
     }
 
     fn request(&mut self) -> Request {
@@ -655,6 +660,49 @@ fn an_ended_subscription_yields_nothing_it_had_buffered() {
 }
 
 #[test]
+fn a_resize_that_fails_on_a_closed_stream_keeps_the_exit_it_had_buffered() {
+    let (closed, connection_closed) = std::sync::mpsc::channel();
+    let holder = subscription_holder(move |peer, _| {
+        peer.send(&HolderMessage::Exited {
+            pane: "p1".into(),
+            exit: Exit {
+                code: Some(0),
+                signal: None,
+                at: "2026-11-11T12:01:00Z".parse().unwrap(),
+            },
+        });
+        closed.send(()).unwrap();
+        // The script returns, so the holder's end closes.
+    });
+    let client = HolderClient::connect(&holder.path, "daemon").unwrap();
+    let mut subscription = client
+        .subscribe(&"p1".into(), Subscribe::default())
+        .unwrap();
+    assert!(matches!(
+        subscription.recv(),
+        Ok(Some(Update::Repaint { .. }))
+    ));
+    connection_closed
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    // Wait until the holder's socket is gone, so the resize write fails.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while subscription.resize(100, 30).is_ok() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the resize never failed"
+        );
+        thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let got = subscription.recv();
+    assert!(matches!(got, Ok(Some(Update::Exited(_)))), "{got:?}");
+    assert_eq!(subscription.recv().unwrap(), None);
+    drop(subscription);
+    drop(client);
+    holder.join();
+}
+
+#[test]
 fn an_error_with_no_id_on_a_subscription_ends_the_stream() {
     let (closed, connection_closed) = std::sync::mpsc::channel();
     let holder = subscription_holder(move |peer, _| {
@@ -748,12 +796,18 @@ fn dropping_a_subscription_ends_its_connection_while_a_handle_lives() {
         assert_eq!(peer.frame(), None);
     });
     let client = HolderClient::connect(&holder.path, "daemon").unwrap();
-    let subscription = client
+    let mut subscription = client
         .subscribe(&"p1".into(), Subscribe::default())
         .unwrap();
+    // The holder has written all it writes once the repaint is in.
+    assert!(matches!(
+        subscription.recv(),
+        Ok(Some(Update::Repaint { .. }))
+    ));
     let handle = subscription.handle();
     drop(subscription);
-    assert!(handle.resize(100, 30).is_err());
+    let err = handle.resize(100, 30).unwrap_err();
+    assert!(err.to_string().contains("has ended"), "{err}");
     drop(client);
     holder.join();
 }

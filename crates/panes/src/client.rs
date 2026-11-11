@@ -648,6 +648,12 @@ impl StreamHandle {
         };
         let wire = encode_request("resize", &request)?;
         let mut writer = lock(&side.writer);
+        if let Some(closed) = side.closed.get() {
+            return Err(PanesError::Unreachable(match closed {
+                Closed::Ended => format!("the subscription {} has ended", side.lease),
+                Closed::Broken(why) => why.clone(),
+            }));
+        }
         // The id is pending before its bytes leave, so a fast answer finds it.
         side.pending().push_back(id);
         let sent = send(&mut writer, &wire, Instant::now() + REQUEST_TIMEOUT);
@@ -739,16 +745,18 @@ impl Subscription {
         if self.state == StreamState::Ended {
             return Ok(None);
         }
-        // Once this side closed the stream, what is still buffered, and the
-        // read error or close the shutdown causes, are not news.
-        let result = match self.handle.0.closed.get() {
-            Some(_) => Ok(None),
-            None => self.read_update(),
-        };
+        // Once this side ended the stream, what is still buffered, and the
+        // read error or close the shutdown causes, are not news. After a
+        // broken resize, what is buffered still comes (an exit, a lag), and
+        // the read that fails then says why.
         let result = match self.handle.0.closed.get() {
             Some(Closed::Ended) => Ok(None),
-            Some(Closed::Broken(why)) => Err(PanesError::Unreachable(why.clone())),
-            None => result,
+            _ => self.read_update(),
+        };
+        let result = match (result, self.handle.0.closed.get()) {
+            (_, Some(Closed::Ended)) => Ok(None),
+            (Err(_), Some(Closed::Broken(why))) => Err(PanesError::Unreachable(why.clone())),
+            (result, _) => result,
         };
         let ends = match &result {
             Ok(None | Some(Update::Lagged)) => true,
@@ -771,16 +779,21 @@ impl Subscription {
 
     fn read_update(&mut self) -> Result<Option<Update>> {
         loop {
-            let Some(frame) = read_frame(&mut self.reader).map_err(PanesError::from_frame)? else {
-                return match self.handle.0.closed.get() {
-                    Some(Closed::Broken(why)) => Err(PanesError::Unreachable(why.clone())),
-                    Some(Closed::Ended) => Ok(None),
-                    None if self.exited => Ok(None),
-                    None => Err(PanesError::Unreachable(format!(
-                        "the holder closed stream {} before the pane exited",
-                        self.stream
-                    ))),
-                };
+            let read = read_frame(&mut self.reader).map_err(PanesError::from_frame);
+            // After the exit, a holder that closes with a resize it never
+            // read resets the connection: that is the end too.
+            let read = match read {
+                Err(PanesError::Unreachable(_)) if self.exited => Ok(None),
+                read => read,
+            };
+            let Some(frame) = read? else {
+                if self.exited {
+                    return Ok(None);
+                }
+                return Err(PanesError::Unreachable(format!(
+                    "the holder closed stream {} before the pane exited",
+                    self.stream
+                )));
             };
             match frame {
                 Frame::Output { stream, bytes } => {
@@ -854,8 +867,9 @@ impl Subscription {
                     } => {
                         if !self.handle.0.take_pending(id) {
                             return Err(PanesError::Protocol(format!(
-                                "an error (id {id}) that answers no resize of stream {}: {code}: {message}",
-                                self.stream
+                                "an error (id {id}) that answers no resize of stream {}: {code}: {}",
+                                self.stream,
+                                brief(&message)
                             )));
                         }
                         return Err(PanesError::from_reply("resize", code, message));
