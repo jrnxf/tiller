@@ -2266,29 +2266,6 @@ fn orchestrator_restart_of_a_retired_project_keeps_the_live_one() {
 }
 
 #[test]
-fn orchestrator_restart_is_the_owners() {
-    let (mut rig, homes) = orchestrator_rig();
-    let first = start_orchestrator(&mut rig, &homes, &owner())
-        .unwrap()
-        .value;
-    let world = world!(rig);
-    let error = orchestrator::start(
-        &mut rig.fleet.store,
-        &Ctx::new(Actor::Daemon),
-        &world,
-        &homes,
-        "alpha",
-        Some(&crate::control::Waits::default()),
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("may not restart"), "{error}");
-    let live = tiller_core::state::outbox::live_orchestrator(rig.fleet.store.conn(), "alpha")
-        .unwrap()
-        .unwrap();
-    assert_eq!(live.id, first.session.id);
-}
-
-#[test]
 fn agent_stop_ends_a_live_orchestrator_and_closes_its_pane() {
     let (mut rig, homes) = orchestrator_rig();
     let first = start_orchestrator(&mut rig, &homes, &owner())
@@ -3162,10 +3139,10 @@ fn an_idle_stale_orchestrator_restarts_now_on_the_current_launch() {
         &mut rig.fleet.store,
         &Ctx::new(Actor::Board),
         Some(std::slice::from_ref(&old)),
-        &mut |store, session| {
+        &mut |store, ctx, session| {
             orchestrator::start(
                 store,
-                &owner(),
+                ctx,
                 &world,
                 &homes,
                 &session.project_id,
@@ -3198,11 +3175,11 @@ fn a_working_stale_orchestrator_is_queued_and_restarts_once_idle() {
 
     let world = world!(rig);
     let restarts = std::cell::Cell::new(0);
-    let mut restart = |store: &mut Store, session: &Session| {
+    let mut restart = |store: &mut Store, ctx: &Ctx, session: &Session| {
         restarts.set(restarts.get() + 1);
         orchestrator::start(
             store,
-            &owner(),
+            ctx,
             &world,
             &homes,
             &session.project_id,
@@ -3254,7 +3231,7 @@ fn a_queued_restart_that_fails_is_dropped_and_shows_as_stale_again() {
     let (mut rig, homes) = orchestrator_rig();
     let id = stale_orchestrator(&mut rig, &homes, "working");
     let ctx = Ctx::new(Actor::Board);
-    let mut fail = |_: &mut Store, _: &Session| Err("herdr is not running".to_owned());
+    let mut fail = |_: &mut Store, _: &Ctx, _: &Session| Err("herdr is not running".to_owned());
 
     crate::stale::restart_stale(&mut rig.fleet.store, &ctx, None, &mut fail).unwrap();
     rig.fleet
@@ -3488,4 +3465,217 @@ fn spawn_refuses_an_approved_blob_it_cannot_read() {
         .query_row("SELECT count(*) FROM session_loads", [], |row| row.get(0))
         .unwrap();
     assert_eq!(loads, 0);
+}
+
+/// T6: one board action has one actor. The board's stale restart queues a
+/// working orchestrator as the board, and the restart that drains it ends
+/// the old session and starts the new one as the board too.
+#[test]
+fn a_board_stale_restart_records_the_board_from_queue_to_restart() {
+    let (mut rig, homes) = orchestrator_rig();
+    let old = stale_orchestrator(&mut rig, &homes, "working");
+    let waits = quick_waits();
+    let board = Ctx::new(Actor::Board);
+    let world = world!(rig);
+    let mut restart = |store: &mut Store, ctx: &Ctx, session: &Session| {
+        orchestrator::start(
+            store,
+            ctx,
+            &world,
+            &homes,
+            &session.project_id,
+            Some(&waits),
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    };
+    crate::stale::restart_stale(&mut rig.fleet.store, &board, None, &mut restart).unwrap();
+    rig.fleet
+        .store
+        .conn()
+        .execute(
+            "UPDATE sessions SET activity = 'idle' WHERE id = ?1",
+            rusqlite::params![old],
+        )
+        .unwrap();
+    let drained = crate::stale::drain_queue(&mut rig.fleet.store, &board, &mut restart).unwrap();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(
+        drained[0].outcome,
+        crate::stale::Outcome::Restarted,
+        "{:?}",
+        drained[0].outcome
+    );
+
+    let live = tiller_core::state::outbox::live_orchestrator(rig.fleet.store.conn(), "alpha")
+        .unwrap()
+        .unwrap();
+    assert_ne!(live.id, old);
+    let actors: Vec<(String, String)> = {
+        let mut statement = rig
+            .fleet
+            .store
+            .conn()
+            .prepare(
+                "SELECT kind, actor FROM events
+                 WHERE kind IN ('session.restart_queued', 'session.ended', 'session.started')
+                   AND entity_id IN (?1, ?2)
+                   AND seq >= (SELECT min(seq) FROM events WHERE kind = 'session.restart_queued')
+                 ORDER BY seq",
+            )
+            .unwrap();
+        statement
+            .query_map(rusqlite::params![old, live.id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let kinds: Vec<&str> = actors.iter().map(|(kind, _)| kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        ["session.restart_queued", "session.ended", "session.started"],
+        "{actors:?}"
+    );
+    assert!(
+        actors.iter().all(|(_, actor)| actor == "board"),
+        "one action, one actor: {actors:?}"
+    );
+}
+
+/// The board restarts an orchestrator as the owner does; a peer's board,
+/// the daemon and a session may not, and their refusal stops nothing.
+#[test]
+fn orchestrator_restart_is_the_owners_or_this_boards() {
+    let (mut rig, homes) = orchestrator_rig();
+    let first = start_orchestrator(&mut rig, &homes, &owner())
+        .unwrap()
+        .value;
+    let pane = first.pane_id.clone().unwrap();
+    rig.herdr.set_screen(&pane, Screen::Idle);
+    rig.fleet.bind(&first.session.id, &pane);
+    let waits = quick_waits();
+    let world = world!(rig);
+    for actor in [
+        Actor::Peer("board-host".into()),
+        Actor::Daemon,
+        Actor::Session(first.session.id.clone()),
+    ] {
+        let error = orchestrator::start(
+            &mut rig.fleet.store,
+            &Ctx::new(actor.clone()),
+            &world,
+            &homes,
+            "alpha",
+            Some(&waits),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("may not"), "{actor}: {error}");
+        // Refused before the stop: the live orchestrator keeps running.
+        let live = tiller_core::state::outbox::live_orchestrator(rig.fleet.store.conn(), "alpha")
+            .unwrap()
+            .unwrap();
+        assert_eq!(live.id, first.session.id);
+    }
+    let restarted = orchestrator::start(
+        &mut rig.fleet.store,
+        &Ctx::new(Actor::Board),
+        &world,
+        &homes,
+        "alpha",
+        Some(&waits),
+    )
+    .unwrap();
+    assert_ne!(restarted.value.session.id, first.session.id);
+    let old: Session = get(rig.fleet.store.conn(), "session", &first.session.id).unwrap();
+    assert_eq!(old.end_reason.as_deref(), Some(orchestrator::RESTARTED));
+}
+
+/// The daemon drains every queue, but a restart the owner queued from a
+/// terminal is still the owner's: the drain restarts as whoever queued it.
+#[test]
+fn a_drained_restart_records_whoever_queued_it() {
+    let (mut rig, homes) = orchestrator_rig();
+    let old = stale_orchestrator(&mut rig, &homes, "working");
+    let waits = quick_waits();
+    let world = world!(rig);
+    let asked = std::cell::RefCell::new(Vec::new());
+    let mut restart = |store: &mut Store, ctx: &Ctx, session: &Session| {
+        asked.borrow_mut().push(ctx.actor.to_string());
+        orchestrator::start(
+            store,
+            ctx,
+            &world,
+            &homes,
+            &session.project_id,
+            Some(&waits),
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    };
+    crate::stale::restart_stale(&mut rig.fleet.store, &owner(), None, &mut restart).unwrap();
+    rig.fleet
+        .store
+        .conn()
+        .execute(
+            "UPDATE sessions SET activity = 'idle' WHERE id = ?1",
+            rusqlite::params![old],
+        )
+        .unwrap();
+    let drained =
+        crate::stale::drain_queue(&mut rig.fleet.store, &Ctx::new(Actor::Board), &mut restart)
+            .unwrap();
+    assert_eq!(drained[0].outcome, crate::stale::Outcome::Restarted);
+    assert_eq!(*asked.borrow(), ["owner"]);
+    let ended: String = rig
+        .fleet
+        .store
+        .conn()
+        .query_row(
+            "SELECT actor FROM events WHERE kind = 'session.ended' AND entity_id = ?1",
+            [&old],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(ended, "owner");
+}
+
+/// Only the board's own queue restarts as the board. Any other queue,
+/// the daemon's among them, restarts as the owner, as every drained
+/// restart did before T6: the drain never runs as an actor that may not
+/// restart an orchestrator.
+#[test]
+fn a_restart_the_daemon_queued_drains_as_the_owner() {
+    let (mut rig, homes) = orchestrator_rig();
+    let old = stale_orchestrator(&mut rig, &homes, "working");
+    let waits = quick_waits();
+    let world = world!(rig);
+    let asked = std::cell::RefCell::new(Vec::new());
+    let mut restart = |store: &mut Store, ctx: &Ctx, session: &Session| {
+        asked.borrow_mut().push(ctx.actor.to_string());
+        orchestrator::start(
+            store,
+            ctx,
+            &world,
+            &homes,
+            &session.project_id,
+            Some(&waits),
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    };
+    let daemon = Ctx::new(Actor::Daemon);
+    crate::stale::restart_stale(&mut rig.fleet.store, &daemon, None, &mut restart).unwrap();
+    rig.fleet
+        .store
+        .conn()
+        .execute(
+            "UPDATE sessions SET activity = 'idle' WHERE id = ?1",
+            rusqlite::params![old],
+        )
+        .unwrap();
+    let drained = crate::stale::drain_queue(&mut rig.fleet.store, &daemon, &mut restart).unwrap();
+    assert_eq!(drained[0].outcome, crate::stale::Outcome::Restarted);
+    assert_eq!(*asked.borrow(), ["owner"]);
 }

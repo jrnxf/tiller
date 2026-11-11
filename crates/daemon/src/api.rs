@@ -8992,9 +8992,9 @@ esac"#,
     }
 
     /// A starter that restarts a session by stamping it as launched now, and
-    /// remembers which it restarted.
+    /// remembers which it restarted and as whom.
     #[derive(Default)]
-    struct FakeRestarts(Mutex<Vec<String>>);
+    struct FakeRestarts(Mutex<Vec<String>>, Mutex<Vec<String>>);
 
     impl OrchestratorStart for FakeRestarts {
         fn start(
@@ -9006,11 +9006,12 @@ esac"#,
             unreachable!("the stale restart does not start an orchestrator")
         }
 
-        fn restart(&self, store: &mut Store, _ctx: &Ctx, session: &Session) -> Result<(), String> {
+        fn restart(&self, store: &mut Store, ctx: &Ctx, session: &Session) -> Result<(), String> {
             let role = tiller_agents::roles::Role::parse(&session.role.to_string()).unwrap();
             tiller_agents::stale::record(store, &Ctx::new(Actor::Daemon), &session.id, role)
                 .map_err(|error| error.to_string())?;
             self.0.lock().unwrap().push(session.id.clone());
+            self.1.lock().unwrap().push(ctx.actor.to_string());
             Ok(())
         }
     }
@@ -9795,6 +9796,20 @@ esac"#,
         assert_eq!(starter.0.lock().unwrap().len(), 2);
         let read: Value = serde_json::from_str(&get(&app, "/api/v1/agents").await.body).unwrap();
         assert_eq!(stale_of(&read, &orchestrator), Value::Null);
+
+        // T6: the click and the drain are one board action. The queue and
+        // both restarts name the board, never the owner as well.
+        assert_eq!(*starter.1.lock().unwrap(), ["board", "board"]);
+        let queued: String = fleet
+            .open()
+            .conn()
+            .query_row(
+                "SELECT actor FROM events WHERE kind = 'session.restart_queued'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, "board");
     }
 
     /// A herdr whose one Claude pane, `w2:p1`, shows the agent status in

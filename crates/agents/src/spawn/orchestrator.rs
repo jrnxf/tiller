@@ -161,7 +161,10 @@ pub fn start(
         // Refused before the stop: a restart that cannot start a new one
         // must leave the live orchestrator running.
         refuse_retired(&project)?;
-        if !matches!(ctx.actor, Actor::Owner) {
+        // The board is the owner signed in on this host, so its Restart and
+        // its stale restart record the board all the way through (T6). A
+        // peer's board, the daemon and a session may not.
+        if !matches!(ctx.actor, Actor::Owner | Actor::Board) {
             return Err(tiller_core::Error::Forbidden(format!(
                 "{} may not restart an orchestrator; the owner does",
                 ctx.actor

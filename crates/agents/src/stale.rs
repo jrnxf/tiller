@@ -13,7 +13,7 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tiller_core::domain::{Activity, Role as SessionRole, Session};
 use tiller_core::state::{get, list};
-use tiller_core::{Applied, Ctx, Store};
+use tiller_core::{Actor, Applied, Ctx, Store};
 
 use crate::roles::{MCP_CONFIG, Role};
 use crate::spawn::launch::sha256_hex;
@@ -164,9 +164,10 @@ pub struct Report {
 }
 
 /// Restarts through the one restart path the caller owns (`tiller
-/// orchestrator start --restart`, or a worker relaunch). It gets the session
-/// to restart and returns the failure text, if any.
-pub type Restart<'a> = dyn FnMut(&mut Store, &Session) -> Result<(), String> + 'a;
+/// orchestrator start --restart`, or a worker relaunch). It gets the actor
+/// the restart runs as and the session to restart, and returns the failure
+/// text, if any.
+pub type Restart<'a> = dyn FnMut(&mut Store, &Ctx, &Session) -> Result<(), String> + 'a;
 
 /// Restarts every idle stale session now and queues the working ones to
 /// restart when they next go idle. Only the sessions in `only` when it is
@@ -183,7 +184,7 @@ pub fn restart_stale(
             continue;
         }
         let outcome = if item.idle {
-            match restart(store, &item.session) {
+            match restart(store, ctx, &item.session) {
                 Ok(()) => Outcome::Restarted,
                 Err(why) => Outcome::Failed(why),
             }
@@ -210,6 +211,18 @@ pub fn drain_queue(
 ) -> tiller_core::Result<Vec<Report>> {
     let mut reports = Vec::new();
     for session in store.restart_queued()? {
+        // The restart is the act of whoever queued it, so it records them,
+        // not the loop that drains it (T6). Only the owner and the board may
+        // restart an orchestrator, so the board's queue restarts as the
+        // board and every other queue as the owner, as before T6.
+        let actor = match queued_by(store, &session)? {
+            Some(Actor::Board) => Actor::Board,
+            _ => Actor::Owner,
+        };
+        let ctx = &Ctx {
+            actor,
+            ..ctx.clone()
+        };
         let Some(stale) = staleness(&session) else {
             // Best effort: the session may have ended meanwhile.
             let _ = store.session_restart_queue(ctx, &session.id, false);
@@ -218,7 +231,7 @@ pub fn drain_queue(
         if !is_idle(store, &session)? {
             continue;
         }
-        let outcome = match restart(store, &session) {
+        let outcome = match restart(store, ctx, &session) {
             Ok(()) => Outcome::Restarted,
             Err(why) => {
                 // Drop the queue entry so a failing restart is not retried
@@ -236,4 +249,24 @@ pub fn drain_queue(
         });
     }
     Ok(reports)
+}
+
+/// Who queued the session's restart: the actor of its newest
+/// `session.restart_queued` event, or `None` when none parses.
+fn queued_by(store: &Store, session: &Session) -> tiller_core::Result<Option<Actor>> {
+    let actor: Option<String> = store
+        .conn()
+        .query_row(
+            "SELECT actor FROM events WHERE entity = 'session' AND entity_id = ?1
+               AND kind = 'session.restart_queued' ORDER BY seq DESC LIMIT 1",
+            params![session.id],
+            |row| row.get(0),
+        )
+        .map(Some)
+        .or_else(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+        .map_err(tiller_core::Error::from)?;
+    Ok(actor.and_then(|actor| actor.parse().ok()))
 }

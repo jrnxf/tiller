@@ -28,17 +28,17 @@ fn one_at_a_time() -> MutexGuard<'static, ()> {
 }
 
 /// Restarts the idle stale sessions, in `only` when it is given, and queues
-/// the working ones. Runs as the owner: the board is signed in as them.
+/// the working ones. The whole action is the board's, the owner signed in on
+/// this host: the queue and each restart record the board (T6).
 pub fn restart_stale(
     store: &mut Store,
     starter: &dyn OrchestratorStart,
     only: Option<&[String]>,
 ) -> tiller_core::Result<RestartStaleResponse> {
     let _pass = one_at_a_time();
-    let owner = Ctx::new(Actor::Owner);
     let board = Ctx::new(Actor::Board);
-    let reports = stale::restart_stale(store, &board, only, &mut |store, session| {
-        starter.restart(store, &owner, session)
+    let reports = stale::restart_stale(store, &board, only, &mut |store, ctx, session| {
+        starter.restart(store, ctx, session)
     })?;
     Ok(response(&reports))
 }
@@ -63,13 +63,14 @@ fn response(reports: &[Report]) -> RestartStaleResponse {
     }
 }
 
-/// One pass over the queue: restarts every queued session that is idle now.
+/// One pass over the queue: restarts every queued session that is idle now,
+/// as whoever queued it (the board, or the owner's `tiller agent restart
+/// --stale`).
 pub fn drain(store: &mut Store, starter: &dyn OrchestratorStart) -> tiller_core::Result<usize> {
     let _pass = one_at_a_time();
-    let owner = Ctx::new(Actor::Owner);
     let board = Ctx::new(Actor::Board);
-    let reports = stale::drain_queue(store, &board, &mut |store, session| {
-        starter.restart(store, &owner, session)
+    let reports = stale::drain_queue(store, &board, &mut |store, ctx, session| {
+        starter.restart(store, ctx, session)
     })?;
     for report in &reports {
         match &report.outcome {

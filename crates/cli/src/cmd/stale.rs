@@ -124,8 +124,8 @@ pub fn restart(app: &App, dry_run: bool) -> Done {
     let homes = orchestrator_homes(&tools)?;
     let mut store = app.write()?;
     let ctx = app.ctx();
-    let reports = stale::restart_stale(&mut store, &ctx, None, &mut |store, session| {
-        restart_session(&tools, &homes, store, &ctx, session)
+    let reports = stale::restart_stale(&mut store, &ctx, None, &mut |store, ctx, session| {
+        restart_session(&tools, &homes, store, ctx, session)
     })
     .map_err(failure_state)?;
     let failed = reports
