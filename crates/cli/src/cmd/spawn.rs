@@ -536,7 +536,11 @@ impl tiller_daemon::api::OrchestratorStart for BoardStart {
         ctx: &tiller_core::Ctx,
         retro: &str,
     ) -> Result<tiller_daemon::api::CuratorRun, StartError> {
-        super::learn::board_run(&self.app, store, ctx, retro).map_err(refused)
+        // A store error goes to the daemon as one, so it checks for damage.
+        super::learn::board_run(&self.app, store, ctx, retro).map_err(|error| match error {
+            super::learn::ClaimError::State(error) => StartError::from(error),
+            super::learn::ClaimError::Refused(failure) => refused(failure),
+        })
     }
 }
 

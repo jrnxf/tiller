@@ -464,9 +464,11 @@ pub(crate) fn claim(
     store: &mut Store,
     ctx: &tiller_core::Ctx,
     retro: &str,
-) -> Result<Claimed, Failure> {
+) -> Result<Claimed, ClaimError> {
     let session_id = new_session_id()?;
-    let claimed = store.retro_start(ctx, retro, Some(&session_id), timeout_minutes(config))?;
+    let claimed = store
+        .retro_start(ctx, retro, Some(&session_id), timeout_minutes(config))
+        .map_err(ClaimError::State)?;
     if claimed.replayed {
         // A replayed key claimed this retro before. Its run was launched
         // then, so nothing is prepared or launched again: preparing would
@@ -474,7 +476,8 @@ pub(crate) fn claim(
         return Err(Failure::refused(format!(
             "retro {} was already claimed under this key; it is not run again",
             claimed.value.id
-        )));
+        ))
+        .into());
     }
     let launch = match prepare(tools, config, store, &claimed.value, &session_id) {
         Ok(launch) => launch,
@@ -487,7 +490,7 @@ pub(crate) fn claim(
                 &claimed.value.id,
                 &note("the curator could not be prepared", &failure),
             )?;
-            return Err(failure);
+            return Err(failure.into());
         }
     };
     Ok(Claimed {
@@ -498,6 +501,28 @@ pub(crate) fn claim(
         env: launch.env,
         timeout_minutes: config.curator_timeout_minutes,
     })
+}
+
+/// Why a claim failed: the store's own error, which the daemon checks for
+/// damage, or any other refusal.
+pub(crate) enum ClaimError {
+    State(tiller_core::Error),
+    Refused(Failure),
+}
+
+impl From<Failure> for ClaimError {
+    fn from(failure: Failure) -> Self {
+        Self::Refused(failure)
+    }
+}
+
+impl From<ClaimError> for Failure {
+    fn from(error: ClaimError) -> Self {
+        match error {
+            ClaimError::State(error) => error.into(),
+            ClaimError::Refused(failure) => failure,
+        }
+    }
 }
 
 /// Runs a claimed retro's curator until it exits, its timeout passes or
@@ -604,7 +629,7 @@ pub(crate) fn board_run(
     store: &mut Store,
     ctx: &tiller_core::Ctx,
     retro: &str,
-) -> Result<tiller_daemon::api::CuratorRun, Failure> {
+) -> Result<tiller_daemon::api::CuratorRun, ClaimError> {
     let config = learning_config(app)?;
     let tools = Tools::load(app)?;
     let claimed = claim(&tools, &config, store, ctx, retro)?;
