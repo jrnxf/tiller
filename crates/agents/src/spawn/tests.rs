@@ -3370,7 +3370,8 @@ fn spawn_renders_the_approved_memory_and_records_the_load() {
     }
     // The brief still reads back for a relaunch.
     assert_eq!(
-        launch::brief_of(&prompt).map(|b| b.starts_with("Do the work on")),
+        launch::brief_in(&rig.scratch.join(&spawned.run.id))
+            .map(|b| b.starts_with("Do the work on")),
         Some(true)
     );
 
@@ -3679,4 +3680,154 @@ fn a_restart_the_daemon_queued_drains_as_the_owner() {
     let drained = crate::stale::drain_queue(&mut rig.fleet.store, &daemon, &mut restart).unwrap();
     assert_eq!(drained[0].outcome, crate::stale::Outcome::Restarted);
     assert_eq!(*asked.borrow(), ["owner"]);
+}
+
+// -- memory a launch renders ---------------------------------------------------
+
+impl Rig {
+    /// Gives the rig a memory repo under its own Tiller home with one
+    /// approved alpha document for every role, its text `text`. Returns the
+    /// revision.
+    pub(crate) fn approved_memory(&mut self, text: &str) -> String {
+        let repo = self.memory_repo();
+        std::fs::write(repo.join("projects/alpha.md"), text).unwrap();
+        let blob = git(&repo, &["hash-object", "-w", "projects/alpha.md"]);
+        self.memory_revision(&blob)
+    }
+
+    /// Records an approved alpha revision whose blob the memory repo does
+    /// not have, as after a gc or a re-clone.
+    pub(crate) fn unreadable_memory(&mut self) -> String {
+        self.memory_repo();
+        self.memory_revision("0123456789abcdef0123456789abcdef01234567")
+    }
+
+    fn memory_repo(&mut self) -> PathBuf {
+        let home = self.fleet.dir.path().join("tiller-home");
+        let repo = home.join("memory");
+        if !repo.join(".git").exists() {
+            std::fs::create_dir_all(repo.join("projects")).unwrap();
+            git(&repo, &["init", "-q"]);
+        }
+        self.tiller_home = home;
+        self.sql(
+            r#"INSERT OR IGNORE INTO memory_sources (id, project_id, boundary, kind, loaded_path,
+                 canonical_repo, canonical_path, apply_method, load_mode, roles, added_at)
+             VALUES ('S-alpha', 'alpha', 'personal', 'tiller_doc',
+                 '~/.tiller/memory/projects/alpha.md', '~/.tiller/memory', 'projects/alpha.md',
+                 'tiller_commit', 'rendered',
+                 '["orchestrator","scout","builder","reviewer","verifier"]',
+                 '2026-11-02T09:00:00.000Z')"#,
+        );
+        repo
+    }
+
+    /// Records the newest approved revision of alpha's document, at `blob`.
+    fn memory_revision(&self, blob: &str) -> String {
+        let count: i64 = self
+            .fleet
+            .store
+            .conn()
+            .query_row("SELECT count(*) FROM memory_revisions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let id = format!("R-{:04}", count + 1);
+        self.sql(&format!(
+            "INSERT INTO memory_revisions (id, source_id, blob_sha, review, provenance, scrub,
+                 recorded_at, recorded_by)
+             VALUES ('{id}', 'S-alpha', '{blob}', 'approved', 'baseline', 'passed',
+                 strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+{count} seconds'), 'daemon')"
+        ));
+        id
+    }
+
+    /// Every `session_loads` row in the store.
+    pub(crate) fn all_loads(&self) -> i64 {
+        self.fleet
+            .store
+            .conn()
+            .query_row("SELECT count(*) FROM session_loads", [], |row| row.get(0))
+            .unwrap()
+    }
+}
+
+/// A spawn whose launch line never went in records no load: "Loaded by"
+/// lists only sessions that got the prompt (`memory.md` section 7).
+#[test]
+fn a_spawn_that_fails_after_the_render_records_no_load() {
+    let mut rig = Rig::new();
+    rig.approved_memory("- Alpha line.\n");
+    rig.herdr.refuse("send_text");
+    let card = rig.card(CardKind::Ship, None);
+    let ctx = rig.orchestrator();
+    let error = rig
+        .try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
+        .map(|_| ())
+        .unwrap_err();
+    assert!(matches!(error, SpawnError::Herdr(_)), "{error}");
+    assert_eq!(rig.all_loads(), 0);
+}
+
+/// The same for an orchestrator whose launch line never went in.
+#[test]
+fn an_orchestrator_start_that_fails_after_the_render_records_no_load() {
+    let (mut rig, homes) = orchestrator_rig();
+    rig.approved_memory("- Alpha line.\n");
+    rig.herdr.refuse("send_text");
+    start_orchestrator(&mut rig, &homes, &owner())
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(rig.all_loads(), 0);
+}
+
+/// A restart whose memory cannot be rendered refuses before the stop, so
+/// the live orchestrator keeps running.
+#[test]
+fn orchestrator_restart_refused_by_its_memory_keeps_the_live_one() {
+    let (mut rig, homes) = orchestrator_rig();
+    let first = start_orchestrator(&mut rig, &homes, &owner())
+        .unwrap()
+        .value;
+    let pane = first.pane_id.clone().unwrap();
+    rig.herdr.set_screen(&pane, Screen::Idle);
+    rig.fleet.bind(&first.session.id, &pane);
+    rig.unreadable_memory();
+
+    let waits = quick_waits();
+    let world = world!(rig);
+    let error = orchestrator::start(
+        &mut rig.fleet.store,
+        &owner(),
+        &world,
+        &homes,
+        "alpha",
+        Some(&waits),
+    )
+    .unwrap_err();
+    assert!(refusal(&error).contains("cannot be read"), "{error}");
+    let live = tiller_core::state::outbox::live_orchestrator(rig.fleet.store.conn(), "alpha")
+        .unwrap()
+        .unwrap();
+    assert_eq!(live.id, first.session.id);
+    assert!(
+        !rig.herdr.calls().iter().any(|c| c.contains("/exit")),
+        "the live orchestrator was sent /exit: {:?}",
+        rig.herdr.calls()
+    );
+}
+
+/// A first start whose memory cannot be rendered leaves no home behind.
+#[test]
+fn orchestrator_start_refused_by_its_memory_makes_no_home() {
+    let (mut rig, homes) = orchestrator_rig();
+    rig.unreadable_memory();
+    let error = start_orchestrator(&mut rig, &homes, &owner())
+        .map(|_| ())
+        .unwrap_err();
+    assert!(refusal(&error).contains("cannot be read"), "{error}");
+    let left: Vec<PathBuf> = std::fs::read_dir(&homes)
+        .map(|dir| dir.map(|e| e.unwrap().path()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "{left:?}");
 }

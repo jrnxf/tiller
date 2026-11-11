@@ -152,18 +152,16 @@ pub(super) fn relaunch_run(
     Ok((applied, warning))
 }
 
-/// The brief a run was launched on, from its prompt in the run scratch: the
-/// board's new attempt starts on it, since the board takes no brief file.
+/// The brief a run was launched on, from the run scratch: the board's new
+/// attempt starts on it, since the board takes no brief file.
 pub(super) fn run_brief(tools: &Tools, run: &Run) -> Result<String, SpawnError> {
-    let prompt = tools.scratch_root().join(&run.id).join("prompt.md");
-    std::fs::read_to_string(&prompt)
-        .ok()
-        .and_then(|text| launch::brief_of(&text).map(str::to_owned))
+    let scratch = tools.scratch_root().join(&run.id);
+    launch::brief_in(&scratch)
         .filter(|brief| !brief.is_empty())
         .ok_or_else(|| {
             SpawnError::Refused(format!(
-                "{} is missing or holds no brief, so a new attempt has nothing to start on; run tiller agent relaunch {} --new-attempt --brief-file <f> from a terminal; nothing was changed",
-                prompt.display(),
+                "{} holds no brief, so a new attempt has nothing to start on; run tiller agent relaunch {} --new-attempt --brief-file <f> from a terminal; nothing was changed",
+                scratch.display(),
                 run.id
             ))
         })

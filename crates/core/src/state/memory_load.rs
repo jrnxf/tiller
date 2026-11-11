@@ -43,8 +43,13 @@ pub struct Loaded {
     pub revision_ids: Vec<String>,
 }
 
-/// The triggers of `session_loads.trigger`.
-const TRIGGERS: &[&str] = &["startup", "resume", "clear", "compact"];
+/// The `session_loads.trigger` values a `SessionStart` observation copies
+/// the newest set under. The launch writes `startup` itself.
+pub const COPY_TRIGGERS: &[&str] = &["resume", "clear", "compact"];
+
+/// How long after its session ended a `SessionStart` observation still
+/// gets its copy: the daemon may have been down when it came in.
+const COPY_WINDOW_MINUTES: i64 = 60;
 
 impl Store {
     /// The approved revisions a launch of `role` in `project` renders, in
@@ -53,8 +58,19 @@ impl Store {
     /// boundary, its `roles` name the role, and it has an approved
     /// revision; the current one is the approved revision recorded last (an
     /// undo records its earlier blob again). A source with no approved
-    /// revision yet loads nothing: its document has no approved text.
+    /// revision yet loads nothing: its document has no approved text. A
+    /// state.db with no live Tiller document loads nothing either, so only
+    /// a launch with memory to load needs `meta.boundary`.
     pub fn mem_loadable(&self, project: &str, role: &str) -> Result<Vec<Loadable>> {
+        let any: bool = self.conn().query_row(
+            "SELECT EXISTS (SELECT 1 FROM memory_sources
+                            WHERE kind = 'tiller_doc' AND retired_at IS NULL)",
+            [],
+            |row| row.get(0),
+        )?;
+        if !any {
+            return Ok(Vec::new());
+        }
         let boundary = host_boundary(self.conn())?;
         let mut stmt = self.conn().prepare(
             "SELECT s.id, r.id, s.project_id, s.canonical_repo, s.canonical_path, r.blob_sha
@@ -83,9 +99,10 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// `mem.load` (the launcher, after a launch rendered `revisions`): one
-    /// `startup` row per revision for the session, at this moment. A launch
-    /// that rendered nothing writes nothing and opens no transaction.
+    /// `mem.load` (the launcher, once a launch's line went in): one
+    /// `startup` row per revision it rendered for the session, at this
+    /// moment. A launch that rendered nothing writes nothing and opens no
+    /// transaction.
     pub fn mem_load(
         &mut self,
         ctx: &Ctx,
@@ -93,7 +110,7 @@ impl Store {
         revisions: &[String],
     ) -> Result<Applied<Loaded>> {
         if revisions.is_empty() {
-            return Ok(nothing(session, "startup", Timestamp::now()));
+            return Ok(nothing(session, "startup", ctx.now));
         }
         self.write(ctx, "mem.load", None, |tx| {
             let session: Session = get(tx.conn(), "session", session)?;
@@ -102,13 +119,12 @@ impl Store {
         })
     }
 
-    /// `mem.load` on a resume, `/clear` or `/compact` (the `SessionStart`
-    /// observation's writer, `protocol.md` 4.2): copies the session's newest
-    /// set with the new trigger at `at`. It renders and hashes nothing, since
-    /// the appended prompt is the one the session launched with. A session
-    /// that loaded nothing writes nothing and opens no transaction, so the
-    /// hook stays in its budget; a copy already recorded at `at` (a replayed
-    /// observation) writes nothing either.
+    /// `mem.load` on a resume, `/clear` or `/compact` (the daemon, on the
+    /// `SessionStart` observation, `protocol.md` 4.2): copies the session's
+    /// newest set with the new trigger at `at`. It renders and hashes
+    /// nothing, since the appended prompt is the one the session launched
+    /// with. A session that loaded nothing writes nothing and opens no
+    /// transaction; a copy already recorded at `at` writes nothing either.
     pub fn mem_load_again(
         &mut self,
         ctx: &Ctx,
@@ -116,7 +132,7 @@ impl Store {
         trigger: &str,
         at: Timestamp,
     ) -> Result<Applied<Loaded>> {
-        if !TRIGGERS.contains(&trigger) || trigger == "startup" {
+        if !COPY_TRIGGERS.contains(&trigger) {
             return Err(Error::Usage(format!(
                 "a copied load is for resume, clear or compact, not {trigger}"
             )));
@@ -126,9 +142,47 @@ impl Store {
         }
         self.write(ctx, "mem.load", None, |tx| {
             let session: Session = get(tx.conn(), "session", session)?;
-            let revisions = newest_set(tx, &session.id)?;
+            let revisions = newest_set_in(tx.conn(), &session.id)?;
             insert(tx, &session, trigger, at, &revisions)
         })
+    }
+
+    /// The daemon's copy pass: makes each copy a `SessionStart` observation
+    /// for resume, clear or compact owes. One is owed when the hook
+    /// recorded it for a session that loaded memory, live or ended less
+    /// than [`COPY_WINDOW_MINUTES`] ago, and no row of its trigger is
+    /// recorded at its time. A copy that fails stops the pass, which the
+    /// next one retries. Returns the copies made, in observation order.
+    pub fn mem_load_owed(&mut self, ctx: &Ctx) -> Result<Vec<Loaded>> {
+        let owed: Vec<(String, String, Timestamp)> = {
+            let mut stmt = self.conn().prepare(
+                "SELECT o.session_id, substr(o.event, length('SessionStart:') + 1), o.observed_at
+                 FROM sessions s
+                 JOIN observations o ON o.session_id = s.id
+                 WHERE (s.ended_at IS NULL OR s.ended_at > ?1)
+                   AND EXISTS (SELECT 1 FROM session_loads l WHERE l.session_id = s.id)
+                   AND o.source = 'hook'
+                   AND o.event IN ('SessionStart:resume', 'SessionStart:clear',
+                                   'SessionStart:compact')
+                   AND NOT EXISTS (
+                       SELECT 1 FROM session_loads l
+                       WHERE l.session_id = o.session_id AND l.loaded_at = o.observed_at
+                         AND l.trigger = substr(o.event, length('SessionStart:') + 1))
+                 ORDER BY o.observed_at, o.id",
+            )?;
+            let rows = stmt.query_map([ctx.now.plus_minutes(-COPY_WINDOW_MINUTES)], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let mut made = Vec::new();
+        for (session, trigger, at) in owed {
+            let copied = self.mem_load_again(ctx, &session, &trigger, at)?.value;
+            if !copied.revision_ids.is_empty() {
+                made.push(copied);
+            }
+        }
+        Ok(made)
     }
 
     /// The session's newest load set: the revisions of its latest
@@ -150,10 +204,6 @@ fn nothing(session: &str, trigger: &str, at: Timestamp) -> Applied<Loaded> {
         events: Vec::new(),
         replayed: false,
     }
-}
-
-fn newest_set(tx: &Tx<'_>, session: &str) -> Result<Vec<String>> {
-    newest_set_in(tx.conn(), session)
 }
 
 fn newest_set_in(conn: &rusqlite::Connection, session: &str) -> Result<Vec<String>> {
@@ -202,4 +252,115 @@ fn insert(
         loaded_at: at,
         revision_ids: written,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::domain::ObservationSource;
+    use crate::state::runs::NewObservation;
+    use crate::state::tests::memory_store;
+    use crate::store::Actor;
+
+    /// One approved alpha document, revision `R-alpha`.
+    fn document(store: &Store) {
+        store
+            .conn()
+            .execute_batch(
+                r#"INSERT INTO memory_sources (id, project_id, boundary, kind, loaded_path,
+                       canonical_repo, canonical_path, apply_method, load_mode, roles, added_at)
+                   VALUES ('S-alpha', 'alpha', 'personal', 'tiller_doc',
+                       '~/.tiller/memory/projects/alpha.md', '~/.tiller/memory',
+                       'projects/alpha.md', 'tiller_commit', 'rendered', '["orchestrator"]',
+                       '2026-11-02T09:00:00.000Z');
+                   INSERT INTO memory_revisions (id, source_id, blob_sha, review, provenance,
+                       scrub, recorded_at, recorded_by)
+                   VALUES ('R-alpha', 'S-alpha', 'abc', 'approved', 'baseline', 'passed',
+                       '2026-11-02T09:00:00.000Z', 'daemon');"#,
+            )
+            .unwrap();
+    }
+
+    fn observe(store: &mut Store, session: &str, event: &str, at: Timestamp) {
+        store
+            .observation_record(
+                &Ctx::new(Actor::Hook),
+                NewObservation {
+                    session_id: Some(session.into()),
+                    run_id: None,
+                    source: ObservationSource::Hook,
+                    event: event.into(),
+                    verdict: None,
+                    observed_at: at,
+                    payload: json!({}),
+                },
+            )
+            .unwrap();
+    }
+
+    fn triggers(store: &Store, session: &str) -> Vec<String> {
+        store
+            .conn()
+            .prepare("SELECT trigger FROM session_loads WHERE session_id = ?1 ORDER BY loaded_at")
+            .unwrap()
+            .query_map([session], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    /// A home with no `meta.boundary` launches while it has no memory to
+    /// load; a Tiller document makes the boundary needed again.
+    #[test]
+    fn a_home_with_no_boundary_launches_while_it_has_no_memory() {
+        let (store, _) = memory_store();
+        store
+            .conn()
+            .execute("DELETE FROM meta WHERE key = 'boundary'", [])
+            .unwrap();
+        assert_eq!(store.mem_loadable("alpha", "builder").unwrap(), Vec::new());
+        document(&store);
+        let error = store.mem_loadable("alpha", "orchestrator").unwrap_err();
+        assert!(error.to_string().contains("no boundary"), "{error}");
+    }
+
+    /// The daemon's pass copies the set once per owed observation, in
+    /// order, and a second pass owes nothing. Startup, fork and a session
+    /// that loaded nothing owe no copy.
+    #[test]
+    fn the_copy_pass_makes_each_owed_copy_once() {
+        let (mut store, session) = memory_store();
+        document(&store);
+        let daemon = Ctx::new(Actor::Daemon);
+        store
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .unwrap();
+        let start = Timestamp::now();
+        for (n, event) in [
+            "SessionStart:startup",
+            "SessionStart:clear",
+            "SessionStart:fork",
+            "SessionStart:compact",
+            "SessionStart:resume",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let minutes = i64::try_from(n).unwrap() + 1;
+            observe(&mut store, &session, event, start.plus_minutes(minutes));
+        }
+        let made = store.mem_load_owed(&daemon).unwrap();
+        assert_eq!(
+            made.iter().map(|l| l.trigger.as_str()).collect::<Vec<_>>(),
+            ["clear", "compact", "resume"]
+        );
+        assert_eq!(
+            triggers(&store, &session),
+            ["startup", "clear", "compact", "resume"]
+        );
+        assert!(store.mem_load_owed(&daemon).unwrap().is_empty());
+        assert_eq!(triggers(&store, &session).len(), 4);
+    }
 }

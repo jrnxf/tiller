@@ -7,10 +7,63 @@
 
 mod common;
 
+use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use common::World;
+
+const WAIT: Duration = Duration::from_secs(30);
+
+struct Daemon {
+    child: Child,
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        // A failed test leaves no daemon behind.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The real daemon on a free port, with a `PATH` that holds `git` and
+/// nothing else, so no poller reaches a real herdr, `gh` or `quota-axi`.
+fn start(world: &World) -> Daemon {
+    let bin = world.dir.path().join("git-only");
+    std::fs::create_dir_all(&bin).unwrap();
+    let found = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let git = String::from_utf8(found.stdout).unwrap();
+    std::os::unix::fs::symlink(git.trim(), bin.join("git")).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tiller"))
+        .args(["daemon", "--port", "0"])
+        .env("TILLER_HOME", world.home())
+        .env("PATH", &bin)
+        .env("TILLER_HERDR", "/nonexistent/herdr")
+        .env("TILLER_QUOTA_AXI", "/nonexistent/quota-axi")
+        .env("TILLER_LOG", "warn")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(WAIT).expect("the daemon said nothing");
+    assert!(line.starts_with("listening on "), "{line:?}");
+    Daemon { child }
+}
 
 /// An executable shell script at `path`.
 fn script(path: &Path, body: &str) {
@@ -156,22 +209,35 @@ fn a_launch_loads_the_approved_memory_into_the_prompt_and_the_loads() {
         vec![(revision.clone(), "startup".to_owned())]
     );
 
-    // The appended prompt survives `/clear`, `/compact` and a resume, so
-    // each SessionStart observation copies the set under its trigger. The
-    // startup bind writes nothing: the launch already did.
+    // The appended prompt survives `/clear`, `/compact` and a resume. The
+    // hook only records each SessionStart as an observation: the startup
+    // row came from the launch, and the copies are the daemon's work.
     for source in ["startup", "clear", "compact", "resume"] {
         world.hook(
             Some(&session),
             "SessionStart",
             &format!(r#"{{"session_id":"claude-orchestrator","source":"{source}"}}"#),
         );
-        // Each copy gets its own `loaded_at`.
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        // Each observation gets its own `observed_at`.
+        std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(
         loads(&world, &session),
-        ["startup", "clear", "compact", "resume"]
-            .map(|trigger| (revision.clone(), trigger.to_owned()))
-            .to_vec()
+        vec![(revision.clone(), "startup".to_owned())]
     );
+
+    // The daemon copies the set under each later trigger, once.
+    let _daemon = start(&world);
+    let want = ["startup", "clear", "compact", "resume"]
+        .map(|trigger| (revision.clone(), trigger.to_owned()))
+        .to_vec();
+    let deadline = Instant::now() + WAIT;
+    while loads(&world, &session) != want {
+        assert!(
+            Instant::now() < deadline,
+            "the daemon never copied the loads: {:?}",
+            loads(&world, &session)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }

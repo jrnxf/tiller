@@ -578,6 +578,40 @@ impl Source for Transcripts {
     }
 }
 
+// -- memory loads -----------------------------------------------------------------
+
+/// Copies a session's load set on each `SessionStart` observation for a
+/// resume, `/clear` or `/compact` (`memory.md` section 7, `protocol.md`
+/// 4.2). The hook only records the observation, so it stays in its budget;
+/// a copy this pass cannot write is retried on the next one, and the
+/// poller's health shows the failure.
+pub struct MemoryLoads {
+    store: Store,
+}
+
+impl Source for MemoryLoads {
+    fn name(&self) -> String {
+        "memory_loads".to_owned()
+    }
+
+    fn interval(&self) -> Duration {
+        Duration::from_secs(5)
+    }
+
+    fn poll(&mut self, now: Timestamp) -> Result<(), PollError> {
+        let made = self.store.mem_load_owed(&Ctx::at(Actor::Daemon, now))?;
+        for loaded in made {
+            tracing::info!(
+                session = loaded.session_id,
+                trigger = loaded.trigger,
+                revisions = loaded.revision_ids.len(),
+                "copied a session's memory load"
+            );
+        }
+        Ok(())
+    }
+}
+
 // -- remote machines ----------------------------------------------------------------
 
 /// Gives every saved remote machine its own cache poller, including one the
@@ -746,6 +780,7 @@ pub fn start(
         store: open()?,
         herdr: tools.herdr.clone(),
     };
+    let loads = MemoryLoads { store: open()? };
     let pages = PageAnswers::new(
         open()?,
         Lavish::new(tools.lavish.clone(), tools.review_hosts.clone()),
@@ -768,6 +803,7 @@ pub fn start(
     spawn(registry, Gated::new(home, gate), stop, &mut handles);
     spawn(registry, Gated::new(home, finished), stop, &mut handles);
     spawn(registry, Gated::new(home, transcripts), stop, &mut handles);
+    spawn(registry, Gated::new(home, loads), stop, &mut handles);
     spawn(registry, Gated::new(home, quota), stop, &mut handles);
     spawn(registry, Gated::new(home, pages), stop, &mut handles);
     spawn(registry, memory, stop, &mut handles);

@@ -9,9 +9,9 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use tiller_core::Store;
 use tiller_core::import::EMPTY_BLOB;
 use tiller_core::state::memory_load::Loadable;
+use tiller_core::{Ctx, Store};
 
 use super::SpawnError;
 use crate::holdout::repo_dir;
@@ -26,6 +26,27 @@ pub struct Memory {
     pub text: String,
     pub pairs: Vec<(String, String)>,
     pub revisions: Vec<String>,
+}
+
+/// Records that `session` loaded `memory` (`mem.load`), once its launch
+/// line went in, so a launch that failed first records no load. The session
+/// runs on the memory either way, so a failed record is a warning, never
+/// the launch's error. Returns the events and that warning.
+pub fn record_load(
+    store: &mut Store,
+    ctx: &Ctx,
+    session: &str,
+    memory: &Memory,
+) -> (Vec<i64>, Option<String>) {
+    match store.mem_load(ctx, session, &memory.revisions) {
+        Ok(applied) => (applied.events, None),
+        Err(e) => (
+            Vec::new(),
+            Some(format!(
+                "recording the memory session {session} loaded failed: {e}"
+            )),
+        ),
+    }
 }
 
 /// The approved memory for a launch of `role` in `project`, from the memory

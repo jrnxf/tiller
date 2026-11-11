@@ -555,32 +555,15 @@ fn apply_with(
                         claude_session_id: claude_id.clone(),
                         pane_id: None,
                         transcript_path: observed.transcript_path.clone(),
-                        source: source.clone(),
+                        source,
                     },
                 );
+                // A resume, `/clear` or `/compact` keeps the memory the
+                // launch rendered; the daemon copies that set from this
+                // observation (`memory.md` section 7), so the hook writes
+                // nothing more.
                 match bound {
-                    Ok(applied) => {
-                        // The appended prompt survives a resume, `/clear`
-                        // and `/compact`, so the session keeps the memory
-                        // its launch rendered: copy that set under the new
-                        // trigger (`memory.md` section 7). The launch wrote
-                        // the `startup` rows itself.
-                        if matches!(source.as_str(), "resume" | "clear" | "compact")
-                            && let Err(error) = store.mem_load_again(
-                                &ctx,
-                                &applied.value.id,
-                                &source,
-                                observed.observed_at,
-                            )
-                        {
-                            insert(
-                                &mut payload,
-                                "memory_load_refused",
-                                json!(error.to_string()),
-                            );
-                        }
-                        session = Some(applied.value);
-                    }
+                    Ok(applied) => session = Some(applied.value),
                     Err(error) => {
                         insert(&mut payload, "bind_refused", json!(error.to_string()));
                     }

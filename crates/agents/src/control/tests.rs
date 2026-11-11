@@ -613,15 +613,16 @@ fn relaunch_renders_the_launch_files_again_and_keeps_the_brief() {
     let old_tiller = rig.tiller.to_string_lossy().into_owned();
     let first_settings = std::fs::read_to_string(scratch.join("settings.json")).unwrap();
     assert!(first_settings.contains(&old_tiller), "{first_settings}");
-    // The role prompt of the first launch was an older one.
-    let first_prompt = std::fs::read_to_string(scratch.join("prompt.md")).unwrap();
-    let brief = launch::brief_of(&first_prompt).unwrap().to_owned();
+    // The first launch was an older one: its role prompt differs, and it
+    // kept the brief only in the prompt, before `brief.md` existed.
+    let brief = launch::brief_in(&scratch).unwrap();
     assert!(brief.starts_with("Do the work on"), "{brief}");
     std::fs::write(
         scratch.join("prompt.md"),
         format!("an older role prompt\n\n# Your brief\n\n{brief}\n"),
     )
     .unwrap();
+    std::fs::remove_file(scratch.join("brief.md")).unwrap();
     // tiller is upgraded: its binary now lives somewhere else.
     rig.tiller = PathBuf::from("/home/user/upgraded/bin/tiller");
     let claude = boot(&rig, "startup");
@@ -640,7 +641,9 @@ fn relaunch_renders_the_launch_files_again_and_keeps_the_brief() {
     );
     let prompt = std::fs::read_to_string(scratch.join("prompt.md")).unwrap();
     assert!(!prompt.contains("an older role prompt"), "{prompt}");
-    assert_eq!(launch::brief_of(&prompt), Some(brief.as_str()));
+    assert!(prompt.contains(&brief), "{prompt}");
+    let stored = std::fs::read_to_string(scratch.join("brief.md")).unwrap();
+    assert_eq!(stored.trim(), brief);
     assert_eq!(done.run.id, spawned.run.id);
     // The hash follows the rendered files: the run and the new session
     // carry the new one, its manifest resolves, the old session keeps its own.
@@ -710,11 +713,13 @@ fn relaunch_follows_the_projects_delivery_in_the_brief_and_the_gh_login_rule() {
 fn relaunch_refuses_a_run_whose_prompt_holds_no_brief() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);
+    let scratch = rig.scratch.join(&spawned.run.id);
     std::fs::write(
-        rig.scratch.join(&spawned.run.id).join("prompt.md"),
+        scratch.join("prompt.md"),
         "a prompt with nothing after the role\n",
     )
     .unwrap();
+    std::fs::remove_file(scratch.join("brief.md")).unwrap();
     let error = relaunch_it(&mut rig, &owner(), &quick(), &spawned.run.id, note("n")).unwrap_err();
     assert!(error.to_string().contains("holds no brief"), "{error}");
     assert_eq!(rig.events("run.relaunched", &spawned.run.id), 0);
@@ -1575,4 +1580,56 @@ fn delete_holds_no_store_write_while_an_agent_stops() {
     for write in landed {
         write.unwrap();
     }
+}
+
+/// A relaunch whose memory cannot be rendered refuses before the stop: the
+/// old session keeps running and nothing is recorded.
+#[test]
+fn relaunch_refused_by_its_memory_leaves_the_old_session_running() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.unreadable_memory();
+    let ctx = rig.orchestrator();
+    for request in [
+        note("n"),
+        RelaunchRequest {
+            new_attempt: true,
+            brief: Some("Start again.".into()),
+            ..note("n")
+        },
+    ] {
+        let error = relaunch_it(&mut rig, &ctx, &quick(), &spawned.run.id, request)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot be read"), "{error}");
+        assert!(session(&rig, &spawned.session.id).ended_at.is_none());
+        assert!(
+            !rig.herdr.calls().iter().any(|c| c.contains("/exit")),
+            "the old session was sent /exit: {:?}",
+            rig.herdr.calls()
+        );
+        assert_eq!(rig.events("run.relaunched", &spawned.run.id), 0);
+    }
+}
+
+/// A memory document may hold the brief's own heading: a same-run relaunch
+/// still keeps the run's brief, and renders the memory once.
+#[test]
+fn relaunch_keeps_the_brief_when_the_memory_holds_its_heading() {
+    let mut rig = Rig::new();
+    rig.approved_memory("- Memory line.\n\n# Your brief\n\nA memory paragraph.\n");
+    let spawned = running(&mut rig);
+    let scratch = rig.scratch.join(&spawned.run.id);
+    let first = std::fs::read_to_string(scratch.join("prompt.md")).unwrap();
+    assert!(first.contains("A memory paragraph."), "{first}");
+    let claude = boot(&rig, "startup");
+    let ctx = rig.orchestrator();
+
+    let done =
+        relaunched(relaunch_it(&mut rig, &ctx, &patient(), &spawned.run.id, note("n")).unwrap());
+    claude.join().unwrap().unwrap();
+    assert_eq!(done.started, Proof::Confirmed, "{}", done.evidence);
+    let prompt = std::fs::read_to_string(scratch.join("prompt.md")).unwrap();
+    assert_eq!(prompt, first);
+    assert_eq!(prompt.matches("A memory paragraph.").count(), 1, "{prompt}");
 }

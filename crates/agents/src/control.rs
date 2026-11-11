@@ -23,7 +23,6 @@ pub use project::{
     AgentsStopped, ProjectDeleted, ProjectRetired, StoppedAgent, delete_project, retire_project,
 };
 
-use std::fs;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -502,18 +501,17 @@ pub fn relaunch(
     if !request.new_attempt {
         // The same run keeps its brief and renders the rest again: check
         // the brief is there before the stop.
-        let prompt = scratch.join("prompt.md");
-        let held = fs::read_to_string(&prompt)
-            .ok()
-            .is_some_and(|text| launch::brief_of(&text).is_some());
-        if !held {
+        if launch::brief_in(&scratch).is_none() {
             return Err(SpawnError::Refused(format!(
                 "{} is missing or holds no brief, so run {} cannot be launched again; relaunch with --new-attempt --brief-file <f>; nothing was changed",
-                prompt.display(),
+                scratch.display(),
                 run.id
             )));
         }
     }
+    // Memory that cannot be read refuses the launch: read it before the
+    // stop, so the refusal leaves the old session running.
+    let memory = memory::render(store, world.tiller_home, &project.id, role)?;
     let model = match &request.asked {
         Some((model, effort)) => {
             let resolved = dispatch::resolve(
@@ -577,6 +575,7 @@ pub fn relaunch(
             brief: brief.as_deref(),
             old_scratch: &scratch,
             old_pane,
+            memory: &memory,
         },
         &mut events,
     )
@@ -1138,6 +1137,8 @@ struct Again<'a> {
     old_scratch: &'a Path,
     /// The stopped session's pane, when it is still open and free.
     old_pane: Option<String>,
+    /// The memory, rendered before the stop.
+    memory: &'a memory::Memory,
 }
 
 /// Writes the new session's launch, binds it to a pane (the old one when it
@@ -1161,6 +1162,7 @@ fn start_again(
         brief,
         old_scratch,
         old_pane,
+        memory,
     } = again;
     let attempt = brief.is_some();
     let brief = match brief {
@@ -1175,14 +1177,14 @@ fn start_again(
         // delivery line is the project's now, since the sandbox's gh login
         // rules follow the delivery the launch files are rendered for.
         None => {
-            let prompt = fs::read_to_string(old_scratch.join("prompt.md"))?;
-            let kept = launch::brief_of(&prompt).ok_or_else(|| {
+            let kept = launch::brief_in(old_scratch).ok_or_else(|| {
                 SpawnError::Refused(format!(
                     "{} holds no brief, so run {} cannot be launched again; relaunch with --new-attempt --brief-file <f>",
-                    old_scratch.join("prompt.md").display(),
+                    old_scratch.display(),
                     run.id
                 ))
             })?;
+            let kept = kept.as_str();
             let mut brief = match kept.rfind("\nDelivery: ") {
                 Some(at) if !kept[at + 1..].contains('\n') => kept[..at].to_owned(),
                 _ => kept.to_owned(),
@@ -1194,7 +1196,6 @@ fn start_again(
         }
     };
     let claude_version = launch::claude_version(&world.config.spawn.claude);
-    let memory = memory::render(store, world.tiller_home, &project.id, role)?;
     let spec = LaunchSpec {
         role,
         session_id: &session.id,
@@ -1219,7 +1220,7 @@ fn start_again(
         claude: &world.config.spawn.claude,
         claude_config: world.claude_config,
         claude_version: claude_version.as_deref(),
-        memory: &memory,
+        memory,
         note: Some(note),
     };
     let line = if attempt {
@@ -1262,7 +1263,6 @@ fn start_again(
         );
         launched.line
     };
-    events.extend(store.mem_load(ctx, &session.id, &memory.revisions)?.events);
     // What the new session was launched with, for the stale-session check.
     events.extend(crate::stale::record(store, ctx, &session.id, role)?.events);
     let pane_id = match old_pane {
@@ -1283,6 +1283,12 @@ fn start_again(
     );
     let since = Timestamp::now();
     let warning = type_line(store, world.herdr, run, &session.id, &pane_id, &line)?;
+    let (loads, loaded) = memory::record_load(store, ctx, &session.id, memory);
+    events.extend(loads);
+    let warning = [warning, loaded]
+        .into_iter()
+        .flatten()
+        .reduce(|all, next| format!("{all}; {next}"));
     Ok((since, pane_id, warning))
 }
 
