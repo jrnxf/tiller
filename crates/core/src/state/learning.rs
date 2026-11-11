@@ -1286,7 +1286,6 @@ fn capture_learning(
     )
 }
 
-/// A retro by id or short form, or the newest retro of a card reference.
 /// Whether a curator may start on `retro` now, the rule `retro.start`
 /// applies. Refuses a retro that is done with any outcome but `unfinished`,
 /// and a pending retro whose curator started less than `timeout_minutes`
@@ -1321,6 +1320,7 @@ pub fn check_start(retro: &Retro, now: Timestamp, timeout_minutes: i64) -> Resul
     Ok(false)
 }
 
+/// A retro by id or short form, or the newest retro of a card reference.
 pub fn resolve_retro(conn: &Connection, input: &str) -> Result<Retro> {
     if let Ok(id) = resolve_id(conn, "retros", "retro", input) {
         return get(conn, "retro", &id);
