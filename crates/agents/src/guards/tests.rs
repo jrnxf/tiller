@@ -1627,7 +1627,8 @@ fn nested_nix_readings_are_bounded() {
     ]);
     // A spent budget still reads what is sure: a direnv directory, a
     // shell on standard input, and the files nix writes.
-    let spend = "direnv exec /tmp true; ".repeat(70);
+    // Each `direnv exec env` path may be the program, and spends a guess.
+    let spend = "direnv exec env true; ".repeat(70);
     verdicts(&[
         (
             &format!("{spend}direnv exec /tmp bash <<< 'tiller approve 01JABC'"),
@@ -1876,6 +1877,29 @@ fn nix_command_forms_are_read() {
             "nix develop --impure --expr 'mkShell { shellHook = \"tiller approve 01JABC\"; }' -c true",
             OWNER,
         ),
+        // `-E` makes every word an expression, in any cluster or place.
+        (
+            "nix-shell -E -v 'mkShell { shellHook = \"tiller approve 01JABC\"; }'",
+            OWNER,
+        ),
+        (
+            "nix-shell 'mkShell { shellHook = \"tiller approve 01JABC\"; }' -E",
+            OWNER,
+        ),
+        (
+            "nix-shell -vE 'mkShell { shellHook = \"tiller approve 01JABC\"; }'",
+            OWNER,
+        ),
+        // `--expr` after a flag the guard does not know, or as a value.
+        (
+            "nix develop --sandbox-paths /x --expr 'mkShell { shellHook = \"tiller approve 01JABC\"; }'",
+            OWNER,
+        ),
+        (
+            "nix develop -k --expr 'mkShell { shellHook = \"tiller approve 01JABC\"; }'",
+            OWNER,
+        ),
+        ("nix-shell -E 'mkShell { }' --run 'cargo test'", None),
         // A long flag nix has as `--no-NAME` or `--extra-NAME`.
         (
             "nix develop --no-write-lock-file -c grep -i foo data.txt",
@@ -1984,6 +2008,24 @@ fn direnv_exec_reads_both_shapes() {
         ("direnv exec ./tiller/./ approve 01JABC", OWNER),
         ("direnv exec x/../tiller approve 01JABC", OWNER),
         ("direnv exec ../.. tiller status x", None),
+        // A project directory is not read as the program it is named for.
+        ("direnv exec /home/user/tiller cargo test", None),
+        ("direnv exec /home/user/claude cargo test", None),
+        (
+            "direnv exec /home/user/proj ls /home/user/proj/.git/hooks",
+            None,
+        ),
+        // A path named for a shell or a wrapper, or in a `bin` directory,
+        // may be that program.
+        (
+            "direnv exec /home/user/x/sh <<< 'tiller approve 01JABC'",
+            OWNER,
+        ),
+        ("direnv exec /home/user/x/env tiller approve 01JABC", OWNER),
+        (
+            "direnv exec /nix/store/abc-tiller-0.1.0/bin/tiller approve 01JABC",
+            OWNER,
+        ),
     ]);
 }
 

@@ -841,17 +841,20 @@ impl Walker<'_, '_> {
                         // when the path is a file: it runs the file, by the
                         // path that `filepath.Clean` leaves (`tiller/.` is
                         // `tiller`, found on PATH). A path that Clean leaves
-                        // as `.`, `..` or `/` can only be a directory. What
-                        // is a directory now may not be one when direnv runs.
+                        // as `.`, `..` or `/` can only be a directory, and
+                        // `direnv_file` names the other paths read as a
+                        // program. What is a directory now may not be one
+                        // when direnv runs.
                         let mut starts = vec![Start::At(i + 3)];
                         match words.get(i + 2) {
                             Some(path) if path.fixed => {
                                 let file = clean_path(&path.text);
-                                let dir = file == "/"
-                                    || file.split('/').all(|part| matches!(part, "." | ".."));
+                                let program = file != "/"
+                                    && !file.split('/').all(|part| matches!(part, "." | ".."))
+                                    && direnv_file(&file);
                                 let mut file = vec![Arg::fixed(&file)];
                                 file.extend_from_slice(words.get(i + 3..).unwrap_or_default());
-                                let found = if dir {
+                                let found = if !program {
                                     None
                                 } else if self.guess() {
                                     self.exec(&file, command, script, false, appended)
@@ -1145,6 +1148,20 @@ impl Walker<'_, '_> {
         shown: &str,
     ) -> Option<Option<Denial>> {
         let tail = &words[at + 1..];
+        // `nix --expr`: the expression's `shellHook` runs too. Any word may
+        // be the flag, as a value nix does not take.
+        for (k, word) in tail.iter().enumerate() {
+            if (!word.fixed || word.is("--expr"))
+                && let Some(expr) = tail.get(k + 1)
+                && protected(&expr.text)
+            {
+                return Some(self.deny(
+                    guessed_code(&expr.text),
+                    "the nix expression may run a protected command in its shell hook",
+                    shown,
+                ));
+            }
+        }
         // Each word, and whether it is a later part of a split cluster:
         // nix splits a word only when it reads it as a flag, so the parts
         // share the place of the word they came from.
@@ -1244,15 +1261,6 @@ impl Walker<'_, '_> {
                         if !value.fixed {
                             list.push_front((value, false));
                             break;
-                        }
-                        // `nix-shell -E` and `nix --expr`: the expression's
-                        // `shellHook` runs too.
-                        if flag == "--expr" && protected(&value.text) {
-                            return Some(self.deny(
-                                guessed_code(&value.text),
-                                "the nix expression runs a protected command in its shell hook",
-                                shown,
-                            ));
                         }
                         // A value that looks like flags is read as them as
                         // well, in case nix takes fewer values than the
@@ -1398,18 +1406,21 @@ impl Walker<'_, '_> {
         {
             return Some(found);
         }
+        // `-E` (in any cluster) reads every other word as an expression,
+        // whose `shellHook` runs too.
+        let expr = args.iter().any(|word| {
+            !word.fixed
+                || word.is("--expr")
+                || (word.fixed && nix_split(&word.text).iter().any(|part| part == "-E"))
+        });
+        if expr && let Some(word) = args.iter().find(|word| protected(&word.text)) {
+            return self.deny(
+                guessed_code(&word.text),
+                "the nix-shell expression may run a protected command in its shell hook",
+                shown,
+            );
+        }
         for (k, word) in args.iter().enumerate() {
-            // `-E`: the expression's `shellHook` runs too.
-            if (word.is("-E") || word.is("--expr"))
-                && let Some(expr) = args.get(k + 1)
-                && protected(&expr.text)
-            {
-                return self.deny(
-                    guessed_code(&expr.text),
-                    "the nix-shell expression runs a protected command in its shell hook",
-                    shown,
-                );
-            }
             if word.fixed && !word.is("--run") && !word.is("--command") {
                 continue;
             }
@@ -3805,6 +3816,45 @@ fn piped_texts(command: &Simple, script: &Script) -> Vec<String> {
         }
     }
     texts
+}
+
+/// Whether `direnv exec PATH` is read with PATH as the program as well,
+/// for a path that `filepath.Clean` left (`path`). A bare name is found
+/// on PATH, and a path in a `bin` directory is a program. Any other path
+/// is most often a project directory, so it is read as a program only
+/// when its name is a shell, a wrapper or a program the guard reads by its
+/// words: a project named `tiller` or `claude` is not read as that
+/// program. A tiller outside the package cannot reach the state anyway.
+fn direnv_file(path: &str) -> bool {
+    const READS: &[&str] = &[
+        "env",
+        "command",
+        "builtin",
+        "busybox",
+        "exec",
+        "xargs",
+        "sudo",
+        "doas",
+        "sudoedit",
+        "su",
+        "nix",
+        "nix-shell",
+        "direnv",
+        "watch",
+        "pwsh",
+        "git",
+        "gh",
+        "gh-axi",
+        "eval",
+    ];
+    let Some((dir, name)) = path.rsplit_once('/') else {
+        return true;
+    };
+    let parent = dir.rsplit('/').next().unwrap_or_default();
+    matches!(parent, "bin" | "sbin")
+        || SHELLS.contains(&name)
+        || READS.contains(&name)
+        || options::runner(name).is_some()
 }
 
 /// Every flag in a cluster, split the way nix splits it when it reads the
