@@ -2,7 +2,7 @@
 
 What the owner can do from the `tiller` CLI, what from the board, and where the two differ. Both surfaces call the same core functions in `tiller-core`, so a rule such as "close cancels the open obligations" holds on both. This page lists the surfaces, not the rules. The rules live in [`../spec/state.md`](../spec/state.md), [`../spec/protocol.md`](../spec/protocol.md) (sections 6 and 7) and [`../spec/authority.md`](../spec/authority.md).
 
-Checked against the code on Tuesday 2026-11-10 (Lisbon time). The Health checks row was added on Wednesday 2026-11-11.
+Checked against the code on Tuesday 2026-11-10 (Lisbon time). The Health checks row was added on Wednesday 2026-11-11. The last two bullets of "Differences that are intended" gave no reason until Wednesday 2026-11-11 (Lisbon time). They now do, and four capability rows were corrected to match the code.
 
 How to read the table:
 
@@ -17,7 +17,7 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 | Capability | CLI | Board | Notes |
 |---|---|---|---|
 | Create a card | Full: `card create` | Part | The board takes project, kind, title, priority, category and body. It has no size, acceptance, fixes or ask link. It also records a Board ask and notes the orchestrator. |
-| Edit a card | Full: `card edit` | Part | The board edits title, body and priority. An empty value clears a field on the CLI. An empty body clears it on the API too: the store decides, so both paths match. |
+| Edit a card | Full: `card edit` | Part | The board edits title, body and priority. An empty value clears a field on the CLI. An empty body clears it on the API too: the store decides, so both paths match (commit 3d57e2f, test `daemon::api::tests::an_empty_body_on_an_edit_clears_it`). |
 | Comment on a card | Full: `card comment` | Full | Both need a live orchestrator to read the comment. Both cap a comment at 20,000 characters. |
 | Hold and release | Full: `card hold`, `card unhold` | Full | Both on the card page. The CLI accepts a date, a local datetime or RFC 3339. The board sends an instant it builds from a Lisbon date and time. |
 | Close a card | Full: `card close --outcome` | Part | The board Close dialog offers Done, Won't do and Duplicate, and always asks for a reason. |
@@ -33,11 +33,11 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 | Withdraw an attention item | Full: `attention withdraw` | Part | The board withdraws only stale items, with a fixed reason, and does not forward the call to a peer. |
 | Open and list attention | Full: `attention open`, `attention list` | Part | The board lists the items in the Inbox. `attention open` is an agent tool. |
 | Decide an approval | Full: `approve` | Full | An accept names the head commit. The CLI takes `--sha` and the board sends the head it shows. |
-| Land a change | Full: `land` | No | |
-| Grants | Full: `grant create`, `grant list`, `grant revoke` | No | |
+| Land a change | Full: `land` | No | Intended. The daemon lands an accepted approval, so the board's Accept starts the land. `land` only asks the daemon to land and waits for the result in a terminal (`authority.md` section 6, `protocol.md` 6.4). |
+| Grants | Full: `grant create`, `grant list`, `grant revoke` | Full | The project dialog's Grants tab lists, creates and revokes a project's grants (commit 6dfebf7). A peer board cannot (`authority.md` section 3). |
 | Away mode | Part: `away start`, `away end`, `away brief` | Full | The board also edits an away window in place. |
 | Recap | Part: `tiller recap` | Part | Both read the same events. Only the board marks the recap seen. |
-| Start an orchestrator | Full: `orchestrator start` | Part | The board has no restart. |
+| Start an orchestrator | Full: `orchestrator start` | Full | The board's Restart is `--restart` as `board`. It is a secondary action behind a confirmation, on a lane whose orchestrator is silent or unreachable (`protocol.md` 7.4, commit f8d4953). |
 | Restart stale sessions | Full: `agent restart --stale` | Full | The CLI acts on this host. The board acts per host. |
 | Focus an agent | Full: `agent focus` | Part | The CLI prints the pane and machine. The board opens the configured terminal app. |
 | Run and session control | Full: `agent relaunch`, `resume`, `interrupt`, `stop`, `send`, `inbox`, `status`, `run`, `pr`, `done`, `obligation`, `artifact`, `review`, `handoff`, `spawn` | No | Agent tools and owner controls. |
@@ -51,7 +51,7 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 | Host lanes, floors, label and boundary | Full: `host edit` | Full | The board edits this host only, in its Settings > Hosts card, with the floors in GB. Both refuse a rename while a peer is paired and a boundary change once anything records the boundary. |
 | File a Tiller bug | Full: `bug file` | No | The board closes or moves a triage card, but does not file one. |
 | Peers | Full: `peer add`, `accept`, `list`, `remove`, `revoke`, `serve`, `pane` | Part | The board adds a host, lists both ends of each link, unpairs a host (`remove`) and revokes a board's key (`revoke`). Accept, serve and pane stay in the CLI. |
-| Memory | Full: `mem note`, `propose`, `approve`, `retro`, `learn` | Part | The board edits, decides (Keep or Discard) and shows revisions. |
+| Memory | Full: `mem note`, `propose`, `approve`, `retro`, `learn` | Part | The board edits, decides (Keep or Discard), shows revisions and undoes an applied change (`memory.md` section 7). The CLI has no undo. |
 | Read the fleet | Full: board, agents, machines, quota, health, events, snapshot | Full | |
 | Health checks | Full: `tiller doctor` | Part | The board runs this host's checks in its Settings > Hosts card, with Check again and Run now on a failing poller. A paired peer's card reads that peer's checks over the link, read-only, with no buttons and no pollers (`protocol.md` 7.3). The CLI checks only the host it runs on. |
 | Owner marker | Full: `owner set`, `owner show` | No | While the marker names another system, both surfaces refuse every mutation with `owner_marker` (exit 6, HTTP 403). The check is in the store, so they share it (`recovery.md` R20). The board shows the refusal in the daemon's words. It has no read-only banner yet. |
@@ -82,5 +82,10 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 - **`tiller daemon` refuses `--db`.** It must use `$TILLER_HOME/state.db`. Honoring `--db` alone would split one daemon across places (the lock, the backups and the mirror).
 - **The board sets few config keys.** It sets only the keys a start reads, as the fix flow in Settings "Starting agents".
 - **Project add stays narrower on the board.** The spec keeps `--checks`, `--remote`, `--default-branch` and the deploy flags on the CLI (state.md).
-- **Reason not recorded: actor `board` and `owner`.** Authority gives both the same rights. No doc says why they are separate actors.
-- **Reason not recorded: CLI-only controls.** Dependencies, `land`, grants, `orchestrator start --restart`, `peer accept`, `serve` and `pane`, and the memory undo route (the API has it, and no surface calls it).
+- **The actors `board` and `owner` stay separate to record where the owner acted.** `events.actor` is the audit trail of origin: `owner` is the developer on the CLI or in chat, `board` is the developer on the board, and `board@<label>` is the developer on a paired board host (`state.md` section 3, line 268; `authority.md` section 3, line 60; `crates/core/src/store.rs:75` and `:79`). Authority gives them the same rights (`Actor::is_owner`, `crates/core/src/store.rs:59`-`60`; `crates/core/src/authority.rs:79`). The split also scopes idempotency: a key replays only for the same actor (`protocol.md` line 330, `state.md` invariant 10), so a board click and a CLI run never replay each other. No doc states the split as a design choice. This reason is read from the code and the spec. It is an open owner question whether it is the intended one.
+- **CLI-only controls.** Each has a reason or is a gap.
+  - **`land`.** Intended. The board's Accept already starts the land, because only the daemon merges (`authority.md` section 6, G01). `tiller land` only waits for that result in a terminal.
+  - **Dependencies and grants.** Not CLI-only any more. The board has both (`card-deps.tsx`, `project-grants.tsx`). The matrix rows above show it.
+  - **`orchestrator start --restart`.** Not CLI-only any more. The board has Restart (`orchestrator-start.tsx`).
+  - **`peer accept`, `peer serve` and `peer pane`.** Intended. `accept` is the owner's step on the other host and needs a terminal or an sshd start, never a peer board (`authority.md` line 298, G45). `serve` and `pane` are the far end of the link, started by sshd for the owner (`protocol.md` `peer serve` and `peer pane` rows). The board's Add a host runs `accept --unattended` over ssh for the owner.
+  - **The memory undo route.** Not unused. The board's change history calls it (`board/src/components/memory/memory-page.tsx`). It is board only by design (`memory.md` section 7). The CLI has no undo. This is a gap only if the owner wants a terminal path.
