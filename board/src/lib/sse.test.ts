@@ -1268,11 +1268,11 @@ test("a coalesced refetch still runs when a fetch begun before the event lands m
   const queryClient = seededClient();
   const signals = await watched(queryClient, signalsPath);
   // A fetch from before the event, slow to answer.
-  let answer = (_value: unknown) => {};
+  const held: { answer?: (value: object) => void } = {};
   signals.read.mockImplementationOnce(
     () =>
       new Promise((resolve) => {
-        answer = resolve;
+        held.answer = resolve;
       }),
   );
   void queryClient.refetchQueries({ queryKey: queryKeyFor(signalsPath) });
@@ -1281,7 +1281,7 @@ test("a coalesced refetch still runs when a fetch begun before the event lands m
 
   applyChange(queryClient, event({ seq: 5000, entity: "card", entity_id: "c1" }));
   // The old fetch lands with numbers from before the event.
-  answer({});
+  held.answer?.({});
   await vi.advanceTimersByTimeAsync(1000);
   expect(signals.read).toHaveBeenCalledTimes(3);
   signals.unsubscribe();
