@@ -18,7 +18,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
-use tiller_core::domain::{Retro, RetroDepth, RetroOutcome, RetroState};
+use tiller_core::domain::{Retro, RetroOutcome, RetroState};
 use tiller_core::state::learning::{self, Learning};
 use tiller_core::state::{get, list};
 use tiller_core::{Error, Store, Timestamp};
@@ -36,9 +36,6 @@ const WINDOW_DAYS: i64 = 30;
 
 /// The most rows one read returns.
 const MOST: i64 = 200;
-
-/// The runs kept for a retried Run again to find by its key.
-const KEPT: usize = 50;
 
 /// `POST /api/v1/retros/{id}/run`.
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
@@ -121,18 +118,14 @@ pub struct RetrosResponse {
     pub curator_timeout_minutes: u64,
 }
 
-struct Run {
-    key: String,
-    retro: String,
-    handle: Option<JoinHandle<()>>,
-}
-
 #[derive(Default)]
 struct Shared {
     /// Held while a Run again claims, so two at once cannot both pass the
     /// same-card check.
     claims: Mutex<()>,
-    runs: Mutex<Vec<Run>>,
+    /// The threads of the curator runs not yet seen to end. A retry of a
+    /// Run again is answered from the key its claim stored, not from here.
+    runs: Mutex<Vec<JoinHandle<()>>>,
     /// Set when the daemon stops: every running curator is stopped.
     stop: Arc<AtomicBool>,
 }
@@ -142,7 +135,7 @@ struct Shared {
 pub struct Retros(Arc<Shared>);
 
 impl Retros {
-    fn runs(&self) -> MutexGuard<'_, Vec<Run>> {
+    fn runs(&self) -> MutexGuard<'_, Vec<JoinHandle<()>>> {
         self.0.runs.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -150,15 +143,8 @@ impl Retros {
         self.0.claims.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn by_key(&self, key: &str) -> Option<String> {
-        self.runs()
-            .iter()
-            .find(|run| run.key == key)
-            .map(|run| run.retro.clone())
-    }
-
     /// Runs `run` on a thread of its own, to be stopped with the daemon.
-    fn start(&self, key: &str, retro: &str, run: crate::api::CuratorRun) -> std::io::Result<()> {
+    fn start(&self, retro: &str, run: crate::api::CuratorRun) -> std::io::Result<()> {
         let stop = Arc::clone(&self.0.stop);
         let id = retro.to_owned();
         let handle = std::thread::Builder::new()
@@ -171,24 +157,10 @@ impl Retros {
                 Err(error) => tracing::warn!(retro = %id, %error, "the curator run failed"),
             })?;
         let mut runs = self.runs();
-        runs.push(Run {
-            key: key.to_owned(),
-            retro: retro.to_owned(),
-            handle: Some(handle),
-        });
-        // The oldest finished runs go first; a running one is always kept,
-        // so the daemon can stop it.
-        while runs.len() > KEPT {
-            let Some(oldest) = runs
-                .iter()
-                .position(|run| run.handle.as_ref().is_none_or(JoinHandle::is_finished))
-            else {
-                break;
-            };
-            if let Some(handle) = runs.remove(oldest).handle {
-                let _ = handle.join();
-            }
-        }
+        // A finished run is dropped; a running one is always kept, so the
+        // daemon can stop it.
+        runs.retain(|run| !run.is_finished());
+        runs.push(handle);
         Ok(())
     }
 
@@ -196,11 +168,7 @@ impl Retros {
     /// record how it ended.
     pub fn stop(&self, wait: Duration) {
         self.0.stop.store(true, Ordering::SeqCst);
-        let handles: Vec<JoinHandle<()>> = self
-            .runs()
-            .iter_mut()
-            .filter_map(|run| run.handle.take())
-            .collect();
+        let handles: Vec<JoinHandle<()>> = self.runs().drain(..).collect();
         let deadline = Instant::now() + wait;
         for handle in handles {
             while !handle.is_finished() && Instant::now() < deadline {
@@ -361,7 +329,6 @@ fn views(
     )?;
     retros
         .into_iter()
-        .filter(|retro| retro.depth == RetroDepth::Full)
         .map(|retro| view(store, retro, now, timeout))
         .collect()
 }
@@ -416,9 +383,13 @@ pub(crate) async fn run_retro(
         }
         let _claiming = retros.claiming();
         let mut store = Store::open_current(&db).map_err(ApiError::from)?;
-        // A retry of a Run again answers with the retro it claimed.
-        if let Some(retro) = retros.by_key(&key) {
-            let retro: Retro = get(store.conn(), "retro", &retro)?;
+        let ctx = board_ctx(&key, args.as_ref());
+        // A retry of a Run again answers with the retro its key claimed and
+        // starts nothing, even after a restart: the claim stored the key.
+        // A key stored for another write is refused by the same call.
+        if store.key_recorded(&ctx)? {
+            let claimed = store.retro_start(&ctx, &id, None, timeout)?;
+            let retro: Retro = get(store.conn(), "retro", &claimed.value.id)?;
             return Ok(response(&retro, Vec::new(), true)?);
         }
         let retro = learning::resolve_retro(store.conn(), &id)?;
@@ -434,10 +405,10 @@ pub(crate) async fn run_retro(
             .into());
         }
         let run = starter
-            .retro_run(&mut store, &board_ctx(&key, args.as_ref()), &retro.id)
+            .retro_run(&mut store, &ctx, &retro.id)
             .map_err(|error| start_refusal(error, |error| damage.suspect(&db, error)))?;
         let claimed = run.claimed.clone();
-        if let Err(error) = retros.start(&key, &claimed.value.id, run) {
+        if let Err(error) = retros.start(&claimed.value.id, run) {
             // The claim stands with no curator behind it: end it so it can
             // run again at once.
             let note = format!("the curator could not be started: {error}");
@@ -782,7 +753,7 @@ mod tests {
             panic!("the claim is refused");
         };
         let retros = Retros::default();
-        retros.start("k", R1, run).unwrap();
+        retros.start(R1, run).unwrap();
         retros.stop(Duration::from_secs(5));
         let retro: Retro = get(fleet.open().conn(), "retro", R1).unwrap();
         assert_eq!(retro.outcome, Some(RetroOutcome::Unfinished));

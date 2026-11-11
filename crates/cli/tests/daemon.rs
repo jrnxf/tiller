@@ -1020,6 +1020,74 @@ fn the_board_runs_an_unfinished_retro_again() {
     assert!(terminate(&mut daemon).success());
 }
 
+/// A retried Run again answers the same retro after the daemon restarts
+/// (`protocol.md` 7.4): the store keeps the key, so no second curator runs
+/// for one click.
+#[test]
+fn a_replayed_run_again_after_a_restart_starts_no_second_curator() {
+    let world = World::initialized();
+    let runs = world.dir.path().join("curator-runs");
+    let (_fake, retro) = curator_home(
+        &world,
+        &format!("#!/bin/sh\necho run >> '{}'\nexit 4\n", runs.display()),
+    );
+    let count = || {
+        std::fs::read_to_string(&runs)
+            .map(|text| text.lines().count())
+            .unwrap_or(0)
+    };
+    let mut daemon = start(&world);
+    let (status, first) = run_again(&world, daemon.port, &retro, "click-1");
+    assert_eq!(status, "HTTP/1.0 200 OK", "{first}");
+    assert_eq!(first["replayed"], false, "{first}");
+    let view = settled(daemon.port, &retro);
+    assert_eq!(view["status"], "unfinished", "{view}");
+    assert_eq!(count(), 1);
+    assert!(terminate(&mut daemon).success());
+
+    let mut daemon = start(&world);
+    let (status, again) = run_again(&world, daemon.port, &retro, "click-1");
+    assert_eq!(status, "HTTP/1.0 200 OK", "{again}");
+    assert_eq!(again["replayed"], true, "{again}");
+    assert_eq!(again["data"]["id"], retro.as_str(), "{again}");
+    assert_eq!(again["events"], serde_json::json!([]), "{again}");
+    // Give a wrongly started curator time to run.
+    std::thread::sleep(Duration::from_millis(500));
+    let later = settled(daemon.port, &retro);
+    assert_eq!(count(), 1, "a second curator ran for one click");
+    assert_eq!(later["status"], "unfinished", "{later}");
+    assert_eq!(later["curator_started_at"], view["curator_started_at"]);
+    // A new click runs it again.
+    let (status, fresh) = run_again(&world, daemon.port, &retro, "click-2");
+    assert_eq!(status, "HTTP/1.0 200 OK", "{fresh}");
+    assert_eq!(fresh["replayed"], false, "{fresh}");
+    settled(daemon.port, &retro);
+    assert_eq!(count(), 2);
+    assert!(terminate(&mut daemon).success());
+}
+
+/// A Run again whose curator cannot be prepared ends the retro
+/// `unfinished` with why, so it can run again at once. The end is not
+/// refused for reusing the click's key.
+#[test]
+fn a_run_again_that_cannot_prepare_its_curator_ends_unfinished() {
+    let world = World::initialized();
+    let (_fake, retro) = curator_home(&world, "#!/bin/sh\nexit 0\n");
+    // A file where the curator's scratch directories go.
+    std::fs::create_dir_all(world.dir.path().join("scratch")).unwrap();
+    std::fs::write(world.dir.path().join("scratch").join("retros"), "").unwrap();
+    let mut daemon = start(&world);
+    let (status, answer) = run_again(&world, daemon.port, &retro, "click-1");
+    assert_ne!(status, "HTTP/1.0 200 OK", "{answer}");
+    let view = retro_view(daemon.port, &retro);
+    assert_eq!(view["status"], "unfinished", "{view}");
+    assert_eq!(
+        view["learning"], "the curator could not be prepared",
+        "{view}"
+    );
+    assert!(terminate(&mut daemon).success());
+}
+
 /// A daemon that stops ends a curator the board started, with what the
 /// curator started, and leaves its retro ready to run again.
 #[test]

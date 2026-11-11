@@ -467,9 +467,14 @@ pub(crate) fn claim(
     let launch = match prepare(tools, config, store, &claimed.value, &session_id) {
         Ok(launch) => launch,
         Err(failure) => {
+            // The claim stored the caller's key, so the end is unkeyed: the
+            // same key on another write would be refused.
+            let mut unkeyed = ctx.clone();
+            unkeyed.key = None;
+            unkeyed.args = None;
             unfinished(
                 store,
-                ctx,
+                &unkeyed,
                 &claimed.value.id,
                 "the curator could not be prepared",
             )?;
