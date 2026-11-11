@@ -646,7 +646,7 @@ impl Source for Transcripts {
 /// (`mark`); the first pass after a start reads them all. A copy this pass
 /// cannot write is logged, the pass goes on to the others, and the
 /// poller's health shows the failure; the mark stays at or before it, so
-/// the next pass tries it again.
+/// the next pass tries it again, for up to an hour.
 pub struct MemoryLoads {
     store: Store,
     mark: Option<Timestamp>,

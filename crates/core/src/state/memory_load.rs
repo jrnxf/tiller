@@ -53,9 +53,10 @@ pub struct CopyPass {
     pub failed: Vec<FailedCopy>,
     /// The `since` of the next pass: the pass's time (`ctx.now`), or the
     /// `recorded_at` of the earliest observation whose copy failed, when
-    /// that is earlier. Every observation committed after the pass read is
-    /// stamped later than the pass's time, less [`MARK_SLACK_MINUTES`], and
-    /// a failed copy is read, and tried, again on the next pass.
+    /// that is earlier, but never more than [`COPY_WINDOW_MINUTES`] before
+    /// the pass. Every observation committed after the pass read is stamped
+    /// later than the pass's time, less [`MARK_SLACK_MINUTES`], and a failed
+    /// copy is read, and tried, again on each pass for that window.
     pub mark: Timestamp,
 }
 
@@ -155,7 +156,8 @@ impl Store {
 
     /// `mem.load` on a resume, `/clear` or `/compact` (the daemon, on the
     /// `SessionStart` observation, `protocol.md` 4.2): copies the session's
-    /// newest set with the new trigger at `at`. It renders and hashes
+    /// newest set at `at` with the new trigger at `at`, so a copy made late
+    /// copies the set the session had then, not one recorded after. It renders and hashes
     /// nothing, since the appended prompt is the one the session launched
     /// with. A session that loaded nothing writes nothing and opens no
     /// transaction; a copy already recorded at `at` writes nothing either.
@@ -171,12 +173,12 @@ impl Store {
                 "a copied load is for resume, clear or compact, not {trigger}"
             )));
         }
-        if newest_set_in(self.conn(), session)?.is_empty() {
+        if set_as_of(self.conn(), session, Some(at))?.is_empty() {
             return Ok(nothing(session, trigger, at));
         }
         self.write(ctx, "mem.load", None, |tx| {
             let session: Session = get(tx.conn(), "session", session)?;
-            let revisions = newest_set_in(tx.conn(), &session.id)?;
+            let revisions = set_as_of(tx.conn(), &session.id, Some(at))?;
             insert(tx, &session, trigger, at, &revisions)
         })
     }
@@ -194,8 +196,9 @@ impl Store {
     /// reads every observation, as the first pass after a start does. A
     /// copy that fails is returned in [`CopyPass::failed`], the pass goes
     /// on to the next one, and the mark stays at or before it, so every
-    /// later pass tries it again until it is made or its session's window
-    /// closes.
+    /// later pass tries it again until it is made or it was recorded
+    /// [`COPY_WINDOW_MINUTES`] ago: a copy that never goes in does not make
+    /// every pass read a growing history.
     pub fn mem_load_owed(&mut self, ctx: &Ctx, since: Option<Timestamp>) -> Result<CopyPass> {
         // With no mark every observation is read, so the planner, not the
         // `recorded_at` index, picks the scan.
@@ -247,7 +250,9 @@ impl Store {
                 Err(error) => {
                     // The next floor is the mark less the slack, so this
                     // observation is read again.
-                    pass.mark = pass.mark.min(recorded_at);
+                    pass.mark = pass
+                        .mark
+                        .min(recorded_at.max(ctx.now.plus_minutes(-COPY_WINDOW_MINUTES)));
                     pass.failed.push(FailedCopy {
                         session_id: session,
                         trigger,
@@ -285,14 +290,25 @@ fn nothing(session: &str, trigger: &str, at: Timestamp) -> Applied<Loaded> {
 /// in the order first written: two triggers can record the same set in
 /// one millisecond.
 fn newest_set_in(conn: &rusqlite::Connection, session: &str) -> Result<Vec<String>> {
+    set_as_of(conn, session, None)
+}
+
+/// The revisions of the session's latest `session_loads` moment at or
+/// before `at` (`None`: its latest), as [`newest_set_in`] orders them.
+fn set_as_of(
+    conn: &rusqlite::Connection,
+    session: &str,
+    at: Option<Timestamp>,
+) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT revision_id FROM session_loads
          WHERE session_id = ?1
-           AND loaded_at = (SELECT max(loaded_at) FROM session_loads WHERE session_id = ?1)
+           AND loaded_at = (SELECT max(loaded_at) FROM session_loads
+                            WHERE session_id = ?1 AND (?2 IS NULL OR loaded_at <= ?2))
          GROUP BY revision_id
          ORDER BY min(rowid)",
     )?;
-    let rows = stmt.query_map([session], |row| row.get(0))?;
+    let rows = stmt.query_map(params![session, at], |row| row.get(0))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
@@ -644,5 +660,80 @@ mod tests {
             ["clear"]
         );
         assert_eq!(third.mark, last.now);
+    }
+
+    /// A copy that never goes in holds the mark back at most the copy
+    /// window, so a pass does not read a growing history for it.
+    #[test]
+    fn a_failed_copy_holds_the_mark_back_at_most_the_window() {
+        let (mut store, session) = memory_store();
+        document(&store);
+        let daemon = Ctx::new(Actor::Daemon);
+        store
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .unwrap();
+        store
+            .conn()
+            .execute_batch(
+                "CREATE TEMP TRIGGER no_clear BEFORE INSERT ON session_loads
+                 WHEN NEW.trigger = 'clear'
+                 BEGIN SELECT RAISE(ABORT, 'no clear copies'); END;",
+            )
+            .unwrap();
+        observe(
+            &mut store,
+            &session,
+            "SessionStart:clear",
+            daemon.now.plus_minutes(1),
+        );
+        let later = Ctx::at(Actor::Daemon, daemon.now.plus_minutes(120));
+        let pass = store.mem_load_owed(&later, None).unwrap();
+        assert_eq!(pass.failed.len(), 1);
+        assert_eq!(pass.mark, later.now.plus_minutes(-COPY_WINDOW_MINUTES));
+    }
+
+    /// A copy made late copies the set the session had at the observation,
+    /// not a set recorded after it.
+    #[test]
+    fn a_late_copy_copies_the_set_of_its_moment() {
+        let (mut store, session) = memory_store();
+        document(&store);
+        store
+            .conn()
+            .execute_batch(
+                "INSERT INTO memory_revisions (id, source_id, blob_sha, review, provenance,
+                     scrub, recorded_at, recorded_by)
+                 VALUES ('R-beta', 'S-alpha', 'def', 'approved', 'baseline', 'passed',
+                     '2026-11-02T10:00:00.000Z', 'daemon');",
+            )
+            .unwrap();
+        let daemon = Ctx::new(Actor::Daemon);
+        store
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .unwrap();
+        observe(
+            &mut store,
+            &session,
+            "SessionStart:clear",
+            daemon.now.plus_minutes(1),
+        );
+        let relaunch = Ctx::at(Actor::Daemon, daemon.now.plus_minutes(3));
+        store
+            .mem_load(&relaunch, &session, &["R-beta".to_owned()])
+            .unwrap();
+        let later = Ctx::at(Actor::Daemon, daemon.now.plus_minutes(5));
+        assert_eq!(owed(&mut store, &later).len(), 1);
+        let copied: Vec<String> = store
+            .conn()
+            .prepare(
+                "SELECT revision_id FROM session_loads WHERE session_id = ?1 AND trigger = 'clear'",
+            )
+            .unwrap()
+            .query_map([&session], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(copied, ["R-alpha"]);
+        assert_eq!(store.mem_loaded(&session).unwrap(), ["R-beta"]);
     }
 }
