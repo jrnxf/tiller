@@ -1585,6 +1585,26 @@ fn xargs_and_shell_long_options_are_read() {
     ]);
 }
 
+/// Nested nix readings spend the shared guess budget, so a long chain is
+/// checked in bounded time and still fails closed.
+#[test]
+fn nested_nix_readings_are_bounded() {
+    let chain = "nix develop --x -c ".repeat(30);
+    let started = std::time::Instant::now();
+    verdicts(&[
+        (
+            &format!("echo 'tiller approve 01JABC' | {chain}true"),
+            Some(Code::OwnerOnly),
+        ),
+        (
+            &format!("{chain}tiller approve 01JABC"),
+            Some(Code::OwnerOnly),
+        ),
+        (&format!("{chain}cargo test"), None),
+    ]);
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
 /// `watch` reads its options the way procps `watch` does, and runs the
 /// rest as one `sh -c` string unless `-x` is among them.
 #[test]
@@ -1733,6 +1753,14 @@ fn nix_command_forms_are_read() {
         ("nix develop --no-sandbox -c grep -i foo data.txt", None),
         // A short flag the guard does not know may take a value.
         ("nix develop -X -c -c tiller approve 01JABC", OWNER),
+        // An empty command starts a shell that reads standard input.
+        ("echo 'tiller approve 01JABC' | nix develop -c", OWNER),
+        (
+            "echo 'tiller approve 01JABC' | nix shell nixpkgs#hello --command",
+            OWNER,
+        ),
+        // A cluster that may be a value takes one place, not one per part.
+        ("nix develop --unk -LL -c x -c tiller approve 01JABC", OWNER),
         // `--redirect` takes two values.
         (
             "nix develop --redirect a -c -c sh -c 'gh pr merge 12'",
@@ -1837,6 +1865,9 @@ fn direnv_exec_reads_both_shapes() {
             Some(Code::GuardTamper),
         ),
         ("direnv exec tiller/ approve 01JABC", OWNER),
+        ("direnv exec tiller/. approve 01JABC", OWNER),
+        ("direnv exec ./tiller/./ approve 01JABC", OWNER),
+        ("direnv exec x/../tiller approve 01JABC", OWNER),
         ("direnv exec ../.. tiller status x", None),
     ]);
 }
