@@ -51,9 +51,11 @@ pub struct CopyPass {
     /// The copies that failed, in observation order. The pass went on past
     /// each one.
     pub failed: Vec<FailedCopy>,
-    /// The pass's time (`ctx.now`): the `since` of the next pass. Every
-    /// observation committed after the pass read is stamped later than
-    /// this, less [`MARK_SLACK_MINUTES`].
+    /// The `since` of the next pass: the pass's time (`ctx.now`), or the
+    /// `recorded_at` of the earliest observation whose copy failed, when
+    /// that is earlier. Every observation committed after the pass read is
+    /// stamped later than the pass's time, less [`MARK_SLACK_MINUTES`], and
+    /// a failed copy is read, and tried, again on the next pass.
     pub mark: Timestamp,
 }
 
@@ -190,19 +192,30 @@ impl Store {
     /// observations recorded after it, less [`MARK_SLACK_MINUTES`], are
     /// read, so a pass does not grow with a long session's history. `None`
     /// reads every observation, as the first pass after a start does. A
-    /// copy that fails is returned in [`CopyPass::failed`], and the pass
-    /// goes on to the next one.
+    /// copy that fails is returned in [`CopyPass::failed`], the pass goes
+    /// on to the next one, and the mark stays at or before it, so every
+    /// later pass tries it again until it is made or its session's window
+    /// closes.
     pub fn mem_load_owed(&mut self, ctx: &Ctx, since: Option<Timestamp>) -> Result<CopyPass> {
-        let floor = since.map_or(EPOCH, |mark| mark.plus_minutes(-MARK_SLACK_MINUTES));
+        // With no mark every observation is read, so the planner, not the
+        // `recorded_at` index, picks the scan.
+        let (index, floor) = match since {
+            Some(mark) => (
+                "INDEXED BY observations_recorded",
+                mark.plus_minutes(-MARK_SLACK_MINUTES),
+            ),
+            None => ("", EPOCH),
+        };
         let events = COPY_TRIGGERS
             .iter()
             .map(|trigger| format!("'SessionStart:{trigger}'"))
             .collect::<Vec<_>>()
             .join(", ");
-        let owed: Vec<(String, String, Timestamp)> = {
-            let mut stmt = self.conn().prepare(&format!(
-                "SELECT o.session_id, substr(o.event, length('SessionStart:') + 1), o.observed_at
-                 FROM observations o INDEXED BY observations_recorded
+        let owed: Vec<(String, String, Timestamp, Timestamp)> = {
+            let mut stmt = self.conn().prepare_cached(&format!(
+                "SELECT o.session_id, substr(o.event, length('SessionStart:') + 1), o.observed_at,
+                        o.recorded_at
+                 FROM observations o {index}
                  JOIN sessions s ON s.id = o.session_id
                  WHERE o.recorded_at > ?2
                    AND (s.ended_at IS NULL OR s.ended_at > ?1)
@@ -218,7 +231,7 @@ impl Store {
             ))?;
             let rows = stmt.query_map(
                 params![ctx.now.plus_minutes(-COPY_WINDOW_MINUTES), floor],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )?;
             rows.collect::<rusqlite::Result<_>>()?
         };
@@ -227,16 +240,21 @@ impl Store {
             failed: Vec::new(),
             mark: ctx.now,
         };
-        for (session, trigger, at) in owed {
+        for (session, trigger, at, recorded_at) in owed {
             match self.mem_load_again(ctx, &session, &trigger, at) {
                 Ok(copied) if copied.value.revision_ids.is_empty() => {}
                 Ok(copied) => pass.made.push(copied.value),
-                Err(error) => pass.failed.push(FailedCopy {
-                    session_id: session,
-                    trigger,
-                    observed_at: at,
-                    error,
-                }),
+                Err(error) => {
+                    // The next floor is the mark less the slack, so this
+                    // observation is read again.
+                    pass.mark = pass.mark.min(recorded_at);
+                    pass.failed.push(FailedCopy {
+                        session_id: session,
+                        trigger,
+                        observed_at: at,
+                        error,
+                    });
+                }
             }
         }
         Ok(pass)
@@ -578,5 +596,53 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["clear"]
         );
+    }
+
+    /// A failed copy holds the mark at its observation, so a pass long
+    /// after it still reads it and makes the copy once the write goes in.
+    #[test]
+    fn a_failed_copy_is_tried_again_on_every_later_pass() {
+        let (mut store, session) = memory_store();
+        document(&store);
+        let daemon = Ctx::new(Actor::Daemon);
+        store
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .unwrap();
+        store
+            .conn()
+            .execute_batch(
+                "CREATE TEMP TRIGGER no_clear BEFORE INSERT ON session_loads
+                 WHEN NEW.trigger = 'clear'
+                 BEGIN SELECT RAISE(ABORT, 'no clear copies'); END;",
+            )
+            .unwrap();
+        observe(
+            &mut store,
+            &session,
+            "SessionStart:clear",
+            daemon.now.plus_minutes(1),
+        );
+        let first = store.mem_load_owed(&daemon, None).unwrap();
+        assert_eq!(first.failed.len(), 1);
+        let later = Ctx::at(Actor::Daemon, daemon.now.plus_minutes(10));
+        let second = store.mem_load_owed(&later, Some(first.mark)).unwrap();
+        assert_eq!(second.failed.len(), 1, "the failed copy is read again");
+        assert!(second.mark < later.now, "{:?}", second.mark);
+        store
+            .conn()
+            .execute_batch("DROP TRIGGER no_clear;")
+            .unwrap();
+        let last = Ctx::at(Actor::Daemon, daemon.now.plus_minutes(20));
+        let third = store.mem_load_owed(&last, Some(second.mark)).unwrap();
+        assert!(third.failed.is_empty(), "{:?}", third.failed);
+        assert_eq!(
+            third
+                .made
+                .iter()
+                .map(|l| l.trigger.as_str())
+                .collect::<Vec<_>>(),
+            ["clear"]
+        );
+        assert_eq!(third.mark, last.now);
     }
 }

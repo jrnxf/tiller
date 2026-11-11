@@ -645,8 +645,8 @@ impl Source for Transcripts {
 /// Each pass reads only the observations recorded since the last one
 /// (`mark`); the first pass after a start reads them all. A copy this pass
 /// cannot write is logged, the pass goes on to the others, and the
-/// poller's health shows the failure; the first pass after the next start
-/// tries it again.
+/// poller's health shows the failure; the mark stays at or before it, so
+/// the next pass tries it again.
 pub struct MemoryLoads {
     store: Store,
     mark: Option<Timestamp>,
