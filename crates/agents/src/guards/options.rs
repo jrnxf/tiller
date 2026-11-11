@@ -302,6 +302,12 @@ pub(super) const FISH: &str = "c=|command= C=|init-command= d=|debug= o=|debug-o
     n|no-execute p=|profile= profile-startup= P|private print-rusage-self \
     print-debug-categories v|version";
 
+/// procps-ng `watch` 4.0. `-x` runs the command with `exec`; without it the
+/// words are joined into one `sh -c` string.
+pub(super) const WATCH: &str = "b|beep c|color C|no-color d?|differences? e|errexit f|follow \
+    g|chgexit q=|equexit= n=|interval= p|precise r|no-rerun s=|shotsdir= t|no-title \
+    w|no-wrap x|exec h|help v|version";
+
 /// A program whose remaining words, after its options and operands, are a
 /// command line it runs.
 pub(super) struct Runner {

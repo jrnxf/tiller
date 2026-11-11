@@ -779,22 +779,35 @@ impl Walker<'_, '_> {
                     let appended = appended || replace.is_none();
                     return self.exec(&tail, command, script, false, appended);
                 }
-                "nix"
-                    if rest
-                        .first()
-                        .is_some_and(|w| w.is("develop") || w.is("shell")) =>
-                {
-                    let at = rest.iter().position(|w| w.is("-c") || w.is("--command"))?;
-                    i = i + 1 + at + 1;
-                }
-                "nix-shell" => {
-                    let at = rest
-                        .iter()
-                        .position(|w| w.is("--run") || w.is("--command"))?;
-                    let payload = rest.get(at + 1)?;
-                    return self.payload(payload, false);
-                }
-                "direnv" if rest.first().is_some_and(|w| w.is("exec")) => i += 3,
+                "nix" => match self.nix(words, i, command, script, appended, &shown) {
+                    Step::Next(next) => i = next,
+                    Step::Done(found) => return found,
+                },
+                "nix-shell" => return self.nix_shell(rest, command, script, &shown),
+                "direnv" => match rest.first() {
+                    Some(sub) if !sub.fixed => {
+                        return self.unreadable_options("direnv", &words[i..]);
+                    }
+                    Some(sub) if sub.is("exec") => {
+                        // `direnv exec DIR COMMAND`, or `direnv exec FILE`
+                        // when the path is a file: it runs the file. A path
+                        // that can only be a directory has one reading.
+                        let path = words.get(i + 2);
+                        let dir = path.is_some_and(|path| {
+                            path.fixed
+                                && (path.is(".") || path.is("..") || path.text.ends_with('/'))
+                        });
+                        let mut starts = vec![Start::At(i + 3)];
+                        if !dir {
+                            starts.push(Start::At(i + 2));
+                        }
+                        match self.starts(starts, words, command, script, appended) {
+                            Step::Next(next) => i = next,
+                            Step::Done(found) => return found,
+                        }
+                    }
+                    _ => break,
+                },
                 "su" => {
                     let su = options::runner("runuser")?;
                     match self.runuser("su", su, words, i, command, script, appended, &shown) {
@@ -802,16 +815,20 @@ impl Walker<'_, '_> {
                         Step::Done(found) => return found,
                     }
                 }
-                "watch" => {
-                    let exec = rest.iter().any(|w| w.is("-x") || w.is("--exec"));
-                    let j = skip(i + 1, &["-n", "--interval", "-q", "--equexit"]);
-                    if exec {
-                        i = j;
-                    } else {
-                        let joined = texts(&words[j..]);
-                        return self.text(&joined, false);
+                "watch" => match options::parse(options::WATCH, false, rest).sure() {
+                    Parse::Read { found, next, .. } => {
+                        let j = i + 1 + next;
+                        if found.iter().any(|option| option.name == "exec") {
+                            i = j;
+                        } else {
+                            // Without `-x`, watch joins the words into one
+                            // `sh -c` string.
+                            let joined = texts(&words[j..]);
+                            return self.text(&joined, false);
+                        }
                     }
-                }
+                    _ => return self.unreadable_options("watch", &words[i..]),
+                },
                 name => {
                     let step = match options::runner(name) {
                         Some(runner) if name == "runuser" => self.runuser(
@@ -989,6 +1006,23 @@ impl Walker<'_, '_> {
         if let Some(found) = self.runner_starts(&read, at + 1, 0, &mut starts) {
             return Step::Done(Some(found));
         }
+        self.starts(starts, words, command, script, appended)
+    }
+
+    /// The places a wrapper's command may start in `words`: one place is
+    /// the next program, and each of several is checked as its own command.
+    fn starts(
+        &mut self,
+        mut starts: Vec<Start>,
+        words: &[Arg],
+        command: &Simple,
+        script: &Script,
+        appended: bool,
+    ) -> Step {
+        starts.retain(|start| match start {
+            Start::At(start) => *start < words.len(),
+            Start::Shell => true,
+        });
         starts.sort_unstable();
         starts.dedup();
         match starts.as_slice() {
@@ -1009,6 +1043,102 @@ impl Walker<'_, '_> {
                 Step::Done(None)
             }
         }
+    }
+
+    /// `nix` at `words[at]`. `nix develop` and `nix shell` run the words
+    /// after `-c` or `--command`, or with no command a shell that reads
+    /// standard input. nix takes every setting as a flag, so its flags
+    /// cannot all be named: every word that may be `-c` starts a reading.
+    /// nix splits a short cluster (`-Lc` is `-L -c`, `-c/bin/x` is `-c
+    /// /bin/x`), and a word not known before it runs may be `-c` too.
+    fn nix(
+        &mut self,
+        words: &[Arg],
+        at: usize,
+        command: &Simple,
+        script: &Script,
+        appended: bool,
+        shown: &str,
+    ) -> Step {
+        let tail = &words[at + 1..];
+        let shell = tail.iter().any(|w| w.is("develop") || w.is("shell"));
+        let mut starts = Vec::new();
+        let mut command_seen = false;
+        for (k, word) in tail.iter().enumerate() {
+            let next = at + 1 + k + 1;
+            if !word.fixed {
+                if !command_seen {
+                    starts.push(Start::At(next));
+                }
+                continue;
+            }
+            let flag = nix_flag(&word.text);
+            if shell && !command_seen && (flag.clears || word.is("--ignore-env")) {
+                return Step::Done(self.deny(
+                    Code::Identity,
+                    format!(
+                        "nix {} clears the environment, which strips the session's identity",
+                        word.text
+                    ),
+                    shown,
+                ));
+            }
+            let Some(attached) = flag.command.or(word.is("--command").then_some(None)) else {
+                continue;
+            };
+            command_seen = true;
+            match attached {
+                // `-c/path`: the command starts with `/path`.
+                Some(program) => {
+                    let mut spliced = vec![Arg::fixed(&program)];
+                    spliced.extend_from_slice(&words[next..]);
+                    if let Some(found) = self.exec(&spliced, command, script, false, appended) {
+                        return Step::Done(Some(found));
+                    }
+                }
+                None => starts.push(Start::At(next)),
+            }
+        }
+        if shell && !command_seen {
+            starts.push(Start::Shell);
+        }
+        self.starts(starts, words, command, script, appended)
+    }
+
+    /// `nix-shell` runs its last `--run` or `--command` string, or with
+    /// neither a shell that reads standard input. A flag value may look
+    /// like `--run`, and a word not known before it runs may be one, so
+    /// every string that may be the command is checked.
+    fn nix_shell(
+        &mut self,
+        args: &[Arg],
+        command: &Simple,
+        script: &Script,
+        shown: &str,
+    ) -> Option<Denial> {
+        if args.iter().any(|w| w.is("--pure")) {
+            return self.deny(
+                Code::Identity,
+                "nix-shell --pure clears the environment, which strips the session's identity",
+                shown,
+            );
+        }
+        let mut string = false;
+        for (k, word) in args.iter().enumerate() {
+            if word.fixed && !word.is("--run") && !word.is("--command") {
+                continue;
+            }
+            string |= word.fixed;
+            if let Some(payload) = args.get(k + 1)
+                && let Some(found) = self.payload(payload, false)
+            {
+                return Some(found);
+            }
+        }
+        if string {
+            return None;
+        }
+        self.stdin_script(command, script)
     }
 
     /// The places the command of `read` may start when its options are
@@ -3297,6 +3427,48 @@ const SCRIPT_READERS: &[&str] = &[
     "python", "python3", "perl", "ruby", "node", "bun", "deno", "php", "lua", "xargs", "source",
     ".",
 ];
+
+/// What one `nix` word may be, read the way nix splits a short cluster:
+/// `-Lic` is `-L -i -c`, and from the first character that is not a letter
+/// the rest is the last flag's value (`-j4`, `-c/bin/x`).
+#[derive(Default)]
+struct NixFlag {
+    /// `-i` (`--ignore-env`) of `nix develop` and `nix shell`, before any
+    /// flag in the cluster that takes the next word as its value.
+    clears: bool,
+    /// `-c`: `Some(None)` when the command starts at the next word, and
+    /// `Some(Some(program))` when the rest of the cluster is the program.
+    command: Option<Option<String>>,
+}
+
+fn nix_flag(text: &str) -> NixFlag {
+    let mut flag = NixFlag::default();
+    let Some(cluster) = text.strip_prefix('-') else {
+        return flag;
+    };
+    if !cluster.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        return flag;
+    }
+    let mut valued = false;
+    for (at, letter) in cluster.char_indices() {
+        if !letter.is_ascii_alphabetic() {
+            break;
+        }
+        if letter == 'c' {
+            let rest = &cluster[at + 1..];
+            let program = rest
+                .starts_with(|c: char| !c.is_ascii_alphabetic())
+                .then(|| rest.to_owned());
+            flag.command = Some(program);
+            break;
+        }
+        // `-k NAME`, `-s NAME VALUE`, `-u NAME`, `-I PATH`, `-f FILE`,
+        // `-j N`, `-o PATH`: the next word is a value, not a flag.
+        valued |= "ksuIfjo".contains(letter);
+        flag.clears |= letter == 'i' && !valued;
+    }
+    flag
+}
 
 /// A remote command that reads a script on standard input. With no command,
 /// the remote login shell reads one.

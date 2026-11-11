@@ -1581,6 +1581,182 @@ fn xargs_and_shell_long_options_are_read() {
     ]);
 }
 
+/// Every verdict that does not match, so a test names each form that fails
+/// instead of stopping at the first.
+fn mismatches(cases: &[(&str, Option<Code>)]) -> Vec<String> {
+    let mut wrong = Vec::new();
+    for role in Role::ALL {
+        for (command, verdict) in cases {
+            let got = bash(role, command).map(|denial| denial.code);
+            if got != *verdict {
+                wrong.push(format!(
+                    "{role}: {command}: got {got:?}, wanted {verdict:?}"
+                ));
+            }
+        }
+    }
+    wrong
+}
+
+/// `watch` reads its options the way procps `watch` does, and runs the
+/// rest as one `sh -c` string unless `-x` is among them.
+#[test]
+fn watch_options_parse_like_getopt() {
+    const OWNER: Option<Code> = Some(Code::OwnerOnly);
+    let wrong = mismatches(&[
+        ("watch -n 5 tiller approve 01JABC", OWNER),
+        ("watch -n5 tiller approve 01JABC", OWNER),
+        ("watch -d -n 5 tiller approve 01JABC", OWNER),
+        ("watch -td -n 5 tiller approve 01JABC", OWNER),
+        // `-d` takes an attached value: `-dn` is `-d n`, so watch runs `5`.
+        ("watch -dn 5 tiller approve 01JABC", None),
+        ("watch -dn5 tiller approve 01JABC", OWNER),
+        ("watch -tbn 5 tiller approve 01JABC", OWNER),
+        ("watch --interval=5 tiller approve 01JABC", OWNER),
+        ("watch --interval 5 tiller approve 01JABC", OWNER),
+        ("watch --inter 5 tiller approve 01JABC", OWNER),
+        ("watch --differences=permanent tiller approve 01JABC", OWNER),
+        ("watch -dpermanent tiller approve 01JABC", OWNER),
+        ("watch -q 3 tiller approve 01JABC", OWNER),
+        ("watch --equexit=3 tiller approve 01JABC", OWNER),
+        ("watch -s /home/user/shots tiller approve 01JABC", OWNER),
+        (
+            "watch --shotsdir /home/user/shots tiller approve 01JABC",
+            OWNER,
+        ),
+        ("watch -- tiller approve 01JABC", OWNER),
+        ("watch -n 5 -- tiller approve 01JABC", OWNER),
+        // `-x` in any cluster, before or after the other options.
+        ("watch -x tiller approve 01JABC", OWNER),
+        ("watch -xn 5 tiller approve 01JABC", OWNER),
+        ("watch -n 5 -x tiller approve 01JABC", OWNER),
+        ("watch --exec --interval=5 tiller approve 01JABC", OWNER),
+        ("watch -x sh -c 'tiller approve 01JABC'", OWNER),
+        // Without `-x` the words are one command string.
+        ("watch 'tiller approve 01JABC'", OWNER),
+        ("watch -n 5 'tiller approve' 01JABC", OWNER),
+        ("watch -dn 5 'true; tiller approve 01JABC'", OWNER),
+        // An option watch does not take, or one not known before it runs.
+        ("watch --bogus tiller approve 01JABC", OWNER),
+        ("watch -n 5 \"$OPT\" tiller approve 01JABC", OWNER),
+        ("watch -tn 5 gh pr merge 12", Some(Code::Merge)),
+        ("watch -dn 5 ls -la", None),
+        ("watch -x -n 2 cargo test", None),
+        ("watch -n 1 'tiller --json snapshot'", None),
+        ("watch --bogus cargo test", None),
+    ]);
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// `nix develop` and `nix shell` run the words after `-c` or `--command`,
+/// in any cluster and after any flag, and a shell on standard input with no
+/// command. `nix-shell` runs its last `--run` or `--command` string.
+#[test]
+fn nix_command_forms_are_read() {
+    const OWNER: Option<Code> = Some(Code::OwnerOnly);
+    const ID: Option<Code> = Some(Code::Identity);
+    let wrong = mismatches(&[
+        ("nix develop -c tiller approve 01JABC", OWNER),
+        ("nix develop -L -c tiller approve 01JABC", OWNER),
+        ("nix develop -Lc tiller approve 01JABC", OWNER),
+        ("nix develop -vLc tiller approve 01JABC", OWNER),
+        ("nix shell nixpkgs#hello -c tiller approve 01JABC", OWNER),
+        (
+            "nix shell nixpkgs#hello --command tiller approve 01JABC",
+            OWNER,
+        ),
+        // Flags before the subcommand.
+        ("nix -L develop -c tiller approve 01JABC", OWNER),
+        (
+            "nix --extra-experimental-features 'nix-command flakes' develop -c tiller approve 01JABC",
+            OWNER,
+        ),
+        (
+            "nix --option sandbox false shell nixpkgs#hello -c tiller approve 01JABC",
+            OWNER,
+        ),
+        (
+            "nix env shell nixpkgs#hello -c tiller approve 01JABC",
+            OWNER,
+        ),
+        // A flag value that looks like `-c`.
+        (
+            "nix develop --keep-env-var -c --command tiller approve 01JABC",
+            OWNER,
+        ),
+        ("nix develop --arg x -c -c tiller approve 01JABC", OWNER),
+        // nix splits `-c/path` into `-c` and `/path`.
+        (
+            "nix develop -c/nix/store/abc-tiller-0.1.0/bin/tiller approve 01JABC",
+            OWNER,
+        ),
+        // A word not known before it runs may be `-c`.
+        ("nix develop \"$OPT\" tiller approve 01JABC", OWNER),
+        // No command: a shell reads standard input.
+        ("echo 'tiller approve 01JABC' | nix develop", OWNER),
+        (
+            "echo 'tiller approve 01JABC' | nix shell nixpkgs#hello",
+            OWNER,
+        ),
+        ("nix develop <<< 'tiller approve 01JABC'", OWNER),
+        // `-i` clears the environment.
+        ("nix develop -i -c tiller status x", ID),
+        ("nix develop -Lic tiller status x", ID),
+        ("nix shell nixpkgs#hello --ignore-env -c true", ID),
+        ("nix-shell --run 'tiller approve 01JABC'", OWNER),
+        (
+            "nix-shell -p hello --command 'tiller approve 01JABC'",
+            OWNER,
+        ),
+        // The last string wins, and a flag value may look like `--run`.
+        ("nix-shell --run true --run 'tiller approve 01JABC'", OWNER),
+        (
+            "nix-shell --arg x --run --run 'tiller approve 01JABC'",
+            OWNER,
+        ),
+        ("nix-shell \"$OPT\" 'tiller approve 01JABC'", OWNER),
+        ("echo 'tiller approve 01JABC' | nix-shell -p hello", OWNER),
+        ("nix-shell --pure --run true", ID),
+        (
+            "nix develop -c cargo clippy --workspace -- -D warnings",
+            None,
+        ),
+        ("nix develop -Lc cargo test", None),
+        ("nix shell nixpkgs#jq -c jq . data.json", None),
+        ("nix-shell -p jq --run 'jq . data.json'", None),
+        ("nix develop", None),
+        ("nix build .#tiller", None),
+        ("nix flake check -L", None),
+        ("echo hi | nix develop -c cat", None),
+    ]);
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// `direnv exec DIR COMMAND`, or `direnv exec FILE` when the path is a
+/// file: the command may start at either word.
+#[test]
+fn direnv_exec_reads_both_shapes() {
+    const OWNER: Option<Code> = Some(Code::OwnerOnly);
+    let wrong = mismatches(&[
+        ("direnv exec . tiller approve 01JABC", OWNER),
+        (
+            "direnv exec /home/user/pool/3/alpha tiller approve 01JABC",
+            OWNER,
+        ),
+        (
+            "direnv exec /nix/store/abc-tiller-0.1.0/bin/tiller approve 01JABC",
+            OWNER,
+        ),
+        ("direnv exec \"$DIR\" tiller approve 01JABC", OWNER),
+        ("direnv \"$SUB\" . tiller approve 01JABC", OWNER),
+        ("direnv exec . sh -c 'tiller approve 01JABC'", OWNER),
+        ("direnv exec . cargo test", None),
+        ("direnv exec /home/user/pool/3/alpha tiller status x", None),
+        ("direnv allow", None),
+    ]);
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// A brace word is not known before it runs: past the positional, it can
 /// only be a flag.
 #[test]
