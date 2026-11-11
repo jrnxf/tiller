@@ -1373,7 +1373,11 @@ export function fixtureResponses(scenario: Scenario = "default", now: number = D
     [machinesPath]: machinesFor(scenario, now),
     [quotaPath]: quotaFor(scenario, now),
     [projectsPath]: projects,
-    [signalsPath]: signalsFor(scenario === "health-bad", now, scenario === "new-install"),
+    [signalsPath]: signalsFor(
+      scenario === "health-bad",
+      now,
+      scenario === "new-install" ? "new-install" : scenario === "empty" ? "no-events" : "full",
+    ),
     [awayBriefPath]: awayFor(
       scenario === "away" ? "running" : scenario === "away-back" ? "back" : "idle",
     ),

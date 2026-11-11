@@ -26,7 +26,7 @@ import "../board/board.css";
 import "./health.css";
 import { useNamedProjects } from "../board/peer-state";
 
-const STATE_LABEL = { good: "Good", watch: "Watch" } as const;
+const STATE_LABEL = { good: "Good", watch: "Watch", none: "No data yet" } as const;
 
 function SignalCard({
   signal,

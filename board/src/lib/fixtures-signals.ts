@@ -155,6 +155,17 @@ const BY_PROJECT = [
 // A new install: eight Lisbon weeks, all empty but the current one, which
 // holds the first ask and nothing landed.
 function freshSignals(now: number): SignalsResponse {
+  // Tiller started this week: an hour in, never later than now.
+  const started = Math.min(now, lisbonWeekStart(now) + 3_600_000);
+  return emptyWeeks(now, 1, new Date(started).toISOString());
+}
+
+// An install that has not seen one event: eight empty weeks, no first event.
+function noEventSignals(now: number): SignalsResponse {
+  return emptyWeeks(now, 0, null);
+}
+
+function emptyWeeks(now: number, needed: number, firstEventAt: string | null): SignalsResponse {
   const first = lisbonWeekStart(now) - 7 * WEEK_MS;
   const weeks: SignalsWeek[] = Array.from({ length: 8 }, (_, index) => {
     const start = first + index * WEEK_MS;
@@ -164,7 +175,7 @@ function freshSignals(now: number): SignalsResponse {
       landed: 0,
       reported: 0,
       merged_prs: 0,
-      needed: index === 7 ? 1 : 0,
+      needed: index === 7 ? needed : 0,
       answered: 0,
       median_answer_minutes: null,
       interventions: { correction: 0, unplanned_escalation: 0, rework: 0, planned: 0 },
@@ -176,20 +187,27 @@ function freshSignals(now: number): SignalsResponse {
       unauthorized: 0,
     };
   });
-  // Tiller started this week: an hour in, never later than now.
-  const started = Math.min(now, lisbonWeekStart(now) + 3_600_000);
   return {
     weeks,
     by_project: [],
     interventions: [],
     machines_live: 1,
     machines_total: 1,
-    first_event_at: new Date(started).toISOString(),
+    first_event_at: firstEventAt,
   };
 }
 
-export function signalsFor(unsafe: boolean, now: number, fresh = false): SignalsResponse {
-  if (fresh) return freshSignals(now);
+// What the fixture's store has seen: a long run of weeks, a new install whose
+// first ask came this week, or no event at all.
+export type SignalsShape = "full" | "new-install" | "no-events";
+
+export function signalsFor(
+  unsafe: boolean,
+  now: number,
+  shape: SignalsShape = "full",
+): SignalsResponse {
+  if (shape === "new-install") return freshSignals(now);
+  if (shape === "no-events") return noEventSignals(now);
   const first = lisbonWeekStart(now) - 7 * WEEK_MS;
   const newest = first + 7 * WEEK_MS;
   const interventions: SignalsIntervention[] = INTERVENTIONS.map((item, index) => {

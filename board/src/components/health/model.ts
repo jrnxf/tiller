@@ -11,7 +11,9 @@ type SignalId = "shipping" | "time" | "quality" | "safety";
 export interface Signal {
   id: SignalId;
   title: string;
-  state: "good" | "watch";
+  // "none" is a signal with nothing to judge yet: the store has no event, or
+  // nothing has landed on a new install. It is neither good nor on watch.
+  state: "good" | "watch" | "none";
   big: number;
   unit: string;
   read: string;
@@ -70,6 +72,9 @@ function beforeFirstEvent(response: SignalsResponse, week: SignalsWeek): boolean
   return first === null || Date.parse(week.start) < Date.parse(first);
 }
 
+// True when the store has no event at all, so no signal has anything to judge.
+const hasNoEvents = (response: SignalsResponse) => response.first_event_at === null;
+
 function shipping(response: SignalsResponse, now: number): Signal | null {
   const weeks = lastWeek(response);
   if (!weeks) return null;
@@ -78,8 +83,9 @@ function shipping(response: SignalsResponse, now: number): Signal | null {
   const quiet = cur === 0 && prev === 0;
   // A new install has no earlier week to compare with, so it is not quiet.
   const fresh = quiet && weeks.before !== null && beforeFirstEvent(response, weeks.before);
+  const none = fresh || hasNoEvents(response);
   let read: string;
-  if (fresh) read = "Nothing has landed yet.";
+  if (none) read = "Nothing has landed yet.";
   else if (quiet) read = "Nothing has landed for two weeks.";
   else if (prev === null) read = `${cur} so far this week.`;
   else if (inProgress(weeks.now, now)) {
@@ -94,7 +100,7 @@ function shipping(response: SignalsResponse, now: number): Signal | null {
   return {
     id: "shipping",
     title: "Shipping",
-    state: quiet && !fresh ? "watch" : "good",
+    state: none ? "none" : quiet ? "watch" : "good",
     big: cur,
     unit: cur === 1 ? "card landed this week" : "cards landed this week",
     read,
@@ -140,7 +146,7 @@ function yourTime(response: SignalsResponse): Signal | null {
   return {
     id: "time",
     title: "Your time",
-    state: reason ? "watch" : "good",
+    state: hasNoEvents(response) ? "none" : reason ? "watch" : "good",
     big: now.needed,
     unit: now.needed === 1 ? "time you were needed" : "times you were needed",
     read,
@@ -159,17 +165,20 @@ function quality(response: SignalsResponse): Signal | null {
   const { now } = weeks;
   const total = problems(now);
   const done = accepted(now);
-  const read = [
-    now.reverts > 0 ? `${count(now.reverts, "revert")} slipped in.` : "No reverts.",
-    now.escaped > 0 ? `${count(now.escaped, "escaped bug")}.` : "No escaped bugs.",
-    total > 0 ? "Worth a look." : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
+  const none = hasNoEvents(response);
+  const read = none
+    ? "Nothing has landed yet, so there is nothing to check."
+    : [
+        now.reverts > 0 ? `${count(now.reverts, "revert")} slipped in.` : "No reverts.",
+        now.escaped > 0 ? `${count(now.escaped, "escaped bug")}.` : "No escaped bugs.",
+        total > 0 ? "Worth a look." : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
   return {
     id: "quality",
     title: "Quality",
-    state: total > 0 ? "watch" : "good",
+    state: none ? "none" : total > 0 ? "watch" : "good",
     big: total,
     unit: total === 1 ? "problem this week" : "problems this week",
     read,
@@ -206,14 +215,16 @@ function safety(response: SignalsResponse): Signal | null {
     now.unauthorized > 0 ? count(now.unauthorized, "unauthorized action") : null,
   ].filter((part): part is string => part !== null);
   const offline = live < machines;
+  const none = hasNoEvents(response);
   return {
     id: "safety",
     title: "Safety",
-    state: total > 0 || offline ? "watch" : "good",
+    state: none ? "none" : total > 0 || offline ? "watch" : "good",
     big: total,
     unit: total === 1 ? "incident this week" : "incidents this week",
-    read:
-      total === 0
+    read: none
+      ? "Nothing has run yet, so there is nothing to check."
+      : total === 0
         ? `Nothing lost, nothing sent twice, nothing unauthorized. ${machinesSentence(live, machines)}`
         : `${named.join(", ")}. ${machinesSentence(live, machines)}`,
     facts: [

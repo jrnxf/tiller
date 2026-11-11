@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
@@ -110,10 +113,37 @@ test("a new install says nothing has landed yet, not that two weeks went by", ()
   response.first_event_at = "2026-10-28T09:00:00.000Z";
   const fresh = signal(response, "shipping");
   expect(fresh.read).toBe("Nothing has landed yet.");
-  expect(fresh.state).toBe("good");
+  // Nothing to judge yet is neither good nor on watch.
+  expect(fresh.state).toBe("none");
   // A store with no event at all is new too.
   response.first_event_at = null;
   expect(signal(response, "shipping").read).toBe("Nothing has landed yet.");
+  expect(signal(response, "shipping").state).toBe("none");
+});
+
+test("a store with no event at all has nothing to judge, so no signal reads Good", () => {
+  const response = counts(NOTHING, NOTHING);
+  response.first_event_at = null;
+  const states = signalsOf(response, done).map((each) => [each.id, each.state]);
+  expect(states).toEqual([
+    ["shipping", "none"],
+    ["time", "none"],
+    ["quality", "none"],
+    ["safety", "none"],
+  ]);
+  // Their sentences do not claim a clean record either.
+  const reads = signalsOf(response, done).map((each) => each.read);
+  expect(reads.join(" ")).not.toMatch(/No reverts|Nothing lost|Both machines/);
+});
+
+test("the same empty weeks on an install that ran long before them are judged", () => {
+  const states = signalsOf(counts(NOTHING, NOTHING), done).map((each) => [each.id, each.state]);
+  expect(states).toEqual([
+    ["shipping", "watch"],
+    ["time", "good"],
+    ["quality", "good"],
+    ["safety", "good"],
+  ]);
 });
 
 test("an install that started during last week, busy but with nothing landed, is new", () => {
@@ -125,7 +155,7 @@ test("an install that started during last week, busy but with nothing landed, is
   response.first_event_at = "2026-10-22T15:00:00.000Z";
   const fresh = signal(response, "shipping");
   expect(fresh.read).toBe("Nothing has landed yet.");
-  expect(fresh.state).toBe("good");
+  expect(fresh.state).toBe("none");
 });
 
 test("an old install with two empty weeks says nothing has landed for two weeks", () => {
@@ -353,6 +383,37 @@ test("Health shows four signals and the quota, with the numbers collapsed and no
   const toggle = within(page).getByRole("button", { name: /Show the numbers/ });
   expect(toggle.getAttribute("aria-expanded")).toBe("false");
   expect(page.querySelector(".charts")).toBeNull();
+});
+
+test("an install with no data says so on every signal card instead of Good", async () => {
+  await renderHealth("empty");
+  const page = screen.getByTestId("health");
+
+  for (const title of ["Shipping", "Your time", "Quality", "Safety"]) {
+    const card = within(page).getByRole("article", { name: `${title}: No data yet` });
+    expect(card.getAttribute("data-state")).toBe("none");
+    expect(card.querySelector(".state")?.textContent).toBe("No data yet");
+  }
+  expect(within(page).queryByText("Good")).toBeNull();
+});
+
+test("every tone and state the Health page can show has a style", () => {
+  // jsdom lays nothing out, so this holds the rules: a class with no rule
+  // falls back to the green of the first, which is how "Out of date" read.
+  const css = readFileSync(resolve(import.meta.dirname, "health.css"), "utf8");
+  const has = (selector: string) => css.includes(`${selector} {`);
+  for (const state of ["good", "watch", "none"]) expect(has(`.state.${state}`), state).toBe(true);
+  // The quota's tones: ok is the base rule; the others are classes.
+  for (const tone of ["warn", "bad", "unk"]) expect(has(`.q-state.${tone}`), tone).toBe(true);
+  expect(has(".q-state.unk i")).toBe(true);
+});
+
+test("the quota says Out of date in the muted tone, not green", async () => {
+  await renderHealth("quota-grey");
+  const quota = screen.getByLabelText("Claude quota");
+  const state = quota.querySelector(".q-state");
+  expect(state?.textContent).toBe("Out of date");
+  expect(state?.className).toBe("q-state unk");
 });
 
 test("Show the numbers opens the weekly charts and the per-project table", async () => {
