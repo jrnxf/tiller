@@ -1110,6 +1110,10 @@ function handle(
       ],
     };
   }
+  const control = /^\/api\/v1\/agents\/([^/]+)\/(steer|interrupt)$/.exec(path);
+  if (method === "POST" && control?.[1]) {
+    return agentControl(decodeURIComponent(control[1]), control[2] ?? "", body);
+  }
   if (method === "POST" && /^\/api\/v1\/agents\/[^/]+\/focus$/.test(path)) {
     return { reply: recorded({}, null, null), followUps: [] };
   }
@@ -1143,6 +1147,59 @@ function handle(
 }
 
 const changed = new Set<string>();
+
+// How many interrupts each fixture agent was sent: the first is confirmed, the
+// next is not, so the dev server shows both results.
+const interrupts = new Map<string, number>();
+
+// Steer and interrupt (protocol.md 7.4). A steer line is typed a few seconds
+// later, as when the pane goes idle. An interrupt reaches a working agent on
+// a run only, as the daemon checks.
+function agentControl(
+  session: string,
+  verb: string,
+  body: Record<string, unknown>,
+): MutationResult {
+  const agent = (fixtureResponses()[agentsPath()] as AgentsResponse).orchestrators
+    .flatMap((orchestrator) => [orchestrator, ...orchestrator.workers])
+    .find((row) => row.session_id === session);
+  if (!agent) return { reply: refused(404, "not_found", `no session ${session}`), followUps: [] };
+  if (verb === "steer") {
+    const text = typeof body.text === "string" ? body.text.trim() : "";
+    if (text === "") return { reply: refused(400, "usage", "the message is empty"), followUps: [] };
+    const outbox = fakeId("01JOUTB");
+    const data = {
+      id: outbox,
+      target_session_id: session,
+      kind: "steer",
+      state: "pending",
+      body: text,
+    };
+    return {
+      reply: recorded(data, outbox, null),
+      followUps: outboxStages(outbox).map((stage) => ({ ...stage, delayMs: stage.delayMs + 6000 })),
+    };
+  }
+  if (!agent.run_id || agent.activity !== "working") {
+    const fact = agent.run_id
+      ? `${agent.herdr_name ?? session} is not working`
+      : "it has no run to interrupt";
+    return { reply: refused(422, "refused", `${fact}; nothing was sent`), followUps: [] };
+  }
+  const count = (interrupts.get(session) ?? 0) + 1;
+  interrupts.set(session, count);
+  const confirmed = count % 2 === 1;
+  const data = {
+    run: agent.run_id,
+    session,
+    pane_id: agent.pane_id ?? "w1:p1",
+    cancel: confirmed ? "confirmed" : "unconfirmed",
+    evidence: confirmed
+      ? "observation Stop after the Escape"
+      : "no interrupt marker or turn end within 10 s; herdr now shows working",
+  };
+  return { reply: recorded(data, null, null), followUps: [] };
+}
 
 function fixturePrompt(redrawn: boolean): PromptDialog {
   const command = redrawn

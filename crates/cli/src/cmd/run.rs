@@ -8,7 +8,6 @@ use tiller_core::domain::{
     Review, Run, RunOutcome, RunRole, StatusState,
 };
 use tiller_core::state::approvals::NewPr;
-use tiller_core::state::outbox::NewMessage;
 use tiller_core::state::publishes::publish;
 use tiller_core::state::{find, get, list, resolve_card, resolve_id};
 use tiller_herdr::client::Herdr;
@@ -429,27 +428,13 @@ pub fn send(app: &App, args: Send) -> Done {
     let text = text_input(args.text.clone(), args.stdin.clone(), "the message")?;
     let mut store = app.write()?;
     let session = resolve_session(&store, &args.target)?;
-    let card_id = match &session.run_id {
-        Some(run_id) => Some(get::<Run>(store.conn(), "run", run_id)?.card_id),
-        None => None,
-    };
     let keyed = app.key(
         &store,
         "outbox.enqueue",
         &json!({"target": session.id, "kind": args.kind, "text": text}),
         &args.key.key,
     )?;
-    let applied = store.outbox_enqueue(
-        &app.ctx(),
-        Some(&keyed.key),
-        NewMessage {
-            target_session_id: session.id,
-            kind: args.kind,
-            body: text,
-            card_id,
-            reply_to: None,
-        },
-    )?;
+    let applied = store.outbox_send(&app.ctx(), Some(&keyed.key), &session.id, args.kind, text)?;
     Ok(Outcome::applied(applied).with_key(&keyed))
 }
 

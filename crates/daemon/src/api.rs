@@ -29,7 +29,7 @@ use tiller_agents::spawn::orchestrator::Orchestrator;
 use tiller_core::config_file as config_toml;
 use tiller_core::domain::{
     Activity, AnsweredVia, Approval, AskSource, CardKind, CardOutcome, HoldReleaseReason, Host,
-    PeerScope, Session,
+    OutboxKind, PeerScope, Run, Session,
 };
 use tiller_core::domain::{Delivery, InterventionKind, Stage};
 use tiller_core::limits::{
@@ -824,6 +824,8 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/agents/{session}/terminal/tail",
             post(terminal_tail),
         )
+        .route("/api/v1/agents/{session}/steer", post(steer_agent))
+        .route("/api/v1/agents/{session}/interrupt", post(interrupt_agent))
         .route("/api/v1/agents/{session}/prompt", post(prompt_read))
         .route(
             "/api/v1/agents/{session}/prompt/answer",
@@ -4192,6 +4194,125 @@ async fn terminal_tail(
     }))
 }
 
+/// One line for an agent, typed into its pane when the pane is idle: the
+/// outbox path of `tiller send --kind steer` (`protocol.md` 3.3, 7.4).
+#[utoipa::path(post, path = "/api/v1/agents/{session}/steer", tag = "mutations", request_body = SteerBody,
+    params(("session" = String, Path)),
+    responses((status = 200, body = MutationResponse, description = "The queued outbox message; `receipt.outbox_id` names it"),
+              (status = 400, body = ErrorBody, description = "an empty line, a line break, or more than 20,000 characters"),
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "`refused`: the session has ended"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn steer_agent(
+    State(state): State<AppState>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers).await?;
+    let request: SteerBody = body(&bytes)?;
+    not_forwarded(
+        &state,
+        request.host.as_deref(),
+        "a steer (a peer pane is watch only)",
+    )
+    .await?;
+    let text = request.text;
+    if text.trim().is_empty() {
+        return Err(ApiError::usage("the message is empty"));
+    }
+    if text.contains(['\n', '\r']) {
+        return Err(ApiError::usage(
+            "a steer is one line; send each line on its own",
+        ));
+    }
+    within("the message", &text, COMMENT_MAX_CHARS)?;
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, key| {
+            let id = resolve_id(store.conn(), "sessions", "session", &session)?;
+            let applied = store.outbox_send(ctx, Some(key), &id, OutboxKind::Steer, text)?;
+            let outbox_id = Some(applied.value.id.clone());
+            let mut done = Done::of(applied)?;
+            done.outbox_id = outbox_id;
+            Ok(done)
+        },
+    )
+    .await
+}
+
+/// Escape to a working agent's pane, and whether its turn ended within
+/// 10 s: `tiller agent interrupt` on the session's run (`protocol.md` 6.4,
+/// 7.4). The request waits for the proof.
+#[utoipa::path(post, path = "/api/v1/agents/{session}/interrupt", tag = "mutations", request_body = InterruptBody,
+    params(("session" = String, Path)),
+    responses((status = 200, body = MutationResponse, description = "`data.cancel` is `confirmed` or `unconfirmed`, with `data.evidence`"),
+              (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "`refused`: the agent is not working, has no run, pane or agent, or this key already sent its Escape; nothing was sent"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
+              (status = 503, body = ErrorBody, description = "herdr is unreachable")))]
+async fn interrupt_agent(
+    State(state): State<AppState>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers).await?;
+    let request: InterruptBody = body(&bytes)?;
+    not_forwarded(
+        &state,
+        request.host.as_deref(),
+        "an interrupt (a peer pane is watch only)",
+    )
+    .await?;
+    // herdr's pane calls here reach this machine's panes only, and a pane
+    // id on a saved machine may name another agent's pane here.
+    if let (_, _, Some(machine)) = pane_of(&state, session.clone()).await? {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "refused",
+            format!("the agent runs on the saved machine {machine}; an interrupt reaches panes on this machine only, so nothing was sent"),
+        )
+        .hint("open it in herdr instead"));
+    }
+    let herdr = state.0.herdr.clone();
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| {
+            let id = resolve_id(store.conn(), "sessions", "session", &session)?;
+            let session: Session = get_row(store.conn(), "session", &id)?;
+            let run_id = session.run_id.ok_or_else(|| Error::Refused {
+                entity: "session",
+                id: id.clone(),
+                fact: "it has no run to interrupt; send it a message instead".to_owned(),
+            })?;
+            let run: Run = get_row(store.conn(), "run", &run_id)?;
+            let waits = tiller_agents::control::Waits::default();
+            let done = tiller_agents::control::interrupt(store, ctx, &herdr, &waits, &run)
+                .map_err(|error| interrupt_refused(&run.id, error))?;
+            Done::of(done)
+        },
+    )
+    .await
+}
+
+/// An interrupt's failure as the store's errors: herdr out of reach is 503,
+/// and any other precondition a refusal naming the run.
+fn interrupt_refused(run: &str, error: tiller_agents::spawn::SpawnError) -> Error {
+    use tiller_agents::spawn::SpawnError;
+    match error {
+        SpawnError::State(error) => error,
+        SpawnError::Herdr(error) => Error::Unavailable(format!("herdr: {error}; nothing was sent")),
+        other => Error::Refused {
+            entity: "run",
+            id: run.to_owned(),
+            fact: other.to_string(),
+        },
+    }
+}
+
 /// The core's refusal when the approval binds another head than the one
 /// the board showed.
 const HEAD_MOVED: &str = "the head moved since it was shown";
@@ -4493,7 +4614,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, set_config,
+        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, set_config,
         away_start, away_edit, away_end, away_brief, pick_bug_project, recap, mark_recap_seen, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, session, login_code, logout
     ),
@@ -8558,6 +8679,254 @@ esac"#,
         assert_eq!(starter.0.lock().unwrap().len(), 2);
         let read: Value = serde_json::from_str(&get(&app, "/api/v1/agents").await.body).unwrap();
         assert_eq!(stale_of(&read, &orchestrator), Value::Null);
+    }
+
+    /// A herdr whose one Claude pane, `w2:p1`, shows the agent status in
+    /// `{dir}/status`; it logs each call.
+    fn agent_herdr(dir: &std::path::Path) -> Cli {
+        let script = format!(
+            r#"echo "$*" >> '{dir}/calls'
+case "$*" in
+*"pane get"*)
+  printf '{{"result":{{"pane":{{"pane_id":"w2:p1","workspace_id":"w2","agent":"claude","agent_status":"%s"}}}}}}\n' "$(cat '{dir}/status')";;
+esac"#,
+            dir = dir.display()
+        );
+        Cli::local().program(vec![
+            "sh".into(),
+            "-c".into(),
+            script.into(),
+            "herdr".into(),
+        ])
+    }
+
+    fn agent_app(fleet: &Fleet, dir: &std::path::Path) -> Router {
+        app_full(
+            fleet.dir.path(),
+            Assets::of::<Fixture>(),
+            Damage::default(),
+            Peers::idle(),
+            agent_herdr(dir),
+            None,
+        )
+    }
+
+    fn herdr_calls(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The message bar's steer is `tiller send --kind steer`: one queued
+    /// outbox line for the session, on its run's card, keyed by the board.
+    #[tokio::test]
+    async fn a_steer_queues_one_line_for_the_agent() {
+        let mut fleet = Fleet::new();
+        let session = fleet.worker("w2:p1");
+        let scratch = tempfile::tempdir().unwrap();
+        let app = agent_app(&fleet, scratch.path());
+        let cookie = owner_cookie(fleet.dir.path());
+        let path = format!("/api/v1/agents/{session}/steer");
+        let body = json!({"idempotency_key": "k-steer", "text": "Stop after the lint fix"});
+
+        let refused = send(&app, mutation("POST", &path, body.clone(), &[])).await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+        for (text, why) in [
+            ("", "is empty"),
+            ("   ", "is empty"),
+            ("one\ntwo", "one line"),
+            (&"a".repeat(COMMENT_MAX_CHARS + 1), "at most 20000"),
+        ] {
+            let bad = json!({"idempotency_key": "k-bad", "text": text});
+            let answer = send(&app, mutation("POST", &path, bad, &[("cookie", &cookie)])).await;
+            assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{}", answer.body);
+            assert!(answer.body.contains(why), "{}", answer.body);
+        }
+
+        let sent = send(
+            &app,
+            mutation("POST", &path, body.clone(), &[("cookie", &cookie)]),
+        )
+        .await;
+        assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
+        let sent: Value = serde_json::from_str(&sent.body).unwrap();
+        assert_eq!(sent["data"]["kind"], "steer");
+        assert_eq!(sent["data"]["state"], "pending");
+        assert_eq!(sent["data"]["body"], "Stop after the lint fix");
+        assert_eq!(sent["receipt"]["outbox_id"], sent["data"]["id"]);
+        let (count, by, card): (i64, String, Option<String>) = fleet
+            .open()
+            .conn()
+            .query_row(
+                "SELECT count(*), max(created_by), max(card_id) FROM outbox WHERE target_session_id = ?1",
+                [&session],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((count, by.as_str()), (1, "board"));
+        let run_card: String = fleet
+            .open()
+            .conn()
+            .query_row(
+                "SELECT card_id FROM runs WHERE id = (SELECT run_id FROM sessions WHERE id = ?1)",
+                [&session],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(card, Some(run_card));
+        // Nothing is typed now: the daemon's delivery loop types it when
+        // the pane is idle.
+        assert!(herdr_calls(scratch.path()).is_empty());
+
+        // A retry replays; a second line is a second message.
+        let again = send(&app, mutation("POST", &path, body, &[("cookie", &cookie)])).await;
+        let again: Value = serde_json::from_str(&again.body).unwrap();
+        assert_eq!(again["replayed"], true);
+        assert_eq!(again["data"]["id"], sent["data"]["id"]);
+        let next = json!({"idempotency_key": "k-steer-2", "text": "Then open the PR"});
+        let next = send(&app, mutation("POST", &path, next, &[("cookie", &cookie)])).await;
+        assert_eq!(next.status, StatusCode::OK, "{}", next.body);
+        let count: i64 = fleet
+            .open()
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM outbox WHERE target_session_id = ?1",
+                [&session],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    /// The message bar's Interrupt is `tiller agent interrupt` on the
+    /// session's run: refused while the agent is not working, else one
+    /// Escape and the checked result. Its key never sends a second one.
+    #[tokio::test]
+    async fn an_interrupt_sends_one_escape_to_a_working_agent() {
+        let mut fleet = Fleet::new();
+        let session = fleet.worker("w2:p1");
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path().to_owned();
+        let app = agent_app(&fleet, &dir);
+        let cookie = owner_cookie(fleet.dir.path());
+        let path = format!("/api/v1/agents/{session}/interrupt");
+        let body = json!({"idempotency_key": "k-int"});
+
+        let refused = send(&app, mutation("POST", &path, body.clone(), &[])).await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+
+        std::fs::write(dir.join("status"), "idle").unwrap();
+        let idle = send(
+            &app,
+            mutation("POST", &path, body.clone(), &[("cookie", &cookie)]),
+        )
+        .await;
+        assert_eq!(
+            idle.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            idle.body
+        );
+        assert!(idle.body.contains("is not working"), "{}", idle.body);
+        assert!(!herdr_calls(&dir).iter().any(|c| c.contains("send-keys")));
+
+        // The turn ends after the Escape, as Claude's Stop hook reports.
+        std::fs::write(dir.join("status"), "working").unwrap();
+        let mut hook_store = fleet.open();
+        let (watch, hooked) = (dir.clone(), session.clone());
+        let claude = std::thread::spawn(move || {
+            for _ in 0..500 {
+                if herdr_calls(&watch)
+                    .iter()
+                    .any(|c| c == "pane send-keys w2:p1 esc")
+                {
+                    hook_store
+                        .observation_record(
+                            &Ctx::new(Actor::Hook),
+                            tiller_core::state::runs::NewObservation {
+                                session_id: Some(hooked),
+                                run_id: None,
+                                source: tiller_core::domain::ObservationSource::Hook,
+                                event: "Stop".into(),
+                                verdict: None,
+                                observed_at: Timestamp::now(),
+                                payload: json!({}),
+                            },
+                        )
+                        .unwrap();
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+        let done = send(
+            &app,
+            mutation("POST", &path, body.clone(), &[("cookie", &cookie)]),
+        )
+        .await;
+        claude.join().unwrap();
+        assert_eq!(done.status, StatusCode::OK, "{}", done.body);
+        let done: Value = serde_json::from_str(&done.body).unwrap();
+        assert_eq!(done["data"]["cancel"], "confirmed", "{done}");
+        assert_eq!(done["data"]["session"], session);
+        assert!(done["data"]["evidence"].as_str().unwrap().contains("Stop"));
+
+        // A retry of the same press finds the agent still working, and
+        // sends nothing.
+        let retry = send(&app, mutation("POST", &path, body, &[("cookie", &cookie)])).await;
+        assert_eq!(
+            retry.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            retry.body
+        );
+        assert!(retry.body.contains("sent already"), "{}", retry.body);
+        let escapes = herdr_calls(&dir)
+            .iter()
+            .filter(|c| c.contains("send-keys"))
+            .count();
+        assert_eq!(escapes, 1);
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_needs_a_run_on_this_machine() {
+        let mut fleet = Fleet::new();
+        let remote = fleet.worker("w3:p1");
+        fleet
+            .open()
+            .conn()
+            .execute_batch(&format!(
+                "INSERT INTO hosts (id, label, kind, herdr_machine) VALUES ('h-r', 'remote-a', 'remote', 'm-1');
+                 UPDATE sessions SET host_id = 'h-r' WHERE id = '{remote}'"
+            ))
+            .unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        std::fs::write(scratch.path().join("status"), "working").unwrap();
+        let app = agent_app(&fleet, scratch.path());
+        let cookie = owner_cookie(fleet.dir.path());
+        let cases = [
+            (remote.clone(), "saved machine m-1"),
+            (fleet.orchestrator_session.clone(), "no run to interrupt"),
+        ];
+        for (session, why) in cases {
+            let path = format!("/api/v1/agents/{session}/interrupt");
+            let body = json!({"idempotency_key": format!("k-{session}")});
+            let answer = send(&app, mutation("POST", &path, body, &[("cookie", &cookie)])).await;
+            assert_eq!(
+                answer.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{}",
+                answer.body
+            );
+            assert!(answer.body.contains(why), "{}", answer.body);
+        }
+        assert!(
+            !herdr_calls(scratch.path())
+                .iter()
+                .any(|c| c.contains("send-keys"))
+        );
     }
 
     #[tokio::test]

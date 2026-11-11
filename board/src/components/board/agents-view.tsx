@@ -33,6 +33,7 @@ import type { SwitchKey, TerminalControl } from "./live-terminal";
 import { AsOf, HostChip, PeerNote } from "./host-chip";
 import { useAmbiguousIds, useStanding, useNamedProjects } from "./peer-state";
 import { StaleChip } from "./stale-sessions";
+import { NO_RUN, NOT_WORKING, SteerBar } from "./steer-bar";
 import { ModelChip, ownerSearch } from "./tile";
 import { BoardIcon, CloseIcon, ServerIcon } from "../shell/icons";
 import "./board.css";
@@ -640,6 +641,18 @@ function Stage({
       <PeerNote standing={standing} />
       <div className="av-card-b" ref={bodyRef}>
         {body}
+        {
+          // Steer and interrupt reach a pane on this machine only: a peer's
+          // pane is watch only, and a saved machine's pane is read as a tail.
+          remote || peerHost ? null : (
+            <SteerBar
+              key={agent.session_id}
+              sessionId={agent.session_id}
+              name={line.name}
+              off={!agent.run_id ? NO_RUN : activity.dot === "live" ? null : NOT_WORKING}
+            />
+          )
+        }
       </div>
       <Details
         line={line}

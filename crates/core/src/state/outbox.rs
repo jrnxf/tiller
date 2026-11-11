@@ -136,6 +136,40 @@ impl Store {
         })
     }
 
+    /// `tiller send` and the board's message bar (`protocol.md` 6.4, 7.4):
+    /// a steer or a note for `session_id`, filed on its run's card when it
+    /// has a run. Keyed like [`Store::outbox_enqueue`].
+    pub fn outbox_send(
+        &mut self,
+        ctx: &Ctx,
+        key: Option<&str>,
+        session_id: &str,
+        kind: OutboxKind,
+        body: String,
+    ) -> Result<Applied<OutboxMessage>> {
+        if !matches!(kind, OutboxKind::Steer | OutboxKind::Note) {
+            return Err(Error::Usage(format!(
+                "a send is a steer or a note, not {kind}"
+            )));
+        }
+        let session: Session = get(self.conn(), "session", session_id)?;
+        let card_id = match &session.run_id {
+            Some(run_id) => Some(get::<Run>(self.conn(), "run", run_id)?.card_id),
+            None => None,
+        };
+        self.outbox_enqueue(
+            ctx,
+            key,
+            NewMessage {
+                target_session_id: session.id,
+                kind,
+                body,
+                card_id,
+                reply_to: None,
+            },
+        )
+    }
+
     /// `outbox.deliver` (daemon): the wake-up line reached `pane_id`, which
     /// hosts the target session. A delivered message rings again.
     pub fn outbox_deliver(

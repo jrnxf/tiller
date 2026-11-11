@@ -155,6 +155,33 @@ export interface PromptRead {
   reason: "not_waiting" | "no_dialog" | null;
 }
 
+// `POST /api/v1/agents/{session}/steer` (protocol.md 7.4): one line, queued
+// in the outbox and typed when the pane is idle.
+export interface SteerBody {
+  idempotency_key: string;
+  text: string;
+}
+
+// `data` of a steer: the queued outbox message.
+export interface SteerQueued {
+  id: string;
+  target_session_id: string;
+  kind: "steer";
+  state: string;
+  body: string;
+}
+
+// `data` of `POST /api/v1/agents/{session}/interrupt` (protocol.md 6.4, 7.4):
+// `confirmed` only when a hook or the transcript showed the turn end within
+// 10 s.
+export interface Interrupted {
+  run: string;
+  session: string;
+  pane_id: string;
+  cancel: "confirmed" | "unconfirmed";
+  evidence: string;
+}
+
 export interface AttentionResponse {
   items: AttentionItem[];
   permission_prompts: PermissionPrompt[];

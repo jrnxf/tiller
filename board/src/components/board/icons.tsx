@@ -135,6 +135,21 @@ export const SendIcon = () => (
   </Glyph>
 );
 
+// Interrupt: the Escape that stops the agent's step.
+export const EscIcon = () => (
+  <Glyph>
+    <path d="M8 2.5v6M4.7 4.6a5 5 0 1 0 6.6 0" {...stroke} strokeWidth={1.4} {...round} />
+  </Glyph>
+);
+
+// A steer line that waits in the queue.
+export const QueuedIcon = () => (
+  <Glyph>
+    <circle cx="8" cy="8" r="6.2" {...stroke} />
+    <path d="M8 4.8V8l2.2 1.4" {...stroke} {...round} />
+  </Glyph>
+);
+
 // The live terminal mirror.
 export const TerminalIcon = () => (
   <Glyph>

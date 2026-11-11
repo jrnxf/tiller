@@ -158,6 +158,104 @@
         }
       }
     },
+    "/api/v1/agents/{session}/interrupt": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "summary": "Escape to a working agent's pane, and whether its turn ended within\n10 s: `tiller agent interrupt` on the session's run (`protocol.md` 6.4,\n7.4). The request waits for the proof.",
+        "operationId": "interrupt_agent",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InterruptBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`data.cancel` is `confirmed` or `unconfirmed`, with `data.evidence`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`refused`: the agent is not working, has no run, pane or agent, or this key already sent its Escape; nothing was sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "herdr is unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/agents/{session}/prompt": {
       "post": {
         "tags": [
@@ -345,6 +443,95 @@
           },
           "503": {
             "description": "herdr is unreachable, or input came faster than 20 a second; nothing was sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/{session}/steer": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "summary": "One line for an agent, typed into its pane when the pane is idle: the\noutbox path of `tiller send --kind steer` (`protocol.md` 3.3, 7.4).",
+        "operationId": "steer_agent",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SteerBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The queued outbox message; `receipt.outbox_id` names it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "an empty line, a line break, or more than 20,000 characters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`refused`: the session has ended",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
             "content": {
               "application/json": {
                 "schema": {
@@ -5883,6 +6070,26 @@
           }
         }
       },
+      "InterruptBody": {
+        "type": "object",
+        "description": "`POST /api/v1/agents/{session}/interrupt`: Escape to a working agent's\npane, and whether its turn ended within 10 s (`protocol.md` 6.4, 7.4).",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label; an interrupt is not forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "LinkEvent": {
         "type": "object",
         "description": "One `event: link` message: a peer link changed state.",
@@ -8601,6 +8808,31 @@
             "description": "The run scratch root (`spawn.scratch_root` or its default). Derived."
           }
         }
+      },
+      "SteerBody": {
+        "type": "object",
+        "description": "`POST /api/v1/agents/{session}/steer`: one line for the agent, typed\ninto its pane when the pane is idle (`protocol.md` 3.3, 7.4).",
+        "required": [
+          "idempotency_key",
+          "text"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label; a steer is not forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string",
+            "description": "One line, at most 20,000 characters."
+          }
+        },
+        "additionalProperties": false
       },
       "TerminalFit": {
         "type": "object",

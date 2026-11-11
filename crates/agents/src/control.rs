@@ -191,7 +191,9 @@ fn worktree_of(run: &Run) -> Result<PathBuf> {
 
 /// Sends Escape to a working session and reports whether its turn ended.
 /// Refuses unless the session is working: a second Escape would reach
-/// whatever the agent does next.
+/// whatever the agent does next. For the same reason a key that already
+/// sent one (the board's, kept by the `interrupt_sent` observation) is
+/// refused, and nothing is sent again.
 pub fn interrupt(
     store: &mut Store,
     ctx: &Ctx,
@@ -200,6 +202,12 @@ pub fn interrupt(
     run: &Run,
 ) -> Result<Applied<Interrupted>> {
     require_controller(ctx, run, "interrupt", false)?;
+    if store.key_recorded(ctx)? {
+        return Err(SpawnError::Refused(format!(
+            "this interrupt of run {} was sent already; nothing was sent again",
+            run.id
+        )));
+    }
     require_local(store, run)?;
     require_active(run)?;
     let session = live_session(store.conn(), &run.id)?.ok_or_else(|| {

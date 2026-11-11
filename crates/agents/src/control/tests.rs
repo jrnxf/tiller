@@ -275,6 +275,33 @@ fn interrupt_without_proof_is_unconfirmed() {
 }
 
 #[test]
+fn a_keyed_interrupt_sends_one_escape_however_often_it_is_retried() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.herdr.set_screen(&spawned.pane_id, Screen::Working);
+    let board = Ctx::new(Actor::Board).with_key("01KEYEDINTERRUPT0000000000");
+
+    let done = interrupt_it(&mut rig, &board, &quick(), &spawned.run.id).unwrap();
+    assert_eq!(done.cancel, Proof::Unconfirmed);
+    // Still working, so only the key stops a second Escape.
+    rig.herdr.set_screen(&spawned.pane_id, Screen::Working);
+    let error = interrupt_it(&mut rig, &board, &quick(), &spawned.run.id).unwrap_err();
+    assert!(matches!(error, SpawnError::Refused(_)), "{error}");
+    assert!(error.to_string().contains("sent already"), "{error}");
+    let escapes = rig
+        .herdr
+        .calls()
+        .iter()
+        .filter(|c| c.starts_with("send_escape"))
+        .count();
+    assert_eq!(escapes, 1, "{:?}", rig.herdr.calls());
+
+    // A new key is a new press.
+    let again = Ctx::new(Actor::Board).with_key("01KEYEDINTERRUPT0000000001");
+    interrupt_it(&mut rig, &again, &quick(), &spawned.run.id).unwrap();
+}
+
+#[test]
 fn interrupt_refuses_a_session_not_working() {
     let mut rig = Rig::new();
     let spawned = running(&mut rig);

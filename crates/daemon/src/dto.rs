@@ -1815,6 +1815,30 @@ pub enum TerminalLine {
     Unfit { message: String },
 }
 
+/// `POST /api/v1/agents/{session}/steer`: one line for the agent, typed
+/// into its pane when the pane is idle (`protocol.md` 3.3, 7.4).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SteerBody {
+    pub idempotency_key: String,
+    /// One line, at most 20,000 characters.
+    pub text: String,
+    /// A paired peer's label; a steer is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
+/// `POST /api/v1/agents/{session}/interrupt`: Escape to a working agent's
+/// pane, and whether its turn ended within 10 s (`protocol.md` 6.4, 7.4).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InterruptBody {
+    pub idempotency_key: String,
+    /// A paired peer's label; an interrupt is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
 /// `POST /api/v1/agents/{session}/focus`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
