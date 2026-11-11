@@ -184,14 +184,17 @@ pub fn write_frame<W: Write>(mut out: W, frame: &Frame) -> Result<(), FrameError
 /// `len` prefix never claims 16 MiB.
 pub fn read_frame<R: Read>(mut input: R) -> Result<Option<Frame>, FrameError> {
     let mut head = [0u8; LEN_BYTES + 1 + ADDRESS_BYTES];
-    let got = fill(&mut input, &mut head[..LEN_BYTES + 1])?;
+    let got = fill(&mut input, &mut head[..LEN_BYTES])?;
     if got == 0 {
         return Ok(None);
     }
     if got < LEN_BYTES {
         return Err(FrameError::Truncated { buffered: got });
     }
+    // The length is checked before the kind byte is read, so a bad length
+    // fails at once, not when more bytes come.
     let len = check_len(u32::from_be_bytes([head[0], head[1], head[2], head[3]]))?;
+    let got = got + fill(&mut input, &mut head[LEN_BYTES..=LEN_BYTES])?;
     if got < LEN_BYTES + 1 {
         return Err(FrameError::Truncated { buffered: got });
     }
@@ -514,6 +517,22 @@ mod tests {
         assert!(matches!(
             decoder.next_frame(),
             Err(FrameError::UnknownKind(9))
+        ));
+        // A bad length is refused before a kind byte is read.
+        struct NoMore;
+        impl Read for NoMore {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                panic!("read past a bad length");
+            }
+        }
+        assert!(matches!(
+            read_frame((&[0u8, 0, 0, 0][..]).chain(NoMore)),
+            Err(FrameError::Empty)
+        ));
+        let over = (MAX_FRAME_LEN + 1).to_be_bytes();
+        assert!(matches!(
+            read_frame((&over[..]).chain(NoMore)),
+            Err(FrameError::TooLarge { .. })
         ));
     }
 

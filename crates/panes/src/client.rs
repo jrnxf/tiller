@@ -39,6 +39,11 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// reply's last byte in, and how long one frame's write may take.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a subscription still reads after a broken resize, so what was
+/// buffered comes, while a holder that keeps the connection open cannot keep
+/// the broken stream alive.
+const BROKEN_GRACE: Duration = Duration::from_secs(2);
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -76,6 +81,11 @@ impl Timed {
     fn unlimit_reads(&mut self) -> io::Result<()> {
         self.deadline = None;
         self.stream.set_read_timeout(None)
+    }
+
+    /// Gives reads a deadline, unless they have one.
+    fn limit_reads(&mut self, deadline: Instant) {
+        self.deadline.get_or_insert(deadline);
     }
 }
 
@@ -701,7 +711,8 @@ impl StreamSide {
     /// the socket. An end shuts both ways, so a waiting read ends now. A
     /// break shuts only the write side: on some systems a read shutdown
     /// drops what is buffered, and an exit or a lag buffered there must
-    /// still come. The holder then sees the close and closes its side.
+    /// still come. [`Subscription::recv`] then reads for at most
+    /// [`BROKEN_GRACE`], and [`StreamHandle::end`] still shuts both ways.
     fn close(&self, why: Closed) {
         let how = match why {
             Closed::Ended => Shutdown::Both,
@@ -754,7 +765,13 @@ impl Subscription {
         // the read that fails then says why.
         let result = match self.handle.0.closed.get() {
             Some(Closed::Ended) => Ok(None),
-            _ => self.read_update(),
+            Some(Closed::Broken(_)) => {
+                self.reader
+                    .get_mut()
+                    .limit_reads(Instant::now() + BROKEN_GRACE);
+                self.read_update()
+            }
+            None => self.read_update(),
         };
         let result = match (result, self.handle.0.closed.get()) {
             (_, Some(Closed::Ended)) => Ok(None),
@@ -896,6 +913,64 @@ impl Subscription {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_broken_stream_ends_soon_while_the_holder_keeps_sending() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let holder = std::thread::spawn(move || {
+            let mut theirs = theirs;
+            let mut wire = Vec::new();
+            Frame::Output {
+                stream: 1,
+                bytes: b"tick".to_vec(),
+            }
+            .encode(&mut wire)
+            .unwrap();
+            while theirs.write_all(&wire).is_ok() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let socket = ours.try_clone().unwrap();
+        let writer = Mutex::new(Timed::new(ours.try_clone().unwrap()));
+        let mut subscription = Subscription {
+            stream: 1,
+            cols: 80,
+            rows: 24,
+            reader: BufReader::new(Timed::new(ours)),
+            handle: StreamHandle(Arc::new(StreamSide {
+                pane: "p1".into(),
+                lease: "stream-1".into(),
+                socket,
+                closed: OnceLock::new(),
+                writer,
+                next_id: AtomicU64::new(1),
+                pending: Mutex::new(VecDeque::new()),
+            })),
+            state: StreamState::Live,
+            exited: false,
+        };
+        assert!(matches!(subscription.recv(), Ok(Some(Update::Output(_)))));
+        let started = Instant::now();
+        subscription
+            .handle
+            .0
+            .close(Closed::Broken("a resize failed: test".into()));
+        let end = loop {
+            match subscription.recv() {
+                Ok(Some(Update::Output(_))) => {
+                    assert!(started.elapsed() < BROKEN_GRACE * 3, "the stream lived on");
+                }
+                other => break other,
+            }
+        };
+        let Err(PanesError::Unreachable(why)) = end else {
+            panic!("expected the break's reason, got {end:?}");
+        };
+        assert_eq!(why, "a resize failed: test");
+        assert_eq!(subscription.recv().unwrap(), None);
+        drop(subscription);
+        holder.join().unwrap();
+    }
 
     #[test]
     fn a_long_quote_is_cut_at_a_char_boundary() {
