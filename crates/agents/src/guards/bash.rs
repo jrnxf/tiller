@@ -101,10 +101,9 @@ const REPO_EDIT: GhFlags = GhFlags {
     slots: 1,
 };
 
-/// Text in a word that is not known before it runs: a variable, a
-/// substitution, a glob or a brace list.
+/// Text in a word that is not known before it runs.
 fn unread(arg: &Arg, text: &str) -> bool {
-    !arg.fixed && text.contains(['$', '`', '*', '?', '[', '{'])
+    !arg.fixed && options::dynamic(text)
 }
 
 /// Whether `gh` reads the flag `-<short>` or `--<long>`: alone, with
@@ -403,6 +402,7 @@ pub(super) fn classify(command: &str, ctx: &Context<'_>) -> Option<Denial> {
         background: HashSet::new(),
         depth: 0,
         remote: false,
+        guesses: 0,
     };
     walker.text(command, true)
 }
@@ -445,6 +445,9 @@ struct Walker<'a, 'b> {
     depth: usize,
     /// The script runs on another host through `ssh`, `mosh` or `et`.
     remote: bool,
+    /// The readings of runner options tried so far with an unread word
+    /// taken as an option. Each one can try more, so they are capped.
+    guesses: usize,
 }
 
 impl Walker<'_, '_> {
@@ -528,7 +531,8 @@ impl Walker<'_, '_> {
         }
         let chars: Vec<char> = word.text.chars().collect();
         let mut out = String::new();
-        let mut fixed = true;
+        // A brace list (`{-d,}`) or sequence makes several words.
+        let mut fixed = !word.braces;
         let mut i = 0;
         while i < chars.len() {
             match chars[i] {
@@ -571,8 +575,6 @@ impl Walker<'_, '_> {
                     };
                 }
                 '*' | '?' | '[' => fixed = false,
-                // A brace list (`{-d,}`) makes several words.
-                '{' if brace_list(&chars[i + 1..]) => fixed = false,
                 _ => {}
             }
             out.push(chars[i]);
@@ -916,7 +918,7 @@ impl Walker<'_, '_> {
                 _ => {}
             }
         }
-        let mut j = at + 1 + next;
+        let j = at + 1 + next;
         if words.get(j).is_some_and(|word| word.is("-")) {
             return Step::Done(self.deny(
                 Code::Identity,
@@ -924,22 +926,39 @@ impl Walker<'_, '_> {
                 shown,
             ));
         }
+        match self.assignments("env", words, at, j, shown) {
+            Ok(j) => Step::Next(j),
+            Err(found) => Step::Done(found),
+        }
+    }
+
+    /// The `NAME=VALUE` words from `words[j]` that `env` and `sudo` (at
+    /// `words[at]`) read before the command: the index after them, or the
+    /// decision one of them settles.
+    fn assignments(
+        &mut self,
+        program: &str,
+        words: &[Arg],
+        at: usize,
+        mut j: usize,
+        shown: &str,
+    ) -> Result<usize, Option<Denial>> {
         while let Some(word) = words.get(j)
             && let Some((name, value)) = word.text.split_once('=')
         {
             if !word.fixed && name.contains(['$', '`']) {
-                return Step::Done(self.unreadable_options("env", &words[at..]));
+                return Err(self.unreadable_options(program, &words[at..]));
             }
             let value = Arg {
                 text: value.to_owned(),
                 fixed: word.fixed,
             };
             if let Some(found) = self.assign(name, &value, shown) {
-                return Step::Done(Some(found));
+                return Err(Some(found));
             }
             j += 1;
         }
-        Step::Next(j)
+        Ok(j)
     }
 
     /// A program from the runner list at `words[at]`: its options and
@@ -1011,6 +1030,9 @@ impl Walker<'_, '_> {
         } = *read;
         let tail = words.get(from..).unwrap_or_default();
         let (found, end) = match options::parse(runner.options, runner.numeric, tail) {
+            // In a guessed reading the program would reject the options, so
+            // the command cannot start this way.
+            Parse::Unsure if depth > 0 => return None,
             Parse::Unsure => return self.unreadable_options(name, &words[at..]),
             Parse::Read { found, next, .. } => (found, Ok(from + next)),
             Parse::Unfixed { found, at, option } => (found, Err((from + at, option))),
@@ -1018,7 +1040,7 @@ impl Walker<'_, '_> {
         if let Some(found) = self.runner_options(name, runner, &found, shown) {
             return Some(found);
         }
-        if let Some(found) = self.runner_outputs(name, runner, &found, shown) {
+        if let Some(found) = self.runner_outputs(runner, &found, shown) {
             return Some(found);
         }
         if found
@@ -1040,9 +1062,10 @@ impl Walker<'_, '_> {
         // environment, or name a file the program writes, cannot be read.
         let named =
             !runner.clears.is_empty() || !runner.env.is_empty() || !runner.writes.is_empty();
-        if named || depth >= 3 {
+        if named || depth >= 3 || self.guesses >= 64 {
             return self.unreadable_options(name, &words[at..]);
         }
+        self.guesses += 1;
         for skip in [1, 2] {
             if unfixed + skip <= words.len()
                 && let Some(found) = self.runner_starts(read, unfixed + skip, depth + 1, starts)
@@ -1061,7 +1084,6 @@ impl Walker<'_, '_> {
         starts: &mut Vec<Start>,
     ) -> Option<Denial> {
         let Reading {
-            name,
             runner,
             words,
             appended,
@@ -1082,7 +1104,7 @@ impl Walker<'_, '_> {
                 break;
             }
             // `flock FILE`: flock opens the file, and creates it.
-            if name == "flock"
+            if runner.lock_file
                 && !number
                 && let Some((code, why)) = path_denial(&operand.text, true, self.ctx)
             {
@@ -1090,7 +1112,7 @@ impl Walker<'_, '_> {
             }
             start += 1;
         }
-        if name == "flock" {
+        if runner.lock_file {
             if words
                 .get(start)
                 .is_some_and(|w| w.is("-c") || w.is("--command"))
@@ -1111,11 +1133,10 @@ impl Walker<'_, '_> {
         None
     }
 
-    /// The options of a runner that name a file it writes. A strace output
-    /// that starts with `|` or `!` is a command strace pipes its trace to.
+    /// The options of a runner that name a file it writes, or with
+    /// `runner.pipes` a command it pipes to.
     fn runner_outputs(
         &mut self,
-        name: &str,
         runner: &Runner,
         found: &[options::Found],
         shown: &str,
@@ -1127,7 +1148,7 @@ impl Walker<'_, '_> {
             let Some(value) = &option.value else {
                 continue;
             };
-            if name == "strace"
+            if runner.pipes
                 && let Some(piped) = value.text.strip_prefix(['|', '!'])
             {
                 let piped = Arg {
@@ -1310,23 +1331,24 @@ impl Walker<'_, '_> {
             Parse::Read { found, next, .. } => (found, next),
             _ => return Step::Done(self.unreadable_options(program, &words[at..])),
         };
-        let mut j = at + 1 + next;
-        while let Some(word) = words.get(j)
-            && let Some((name, value)) = word.text.split_once('=')
-        {
-            if !word.fixed && name.contains(['$', '`']) {
-                return Step::Done(self.unreadable_options(program, &words[at..]));
-            }
-            let value = Arg {
-                text: value.to_owned(),
-                fixed: word.fixed,
-            };
-            if let Some(found) = self.assign(name, &value, shown) {
-                return Step::Done(Some(found));
-            }
-            j += 1;
-        }
+        let j = match self.assignments(program, words, at, at + 1 + next, shown) {
+            Ok(j) => j,
+            Err(found) => return Step::Done(found),
+        };
         let has = |names: &[&str]| found.iter().any(|option| names.contains(&option.name));
+        // These print or reset, and run no command: `sudo -l COMMAND` says
+        // whether the command is allowed, as `doas -C FILE COMMAND` does.
+        let no_command = if program == "doas" {
+            has(&["C", "L"])
+        } else {
+            has(&["list", "version", "validate", "remove-timestamp"])
+                || found
+                    .iter()
+                    .any(|option| option.name == "help" && option.value.is_none())
+        };
+        if no_command {
+            return Step::Done(None);
+        }
         if program == "sudoedit" || (program != "doas" && has(&["edit"])) {
             for file in words.get(j..).unwrap_or_default() {
                 if let Some((code, why)) = path_denial(&file.text, true, self.ctx) {
@@ -1676,7 +1698,8 @@ impl Walker<'_, '_> {
         let mut stdin = false;
         while let Some(arg) = args.get(j) {
             let text = arg.text.as_str();
-            if text == "--" {
+            // `-` ends the options as `--` does.
+            if arg.is("--") || arg.is("-") {
                 j += 1;
                 break;
             }
@@ -1699,6 +1722,10 @@ impl Walker<'_, '_> {
                     return self.unreadable_options(name, args);
                 };
                 continue;
+            }
+            // A word the guard cannot read may be an option such as `-c`.
+            if !arg.fixed {
+                return self.unreadable_options(name, args);
             }
             if (text.starts_with('-') || text.starts_with('+')) && text.len() > 1 {
                 let flags = &text[1..];
@@ -3287,11 +3314,6 @@ fn reads_stdin(redirect: &Redirect) -> bool {
 
 fn is_sha(text: &str) -> bool {
     (7..=40).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-/// Whether the text after a `{` holds a `,` before its `}`: a brace list.
-fn brace_list(after: &[char]) -> bool {
-    after.contains(&'}') && after.iter().take_while(|c| **c != '}').any(|c| *c == ',')
 }
 
 /// The text of a `pwsh -EncodedCommand` value: base64 of UTF-16LE. .NET

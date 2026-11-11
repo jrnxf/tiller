@@ -1559,6 +1559,68 @@ fn gh_brace_word_is_unread() {
     ]);
 }
 
+/// A brace sequence makes several words as a brace list does, and a quoted
+/// brace is literal text.
+#[test]
+fn brace_sequences_are_unread_and_quoted_braces_are_text() {
+    verdicts(&[
+        ("gh pr close 5 -{d..d}", Some(Code::Merge)),
+        ("gh pr close 5 \"$HOME{-d,}\"", None),
+        ("mkdir -p src/{1..3}", None),
+    ]);
+}
+
+/// A shell reads `-` as the end of its options, and a word it cannot read
+/// where its options are may be `-c`.
+#[test]
+fn shell_dash_and_unread_options_fail_closed() {
+    const MERGE: Option<Code> = Some(Code::Merge);
+    verdicts(&[
+        ("echo 'gh pr merge 12' | bash -", MERGE),
+        ("echo 'gh pr merge 12' | sh -", MERGE),
+        ("echo 'gh pr merge 12' | su root -s /bin/sh -", MERGE),
+        ("bash -$O 'gh pr merge 12'", MERGE),
+        ("bash $O 'gh pr merge 12'", MERGE),
+        ("su root -- -$O 'gh pr merge 12'", MERGE),
+        ("bash - ./build.sh", None),
+        ("bash \"$SCRIPT\"", None),
+        ("bash -$O ./build.sh", None),
+    ]);
+}
+
+/// A guessed reading of a runner's options that the program would reject
+/// adds no place for the command to start, and the guesses are capped.
+#[test]
+fn runner_guesses_drop_rejected_readings_and_stop() {
+    verdicts(&[
+        ("timeout $T git -C repo status", None),
+        // `nice` takes no operand, so `$N` may be the program, as with
+        // `$CMD git status`.
+        ("nice $N git -C repo status", Some(Code::GuardTamper)),
+    ]);
+    let nested = format!("{}gh pr merge 12", "nice $X ".repeat(30));
+    let started = std::time::Instant::now();
+    for role in Role::ALL {
+        assert!(bash(role, &nested).is_some(), "{role}: {nested}: allowed");
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+}
+
+/// `sudo -l COMMAND` and the other listing options run no command, and
+/// `doas -a STYLE` is read.
+#[test]
+fn sudo_listing_runs_no_command() {
+    verdicts(&[
+        ("sudo -l gh pr merge 12", None),
+        ("sudo -V", None),
+        ("doas -C /etc/doas.conf gh pr merge 12", None),
+        ("doas -a passwd gh pr view 1", None),
+        ("doas -a passwd gh pr merge 12", Some(Code::Merge)),
+        ("sudo -k gh pr merge 12", Some(Code::Merge)),
+        ("sudo -hexample.com gh pr merge 12", Some(Code::Merge)),
+    ]);
+}
+
 /// Owner decision, Wednesday 2026-11-11: a word the guard cannot read in
 /// the PR number slot is the number; one after it can only be a flag, so it
 /// is read as the flag the rule checks for.

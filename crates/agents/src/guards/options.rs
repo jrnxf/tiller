@@ -124,8 +124,9 @@ impl Parse {
     }
 }
 
-/// Text in an unfixed word that the shell may change.
-fn dynamic(text: &str) -> bool {
+/// Text in an unfixed word that the shell may change: a variable, a
+/// substitution, a glob, a brace list or a tilde.
+pub(super) fn dynamic(text: &str) -> bool {
     text.contains(['$', '`', '*', '?', '[', '{', '~'])
 }
 
@@ -287,7 +288,7 @@ pub(super) const SUDO: &str = "A|askpass a=|auth-type= B|bell b|background C=|cl
     t=|type= U=|other-user= u=|user= V|version v|validate";
 
 /// OpenBSD `doas`.
-pub(super) const DOAS: &str = "C= L n s u=";
+pub(super) const DOAS: &str = "a= C= L n s u=";
 
 /// GNU findutils `xargs`, plus the BSD `xargs` options `-J`, `-R` and `-S`.
 pub(super) const XARGS: &str = "0|null a=|arg-file= d=|delimiter= E= e?|eof? I= i?|replace? \
@@ -323,6 +324,12 @@ pub(super) struct Runner {
     /// With no command, the program starts a shell, which reads its script
     /// on standard input.
     pub shell: bool,
+    /// A `writes` value that starts with `|` or `!` is a command the
+    /// program pipes its output to.
+    pub pipes: bool,
+    /// The operand is a file the program opens and creates, or a file
+    /// descriptor when it is a number, and `-c COMMAND` may follow it.
+    pub lock_file: bool,
 }
 
 const fn runs(options: &'static str) -> Runner {
@@ -336,6 +343,8 @@ const fn runs(options: &'static str) -> Runner {
         env: &[],
         writes: &[],
         shell: false,
+        pipes: false,
+        lock_file: false,
     }
 }
 
@@ -344,6 +353,7 @@ const fn runs(options: &'static str) -> Runner {
 const STRACE: Runner = Runner {
     env: &["env"],
     writes: &["output"],
+    pipes: true,
     ..runs(
         "a=|columns= A|output-append-mode b=|detach-on= c|summary-only C|summary d|debug \
          D|daemonize? e= E=|env= f|follow-forks F h|help i|instruction-pointer \
@@ -462,6 +472,7 @@ const FAKEROOT: Runner = Runner {
 /// `-c` form after the operand, and the operand as a file flock creates.
 pub(super) const FLOCK: Runner = Runner {
     operands: 1,
+    lock_file: true,
     ..runs(
         "s|shared x|e|exclusive u|unlock n|nb|nonblock w=|wait=|timeout= \
          E=|conflict-exit-code= o|close F|no-fork verbose fcntl h|help V|version",
