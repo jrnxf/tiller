@@ -214,8 +214,7 @@ function refetchSoon(queryClient: QueryClient, name: string, matches: (path: str
         queryKey: API_KEY_PREFIX,
         type: "active",
         // A screen that mounted meanwhile has read it already.
-        predicate: (query) =>
-          query.state.isInvalidated && matcher(String(query.queryKey[1] ?? "")),
+        predicate: (query) => query.state.isInvalidated && matcher(String(query.queryKey[1] ?? "")),
       });
     }
   }, COALESCE_MS);

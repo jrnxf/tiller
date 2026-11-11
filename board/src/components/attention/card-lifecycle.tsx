@@ -584,7 +584,9 @@ export function EditFields({
           onChange={(event) => setBody(event.target.value)}
         />
       </Field>
-      {titleChanged ? <LimitNote what="title" text={title.trim()} limit={LIMITS.cardTitle} /> : null}
+      {titleChanged ? (
+        <LimitNote what="title" text={title.trim()} limit={LIMITS.cardTitle} />
+      ) : null}
       {bodyChanged ? <LimitNote what="body" text={body.trim()} limit={LIMITS.cardBody} /> : null}
       <ActionFailure error={action.error} host={ownerOf(card)} />
       <div className="edit-acts">

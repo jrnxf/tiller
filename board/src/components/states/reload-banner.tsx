@@ -8,12 +8,12 @@ import { RefreshIcon } from "../shell/icons";
 // Whether this tab asked for a part of the board that the daemon no longer
 // serves: an upgrade replaced the files a screen or the editor loads from.
 const staleBoardStore = createStore(false);
+const onError = () => staleBoardStore.set(true);
 
 // Listens for a part of the board that failed to load. The screen that asked
 // still shows its own error; the banner says what fixes it. Returns what stops
 // the listening.
 export function watchForStaleBoard(target: Window): () => void {
-  const onError = () => staleBoardStore.set(true);
   target.addEventListener("vite:preloadError", onError);
   return () => target.removeEventListener("vite:preloadError", onError);
 }
