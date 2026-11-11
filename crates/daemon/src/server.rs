@@ -304,6 +304,9 @@ fn init_if_missing(home: &Path) -> Result<(), DaemonError> {
     Ok(())
 }
 
+/// The longest the address line waits for the first worker start.
+const FIRST_START: Duration = Duration::from_secs(10);
+
 async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonError> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, config.port));
     let listener = tokio::net::TcpListener::bind(addr)
@@ -360,14 +363,18 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         review_hosts: config.review_hosts.clone(),
         versions: Arc::clone(&tool_versions),
     };
+    let (first_tx, first_rx) = tokio::sync::oneshot::channel();
     let workers = tokio::spawn(start_workers(
-        config.home.clone(),
-        damage.clone(),
-        lock,
-        tools.clone(),
-        registry.clone(),
+        WorkerSetup {
+            home: config.home.clone(),
+            damage: damage.clone(),
+            lock,
+            tools: tools.clone(),
+            registry: registry.clone(),
+        },
         stop_tx.clone(),
         Arc::clone(&fatal),
+        first_tx,
     ));
 
     // Health answers before `tiller init`, when no worker reads the tools.
@@ -435,9 +442,28 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         tokio::spawn(async move { fits.restore_left(&herdr).await });
     }
 
-    // Handlers first: a SIGTERM that follows the address line at once must
-    // stop the daemon cleanly, not kill it.
-    let signal = signal();
+    // Handlers first: a SIGTERM that follows the address line at once, or
+    // that arrives while the first worker start runs, must stop the daemon
+    // cleanly, not kill it.
+    let mut signal = Box::pin(signal());
+    // The pollers of an initialized database are registered before the
+    // address line, so a request that follows the line never sees a 404 for
+    // one that is about to exist. The wait ends early on a stop, a signal or
+    // after `FIRST_START`, and a database that is not ready (or a dropped
+    // sender) does not hold the daemon back. A remote machine's poller still
+    // appears after the first poll of `machines`.
+    let mut signalled = false;
+    {
+        let mut stopped_first = stop.clone();
+        tokio::select! {
+            _ = first_rx => {}
+            () = &mut signal => signalled = true,
+            _ = stopped_first.wait_for(|stop| *stop) => {}
+            () = tokio::time::sleep(FIRST_START) => {
+                tracing::warn!("the workers are slow to start; listening anyway");
+            }
+        }
+    }
     // The address line is the readiness signal for supervisors and the smoke
     // script. A closed stdout must not take the daemon down.
     let mut stdout = std::io::stdout();
@@ -457,7 +483,8 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
     let mut stopped_early = stop.clone();
     let shutdown = async move {
         tokio::select! {
-            () = signal => {}
+            // Already seen while the first worker start ran: stop at once.
+            () = async { if !signalled { signal.await } } => {}
             // A newer schema or a failed start stops the daemon from inside.
             _ = stopped_early.wait_for(|stop| *stop) => {}
         }
@@ -510,20 +537,35 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
     })
 }
 
-/// Starts the workers once `state.db` is initialized, waiting for `tiller
-/// init` if needed. The database is migrated first (`recovery.md` R11); a
-/// damaged one gets no workers at all (R10). A
-/// database newer than this binary, or a panic, stops the daemon through
-/// `fatal`.
-async fn start_workers(
+/// What the workers start from.
+struct WorkerSetup {
     home: PathBuf,
     damage: Damage,
     lock: Arc<DaemonLock>,
     tools: Tools,
     registry: Registry,
+}
+
+/// Starts the workers once `state.db` is initialized, waiting for `tiller
+/// init` if needed. `first` fires once the first attempt is over, so the
+/// address line can follow the registered pollers. The database is migrated
+/// first (`recovery.md` R11); a damaged one gets no workers at all (R10). A
+/// database newer than this binary, or a panic, stops the daemon through
+/// `fatal`.
+async fn start_workers(
+    setup: WorkerSetup,
     stopping: watch::Sender<bool>,
     fatal: FatalSlot,
+    first: tokio::sync::oneshot::Sender<()>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
+    let WorkerSetup {
+        home,
+        damage,
+        lock,
+        tools,
+        registry,
+    } = setup;
+    let mut first = Some(first);
     let mut stop = stopping.subscribe();
     loop {
         if *stop.borrow() {
@@ -555,6 +597,16 @@ async fn start_workers(
             workers::start(&home_, lock_, &tools_, &registry_, &damage_, &stop_).map(Some)
         })
         .await;
+        // The first attempt is over unless it hit a transient error, which
+        // retries below: the address line waits through that. The early
+        // returns drop the sender, which also ends the wait.
+        if !matches!(&started, Ok(Err(error)) if !matches!(
+            error,
+            tiller_core::Error::Unavailable(_) | tiller_core::Error::SchemaTooNew { .. }
+        )) && let Some(first) = first.take()
+        {
+            let _ = first.send(());
+        }
         match started {
             Ok(Ok(Some(handles))) => return handles,
             Ok(Ok(None)) => {}
