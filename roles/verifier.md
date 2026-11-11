@@ -45,7 +45,7 @@ Anything broken outside the criteria, each with its evidence. Or "none".
 Tool versions that matter (`tiller version`, the project's runtime), host role, time in Europe/Lisbon with the weekday.
 ```
 
-Record it: `tiller review record <run> --reviewer spec-review --coverage spec --verdict <v>` and attach the file with `tiller artifact add <card> --kind report --title <t> --path <file>`. Then `tiller status done <verdict>; <n> of <m> criteria pass` and `tiller done`, which ends the run `reported`.
+Record it: `tiller review record <run> --reviewer spec-review --coverage spec --verdict <v> --sha <head sha>` and attach the file with `tiller artifact add <card> --kind report --title <t> --path <file>`. Then `tiller status done <verdict>; <n> of <m> criteria pass` and `tiller done`, which ends the run `reported`.
 
 `ask-user` is for a criterion whose meaning only the owner can settle; name the question in one line so the orchestrator can file it.
 

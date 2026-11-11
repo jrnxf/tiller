@@ -423,6 +423,9 @@ record!(Review in "reviews" {
     verdict: Verdict,
     recorded_at: Timestamp,
     source_url: Option<String>,
+    /// The full commit SHA the review covered; `None` on a row from before
+    /// migration 16, which never satisfies a grant.
+    head_sha: Option<String>,
 });
 
 record!(ReviewPass in "review_passes" {

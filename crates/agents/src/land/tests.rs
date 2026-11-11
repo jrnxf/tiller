@@ -762,7 +762,17 @@ fn standing() -> Value {
     })
 }
 
+/// A code review of the card's PR at the head its cache holds.
 fn review(world: &mut World, card: &Card, verdict: Verdict, high: i64) {
+    let pr: tiller_core::domain::Pr = find(world.store.conn(), "card_id = ?1", &[&card.id])
+        .unwrap()
+        .unwrap();
+    let head = pr.head_sha.clone().unwrap();
+    review_at(world, card, &head, verdict, high);
+}
+
+/// A code review of the card's PR that covered `head`.
+fn review_at(world: &mut World, card: &Card, head: &str, verdict: Verdict, high: i64) {
     let pr: tiller_core::domain::Pr = find(world.store.conn(), "card_id = ?1", &[&card.id])
         .unwrap()
         .unwrap();
@@ -779,6 +789,7 @@ fn review(world: &mut World, card: &Card, verdict: Verdict, high: i64) {
                 findings_low: 0,
                 verdict,
                 source_url: None,
+                head_sha: head.into(),
             },
         )
         .unwrap();
@@ -2618,6 +2629,7 @@ fn p13_a_standing_grant_does_not_reach_another_projects_pr() {
                 findings_low: 0,
                 verdict: Verdict::Pass,
                 source_url: None,
+                head_sha: HEAD.into(),
             },
         )
         .unwrap();
@@ -2715,4 +2727,136 @@ fn p17_a_leaky_description_is_refused_before_the_forge_is_called() {
         assert_eq!(forge.opened().len(), 1);
         assert_eq!(remote_branch(remote.path()), head);
     }
+}
+
+/// B11: a review covers the commit it read. After the head moves, a pass
+/// recorded at the old head does not let a grant accept the new one; a pass
+/// at the new head does. A review with no recorded commit, from before
+/// migration 16, never counts.
+#[test]
+fn grant_reviews_bind_to_the_pr_head() {
+    let mut world = World::new(Delivery::DirectPr);
+    let lock = world.lock();
+    let forge = FakeForge::new();
+    let grant_id = grant(&mut world, standing());
+    let (card, pr) = world.pr();
+    review_at(&mut world, &card, HEAD, Verdict::Pass, 0);
+    world
+        .store
+        .pr_refresh(&Ctx::new(Actor::Daemon), &pr, fetch(MOVED))
+        .unwrap();
+    forge.set(|view| view.head_sha = MOVED.into());
+    let matched = lander(&forge)
+        .match_grants(&lock, &mut world.store)
+        .unwrap()
+        .approvals;
+    assert!(matched.is_empty(), "unreviewed head accepted: {matched:?}");
+
+    // The miss names the head the review is missing at.
+    let grant_row: tiller_core::domain::Grant =
+        get(world.store.conn(), "grant", &grant_id).unwrap();
+    let project: Project = get(world.store.conn(), "project", "alpha").unwrap();
+    let pr_row: Pr = get(world.store.conn(), "pr", &pr).unwrap();
+    let view = forge.view.borrow().clone();
+    let approval = draft(&pr_row, &project, ApprovalAction::Squash, &view);
+    let evaluate = |store: &Store| {
+        grants::evaluate(
+            store.conn(),
+            &grant_row,
+            &approval,
+            &pr_row,
+            &view,
+            tiller_core::Timestamp::now(),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        evaluate(&world.store),
+        Err("no code-review review is recorded at 222222222222".to_owned())
+    );
+
+    // A pass from before migration 16 has no commit and never counts.
+    review_at(&mut world, &card, MOVED, Verdict::Pass, 0);
+    world
+        .store
+        .conn()
+        .execute("UPDATE reviews SET head_sha = NULL", [])
+        .unwrap();
+    assert_eq!(
+        evaluate(&world.store),
+        Err("no code-review review is recorded at 222222222222".to_owned())
+    );
+
+    // A pass then a fail at the new head: the newest decides.
+    review_at(&mut world, &card, MOVED, Verdict::Pass, 0);
+    review_at(&mut world, &card, MOVED, Verdict::Fail, 0);
+    assert_eq!(
+        evaluate(&world.store),
+        Err("code-review verdict is fail".to_owned())
+    );
+
+    // A pass at the new head lets the grant accept it, bound to that head.
+    review_at(&mut world, &card, MOVED, Verdict::Pass, 0);
+    assert_eq!(evaluate(&world.store), Ok(()));
+    let matched = lander(&forge)
+        .match_grants(&lock, &mut world.store)
+        .unwrap()
+        .approvals;
+    assert_eq!(matched.len(), 1, "{matched:?}");
+    assert_eq!(matched[0].head_sha.as_deref(), Some(MOVED));
+    assert_eq!(
+        matched[0].decided_by.as_deref(),
+        Some(format!("grant:{grant_id}").as_str())
+    );
+}
+
+/// B11: `review.record` takes the full SHA of the reviewed commit, so a grant
+/// can compare it with the PR head; a short or malformed one is refused.
+#[test]
+fn review_record_takes_a_full_sha() {
+    let mut world = World::new(Delivery::DirectPr);
+    let (card, _) = world.pr();
+    let pr: Pr = find(world.store.conn(), "card_id = ?1", &[&card.id])
+        .unwrap()
+        .unwrap();
+    for bad in ["1111111", "", "zz11111111111111111111111111111111111111"] {
+        let error = world
+            .store
+            .review_record(
+                &Ctx::new(Actor::Session(world.orchestrator.clone())),
+                NewReview {
+                    run_id: pr.run_id.clone().unwrap(),
+                    reviewer: Reviewer::CodeReview,
+                    coverage: Coverage::Diff,
+                    findings_high: 0,
+                    findings_medium: 0,
+                    findings_low: 0,
+                    verdict: Verdict::Pass,
+                    source_url: None,
+                    head_sha: bad.into(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "usage", "{bad:?}: {error}");
+    }
+    let upper = "ABCDEF".repeat(6) + "ABCD";
+    let recorded = world
+        .store
+        .review_record(
+            &Ctx::new(Actor::Session(world.orchestrator.clone())),
+            NewReview {
+                run_id: pr.run_id.clone().unwrap(),
+                reviewer: Reviewer::CodeReview,
+                coverage: Coverage::Diff,
+                findings_high: 0,
+                findings_medium: 0,
+                findings_low: 0,
+                verdict: Verdict::Pass,
+                source_url: None,
+                head_sha: upper.clone(),
+            },
+        )
+        .unwrap()
+        .value;
+    assert_eq!(recorded.head_sha, Some(upper.to_ascii_lowercase()));
 }

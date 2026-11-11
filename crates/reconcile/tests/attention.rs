@@ -21,6 +21,7 @@ fn record(w: &mut World, run_id: &str, reviewer: Reviewer, verdict: Verdict) {
                 findings_low: 0,
                 verdict,
                 source_url: Some("https://example.com/runs/1".into()),
+                head_sha: "a1".repeat(20),
             },
         )
         .unwrap();

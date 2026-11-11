@@ -5,13 +5,14 @@ mod common;
 
 use common::*;
 use tiller_core::domain::{
-    ApprovalAction, ApprovalKind, ApprovalState, AttentionKind, CardOutcome, Delivery, Effort,
-    GrantKind, RunOutcome, RunRole,
+    ApprovalAction, ApprovalKind, ApprovalState, AttentionKind, CardOutcome, Coverage, Delivery,
+    Effort, GrantKind, Reviewer, RunOutcome, RunRole, Verdict,
 };
 use tiller_core::state::approvals::{NewApproval, NewGrant};
 use tiller_core::state::cards::NewCard;
 use tiller_core::state::list;
 use tiller_core::state::projects::NewProject;
+use tiller_core::state::records::NewReview;
 use tiller_core::state::runs::{EndRun, NewOrchestrator, NewRun, SpawnChecks};
 
 /// R08 (also the T4.3 acceptance): a push after approval marks it stale,
@@ -466,4 +467,61 @@ fn a_merge_ask_outlives_the_run_that_raised_it() {
         tiller_core::state::attention::still_current(w.store().conn(), &items[0]).unwrap(),
         "a merge ask is not stale because its run ended"
     );
+}
+
+/// B11: R08's rematch counts only a review recorded at the new head. A pass
+/// at the old head leaves the new head to the owner; a pass at the new head
+/// lets the grant accept it.
+#[test]
+fn rematch_needs_a_review_at_the_new_head() {
+    const OLD: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+    const NEW: &str = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2";
+    let rematch = |reviewed: &str| {
+        let mut w = World::new();
+        let worker = w.worker("w2:p1");
+        w.place();
+        let pr = w.link_pr(&worker, 7, OLD);
+        w.approve(&worker, &pr, OLD, true);
+        let run = w.run_of(&worker);
+        w.store_mut()
+            .grant_create(
+                &owner(),
+                NewGrant {
+                    project_id: "alpha".into(),
+                    kind: GrantKind::Merge,
+                    conditions: serde_json::json!({
+                        "v": 1, "actions": ["squash"], "checks": "success",
+                        "reviews": {"require": ["code-review"], "max_high": 0}
+                    }),
+                },
+            )
+            .unwrap();
+        w.store_mut()
+            .review_record(
+                &owner(),
+                NewReview {
+                    run_id: run.id.clone(),
+                    reviewer: Reviewer::CodeReview,
+                    coverage: Coverage::Diff,
+                    findings_high: 0,
+                    findings_medium: 0,
+                    findings_low: 0,
+                    verdict: Verdict::Pass,
+                    source_url: None,
+                    head_sha: reviewed.into(),
+                },
+            )
+            .unwrap();
+        w.forge.pr(REPO, 7, open_pr(OLD));
+        w.pass(now());
+        w.forge.pr(REPO, 7, open_pr(NEW));
+        w.forge.descends(OLD, NEW);
+        let path = run.worktree_path.clone().unwrap();
+        w.scanner.worktree(&path, "fm/work", NEW, false, Some(1));
+        w.pass(now().plus_minutes(1))
+    };
+    let report = rematch(OLD);
+    assert!(report.did("no grant matched"), "{report:?}");
+    let report = rematch(NEW);
+    assert!(report.did("rematched to a standing grant"), "{report:?}");
 }

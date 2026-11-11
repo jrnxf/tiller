@@ -200,13 +200,17 @@ pub fn evaluate(
         let Some(run) = &run else {
             return Ok(Err("the PR has no run to carry reviews".into()));
         };
+        // A review covers the commit it read: only one recorded at the head
+        // the forge reports now counts, and a review with no recorded commit
+        // (from before migration 16) never does (B11).
+        let head = view.head_sha.to_ascii_lowercase();
         let recorded: Vec<Review> = list(
             conn,
-            "run_id = ?1 ORDER BY recorded_at DESC, id DESC",
-            &[&run.id],
+            "run_id = ?1 AND head_sha = ?2 ORDER BY recorded_at DESC, id DESC",
+            &[&run.id, &head],
         )?;
         for kind in &reviews.require {
-            // The newest review of each kind decides.
+            // The newest review of each kind at this head decides.
             match recorded
                 .iter()
                 .find(|review| review.reviewer.as_str() == kind)
@@ -222,7 +226,12 @@ pub fn evaluate(
                     }
                 }
                 Some(review) => return Ok(Err(format!("{kind} verdict is {}", review.verdict))),
-                None => return Ok(Err(format!("no {kind} review is recorded"))),
+                None => {
+                    return Ok(Err(format!(
+                        "no {kind} review is recorded at {}",
+                        short(&view.head_sha)
+                    )));
+                }
             }
         }
     }
@@ -237,6 +246,11 @@ pub fn evaluate(
         return Ok(Err(format!("the PR changes {path}, which no grant covers")));
     }
     Ok(Ok(()))
+}
+
+/// The first 12 characters of a SHA, for a miss the board shows.
+fn short(sha: &str) -> &str {
+    sha.get(..12).unwrap_or(sha)
 }
 
 /// The project-relative loaded paths of the project's live source-map rows.

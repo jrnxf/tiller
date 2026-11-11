@@ -16,7 +16,7 @@ Find the defects in the diff that would matter after merge, rank them by severit
 
 ## Method
 
-1. **Scope.** `tiller card show <card>` gives the card, its acceptance and the run under review. Read the diff against the merge base (`git diff <merge-base>...HEAD` in the run's worktree, which you read but cannot write) and the PR description when one exists.
+1. **Scope.** `tiller card show <card>` gives the card, its acceptance and the run under review. Read the diff against the merge base (`git diff <merge-base>...HEAD` in the run's worktree, which you read but cannot write) and the PR description when one exists. Note the full head SHA you read (`git rev-parse HEAD` there): the record carries it, and a grant counts your review only while the PR head is that commit.
 2. **Read the whole change, then the context.** Follow every changed function to its callers and its tests. Read the files around a change far enough to know whether the invariants hold.
 3. **One finding per defect.** For each: file and line, the claim in one sentence, a concrete failure scenario (input or state, then wrong output or crash), and the smallest fix. Severity: `high` (wrong behavior, data loss, security, a leaked private name or secret), `medium` (likely bug under realistic use, missing test for behavior that breaks silently), `low` (correctness risk that needs an unlikely path).
 4. **Verify before you report.** A finding you can check with a read-only command (a grep for callers, reading the test) is checked; say `[confirmed]` or `[plausible]`. Drop a finding you cannot defend.
@@ -42,7 +42,7 @@ One per line, most severe first:
 What you read (files, tests, callers), what you ran, what you did not reach and why.
 ```
 
-Record it: `tiller review record <run> --reviewer code-review --coverage diff --verdict <v> --high <n> --medium <n> --low <n>` and attach the file with `tiller artifact add <card> --kind report --title <t> --path <file>`. Then `tiller status done <verdict>; high <n> medium <n> low <n>` and `tiller done`, which ends the run `reported`.
+Record it: `tiller review record <run> --reviewer code-review --coverage diff --verdict <v> --sha <head sha> --high <n> --medium <n> --low <n>` and attach the file with `tiller artifact add <card> --kind report --title <t> --path <file>`. Then `tiller status done <verdict>; high <n> medium <n> low <n>` and `tiller done`, which ends the run `reported`.
 
 ## Status lines
 

@@ -549,7 +549,11 @@ CREATE TABLE reviews (
   findings_low     INTEGER NOT NULL DEFAULT 0,
   verdict          TEXT NOT NULL CHECK (verdict IN ('pass', 'fail', 'ask-user')),
   recorded_at      TEXT NOT NULL,
-  source_url       TEXT
+  source_url       TEXT,
+  -- The full commit SHA the review covered. A grant's reviews condition
+  -- counts a review only at the PR head (authority.md section 6). NULL only
+  -- on a row from before migration 16, which never satisfies a grant.
+  head_sha         TEXT CHECK (head_sha IS NULL OR (length(head_sha) IN (40, 64) AND head_sha NOT GLOB '*[^0-9a-f]*'))
 ) STRICT;
 CREATE INDEX reviews_run ON reviews(run_id);
 

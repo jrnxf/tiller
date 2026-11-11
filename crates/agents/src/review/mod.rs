@@ -440,7 +440,8 @@ pub fn chunk_brief(
     );
     let _ = writeln!(
         out,
-        "## Record\n\n1. Write review.md: the findings, then \"Covered\" and \"Not covered\".\n2. `tiller review record <your run> --reviewer code-review --coverage diff --verdict <v> --high <n> --medium <n> --low <n>`\n3. `tiller artifact add {card} --kind report --title \"chunk {chunk} of {total}\" --path review.md`\n"
+        "## Record\n\n1. Write review.md: the findings, then \"Covered\" and \"Not covered\".\n2. `tiller review record <your run> --reviewer code-review --coverage diff --verdict <v> --sha {head} --high <n> --medium <n> --low <n>`\n3. `tiller artifact add {card} --kind report --title \"chunk {chunk} of {total}\" --path review.md`\n",
+        head = plan.head_sha,
     );
     let _ = writeln!(out, "## Every PR in the pass\n\n{}", index(plan));
     Some(out)

@@ -406,7 +406,7 @@ Reads have no side effects and are all trivially idempotent; they are listed aft
 |---|---|---|---|
 | `tiller obligation open <card> --what <t> (--on <event filter> \| --due <date> \| --standing <event filter>)` / `cancel <id>` | `obligation.open` / `obligation.cancel` | orchestrator | keyed / natural |
 | `tiller artifact add <card> --kind K --title T [--url <u>] [--path <p>]` (at least one; a path is made absolute) | `artifact.add` | worker, orchestrator | keyed (natural per url) |
-| `tiller review record <run> --reviewer R --coverage C --verdict V [--high n --medium n --low n] [--url <u>]` | `review.record` | worker, daemon | keyed |
+| `tiller review record <run> --reviewer R --coverage C --verdict V --sha <full SHA reviewed> [--high n --medium n --low n] [--url <u>]` (no `--sha`, or a short one, is refused: a grant compares it with the PR head) | `review.record` | worker, daemon | keyed |
 | `tiller review plan <project>` | none (a read): the chunk plan of the next pass, from the project's checkout and `prs` (`docs/design/pre-launch-validation.md` section 4) | orchestrator, owner | n/a |
 | `tiller review start <project>` | `review_pass.start`: fetches the default-branch head, computes the plan and stores both | orchestrator (its own project), owner | natural |
 | `tiller review brief <pass> (--chunk <n> [--only <path>]... \| --summary) [--out <file>]` | none (a read): the brief of one chunk run or of the summary run, for `tiller spawn --brief-file` | orchestrator, owner | n/a |

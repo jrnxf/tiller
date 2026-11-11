@@ -192,6 +192,8 @@ fn same_key_twice_has_no_second_effect() {
             "full",
             "--verdict",
             "pass",
+            "--sha",
+            "0123456789abcdef0123456789abcdef01234567",
             "--key",
             "k-rev",
         ],

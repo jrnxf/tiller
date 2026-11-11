@@ -342,6 +342,8 @@ fn prelaunch_cycle_end_to_end() {
             "diff",
             "--verdict",
             "fail",
+            "--sha",
+            "0123456789abcdef0123456789abcdef01234567",
             "--high",
             "1",
         ],
@@ -386,6 +388,8 @@ fn prelaunch_cycle_end_to_end() {
             "diff",
             "--verdict",
             "pass",
+            "--sha",
+            "0123456789abcdef0123456789abcdef01234567",
         ],
     );
     world.must_as(

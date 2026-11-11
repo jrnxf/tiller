@@ -128,14 +128,26 @@ pub fn check(
         let Some(run) = run else {
             return fail("reviews are required but the PR has no run");
         };
-        let rows: Vec<Review> = list(conn, "run_id = ?1 ORDER BY recorded_at", &[&run.id])?;
+        // A review covers the commit it read: only one recorded at the PR
+        // head counts, and a review with no recorded commit (from before
+        // migration 16) never does (B11).
+        let Some(head) = pr.head_sha.as_deref().map(str::to_ascii_lowercase) else {
+            return fail("PR head is unknown");
+        };
+        let rows: Vec<Review> = list(
+            conn,
+            "run_id = ?1 AND head_sha = ?2 ORDER BY recorded_at DESC, id DESC",
+            &[&run.id, &head],
+        )?;
         let required = str_list(reviews.get("require")).unwrap_or_default();
         for reviewer in required {
+            // The newest review of each kind at this head decides.
             let passed = rows
                 .iter()
-                .any(|r| r.reviewer.as_str() == reviewer && r.verdict == Verdict::Pass);
+                .find(|r| r.reviewer.as_str() == reviewer)
+                .is_some_and(|r| r.verdict == Verdict::Pass);
             if !passed {
-                return fail("a required review has not passed");
+                return fail("a required review has not passed at the PR head");
             }
         }
         if let Some(max_high) = reviews.get("max_high").and_then(Value::as_i64)

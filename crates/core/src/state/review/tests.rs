@@ -92,6 +92,7 @@ fn review_chunks(store: &mut Store, pass: &ReviewPass, chunks: &[usize], now: &s
                     findings_low: 2,
                     verdict: Verdict::Fail,
                     source_url: None,
+                    head_sha: "a1".repeat(20),
                 },
             )
             .unwrap();

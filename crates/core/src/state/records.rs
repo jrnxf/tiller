@@ -43,6 +43,9 @@ pub struct NewReview {
     pub findings_low: i64,
     pub verdict: Verdict,
     pub source_url: Option<String>,
+    /// The commit the review covered, as a full SHA. A grant's `reviews`
+    /// condition counts the review only while the PR head is this commit.
+    pub head_sha: String,
 }
 
 /// The new facts of a handoff; the rest is projected at write time.
@@ -51,6 +54,20 @@ pub struct NewHandoff {
     pub session_id: String,
     pub conclusions: String,
     pub next_action: String,
+}
+
+/// A full commit SHA, lowercased: 40 hex characters (SHA-1) or 64 (SHA-256).
+/// A review binds to the exact commit it covered, so a short form, which a
+/// grant could not compare with the PR head, is refused.
+fn full_sha(sha: &str) -> Result<String> {
+    let sha = sha.trim().to_ascii_lowercase();
+    if matches!(sha.len(), 40 | 64) && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(sha)
+    } else {
+        Err(Error::Usage(format!(
+            "{sha:?} is not a full commit SHA: give the 40 or 64 hex characters of the commit you reviewed"
+        )))
+    }
 }
 
 /// `obligation.open` inside a mutation.
@@ -297,13 +314,14 @@ impl Store {
         if new.findings_high < 0 || new.findings_medium < 0 || new.findings_low < 0 {
             return Err(Error::Usage("finding counts must not be negative".into()));
         }
+        let head_sha = full_sha(&new.head_sha)?;
         self.write(ctx, "review.record", None, |tx| {
             let run: Run = get(tx.conn(), "run", &resolve_id(tx.conn(), "runs", "run", &new.run_id)?)?;
             let id = ids::new_ulid();
             tx.conn().execute(
                 "INSERT INTO reviews (id, run_id, card_id, reviewer, coverage, findings_high, findings_medium,
-                                      findings_low, verdict, recorded_at, source_url)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                      findings_low, verdict, recorded_at, source_url, head_sha)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     id,
                     run.id,
@@ -316,6 +334,7 @@ impl Store {
                     new.verdict,
                     tx.now(),
                     new.source_url,
+                    head_sha,
                 ],
             )?;
             tx.event(
@@ -326,6 +345,7 @@ impl Store {
                         "reviewer": new.reviewer,
                         "verdict": new.verdict,
                         "findings": [new.findings_high, new.findings_medium, new.findings_low],
+                        "head_sha": head_sha,
                     })),
             )?;
             get(tx.conn(), "review", &id)

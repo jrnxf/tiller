@@ -226,6 +226,7 @@ exit: 0
         "findings_high": 0,
         "findings_low": 2,
         "findings_medium": 0,
+        "head_sha": "0123456789abcdef0123456789abcdef01234567",
         "id": "<id55>",
         "recorded_at": "<time>",
         "reviewer": "code-review",

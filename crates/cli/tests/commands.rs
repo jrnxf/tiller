@@ -531,6 +531,8 @@ fn every_command_has_a_snapshot_and_an_exit_code() {
             "diff",
             "--verdict",
             "pass",
+            "--sha",
+            "0123456789abcdef0123456789abcdef01234567",
             "--low",
             "2",
             "--key",

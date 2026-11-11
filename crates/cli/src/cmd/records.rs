@@ -89,6 +89,10 @@ pub struct ReviewRecord {
     /// pass, fail or ask-user
     #[arg(long)]
     pub verdict: Verdict,
+    /// The full SHA of the commit you reviewed. A grant counts the review
+    /// only while the PR head is this commit
+    #[arg(long)]
+    pub sha: String,
     /// How many high-severity findings
     #[arg(long, default_value_t = 0)]
     pub high: i64,
@@ -252,8 +256,8 @@ pub fn review_record(app: &App, args: ReviewRecord) -> Done {
         &store,
         "review.record",
         &json!({"run": run.id, "reviewer": args.reviewer, "coverage": args.coverage,
-                "verdict": args.verdict, "high": args.high, "medium": args.medium,
-                "low": args.low, "url": args.url}),
+                "verdict": args.verdict, "sha": args.sha, "high": args.high,
+                "medium": args.medium, "low": args.low, "url": args.url}),
         &args.key.key,
     )?;
     let applied = store.review_record(
@@ -267,6 +271,7 @@ pub fn review_record(app: &App, args: ReviewRecord) -> Done {
             findings_low: args.low,
             verdict: args.verdict,
             source_url: args.url,
+            head_sha: args.sha,
         },
     )?;
     Ok(Outcome::applied(applied).with_key(&keyed))

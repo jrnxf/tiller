@@ -204,6 +204,65 @@ fn idempotency_keys_keep_their_rows_across_0015() {
     assert_eq!(current_version(&conn).unwrap(), 15);
 }
 
+/// Migration 16: a review stored before it keeps its row with no commit, so
+/// it never satisfies a grant; a new row carries a full SHA and the column
+/// refuses a short one; going back down keeps every review.
+#[test]
+fn reviews_keep_their_rows_across_0016() {
+    let mut conn = connection();
+    to_version(&mut conn, 15).unwrap();
+    conn.execute_batch(&format!("BEGIN; {FIXTURE_V1} COMMIT;"))
+        .unwrap();
+    to_version(&mut conn, 16).unwrap();
+    let old: Option<String> = conn
+        .query_row(
+            "SELECT head_sha FROM reviews WHERE id = '01JC0000000000000000000RV1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(old, None, "a review from before 16 has no commit");
+    let insert = |id: &str, sha: &str| {
+        conn.execute(
+            "INSERT INTO reviews (id, run_id, card_id, reviewer, coverage, verdict, recorded_at, head_sha)
+             SELECT ?1, run_id, card_id, 'code-review', 'diff', 'pass', '2026-11-03T09:00:00.000Z', ?2
+             FROM reviews WHERE id = '01JC0000000000000000000RV1'",
+            [id, sha],
+        )
+    };
+    insert("01JC0000000000000000000RV2", &"ab".repeat(20)).unwrap();
+    insert("01JC0000000000000000000RV3", &"cd".repeat(32)).unwrap();
+    for bad in ["abcdef1", &"AB".repeat(20), &"zz".repeat(20)] {
+        assert!(
+            insert("01JC0000000000000000000RV4", bad).is_err(),
+            "{bad} is not a full lowercase SHA"
+        );
+    }
+
+    to_version(&mut conn, 15).unwrap();
+    let ids: Vec<String> = conn
+        .prepare("SELECT id FROM reviews ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        ids,
+        [
+            "01JC0000000000000000000RV1",
+            "01JC0000000000000000000RV2",
+            "01JC0000000000000000000RV3"
+        ]
+    );
+    assert!(
+        conn.prepare("SELECT head_sha FROM reviews").is_err(),
+        "down drops the column"
+    );
+    to_version(&mut conn, 16).unwrap();
+    assert_eq!(current_version(&conn).unwrap(), 16);
+}
+
 /// Migration 2 lowers no project's rigor: every project that existed before
 /// it reads `launched`, with nothing reviewed yet.
 #[test]

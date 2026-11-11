@@ -296,6 +296,7 @@ fn an_ask_user_finding_before_a_reopen_is_not_raised_on_the_reopened_card() {
                     findings_low: 0,
                     verdict: Verdict::AskUser,
                     source_url: Some("https://example.com/runs/1".into()),
+                    head_sha: "a1".repeat(20),
                 },
             )
             .unwrap();

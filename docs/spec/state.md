@@ -290,7 +290,7 @@ An intervention is a time the developer was needed: an attention item that was a
 
 `reviews`: review coverage and findings per run (plan v2, point 20).
 
-- `id`, `run_id`, `card_id`, `reviewer` (`code-review`, `spec-review`, `no-mistakes`, `human`), `coverage` (`diff`, `spec`, `full`), `findings_high`, `findings_medium`, `findings_low`, `verdict` (`pass`, `fail`, `ask-user`), `recorded_at`, `source_url`.
+- `id`, `run_id`, `card_id`, `reviewer` (`code-review`, `spec-review`, `no-mistakes`, `human`), `coverage` (`diff`, `spec`, `full`), `findings_high`, `findings_medium`, `findings_low`, `verdict` (`pass`, `fail`, `ask-user`), `recorded_at`, `source_url`, `head_sha` (the full SHA of the commit the review covered; null only on a row from before migration 16, which never satisfies a grant: `authority.md` section 6).
 
 ### Review pass
 
@@ -478,7 +478,7 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `artifact.add` | worker, orchestrator | card exists | `artifacts` | `artifact.added` |
 | `artifact.retire` | daemon, orchestrator, owner (inside run cleanup, P48) | artifact exists; retiring a retired one changes nothing | `artifacts.retired_at` | `artifact.retired` |
 | `artifact.feedback` | daemon (the review page poller, `protocol.md` 3.5) | artifact exists; keyed by the feedback entry | nothing | `artifact.feedback` on the artifact's card |
-| `review.record` | worker, daemon | run exists | `reviews` | `review.recorded` |
+| `review.record` | worker, daemon | run exists; `head_sha` is a full commit SHA (40 or 64 hex), stored lowercase | `reviews` | `review.recorded` |
 | `handoff.write` | orchestrator | session live | `handoffs` | `handoff.written` |
 | `cache.refresh` | pollers | none | `panes`, `worktrees`, `quota_windows`, `hosts.last_seen_at` | `host.changed`, `pane.changed`, `worktree.changed`, `quota.changed` only on a change |
 | `reservation.release` | reconcile | reservation open; its run ended or missing | `reservations.released_at` (`reconciled`) | `reservation.released` |
