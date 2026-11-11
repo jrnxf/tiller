@@ -1398,16 +1398,7 @@ pub fn timeline(store: &Store, reference: &str, before: Option<i64>) -> Result<T
     let card = store.card(reference)?;
     let before = before.unwrap_or(i64::MAX);
     let page = TIMELINE_PAGE + 1;
-    let mut events: Vec<Event> = list(
-        store.conn(),
-        "card_id = ?1 AND seq < ?2
-           AND NOT (kind = 'attention.notified' AND EXISTS (
-                SELECT 1 FROM events AS outcome
-                WHERE outcome.entity_id = events.entity_id
-                  AND outcome.kind IN ('attention.notify_sent', 'attention.notify_failed')))
-         ORDER BY seq DESC LIMIT ?3",
-        &[&card.id, &before, &page],
-    )?;
+    let mut events: Vec<Event> = store.timeline(&card.id, before, page)?;
     let more = events.len() > usize::try_from(TIMELINE_PAGE).unwrap_or(usize::MAX);
     events.truncate(usize::try_from(TIMELINE_PAGE).unwrap_or(usize::MAX));
     let next_before = if more {

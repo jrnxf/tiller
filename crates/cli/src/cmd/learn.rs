@@ -685,13 +685,15 @@ pub(crate) fn board_run(
     let config = learning_config(app)?;
     let tools = Tools::load(app)?;
     let claimed = claim(&tools, &config, store, ctx, retro)?;
-    let db = app.db.clone();
+    let (db, home) = (app.db.clone(), app.home.clone());
     Ok(tiller_daemon::api::CuratorRun {
         claimed: claimed.retro.clone(),
         run: Box::new(move |stop| {
             let interrupt = Interrupt::flag(stop);
             let ran = launch(&claimed, &interrupt);
-            let mut store = Store::open_current(&db).map_err(|error| error.to_string())?;
+            let mut store = Store::open_current(&db)
+                .map_err(|error| error.to_string())?
+                .with_owner_home(home);
             let ctx = tiller_core::Ctx::new(Actor::Daemon);
             match ran {
                 Ok(ran) => end(&mut store, &ctx, &claimed, &ran, "the daemon stopped")

@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 
-import { MemoryPage, retryUnlessMissing } from "../components/memory/memory-page";
+import { MemoryPage } from "../components/memory/memory-page";
 import { memoryQuery, projectsQuery } from "../lib/queries";
 
 interface MemorySearch {
@@ -18,12 +18,12 @@ export const Route = createFileRoute("/memory")({
         : undefined,
   }),
   loaderDeps: ({ search }) => ({ doc: search.doc }),
+  // The document is read once, with no retry (the client's default is one):
+  // a failed open shows the section's note at once. Its Retry reads the
+  // document again, and the page says it is reading until the read answers.
   loader: ({ context, deps }) =>
     Promise.allSettled([
-      context.queryClient.ensureQueryData({
-        ...memoryQuery(deps.doc),
-        retry: retryUnlessMissing,
-      }),
+      context.queryClient.ensureQueryData({ ...memoryQuery(deps.doc), retry: false }),
       context.queryClient.ensureQueryData(projectsQuery()),
     ]),
   component: MemoryRoute,

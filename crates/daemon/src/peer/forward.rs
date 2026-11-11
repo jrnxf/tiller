@@ -259,12 +259,9 @@ pub(super) fn verify(
 }
 
 /// The owner marker (`authority.md` G26): `<home>/owner` absent, empty or
-/// naming `tiller`.
+/// naming `tiller`, read as the store reads it.
 fn owner_marker_names_tiller(home: &Path) -> bool {
-    match std::fs::read_to_string(home.join("owner")) {
-        Ok(marker) => matches!(marker.trim(), "" | "tiller"),
-        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-    }
+    tiller_core::owner::check(home).is_ok()
 }
 
 /// The project a frame's target is in, or `None` when the target does not

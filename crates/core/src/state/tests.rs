@@ -2027,6 +2027,81 @@ fn run_clean_refuses_a_worktree_a_successor_works_in() {
     }
 }
 
+/// A repeat `run.clean` of a run already cleaned is a natural replay, even
+/// once the pool leased the path to an unrelated run: that run is no
+/// successor, and its worktree is left alone.
+#[test]
+fn a_repeat_run_clean_after_the_pool_reissued_the_path_replays() {
+    let (mut store, _) = memory_store();
+    let path = "/home/user/worktrees/alpha-1".to_owned();
+    let start = |store: &mut Store, title: &str| {
+        let card = store
+            .card_create(&owner(), None, card(CardKind::Ship, title), None)
+            .unwrap()
+            .value;
+        store
+            .run_start(
+                &owner(),
+                None,
+                NewRun {
+                    worktree_path: Some(path.clone()),
+                    ..builder_run(&card.id)
+                },
+            )
+            .unwrap()
+            .value
+            .run
+    };
+    let old = start(&mut store, "first");
+    store
+        .run_end(
+            &owner(),
+            &old.id,
+            super::runs::EndRun {
+                outcome: RunOutcome::Abandoned,
+                note: None,
+            },
+        )
+        .unwrap();
+    let reading = |run: &str| super::caches::WorktreeReading {
+        path: path.clone(),
+        project_id: Some("alpha".into()),
+        run_id: Some(run.to_owned()),
+        branch: None,
+        head_sha: None,
+        dirty: Some(false),
+        unlanded_commits: Some(0),
+    };
+    store
+        .cache_worktree(&Ctx::new(Actor::Daemon), &old.host_id, reading(&old.id))
+        .unwrap();
+    store.run_clean(&owner(), &old.id, true).unwrap();
+
+    let other = start(&mut store, "second");
+    store
+        .cache_worktree(&Ctx::new(Actor::Daemon), &old.host_id, reading(&other.id))
+        .unwrap();
+    store.run_clean(&owner(), &old.id, true).unwrap();
+    let gone: Option<String> = store
+        .conn()
+        .query_row(
+            "SELECT gone_at FROM worktrees WHERE host_id = ?1 AND path = ?2",
+            [&old.host_id, &path],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(gone, None, "the other run's worktree is left alone");
+    let cleaned: i64 = store
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind = 'run.cleaned'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cleaned, 1);
+}
+
 /// A cache reading that sees the path again (the pool reissued it) clears
 /// `gone_at`, but the run that cleaned it still may not be relaunched there.
 #[test]

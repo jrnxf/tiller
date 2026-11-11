@@ -119,29 +119,51 @@ function colorOf(projects: { id: string }[], id: string): string {
 // so it is never asked for by name (one cache entry, one request).
 const scopeOf = (scope: string) => (scope === FLEET ? undefined : scope);
 
+// How long focus waits for the document a change made before it gives up.
+const FOCUS_WAIT_MS = 10_000;
+const MODIFIERS = new Set([
+  "Alt",
+  "AltGraph",
+  "CapsLock",
+  "Control",
+  "Fn",
+  "FnLock",
+  "Hyper",
+  "Meta",
+  "NumLock",
+  "OS",
+  "ScrollLock",
+  "Shift",
+  "Super",
+  "Symbol",
+  "SymbolLock",
+]);
+
 const isMissing = (error: unknown) => error instanceof ReadError && error.status === 404;
 
 const running = (job: MemoryEvalJob) => job.finished_at === null;
 
 // A document that is not there will not be there on a second read, so the page
 // says so at once; any other failure is read once more.
-export const retryUnlessMissing = (failures: number, error: unknown) =>
-  !isMissing(error) && failures < 1;
+const retryUnlessMissing = (failures: number, error: unknown) => !isMissing(error) && failures < 1;
 
 // One document's answer, or `null` when the daemon has no such document, which
-// the page says plainly instead of failing. Any other failure goes to the
-// section's note, with its retry. `undefined` means the read is still going.
+// the page says plainly instead of failing. A first read that fails goes to the
+// section's note, with its retry. A read again that fails keeps the document on
+// screen, with any open draft. `undefined` means the first read is still going.
 function useDocAnswer(scope: string): MemoryResponse | null | undefined {
   const query = useQuery({
     ...memoryQuery(scopeOf(scope)),
     retry: retryUnlessMissing,
-    throwOnError: (error) => !isMissing(error),
+    throwOnError: (error, read) => read.state.data === undefined && !isMissing(error),
     // A run that fails records nothing, so no event says it ended: the page
     // reads again while one runs.
     refetchInterval: (read) => (read.state.data?.evals.some(running) ? 5000 : false),
   });
-  if (query.data) return query.data;
-  return isMissing(query.error) ? null : undefined;
+  // A document removed since it was read is gone, even though its old answer
+  // is still held.
+  if (isMissing(query.error)) return null;
+  return query.data;
 }
 
 // One tab per memory document, the shared one first. A tab shows the
@@ -904,8 +926,13 @@ function DocSection({
           resolved.position === position;
         const refusal = ctl.refusalFor(lineScope(section.title, nth, line.text));
         return (
-          // Keyed by its text, so a landed edit starts the line afresh.
-          <div className="a-item" key={`${nth}:${line.text}`}>
+          // Keyed by its memory, so a line changed elsewhere keeps its row and
+          // an open editor keeps its caret. A line with no memory yet is keyed
+          // by its text.
+          <div
+            className="a-item"
+            key={line.memory_id ? `id:${line.memory_id}` : `text:${nth}:${line.text}`}
+          >
             <LineRow
               line={line}
               projects={projects}
@@ -1185,13 +1212,41 @@ function Doc({ data }: { data: MemoryResponse }) {
   // The proposal whose holdout eval the dialog is about to start.
   const [evaluating, setEvaluating] = useState<string | null>(null);
   // Where focus goes next, held outside state: it is read by the effect below
-  // and never shown. `wake` renders once more so the effect looks again.
-  const wanted = useRef<Focus | null>(null);
+  // and never shown. `wake` renders once more so the effect looks again. It
+  // waits only so long, and only until the owner clicks or types elsewhere:
+  // focus that comes back late would take them from what they moved on to.
+  const wanted = useRef<{ focus: Focus; until: number } | null>(null);
+  // Counts the owner's clicks and keys. A write notes it when it starts, and
+  // when it lands gives focus back only if the owner did nothing meanwhile.
+  const moves = useRef(0);
   const [, wake] = useReducer((n: number) => n + 1, 0);
   const setFocus = (at: Focus) => {
-    wanted.current = at;
+    wanted.current = { focus: at, until: Date.now() + FOCUS_WAIT_MS };
     wake();
   };
+  const focusAfter = (at: Focus, since: number) => {
+    if (moves.current === since) setFocus(at);
+  };
+  useEffect(() => {
+    // Capture runs before the handler that may ask for focus again. These
+    // are not a move: a modifier key alone (it starts a shortcut or a
+    // selection), a held key (the press that started the write, held on),
+    // and a press in the editor, the one a save is about to close (a
+    // second Enter, a click to place the caret).
+    const movedOn = (event: Event) => {
+      if (event instanceof KeyboardEvent && (event.repeat || MODIFIERS.has(event.key))) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest(".ed")) return;
+      moves.current += 1;
+      wanted.current = null;
+    };
+    document.addEventListener("pointerdown", movedOn, true);
+    document.addEventListener("keydown", movedOn, true);
+    return () => {
+      document.removeEventListener("pointerdown", movedOn, true);
+      document.removeEventListener("keydown", movedOn, true);
+    };
+  }, []);
   const locked = doc.dirty || pending;
   const local = projects.projects.filter((project) => !isPeerRow(project));
 
@@ -1237,8 +1292,14 @@ function Doc({ data }: { data: MemoryResponse }) {
   // Focus returns to the row or button the editor, or the removed line, left
   // behind, once the page shows the document as the change made it.
   useEffect(() => {
-    const focus = wanted.current;
-    if (!focus || locked) return;
+    const held = wanted.current;
+    if (!held) return;
+    if (Date.now() > held.until) {
+      wanted.current = null;
+      return;
+    }
+    const focus = held.focus;
+    if (locked) return;
     if (focus.from !== null && doc.blob === focus.from) return;
     wanted.current = null;
     const active = document.activeElement;
@@ -1301,9 +1362,10 @@ function Doc({ data }: { data: MemoryResponse }) {
     if (!editor) return;
     const { key } = editor;
     const from = doc.blob;
+    const since = moves.current;
     setEditor({ ...editor, frozen: resolved });
     void edit(EDITOR, section, body, note).then((landed) => {
-      if (landed) setFocus({ section, at, from });
+      if (landed) focusAfter({ section, at, from }, since);
       setEditor((now) => {
         if (now?.key !== key) return now;
         return landed ? null : { ...now, frozen: null };
@@ -1363,13 +1425,14 @@ function Doc({ data }: { data: MemoryResponse }) {
       return;
     }
     const from = doc.blob;
+    const since = moves.current;
     void edit(
       lineScope(section, removal.nth, removal.text),
       section,
       { op: "remove", index: removing.index },
       "Removed.",
     ).then((landed) => {
-      if (landed) setFocus({ section, at: position, from });
+      if (landed) focusAfter({ section, at: position, from }, since);
     });
   };
 
@@ -1555,9 +1618,25 @@ function NotFound({ scope }: { scope: string }) {
   );
 }
 
+// While the page has no copy of the document yet (a failed open that the owner
+// asked to read again), it says it is reading instead of showing nothing.
+function Reading() {
+  return (
+    <div className="m2-wrap">
+      <article className="m2-doc" aria-busy="true">
+        <header className="m2-head">
+          <p className="m2-sub" role="status">
+            Reading this memory document...
+          </p>
+        </header>
+      </article>
+    </div>
+  );
+}
+
 function DocView({ scope }: { scope: string }) {
   const answer = useDocAnswer(scope);
-  if (answer === undefined) return null;
+  if (answer === undefined) return <Reading />;
   if (answer === null) return <NotFound scope={scope} />;
   return <Doc data={answer} />;
 }

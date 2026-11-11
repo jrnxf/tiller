@@ -916,7 +916,7 @@ pub fn start(
     spawn(registry, Gated::new(home, quota), stop, &mut handles);
     spawn(registry, Gated::new(home, pages), stop, &mut handles);
     spawn(registry, Gated::new(home, backups), stop, &mut handles);
-    spawn(registry, memory, stop, &mut handles);
+    spawn(registry, Gated::new(home, memory), stop, &mut handles);
     Ok(handles)
 }
 
@@ -1434,6 +1434,155 @@ esac
         source.poll(ended.plus_minutes(11)).unwrap();
         t.source().poll(ended.plus_minutes(11)).unwrap();
         assert_eq!(t.recorded(), ["u1", "u2"], "nothing after the window");
+    }
+
+    /// Retention on a transcript-intake host: a line stamped after the
+    /// session ended is kept as a row, but it moves nothing. The session
+    /// stays `ended` and no ask is opened on it. A line stamped before the
+    /// end, which Claude Code flushed late, still records its ask.
+    #[test]
+    fn transcript_lines_after_the_end_leave_an_ended_session_ended() {
+        let mut t = Transcript::new();
+        let path = t.path("main.jsonl");
+        t.bind("claude-orchestrator", &path, "startup");
+        let session = t.fleet.orchestrator_session.clone();
+        let ended = Timestamp::now();
+        let mut source = t.source();
+        source.intake = true;
+        source.poll(ended).unwrap();
+        // The SessionEnd hook.
+        t.fleet
+            .store
+            .observation_record(
+                &Ctx::at(Actor::Hook, ended),
+                tiller_core::state::runs::NewObservation {
+                    session_id: Some(session.clone()),
+                    run_id: None,
+                    source: tiller_core::domain::ObservationSource::Hook,
+                    event: "SessionEnd:exit".into(),
+                    verdict: Some(tiller_core::domain::Activity::Ended),
+                    observed_at: ended,
+                    payload: serde_json::json!({}),
+                },
+            )
+            .unwrap();
+        t.end(ended);
+
+        let before = ended.plus_minutes(-1).to_string();
+        let after = ended.plus_minutes(1).to_string();
+        let user = |uuid: &str, at: &str, text: &str| {
+            serde_json::json!({"type": "user", "uuid": uuid, "timestamp": at,
+                "message": {"role": "user", "content": text}})
+        };
+        Transcript::append(&path, &user("late", &before, "typed before the end"));
+        Transcript::append(&path, &user("dead", &after, "typed after the end"));
+        Transcript::append(
+            &path,
+            &serde_json::json!({"type": "assistant", "uuid": "turn", "timestamp": after,
+                "message": {"role": "assistant", "stop_reason": "end_turn"}}),
+        );
+        source.poll(ended.plus_minutes(2)).unwrap();
+
+        assert_eq!(t.recorded(), ["late", "dead", "turn"], "every row is kept");
+        let row: Session =
+            tiller_core::state::get(t.fleet.store.conn(), "session", &session).unwrap();
+        assert_eq!(row.activity, tiller_core::domain::Activity::Ended);
+        let conn = t.fleet.store.conn();
+        let texts: Vec<String> = conn
+            .prepare("SELECT text FROM asks WHERE session_id = ?1 ORDER BY id")
+            .unwrap()
+            .query_map([&session], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(texts, ["typed before the end"]);
+        let moved: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind = 'observation.recorded'
+                 AND json_extract(payload, '$.from') = 'ended'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(moved, 0, "the activity never left ended");
+    }
+
+    /// A session ended with no `Ended` verdict (a relaunch) while it read
+    /// working settles into the idle of a turn's last line that Claude Code
+    /// flushed late. Later lines, whatever their stamps, move it only
+    /// forward: to errored, then to ended, never back.
+    #[test]
+    fn an_ended_session_settles_only_forward() {
+        let mut t = Transcript::new();
+        let path = t.path("main.jsonl");
+        t.bind("claude-orchestrator", &path, "startup");
+        let session = t.fleet.orchestrator_session.clone();
+        let ended = Timestamp::now();
+        let mut source = t.source();
+        source.intake = true;
+        source.poll(ended).unwrap();
+        t.fleet
+            .store
+            .observation_record(
+                &Ctx::at(Actor::Hook, ended),
+                tiller_core::state::runs::NewObservation {
+                    session_id: Some(session.clone()),
+                    run_id: None,
+                    source: tiller_core::domain::ObservationSource::Hook,
+                    event: "UserPromptSubmit".into(),
+                    verdict: Some(tiller_core::domain::Activity::Working),
+                    observed_at: ended.plus_minutes(-2),
+                    payload: serde_json::json!({}),
+                },
+            )
+            .unwrap();
+        t.end(ended);
+
+        let turn = |uuid: &str, at: Timestamp| {
+            serde_json::json!({"type": "assistant", "uuid": uuid, "timestamp": at.to_string(),
+                "message": {"role": "assistant", "stop_reason": "end_turn"}})
+        };
+        Transcript::append(&path, &turn("late", ended.plus_minutes(-1)));
+        source.poll(ended.plus_minutes(2)).unwrap();
+        let row: Session =
+            tiller_core::state::get(t.fleet.store.conn(), "session", &session).unwrap();
+        assert_eq!(row.activity, tiller_core::domain::Activity::Idle);
+
+        // A host clock behind the daemon's stamps a later line before the
+        // end, and the new process of a relaunch may go on writing the same
+        // file: neither makes the session work again or flips it back.
+        use tiller_core::domain::Activity::{Ended, Errored, Idle, Working};
+        for (at, verdict, then) in [
+            (
+                Timestamp::from_millis(ended.as_millis() - 30_000).unwrap(),
+                Working,
+                Idle,
+            ),
+            (ended.plus_minutes(3), Working, Idle),
+            (ended.plus_minutes(4), Errored, Errored),
+            (ended.plus_minutes(5), Idle, Errored),
+            (ended.plus_minutes(6), Ended, Ended),
+            (ended.plus_minutes(7), Errored, Ended),
+        ] {
+            t.fleet
+                .store
+                .observation_record(
+                    &Ctx::at(Actor::Hook, ended.plus_minutes(3)),
+                    tiller_core::state::runs::NewObservation {
+                        session_id: Some(session.clone()),
+                        run_id: None,
+                        source: tiller_core::domain::ObservationSource::Hook,
+                        event: "UserPromptSubmit".into(),
+                        verdict: Some(verdict),
+                        observed_at: at,
+                        payload: serde_json::json!({}),
+                    },
+                )
+                .unwrap();
+            let row: Session =
+                tiller_core::state::get(t.fleet.store.conn(), "session", &session).unwrap();
+            assert_eq!(row.activity, then, "{verdict} at {at}");
+        }
     }
 
     /// Retention and `/clear` together: the window keeps the file the

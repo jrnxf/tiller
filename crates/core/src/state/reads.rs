@@ -106,9 +106,20 @@ impl Store {
         )
     }
 
-    /// Every event on one card, oldest first.
-    pub fn timeline(&self, card_id: &str) -> Result<Vec<Event>> {
-        list(self.conn(), "card_id = ?1 ORDER BY seq", &[&card_id])
+    /// One page of a card's timeline, newest first: at most `limit` events
+    /// older than `before` (the board and `tiller card timeline`). One
+    /// notification is one line: the write-ahead `attention.notified`
+    /// record is left out once an outcome follows it (`protocol.md` 3.4).
+    pub fn timeline(&self, card_id: &str, before: i64, limit: i64) -> Result<Vec<Event>> {
+        list(
+            self.conn(),
+            &format!(
+                "card_id = ?1 AND seq < ?2 AND {}
+                 ORDER BY seq DESC LIMIT ?3",
+                super::notifications::ONE_LINE_PER_NOTIFICATION
+            ),
+            &[&card_id, &before, &limit],
+        )
     }
 
     /// When the daemon's ruleset check last moved a project's merge gate, or

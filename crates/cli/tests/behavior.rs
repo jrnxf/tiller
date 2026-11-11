@@ -646,6 +646,45 @@ fn fleet_sessions_cannot_run_owner_commands() {
     assert!(world.run(&["owner", "show"]).data()["owner"].is_null());
 }
 
+/// `tiller card timeline` shows one line per notification, as the board
+/// does: the write-ahead `attention.notified` record is left out once its
+/// outcome follows it.
+#[test]
+fn the_cli_timeline_shows_one_line_per_notification() {
+    let world = World::initialized();
+    world.must(&[
+        "card", "create", "alpha", "--kind", "ship", "--title", "One",
+    ]);
+    let item = world
+        .store()
+        .attention_open(
+            &Ctx::new(Actor::Owner),
+            None,
+            tiller_core::state::attention::NewAttention {
+                card: world.store().card("alpha-1").unwrap().id,
+                kind: tiller_core::domain::AttentionKind::Decision,
+                question: "which release note?".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .value;
+    let daemon = Ctx::new(Actor::Daemon);
+    let mut store = world.store();
+    store.notification_record(&daemon, &item.id).unwrap();
+    store.notification_sent(&daemon, &item.id).unwrap();
+
+    let out = world.must(&["card", "timeline", "alpha-1"]);
+    let kinds: Vec<&str> = out.data()["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event["kind"].as_str())
+        .filter(|kind| kind.starts_with("attention.notif"))
+        .collect();
+    assert_eq!(kinds, ["attention.notify_sent"], "{}", out.json);
+}
+
 #[test]
 fn a_worker_whose_orchestrator_ended_is_still_listed() {
     let world = World::initialized();
@@ -755,6 +794,49 @@ fn a_session_before_init_names_the_same_setup_steps_as_every_other_refusal() {
         hint.ends_with("the owner must run tiller owner set tiller, then tiller init"),
         "{hint}"
     );
+}
+
+/// R20 with `--db` outside the home: the CLI and the store read one owner
+/// marker, the home's. A marker beside the database refuses nothing, and
+/// the home's marker refuses the store's writes too.
+#[test]
+fn a_db_outside_the_home_reads_the_home_s_owner_marker() {
+    let world = World::new();
+    std::fs::create_dir_all(world.home()).unwrap();
+    let elsewhere = world.dir.path().join("elsewhere");
+    let db = elsewhere.join("state.db");
+    let db = db.to_str().unwrap();
+    let init = [
+        "--db",
+        db,
+        "init",
+        "--host-label",
+        "host-a",
+        "--lane-capacity",
+        "2",
+    ];
+    assert!(world.run(&init).ok());
+    std::fs::write(elsewhere.join("owner"), "other\n").unwrap();
+    let add = |id: &str| {
+        world.run(&[
+            "--db",
+            db,
+            "project",
+            "add",
+            id,
+            "--name",
+            id,
+            "--repo",
+            "example/alpha",
+            "--delivery",
+            "direct-pr",
+        ])
+    };
+    let added = add("alpha");
+    assert!(added.ok(), "{}", added.json);
+    std::fs::write(world.home().join("owner"), "other\n").unwrap();
+    std::fs::remove_file(elsewhere.join("owner")).unwrap();
+    assert_eq!(add("beta").error_code(), "owner_marker");
 }
 
 #[test]

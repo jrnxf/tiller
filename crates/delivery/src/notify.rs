@@ -67,15 +67,24 @@ impl<H: Herdr> Notifier<H> {
             if self.store.notification_record(&ctx, &item.id)?.replayed {
                 continue;
             }
+            // The send happened (or was refused) either way: an outcome
+            // that cannot be written is logged, and the pass goes on to the
+            // other items, which it would otherwise never notify.
             match self.herdr.notify(&title, &body) {
                 Ok(()) => {
-                    self.store.notification_sent(&ctx, &item.id)?;
+                    if let Err(error) = self.store.notification_sent(&ctx, &item.id) {
+                        tracing::warn!(item = %item.id, %error, "recording a sent notification failed");
+                    }
                     report.notified.push(item.id);
                 }
                 Err(error) => {
                     tracing::warn!(item = %item.id, %error, "herdr notification failed");
-                    self.store
-                        .notification_fail(&ctx, &item.id, &error.to_string())?;
+                    if let Err(write) =
+                        self.store
+                            .notification_fail(&ctx, &item.id, &error.to_string())
+                    {
+                        tracing::warn!(item = %item.id, error = %write, "recording a failed notification failed");
+                    }
                     report.failed.push((item.id, error.to_string()));
                 }
             }

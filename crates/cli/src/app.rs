@@ -431,7 +431,7 @@ impl App {
             })
             .hint(tiller_core::INIT_HINT));
         }
-        Ok(Store::open(&self.db)?)
+        Ok(Store::open(&self.db)?.with_owner_home(&self.home))
     }
 
     /// Opens `state.db` for a mutation: the owner marker must not name
@@ -454,7 +454,7 @@ impl App {
                 .mode(0o700)
                 .create(dir)?;
         }
-        Ok(Store::open(&self.db)?)
+        Ok(Store::open(&self.db)?.with_owner_home(&self.home))
     }
 
     /// Refuses every mutation while `<home>/owner` names another system
@@ -464,10 +464,7 @@ impl App {
     }
 
     pub fn owner_marker(&self) -> Option<String> {
-        std::fs::read_to_string(self.home.join("owner"))
-            .ok()
-            .map(|text| text.trim().to_owned())
-            .filter(|text| !text.is_empty())
+        tiller_core::owner::name(&self.home)
     }
 
     /// A session id that resolves to no row, or to an ended session, is

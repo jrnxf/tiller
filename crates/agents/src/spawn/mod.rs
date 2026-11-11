@@ -661,23 +661,34 @@ fn fail(
         notes.push(format!("closing pane {pane} failed: {e}"));
     }
     if let Some(worktree) = &made.worktree {
-        let recorded = get::<Run>(store.conn(), "run", &run.id).map_err(SpawnError::from);
-        let worktree_text = worktree.to_string_lossy();
-        // The pool leased a worktree that `run.place` never recorded, so
-        // cleanup cannot find it: it goes back here, still fresh, under the
-        // holder it was taken for.
-        let unrecorded = recorded.as_ref().is_ok_and(|recorded| {
-            recorded.worktree_path.as_deref() != Some(worktree_text.as_ref())
-        });
-        match recorded.and_then(|run| cleanup(store, ctx, world, &run)) {
-            Ok(_) => {}
-            Err(e) => notes.push(format!("the worktree was kept: {e}")),
-        }
-        if unrecorded && let Err(e) = world.pool.give_back(worktree, &holder(run)) {
-            notes.push(format!(
-                "{} was leased but not recorded, and treehouse did not take it back ({e}); return it with treehouse return",
+        match get::<Run>(store.conn(), "run", &run.id) {
+            // Whether a record names the lease is unknown, so it stays: a
+            // give-back here could hand away a path a record still holds.
+            Err(e) => notes.push(format!(
+                "{} was kept: reading the run to clean it up failed ({e}); once no run records it, return it with treehouse return",
                 worktree.display()
-            ));
+            )),
+            Ok(recorded) => {
+                // The pool leased a worktree that `run.place` never
+                // recorded, so cleanup cannot find it: it goes back here,
+                // still fresh, under the holder it was taken for.
+                let unrecorded =
+                    recorded.worktree_path.as_deref() != Some(worktree.to_string_lossy().as_ref());
+                let cleaned = cleanup(store, ctx, world, &recorded);
+                if unrecorded {
+                    if let Err(e) = cleaned {
+                        notes.push(format!("cleanup failed: {e}"));
+                    }
+                    if let Err(e) = world.pool.give_back(worktree, &holder(run)) {
+                        notes.push(format!(
+                            "{} was leased but not recorded, and treehouse did not take it back ({e}); return it with treehouse return",
+                            worktree.display()
+                        ));
+                    }
+                } else if let Err(e) = cleaned {
+                    notes.push(format!("the worktree was kept: {e}"));
+                }
+            }
         }
     }
     if notes.is_empty() {

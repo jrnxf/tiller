@@ -613,6 +613,11 @@ pub fn landed_evidence(conn: &rusqlite::Connection, card: &Card) -> Result<bool>
 /// Whether the owner answered "Superseded" to an R07 outside-merge
 /// `recovery` item on the card since it was created or last reopened: the
 /// evidence the daemon needs to close the card `superseded`.
+///
+/// Who answered is not checked here, as `landed_evidence` does not check it
+/// for "Mark landed": `attention.answer` takes an answer from any
+/// principal, so a guard on who may answer an R07 item belongs there, for
+/// both answers at once.
 fn superseded_answer(conn: &rusqlite::Connection, card: &Card) -> Result<bool> {
     let since = reopened_seq(conn, card)?;
     Ok(conn.query_row(
@@ -1056,57 +1061,30 @@ impl Store {
         evidence: Option<&str>,
     ) -> Result<Applied<Closed>> {
         self.write(ctx, "card.close", None, |tx| {
-            let card = resolve_card(tx.conn(), card)?;
-            require_card_scope(tx.conn(), tx.actor(), &card.project_id, CardAction::Close(outcome))?;
-            if card.outcome == Some(outcome) {
-                return Ok(Closed {
-                    card,
-                    released_holds: Vec::new(),
-                    released_dependants: Vec::new(),
-                });
+            card_close_in(tx, card, outcome, reason, evidence)
+        })
+    }
+
+    /// `card.close` after ending every active run of the card with `end`,
+    /// all in one transaction: a refused end or close writes nothing, so a
+    /// refusal never leaves some runs ended on a card that stays open. The
+    /// runs are read inside the transaction, so a run that starts or ends
+    /// meanwhile is seen as it is.
+    pub fn card_close_ending_runs(
+        &mut self,
+        ctx: &Ctx,
+        card: &str,
+        outcome: CardOutcome,
+        reason: Option<&str>,
+        evidence: Option<&str>,
+        end: &EndRun,
+    ) -> Result<Applied<Closed>> {
+        self.write(ctx, "card.close", None, |tx| {
+            let card_id = resolve_card(tx.conn(), card)?.id;
+            for run in active_runs(tx.conn(), &card_id)? {
+                super::runs::run_end_in(tx, &run.id, end.clone())?;
             }
-            require_open(&card)?;
-            if !allowed_outcomes(card.kind).contains(&outcome) {
-                // Let the lifecycle name the allowed outcomes.
-                CardStatus::Open.close(card.kind, outcome).map_err(refuse("card", &card.display_id))?;
-            }
-            match outcome {
-                CardOutcome::Landed if !landed_evidence(tx.conn(), &card)? => {
-                    let since = since_reopen(tx.conn(), &card)?;
-                    return Err(Error::refused(
-                        "card",
-                        &card.display_id,
-                        format!(
-                            "landed needs a succeeded merge or land approval, or a recovery item answered \"Mark landed\"{since}"
-                        ),
-                    ));
-                }
-                CardOutcome::Reported if !report_evidence(tx.conn(), &card)? => {
-                    let since = since_reopen(tx.conn(), &card)?;
-                    return Err(Error::refused(
-                        "card",
-                        &card.display_id,
-                        format!("no report artifact is recorded on the card{since}"),
-                    ));
-                }
-                // The daemon's one close besides `landed`: carrying out the
-                // owner's "Superseded" to R07 (`recovery.md` R07).
-                CardOutcome::Superseded
-                    if matches!(tx.actor(), Actor::Daemon) && !superseded_answer(tx.conn(), &card)? =>
-                {
-                    let since = since_reopen(tx.conn(), &card)?;
-                    return Err(Error::Forbidden(format!(
-                        "the daemon closes a card superseded only on the owner's answer \"{SUPERSEDED}\" to its outside-merge recovery item{since}"
-                    )));
-                }
-                CardOutcome::Completed => required("evidence", evidence.unwrap_or_default())?,
-                CardOutcome::Cancelled
-                | CardOutcome::Superseded
-                | CardOutcome::Failed
-                | CardOutcome::Abandoned => required("reason", reason.unwrap_or_default())?,
-                _ => {}
-            }
-            close_card(tx, &card, outcome, json!({"reason": reason, "evidence": evidence}))
+            card_close_in(tx, &card_id, outcome, reason, evidence)
         })
     }
 
@@ -1227,4 +1205,78 @@ impl Store {
             )
         })
     }
+}
+
+/// `card.close`'s transaction body, shared with
+/// [`Store::card_close_ending_runs`].
+fn card_close_in(
+    tx: &mut Tx<'_>,
+    card: &str,
+    outcome: CardOutcome,
+    reason: Option<&str>,
+    evidence: Option<&str>,
+) -> Result<Closed> {
+    let card = resolve_card(tx.conn(), card)?;
+    require_card_scope(
+        tx.conn(),
+        tx.actor(),
+        &card.project_id,
+        CardAction::Close(outcome),
+    )?;
+    if card.outcome == Some(outcome) {
+        return Ok(Closed {
+            card,
+            released_holds: Vec::new(),
+            released_dependants: Vec::new(),
+        });
+    }
+    require_open(&card)?;
+    if !allowed_outcomes(card.kind).contains(&outcome) {
+        // Let the lifecycle name the allowed outcomes.
+        CardStatus::Open
+            .close(card.kind, outcome)
+            .map_err(refuse("card", &card.display_id))?;
+    }
+    match outcome {
+        CardOutcome::Landed if !landed_evidence(tx.conn(), &card)? => {
+            let since = since_reopen(tx.conn(), &card)?;
+            return Err(Error::refused(
+                "card",
+                &card.display_id,
+                format!(
+                    "landed needs a succeeded merge or land approval, or a recovery item answered \"Mark landed\"{since}"
+                ),
+            ));
+        }
+        CardOutcome::Reported if !report_evidence(tx.conn(), &card)? => {
+            let since = since_reopen(tx.conn(), &card)?;
+            return Err(Error::refused(
+                "card",
+                &card.display_id,
+                format!("no report artifact is recorded on the card{since}"),
+            ));
+        }
+        // The daemon's one close besides `landed`: carrying out the
+        // owner's "Superseded" to R07 (`recovery.md` R07).
+        CardOutcome::Superseded
+            if matches!(tx.actor(), Actor::Daemon) && !superseded_answer(tx.conn(), &card)? =>
+        {
+            let since = since_reopen(tx.conn(), &card)?;
+            return Err(Error::Forbidden(format!(
+                "the daemon closes a card superseded only on the owner's answer \"{SUPERSEDED}\" to its outside-merge recovery item{since}"
+            )));
+        }
+        CardOutcome::Completed => required("evidence", evidence.unwrap_or_default())?,
+        CardOutcome::Cancelled
+        | CardOutcome::Superseded
+        | CardOutcome::Failed
+        | CardOutcome::Abandoned => required("reason", reason.unwrap_or_default())?,
+        _ => {}
+    }
+    close_card(
+        tx,
+        &card,
+        outcome,
+        json!({"reason": reason, "evidence": evidence}),
+    )
 }

@@ -186,6 +186,10 @@ pub struct Recorded {
     pub observation: Observation,
     /// The session's activity moved to the observation's verdict.
     pub verdict_changed: bool,
+    /// When the hold ends on a `herdr:idle` that a fresh hook `working`
+    /// held (`protocol.md` 4.5); `None` when the observation was not held.
+    #[serde(default)]
+    pub idle_held_until: Option<Timestamp>,
 }
 
 /// How long a hook `working` holds against a `herdr:idle` (`protocol.md`
@@ -193,14 +197,36 @@ pub struct Recorded {
 pub const HOOK_WORKING_HOLD_MS: i64 = 30_000;
 
 /// A `herdr:idle` never replaces a hook `working` less than 30 s old.
-fn herdr_idle_held(session: &Session, new: &NewObservation) -> bool {
-    new.source == ObservationSource::Herdr
-        && new.verdict == Some(Activity::Idle)
-        && session.activity == Activity::Working
-        && session.activity_source == Some(ObservationSource::Hook)
-        && session
-            .activity_observed_at
-            .is_some_and(|at| new.observed_at.as_millis() - at.as_millis() < HOOK_WORKING_HOLD_MS)
+/// Returns when the hold ends, if it holds.
+/// How far an ended session has settled: a live state is 0, and an ended
+/// session moves only to a higher rank. The match has no catch-all, so a
+/// new state must be placed.
+fn rest_rank(activity: Activity) -> u8 {
+    match activity {
+        Activity::Working
+        | Activity::WaitingPermission
+        | Activity::WaitingInput
+        | Activity::Unknown => 0,
+        Activity::Idle => 1,
+        Activity::Errored => 2,
+        Activity::Ended => 3,
+    }
+}
+
+fn herdr_idle_held(session: &Session, new: &NewObservation) -> Option<Timestamp> {
+    if new.source != ObservationSource::Herdr
+        || new.verdict != Some(Activity::Idle)
+        || session.activity != Activity::Working
+        || session.activity_source != Some(ObservationSource::Hook)
+    {
+        return None;
+    }
+    let until = session.activity_observed_at?.as_millis() + HOOK_WORKING_HOLD_MS;
+    if new.observed_at.as_millis() < until {
+        Timestamp::from_millis(until)
+    } else {
+        None
+    }
 }
 
 /// A `panes` filter for the panes of the run bound at `?{param}`. A pane row
@@ -529,6 +555,59 @@ fn worktree_returned(conn: &Connection, run: &Run, path: &str) -> Result<bool> {
         params![root.id, run.host_id, path],
         |row| row.get(0),
     )?)
+}
+
+/// `run.end`'s transaction body, shared with `Store::card_close_ending_runs`.
+pub(crate) fn run_end_in(tx: &mut Tx<'_>, run: &str, end: EndRun) -> Result<Run> {
+    let run = load_run(tx, run)?;
+    if run.outcome == Some(end.outcome) {
+        return Ok(run);
+    }
+    require_active(&run)?;
+    let card: Card = get(tx.conn(), "card", &run.card_id)?;
+    match end.outcome {
+        RunOutcome::Landed if !landed_evidence(tx.conn(), &card)? => {
+            return Err(Error::refused(
+                "run",
+                &run.id,
+                "landed comes from a finished merge or an outside merge the owner confirmed",
+            ));
+        }
+        RunOutcome::Reported
+            if card.kind == CardKind::Ship
+                && run.role == RunRole::Builder
+                && published_head(tx.conn(), &run)?.is_none() =>
+        {
+            return Err(Error::refused(
+                "run",
+                &run.id,
+                "a builder on a ship card ends reported only once its committed head is on an open PR; otherwise landed with the merge, or failed or abandoned",
+            ));
+        }
+        _ => {}
+    }
+    if let (Actor::Session(_), Some(path)) = (tx.actor(), &run.worktree_path) {
+        let known: Option<Option<i64>> = tx
+            .conn()
+            .query_row(
+                "SELECT unlanded_commits FROM worktrees WHERE host_id = ?1 AND path = ?2",
+                params![run.host_id, path],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
+        if !matches!(known, Some(Some(_))) {
+            return Err(Error::refused(
+                "run",
+                &run.id,
+                format!("unlanded commits in {path} are unknown; refresh the worktree first"),
+            ));
+        }
+    }
+    end_run(tx, &run, end)
 }
 
 /// `run.relaunch`'s transaction body, shared with its rehearsal.
@@ -1448,57 +1527,7 @@ impl Store {
     /// session ending its own run needs a known `unlanded_commits` for its
     /// worktree (P51).
     pub fn run_end(&mut self, ctx: &Ctx, run: &str, end: EndRun) -> Result<Applied<Run>> {
-        self.write(ctx, "run.end", None, |tx| {
-            let run = load_run(tx, run)?;
-            if run.outcome == Some(end.outcome) {
-                return Ok(run);
-            }
-            require_active(&run)?;
-            let card: Card = get(tx.conn(), "card", &run.card_id)?;
-            match end.outcome {
-                RunOutcome::Landed if !landed_evidence(tx.conn(), &card)? => {
-                    return Err(Error::refused(
-                        "run",
-                        &run.id,
-                        "landed comes from a finished merge or an outside merge the owner confirmed",
-                    ));
-                }
-                RunOutcome::Reported
-                    if card.kind == CardKind::Ship
-                        && run.role == RunRole::Builder
-                        && published_head(tx.conn(), &run)?.is_none() =>
-                {
-                    return Err(Error::refused(
-                        "run",
-                        &run.id,
-                        "a builder on a ship card ends reported only once its committed head is on an open PR; otherwise landed with the merge, or failed or abandoned",
-                    ));
-                }
-                _ => {}
-            }
-            if let (Actor::Session(_), Some(path)) = (tx.actor(), &run.worktree_path) {
-                let known: Option<Option<i64>> = tx
-                    .conn()
-                    .query_row(
-                        "SELECT unlanded_commits FROM worktrees WHERE host_id = ?1 AND path = ?2",
-                        params![run.host_id, path],
-                        |row| row.get(0),
-                    )
-                    .map(Some)
-                    .or_else(|error| match error {
-                        rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                        other => Err(other),
-                    })?;
-                if !matches!(known, Some(Some(_))) {
-                    return Err(Error::refused(
-                        "run",
-                        &run.id,
-                        format!("unlanded commits in {path} are unknown; refresh the worktree first"),
-                    ));
-                }
-            }
-            end_run(tx, &run, end)
-        })
+        self.write(ctx, "run.end", None, |tx| run_end_in(tx, run, end))
     }
 
     /// `session.start` for an orchestrator (`tiller orchestrator start`).
@@ -1924,11 +1953,17 @@ impl Store {
                 &[&run.host_id, &path],
             )?
             .ok_or_else(|| Error::refused("worktree", &path, "no reading of the worktree"))?;
+            // A replay comes first: once the chain cleaned the worktree, the
+            // pool may lease the path to an unrelated run, and a repeat
+            // clean leaves that run's worktree alone.
+            if worktree.gone_at.is_some() || worktree_returned(tx.conn(), &run, &path)? {
+                return Ok(run);
+            }
             // A relaunch in place (`--new-attempt`) hands the worktree to a
-            // successor. Checked here, in the transaction that marks the
-            // worktree gone, so no successor can start between the check and
-            // the write.
-            if let Some(successor) = find::<Run>(
+            // successor, and the pool may lease a returned path to any run.
+            // Checked here, in the transaction that marks the worktree gone,
+            // so no run can start there between the check and the write.
+            if let Some(active) = find::<Run>(
                 tx.conn(),
                 "host_id = ?1 AND worktree_path = ?2 AND ended_at IS NULL AND id != ?3",
                 &[&run.host_id, &path, &run.id],
@@ -1936,11 +1971,8 @@ impl Store {
                 return Err(Error::refused(
                     "worktree",
                     &path,
-                    format!("the worktree is in use by active run {}", successor.id),
+                    format!("the worktree is in use by active run {}", active.id),
                 ));
-            }
-            if worktree.gone_at.is_some() {
-                return Ok(run);
             }
             if worktree.fetched_at < ended_at {
                 return Err(Error::refused(
@@ -2029,10 +2061,23 @@ impl Store {
                 ],
             )?;
             let mut verdict_changed = false;
+            let mut idle_held_until = None;
             if let (Some(session_id), Some(verdict)) = (&new.session_id, new.verdict) {
                 let session: Session = get(tx.conn(), "session", session_id)?;
                 let newer = session.activity_observed_at.is_none_or(|at| new.observed_at > at);
-                if newer && !herdr_idle_held(&session, &new) {
+                // A line read in the transcript's retention window, or a
+                // hook that comes late, is kept as a row, but an ended
+                // session never looks live again (`protocol.md` 5). One
+                // ended with no `Ended` verdict (a relaunch, a failed spawn)
+                // may still settle, such as into the idle of a turn's last
+                // line flushed late, but only forward: idle, then errored,
+                // then ended. A process that goes on writing the same file
+                // cannot flip it back. No clock is compared, so skew between
+                // hosts cannot reopen it.
+                let may_move = session.ended_at.is_none()
+                    || rest_rank(verdict) > rest_rank(session.activity);
+                idle_held_until = herdr_idle_held(&session, &new);
+                if newer && may_move && idle_held_until.is_none() {
                     tx.conn().execute(
                         "UPDATE sessions SET activity = ?2, activity_observed_at = ?3, activity_source = ?4 WHERE id = ?1",
                         params![session.id, verdict, new.observed_at, new.source],
@@ -2060,6 +2105,7 @@ impl Store {
             Ok(Recorded {
                 observation: get(tx.conn(), "observation", &id)?,
                 verdict_changed,
+                idle_held_until,
             })
         })
     }

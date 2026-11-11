@@ -17,7 +17,7 @@ use tiller_core::state::runs::{Bind, EndRun, NewOrchestrator, NewRun, Relaunch, 
 use tiller_core::state::{get, list};
 use tiller_core::{Actor, Ctx, Store, Timestamp};
 use tiller_delivery::outbox::{
-    Deliverer, Pacing, RINGS_MINUTES, Report, SUBMIT_PASSES, SUBMIT_PRESSES,
+    BUSY_DEFER_SECS, Deliverer, Pacing, RINGS_MINUTES, Report, SUBMIT_PASSES, SUBMIT_PRESSES,
 };
 use tiller_herdr::client::Herdr;
 use tiller_herdr::fake::{FakeHerdr, PAUSE_ENV, Screen};
@@ -381,9 +381,24 @@ fn a_record_that_fails_midway_does_not_strand_the_rest_of_the_batch() {
 
     let report = w.deliverer.pass(at(4)).unwrap();
     assert_eq!(w.typed(), 1, "one line for the batch");
+    // The fault refuses the defer too, so the message waits in memory, and
+    // the one entry for it says so.
     assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
     assert!(
         report.errors[0].1.contains("disk fault"),
+        "{:?}",
+        report.errors
+    );
+    assert!(
+        report
+            .errors
+            .iter()
+            .all(|(_, error)| error.contains(&second.id)),
+        "each entry names the message: {:?}",
+        report.errors
+    );
+    assert!(
+        report.errors[0].1.contains("waits in memory only"),
         "{:?}",
         report.errors
     );
@@ -392,13 +407,19 @@ fn a_record_that_fails_midway_does_not_strand_the_rest_of_the_batch() {
     assert_eq!(w.message(&second.id).state, OutboxState::Pending);
     assert_eq!(w.message(&third.id).state, OutboxState::Delivered);
 
-    // Once the fault clears the next pass records the one that was missed.
+    // The missed one waits like a busy pane: while the fault lasts, the
+    // passes do not type the line into the pane again.
+    w.deliverer.pass(at(6)).unwrap();
+    w.deliverer.pass(at(8)).unwrap();
+    assert_eq!(w.typed(), 1, "no retype while the fault lasts");
+
+    // Once the fault clears, the next ring records the one that was missed.
     w.fleet
         .store
         .conn()
         .execute_batch("DROP TRIGGER fault")
         .unwrap();
-    w.pass(at(5));
+    w.pass(at(4 + BUSY_DEFER_SECS));
     assert_eq!(w.message(&second.id).state, OutboxState::Delivered);
 }
 

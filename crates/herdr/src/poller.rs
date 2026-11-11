@@ -19,7 +19,7 @@ use serde_json::json;
 use tiller_core::domain::{Activity, ObservationSource, Session};
 use tiller_core::state::caches::PaneReading;
 use tiller_core::state::get;
-use tiller_core::state::runs::{HOOK_WORKING_HOLD_MS, NewObservation};
+use tiller_core::state::runs::NewObservation;
 use tiller_core::{Actor, Ctx, Store, Timestamp};
 use tokio::sync::{Notify, watch};
 
@@ -275,6 +275,9 @@ pub fn verdict(status: &str, newest: &Session) -> Option<Activity> {
     }
 }
 
+/// A pane and the session bound to it.
+type Bound = (String, String);
+
 /// One herdr server's snapshot source: the local server, which also gets its
 /// layout and row tokens repaired, or a saved machine, which is read only.
 pub struct HerdrSource<H: Herdr> {
@@ -283,14 +286,16 @@ pub struct HerdrSource<H: Herdr> {
     host_id: String,
     machine: Option<String>,
     /// The status last recorded per bound pane, so an observation is written
-    /// only when herdr's reading changes.
-    statuses: HashMap<String, Option<String>>,
+    /// only when herdr's reading changes. Each map is keyed by pane and
+    /// session: a pane that another session binds starts afresh.
+    statuses: HashMap<Bound, Option<String>>,
     /// Bound panes whose last `herdr:idle` a fresh hook `working` held
     /// (`protocol.md` 4.5), with when the hold ends: the reading is sent
-    /// again then, though it has not changed.
-    held: HashMap<String, Timestamp>,
+    /// again then, though it has not changed, while the session is still
+    /// hook `working`.
+    held: HashMap<Bound, Timestamp>,
     /// Bound panes already reported gone.
-    gone: HashSet<String>,
+    gone: HashSet<Bound>,
     /// What the last layout pass could not do, said once: the pass runs on
     /// every poll, and a complaint is logged again only when it changes.
     layout_complaint: Option<String>,
@@ -394,41 +399,52 @@ impl<H: Herdr + Send + 'static> HerdrSource<H> {
     ) -> Result<(), PollError> {
         // Only bound panes are remembered: a pane whose session ended, or
         // that another session took, starts afresh.
-        let bound: HashSet<&str> = bindings.iter().map(|b| b.pane_id.as_str()).collect();
-        self.statuses
-            .retain(|pane, _| bound.contains(pane.as_str()));
-        self.held.retain(|pane, _| bound.contains(pane.as_str()));
-        self.gone.retain(|pane| bound.contains(pane.as_str()));
+        let bound: HashSet<Bound> = bindings
+            .iter()
+            .map(|b| (b.pane_id.clone(), b.session_id.clone()))
+            .collect();
+        self.statuses.retain(|key, _| bound.contains(key));
+        self.held.retain(|key, _| bound.contains(key));
+        self.gone.retain(|key| bound.contains(key));
         for binding in bindings {
+            let key: Bound = (binding.pane_id.clone(), binding.session_id.clone());
             let pane = snapshot.pane(&binding.pane_id);
             // The caches move only once the observation is recorded, so a
             // failed write is retried on the next poll.
             let (event, verdict) = match pane {
                 None => {
-                    if self.gone.contains(&binding.pane_id) {
+                    if self.gone.contains(&key) {
                         continue;
                     }
                     ("pane_gone".to_owned(), Some(Activity::Ended))
                 }
                 Some(pane) => {
-                    self.gone.remove(&binding.pane_id);
-                    let resend = self
-                        .held
-                        .get(&binding.pane_id)
-                        .is_some_and(|until| ctx.now >= *until);
-                    if self.statuses.get(&binding.pane_id) == Some(&pane.agent_status) && !resend {
+                    self.gone.remove(&key);
+                    let due = self.held.get(&key).is_some_and(|until| ctx.now >= *until);
+                    let unchanged = self.statuses.get(&key) == Some(&pane.agent_status);
+                    if unchanged && !due {
                         continue;
                     }
                     let Some(status) = pane.agent_status.as_deref() else {
-                        self.statuses.insert(binding.pane_id.clone(), None);
-                        self.held.remove(&binding.pane_id);
+                        self.held.remove(&key);
+                        self.statuses.insert(key, None);
                         continue;
                     };
                     let session: Session = get(self.store.conn(), "session", &binding.session_id)?;
+                    // The resend is owed only while a hook `working` still
+                    // holds the session: a newer hook verdict (a permission
+                    // prompt, an error, a Stop) has replaced it otherwise.
+                    if unchanged
+                        && !(session.activity == Activity::Working
+                            && session.activity_source == Some(ObservationSource::Hook))
+                    {
+                        self.held.remove(&key);
+                        continue;
+                    }
                     (format!("herdr:{status}"), verdict(status, &session))
                 }
             };
-            self.store.observation_record(
+            let recorded = self.store.observation_record(
                 ctx,
                 NewObservation {
                     session_id: Some(binding.session_id.clone()),
@@ -447,42 +463,24 @@ impl<H: Herdr + Send + 'static> HerdrSource<H> {
             match pane {
                 None => {
                     // A pane that comes back is read afresh.
-                    self.gone.insert(binding.pane_id.clone());
-                    self.statuses.remove(&binding.pane_id);
-                    self.held.remove(&binding.pane_id);
+                    self.statuses.remove(&key);
+                    self.held.remove(&key);
+                    self.gone.insert(key);
                 }
                 Some(pane) => {
-                    self.statuses
-                        .insert(binding.pane_id.clone(), pane.agent_status.clone());
-                    let session: Session = get(self.store.conn(), "session", &binding.session_id)?;
-                    match held_until(&session, verdict, ctx.now) {
-                        Some(until) => self.held.insert(binding.pane_id.clone(), until),
-                        None => self.held.remove(&binding.pane_id),
+                    self.statuses.insert(key.clone(), pane.agent_status.clone());
+                    // herdr keeps reading idle, so a held idle is sent
+                    // again when its hold ends; without that it would
+                    // never land.
+                    match recorded.value.idle_held_until {
+                        Some(until) => self.held.insert(key, until),
+                        None => self.held.remove(&key),
                     };
                 }
             }
         }
         Ok(())
     }
-}
-
-/// When the hold on a `herdr:idle` just recorded ends, if a fresh hook
-/// `working` held it (`protocol.md` 4.5): `session` is the row as the
-/// record left it. herdr keeps reading idle, so the poller sends the reading
-/// again then; without that the idle would never land.
-fn held_until(session: &Session, verdict: Option<Activity>, now: Timestamp) -> Option<Timestamp> {
-    if verdict != Some(Activity::Idle)
-        || session.activity != Activity::Working
-        || session.activity_source != Some(ObservationSource::Hook)
-    {
-        return None;
-    }
-    let until = session.activity_observed_at?.as_millis() + HOOK_WORKING_HOLD_MS;
-    // A hold that already ended means the reading was older than the
-    // hook's, not held: sending it again would change nothing.
-    (until > now.as_millis())
-        .then(|| Timestamp::from_millis(until))
-        .flatten()
 }
 
 impl<H: Herdr + Send + 'static> Source for HerdrSource<H> {
@@ -1206,6 +1204,92 @@ mod tests {
         );
     }
 
+    /// The resend is owed only while the hook `working` that held the idle
+    /// is still the session's activity. A permission prompt or an error the
+    /// hooks report during the hold is newer than herdr's idle: the resend
+    /// at the end of the hold must not replace it.
+    #[test]
+    fn a_held_herdr_idle_is_not_resent_over_a_newer_hook_verdict() {
+        for (event, newer) in [
+            ("PermissionRequest", Activity::WaitingPermission),
+            ("StopFailure", Activity::Errored),
+        ] {
+            let mut fleet = Fleet::new();
+            let worker = fleet.worker("w2:p1");
+            let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
+            fleet.place(&herdr);
+            let registry = Registry::new();
+            let mut poller = registry
+                .register(HerdrSource::local(herdr.clone(), fleet.open(), &fleet.host))
+                .unwrap();
+            let hook = |fleet: &mut Fleet, event: &str, verdict, seconds| {
+                fleet
+                    .store
+                    .observation_record(
+                        &Ctx::new(Actor::Hook),
+                        NewObservation {
+                            session_id: Some(worker.clone()),
+                            run_id: None,
+                            source: ObservationSource::Hook,
+                            event: event.into(),
+                            verdict: Some(verdict),
+                            observed_at: at(seconds),
+                            payload: json!({}),
+                        },
+                    )
+                    .unwrap();
+            };
+            let activity = |fleet: &Fleet| {
+                get::<Session>(fleet.store.conn(), "session", &worker)
+                    .unwrap()
+                    .activity
+            };
+            hook(&mut fleet, "PreToolUse", Activity::Working, 1);
+            herdr.set_screen("w2:p1", Screen::Idle);
+            poller.poll_once(at(5));
+            assert_eq!(activity(&fleet), Activity::Working, "held");
+            hook(&mut fleet, event, newer, 10);
+            for n in [32, 40, 120] {
+                poller.poll_once(at(n));
+                assert_eq!(activity(&fleet), newer, "{event} kept at {n} s");
+            }
+            assert_eq!(herdr_events(&fleet, &worker), ["herdr:idle"], "{event}");
+            assert!(poller.source().held.is_empty(), "{event}");
+        }
+    }
+
+    /// A pane that another session binds between two polls starts afresh:
+    /// the new session's first reading is recorded though herdr's status
+    /// did not change, and its pane going away is reported.
+    #[test]
+    fn a_pane_bound_to_a_new_session_between_polls_starts_afresh() {
+        let mut fleet = Fleet::new();
+        let first = fleet.worker("w2:p1");
+        let herdr = FakeHerdr::new(fleet.dir.path().join("herdr.json"));
+        fleet.place(&herdr);
+        let registry = Registry::new();
+        let mut poller = registry
+            .register(HerdrSource::local(herdr.clone(), fleet.open(), &fleet.host))
+            .unwrap();
+        poller.poll_once(at(0));
+        assert_eq!(herdr_events(&fleet, &first), ["herdr:idle"]);
+
+        fleet
+            .store
+            .session_end(&Ctx::new(Actor::Daemon), &first, "test")
+            .unwrap();
+        let second = fleet.worker("w2:p1");
+        poller.poll_once(at(2));
+        assert_eq!(
+            herdr_events(&fleet, &second),
+            ["herdr:idle"],
+            "the new session's first reading"
+        );
+        herdr.remove_pane("w2:p1");
+        poller.poll_once(at(4));
+        assert_eq!(herdr_events(&fleet, &second), ["herdr:idle", "pane_gone"]);
+    }
+
     /// A pane that herdr reports gone and then again, with the status it
     /// had, is observed again: the session does not stay `ended`.
     #[test]
@@ -1269,9 +1353,17 @@ mod tests {
         herdr.remove_pane("w2:p1");
         poller.poll_once(at(2));
         let source = poller.source();
-        assert!(source.gone.contains("w2:p1"));
-        assert!(source.statuses.contains_key("w4:p1"));
-        assert!(source.held.contains_key("w4:p1"));
+        assert!(source.gone.contains(&("w2:p1".to_owned(), gone.clone())));
+        assert!(
+            source
+                .statuses
+                .contains_key(&("w4:p1".to_owned(), held.clone()))
+        );
+        assert!(
+            source
+                .held
+                .contains_key(&("w4:p1".to_owned(), held.clone()))
+        );
 
         for session in [&gone, &held] {
             fleet
@@ -1281,9 +1373,13 @@ mod tests {
         }
         poller.poll_once(at(3));
         let source = poller.source();
-        assert!(!source.gone.contains("w2:p1"), "{:?}", source.gone);
-        assert!(!source.statuses.contains_key("w2:p1"));
-        assert!(!source.statuses.contains_key("w4:p1"));
+        assert!(source.gone.is_empty(), "{:?}", source.gone);
+        let panes: Vec<&str> = source
+            .statuses
+            .keys()
+            .map(|(pane, _)| pane.as_str())
+            .collect();
+        assert_eq!(panes, ["w1:p1"], "only the orchestrator's pane is left");
         assert!(source.held.is_empty(), "{:?}", source.held);
     }
 }

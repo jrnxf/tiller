@@ -197,3 +197,54 @@ fn an_edit_made_outside_the_board_reaches_the_stream() {
     heard(&rx, WAIT, "\"entity\":\"memory_repo\"")
         .unwrap_or_else(|seen| panic!("no change for the editor's save; saw {seen:?}"));
 }
+
+/// The memory poller as `/health` shows it.
+fn memory_poller(port: u16) -> serde_json::Value {
+    let answer = fetch(port, "/api/v1/health");
+    let body = answer.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+    let health: serde_json::Value = serde_json::from_str(body).unwrap();
+    health["pollers"]
+        .as_array()
+        .and_then(|pollers| pollers.iter().find(|p| p["source"] == "memory"))
+        .cloned()
+        .unwrap_or_else(|| panic!("no memory poller: {body}"))
+}
+
+/// R20: while the owner marker names another system, the watcher holds like
+/// every other worker. An outside edit writes nothing and the poller does
+/// not fail; once the marker names Tiller again, the edit reaches the board.
+#[test]
+fn the_watcher_holds_while_the_marker_names_another_system() {
+    let world = World::initialized();
+    let root = world.home().join("memory");
+    std::fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "--quiet", "--initial-branch=main"]);
+    commit_outside(
+        &root,
+        "# Fleet\n\n## How we work here\n\n- The first line.\n",
+    );
+    let (_daemon, port) = git_only_daemon(&world);
+    let rx = changes(port);
+    watching(port);
+    drain(&rx, Duration::from_secs(2));
+
+    let marker = world.home().join("owner");
+    std::fs::write(&marker, "other\n").unwrap();
+    commit_outside(
+        &root,
+        "# Fleet\n\n## How we work here\n\n- Edited while read only.\n",
+    );
+    // Long enough for the watcher to see the edit, wait a poll and read it.
+    let held = drain(&rx, Duration::from_secs(5));
+    assert!(
+        held.iter().all(|data| !data.contains("memory_repo")),
+        "{held:?}"
+    );
+    let poller = memory_poller(port);
+    assert_eq!(poller["consecutive_failures"], 0, "{poller}");
+    assert!(poller["last_error"].is_null(), "{poller}");
+
+    std::fs::write(&marker, "tiller\n").unwrap();
+    heard(&rx, WAIT, "\"entity\":\"memory_repo\"")
+        .unwrap_or_else(|seen| panic!("no change after the flip back; saw {seen:?}"));
+}

@@ -12,6 +12,31 @@ use crate::domain::Attention;
 use crate::error::Result;
 use crate::store::{Applied, Ctx, NewEvent, Store};
 
+/// The event kinds of a notification's outcome, as an SQL list:
+/// `attention.notify_sent` (`notification.sent`) and
+/// `attention.notify_failed` (`notification.fail`). A macro, so the
+/// constants below spell the list once.
+macro_rules! outcome_kinds {
+    () => {
+        "'attention.notify_sent', 'attention.notify_failed'"
+    };
+}
+
+/// `outcome_kinds!` as a constant.
+const OUTCOME_KINDS: &str = outcome_kinds!();
+
+/// The SQL condition that leaves out a write-ahead `attention.notified`
+/// record once its outcome follows it, for a query over `events`: one
+/// notification is one timeline line (`protocol.md` 3.4).
+pub(crate) const ONE_LINE_PER_NOTIFICATION: &str = concat!(
+    "NOT (events.kind = 'attention.notified' AND EXISTS (
+    SELECT 1 FROM events AS outcome
+    WHERE outcome.entity = 'attention' AND outcome.entity_id = events.entity_id
+      AND outcome.kind IN (",
+    outcome_kinds!(),
+    ")))"
+);
+
 impl Store {
     /// `notification.record` (daemon): writes `attention.notified` for an
     /// open item, once. The daemon sends the desktop notification only when
@@ -103,16 +128,14 @@ impl Store {
 /// Whether the item has its write-ahead `attention.notified` record and no
 /// outcome (`attention.notify_sent` or `attention.notify_failed`) yet.
 fn awaiting_outcome(conn: &Connection, item: &str) -> Result<bool> {
-    let seen = |kinds: &str| -> Result<bool> {
-        Ok(conn
-            .query_row(
-                &format!("SELECT seq FROM events WHERE kind IN ({kinds}) AND entity_id = ?1"),
-                [item],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .is_some())
-    };
-    Ok(seen("'attention.notified'")?
-        && !seen("'attention.notify_sent', 'attention.notify_failed'")?)
+    Ok(conn.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM events WHERE entity = 'attention' AND entity_id = ?1
+                              AND kind = 'attention.notified')
+                AND NOT EXISTS (SELECT 1 FROM events WHERE entity = 'attention' AND entity_id = ?1
+                                  AND kind IN ({OUTCOME_KINDS}))"
+        ),
+        [item],
+        |row| row.get(0),
+    )?)
 }

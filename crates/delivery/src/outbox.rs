@@ -127,7 +127,9 @@ pub struct Report {
     pub failed: Vec<String>,
     /// Messages reported to the orchestrator or the owner as unread.
     pub reported: Vec<String>,
-    /// `(session, error)` for each session the pass could not serve.
+    /// `(session, error)` for each session the pass could not serve, and
+    /// for each message of a rung batch it could not record (the error
+    /// then names the message).
     pub errors: Vec<(String, String)>,
 }
 
@@ -376,7 +378,32 @@ impl<H: Herdr> Deliverer<H> {
             let next = next_ring(first.unwrap_or(now), rings + 1, now);
             match self.record_ring(ctx, message, pane_id, next) {
                 Ok(()) => report.rung.push(message.id.clone()),
-                Err(error) => Self::failed(report, message.target_session_id.clone(), &error),
+                Err(error) => {
+                    tracing::warn!(message = %message.id, %error, "recording a ring failed");
+                    // Still due, it would have the line typed again on each
+                    // pass while the fault lasts: it waits as for a busy
+                    // pane, in the store if it can be written, else here.
+                    let until = plus_secs(now, BUSY_DEFER_SECS);
+                    let reason = format!("recording the ring failed: {error}");
+                    let text = match self.store.outbox_defer(ctx, &message.id, until, &reason) {
+                        Ok(_) => {
+                            report.deferred.push((message.id.clone(), reason));
+                            format!("message {}: {error}", message.id)
+                        }
+                        Err(defer) => {
+                            tracing::warn!(message = %message.id, error = %defer, "deferring an unrecorded ring failed");
+                            self.quiet(&[message], until);
+                            format!(
+                                "message {}: {error}; deferring it failed too, so it waits in memory only: {defer}",
+                                message.id
+                            )
+                        }
+                    };
+                    // One error entry per message, whatever failed.
+                    report
+                        .errors
+                        .push((message.target_session_id.clone(), text));
+                }
             }
         }
     }
@@ -391,15 +418,14 @@ impl<H: Herdr> Deliverer<H> {
         match self.store.outbox_deliver(ctx, &message.id, pane_id, next) {
             Ok(_) => Ok(()),
             // The target's hook acked the batch the moment the line was
-            // submitted, before this record.
-            Err(_)
-                if get::<OutboxMessage>(self.store.conn(), "outbox message", &message.id)?
-                    .state
-                    == OutboxState::Acked =>
-            {
-                Ok(())
+            // submitted, before this record. A read that fails too keeps
+            // the record's own error.
+            Err(error) => {
+                match get::<OutboxMessage>(self.store.conn(), "outbox message", &message.id) {
+                    Ok(now) if now.state == OutboxState::Acked => Ok(()),
+                    _ => Err(error.into()),
+                }
             }
-            Err(error) => Err(error.into()),
         }
     }
 

@@ -10,12 +10,25 @@
 //! is the watcher's own JSON; the store only keeps it. It is rebuildable:
 //! without it the first look is the baseline.
 
+use std::collections::HashSet;
+
 use rusqlite::OptionalExtension;
 use serde_json::json;
 
 use super::projects::{meta, require_daemon};
 use crate::error::Result;
 use crate::store::{Applied, Ctx, NewEvent, Store, Tx};
+
+/// The events that record a commit Tiller made to the memory repo, as a
+/// literal so each query that reads them stays one `&'static str`.
+macro_rules! tiller_commits {
+    () => {
+        " FROM events
+         WHERE kind = 'memory_revision.recorded'
+           AND json_extract(payload, '$.provenance') = 'tiller'
+           AND json_extract(payload, '$.commit_sha') IS NOT NULL"
+    };
+}
 
 /// The `meta` key that holds the watcher's last look.
 const WATCH: &str = "memory_watch";
@@ -74,10 +87,11 @@ impl Store {
         Ok(self
             .conn()
             .query_row(
-                "SELECT seq, json_extract(payload, '$.commit_sha') FROM events
-                 WHERE kind = 'memory_revision.recorded'
-                   AND json_extract(payload, '$.commit_sha') IS NOT NULL
-                 ORDER BY seq DESC LIMIT 1",
+                concat!(
+                    "SELECT seq, json_extract(payload, '$.commit_sha')",
+                    tiller_commits!(),
+                    " ORDER BY seq DESC LIMIT 1"
+                ),
                 [],
                 |row| {
                     Ok(TillerCommit {
@@ -87,6 +101,21 @@ impl Store {
                 },
             )
             .optional()?)
+    }
+
+    /// The commits of the Tiller revisions recorded after `seq` (all of them
+    /// when `seq` is `None`): the commits the watcher may read as Tiller's
+    /// own since its last look.
+    pub fn mem_commits_since(&self, seq: Option<i64>) -> Result<HashSet<String>> {
+        let mut statement = self.conn().prepare_cached(concat!(
+            "SELECT json_extract(payload, '$.commit_sha')",
+            tiller_commits!(),
+            " AND seq > ?1"
+        ))?;
+        let commits = statement
+            .query_map([seq.unwrap_or(0)], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<HashSet<String>>>()?;
+        Ok(commits)
     }
 }
 
@@ -169,7 +198,7 @@ mod tests {
                 .unwrap()
                 .value
         };
-        record(
+        let first = record(
             &mut store,
             json!({"commit_sha": "c1", "provenance": "tiller"}),
         );
@@ -182,6 +211,12 @@ mod tests {
             &mut store,
             json!({"blob_sha": "b3", "provenance": "external"}),
         );
+        // One that names a commit with another provenance is not Tiller's
+        // commit either.
+        record(
+            &mut store,
+            json!({"commit_sha": "c4", "provenance": "external"}),
+        );
         assert_eq!(
             store.mem_last_commit().unwrap(),
             Some(TillerCommit {
@@ -189,5 +224,14 @@ mod tests {
                 commit: "c2".into()
             })
         );
+        let since = |seq| {
+            let mut commits: Vec<String> =
+                store.mem_commits_since(seq).unwrap().into_iter().collect();
+            commits.sort();
+            commits
+        };
+        assert_eq!(since(None), ["c1", "c2"]);
+        assert_eq!(since(Some(first)), ["c2"]);
+        assert_eq!(since(Some(second)), Vec::<String>::new());
     }
 }

@@ -5,6 +5,7 @@
 //! Nothing here writes outside `<repo>/.git` and the one canonical file the
 //! approval names.
 
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
@@ -52,8 +53,10 @@ fn internal(what: &str, error: impl std::fmt::Display) -> Error {
 }
 
 /// A canonical path: relative, with plain components only.
-fn checked(path: &str) -> Result<&str> {
+pub(crate) fn checked(path: &str) -> Result<&str> {
+    // A control character would split a line of git's batch input.
     let plain = !path.is_empty()
+        && !path.chars().any(char::is_control)
         && Path::new(path)
             .components()
             .all(|part| matches!(part, Component::Normal(_)));
@@ -229,31 +232,96 @@ impl Repo {
         if paths.is_empty() || self.head()?.is_none() {
             return Ok(vec![String::new(); paths.len()]);
         }
+        Ok(self
+            .bytes_at("HEAD", paths)?
+            .into_iter()
+            .map(|bytes| String::from_utf8_lossy(&bytes.unwrap_or_default()).into_owned())
+            .collect())
+    }
+
+    /// The bytes of each path at `rev`, `None` when it is not a file there,
+    /// from one git process.
+    pub(crate) fn bytes_at(&self, rev: &str, paths: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut input = String::new();
         for path in paths {
-            input.push_str("HEAD:");
+            input.push_str(rev);
+            input.push(':');
             input.push_str(checked(path)?);
             input.push('\n');
         }
         let out = self.git_bytes(&["cat-file", "--batch"], &input)?;
         let mut rest = out.as_slice();
-        let mut texts = Vec::with_capacity(paths.len());
+        let mut found = Vec::with_capacity(paths.len());
         for _ in paths {
             let end = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
             let header = String::from_utf8_lossy(&rest[..end]).into_owned();
             rest = rest.get(end + 1..).unwrap_or_default();
-            // `<oid> blob <size>`, then the bytes; `<name> missing` otherwise.
+            // `<oid> <type> <size>`, then the bytes; `<name> missing` otherwise.
             let mut parts = header.rsplit(' ');
             let size = parts.next().and_then(|s| s.parse::<usize>().ok());
             match (size, parts.next()) {
-                (Some(size), Some("blob")) if size <= rest.len() => {
-                    texts.push(String::from_utf8_lossy(&rest[..size]).into_owned());
+                (Some(size), Some(kind)) if size <= rest.len() => {
+                    found.push((kind == "blob").then(|| rest[..size].to_vec()));
                     rest = rest.get(size + 1..).unwrap_or_default();
                 }
-                _ => texts.push(String::new()),
+                _ => found.push(None),
             }
         }
-        Ok(texts)
+        Ok(found)
+    }
+
+    /// Each commit reachable from `to` and not from `from` (every commit of
+    /// `to` when `from` is `None`, or names a commit the repo no longer
+    /// has), newest first along first parents, with the paths it wrote: at
+    /// most `limit` of them and one more, so a caller can tell a longer
+    /// list. A merge wrote every path it changed against its first parent,
+    /// so the changes it brought in are its own. The flags fix what the
+    /// owner's git config could change. One git process reads it all.
+    pub(crate) fn history(
+        &self,
+        from: Option<&str>,
+        to: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, HashSet<String>)>> {
+        let count = format!("--max-count={}", limit + 1);
+        let not = from.map(|from| format!("^{from}"));
+        let mut args = vec![
+            "log",
+            "--first-parent",
+            "--diff-merges=first-parent",
+            "--root",
+            "--no-show-signature",
+            "--no-renames",
+            "--no-color",
+            "--name-only",
+            "-z",
+            "--ignore-missing",
+            &count,
+            "--format=%x01%H",
+            to,
+        ];
+        args.extend(not.as_deref());
+        let out = self.git(None, &args, None)?;
+        let mut commits: Vec<(String, HashSet<String>)> = Vec::new();
+        for field in out.split('\0') {
+            // A commit's field is its marker and its hash, alone; a path
+            // field follows the newline that ends the commit's line.
+            let commit = field
+                .strip_prefix('\u{1}')
+                .filter(|hash| hash.len() >= 40 && hash.bytes().all(|b| b.is_ascii_hexdigit()));
+            if let Some(commit) = commit {
+                commits.push((commit.to_owned(), HashSet::new()));
+                continue;
+            }
+            let path = field.strip_prefix('\n').unwrap_or(field);
+            if let (false, Some((_, paths))) = (path.is_empty(), commits.last_mut()) {
+                paths.insert(path.to_owned());
+            }
+        }
+        Ok(commits)
     }
 
     /// The file as Tiller checks it before every change.

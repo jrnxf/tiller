@@ -235,13 +235,13 @@ async fn the_boards_own_write_is_not_an_outside_change() {
     let mut watcher = Watcher::new(home, Store::open(&fleet.db).unwrap());
     look(&mut watcher);
 
-    let edit = |key: &'static str, text: &'static str| {
+    let edit_in = |project: &'static str, key: &'static str, text: &'static str| {
         let app = app.clone();
         let cookie = cookie.clone();
         async move {
-            let view = get(&app, "/api/v1/memory?scope=fleet").await;
+            let view = get(&app, &format!("/api/v1/memory?scope={project}")).await;
             let view: Value = serde_json::from_str(&view.body).unwrap();
-            let body = json!({"idempotency_key": key, "project": "fleet", "op": "add",
+            let body = json!({"idempotency_key": key, "project": project, "op": "add",
                               "section": RULE_SECTION, "text": text,
                               "base_blob": view["doc"]["blob"]});
             let answer = send(
@@ -252,6 +252,7 @@ async fn the_boards_own_write_is_not_an_outside_change() {
             assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
         }
     };
+    let edit = |key: &'static str, text: &'static str| edit_in("fleet", key, text);
     let root = Repo::at(home).root().to_owned();
     // The first edit makes the repo; the second commits on top of it. Each
     // time the watcher reads the new HEAD and writes nothing.
@@ -272,15 +273,209 @@ async fn the_boards_own_write_is_not_an_outside_change() {
     }
     assert_eq!(changes(&watcher), Vec::<Value>::new());
 
-    // An edit and an editor's save of another document in one window.
+    // An edit and an editor's save of another document in one window: the
+    // change names only the document saved outside Tiller.
     edit("k-3", "Keep the third line").await;
     std::fs::create_dir_all(root.join("projects")).unwrap();
     std::fs::write(root.join("projects/alpha.md"), "# Alpha, by hand\n").unwrap();
     look(&mut watcher);
     assert_eq!(
         look(&mut watcher),
+        Some(vec!["projects/alpha.md".to_owned()])
+    );
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        changes(&watcher),
+        [json!({"head": head.trim(), "files": ["projects/alpha.md"]})]
+    );
+
+    // An editor's save over the document Tiller just committed is a change
+    // of that document.
+    edit("k-4", "Keep the fourth line").await;
+    let fleet_md = root.join("fleet.md");
+    let mut text = std::fs::read_to_string(&fleet_md).unwrap();
+    text.push_str("- Typed by hand after the commit.\n");
+    std::fs::write(&fleet_md, text).unwrap();
+    look(&mut watcher);
+    assert_eq!(look(&mut watcher), Some(vec!["fleet.md".to_owned()]));
+    git(&root, &["checkout", "--quiet", "--", "fleet.md"]);
+    look(&mut watcher);
+    look(&mut watcher);
+
+    // A commit made by hand, then Tiller's commit on top of it in one
+    // window: the document the hand commit wrote is a change, though it
+    // matches HEAD.
+    commit(&root, "projects/alpha.md", "# Alpha, committed by hand\n");
+    edit("k-5", "Keep the fifth line").await;
+    look(&mut watcher);
+    assert_eq!(
+        look(&mut watcher),
+        Some(vec!["projects/alpha.md".to_owned()])
+    );
+
+    // Two of Tiller's commits, to two documents, in one window: the first
+    // commit's document is Tiller's write too, though `HEAD` did not write
+    // it.
+    edit("k-6", "Keep the sixth line").await;
+    edit_in("alpha", "k-7", "Keep the seventh line").await;
+    look(&mut watcher);
+    assert_eq!(look(&mut watcher), None);
+    assert_eq!(changes(&watcher).len(), 4, "no change since k-5");
+
+    // An outside merge between Tiller's commits that brings in only
+    // another file: Tiller's document is still Tiller's write, though it
+    // differs from the merged branch.
+    let base = git(&root, &["rev-parse", "HEAD"]);
+    edit("k-6b", "Keep the line before the merge").await;
+    git(&root, &["checkout", "--quiet", "-b", "side", base.trim()]);
+    commit(&root, "README.md", "# Notes\n");
+    git(&root, &["checkout", "--quiet", "main"]);
+    git(
+        &root,
+        &[
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "--no-gpg-sign",
+            "--no-edit",
+            "side",
+        ],
+    );
+    edit_in("alpha", "k-7b", "Keep the line after the merge").await;
+    look(&mut watcher);
+    assert_eq!(look(&mut watcher), None);
+    assert_eq!(changes(&watcher).len(), 4, "no change since k-5");
+
+    // The owner's git config does not change how the watcher reads the
+    // history.
+    git(&root, &["config", "log.diffMerges", "combined"]);
+    git(&root, &["config", "log.showRoot", "false"]);
+
+    // On another branch, an outside merge of Tiller's branch that keeps
+    // that branch's text of Tiller's document owns the text, though Tiller
+    // wrote the document too; Tiller then commits on that branch.
+    let base = git(&root, &["rev-parse", "HEAD"]);
+    git(&root, &["checkout", "--quiet", "-b", "other", base.trim()]);
+    commit(
+        &root,
+        "projects/alpha.md",
+        "# Alpha, from the other branch\n",
+    );
+    git(&root, &["checkout", "--quiet", "main"]);
+    edit_in("alpha", "k-7c", "Keep the line the merge drops").await;
+    git(&root, &["checkout", "--quiet", "other"]);
+    git(
+        &root,
+        &[
+            "merge",
+            "--quiet",
+            "--no-gpg-sign",
+            "--no-edit",
+            "-s",
+            "ours",
+            "main",
+        ],
+    );
+    edit("k-7d", "Keep the line after the second merge").await;
+    look(&mut watcher);
+    assert_eq!(
+        look(&mut watcher),
+        Some(vec!["projects/alpha.md".to_owned()])
+    );
+
+    // A merge into Tiller's branch that takes the other branch's text of
+    // Tiller's document whole owns that text too.
+    let base = git(&root, &["rev-parse", "HEAD"]);
+    git(
+        &root,
+        &["checkout", "--quiet", "-b", "outside", base.trim()],
+    );
+    commit(&root, "projects/alpha.md", "# Alpha, from outside\n");
+    git(&root, &["checkout", "--quiet", "other"]);
+    edit_in("alpha", "k-7e", "Keep the line the second merge drops").await;
+    git(
+        &root,
+        &["merge", "--quiet", "--no-commit", "-X", "theirs", "outside"],
+    );
+    git(
+        &root,
+        &["checkout", "--quiet", "outside", "--", "projects/alpha.md"],
+    );
+    git(&root, &["commit", "--quiet", "--no-gpg-sign", "--no-edit"]);
+    edit("k-7f", "Keep the line after the third merge").await;
+    look(&mut watcher);
+    assert_eq!(
+        look(&mut watcher),
+        Some(vec!["projects/alpha.md".to_owned()])
+    );
+
+    // Tiller commits the bytes it writes, with no clean filter between, so
+    // a filter in the repo does not make its own write look like an
+    // outside one.
+    git(
+        &root,
+        &["config", "filter.shout.clean", "sed s/eighth/EIGHTH/"],
+    );
+    std::fs::write(root.join(".git/info/attributes"), "fleet.md filter=shout\n").unwrap();
+    edit("k-8", "Keep the eighth line").await;
+    let stored = git(&root, &["show", "HEAD:fleet.md"]);
+    assert!(stored.contains("Keep the eighth line"), "{stored}");
+    look(&mut watcher);
+    assert_eq!(look(&mut watcher), None);
+}
+
+/// A document the watcher cannot read is a change of that document, not a
+/// failed look: an edit of another document still reaches the board, and
+/// the document is a change again once it can be read.
+#[test]
+fn an_unreadable_document_does_not_stop_the_watcher() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = tempfile::tempdir().unwrap();
+    let root = repo(home.path(), "# Fleet\n\n- First.\n");
+    commit(&root, "projects/alpha.md", "# Alpha\n");
+    let mut watcher = watcher(home.path());
+    look(&mut watcher);
+
+    let alpha = root.join("projects/alpha.md");
+    std::fs::set_permissions(&alpha, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&alpha).is_ok() {
+        // File modes do not bind this user (root): nothing here can make a
+        // document unreadable.
+        eprintln!("skipped: file modes do not bind this user");
+        return;
+    }
+    std::fs::write(root.join("fleet.md"), "# Fleet\n\n- Saved by hand.\n").unwrap();
+    look(&mut watcher);
+    assert_eq!(
+        look(&mut watcher),
         Some(vec!["fleet.md".to_owned(), "projects/alpha.md".to_owned()])
     );
+    std::fs::write(root.join("fleet.md"), "# Fleet\n\n- Saved again.\n").unwrap();
+    look(&mut watcher);
+    assert_eq!(look(&mut watcher), Some(vec!["fleet.md".to_owned()]));
+
+    std::fs::set_permissions(&alpha, std::fs::Permissions::from_mode(0o644)).unwrap();
+    look(&mut watcher);
+    assert_eq!(
+        look(&mut watcher),
+        Some(vec!["projects/alpha.md".to_owned()])
+    );
+}
+
+/// A file whose name holds a newline is not a memory document: git's batch
+/// input is one path a line, so the watcher never takes one.
+#[test]
+fn a_name_with_a_newline_is_not_watched() {
+    let home = tempfile::tempdir().unwrap();
+    let root = repo(home.path(), "# Fleet\n\n- First.\n");
+    let mut watcher = watcher(home.path());
+    look(&mut watcher);
+
+    std::fs::create_dir_all(root.join("projects")).unwrap();
+    std::fs::write(root.join("projects/a\nb.md"), "# Split\n").unwrap();
+    std::fs::write(root.join("fleet.md"), "# Fleet\n\n- Saved by hand.\n").unwrap();
+    look(&mut watcher);
+    assert_eq!(look(&mut watcher), Some(vec!["fleet.md".to_owned()]));
 }
 
 /// An edit made while the daemon is down is seen when it starts again: the

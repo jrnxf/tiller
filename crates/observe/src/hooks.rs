@@ -17,6 +17,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use tiller_core::domain::{Activity, ObservationSource, Session};
 use tiller_core::error::READ_ONLY_MARKER;
+use tiller_core::owner::Marker;
 use tiller_core::state::runs::{Bind, NewObservation};
 use tiller_core::state::{find, get};
 use tiller_core::{Actor, Ctx, Error, Store, Timestamp};
@@ -350,8 +351,23 @@ pub fn run_with(
     env: &Env,
     intake: Option<&dyn Intake>,
 ) -> (Outcome, Option<Value>) {
-    if !owner_is_tiller(&env.tiller_home) {
-        return (Outcome::NotOwner, None);
+    // Another system's hooks own the session (`recovery.md` R20), so the
+    // hook yields and spools nothing. A marker that cannot be read may name
+    // one, so the hook yields too, and says why in its log for an event it
+    // would have recorded: a lasting read error would otherwise leave no
+    // trace.
+    match tiller_core::owner::read(&env.tiller_home) {
+        Marker::Tiller => {}
+        Marker::Other(_) => return (Outcome::NotOwner, None),
+        Marker::Unreadable(error) => {
+            if handler(event) != Handler::Ignore {
+                log(
+                    env,
+                    &format!("{event}: yielded, the owner marker could not be read ({error})"),
+                );
+            }
+            return (Outcome::NotOwner, None);
+        }
     }
     let observed = match observe(event, input, env, Timestamp::now()) {
         Ok(Some(observed)) => observed,
@@ -687,7 +703,10 @@ pub fn import_spool(store: &mut Store, env: &Env) -> tiller_core::Result<usize> 
                     fs::remove_file(&path).map_err(|error| Error::Internal(error.to_string()))?;
                     imported += 1;
                 }
-                Err(error @ Error::Unavailable(_)) => return Err(error),
+                // A busy database, or a marker that flipped to another
+                // system since the pass began: the file waits for a pass
+                // that can write it.
+                Err(error @ (Error::Unavailable(_) | Error::OwnerMarker(_))) => return Err(error),
                 Err(error) => {
                     log(
                         env,
@@ -728,15 +747,6 @@ fn fresh_working(session: &Session, now: Timestamp) -> bool {
         && session
             .activity_observed_at
             .is_some_and(|at| now.as_millis() - at.as_millis() < TOOL_COALESCE_MS)
-}
-
-/// `~/.tiller/owner` absent or saying `tiller`. Any other name means another
-/// system's hooks own the session (`recovery.md` R20).
-fn owner_is_tiller(home: &Path) -> bool {
-    match fs::read_to_string(home.join("owner")) {
-        Ok(text) => text.trim() == "tiller",
-        Err(_) => true,
-    }
 }
 
 /// Writes `observed` to `<ulid>.json.tmp` and renames it to `<ulid>.json`, so

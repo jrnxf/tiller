@@ -20,22 +20,53 @@ pub const TILLER: &str = "tiller";
 /// The command that hands the host back to Tiller.
 pub const FLIP_BACK: &str = flip_back!();
 
+/// What the marker in a Tiller home says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Marker {
+    /// Missing, empty or `tiller`: Tiller's writes go ahead.
+    Tiller,
+    /// The other system the marker names.
+    Other(String),
+    /// The marker could not be read, so it may name another system.
+    Unreadable(String),
+}
+
+/// Reads the marker in `home`. [`check`] is the gate for a write; a caller
+/// that must treat an unreadable marker apart from a foreign one, such as a
+/// hook that spools it, reads it here.
+pub fn read(home: &Path) -> Marker {
+    match std::fs::read_to_string(home.join(MARKER)) {
+        Ok(text) => match text.trim() {
+            "" | TILLER => Marker::Tiller,
+            other => Marker::Other(other.to_owned()),
+        },
+        Err(error) if error.kind() == ErrorKind::NotFound => Marker::Tiller,
+        Err(error) => Marker::Unreadable(error.to_string()),
+    }
+}
+
 /// [`Error::OwnerMarker`] while the marker in `home` names another system,
 /// or cannot be read.
 pub fn check(home: &Path) -> Result<()> {
-    let path = home.join(MARKER);
-    match std::fs::read_to_string(&path) {
-        Ok(text) => match text.trim() {
-            "" | TILLER => Ok(()),
-            other => Err(Error::OwnerMarker(format!(
-                "the owner marker names {other:?}, not \"{TILLER}\""
-            ))),
-        },
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(Error::OwnerMarker(format!(
+    match read(home) {
+        Marker::Tiller => Ok(()),
+        Marker::Other(other) => Err(Error::OwnerMarker(format!(
+            "the owner marker names {other:?}, not \"{TILLER}\""
+        ))),
+        Marker::Unreadable(error) => Err(Error::OwnerMarker(format!(
             "the owner marker could not be read ({error}), so it may name another system"
         ))),
     }
+}
+
+/// The name the marker in `home` holds, trimmed; `None` when it is
+/// missing, empty or cannot be read. For showing the marker: [`check`]
+/// decides whether a write may go ahead.
+pub fn name(home: &Path) -> Option<String> {
+    std::fs::read_to_string(home.join(MARKER))
+        .ok()
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
 }
 
 #[cfg(test)]

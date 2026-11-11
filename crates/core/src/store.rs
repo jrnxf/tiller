@@ -293,9 +293,12 @@ fn home_of(path: &Path) -> Option<PathBuf> {
 /// An open `state.db`.
 pub struct Store {
     conn: Connection,
-    /// The directory that holds `state.db` and its owner marker; none for
-    /// an in-memory database.
+    /// The directory that holds `state.db` and its backups; none for an
+    /// in-memory database.
     home: Option<PathBuf>,
+    /// The Tiller home whose owner marker every write checks, when
+    /// [`Store::with_owner_home`] names one; else `home`.
+    owner_home: Option<PathBuf>,
 }
 
 impl Store {
@@ -310,6 +313,7 @@ impl Store {
         Ok(Self {
             conn,
             home: home_of(path.as_ref()),
+            owner_home: None,
         })
     }
 
@@ -328,6 +332,7 @@ impl Store {
         Ok(Self {
             conn,
             home: home_of(path.as_ref()),
+            owner_home: None,
         })
     }
 
@@ -336,7 +341,11 @@ impl Store {
         let mut conn = Connection::open_in_memory()?;
         configure(&conn)?;
         migrate::up(&mut conn)?;
-        Ok(Self { conn, home: None })
+        Ok(Self {
+            conn,
+            home: None,
+            owner_home: None,
+        })
     }
 
     /// An in-memory copy of this database, for tests that run many cases
@@ -349,14 +358,27 @@ impl Store {
             return Err(Error::Internal(format!("the copy stopped: {step:?}")));
         }
         configure(&conn)?;
-        Ok(Self { conn, home: None })
+        Ok(Self {
+            conn,
+            home: None,
+            owner_home: None,
+        })
     }
 
-    /// Refuses a mutation while the owner marker beside `state.db` names
+    /// Checks the owner marker in `home`, the Tiller home, instead of the
+    /// database's directory: a CLI given `--db` outside its home answers
+    /// to the home's marker, as its own check does (`recovery.md` R20).
+    #[must_use]
+    pub fn with_owner_home(mut self, home: impl Into<PathBuf>) -> Self {
+        self.owner_home = Some(home.into());
+        self
+    }
+
+    /// Refuses a mutation while the owner marker in the Tiller home names
     /// another system (`recovery.md` R20). Read on every write, since the
     /// owner can flip it while the store is open.
     fn check_owner(&self) -> Result<()> {
-        match &self.home {
+        match self.owner_home.as_deref().or(self.home.as_deref()) {
             Some(home) => crate::owner::check(home),
             None => Ok(()),
         }
