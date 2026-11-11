@@ -162,7 +162,7 @@ export function BugTriage({
         <button
           ref={pickButton}
           type="button"
-          className="btn ghost"
+          className="btn"
           disabled={busy || !local}
           title={local ? `Pick the project that takes Tiller bugs on ${host}` : PICK_IS_LOCAL}
           onClick={() => setPicking(true)}

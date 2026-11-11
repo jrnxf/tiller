@@ -997,18 +997,6 @@ kbd {
   height: 14px;
 }
 
-.btn.ghost {
-  border-color: transparent;
-  background: transparent;
-  box-shadow: none;
-  color: var(--fg-3);
-}
-
-.btn.ghost:hover {
-  background: var(--bg-hover);
-  color: var(--fg-1);
-}
-
 .ib {
   width: 28px;
   height: 28px;
