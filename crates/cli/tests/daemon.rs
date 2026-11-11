@@ -924,9 +924,59 @@ fn curator_home(world: &World, body: &str) -> (std::path::PathBuf, String) {
     (fake, retro)
 }
 
-/// A stand-in curator that exits `code` without finishing its retro.
-fn exiting(code: i32) -> String {
-    format!("#!/bin/sh\nexit {code}\n")
+/// A log the stand-in curators add a line to on each run, so a test counts
+/// the runs.
+struct RunLog(std::path::PathBuf);
+
+impl RunLog {
+    fn new(world: &World) -> Self {
+        Self(world.dir.path().join("curator-runs"))
+    }
+
+    /// A stand-in curator that records its run, then runs `rest`.
+    fn curator(&self, rest: &str) -> String {
+        let path = self.0.display().to_string().replace('\'', "'\\''");
+        format!("#!/bin/sh\necho run >> '{path}'\n{rest}")
+    }
+
+    fn count(&self) -> usize {
+        std::fs::read_to_string(&self.0)
+            .map(|text| text.lines().count())
+            .unwrap_or(0)
+    }
+}
+
+/// Asks for a reconcile pass with Run now, and waits until one that
+/// started at or after `asked` is over. Run now answers with the poller's
+/// health after the pass, or as it stands when the pass takes longer; then
+/// `GET /api/v1/health` is read until it shows the pass.
+fn reconciled_after(world: &World, port: u16, asked: tiller_core::Timestamp) {
+    let after = |poller: &Value| {
+        poller["last_attempt_at"]
+            .as_str()
+            .and_then(|at| at.parse::<tiller_core::Timestamp>().ok())
+            .is_some_and(|at| at.as_millis() >= asked.as_millis())
+    };
+    let key = format!(r#"{{"idempotency_key":"reconcile-{}"}}"#, asked.as_millis());
+    let (status, answer) = post_as_board(world, port, "/api/v1/pollers/reconcile/run", &key);
+    assert_eq!(status, "HTTP/1.0 200 OK", "{answer}");
+    if after(&answer["data"]) {
+        return;
+    }
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let (_, body) = get(port, "/api/v1/health");
+        let health: Value = serde_json::from_str(&body).unwrap();
+        let passed = health["pollers"]
+            .as_array()
+            .and_then(|pollers| pollers.iter().find(|p| p["source"] == "reconcile"))
+            .is_some_and(after);
+        if passed {
+            return;
+        }
+        assert!(Instant::now() < deadline, "no reconcile pass ran: {body}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// The board's view of `retro` from `GET /api/v1/retros`.
@@ -971,7 +1021,8 @@ fn run_again(world: &World, port: u16, retro: &str, key: &str) -> (String, Value
 #[test]
 fn the_board_runs_an_unfinished_retro_again() {
     let world = World::initialized();
-    let (fake, retro) = curator_home(&world, &exiting(3));
+    let runs = RunLog::new(&world);
+    let (fake, retro) = curator_home(&world, &runs.curator("exit 3\n"));
     let ran = world.must(&["retro", "run", &retro]);
     assert_eq!(ran.data()["retro"]["outcome"], "unfinished", "{}", ran.json);
     let mut daemon = start(&world);
@@ -983,7 +1034,9 @@ fn the_board_runs_an_unfinished_retro_again() {
     );
     assert!(view["run_refusal"].is_null(), "{view}");
 
-    std::fs::write(&fake, exiting(4)).unwrap();
+    assert_eq!(runs.count(), 1);
+
+    std::fs::write(&fake, runs.curator("exit 4\n")).unwrap();
     let (status, answer) = run_again(&world, daemon.port, &retro, "again-1");
     assert_eq!(status, "HTTP/1.0 200 OK", "{answer}");
     assert_eq!(answer["data"]["state"], "pending", "{answer}");
@@ -994,18 +1047,25 @@ fn the_board_runs_an_unfinished_retro_again() {
         "curator exited 4 without finishing the retro"
     );
     assert_eq!(view["started_by"], "board", "{view}");
-    // Nothing runs it again by itself.
-    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(runs.count(), 2, "one click ran one curator");
+    // Nothing runs it again by itself. Only Run again starts a curator, and
+    // its thread ends with the run. The one worker that comes back to retros
+    // on its own is the learning sweep in the reconcile pass, which only
+    // schedules them, so a whole pass that started after the run ended is
+    // the proof, not a wait. A start there would claim the retro in the
+    // store first, so the status and the start would show it.
+    reconciled_after(&world, daemon.port, tiller_core::Timestamp::now());
     let later = retro_view(daemon.port, &retro);
     assert_eq!(later["status"], "unfinished", "{later}");
     assert_eq!(later["curator_started_at"], view["curator_started_at"]);
+    assert_eq!(runs.count(), 2, "a curator ran that no click started");
 
     std::fs::write(
         &fake,
-        format!(
-            "#!/bin/sh\n\"{tiller}\" retro finish \"$TILLER_RETRO_ID\" --nothing >/dev/null\n",
+        runs.curator(&format!(
+            "\"{tiller}\" retro finish \"$TILLER_RETRO_ID\" --nothing >/dev/null\n",
             tiller = env!("CARGO_BIN_EXE_tiller")
-        ),
+        )),
     )
     .unwrap();
     let (status, answer) = run_again(&world, daemon.port, &retro, "again-2");
@@ -1018,6 +1078,7 @@ fn the_board_runs_an_unfinished_retro_again() {
     let (status, answer) = run_again(&world, daemon.port, &retro, "again-3");
     assert_eq!(status, "HTTP/1.0 422 Unprocessable Entity", "{answer}");
     assert!(terminate(&mut daemon).success());
+    assert_eq!(runs.count(), 3, "one curator for each click that ran one");
 }
 
 /// A retried Run again answers the same retro after the daemon restarts
@@ -1026,23 +1087,15 @@ fn the_board_runs_an_unfinished_retro_again() {
 #[test]
 fn a_replayed_run_again_after_a_restart_starts_no_second_curator() {
     let world = World::initialized();
-    let runs = world.dir.path().join("curator-runs");
-    let (_fake, retro) = curator_home(
-        &world,
-        &format!("#!/bin/sh\necho run >> '{}'\nexit 4\n", runs.display()),
-    );
-    let count = || {
-        std::fs::read_to_string(&runs)
-            .map(|text| text.lines().count())
-            .unwrap_or(0)
-    };
+    let runs = RunLog::new(&world);
+    let (_fake, retro) = curator_home(&world, &runs.curator("exit 4\n"));
     let mut daemon = start(&world);
     let (status, first) = run_again(&world, daemon.port, &retro, "click-1");
     assert_eq!(status, "HTTP/1.0 200 OK", "{first}");
     assert_eq!(first["replayed"], false, "{first}");
     let view = settled(daemon.port, &retro);
     assert_eq!(view["status"], "unfinished", "{view}");
-    assert_eq!(count(), 1);
+    assert_eq!(runs.count(), 1);
     assert!(terminate(&mut daemon).success());
     // A start clears the curator's scratch directory and writes its launch
     // there before it answers, and a curator starts only from a written
@@ -1065,7 +1118,7 @@ fn a_replayed_run_again_after_a_restart_starts_no_second_curator() {
     assert_eq!(again["events"], serde_json::json!([]), "{again}");
     assert!(marker.exists(), "the replay prepared the curator again");
     let later = settled(daemon.port, &retro);
-    assert_eq!(count(), 1, "a second curator ran for one click");
+    assert_eq!(runs.count(), 1, "a second curator ran for one click");
     assert_eq!(later["status"], "unfinished", "{later}");
     assert_eq!(later["curator_started_at"], view["curator_started_at"]);
     // A new click runs it again.
@@ -1073,7 +1126,7 @@ fn a_replayed_run_again_after_a_restart_starts_no_second_curator() {
     assert_eq!(status, "HTTP/1.0 200 OK", "{fresh}");
     assert_eq!(fresh["replayed"], false, "{fresh}");
     settled(daemon.port, &retro);
-    assert_eq!(count(), 2);
+    assert_eq!(runs.count(), 2);
     assert!(terminate(&mut daemon).success());
 }
 
