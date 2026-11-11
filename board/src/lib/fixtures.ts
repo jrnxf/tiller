@@ -155,15 +155,24 @@ const minutes = (now: number, delta: number) => new Date(now + delta * 60_000).t
 
 const WEEK = 7 * 24 * 60 * 60_000;
 
-// The stand-in week resets on Tuesdays at 14:00 Lisbon time: the first such
-// reset after `now`, so every screen that names it (the sidebar, Health and
-// the holdout plan) names the same future time on any day.
+// The stand-in week resets on Tuesdays at 14:00 UTC (14:00 Lisbon time in
+// winter, 15:00 in summer): the first such reset after `now`, so every
+// screen that names it (the sidebar, Health and the holdout plan) names the
+// same future time on any day.
 const WEEK_RESET = Date.parse("2026-11-03T14:00:00.000Z");
 function weekOffset(now: number): number {
   return Math.max(0, Math.ceil((now - WEEK_RESET) / WEEK)) * WEEK;
 }
 const weekly = (now: number, at: string) =>
   new Date(Date.parse(at) + weekOffset(now)).toISOString();
+
+// The red stand-in week runs out at the same share of the time to its reset
+// on any day: 8 of the 26 hours that Monday 12:00 UTC has left. So the
+// runway always ends after `now` and before the reset.
+function weeklyExhaustion(now: number): string {
+  const reset = Date.parse(weekly(now, "2026-11-03T14:00:00.000Z"));
+  return new Date(now + Math.round(((reset - now) * 8) / 26)).toISOString();
+}
 
 function weeklyWindow(
   now: number,
@@ -255,7 +264,7 @@ function quotaFor(scenario: Scenario, now: number): QuotaResponse {
             pace: "ahead",
             burn_multiple: 2.2,
             reserve: -31,
-            projected_exhaustion_at: weekly(now, "2026-11-02T20:00:00.000Z"),
+            projected_exhaustion_at: weeklyExhaustion(now),
           }),
           sessionWindow(now),
           modelWindow(now),
