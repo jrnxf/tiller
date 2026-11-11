@@ -219,7 +219,7 @@ Every estimate below is agent wall-clock time for one lane, including that task'
 | Federated board (F1 to F6, ADR 0003) | 13-17.5 h | 10.5-14 h, beside waves E and F, off the day-one critical path |
 | Cutover, all three hosts | 4.5-6.5 h | 4.5-6.5 h, plus stability days between hosts |
 | After day one (M7) | 14-21 h | 10-14 h |
-| Terminal holder (H00 to H15 and the S1 slice, ADR 0004) | about 69 h | about 56 h, after M6; see `docs/design/terminal-holder.md` section 13 |
+| Terminal holder (H00 to H15 and the S1 slice, ADR 0004) | about 69 h | about 57 h; see `docs/design/terminal-holder.md` section 13 |
 
 Day one is higher than the 50-70 h in plan v2 for three reasons: this plan adds the spec phase (M1), counts review and CI on every task, and adds about 8-12 h for the Rust core (compile loops and async work) and the two-toolchain setup. The approved mocks moved the Health page into day one (T3.5, 2-3 h) and shrank the after-day-one health work (T7.1).
 
@@ -799,7 +799,7 @@ ADR 0003 (accepted Tuesday 2026-11-03) gives the owner one board across hosts: e
 
 ## M5H: Terminal holder
 
-ADR 0004 (accepted Wednesday 2026-11-11) makes Tiller own its terminals: a holder process per host owns the agent PTYs, the board is the main pane UI, and `tiller attach` gives a real terminal. It replaces herdr, and `crates/herdr` goes at the holder cutover. The design and the full task table, with each task's goal, dependencies and time, are in `docs/design/terminal-holder.md` section 13; that table wins over this summary. The contracts are the [H] rules in `protocol.md`, `recovery.md`, `state.md` and `authority.md`. These tasks run after the M6 cutover.
+ADR 0004 (accepted Wednesday 2026-11-11) makes Tiller own its terminals: a holder process per host owns the agent PTYs, the board is the main pane UI, and `tiller attach` gives a real terminal. It replaces herdr, and `crates/herdr` goes at the holder cutover. The design and the full task table, with each task's goal, dependencies and time, are in `docs/design/terminal-holder.md` section 13; that table wins over this summary. The contracts are the [H] rules in `protocol.md`, `recovery.md`, `state.md` and `authority.md`. These tasks run beside the rest of this plan. Their own cutover, H15, switches the running Tiller from herdr to the holder; it is not M6, and the [H] tag in the specs means H15.
 
 | Group | Tasks | Lands on |
 |---|---|---|
@@ -807,7 +807,7 @@ ADR 0004 (accepted Wednesday 2026-11-11) makes Tiller own its terminals: a holde
 | First slice | S1a (protocol and client), S1b (the minimal holder), S1c (the minimal daemon wiring), S1P (the owner's preview on a test home) | S1a and S1b on `main`, S1c on `holder-port` |
 | Holder | H02 to H05 (crates, core, live output, live upgrade), HA1 (handover audit), H06 (service), H07 (`tiller attach`), H08 (raw fixtures) | `main` |
 | Port | H09 to H14 (agents, reconcile, API and peers, board, herdr removed, soak) | `holder-port`, merged into `main` once by the owner |
-| Holder cutover | H15, with the owner | `main` |
+| Holder cutover | H15, with the owner: steps on the running Tiller, no PR | - |
 
 The slice is done when the owner types in a shell pane on the S1P preview, reloads the page and sees the same screen, and restarts the daemon with the holder up and gets the same pane back with its history. The live tiller is never deployed from `holder-port`.
 

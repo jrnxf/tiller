@@ -12,7 +12,7 @@
   - Owner notifications go to the owner's desktop notification app, which shows them as cards.
   - A builder records raw PTY fixtures of real Claude Code sessions, after the owner gives the go.
 
-This doc is the design. The contract changes it needs in `docs/spec/` land in task H01, in the same PR as this doc and before any code. The specs tag each changed rule [H]: it states the behavior after the cutover (section 11), and herdr does that work until then.
+This doc is the design. The contract changes it needs in `docs/spec/` land in task H01, after this doc and before any code. The specs tag each changed rule [H]: it states the behavior after the cutover (section 11), and herdr does that work until then.
 
 ## 1. Why
 
@@ -332,7 +332,7 @@ The holder encodes each name for the app's current mode: legacy, application cur
 | Test helpers | `herdr/testing.rs` (`Fleet`, `Pty`), `herdr/fake.rs`, used across the daemon, delivery, agents and reconcile tests | `tiller-panes::testing` over `FakePanes`. Each test keeps what it checks, and the herdr-only checks (layout, tokens) go |
 | Terminal launcher | `herdr/front.rs` (`Terminal`, `MacApp`, `Opened`, `open_agent`) | `tiller-panes::open`, launching `tiller attach` in place of herdr (section 5.3) |
 | Child process helper | `cli/cmd/learn.rs:21` (`process::{Ended, Interrupt}`) | Moves to `tiller-panes::process` unchanged |
-| Role sandbox `Bash(herdr *)` | `roles/*.settings.json`, `agents/roles.rs:445`, `guards/*` | Deny `tiller holder *`, `tiller attach *` and `$TILLER_HOME/run/**` instead |
+| Role sandbox `Bash(herdr *)` | `roles/*.settings.json`, `agents/roles.rs:445`, `guards/*` | Deny `tiller holder*`, `tiller attach*` and `$TILLER_HOME/run/**` instead |
 
 ### 4.5 Why line submit keeps its loop
 
@@ -579,7 +579,7 @@ The doc rows land in H01, before the code, so that each builder builds against a
 | `contract/openapi.json` | The DTO renames (section 11.1) and the focus copy |
 | `nix/module.nix` | The holder service (section 11.2). herdr removed from the daemon's PATH comment and the module options |
 | `flake.nix` | The fixture path moves to `crates/panes/tests/fixtures`. The Homebrew herdr check message goes |
-| `roles/*.settings.json` | `Bash(herdr *)` becomes `Bash(tiller holder *)` and `Bash(tiller attach *)` |
+| `roles/*.settings.json` | `Bash(herdr *)` becomes `Bash(tiller holder*)` and `Bash(tiller attach*)`, each with its `Bash(<tiller> ...)` twin, with no space before the `*` so the bare commands match too |
 | `probe/` | History, left as is (`probe/reports` record what was measured then) |
 | `scripts/firstmate-export` and its fixtures | Left as is. It reads the predecessor's herdr ids, which is part of the import contract |
 | `scripts/two-host-demo.sh` | `TILLER_HERDR=/nonexistent/herdr` becomes a test holder socket in the demo's home |
@@ -651,10 +651,10 @@ Each task is one builder, one branch, one worktree and one PR, with a `/code-rev
 | # | Task | Depends on | Time |
 |---|---|---|---|
 | H00 | Freeze today's composer and prompt results on the 9 fixtures as `insta` snapshots | - | 30 min |
-| H01 | Spec amendments: every row of section 10 except the code ones, plus ADR 0004 marked accepted and the S1 rows of this section. It lands in one PR with this doc | - | 2 h |
+| H01 | Spec amendments: every row of section 10 except the code ones, plus ADR 0004 marked accepted and the S1 rows of this section | this doc merged | 2 h |
 | S1a | The minimal part of H02: the `tiller-panes` crate with protocol types, framing (kinds 0, 1 and 2), the version handshake, `HolderClient`, the `Panes` trait with the methods the slice uses, and `FakePanes`. No module moves. Framing round-trip tests and a handshake version mismatch test | H01, H00 | 2 h |
 | S1b | The minimal part of H03 and H04: `tiller holder` with the socket (mode 0600, peer check), the lock, PTY spawn and reaping with exit codes, the `alacritty_terminal` model with `catch_unwind`, `subscribe` with a full repaint and then passthrough, raw input, and resize. One fixed cap on each client's output queue: a full queue drops the client. No leases, sync buffering or fault tests. An end-to-end test that spawns a shell, types and reads the repaint, a peer check test and an exit code test | S1a | 2.5 h |
-| S1c (`holder-port`) | The minimal daemon wiring: new agents launch in the holder, the agent record keeps the pane id, the terminal and input endpoints use the holder, and the daemon finds its panes after it restarts. Only the board copy it needs. It tests against `FakePanes` first. Its end-to-end test, the first of 9.2, restarts the daemon with the holder up and checks that the endpoint serves the same pane and takes input | S1a, and S1b for the end-to-end test | 1.5 h |
+| S1c (`holder-port`) | The minimal daemon wiring: new agents launch in the holder, the agent record keeps the pane id, the terminal and input endpoints use the holder, and the daemon finds its panes after it restarts. Only the board copy it needs. It tests against `FakePanes` first. Its end-to-end test, a first restart test ahead of 9.2, restarts the daemon with the holder up and checks that the endpoint serves the same pane and takes input | S1a, and S1b for the end-to-end test | 1.5 h |
 | S1P | A preview from `holder-port` on one host: a holder and a daemon on a test `TILLER_HOME`, the board on a spare port, and one plain shell pane, never a model agent. The owner checks the slice. Steps to run the same preview on the other hosts | S1b, S1c | 30 min |
 | H02 | Finish `tiller-panes` and add `tiller-poll`: the rest of the protocol types, the `Live` trait, the rest of the `Panes` methods, and key names. Move `composer.rs`, `submit.rs`, `process.rs`, `front.rs`, `testing.rs` and the generic poller there, with `tiller-herdr` re-exporting them so `main` still builds | S1P (the slice done) | 3 h |
 | H03 | Finish the `tiller-holder` core: env, the requests other than `subscribe` and `upgrade` that the slice left out, and the model gate of 9.1 | H02 | 4 h |
@@ -664,7 +664,7 @@ Each task is one builder, one branch, one worktree and one PR, with a `/code-rev
 | H06 | `tiller holder` service: `--detach`, `upgrade`, the Nix module service and launchd agent, the doctor `holder` check | H03 | 3 h |
 | H07 | `tiller attach`: raw mode, prefix (both encodings), detach restore, many clients, read-only, switcher. The tests of 9.5 | H04 | 5 h |
 | H08 | Raw fixture recording (owner's go): recorder, about 20 min of real sessions, scrub, marks, raw stream gate | H04 | 3 h |
-| H09 (`holder-port`) | Agents and delivery on `Panes`, from S1c's wiring: spawn, resume, control, stop, submit, notifier on `[notify] command`, labels. `fake-agent` and the restart tests of 9.2 left after S1c | S1c, H05, H06 | 6 h |
+| H09 (`holder-port`) | Agents and delivery on `Panes`, from S1c's wiring: spawn, resume, control, stop, submit, notifier on `[notify] command`, labels. `fake-agent` and the restart tests of 9.2 | S1c, H05, H06 | 6 h |
 | H10 (`holder-port`) | Reconcile, observe and state: `HolderSource`, ladder, R18, R21 and R22, `holder` observations, the migration of 11.1, config keys | H09 | 6 h |
 | H11 (`holder-port`) | Daemon API and peers: live view on `subscribe`, Fit as a lease, history, prompt, input, Open in terminal, peer pane link, the saved-machine paths removed | H10, H07 | 5 h |
 | H12 (`holder-port`) | Board: copy, `terminal-open.ts`, stream semantics, the tail UI for saved machines removed, screenshots in both themes at 1440 and 390 px | H11 | 4 h |
@@ -672,7 +672,7 @@ Each task is one builder, one branch, one worktree and one PR, with a `/code-rev
 | H14 (`holder-port`) | End-to-end soak on a test home with `fake-agent` panes: 4 h of daemon restarts, 3 live upgrades and a holder kill, with no gap in any counter. Then the full CI gate and `nix flake check` | H13 | 6 h (4 h is the soak itself) |
 | H15 | Cutover on the live tiller, with the owner (section 11.3), after the owner merges `holder-port` | H14 | 1 h |
 
-**Total:** about 69 hours of agent time: about 9 hours for H00, H01 and the slice, and about 60 hours for H02 to H15 with HA1. H00 runs beside H01, and S1c beside S1b. H06, H07, H08 and HA1 run beside H04 and H05. The critical path is H01, S1a, S1b and S1P, then H02 to H05, then H09 to H15: about 56 hours.
+**Total:** about 69 hours of agent time: about 9 hours for H00, H01 and the slice, and about 60 hours for H02 to H15 with HA1. H00 runs beside H01, and S1c beside S1b. H06, H07, H08 and HA1 run beside H04 and H05. The critical path is H01, S1a, S1b, the end of S1c (its end-to-end test and review, about 1 h) and S1P, then H02 to H05, then H09 to H15: about 57 hours.
 
 ## 14. What stays open
 

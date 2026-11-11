@@ -488,7 +488,7 @@ ADR 0003, accepted Tuesday 2026-11-03. The owner approved it; runs in one or two
 
 ---
 
-## Terminal holder (ADR 0004, after the cutover)
+## Terminal holder (ADR 0004)
 
 ADR 0004, accepted Wednesday 2026-11-11. A holder process per host owns the agent PTYs, in place of herdr. The briefs are the task table in `docs/design/terminal-holder.md` section 13, which wins over the short lines here; `build-plan.md` M5H gives the groups. H00 to H08, HA1, S1a and S1b merge to `main`. S1c and H09 to H14 merge to `holder-port`, which the owner merges into `main` once, before H15.
 
@@ -499,7 +499,7 @@ ADR 0004, accepted Wednesday 2026-11-11. A holder process per host owns the agen
 - [ ] Delivered
 
 ### H01 Spec amendments
-`opus` medium - 2 h - lands in one PR with the design doc
+`opus` medium - 2 h - after the design doc merged
 
 - [x] ADR 0004 and `terminal-holder.md` marked accepted
 - [x] The doc rows of `terminal-holder.md` section 10 done, each changed rule tagged [H]; the code rows left for their tasks
@@ -524,7 +524,7 @@ ADR 0004, accepted Wednesday 2026-11-11. A holder process per host owns the agen
 `opus` medium - 1.5 h - after S1a; its end-to-end test after S1b
 
 - [ ] `holder-port` created from `main`; new agents launch in the holder; the agent record keeps the pane id; the terminal and input endpoints use the holder; the daemon finds its panes after a restart
-- [ ] Check: the daemon restarts with the holder up, and the endpoint serves the same pane and takes input (the first 9.2 test)
+- [ ] Check: the daemon restarts with the holder up, and the endpoint serves the same pane and takes input (a first restart test; H09 adds `fake-agent` and the tests of 9.2)
 - [ ] Delivered
 
 ### S1P Preview of the first slice
@@ -599,8 +599,7 @@ the orchestrator - 30 min - after S1b and S1c
 ### H15 Holder cutover
 the orchestrator, with the owner - 1 h - after the owner merges `holder-port` into `main`
 
-- [ ] The steps of `terminal-holder.md` 11.3 on the live tiller
-- [ ] Delivered
+- [ ] The steps of `terminal-holder.md` 11.3 on the live tiller, with the owner (no PR)
 
 ---
 
