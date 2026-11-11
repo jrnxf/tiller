@@ -311,7 +311,9 @@ test("a peer's failed read again keeps its last report, marked as the last good 
   fireEvent.click(within(card).getByRole("button", { name: "Check again" }));
   const line = await within(card).findByTestId("check-unreadable", undefined, { timeout: 3000 });
   expect(line.textContent).toContain("The lines below are its last good read.");
-  expect(card.textContent).toMatch(/Last good read from host-d \w{3} \d{1,2} \w{3}, \d{2}:\d{2}/);
+  expect(card.textContent).toMatch(
+    /Read from host-d, last good run \w{3} \d{1,2} \w{3}, \d{2}:\d{2}/,
+  );
   expect(card.textContent).not.toMatch(/Read from host-d, last run/);
   expect(within(card).getByTestId("check-tools:found")).toBeTruthy();
 });

@@ -17,7 +17,6 @@
 
 use std::ffi::OsString;
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -108,21 +107,39 @@ fn claude(program: &[OsString]) -> Check {
 /// binary the daemon's pid runs (`tools::running_daemon_version`) and
 /// compared with the CLI's: a daemon on another version than its CLI is a
 /// warning, the shape of the Firstmate regression where an upgraded CLI kept
-/// talking to an old daemon.
-fn no_mistakes(cli: &Check) -> Check {
+/// talking to an old daemon. `status` is what `daemon status` printed and
+/// `daemon` the daemon binary's version line, both read while the CLI was.
+fn no_mistakes(
+    cli: &Check,
+    status: Result<Option<String>, String>,
+    daemon: Option<String>,
+) -> Check {
     const NAME: &str = "no-mistakes daemon";
     if cli.status != Status::Ok {
         return Check::new(NAME, false, Status::Warn, "the no-mistakes CLI is missing");
     }
-    let running = match tools::run_first_line("no-mistakes".as_ref(), &[], "daemon status") {
+    let running = match status {
         Ok(line) => line.unwrap_or_else(|| "running".into()),
         Err(error) => return Check::missing(NAME, false, error),
     };
-    no_mistakes_skew(
-        &running,
-        cli.version.as_deref(),
-        tools::running_daemon_version(),
-    )
+    no_mistakes_skew(&running, cli.version.as_deref(), daemon)
+}
+
+/// The no-mistakes CLI and its daemon. The three reads run at the same time,
+/// so the pair costs one probe timeout, not the sum of them.
+fn no_mistakes_pair() -> (Check, Check) {
+    std::thread::scope(|scope| {
+        let status =
+            scope.spawn(|| tools::run_first_line("no-mistakes".as_ref(), &[], "daemon status"));
+        let daemon = scope.spawn(tools::running_daemon_version);
+        let cli = tool("no-mistakes", false, &["no-mistakes".into()]);
+        let status = status
+            .join()
+            .unwrap_or_else(|_| Err("daemon status stopped before it answered".into()));
+        let daemon = daemon.join().ok().flatten();
+        let check = no_mistakes(&cli, status, daemon);
+        (cli, check)
+    })
 }
 
 /// The verdict on a running daemon, given the CLI's version line and the
@@ -419,49 +436,19 @@ fn firstmate_scripts(lines: &str) -> Vec<&'static str> {
 }
 
 /// The process list as command lines: `ps -axo args=`, or the command in
-/// `TILLER_PS` (the way the tests inject a fixed list).
-fn process_list() -> Result<String, String> {
+/// `TILLER_PS` (the way the tests inject a fixed list). A list that hangs is
+/// killed at the report's `deadline`, so its probe does not outlive it.
+fn process_list(deadline: Instant) -> Result<String, String> {
     let program = env_command("TILLER_PS").unwrap_or_else(|| vec!["ps".into()]);
     let (first, rest) = program.split_first().ok_or("no command is configured")?;
-    let mut child = Command::new(first)
-        .args(rest)
-        .args(["-axo", "args="])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("cannot run {}: {error}", first.to_string_lossy()))?;
-    let mut stdout = child.stdout.take();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut text = Vec::new();
-        if let Some(pipe) = stdout.as_mut() {
-            let _ = std::io::Read::read_to_end(pipe, &mut text);
+    let left = deadline.saturating_duration_since(Instant::now());
+    tools::run_within(first, rest, ["-axo", "args="], left).map_err(|error| {
+        if error.starts_with("did not answer") {
+            late()
+        } else {
+            error
         }
-        let _ = tx.send(text);
-    });
-    // A process list that hangs is killed at the report's deadline, so its
-    // probe does not outlive the report.
-    let deadline = Instant::now() + REPORT_DEADLINE;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(late());
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(error) => return Err(error.to_string()),
-        }
-    };
-    if !status.success() {
-        return Err(format!("exited with {status}"));
-    }
-    let text = rx
-        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-        .map_err(|_| "kept its output open".to_owned())?;
-    Ok(String::from_utf8_lossy(&text).into_owned())
+    })
 }
 
 /// Whether a daemon holds `<home>/daemon.lock` now. A home that never ran a
@@ -568,10 +555,14 @@ fn firstmate(list: Result<String, String>, marker: Option<&str>, daemon: bool) -
     }
 }
 
-/// The longest the report waits for its probes together. A board host waits
-/// 10 s for a peer's answer (`Timing::query`), so a peer's report must be
-/// sent well inside that, however many of its tools hang.
+/// The longest the report waits for its probes, counted from its start. A
+/// board host waits 10 s for a peer's answer (`Timing::query`, held to it by
+/// a test), so a peer's report must be sent well inside that, however many of
+/// its tools hang.
 pub const REPORT_DEADLINE: Duration = Duration::from_secs(7);
+
+// A tool that answers inside its own timeout answers inside the report's.
+const _: () = assert!(PROBE_TIMEOUT.as_millis() < REPORT_DEADLINE.as_millis());
 
 /// What a probe still running at [`REPORT_DEADLINE`] reports.
 fn late() -> String {
@@ -586,16 +577,20 @@ struct Probes {
     slots: Vec<Check>,
     /// How many slots a probe still has to fill.
     pending: usize,
+    /// When the report stops waiting.
+    deadline: Instant,
     tx: mpsc::Sender<(usize, Check)>,
     rx: mpsc::Receiver<(usize, Check)>,
 }
 
 impl Probes {
-    fn new() -> Self {
+    /// Probes for a report that waits for them until `within` from now.
+    fn new(within: Duration) -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
             slots: Vec::new(),
             pending: 0,
+            deadline: Instant::now() + within,
             tx,
             rx,
         }
@@ -638,16 +633,16 @@ impl Probes {
         });
     }
 
-    /// The checks, once every probe has answered or `within` has passed.
-    fn finish(self, within: Duration) -> Vec<Check> {
+    /// The checks, once every probe has answered or the deadline has passed.
+    fn finish(self) -> Vec<Check> {
         let Self {
             mut slots,
             mut pending,
+            deadline,
             tx,
             rx,
         } = self;
         drop(tx);
-        let deadline = Instant::now() + within;
         while pending > 0 {
             let Ok((slot, check)) =
                 rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
@@ -666,6 +661,10 @@ impl Probes {
 /// Every check, run now: the report `tiller doctor` prints and the board's
 /// host card shows (`GET /api/v1/doctor`).
 pub fn report(app: &App) -> Report {
+    // Every probe that starts a process runs on a thread of its own, and the
+    // report waits for them together, at most REPORT_DEADLINE from here: a
+    // hung tool costs its own timeout, never the sum of them all.
+    let mut probes = Probes::new(REPORT_DEADLINE);
     let mut checks = Vec::new();
     let table = load_config(app);
     let config = match table
@@ -685,10 +684,6 @@ pub fn report(app: &App) -> Report {
     };
     let spawn = &config.spawn;
 
-    // Every probe that starts a process runs on a thread of its own, and the
-    // report waits for them together, at most REPORT_DEADLINE: a hung tool
-    // costs its own timeout, never the sum of them all.
-    let mut probes = Probes::new();
     probes.tool("git", true, vec!["git".into()]);
     probes.tool("treehouse", true, words(&spawn.treehouse));
     let program = herdr_program(spawn);
@@ -716,9 +711,8 @@ pub fn report(app: &App) -> Report {
             Check::missing("no-mistakes daemon", false, late()),
         ],
         |put| {
-            let nm = tool("no-mistakes", false, &["no-mistakes".into()]);
-            let daemon = no_mistakes(&nm);
-            put(nm);
+            let (cli, daemon) = no_mistakes_pair();
+            put(cli);
             put(daemon);
         },
     );
@@ -727,11 +721,12 @@ pub fn report(app: &App) -> Report {
     let daemon = daemon_running(&app.home);
     probes.ready(owner_marker(marker.as_deref(), daemon));
     let late_list = firstmate(Err(late()), marker.as_deref(), daemon);
+    let deadline = probes.deadline;
     probes.one(late_list, move || {
-        firstmate(process_list(), marker.as_deref(), daemon)
+        firstmate(process_list(deadline), marker.as_deref(), daemon)
     });
     probes.ready(merge_app(&app.home));
-    checks.extend(probes.finish(REPORT_DEADLINE));
+    checks.extend(probes.finish());
     let merge_gates = stored(app, &mut checks);
 
     Report {
@@ -768,6 +763,18 @@ mod tests {
     use super::{Status, firstmate, firstmate_scripts, no_mistakes_skew, owner_marker};
 
     const FM: &str = "bash /opt/fm/bin/fm-watch.sh\n/bin/zsh -l\nbash /opt/fm/bin/fm-supervise-daemon.sh --loop\n";
+
+    /// A peer's report goes out well inside the time its board host waits
+    /// for it, with room for the checks around the probes and the link.
+    #[test]
+    fn the_report_deadline_fits_inside_a_peer_query() {
+        let query = tiller_daemon::peer::Timing::default().query;
+        assert!(
+            super::REPORT_DEADLINE + std::time::Duration::from_secs(2) <= query,
+            "{:?} against {query:?}",
+            super::REPORT_DEADLINE
+        );
+    }
 
     #[test]
     fn firstmate_scripts_match_by_file_name_not_substring() {

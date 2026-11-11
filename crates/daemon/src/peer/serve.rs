@@ -281,8 +281,13 @@ impl Link<'_> {
                     self.recheck(output)?;
                     match parse_query(&path) {
                         // The checks can take seconds: they run on a thread
-                        // of their own, and the answer goes out below.
-                        Ok(Query::Doctor) => self.checks.ask(id, self.config),
+                        // of their own, and the answer goes out below. A run
+                        // that has already ended answers its own queries
+                        // first, so this one gets a new run.
+                        Ok(Query::Doctor) => {
+                            self.send_checks(output)?;
+                            self.checks.ask(id, self.config);
+                        }
                         query => {
                             let (http_status, body) = self.answer(query);
                             send(
@@ -324,20 +329,7 @@ impl Link<'_> {
                 tick = Instant::now();
                 self.recheck(output)?;
             }
-            if let Some((ids, http_status, body)) = self.checks.done() {
-                // The key row may have changed while the checks ran.
-                self.recheck(output)?;
-                for id in ids {
-                    send(
-                        output,
-                        &Frame::Result {
-                            id,
-                            http_status,
-                            body: body.clone(),
-                        },
-                    )?;
-                }
-            }
+            self.send_checks(output)?;
             self.send_events(output, false)?;
             if beat.elapsed() >= timing.beat {
                 beat = Instant::now();
@@ -350,6 +342,27 @@ impl Link<'_> {
                 )?;
             }
         }
+    }
+
+    /// The answer of a run of the checks that has ended, to each query that
+    /// waits for it.
+    fn send_checks(&mut self, output: &mut impl Write) -> Result<(), ServeError> {
+        let Some((ids, http_status, body)) = self.checks.done() else {
+            return Ok(());
+        };
+        // The key row may have changed while the checks ran.
+        self.recheck(output)?;
+        for id in ids {
+            send(
+                output,
+                &Frame::Result {
+                    id,
+                    http_status,
+                    body: body.clone(),
+                },
+            )?;
+        }
+        Ok(())
     }
 
     /// Verifies a `mutate` (`protocol.md` 10.3 step 3) and applies it.
@@ -441,8 +454,13 @@ impl Link<'_> {
                 }
                 serde_json::to_value(detail)
             }
-            // `run` hands the checks to `Checks`, off the link thread.
-            Query::Doctor => serde_json::to_value(doctor(self.config.orchestrators.as_deref())?),
+            // `run` hands the checks to `Checks`, off the link thread: they
+            // never run here.
+            Query::Doctor => {
+                return Err(ApiError::from(tiller_core::Error::Internal(
+                    "the checks run off the link thread".into(),
+                )));
+            }
         };
         body.map_err(json_error)
     }
