@@ -272,14 +272,66 @@ async fn the_boards_own_write_is_not_an_outside_change() {
     }
     assert_eq!(changes(&watcher), Vec::<Value>::new());
 
-    // An edit and an editor's save of another document in one window.
+    // An edit and an editor's save of another document in one window: the
+    // change names only the document saved outside Tiller.
     edit("k-3", "Keep the third line").await;
     std::fs::create_dir_all(root.join("projects")).unwrap();
     std::fs::write(root.join("projects/alpha.md"), "# Alpha, by hand\n").unwrap();
     look(&mut watcher);
     assert_eq!(
         look(&mut watcher),
+        Some(vec!["projects/alpha.md".to_owned()])
+    );
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        changes(&watcher),
+        [json!({"head": head.trim(), "files": ["projects/alpha.md"]})]
+    );
+
+    // An editor's save over the document Tiller just committed is a change
+    // of that document.
+    edit("k-4", "Keep the fourth line").await;
+    let fleet_md = root.join("fleet.md");
+    let mut text = std::fs::read_to_string(&fleet_md).unwrap();
+    text.push_str("- Typed by hand after the commit.\n");
+    std::fs::write(&fleet_md, text).unwrap();
+    look(&mut watcher);
+    assert_eq!(look(&mut watcher), Some(vec!["fleet.md".to_owned()]));
+}
+
+/// A document the watcher cannot read is a change of that document, not a
+/// failed look: an edit of another document still reaches the board, and
+/// the document is a change again once it can be read.
+#[test]
+fn an_unreadable_document_does_not_stop_the_watcher() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = tempfile::tempdir().unwrap();
+    let root = repo(home.path(), "# Fleet\n\n- First.\n");
+    commit(&root, "projects/alpha.md", "# Alpha\n");
+    let mut watcher = watcher(home.path());
+    look(&mut watcher);
+
+    let alpha = root.join("projects/alpha.md");
+    std::fs::set_permissions(&alpha, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(
+        std::fs::read(&alpha).is_err(),
+        "this test needs a user that file modes bind"
+    );
+    std::fs::write(root.join("fleet.md"), "# Fleet\n\n- Saved by hand.\n").unwrap();
+    look(&mut watcher);
+    assert_eq!(
+        look(&mut watcher),
         Some(vec!["fleet.md".to_owned(), "projects/alpha.md".to_owned()])
+    );
+    std::fs::write(root.join("fleet.md"), "# Fleet\n\n- Saved again.\n").unwrap();
+    look(&mut watcher);
+    assert_eq!(look(&mut watcher), Some(vec!["fleet.md".to_owned()]));
+
+    std::fs::set_permissions(&alpha, std::fs::Permissions::from_mode(0o644)).unwrap();
+    look(&mut watcher);
+    assert_eq!(
+        look(&mut watcher),
+        Some(vec!["projects/alpha.md".to_owned()])
     );
 }
 

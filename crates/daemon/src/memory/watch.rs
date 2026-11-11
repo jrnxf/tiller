@@ -19,12 +19,16 @@
 //! vouch for it from then on.
 //!
 //! Tiller's own commit is not an outside change. When `HEAD` is the commit
-//! of a revision Tiller recorded since the last look, and every changed
-//! document matches `HEAD`, the watcher takes the new state as known and
-//! writes nothing: that write's own events already refreshed the board.
+//! of a revision Tiller recorded since the last look, a changed document
+//! that matches `HEAD` is Tiller's write: that write's own events already
+//! refreshed the board. The change names only the documents that differ
+//! from `HEAD`, and when none does the watcher writes nothing. That check
+//! reads `HEAD` with one git process, after the lock is released.
 //!
 //! A missing repo is not an error. It has no `HEAD` and no documents, and a
-//! repo made or replaced later is a change like any other.
+//! repo made or replaced later is a change like any other. A document that
+//! cannot be read is not an error either: it has a digest of its own, so it
+//! is a change, and the other documents are still watched.
 //!
 //! What a look read (`HEAD`, each document's digest, Tiller's last commit)
 //! is kept in the store (`mem.watch`, and with each `mem.outside_edit`). A
@@ -35,17 +39,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::MetadataExt as _;
-use std::path::{Component, Path};
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
-use tiller_agents::land::scrub::ScrubList;
 use tiller_core::memory::sha256_hex;
 use tiller_core::state::memory_repo::TillerCommit;
 use tiller_core::{Actor, Ctx, Error, Result, Store, Timestamp};
 use tiller_herdr::poller::{PollError, Source};
 
-use super::apply::{Repo, TryLock};
+use super::apply::{Repo, TryLock, checked};
 
 const INTERVAL: Duration = Duration::from_secs(1);
 
@@ -127,11 +130,7 @@ impl Stamp {
             .as_deref()
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
             .and_then(|text| text.trim().strip_prefix("ref: "))
-            .filter(|name| {
-                Path::new(name)
-                    .components()
-                    .all(|part| matches!(part, Component::Normal(_)))
-            })
+            .and_then(|name| checked(name).ok())
             .and_then(|name| Stat::of(&git.join(name)));
         let mut docs = BTreeMap::new();
         if let Some(stat) = Stat::of(&root.join(FLEET)) {
@@ -206,7 +205,7 @@ impl Watcher {
     fn look(&mut self, now: Timestamp) -> Result<Option<Vec<String>>> {
         let stamp = Stamp::take(&self.repo);
         if let Some(known) = &mut self.known {
-            if known.stamp == stamp && !racy_moved(&self.repo, known, &stamp)? {
+            if known.stamp == stamp && !racy_moved(&self.repo, known, &stamp) {
                 self.waiting = None;
                 return Ok(None);
             }
@@ -227,33 +226,8 @@ impl Watcher {
                 return Ok(None);
             }
         }
-        // A writer's commit is read once it is whole.
-        let _lock = match self.repo.try_lock()? {
-            TryLock::Held(lock) => Some(lock),
-            TryLock::NoRepo => None,
-            TryLock::Busy => return Ok(None),
-        };
-        // Taken before the stat, so a document changed while it is read
-        // counts as racy.
-        let read_at = SystemTime::now();
-        let stamp = Stamp::take(&self.repo);
-        let head = self.repo.head()?;
-        let texts = self.texts(&stamp)?;
-        let tiller = self.store.mem_last_commit()?;
-        let racy = stamp
-            .docs
-            .iter()
-            .filter(|(_, stat)| stat.racy(read_at))
-            .map(|(path, _)| path.clone())
-            .collect();
-        let next = Known {
-            stamp,
-            seen: Seen {
-                head,
-                texts,
-                tiller,
-            },
-            racy,
+        let Some(next) = self.read()? else {
+            return Ok(None);
         };
         let before = match &self.known {
             Some(known) => Some(known.seen.clone()),
@@ -272,8 +246,42 @@ impl Watcher {
         Ok(wrote)
     }
 
+    /// The repo as it is now, read under the lock so a writer's commit is
+    /// read once it is whole; `None` while a writer holds it. The lock is
+    /// released when the read ends.
+    fn read(&self) -> Result<Option<Known>> {
+        let _lock = match self.repo.try_lock()? {
+            TryLock::Held(lock) => Some(lock),
+            TryLock::NoRepo => None,
+            TryLock::Busy => return Ok(None),
+        };
+        // Taken before the stat, so a document changed while it is read
+        // counts as racy.
+        let read_at = SystemTime::now();
+        let stamp = Stamp::take(&self.repo);
+        let head = self.repo.head()?;
+        let texts = self.texts(&stamp);
+        let tiller = self.store.mem_last_commit()?;
+        let racy = stamp
+            .docs
+            .iter()
+            .filter(|(_, stat)| stat.racy(read_at))
+            .map(|(path, _)| path.clone())
+            .collect();
+        Ok(Some(Known {
+            stamp,
+            seen: Seen {
+                head,
+                texts,
+                tiller,
+            },
+            racy,
+        }))
+    }
+
     /// Writes `mem.outside_edit` when `next` moved from `before` and the
-    /// move is not Tiller's own commit; returns the changed documents.
+    /// move is not only Tiller's own commit; returns the documents changed
+    /// outside Tiller.
     fn compare(
         &mut self,
         before: &Seen,
@@ -286,10 +294,19 @@ impl Watcher {
             .filter(|path| before.texts.get(*path) != next.texts.get(*path))
             .cloned()
             .collect();
-        let moved = next.head != before.head || !changed.is_empty();
-        if !moved || self.own_write(before, next, &changed)? {
+        if next.head == before.head && changed.is_empty() {
             return Ok(None);
         }
+        let changed = match self.tiller_commit(before, next) {
+            Some(commit) => {
+                let outside = self.not_at(commit, next, changed)?;
+                if outside.is_empty() {
+                    return Ok(None);
+                }
+                outside
+            }
+            None => changed,
+        };
         self.store.mem_outside_edit(
             &Ctx::at(Actor::Daemon, now),
             next.head.as_deref(),
@@ -334,7 +351,7 @@ impl Watcher {
 
     /// Each document's digest, reading only those whose stat moved or could
     /// not vouch for them at the last look.
-    fn texts(&self, stamp: &Stamp) -> Result<BTreeMap<String, String>> {
+    fn texts(&self, stamp: &Stamp) -> BTreeMap<String, String> {
         let mut texts = BTreeMap::new();
         for (path, stat) in &stamp.docs {
             let same = self.known.as_ref().and_then(|known| {
@@ -346,57 +363,65 @@ impl Watcher {
                 texts.insert(path.clone(), digest.clone());
                 continue;
             }
-            if let Some(digest) = digest(&self.repo, path)? {
+            if let Some(digest) = digest(&self.repo, path) {
                 texts.insert(path.clone(), digest);
             }
         }
-        Ok(texts)
+        texts
     }
 
-    /// Tiller's own commit: `HEAD` is a commit Tiller recorded since the
-    /// last look, and each changed document is the file at `HEAD`.
-    fn own_write(&self, known: &Seen, next: &Seen, changed: &[String]) -> Result<bool> {
-        let recorded = next.tiller != known.tiller
-            && next.head.is_some()
-            && next.tiller.as_ref().map(|t| &t.commit) == next.head.as_ref();
-        if !recorded {
-            return Ok(false);
-        }
-        for path in changed {
-            let file = self.repo.state(path, &ScrubList::default())?;
-            if file.work_blob != file.head_blob {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+    /// The commit at `HEAD` when it is a commit Tiller recorded since the
+    /// last look.
+    fn tiller_commit<'a>(&self, before: &Seen, next: &'a Seen) -> Option<&'a str> {
+        let head = next.head.as_deref()?;
+        let recorded = next.tiller != before.tiller
+            && next.tiller.as_ref().map(|t| t.commit.as_str()) == Some(head);
+        recorded.then_some(head)
+    }
+
+    /// The documents of `changed` whose bytes, as `next` read them, are not
+    /// the file at `commit`: those Tiller's commit does not explain. One git
+    /// process reads them all.
+    fn not_at(&self, commit: &str, next: &Seen, changed: Vec<String>) -> Result<Vec<String>> {
+        let at = self.repo.bytes_at(commit, &changed)?;
+        Ok(changed
+            .into_iter()
+            .zip(at)
+            .filter(|(path, bytes)| {
+                bytes.as_deref().map(sha256_hex).as_ref() != next.texts.get(path)
+            })
+            .map(|(path, _)| path)
+            .collect())
     }
 }
 
-/// A document's digest; `None` when it is not there.
-fn digest(repo: &Repo, path: &str) -> Result<Option<String>> {
+/// A document's digest; `None` when it is not there. One that cannot be read
+/// has a digest of its own, so it is a change and the look goes on.
+fn digest(repo: &Repo, path: &str) -> Option<String> {
     match fs::read(repo.root().join(path)) {
-        Ok(bytes) => Ok(Some(sha256_hex(&bytes))),
+        Ok(bytes) => Some(sha256_hex(&bytes)),
         // Removed since the stat: it is not there.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(Error::Internal(format!(
-            "memory repo: read {path}: {error}"
-        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            tracing::warn!(path, %error, "the memory watcher cannot read a document");
+            Some(format!("unreadable: {:?}", error.kind()))
+        }
     }
 }
 
 /// Reads each racy document of a still stamp again. True when one's bytes
 /// moved; otherwise drops those whose stat can vouch for them now.
-fn racy_moved(repo: &Repo, known: &mut Known, stamp: &Stamp) -> Result<bool> {
+fn racy_moved(repo: &Repo, known: &mut Known, stamp: &Stamp) -> bool {
     for path in &known.racy {
-        if digest(repo, path)?.as_ref() != known.seen.texts.get(path) {
-            return Ok(true);
+        if digest(repo, path).as_ref() != known.seen.texts.get(path) {
+            return true;
         }
     }
     let now = SystemTime::now();
     known
         .racy
         .retain(|path| stamp.docs.get(path).is_some_and(|stat| stat.racy(now)));
-    Ok(false)
+    false
 }
 
 fn encode(seen: &Seen) -> Result<String> {
