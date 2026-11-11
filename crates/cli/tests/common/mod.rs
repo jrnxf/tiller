@@ -15,6 +15,22 @@ use tiller_core::domain::{Effort, RunRole};
 use tiller_core::state::runs::{NewOrchestrator, NewRun, SpawnChecks};
 use tiller_core::{Actor, Ctx, Store};
 
+/// What a caller's shell may set that changes what `tiller` does, removed
+/// from every command a test runs. Run from a Claude Code shell, over ssh or
+/// neither, the owner checks see the same caller: no `CLAUDECODE`, no
+/// `SSH_CONNECTION`, and the test stand-in for a terminal with no Claude Code
+/// behind it only where a test asks for it (`authority::principal`).
+pub const CALLER_ENV: &[&str] = &[
+    "TILLER_DB",
+    "TILLER_SESSION_ID",
+    "TILLER_RUN_ID",
+    "TILLER_SSH",
+    "TILLER_GH",
+    "TILLER_TEST_OWNER",
+    "CLAUDECODE",
+    "SSH_CONNECTION",
+];
+
 /// What one command printed and how it exited.
 pub struct Out {
     pub code: i32,
@@ -99,24 +115,23 @@ impl World {
         self.home().join("state.db")
     }
 
-    fn command(&self, session: Option<&str>) -> Command {
+    /// `tiller` against this home and nothing the caller's shell carries:
+    /// none of [`CALLER_ENV`], so a developer's `TILLER_DB` or session never
+    /// reaches the command.
+    pub fn bare_command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_tiller"));
+        command.env("TILLER_HOME", self.home());
+        for name in CALLER_ENV {
+            command.env_remove(name);
+        }
         command
-            .env("TILLER_HOME", self.home())
-            // A launch records workspace trust in Claude's config; keep the
-            // owner's own config out of reach.
-            .env("CLAUDE_CONFIG_DIR", self.dir.path().join("claude"))
-            .env_remove("TILLER_DB")
-            .env_remove("TILLER_SESSION_ID")
-            .env_remove("TILLER_RUN_ID")
-            .env_remove("TILLER_SSH")
-            .env_remove("TILLER_GH")
-            // Run from a Claude Code shell, over ssh or neither, the owner
-            // checks see the same caller: no `CLAUDECODE`, no
-            // `SSH_CONNECTION`, and the test stand-in for a terminal with no
-            // Claude Code behind it (`authority::principal`).
-            .env_remove("CLAUDECODE")
-            .env_remove("SSH_CONNECTION");
+    }
+
+    fn command(&self, session: Option<&str>) -> Command {
+        let mut command = self.bare_command();
+        // A launch records workspace trust in Claude's config; keep the
+        // owner's own config out of reach.
+        command.env("CLAUDE_CONFIG_DIR", self.dir.path().join("claude"));
         if self.terminal.get() {
             command.env("TILLER_TEST_OWNER", "1");
         }
