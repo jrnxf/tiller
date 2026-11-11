@@ -453,10 +453,7 @@ pub fn relaunch(
         key: key.map(str::to_owned),
         ..ctx.clone()
     };
-    let ctx = &Ctx {
-        key: None,
-        ..ctx.clone()
-    };
+    let ctx = &ctx.unkeyed();
     require_controller(ctx, run, "relaunch", false)?;
     if store.key_recorded(&keyed)? {
         let applied =

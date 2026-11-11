@@ -126,10 +126,7 @@ pub fn start(
         .into());
     }
     let keyed = ctx.clone();
-    let ctx = &Ctx {
-        key: None,
-        ..ctx.clone()
-    };
+    let ctx = &ctx.unkeyed();
     let project: Project = get(store.conn(), "project", project)?;
     let label = layout::orchestrator_label(&project.id);
     // A start this key made already replays while its orchestrator lives.

@@ -2931,10 +2931,7 @@ async fn add_numbered(
             match write_checkout(&home, &config_key, &path) {
                 Ok(false) => {}
                 Ok(true) => match store.config_changed(
-                    &Ctx {
-                        key: None,
-                        ..ctx.clone()
-                    },
+                    &ctx.unkeyed(),
                     &config_key,
                     json!(path),
                 ) {
@@ -3244,14 +3241,7 @@ async fn pair_host(
             )?;
             // The key went with `peer.pair`; this event is its own write.
             let recorded = changed.then(|| {
-                store.config_changed(
-                    &Ctx {
-                        key: None,
-                        ..ctx.clone()
-                    },
-                    &format!("peers.{label}.ssh"),
-                    json!(alias),
-                )
+                store.config_changed(&ctx.unkeyed(), &format!("peers.{label}.ssh"), json!(alias))
             });
             Ok(paired_done(
                 &alias,
