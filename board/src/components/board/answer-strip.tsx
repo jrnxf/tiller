@@ -1,11 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
+import type { ReactNode } from "react";
 
 import type { PromptDialog, PromptRead } from "../../lib/api-types";
 import { CheckIcon } from "../shell/icons";
 import { Ago } from "./ago";
 import { ShieldIcon, WarnIcon } from "./icons";
 import { promptPath, readPane } from "./terminal-stream";
+import "./answer-strip.css";
 
 // How long the receipt stays before the strip folds away.
 const RECEIPT_MS = 1800;
@@ -30,10 +32,13 @@ export function AnswerStrip({
   sessionId,
   waiting,
   observedAt,
+  fallback = null,
 }: {
   sessionId: string;
   waiting: boolean;
   observedAt: string;
+  // What shows in the strip's place once a read found no dialog to answer.
+  fallback?: ReactNode;
 }) {
   const [answer, setAnswer] = useState<Answer | null>(null);
   // The wait the strip answers, named by the activity time it began at. A
@@ -147,6 +152,7 @@ export function AnswerStrip({
     );
   }
   const open = strip !== null && !(current?.kind === "sent" && current.folded);
+  if (strip === null && read.fetchStatus === "idle" && fallback !== null) return fallback;
   return (
     <div className={`av-strip-w${open ? "" : " shut"}`}>
       <div>{strip}</div>

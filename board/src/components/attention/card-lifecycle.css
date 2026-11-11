@@ -130,6 +130,16 @@
   color: var(--fg-3);
 }
 
+.cm-item[data-disabled] {
+  color: var(--fg-4);
+  cursor: default;
+}
+
+/* An item's shortcut sits at the row's right end. */
+.cm-item kbd {
+  margin-left: auto;
+}
+
 .cm-item.bad,
 .cm-item.bad .icon {
   color: var(--red-text);

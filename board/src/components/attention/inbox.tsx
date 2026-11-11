@@ -3,7 +3,13 @@ import { Link } from "@tanstack/react-router";
 import { useMemo } from "react";
 import type { CSSProperties, ReactNode } from "react";
 
-import type { AttentionItem, BoardRow, PermissionPrompt, Project } from "../../lib/api-types";
+import type {
+  AgentRow,
+  AttentionItem,
+  BoardRow,
+  PermissionPrompt,
+  Project,
+} from "../../lib/api-types";
 import { focusReason, ownerKey, ownerOf, projectIndex, shownId } from "../../lib/peers";
 import type { Owned } from "../../lib/peers";
 import { AWAY_BRIEF_ID, briefIsUnread, briefReadStore } from "../../lib/away";
@@ -19,6 +25,7 @@ import {
 import { scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
 import { CheckIcon } from "../shell/icons";
+import { AnswerStrip } from "../board/answer-strip";
 import { HostChip } from "../board/host-chip";
 import { useAmbiguousIds, useStanding, useNamedProjects } from "../board/peer-state";
 import { AwayBriefDetail, AwayBriefRow } from "./away-brief";
@@ -26,7 +33,7 @@ import { answeredStore, withdrawnStore } from "./answered";
 import type { Withdrawn } from "./answered";
 import { AnswerForm } from "./answer";
 import { ApproveBlock } from "./approve";
-import { CardActions, OpenInHerdr } from "./card-actions";
+import { CardActions, HerdrMenu, OpenInHerdr } from "./card-actions";
 import { CardOverflow } from "./card-lifecycle";
 import { tidy } from "./ansi";
 import { RecapCard } from "./recap";
@@ -328,47 +335,79 @@ function DecisionDetail({
   );
 }
 
+// The agent a session runs, by its herdr name; a generic one before the
+// agents list has it.
+function agentName(sessionId: string, agents: AgentRow[]): string {
+  const agent = agents
+    .flatMap((row) => [row, ...row.workers])
+    .find((row) => row.session_id === sessionId);
+  return agent?.herdr_name ?? "A worker";
+}
+
 function PermissionDetail({ prompt, ctx }: { prompt: PermissionPrompt; ctx: Context }) {
+  const agents = useQuery(agentsQuery()).data?.orchestrators ?? [];
+  const owner = ctx.cards.get(prompt.card_id) ?? prompt;
+  const peer = ownerOf(owner);
+  const name = agentName(prompt.session_id, agents);
   const chip = (
     <span className="lab sm warn">
       <LockIcon />
       Permission prompt
     </span>
   );
+  // The hook's record of the dialog: what shows when the screen gives no
+  // buttons to press (a peer's pane, a saved machine's, or no dialog read).
+  const asking = (
+    <div className="blk">
+      <div className="blk-h">What the pane is asking</div>
+      <div className="pane-box">
+        <div className="pb-h">
+          <LockIcon />
+          <span>{prompt.tool}</span>
+          <span className="sp" />
+          <span className="lab sm warn">waiting {formatAge(prompt.since)}</span>
+        </div>
+        <pre>{prompt.detail ?? "The command is not recorded yet."}</pre>
+      </div>
+    </div>
+  );
   return (
     <>
       <BackLink />
-      <Meta
-        cardId={prompt.card_id}
-        owner={ctx.cards.get(prompt.card_id) ?? prompt}
-        ctx={ctx}
-        chip={chip}
-        when={`waiting since ${formatWhen(prompt.since)}, ${formatAge(prompt.since)}`}
-      />
-      <h2 className="d-q">Allow {prompt.tool}?</h2>
-      <p className="d-ctx">
-        A worker is stopped on a permission dialog in its pane. This is a keypress, not a decision:
-        answer it in the pane.
-      </p>
-      <div className="blk">
-        <div className="blk-h">What the pane is asking</div>
-        <div className="pane-box">
-          <div className="pb-h">
-            <LockIcon />
-            <span>{prompt.tool}</span>
-            <span className="sp" />
-            <span className="lab sm warn">waiting {formatAge(prompt.since)}</span>
-          </div>
-          <pre>{prompt.detail ?? "The command is not recorded yet."}</pre>
-        </div>
-      </div>
-      <div className="acts">
-        <OpenInHerdr
-          sessionId={prompt.session_id}
-          label="Open the pane in herdr"
-          off={focusReason(ownerOf(ctx.cards.get(prompt.card_id) ?? prompt))}
+      <div className="d-top">
+        <Meta
+          cardId={prompt.card_id}
+          owner={owner}
+          ctx={ctx}
+          chip={chip}
+          when={`waiting since ${formatWhen(prompt.since)}, ${formatAge(prompt.since)}`}
         />
+        <HerdrMenu sessionId={prompt.session_id} off={focusReason(peer)} />
       </div>
+      <h2 className="d-q">Allow {prompt.tool}?</h2>
+      {peer ? (
+        <>
+          <p className="d-ctx">
+            {name} is stopped on a permission dialog. {peer} owns its pane, so answer it from that
+            host.
+          </p>
+          {asking}
+        </>
+      ) : (
+        <>
+          <p className="d-ctx">
+            {name} is stopped on a permission dialog. Press an answer, and the board types it in the
+            pane.
+          </p>
+          <AnswerStrip
+            key={prompt.session_id}
+            sessionId={prompt.session_id}
+            waiting
+            observedAt={prompt.since}
+            fallback={asking}
+          />
+        </>
+      )}
       <CardActions card={ctx.cards.get(prompt.card_id) ?? null} sessionId={null} />
     </>
   );

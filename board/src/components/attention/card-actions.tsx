@@ -1,3 +1,4 @@
+import { Menu } from "@base-ui/react/menu";
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -14,11 +15,12 @@ import { useHostLabel, useMachineRows, useStanding, useNamedProjects } from "../
 import { ActionFailure } from "./action-failure";
 import { sendMutation } from "./api";
 import { PRIORITIES } from "./format";
-import { PaneIcon, SendIcon } from "./icons";
+import { DotsIcon, PaneIcon, SendIcon } from "./icons";
 import { LimitNote } from "./limit-note";
 import { InlineReceipt, ReceiptPanel } from "./receipt";
 import { Select } from "../ui/select";
 import { useAction } from "./use-action";
+import "./card-lifecycle.css";
 
 // Reprioritize is a field edit, so it carries the card's `rev` and a stale
 // one is a readable conflict (state.md principle 5).
@@ -295,16 +297,8 @@ function isShown(element: Element): boolean {
 }
 
 // Focuses the agent's pane in herdr, with the saved machine for a remote one.
-export function OpenInHerdr({
-  sessionId,
-  label,
-  off,
-}: {
-  sessionId: string;
-  label?: string;
-  // Why the button is off: pane focus is not forwarded to a peer.
-  off?: string | null;
-}) {
+// `O` presses it while the element `shown` holds is on screen.
+function useHerdrFocus(sessionId: string, off: string | null | undefined) {
   const send = useCallback(
     (idempotency_key: string) =>
       sendMutation<FocusData>("POST", focusPath(sessionId), { idempotency_key }),
@@ -329,7 +323,7 @@ export function OpenInHerdr({
   const outcome = last ? focusOutcome(last.data, remote) : null;
   const action = useAction({ binding: `${sessionId}:${round}`, send, onRecorded });
   const { trigger } = action;
-  const button = useRef<HTMLButtonElement>(null);
+  const shown = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -338,7 +332,7 @@ export function OpenInHerdr({
       if (shortcutsBlocked(event)) return;
       // On a narrow screen the detail is hidden behind the list; the key only
       // acts on a pane the owner can see.
-      if (!button.current || !isShown(button.current)) return;
+      if (!shown.current || !isShown(shown.current)) return;
       trigger();
     };
     if (off) return;
@@ -346,20 +340,8 @@ export function OpenInHerdr({
     return () => window.removeEventListener("keydown", onKey);
   }, [trigger, off]);
 
-  return (
-    <span className="ca-herdr">
-      <button
-        type="button"
-        ref={button}
-        className="btn"
-        disabled={action.pending || Boolean(off)}
-        title={off ?? "Focus this agent's pane in herdr"}
-        onClick={action.trigger}
-      >
-        <PaneIcon />
-        {label ?? "Open in herdr"}
-        <kbd>O</kbd>
-      </button>
+  const feedback = (
+    <>
       {last && outcome && !action.pending ? (
         outcome.tone === "ok" ? (
           <InlineReceipt
@@ -373,6 +355,79 @@ export function OpenInHerdr({
         )
       ) : null}
       <ActionFailure error={action.error} host={undefined} />
+    </>
+  );
+  return { action, shown, feedback };
+}
+
+export function OpenInHerdr({
+  sessionId,
+  label,
+  off,
+}: {
+  sessionId: string;
+  label?: string;
+  // Why the button is off: pane focus is not forwarded to a peer.
+  off?: string | null;
+}) {
+  const { action, shown, feedback } = useHerdrFocus(sessionId, off);
+  return (
+    <span className="ca-herdr">
+      <button
+        type="button"
+        ref={shown}
+        className="btn"
+        disabled={action.pending || Boolean(off)}
+        title={off ?? "Focus this agent's pane in herdr"}
+        onClick={action.trigger}
+      >
+        <PaneIcon />
+        {label ?? "Open in herdr"}
+        <kbd>O</kbd>
+      </button>
+      {feedback}
+    </span>
+  );
+}
+
+// Open in herdr as an item of a ··· menu, for a detail whose primary action
+// is on the board. Its receipt or refusal shows to the menu's left.
+export function HerdrMenu({
+  sessionId,
+  off,
+  children,
+}: {
+  sessionId: string;
+  off?: string | null;
+  // More items, above Open in herdr.
+  children?: ReactNode;
+}) {
+  const { action, shown, feedback } = useHerdrFocus(sessionId, off);
+  return (
+    <span className="ca-herdr">
+      {feedback}
+      <Menu.Root>
+        <Menu.Trigger ref={shown} className="btn sm cm-dots" aria-label="More actions">
+          <DotsIcon />
+        </Menu.Trigger>
+        <Menu.Portal>
+          <Menu.Positioner className="sel-pos" align="end" sideOffset={4}>
+            <Menu.Popup className="cm-popup" aria-label="More actions">
+              {children}
+              <Menu.Item
+                className="cm-item"
+                disabled={action.pending || Boolean(off)}
+                title={off ?? "Focus this agent's pane in herdr"}
+                onClick={action.trigger}
+              >
+                <PaneIcon />
+                Open in herdr
+                <kbd>O</kbd>
+              </Menu.Item>
+            </Menu.Popup>
+          </Menu.Positioner>
+        </Menu.Portal>
+      </Menu.Root>
     </span>
   );
 }

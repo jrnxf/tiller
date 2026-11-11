@@ -972,7 +972,7 @@ function attentionFor(
     ],
     permission_prompts: [
       {
-        session_id: "01JSESS000000000000000000C",
+        session_id: sessionId("Wgamma-12"),
         card_id: cardId("gamma-12"),
         tool: "Bash",
         detail: "rm -rf target/debug/incremental && cargo build -p gamma-cert",

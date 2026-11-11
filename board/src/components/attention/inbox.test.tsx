@@ -3,7 +3,7 @@ import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
-import type { AgentRow, AgentsResponse } from "../../lib/api-types";
+import type { AgentRow, AgentsResponse, PromptDialog } from "../../lib/api-types";
 import { hydrateFromSnapshot } from "../../lib/boot";
 import {
   FIXTURE_HEAD_SHA,
@@ -27,7 +27,7 @@ const RETRY = "01JATTN0000000000000000000";
 const MERGE = "01JATTN0000000000000000001";
 const QUIET = "01JATTN0000000000000000002";
 const CAPACITY = "01JATTN0000000000000000003";
-const SESSION_C = "01JSESS000000000000000000C";
+const SESSION_C = "01JSESSWGAMMA1200000000000";
 const HOST_B = "01JHOSTB00000000000000000B";
 
 interface Call {
@@ -41,6 +41,23 @@ type Reply = { status: number; body: unknown } | "unreachable";
 let calls: Call[] = [];
 let replies: Reply[] = [];
 let release: (() => void) | null = null;
+// Reads of a waiting agent's dialog (`POST .../prompt`): kept apart from the
+// mutations, and answered from `screens` in turn, the last one repeating.
+let reads: string[] = [];
+let screens: PromptDialog[] = [];
+
+const DIALOG: PromptDialog = {
+  tool: "Bash",
+  title: "Bash command",
+  command: "rm -rf target/debug/incremental && cargo build -p gamma-cert",
+  question: "Do you want to proceed?",
+  options: [
+    { n: 1, text: "Yes" },
+    { n: 2, text: "Yes, and don't ask again for rm and cargo build commands in /home/user/gamma" },
+    { n: 3, text: "No" },
+  ],
+  screen: "s1",
+};
 
 const ok = (receipt: Partial<Record<string, unknown>> = {}) => ({
   status: 200,
@@ -69,6 +86,18 @@ function stubDaemon(scenario: Scenario, hold = false) {
         (serverResponses(scenario) as Record<string, unknown>)[path] ??
         fixtureResource(path, scenario);
       return new Response(JSON.stringify(data), { status: 200 });
+    }
+    const read = /^\/api\/v1\/agents\/([^/]+)\/prompt$/.exec(path);
+    if (read?.[1]) {
+      reads.push(read[1]);
+      const prompt = (screens.length > 1 ? screens.shift() : screens[0]) ?? null;
+      const body = {
+        session_id: read[1],
+        read_at: "2026-11-02T11:59:58.000Z",
+        prompt,
+        reason: prompt ? null : "no_dialog",
+      };
+      return new Response(JSON.stringify(body), { status: 200 });
     }
     calls.push({ method, path, body: JSON.parse(String(init?.body)) as Record<string, unknown> });
     if (hold) await new Promise<void>((resolve) => (release = resolve));
@@ -101,6 +130,8 @@ beforeEach(() => {
   calls = [];
   replies = [];
   release = null;
+  reads = [];
+  screens = [DIALOG];
   vi.stubGlobal("matchMedia", (query: string) => ({
     matches: false,
     media: query,
@@ -478,15 +509,77 @@ test("comment, add card and open in herdr each reach their endpoint with a recei
   expect(within(actions).getByText(/Focused in herdr/)).toBeTruthy();
 });
 
-test("a permission prompt is answered in its pane, not with a decision", async () => {
-  stubDaemon("default");
-  await renderInbox("default", "perm-01JSESS000000000000000000C");
-  expect(screen.getByText("Permission prompt")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: /^Answer/ })).toBeNull();
+// Opens the detail's ··· menu and picks Open in herdr.
+async function openHerdr() {
+  const detail = document.querySelector<HTMLElement>(".in-detail");
+  if (!detail) throw new Error("no detail pane");
+  fireEvent.click(within(detail).getByRole("button", { name: "More actions" }));
+  const menu = await screen.findByRole("menu", { name: "More actions" });
+  fireEvent.click(within(menu).getByRole("menuitem", { name: /Open in herdr/ }));
+}
 
-  fireEvent.click(screen.getByRole("button", { name: /Open the pane in herdr/ }));
+test("a permission prompt shows the pane's own options, in pane order, as answer buttons", async () => {
+  stubDaemon("default");
+  await renderInbox("default", "perm-01JSESSWGAMMA1200000000000");
+  expect(screen.getByText("Permission prompt")).toBeTruthy();
+  const yes = await screen.findByRole("button", { name: "Answer 1: Yes" });
+  const answers = screen.getAllByRole("button", { name: /^Answer \d/ });
+  expect(answers.map((button) => button.getAttribute("data-n"))).toEqual(["1", "2", "3"]);
+  expect(yes.className).toContain("first");
+  expect(reads).toEqual([SESSION_C]);
+  expect(screen.getByText(/Press an answer, and the board types it in the pane\./)).toBeTruthy();
+  expect(screen.queryByText(/answer it in the pane/)).toBeNull();
+  // The hook's record shows only when the screen gives nothing to press.
+  expect(screen.queryByText("What the pane is asking")).toBeNull();
+  expect(calls).toHaveLength(0);
+});
+
+test("pressing an answer types its digit, with the screen it was drawn from", async () => {
+  stubDaemon("default");
+  await renderInbox("default", "perm-01JSESSWGAMMA1200000000000");
+  fireEvent.click(await screen.findByRole("button", { name: "Answer 1: Yes" }));
   await flush();
-  expect(calls[0]?.path).toBe("/api/v1/agents/01JSESS000000000000000000C/focus");
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.path).toBe(`/api/v1/agents/${SESSION_C}/prompt/answer`);
+  expect(calls[0]?.body).toEqual({ option: 1, screen: "s1" });
+  expect(screen.getByRole("status").textContent).toMatch(/Sent 1 · Yes\./);
+});
+
+test("a changed screen types nothing, and the new options show", async () => {
+  stubDaemon("default");
+  const redrawn = {
+    ...DIALOG,
+    command: "rm -rf target && cargo build -p gamma-cert",
+    screen: "s2",
+  };
+  screens = [DIALOG, redrawn];
+  replies.push({
+    status: 409,
+    body: { error: "screen_changed", detail: "the prompt changed after the buttons were drawn" },
+  });
+  await renderInbox("default", "perm-01JSESSWGAMMA1200000000000");
+  fireEvent.click(await screen.findByRole("button", { name: "Answer 1: Yes" }));
+  await flush();
+  expect(screen.getByRole("alert").textContent).toMatch(/^Not sent\. The prompt changed/);
+  expect(screen.getByText("rm -rf target && cargo build -p gamma-cert")).toBeTruthy();
+  expect(calls).toHaveLength(1);
+});
+
+test("with no dialog on the screen, the detail shows what the hook recorded", async () => {
+  stubDaemon("default");
+  screens = [];
+  await renderInbox("default", "perm-01JSESSWGAMMA1200000000000");
+  expect(await screen.findByText("What the pane is asking", {}, { timeout: 4000 })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /^Answer \d/ })).toBeNull();
+});
+
+test("Open in herdr moves into the detail's ··· menu", async () => {
+  stubDaemon("default");
+  await renderInbox("default", "perm-01JSESSWGAMMA1200000000000");
+  expect(screen.queryByRole("button", { name: /Open the pane in herdr/ })).toBeNull();
+  await openHerdr();
+  await flush();
+  expect(calls[0]?.path).toBe(`/api/v1/agents/${SESSION_C}/focus`);
 });
 
 test("the pane button says what herdr did, and when no herdr window here shows it", async () => {
@@ -496,13 +589,13 @@ test("the pane button says what herdr did, and when no herdr window here shows i
   const unseen = ok();
   unseen.body.data = { opened: "unseen", terminal: null };
   replies.push(launched, unseen);
-  await renderInbox("default", "perm-01JSESS000000000000000000C");
+  await renderInbox("default", "perm-01JSESSWGAMMA1200000000000");
 
-  fireEvent.click(screen.getByRole("button", { name: /Open the pane in herdr/ }));
+  await openHerdr();
   await flush();
   expect(screen.getByText(/Opened herdr in Ghostty/)).toBeTruthy();
 
-  fireEvent.click(screen.getByRole("button", { name: /Open the pane in herdr/ }));
+  await openHerdr();
   await flush();
   expect(screen.getByRole("alert").textContent).toMatch(
     /no herdr window is open on the daemon's machine\. Start herdr there, or open the board on the machine you are at\./,
@@ -512,7 +605,7 @@ test("the pane button says what herdr did, and when no herdr window here shows i
 
 test("the pane button says where to find a remote agent's pane", async () => {
   stubDaemon("default");
-  const { queryClient } = await renderInbox("default", "perm-01JSESS000000000000000000C");
+  const { queryClient } = await renderInbox("default", "perm-01JSESSWGAMMA1200000000000");
   // The prompt's agent runs on host-b, a saved remote machine.
   act(() => {
     queryClient.setQueryData<AgentsResponse>(agentsQuery().queryKey, (agents) => {
@@ -523,7 +616,7 @@ test("the pane button says where to find a remote agent's pane", async () => {
     });
   });
 
-  fireEvent.click(screen.getByRole("button", { name: /Open the pane in herdr/ }));
+  await openHerdr();
   await flush();
   expect(screen.getByRole("status").textContent).toMatch(
     /^Focused on host-b - select host-b in herdr's sidebar,/,
@@ -532,7 +625,7 @@ test("the pane button says where to find a remote agent's pane", async () => {
 
 test("pressing O twice while the first focus is in flight focuses once", async () => {
   stubDaemon("default", true);
-  await renderInbox("default", "perm-01JSESS000000000000000000C");
+  await renderInbox("default", "perm-01JSESSWGAMMA1200000000000");
   fireEvent.keyDown(window, { key: "o" });
   fireEvent.keyDown(window, { key: "o" });
   release?.();
@@ -542,7 +635,7 @@ test("pressing O twice while the first focus is in flight focuses once", async (
 
 test("O does nothing while the detail pane is hidden or the key is held", async () => {
   stubDaemon("default");
-  await renderInbox("default", "perm-01JSESS000000000000000000C");
+  await renderInbox("default", "perm-01JSESSWGAMMA1200000000000");
   fireEvent.keyDown(window, { key: "o", repeat: true });
   const detail = document.querySelector<HTMLElement>(".in-detail");
   if (!detail) throw new Error("no detail pane");
