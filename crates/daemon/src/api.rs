@@ -9671,13 +9671,31 @@ esac"#,
         home: &std::path::Path,
         starter: Arc<dyn OrchestratorStart>,
     ) -> Router {
-        app_polling(home, Some(starter), Registry::new())
+        app_retros(home, starter, crate::retros::Retros::default())
+    }
+
+    /// The board API with this starter, running retros through `retros`.
+    pub(crate) fn app_retros(
+        home: &std::path::Path,
+        starter: Arc<dyn OrchestratorStart>,
+        retros: crate::retros::Retros,
+    ) -> Router {
+        app_running(home, Some(starter), Registry::new(), retros)
     }
 
     fn app_polling(
         home: &std::path::Path,
         starter: Option<Arc<dyn OrchestratorStart>>,
         pollers: Registry,
+    ) -> Router {
+        app_running(home, starter, pollers, crate::retros::Retros::default())
+    }
+
+    fn app_running(
+        home: &std::path::Path,
+        starter: Option<Arc<dyn OrchestratorStart>>,
+        pollers: Registry,
+        retros: crate::retros::Retros,
     ) -> Router {
         let (_newest_tx, newest) = watch::channel(0);
         let (_stop_tx, stop) = watch::channel(false);
@@ -9702,7 +9720,7 @@ esac"#,
             ssh: vec!["ssh".into()],
             evals: memory::eval::Evals::default(),
             backups: crate::backups::BackupJobs::default(),
-            retros: crate::retros::Retros::default(),
+            retros,
         }))
     }
 

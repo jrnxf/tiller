@@ -451,13 +451,18 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
     let evals = state.0.evals.clone();
     let server = axum::serve(listener, api::router(state)).with_graceful_shutdown(shutdown);
     let mut stopped = stop.clone();
-    tokio::select! {
-        served = server => served.map_err(DaemonError::Serve)?,
+    // A serve error is returned only once the curators and evals the board
+    // started are stopped too.
+    let served = tokio::select! {
+        served = server => served.map_err(DaemonError::Serve),
         () = async {
             let _ = stopped.wait_for(|stop| *stop).await;
             tokio::time::sleep(DRAIN).await;
-        } => tracing::warn!("requests still open after the drain; exiting"),
-    }
+        } => {
+            tracing::warn!("requests still open after the drain; exiting");
+            Ok(())
+        }
+    };
     let _ = stop_tx.send(true);
     if let Ok(Ok(handles)) = tokio::time::timeout(DRAIN, workers).await {
         for handle in handles {
@@ -470,6 +475,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
     // A holdout eval the board started is stopped the same way, and records
     // nothing.
     let _ = tokio::task::spawn_blocking(move || evals.stop(DRAIN)).await;
+    served?;
     // An older binary never writes to a newer database, not even its stop
     // event.
     let fatal = *fatal.lock().unwrap_or_else(PoisonError::into_inner);

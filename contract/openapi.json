@@ -5679,7 +5679,7 @@
             }
           },
           "503": {
-            "description": "this daemon cannot run retros",
+            "description": "this daemon cannot run retros, or it is stopping",
             "content": {
               "application/json": {
                 "schema": {

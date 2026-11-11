@@ -164,10 +164,20 @@ impl Retros {
         Ok(())
     }
 
+    /// Whether the daemon is stopping: a claim then starts nothing.
+    fn stopping(&self) -> bool {
+        self.0.stop.load(Ordering::SeqCst)
+    }
+
     /// Stops every running curator and waits up to `wait` for each run to
-    /// record how it ended.
+    /// record how it ended. The flag is set under the claims lock, so a Run
+    /// again still claiming has started its run before the runs are taken,
+    /// and one that claims later is refused.
     pub fn stop(&self, wait: Duration) {
-        self.0.stop.store(true, Ordering::SeqCst);
+        {
+            let _claiming = self.claiming();
+            self.0.stop.store(true, Ordering::SeqCst);
+        }
         let handles: Vec<JoinHandle<()>> = self.runs().drain(..).collect();
         let deadline = Instant::now() + wait;
         for handle in handles {
@@ -357,7 +367,7 @@ pub(crate) async fn list_retros(
               (status = 404, body = ErrorBody),
               (status = 422, body = ErrorBody, description = "done with an outcome other than unfinished, its curator still runs, or another retro of the same card runs"),
               (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded"),
-              (status = 503, body = ErrorBody, description = "this daemon cannot run retros")))]
+              (status = 503, body = ErrorBody, description = "this daemon cannot run retros, or it is stopping")))]
 pub(crate) async fn run_retro(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -382,6 +392,9 @@ pub(crate) async fn run_retro(
             return Err(uninitialized());
         }
         let _claiming = retros.claiming();
+        if retros.stopping() {
+            return Err(Error::Unavailable("the daemon is stopping".into()).into());
+        }
         let mut store = Store::open_current(&db).map_err(ApiError::from)?;
         let ctx = board_ctx(&key, args.as_ref());
         // A retry of a Run again answers with the retro its key claimed and
@@ -761,5 +774,52 @@ mod tests {
             retro.learning.as_deref(),
             Some("curator stopped: the daemon stopped before the retro was finished")
         );
+    }
+
+    /// A Run again that arrives once the daemon is stopping claims nothing,
+    /// so no curator starts after the runs were taken to be stopped.
+    #[tokio::test]
+    async fn a_stopping_daemon_starts_no_new_curator() {
+        let fleet = fleet();
+        let cookie = owner_cookie(fleet.dir.path());
+        let retros = Retros::default();
+        let app = crate::api::tests::app_retros(
+            fleet.dir.path(),
+            Arc::new(FakeCurator {
+                db: fleet.db.clone(),
+                endings: Mutex::new(VecDeque::from([Ending::UntilStopped])),
+            }),
+            retros.clone(),
+        );
+        retros.stop(Duration::from_secs(1));
+        let (status, body) = run(&app, &cookie, R1, "late").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .ends_with("the daemon is stopping"),
+            "{body}"
+        );
+        let r1 = one(&app, R1).await;
+        assert_eq!(r1.status, RetroStatus::Unfinished);
+        assert!(retros.runs().is_empty());
+    }
+
+    /// Stopping waits for a Run again that is still claiming, so its run is
+    /// among the ones stopped.
+    #[test]
+    fn stopping_waits_for_a_claim_in_progress() {
+        let retros = Retros::default();
+        let claiming = retros.claiming();
+        let stopper = {
+            let retros = retros.clone();
+            std::thread::spawn(move || retros.stop(Duration::from_secs(1)))
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!retros.stopping(), "stop did not wait for the claim");
+        drop(claiming);
+        stopper.join().unwrap();
+        assert!(retros.stopping());
     }
 }
