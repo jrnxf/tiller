@@ -1697,7 +1697,8 @@ impl Store {
     /// `mem.repropose` from the memory view ("Re-propose on current text",
     /// U14): a proposal made against an older text, the same add, rewrite or
     /// removal redone on the current text as a new proposal, with the old
-    /// one's author, reason and evidence. The old one is closed. The new one
+    /// one's author, reason and evidence. The old one is closed and leaves
+    /// its open change set, which closes `abandoned` once empty. The new one
     /// is in no change set, so Keep waits for its own holdout run.
     pub fn mem_repropose(
         &mut self,
@@ -1753,6 +1754,7 @@ impl Store {
                 file.head_blob, again.id
             );
             set_proposal(tx, &proposal, "discarded", "proposal.stale", &why)?;
+            learning::leave_open_set(tx, &proposal.id, &again.id)?;
             Ok(Pending {
                 proposal_id: again.id,
                 approval_id: None,

@@ -93,7 +93,7 @@ A change set is the unit the loop measures.
 
 `change_sets`: `id`, `name`, `state` (`open`, `measuring`, `closed`), `window_cards` (default `learning.window_cards`, 10), `opened_at`, `measuring_from` (the first member's apply), `closed_at`, `close_reason` (`window_complete`, `abandoned`), `rev`. `change_set_members`: (`change_set_id`, `proposal_id`, `added_at`); a proposal belongs to at most one set.
 
-- `tiller learn bundle <name> <proposal>...` opens a set with its members. `tiller learn add <set> <proposal>` adds one while the set is `open`; a member added after an eval run invalidates it (section 7). `tiller learn abandon <set>` closes it.
+- `tiller learn bundle <name> <proposal>...` opens a set with its members. `tiller learn add <set> <proposal>` adds one while the set is `open`; a member added after an eval run invalidates it (section 7). `tiller learn abandon <set>` closes it. A member that `mem.repropose` replaces leaves its set (`change_set.member_removed`, with `proposal` and `replaced_by`), and a set left empty closes `abandoned` (memory.md sections 6 and 12).
 - A lone proposal is a set of one. `tiller learn eval --proposal <p>` opens it, named after the proposal.
 - The sweep moves an `open` set to `measuring` once any member is `applied`, and closes it `window_complete` once `window_cards` cards have closed `landed` or `reported` since `measuring_from`.
 - **The rule.** While a set is `measuring` and its window is not complete, no proposal outside that set can be accepted. The gate (section 7) says which set is measuring and how many cards remain. Nothing stops the owner from opening a second set and running its holdout meanwhile; only the approval waits. This is "one change at a time, or a named bundle" (point 22): the bundle is measured as a bundle, and its name is the attribution.
@@ -138,7 +138,7 @@ A model upgrade changes the `claude` part of every new hash; `tiller learn statu
 | `retro.finish` | the curator, the owner | retro `full` and `pending` (a `done` retro replays the same outcome); `--learning` and `--proposed` need their argument | `retros` (state, outcome, learning), `evidence` (for `--learning`) | `retro.finished`, `evidence.captured` |
 | `change_set.create` | owner | each proposal exists, is `proposed` and in no set; name not used by an open set | `change_sets`, `change_set_members` | `change_set.created` |
 | `change_set.add` | owner | set `open`; proposal as above | `change_set_members` | `change_set.member_added` |
-| `change_set.close` | owner (`abandoned`), sweep (`window_complete`) | set not `closed` | `change_sets` | `change_set.closed` |
+| `change_set.close` | owner (`abandoned`), sweep (`window_complete`), `mem.repropose` (`abandoned`, a set it leaves empty) | set not `closed` | `change_sets` | `change_set.closed` |
 | `change_set.measure` | sweep | set `open`, a member `applied` | `change_sets.state`, `measuring_from` | `change_set.measuring` |
 | `eval_run.record` | `tiller learn eval` (owner) | set exists; result parses | `eval_runs` | `eval_run.recorded` |
 | `config.manifest_record` | `tiller spawn` | none; a known hash writes nothing | `config_manifests` | `config.manifest_recorded` |

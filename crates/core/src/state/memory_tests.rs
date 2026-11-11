@@ -1,4 +1,5 @@
 use super::*;
+use crate::domain::{ChangeSet, ChangeSetClose, ChangeSetState};
 use crate::state::learning::EvalResult;
 use crate::state::tests::{memory_store, owner};
 
@@ -1000,6 +1001,82 @@ fn deleting_a_project_removes_its_memory_and_unlinks_the_fleet_one() {
 
 /// U14: a proposal whose document moved after it was made is stale. Its
 /// hint names the act that clears it, which the memory view offers.
+#[test]
+fn a_reproposed_member_leaves_its_open_change_set() {
+    let (mut store, _) = memory_store();
+    let lone = agent_proposal(
+        &mut store,
+        "alpha",
+        "",
+        "The staging DB resets at midnight",
+        None,
+    );
+    measured(&mut store, "staging notes", &[&lone]);
+    let first = agent_proposal(&mut store, "alpha", "", "Deploys freeze on Fridays", None);
+    let second = agent_proposal(&mut store, "alpha", "", "Logs rotate hourly", None);
+    measured(&mut store, "ops notes", &[&first, &second]);
+    let bundle = learning::open_set_of(store.conn(), &first)
+        .unwrap()
+        .unwrap();
+    let measured_members = learning::members_sha256_of(store.conn(), &bundle.id).unwrap();
+    // The text moves under all three.
+    let owner_line = add(&mut store, "alpha", "Owner line", "", doc::RULE_SECTION);
+    let now = "## How we work here\n\n- Owner line\n";
+    apply(
+        &mut store,
+        owner_line.approval_id.as_deref().unwrap(),
+        "",
+        now,
+    );
+    let head = file(now).head_blob;
+
+    // A set of one: its only member is replaced, so the set closes abandoned.
+    let lone_set = learning::open_set_of(store.conn(), &lone).unwrap().unwrap();
+    store
+        .mem_repropose(&owner(), &lone, &head, &file(now))
+        .unwrap();
+    assert!(
+        learning::open_set_of(store.conn(), &lone)
+            .unwrap()
+            .is_none()
+    );
+    let closed: ChangeSet = get(store.conn(), "change set", &lone_set.id).unwrap();
+    assert_eq!(closed.state, ChangeSetState::Closed);
+    assert_eq!(closed.close_reason, Some(ChangeSetClose::Abandoned));
+
+    // A bundle: the replaced member leaves it, the other stays, and the run
+    // that measured both no longer clears the one left.
+    store
+        .mem_repropose(&owner(), &first, &head, &file(now))
+        .unwrap();
+    assert!(
+        learning::open_set_of(store.conn(), &first)
+            .unwrap()
+            .is_none()
+    );
+    let still = learning::open_set_of(store.conn(), &second)
+        .unwrap()
+        .unwrap();
+    assert_eq!(still.id, bundle.id);
+    assert_eq!(still.state, ChangeSetState::Open);
+    assert_ne!(
+        learning::members_sha256_of(store.conn(), &bundle.id).unwrap(),
+        measured_members
+    );
+    let gate = learning::gate(store.conn(), &second).unwrap();
+    assert!(!gate.ok, "{gate:?}");
+    let removed: Vec<String> = store
+        .conn()
+        .prepare("SELECT payload FROM events WHERE kind = 'change_set.member_removed' ORDER BY seq")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(removed.len(), 2, "{removed:?}");
+    assert!(removed[1].contains(&first), "{removed:?}");
+}
+
 #[test]
 fn a_stale_proposal_is_reproposed_on_the_current_text() {
     let (mut store, _) = memory_store();

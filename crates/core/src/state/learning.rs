@@ -536,6 +536,33 @@ fn add_member(tx: &mut Tx<'_>, set: &ChangeSet, proposal: &str) -> Result<Change
     })
 }
 
+/// A proposal that `replaced_by` replaced leaves the set it is in that is
+/// not closed, if any: that set's holdout no longer measures what would
+/// land. A set left with no members closes `abandoned`.
+pub(crate) fn leave_open_set(tx: &mut Tx<'_>, proposal: &str, replaced_by: &str) -> Result<()> {
+    let Some(member) = open_membership(tx.conn(), proposal)? else {
+        return Ok(());
+    };
+    let set: ChangeSet = get(tx.conn(), "change set", &member.change_set_id)?;
+    tx.conn().execute(
+        "DELETE FROM change_set_members WHERE change_set_id = ?1 AND proposal_id = ?2",
+        params![set.id, proposal],
+    )?;
+    tx.event(
+        NewEvent::new("change_set", &set.id, "change_set.member_removed")
+            .payload(json!({"proposal": proposal, "replaced_by": replaced_by})),
+    )?;
+    let left = count(
+        tx.conn(),
+        "SELECT COUNT(*) FROM change_set_members WHERE change_set_id = ?1",
+        &[&set.id],
+    )?;
+    if left == 0 {
+        close_set(tx, &set, ChangeSetClose::Abandoned)?;
+    }
+    Ok(())
+}
+
 fn require_owner_or_daemon(actor: &Actor, what: &str) -> Result<()> {
     if actor.is_owner() || matches!(actor, Actor::Daemon) {
         Ok(())
