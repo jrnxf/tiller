@@ -454,3 +454,41 @@ test("a click that focuses the card around a button gives focus back to the butt
   fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
   expect(document.activeElement).toBe(run);
 });
+
+// A dialog opened from a button that holds a script-only part, in a card the
+// owner can Tab to.
+function Tabbable() {
+  const [isOpen, setOpen] = useState(false);
+  return (
+    <div tabIndex={0} data-testid="tile">
+      <button type="button" onClick={() => setOpen(true)}>
+        <span tabIndex={-1}>Go</span>
+      </button>
+      {isOpen ? (
+        <Modal className="dialog" label="Tile dialog" onClose={() => setOpen(false)}>
+          <button type="button">Inside</button>
+        </Modal>
+      ) : null}
+    </div>
+  );
+}
+
+test("a press on a script-only part inside a button makes the button the opener", () => {
+  render(<Tabbable />);
+  (document.activeElement as HTMLElement | null)?.blur();
+  const go = screen.getByRole("button", { name: "Go" });
+  fireEvent.pointerDown(screen.getByText("Go"));
+  fireEvent.click(go);
+  fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+  expect(document.activeElement).toBe(go);
+});
+
+test("a click that focuses a card the owner can Tab to gives focus back to the button", () => {
+  render(<Tabbable />);
+  const go = screen.getByRole("button", { name: "Go" });
+  fireEvent.pointerDown(go);
+  screen.getByTestId("tile").focus();
+  fireEvent.click(go);
+  fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+  expect(document.activeElement).toBe(go);
+});

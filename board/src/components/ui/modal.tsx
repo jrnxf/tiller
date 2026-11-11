@@ -35,11 +35,17 @@ if (typeof document !== "undefined") {
     "pointerdown",
     (event) => {
       const target = event.target instanceof Element ? event.target : null;
-      // The nearest control only: a press in a script-only panel is no
-      // control's, not the press of one further out.
-      const control = target?.closest<HTMLElement>(CONTROLS) ?? null;
       presses += 1;
-      pressed = control?.matches(PRESSABLE) && !control.closest('[role="menu"]') ? control : null;
+      // The nearest control the owner can reach, out past a script-only part
+      // inside it, but never out of a dialog: a press on its text is no
+      // control's.
+      let control = target?.closest<HTMLElement>(CONTROLS) ?? null;
+      while (control && !control.matches(PRESSABLE)) {
+        control = control.matches('[role="dialog"], [aria-modal="true"]')
+          ? null
+          : (control.parentElement?.closest<HTMLElement>(CONTROLS) ?? null);
+      }
+      pressed = control && !control.closest('[role="menu"]') ? control : null;
     },
     true,
   );
@@ -82,19 +88,18 @@ if (typeof document !== "undefined") {
 function openerNow(): HTMLElement | null {
   const active = document.activeElement;
   const inMenu = active instanceof HTMLElement && active.closest('[role="menu"]') !== null;
-  // Safari, and Firefox on macOS, focus a script-only panel around a clicked
-  // button, not the button: the button is the opener.
+  // A click that left focus on the page, or on a part around the control
+  // (Safari, and Firefox on macOS, never focus a clicked button): the control
+  // it pressed.
   if (
     active instanceof HTMLElement &&
-    !active.matches(PRESSABLE) &&
+    active !== pressed &&
     pressed?.isConnected &&
     active.contains(pressed)
   ) {
     return pressed;
   }
   if (active instanceof HTMLElement && active !== document.body && !inMenu) return active;
-  // A click that left focus on the page: the control it pressed.
-  if (active === document.body && pressed?.isConnected) return pressed;
   // Focus fell to the page because the control that had it was removed, not
   // because the owner clicked the page.
   const dropped = active === document.body && last?.isConnected === false;
