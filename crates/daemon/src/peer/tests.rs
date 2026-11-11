@@ -214,16 +214,21 @@ impl SyncLink {
     /// The next frame that is not a `beat`.
     fn next(&mut self) -> Frame {
         loop {
-            let mut line = String::new();
-            assert!(
-                self.reader.read_line(&mut line).unwrap() > 0,
-                "the link closed"
-            );
-            match serde_json::from_str(&line).unwrap() {
+            match self.any() {
                 Frame::Beat { .. } => continue,
                 frame => return frame,
             }
         }
+    }
+
+    /// The next frame, a `beat` too.
+    fn any(&mut self) -> Frame {
+        let mut line = String::new();
+        assert!(
+            self.reader.read_line(&mut line).unwrap() > 0,
+            "the link closed"
+        );
+        serde_json::from_str(&line).unwrap()
     }
 }
 
@@ -2036,6 +2041,105 @@ async fn a_peers_checks_are_read_over_the_link() {
     assert_eq!(error.error.code, "unavailable");
     let missing = get(&app, "/api/v1/doctor?host=no-such-host").await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
+}
+
+/// A peer's binary whose checks hang until the test lets them finish, and
+/// count how often they ran.
+struct HeldDoctor {
+    runs: Arc<AtomicUsize>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl OrchestratorStart for HeldDoctor {
+    fn start(
+        &self,
+        store: &mut Store,
+        ctx: &tiller_core::Ctx,
+        project: &str,
+        restart: bool,
+    ) -> Result<tiller_core::Applied<tiller_agents::spawn::orchestrator::Orchestrator>, StartError>
+    {
+        PeerDoctor.start(store, ctx, project, restart)
+    }
+
+    fn doctor(&self) -> Option<crate::dto::DoctorReport> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        let _ = self
+            .release
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(20));
+        PeerDoctor.doctor()
+    }
+}
+
+/// The peer runs its checks off the link: while they run (a hung tool can
+/// take seconds), the link keeps beating and answers other queries. Two
+/// `doctor` queries in flight share one run.
+#[test]
+fn a_peers_checks_run_off_the_link_one_run_at_a_time() {
+    let pair = pair();
+    let (release, held) = std::sync::mpsc::channel();
+    let runs = Arc::new(AtomicUsize::new(0));
+    let doctor = Arc::new(HeldDoctor {
+        runs: runs.clone(),
+        release: Mutex::new(held),
+    });
+    let mut link = SyncLink::on(serve_with_starter(
+        pair.peer.dir.path(),
+        "test-host",
+        Some(doctor),
+    ));
+    link.send(&hello(&pair, None));
+    assert!(matches!(link.next(), Frame::Welcome(_)));
+    assert!(matches!(link.next(), Frame::Snapshot(_)));
+    for id in ["d1", "d2"] {
+        link.send(&Frame::Query {
+            id: id.into(),
+            path: "doctor".into(),
+        });
+    }
+    link.send(&Frame::Query {
+        id: "c1".into(),
+        path: "cards/no-such-card".into(),
+    });
+
+    // The checks are held: the card query is answered and beats still come.
+    let (mut beat, mut card) = (false, false);
+    while !(beat && card) {
+        match link.any() {
+            Frame::Beat { .. } => beat = true,
+            Frame::Result {
+                id, http_status, ..
+            } => {
+                assert_eq!((id.as_str(), http_status), ("c1", 404));
+                card = true;
+            }
+            Frame::Event(_) => {}
+            frame => panic!("expected a beat or the card's result, got {frame:?}"),
+        }
+    }
+
+    release.send(()).unwrap();
+    let mut answered = Vec::new();
+    while answered.len() < 2 {
+        match link.any() {
+            Frame::Result {
+                id,
+                http_status,
+                body,
+            } => {
+                assert_eq!(http_status, 200, "{body}");
+                assert_eq!(body["checks"][0]["detail"], "gh is not on PATH of the peer");
+                answered.push(id);
+            }
+            Frame::Beat { .. } | Frame::Event(_) => {}
+            frame => panic!("expected the checks, got {frame:?}"),
+        }
+    }
+    answered.sort();
+    assert_eq!(answered, ["d1", "d2"]);
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
 }
 
 /// A peer that is not live is 503 `peer_unreachable` at once. A peer whose

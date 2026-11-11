@@ -1578,12 +1578,7 @@ async fn doctor(
     let Some(report) = report else {
         return Err(Error::Unavailable("this daemon cannot run its checks".into()).into());
     };
-    Ok(Json(Doctor {
-        checked_at: checked_at.to_string(),
-        ok: report.ok,
-        checks: report.checks,
-        merge_gates: report.merge_gates,
-    }))
+    Ok(Json(Doctor::from_report(report, checked_at)))
 }
 
 /// Run now: ends one poller's wait so it polls at once, then answers with

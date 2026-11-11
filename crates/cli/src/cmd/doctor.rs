@@ -10,10 +10,16 @@
 //! The tools are found the way the daemon and spawn find them:
 //! `TILLER_HERDR`, `TILLER_QUOTA_AXI` and `TILLER_GH` first, then the
 //! `[spawn]` tables of `config.toml`, then the bare program name.
+//!
+//! The probes run at the same time, and the report waits for them at most
+//! [`REPORT_DEADLINE`]: a probe still running then is reported as not
+//! answering, so hung tools cannot hold the report past it.
 
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tiller_agents::land::app::{APP_DIR, AppKey, KEY_FILE, KeyError};
@@ -417,17 +423,45 @@ fn firstmate_scripts(lines: &str) -> Vec<&'static str> {
 fn process_list() -> Result<String, String> {
     let program = env_command("TILLER_PS").unwrap_or_else(|| vec!["ps".into()]);
     let (first, rest) = program.split_first().ok_or("no command is configured")?;
-    let output = Command::new(first)
+    let mut child = Command::new(first)
         .args(rest)
         .args(["-axo", "args="])
         .stdin(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output()
+        .spawn()
         .map_err(|error| format!("cannot run {}: {error}", first.to_string_lossy()))?;
-    if !output.status.success() {
-        return Err(format!("exited with {}", output.status));
+    let mut stdout = child.stdout.take();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = Vec::new();
+        if let Some(pipe) = stdout.as_mut() {
+            let _ = std::io::Read::read_to_end(pipe, &mut text);
+        }
+        let _ = tx.send(text);
+    });
+    // A process list that hangs is killed at the report's deadline, so its
+    // probe does not outlive the report.
+    let deadline = Instant::now() + REPORT_DEADLINE;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(late());
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => return Err(error.to_string()),
+        }
+    };
+    if !status.success() {
+        return Err(format!("exited with {status}"));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let text = rx
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|_| "kept its output open".to_owned())?;
+    Ok(String::from_utf8_lossy(&text).into_owned())
 }
 
 /// Whether a daemon holds `<home>/daemon.lock` now. A home that never ran a
@@ -534,6 +568,101 @@ fn firstmate(list: Result<String, String>, marker: Option<&str>, daemon: bool) -
     }
 }
 
+/// The longest the report waits for its probes together. A board host waits
+/// 10 s for a peer's answer (`Timing::query`), so a peer's report must be
+/// sent well inside that, however many of its tools hang.
+pub const REPORT_DEADLINE: Duration = Duration::from_secs(7);
+
+/// What a probe still running at [`REPORT_DEADLINE`] reports.
+fn late() -> String {
+    format!("did not answer within {REPORT_DEADLINE:?}")
+}
+
+/// The report's checks in their order: some known at once, the rest made by
+/// probes that run on threads of their own.
+struct Probes {
+    /// Each slot's check: the answer when known at once, else what the slot
+    /// reports if its probe is still running at the deadline.
+    slots: Vec<Check>,
+    /// How many slots a probe still has to fill.
+    pending: usize,
+    tx: mpsc::Sender<(usize, Check)>,
+    rx: mpsc::Receiver<(usize, Check)>,
+}
+
+impl Probes {
+    fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self {
+            slots: Vec::new(),
+            pending: 0,
+            tx,
+            rx,
+        }
+    }
+
+    /// A check known at once.
+    fn ready(&mut self, check: Check) {
+        self.slots.push(check);
+    }
+
+    /// Starts `probe` on a thread of its own. It fills the slots `late`
+    /// holds, in order, through its argument.
+    fn start(
+        &mut self,
+        late: Vec<Check>,
+        probe: impl FnOnce(&mut dyn FnMut(Check)) + Send + 'static,
+    ) {
+        let mut slot = self.slots.len();
+        self.pending += late.len();
+        self.slots.extend(late);
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            probe(&mut |check| {
+                // A report past its deadline has gone: the answer is dropped.
+                let _ = tx.send((slot, check));
+                slot += 1;
+            });
+        });
+    }
+
+    /// [`Probes::start`] for a probe that makes one check.
+    fn one(&mut self, late: Check, probe: impl FnOnce() -> Check + Send + 'static) {
+        self.start(vec![late], move |put| put(probe()));
+    }
+
+    /// A tool that must (or may) answer `--version`.
+    fn tool(&mut self, name: &'static str, required: bool, program: Vec<OsString>) {
+        self.one(Check::missing(name, required, late()), move || {
+            tool(name, required, &program)
+        });
+    }
+
+    /// The checks, once every probe has answered or `within` has passed.
+    fn finish(self, within: Duration) -> Vec<Check> {
+        let Self {
+            mut slots,
+            mut pending,
+            tx,
+            rx,
+        } = self;
+        drop(tx);
+        let deadline = Instant::now() + within;
+        while pending > 0 {
+            let Ok((slot, check)) =
+                rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            else {
+                break;
+            };
+            if let Some(place) = slots.get_mut(slot) {
+                *place = check;
+                pending -= 1;
+            }
+        }
+        slots
+    }
+}
+
 /// Every check, run now: the report `tiller doctor` prints and the board's
 /// host card shows (`GET /api/v1/doctor`).
 pub fn report(app: &App) -> Report {
@@ -556,31 +685,53 @@ pub fn report(app: &App) -> Report {
     };
     let spawn = &config.spawn;
 
-    checks.push(tool("git", true, &["git".into()]));
-    checks.push(tool("treehouse", true, &words(&spawn.treehouse)));
-    checks.push(herdr(herdr_program(spawn)));
-    checks.push(claude(&[OsString::from(&spawn.claude)]));
-    checks.push(tool(
+    // Every probe that starts a process runs on a thread of its own, and the
+    // report waits for them together, at most REPORT_DEADLINE: a hung tool
+    // costs its own timeout, never the sum of them all.
+    let mut probes = Probes::new();
+    probes.tool("git", true, vec!["git".into()]);
+    probes.tool("treehouse", true, words(&spawn.treehouse));
+    let program = herdr_program(spawn);
+    probes.one(Check::missing("herdr", true, late()), move || {
+        herdr(program)
+    });
+    let program = [OsString::from(&spawn.claude)];
+    probes.one(Check::missing("claude", true, late()), move || {
+        claude(&program)
+    });
+    probes.tool(
         "gh",
         true,
-        &env_command("TILLER_GH").unwrap_or_else(|| vec!["gh".into()]),
-    ));
-    checks.push(tool("gh-axi", false, &["gh-axi".into()]));
-    checks.push(tool(
+        env_command("TILLER_GH").unwrap_or_else(|| vec!["gh".into()]),
+    );
+    probes.tool("gh-axi", false, vec!["gh-axi".into()]);
+    probes.tool(
         "quota-axi",
         config.quota.enabled,
-        &env_command("TILLER_QUOTA_AXI").unwrap_or_else(|| vec!["quota-axi".into()]),
-    ));
-    let nm = tool("no-mistakes", false, &["no-mistakes".into()]);
-    let daemon = no_mistakes(&nm);
-    checks.push(nm);
-    checks.push(daemon);
-    checks.push(hooks());
+        env_command("TILLER_QUOTA_AXI").unwrap_or_else(|| vec!["quota-axi".into()]),
+    );
+    probes.start(
+        vec![
+            Check::missing("no-mistakes", false, late()),
+            Check::missing("no-mistakes daemon", false, late()),
+        ],
+        |put| {
+            let nm = tool("no-mistakes", false, &["no-mistakes".into()]);
+            let daemon = no_mistakes(&nm);
+            put(nm);
+            put(daemon);
+        },
+    );
+    probes.ready(hooks());
     let marker = app.owner_marker();
     let daemon = daemon_running(&app.home);
-    checks.push(owner_marker(marker.as_deref(), daemon));
-    checks.push(firstmate(process_list(), marker.as_deref(), daemon));
-    checks.push(merge_app(&app.home));
+    probes.ready(owner_marker(marker.as_deref(), daemon));
+    let late_list = firstmate(Err(late()), marker.as_deref(), daemon);
+    probes.one(late_list, move || {
+        firstmate(process_list(), marker.as_deref(), daemon)
+    });
+    probes.ready(merge_app(&app.home));
+    checks.extend(probes.finish(REPORT_DEADLINE));
     let merge_gates = stored(app, &mut checks);
 
     Report {

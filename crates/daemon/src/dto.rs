@@ -910,6 +910,19 @@ pub struct Doctor {
     pub merge_gates: Vec<DoctorGate>,
 }
 
+impl Doctor {
+    /// The board's shape of a report whose checks began at `checked_at`:
+    /// this host's own read and a peer's answer to a `doctor` query.
+    pub fn from_report(report: DoctorReport, checked_at: tiller_core::Timestamp) -> Self {
+        Self {
+            checked_at: checked_at.to_string(),
+            ok: report.ok,
+            checks: report.checks,
+            merge_gates: report.merge_gates,
+        }
+    }
+}
+
 /// The inlined `<script id="tiller-boot">` body and `GET /api/v1/snapshot`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Snapshot {

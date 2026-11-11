@@ -61,11 +61,12 @@ function Line({
 }: {
   line: CheckLine;
   owner: boolean;
-  onRan: (after: PollerHealth | null) => void;
+  // How a poller's Run now reports back; a peer's lines have no Run now.
+  onRan?: (after: PollerHealth | null) => void;
 }) {
   const end =
     line.end?.kind === "run" ? (
-      owner ? (
+      owner && onRan ? (
         <RunNow poller={line.end.poller} onRan={onRan} />
       ) : (
         <span className="set-line-r">Owner only</span>
@@ -112,18 +113,7 @@ function LocalChecks({ health, owner }: { health: DaemonHealth; owner: boolean }
     <HostCardSection
       title="Checks"
       meta={meta}
-      action={
-        <button
-          type="button"
-          className="btn sm"
-          onClick={again}
-          disabled={doctor.isFetching}
-          aria-busy={doctor.isFetching || undefined}
-        >
-          <RetryIcon />
-          Check again
-        </button>
-      }
+      action={<CheckAgain busy={doctor.isFetching} onClick={again} />}
     >
       <ul className="set-lines" aria-live="polite">
         {doctor.isError ? (
@@ -146,56 +136,85 @@ function LocalChecks({ health, owner }: { health: DaemonHealth; owner: boolean }
 }
 
 // Why a peer's checks did not come, in the daemon's words: a link that is
-// not live, or a peer that cannot run them.
-function unsent(label: string, error: Error): Words {
+// not live, a peer that cannot run them, or a peer on a tiller from before
+// `doctor` was a query, which refuses it as a usage error.
+function unsent(label: string, error: Error, stale: boolean): Words {
   const read = error instanceof ReadError ? error : null;
+  const older = read?.status === 400 && read.code === "usage";
   return [
-    `${label} did not send them: ${(read?.reason ?? error.message).replace(/\.$/, "")}.`,
+    older
+      ? `${label} runs an older tiller that cannot send its checks.`
+      : `${label} did not send them: ${(read?.reason ?? error.message).replace(/\.$/, "")}.`,
     read?.code === "peer_unreachable"
       ? " They show again once its link is live."
       : " Run tiller doctor in a shell on that host.",
+    ...(stale ? [" The lines below are its last good read."] : []),
   ];
 }
 
-// A paired peer's checks: the peer runs them when its card opens and sends
-// the report over the link. This board only reads them, so the card has no
-// buttons; the fixes are made on that host.
+// The Check again button of a card's checks: it runs them once more.
+function CheckAgain({ busy, onClick }: { busy: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      className="btn sm"
+      onClick={onClick}
+      disabled={busy}
+      aria-busy={busy || undefined}
+    >
+      <RetryIcon />
+      Check again
+    </button>
+  );
+}
+
+// A paired peer's checks: the peer runs them when its card opens, and again
+// on Check again, and sends the report over the link. This board only reads
+// them: the fixes are made on that host.
 function PeerChecks({ machine }: { machine: Machine }) {
   const doctor = useQuery(doctorQuery(machine.label));
   const checked = whenText(doctor.data?.checked_at);
+  // A read again that failed leaves the last report: it says so.
+  const stale = doctor.isError && doctor.data !== undefined;
   const meta = doctor.isFetching
     ? `Running the checks on ${machine.label}`
     : checked
-      ? `Read from ${machine.label}, last run ${checked}`
+      ? stale
+        ? `Last good read from ${machine.label} ${checked}`
+        : `Read from ${machine.label}, last run ${checked}`
       : null;
   return (
-    <HostCardSection title="Checks" meta={meta}>
+    <HostCardSection
+      title="Checks"
+      meta={meta}
+      action={<CheckAgain busy={doctor.isFetching} onClick={() => void doctor.refetch()} />}
+    >
       <ul className="set-lines" aria-live="polite" data-testid="peer-checks">
         {doctor.isError ? (
           <CardLine
             testid="check-unreadable"
             tone="amber"
             title="Checks"
-            detail={unsent(machine.label, doctor.error)}
+            detail={unsent(machine.label, doctor.error, stale)}
           />
         ) : null}
         {doctor.data
           ? peerCheckLines(doctor.data).map((line) => (
-              <CardLine
-                key={line.key}
-                testid={`check-${line.key}`}
-                tone={line.tone}
-                title={line.title}
-                sub={line.sub}
-                detail={line.detail}
-                end={
-                  line.end?.kind === "note" ? (
-                    <span className="set-line-r">{line.end.text}</span>
-                  ) : null
-                }
-              />
+              <Line key={line.key} line={line} owner={false} />
             ))
           : null}
+        {doctor.data ? (
+          // The link's `tiller peer serve` runs them, with the SSH session's
+          // PATH and environment, not the ones the peer's daemon runs with.
+          <CardLine
+            testid="check-environment"
+            tone={null}
+            title="Where they ran"
+            detail={[
+              `They ran in the SSH session of ${machine.label}'s link, not in its daemon. Its PATH can differ, so a tool can be found here and not by the daemon, or the reverse.`,
+            ]}
+          />
+        ) : null}
       </ul>
     </HostCardSection>
   );

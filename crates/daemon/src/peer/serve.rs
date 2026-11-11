@@ -96,6 +96,7 @@ pub fn serve(
         key,
         cursor: 0,
         data_version: None,
+        checks: Checks::default(),
     };
     // A board host with no copy (`last_seq` null) gets a snapshot, as one
     // whose copy is too old or ahead of this database does.
@@ -261,6 +262,7 @@ struct Link<'a> {
     /// The newest `seq` sent.
     cursor: i64,
     data_version: Option<i64>,
+    checks: Checks,
 }
 
 impl Link<'_> {
@@ -277,15 +279,22 @@ impl Link<'_> {
             match frames.recv_timeout(timing.poll) {
                 Ok(Frame::Query { id, path }) => {
                     self.recheck(output)?;
-                    let (http_status, body) = self.answer(&path);
-                    send(
-                        output,
-                        &Frame::Result {
-                            id,
-                            http_status,
-                            body,
-                        },
-                    )?;
+                    match parse_query(&path) {
+                        // The checks can take seconds: they run on a thread
+                        // of their own, and the answer goes out below.
+                        Ok(Query::Doctor) => self.checks.ask(id, self.config),
+                        query => {
+                            let (http_status, body) = self.answer(query);
+                            send(
+                                output,
+                                &Frame::Result {
+                                    id,
+                                    http_status,
+                                    body,
+                                },
+                            )?;
+                        }
+                    }
                 }
                 Ok(Frame::Mutate(frame)) => {
                     // The checks run before anything is written; a refusal
@@ -314,6 +323,20 @@ impl Link<'_> {
             if tick.elapsed() >= timing.tick {
                 tick = Instant::now();
                 self.recheck(output)?;
+            }
+            if let Some((ids, http_status, body)) = self.checks.done() {
+                // The key row may have changed while the checks ran.
+                self.recheck(output)?;
+                for id in ids {
+                    send(
+                        output,
+                        &Frame::Result {
+                            id,
+                            http_status,
+                            body: body.clone(),
+                        },
+                    )?;
+                }
             }
             self.send_events(output, false)?;
             if beat.elapsed() >= timing.beat {
@@ -399,20 +422,12 @@ impl Link<'_> {
         Ok(seq)
     }
 
-    /// One allowlisted single-entity GET, or this host's checks, as the
-    /// board API would answer it.
-    fn answer(&self, path: &str) -> (u16, Value) {
-        match self.read(path) {
-            Ok(body) => (StatusCode::OK.as_u16(), body),
-            Err(error) => {
-                let (status, body) = error.into_parts();
-                (status.as_u16(), error_value(&body))
-            }
-        }
+    /// One allowlisted single-entity GET, as the board API would answer it.
+    fn answer(&self, query: Result<Query, ApiError>) -> (u16, Value) {
+        answered(query.and_then(|query| self.read(query)))
     }
 
-    fn read(&self, path: &str) -> Result<Value, ApiError> {
-        let query = parse_query(path)?;
+    fn read(&self, query: Query) -> Result<Value, ApiError> {
         let store = &self.store;
         let body = match query {
             Query::Card(id) => serde_json::to_value(views::card_detail(store, &id)?),
@@ -426,30 +441,90 @@ impl Link<'_> {
                 }
                 serde_json::to_value(detail)
             }
-            Query::Doctor => serde_json::to_value(self.doctor()?),
+            // `run` hands the checks to `Checks`, off the link thread.
+            Query::Doctor => serde_json::to_value(doctor(self.config.orchestrators.as_deref())?),
         };
-        body.map_err(|error| ApiError::from(tiller_core::Error::from(error)))
+        body.map_err(json_error)
+    }
+}
+
+/// The `doctor` queries of one link: at most one run of the checks at a time,
+/// on a thread of its own, so the link keeps sending beats and events and
+/// answering other frames while a hung tool holds a probe. A query that
+/// comes while a run is going shares its answer, which also keeps a board
+/// host from starting a run per query.
+#[derive(Default)]
+struct Checks {
+    /// The run going now.
+    running: Option<Run>,
+}
+
+/// One run of the checks: the queries waiting for it, and where its answer,
+/// an HTTP status and a body, comes.
+struct Run {
+    waiting: Vec<String>,
+    answer: mpsc::Receiver<(u16, Value)>,
+}
+
+impl Checks {
+    fn ask(&mut self, id: String, config: &ServeConfig) {
+        if let Some(run) = &mut self.running {
+            run.waiting.push(id);
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let services = config.orchestrators.clone();
+        std::thread::spawn(move || {
+            let _ = tx
+                .send(answered(doctor(services.as_deref()).and_then(|report| {
+                    serde_json::to_value(report).map_err(json_error)
+                })));
+        });
+        self.running = Some(Run {
+            waiting: vec![id],
+            answer: rx,
+        });
     }
 
-    /// The checks `tiller doctor` runs, run on this host now, as its own
-    /// board's `GET /api/v1/doctor` answers them. Read only: the board host
-    /// shows them and can act on none.
-    fn doctor(&self) -> Result<Doctor, ApiError> {
-        let checked_at = Timestamp::now();
-        let report = self
-            .config
-            .orchestrators
-            .as_ref()
-            .and_then(|services| services.doctor())
-            .ok_or_else(|| {
-                tiller_core::Error::Unavailable("this host cannot run its checks".into())
-            })?;
-        Ok(Doctor {
-            checked_at: checked_at.to_string(),
-            ok: report.ok,
-            checks: report.checks,
-            merge_gates: report.merge_gates,
-        })
+    /// The finished run's answer and the queries it answers, once.
+    fn done(&mut self) -> Option<(Vec<String>, u16, Value)> {
+        let run = self.running.as_ref()?;
+        let (http_status, body) = match run.answer.try_recv() {
+            Ok(answer) => answer,
+            Err(mpsc::TryRecvError::Empty) => return None,
+            // The run panicked: its queries still get an answer.
+            Err(mpsc::TryRecvError::Disconnected) => answered(Err(ApiError::from(
+                tiller_core::Error::Internal("the checks stopped before they finished".into()),
+            ))),
+        };
+        let run = self.running.take()?;
+        Some((run.waiting, http_status, body))
+    }
+}
+
+/// The checks `tiller doctor` runs, run on this host now, as its own board's
+/// `GET /api/v1/doctor` answers them. Read only: the board host shows them
+/// and can act on none.
+fn doctor(services: Option<&dyn crate::api::OrchestratorStart>) -> Result<Doctor, ApiError> {
+    let checked_at = Timestamp::now();
+    let report = services
+        .and_then(|services| services.doctor())
+        .ok_or_else(|| tiller_core::Error::Unavailable("this host cannot run its checks".into()))?;
+    Ok(Doctor::from_report(report, checked_at))
+}
+
+fn json_error(error: serde_json::Error) -> ApiError {
+    ApiError::from(tiller_core::Error::from(error))
+}
+
+/// A read's `result` status and body.
+fn answered(read: Result<Value, ApiError>) -> (u16, Value) {
+    match read {
+        Ok(body) => (StatusCode::OK.as_u16(), body),
+        Err(error) => {
+            let (status, body) = error.into_parts();
+            (status.as_u16(), error_value(&body))
+        }
     }
 }
 

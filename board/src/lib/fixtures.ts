@@ -1827,12 +1827,12 @@ function doctorRead(
       ok: false,
       error: {
         code: "peer_unreachable",
-        message: `${host} is unreachable; its link is not live`,
+        message: `${machine.label} is unreachable; its link is not live`,
         hint: "the board shows its cached row; try again once the link is live",
       },
     });
   }
-  return peerDoctorFor(host, now);
+  return peerDoctorFor(machine.label, now);
 }
 
 export function fixtureResource(
