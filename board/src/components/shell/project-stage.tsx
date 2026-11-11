@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import type { Project } from "../../lib/api-types";
 import { ownerOf } from "../../lib/peers";
 import {
+  projectGrantsQuery,
   projectSetupQuery,
   projectsPath,
   queryKeyFor,
@@ -20,6 +21,7 @@ import { Modal } from "../ui/modal";
 import { ArchiveProject } from "./project-archive";
 import { DeleteProject } from "./project-delete";
 import { FLEET_PROJECT } from "./project-dialog";
+import { GrantsLine } from "./project-grants";
 import { ProjectSettings } from "./project-settings";
 import "./project-stage.css";
 
@@ -151,6 +153,7 @@ function SetupFacts({ project }: { project: Project }) {
           </Fact>
         </>
       ) : null}
+      <GrantsFact project={project} />
       <Fact label="Checkout">
         {setup.checkout ? (
           <code className="stage-sha">
@@ -196,6 +199,18 @@ function SetupFacts({ project }: { project: Project }) {
         </div>
       ) : null}
     </>
+  );
+}
+
+// How many grants let this project's work merge without the owner. The
+// dialog behind Grants and settings lists them.
+function GrantsFact({ project }: { project: Project }) {
+  const grants = useQuery(projectGrantsQuery(project.id)).data;
+  if (!grants) return null;
+  return (
+    <Fact label="Grants">
+      <GrantsLine grants={grants.grants} />
+    </Fact>
   );
 }
 
@@ -320,7 +335,7 @@ export function ProjectDetail({ project, id }: { project: Project; id: string })
           title={editOff}
           onClick={() => setEditing(true)}
         >
-          Edit project
+          Grants and settings
         </button>
       )}
       {project.id === FLEET_PROJECT ? null : (

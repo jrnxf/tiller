@@ -85,6 +85,7 @@ function serve(other?: Partial<ProjectFields>) {
           data: { ...alpha, rev: stored.rev },
         });
       }
+      if (path === "/api/v1/projects/alpha/grants") return json({ project: "alpha", grants: [] });
       if (path === "/api/v1/projects/alpha") return json(stored);
       return json({}, 404);
     }),
@@ -101,14 +102,16 @@ function renderDetail(project: Project = alpha) {
 }
 
 async function openEdit() {
-  fireEvent.click(await screen.findByRole("button", { name: "Edit project" }));
-  const dialog = await screen.findByRole("dialog", { name: "Edit alpha" });
+  fireEvent.click(await screen.findByRole("button", { name: "Grants and settings" }));
+  const dialog = await screen.findByRole("dialog", { name: "alpha" });
+  // The dialog opens on the grants; the fields are under Edit.
+  fireEvent.click(within(dialog).getByRole("button", { name: "Edit" }));
   // The form shows once this open's own read is back.
   await within(dialog).findByLabelText("Name");
   return within(dialog);
 }
 
-test("Edit project opens on the stored fields and saves only what changed, against the rev it read", async () => {
+test("Edit opens on the stored fields and saves only what changed, against the rev it read", async () => {
   const patches = serve();
   renderDetail();
   const dialog = await openEdit();
@@ -189,7 +192,9 @@ test("a project changed elsewhere is not overwritten: the dialog says what moved
 test("a project a peer owns is edited on that host", async () => {
   serve();
   renderDetail({ ...alpha, host: "host-b", link: "live" });
-  const button = (await screen.findByRole("button", { name: "Edit project" })) as HTMLButtonElement;
+  const button = (await screen.findByRole("button", {
+    name: "Grants and settings",
+  })) as HTMLButtonElement;
   expect(button.disabled).toBe(true);
   expect(button.title).toBe("host-b owns this project: edit it there");
 });

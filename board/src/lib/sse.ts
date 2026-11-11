@@ -188,6 +188,10 @@ function refetchMatching(queryClient: QueryClient, matches: (path: string) => bo
 // `/api/v1/projects/<id>/setup`, whatever the project.
 const PROJECT_SETUP_PATH = /^\/api\/v1\/projects\/[^/?]+\/setup$/;
 
+// `/api/v1/projects/<id>/grants`, whatever the project: a grant event names
+// the grant, not its project.
+const PROJECT_GRANTS_PATH = /^\/api\/v1\/projects\/[^/?]+\/grants$/;
+
 // The list read of each entity the board writes in place from `entity_state`.
 // The daemon sends no state when it could not read the entity (one bad row
 // never stalls the stream), and then only a fetch can say what it is.
@@ -292,8 +296,13 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
         refetchType: "active",
       });
       break;
+    case "grant":
+      refetchMatching(queryClient, (path) => PROJECT_GRANTS_PATH.test(path));
+      break;
     case "approval":
       if (hasState(state)) recordProgress(event.entity_id, state.state, event.at);
+      // A grant counts the approvals it accepted.
+      refetchMatching(queryClient, (path) => PROJECT_GRANTS_PATH.test(path));
       // An attention item embeds its approval's state and head, so a stale or
       // re-bound approval must reach the inbox before the owner clicks.
       queryClient.invalidateQueries({

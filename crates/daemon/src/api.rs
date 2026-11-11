@@ -31,13 +31,13 @@ use tiller_core::domain::{
     Activity, AnsweredVia, Approval, AskSource, CardKind, CardOutcome, HoldReleaseReason, Host,
     OutboxKind, PeerScope, Run, Session,
 };
-use tiller_core::domain::{Delivery, InterventionKind, Stage};
+use tiller_core::domain::{Delivery, GrantKind, InterventionKind, Stage};
 use tiller_core::host_config;
 use tiller_core::limits::{
     ANSWER_MAX_CHARS, ASK_NOTE_MAX_CHARS, BODY_MAX_CHARS, COMMENT_MAX_CHARS, TITLE_MAX_CHARS,
     within,
 };
-use tiller_core::state::approvals::Decision;
+use tiller_core::state::approvals::{Decision, NewGrant};
 use tiller_core::state::asks::NewAsk;
 use tiller_core::state::cards::{CardEdit, NewCard};
 use tiller_core::state::peers::{
@@ -876,6 +876,11 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/projects/{id}",
             get(project_fields).patch(edit_project),
         )
+        .route(
+            "/api/v1/projects/{id}/grants",
+            get(project_grants).post(create_grant),
+        )
+        .route("/api/v1/grants/{id}", axum::routing::delete(revoke_grant))
         .route(
             "/api/v1/interventions/{id}/label",
             post(relabel_intervention),
@@ -3290,6 +3295,105 @@ async fn edit_project(
     .await
 }
 
+#[utoipa::path(get, path = "/api/v1/projects/{id}/grants", tag = "reads",
+    params(("id" = String, Path)),
+    responses((status = 200, body = ProjectGrants), (status = 404, body = ErrorBody)))]
+async fn project_grants(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<ProjectGrants> {
+    read(&state, move |store| {
+        let grants = store
+            .grants(&id)?
+            .into_iter()
+            .map(|row| GrantRow {
+                short: ids::short(&row.grant.id).to_owned(),
+                id: row.grant.id,
+                project_id: row.grant.project_id,
+                kind: row.grant.kind.to_string(),
+                conditions: row.grant.conditions,
+                granted_at: row.grant.granted_at.to_string(),
+                granted_by: row.grant.granted_by,
+                revoked_at: row.grant.revoked_at.map(|at| at.to_string()),
+                revoke_reason: row.grant.revoke_reason,
+                uses: row.uses,
+            })
+            .collect();
+        Ok(ProjectGrants {
+            project: id,
+            grants,
+        })
+    })
+    .await
+    .map(Json)
+}
+
+#[utoipa::path(post, path = "/api/v1/projects/{id}/grants", tag = "mutations", request_body = CreateGrant,
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse, description = "`data` is the new grant"),
+              (status = 400, body = ErrorBody, description = "`usage`: the kind, the conditions or `expires` is not one a grant takes"),
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn create_grant(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers).await?;
+    let request: CreateGrant = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "a grant").await?;
+    let kind = request.kind.parse::<GrantKind>()?;
+    // The checks `tiller grant create` makes before the store's own.
+    let mut conditions = request.conditions;
+    if !conditions.is_object() {
+        return Err(Error::Usage("conditions is a JSON object".into()).into());
+    }
+    if let Some(expires) = &request.expires {
+        conditions["expires_at"] = json!(tiller_core::time::lisbon::parse_when(expires)?);
+    }
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| {
+            Done::of(store.grant_create(
+                ctx,
+                NewGrant {
+                    project_id: id,
+                    kind,
+                    conditions,
+                },
+            )?)
+        },
+    )
+    .await
+}
+
+#[utoipa::path(delete, path = "/api/v1/grants/{id}", tag = "mutations", request_body = RevokeGrant,
+    params(("id" = String, Path, description = "A grant's ULID or its short form")),
+    responses((status = 200, body = MutationResponse, description = "`data` is the revoked grant; revoking a revoked grant returns it"),
+              (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn revoke_grant(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers).await?;
+    let request: RevokeGrant = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "a grant revoke").await?;
+    let reason = request
+        .reason
+        .unwrap_or_else(|| "revoked by the owner".into());
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| Done::of(store.grant_revoke(ctx, &id, &reason)?),
+    )
+    .await
+}
+
 #[utoipa::path(get, path = "/api/v1/start-settings", tag = "reads",
     responses((status = 200, body = StartSettings), (status = 503, body = ErrorBody)))]
 async fn start_settings(State(state): State<AppState>) -> ApiResult<StartSettings> {
@@ -4884,6 +4988,7 @@ async fn app_shell(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health, doctor, run_poller,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, add_dep, remove_dep, close,
         cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, host_config_read, set_config,
+        project_grants, create_grant, revoke_grant,
         away_start, away_edit, away_end, away_brief, pick_bug_project, recap, mark_recap_seen, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, memory::repropose, memory::eval::eval_plan,
         memory::eval::eval_start, session, login_code, logout
@@ -6848,6 +6953,281 @@ pub(crate) mod tests {
             )
             .unwrap();
         assert_eq!(events, 2);
+    }
+
+    /// Grants per project: the board reads every grant with its use count,
+    /// creates one and revokes one through the store paths `tiller grant`
+    /// uses. Both writes are owner only and refuse what the CLI refuses.
+    #[tokio::test]
+    async fn board_grants_create_list_and_revoke_as_tiller_grant_does() {
+        use tiller_core::domain::{ApprovalAction, ApprovalKind, ApprovalState};
+        use tiller_core::state::approvals::{NewApproval, NewPr};
+        let mut fleet = Fleet::new();
+        let home = fleet.dir.path().to_owned();
+        let app = app(&home, Assets::of::<Fixture>());
+        let cookie = owner_cookie(&home);
+        let write = |method: &str, path: &str, body: Value, cookie: &str| {
+            let headers: Vec<(&str, &str)> = if cookie.is_empty() {
+                vec![]
+            } else {
+                vec![("cookie", cookie)]
+            };
+            mutation(method, path, body, &headers)
+        };
+        let grants = |app: Router| async move {
+            let answer = get(&app, "/api/v1/projects/alpha/grants").await;
+            assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+            serde_json::from_str::<Value>(&answer.body).unwrap()["grants"].clone()
+        };
+        let squash =
+            json!({"v": 1, "actions": ["squash"], "base_ref": "main", "checks": "success"});
+
+        assert_eq!(grants(app.clone()).await, json!([]));
+        let missing = get(&app, "/api/v1/projects/nope/grants").await;
+        assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
+
+        // Refused before anything is written.
+        let anonymous = send(
+            &app,
+            write(
+                "POST",
+                "/api/v1/projects/alpha/grants",
+                json!({"idempotency_key": "k-g-1", "kind": "merge", "conditions": squash}),
+                "",
+            ),
+        )
+        .await;
+        assert_eq!(
+            anonymous.status,
+            StatusCode::FORBIDDEN,
+            "{}",
+            anonymous.body
+        );
+        for (key, bad) in [
+            ("k-g-2", json!({"kind": "yolo", "conditions": squash})),
+            ("k-g-3", json!({"kind": "merge", "conditions": ["squash"]})),
+            (
+                "k-g-4",
+                json!({"kind": "merge", "conditions": {"actions": ["squash"]}}),
+            ),
+            (
+                "k-g-5",
+                json!({"kind": "merge", "conditions": {"v": 2, "actions": ["squash"]}}),
+            ),
+            (
+                "k-g-6",
+                json!({"kind": "merge", "conditions": {"v": 1, "actions": []}}),
+            ),
+            (
+                "k-g-7",
+                json!({"kind": "merge", "conditions": {"v": 1, "actions": ["push"]}}),
+            ),
+            (
+                "k-g-8",
+                json!({"kind": "land_direct", "conditions": {"v": 1, "actions": ["squash"]}}),
+            ),
+            (
+                "k-g-9",
+                json!({"kind": "merge", "conditions": squash, "expires": "someday"}),
+            ),
+            (
+                "k-g-10",
+                json!({"kind": "merge", "conditions": squash, "name": "extra"}),
+            ),
+        ] {
+            let mut body = bad.clone();
+            body["idempotency_key"] = json!(key);
+            let refused = send(
+                &app,
+                write("POST", "/api/v1/projects/alpha/grants", body, &cookie),
+            )
+            .await;
+            assert_eq!(
+                refused.status,
+                StatusCode::BAD_REQUEST,
+                "{bad}: {}",
+                refused.body
+            );
+        }
+        let unknown = send(
+            &app,
+            write(
+                "POST",
+                "/api/v1/projects/nope/grants",
+                json!({"idempotency_key": "k-g-11", "kind": "merge", "conditions": squash}),
+                &cookie,
+            ),
+        )
+        .await;
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND, "{}", unknown.body);
+        assert_eq!(grants(app.clone()).await, json!([]), "a refusal wrote");
+
+        let create = json!({"idempotency_key": "k-g-12", "kind": "merge", "conditions": squash,
+            "expires": "2099-02-01T18:00"});
+        let created = send(
+            &app,
+            write(
+                "POST",
+                "/api/v1/projects/alpha/grants",
+                create.clone(),
+                &cookie,
+            ),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+        let created: Value = serde_json::from_str(&created.body).unwrap();
+        let id = created["data"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(created["data"]["granted_by"], "board", "{created}");
+        assert_eq!(
+            created["data"]["conditions"]["expires_at"], "2099-02-01T18:00:00.000Z",
+            "{created}"
+        );
+        let replay = send(
+            &app,
+            write("POST", "/api/v1/projects/alpha/grants", create, &cookie),
+        )
+        .await;
+        let replay: Value = serde_json::from_str(&replay.body).unwrap();
+        assert_eq!(replay["replayed"], true, "{replay}");
+
+        // An approval the grant accepted counts as one use.
+        let owner = Ctx::new(Actor::Owner);
+        let daemon = Ctx::new(Actor::Daemon);
+        let card = fleet
+            .store
+            .card_create(
+                &owner,
+                None,
+                tiller_core::state::cards::NewCard {
+                    project_id: "alpha".into(),
+                    kind: CardKind::Ship,
+                    title: "granted".into(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap()
+            .value;
+        let pr = fleet
+            .store
+            .pr_link(
+                &owner,
+                NewPr {
+                    card: card.id.clone(),
+                    run_id: None,
+                    number: 4,
+                    url: "https://example.com/example/alpha/pull/4".into(),
+                    head_sha: Some("1111222233334444".into()),
+                    base_ref: Some("main".into()),
+                },
+            )
+            .unwrap()
+            .value;
+        let accepted = fleet
+            .store
+            .approval_request(
+                &daemon,
+                NewApproval {
+                    kind: ApprovalKind::Merge,
+                    card: card.id.clone(),
+                    run_id: None,
+                    pr_id: Some(pr.id),
+                    branch: None,
+                    head_sha: "1111222233334444".into(),
+                    action: ApprovalAction::Squash,
+                    memory_paths: None,
+                    grant_id: Some(id.clone()),
+                },
+            )
+            .unwrap()
+            .value;
+        assert_eq!(accepted.state, ApprovalState::Accepted);
+        let listed = grants(app.clone()).await;
+        assert_eq!(listed[0]["id"], id.as_str(), "{listed}");
+        assert_eq!(listed[0]["short"], ids::short(&id), "{listed}");
+        assert_eq!(listed[0]["kind"], "merge");
+        assert_eq!(listed[0]["uses"], 1, "{listed}");
+        assert_eq!(listed[0]["revoked_at"], Value::Null);
+
+        // The revoke: owner only, a reason when one is sent, a known grant.
+        let path = format!("/api/v1/grants/{}", ids::short(&id));
+        let anonymous = send(
+            &app,
+            write("DELETE", &path, json!({"idempotency_key": "k-g-13"}), ""),
+        )
+        .await;
+        assert_eq!(
+            anonymous.status,
+            StatusCode::FORBIDDEN,
+            "{}",
+            anonymous.body
+        );
+        let blank = send(
+            &app,
+            write(
+                "DELETE",
+                &path,
+                json!({"idempotency_key": "k-g-14", "reason": " "}),
+                &cookie,
+            ),
+        )
+        .await;
+        assert_eq!(blank.status, StatusCode::BAD_REQUEST, "{}", blank.body);
+        let unknown = send(
+            &app,
+            write(
+                "DELETE",
+                "/api/v1/grants/zzzzzzz",
+                json!({"idempotency_key": "k-g-15"}),
+                &cookie,
+            ),
+        )
+        .await;
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND, "{}", unknown.body);
+        assert_eq!(grants(app.clone()).await[0]["revoked_at"], Value::Null);
+
+        let revoked = send(
+            &app,
+            write(
+                "DELETE",
+                &path,
+                json!({"idempotency_key": "k-g-16"}),
+                &cookie,
+            ),
+        )
+        .await;
+        assert_eq!(revoked.status, StatusCode::OK, "{}", revoked.body);
+        let listed = grants(app.clone()).await;
+        assert_ne!(listed[0]["revoked_at"], Value::Null, "{listed}");
+        assert_eq!(listed[0]["revoke_reason"], "revoked by the owner");
+        let approval: Approval = get_row(fleet.store.conn(), "approval", &accepted.id).unwrap();
+        assert_eq!(
+            approval.state,
+            ApprovalState::Stale,
+            "the revoke left it accepted"
+        );
+        // Revoking a revoked grant returns it and writes nothing new.
+        let again = send(
+            &app,
+            write(
+                "DELETE",
+                &path,
+                json!({"idempotency_key": "k-g-17"}),
+                &cookie,
+            ),
+        )
+        .await;
+        assert_eq!(again.status, StatusCode::OK, "{}", again.body);
+        let revokes: i64 = fleet
+            .store
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind = 'grant.revoked'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(revokes, 1);
     }
 
     /// The board's project add: owner-only, never forwarded, replayed by

@@ -18,6 +18,7 @@ import type {
   MemoryRevision,
   ProjectDeletePreview,
   ProjectFields,
+  ProjectGrants,
   ProjectRetirePreview,
   ProjectSetup,
   ProjectsResponse,
@@ -234,11 +235,18 @@ export const projectSetupPath = (projectId: string): QueryPath =>
 export const projectSetupQuery = (projectId: string) =>
   queryOptions({ ...readQuery<ProjectSetup>(projectSetupPath(projectId)), staleTime: 0 });
 
-// One of this host's projects as Edit project shows it. The dialog reads it
+// One of this host's projects as the Edit tab shows it. The dialog reads it
 // fresh each time it opens, and a `project` event refreshes it (lib/sse.ts).
 export const projectFieldsPath = (projectId: string): QueryPath => `/api/v1/projects/${projectId}`;
 export const projectFieldsQuery = (projectId: string) =>
   queryOptions({ ...readQuery<ProjectFields>(projectFieldsPath(projectId)), staleTime: 0 });
+
+// Every grant of one of this host's projects, live and ended. A `grant` event
+// refreshes it, and so does an `approval` one, which moves a grant's uses
+// (lib/sse.ts).
+const projectGrantsPath = (projectId: string): QueryPath => `/api/v1/projects/${projectId}/grants`;
+export const projectGrantsQuery = (projectId: string) =>
+  queryOptions({ ...readQuery<ProjectGrants>(projectGrantsPath(projectId)), staleTime: 0 });
 
 // A single-entity read takes `?host=<label>` for a peer's record; absent means
 // this host (protocol.md section 7.3).

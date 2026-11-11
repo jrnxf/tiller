@@ -544,6 +544,45 @@ export interface ProjectFields {
   rev: number;
 }
 
+// A grant's version 1 conditions (authority.md section 6). Every key but `v`
+// and `actions` is optional, and a missing one does not limit the grant.
+export interface GrantConditions {
+  v: number;
+  actions: string[];
+  base_ref?: string;
+  head_ref_pattern?: string;
+  opened_by_fleet_run?: boolean;
+  card_kinds?: string[];
+  checks?: string;
+  pipeline?: string;
+  reviews?: { require?: string[]; max_high?: number | null };
+  exclude_paths?: string[];
+  expires_at?: string;
+  // Set on a grant away mode made; it ends with away mode.
+  away_approval_id?: string;
+}
+
+// One grant of a project, live or ended, and the approvals it accepted.
+export interface GrantRow {
+  id: string;
+  // The last 7 characters of the id.
+  short: string;
+  project_id: string;
+  kind: "merge" | "land_direct";
+  conditions: GrantConditions;
+  granted_at: string;
+  granted_by: string;
+  revoked_at: string | null;
+  revoke_reason: string | null;
+  uses: number;
+}
+
+// `GET /api/v1/projects/{id}/grants`: every grant of the project, newest first.
+export interface ProjectGrants {
+  project: string;
+  grants: GrantRow[];
+}
+
 // `GET /api/v1/projects/checkout`: what Add project would do with a local
 // checkout. Either `problem` is set and the rest is null, or the reverse.
 export interface CheckoutCheck {

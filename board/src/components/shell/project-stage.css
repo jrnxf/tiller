@@ -685,7 +685,7 @@
   border-left: 1px solid var(--line-1);
 }
 
-/* Edit project: a command list is one command per line. */
+/* The Edit tab: a command list is one command per line. */
 .pa-f .note-in.area {
   height: 64px;
   padding: 7px 12px;

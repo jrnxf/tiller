@@ -1294,6 +1294,71 @@ pub struct EditProject {
     pub deploy_timeout_minutes: Option<i64>,
 }
 
+/// `GET /api/v1/projects/{id}/grants`: every standing grant of the project,
+/// newest first, live and ended alike (`authority.md`, Standing grants).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ProjectGrants {
+    pub project: String,
+    pub grants: Vec<GrantRow>,
+}
+
+/// One grant row and how many approvals it accepted.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct GrantRow {
+    pub id: String,
+    /// The last 7 characters of the id, as `tiller grant revoke` takes it.
+    pub short: String,
+    pub project_id: String,
+    /// `merge` or `land_direct`.
+    pub kind: String,
+    /// The version 1 conditions object (`authority.md` section 6). An
+    /// `away_approval_id` marks a grant away mode made.
+    #[schema(value_type = Object)]
+    pub conditions: Value,
+    pub granted_at: String,
+    pub granted_by: String,
+    /// Null while the grant is live. A grant past its `expires_at` stops
+    /// matching without being revoked.
+    pub revoked_at: Option<String>,
+    pub revoke_reason: Option<String>,
+    /// The approvals the grant accepted.
+    pub uses: i64,
+}
+
+/// `POST /api/v1/projects/{id}/grants`, as `tiller grant create` does. Owner
+/// only, local to the owning host; it is not forwarded to a peer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateGrant {
+    pub idempotency_key: String,
+    /// A paired peer's label. Refused: a grant is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// `merge` or `land_direct`.
+    pub kind: String,
+    /// The version 1 conditions object (`authority.md` section 6).
+    #[schema(value_type = Object)]
+    pub conditions: Value,
+    /// When the grant ends, as `--expires` takes it; it sets
+    /// `conditions.expires_at`.
+    #[serde(default)]
+    pub expires: Option<String>,
+}
+
+/// `DELETE /api/v1/grants/{id}`, as `tiller grant revoke` does. Owner only,
+/// local to the owning host.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RevokeGrant {
+    pub idempotency_key: String,
+    /// A paired peer's label. Refused: a revoke is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Why the grant ends; "revoked by the owner" when absent.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
 /// `GET /api/v1/projects/{id}/delete`: what a project delete would remove,
 /// without removing anything (`state.md`, Deleting a project).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]

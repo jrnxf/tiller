@@ -19,6 +19,13 @@ use crate::ids;
 use crate::store::{Actor, Applied, Ctx, NewEvent, Store, Tx};
 use crate::time::Timestamp;
 
+/// A grant and the number of approvals it accepted.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GrantUses {
+    pub grant: Grant,
+    pub uses: i64,
+}
+
 /// A PR to link to a card.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NewPr {
@@ -958,6 +965,28 @@ impl Store {
             let id = resolve_id(tx.conn(), "grants", "grant", grant)?;
             revoke_grant(tx, &id, reason)
         })
+    }
+
+    /// Every grant of `project`, newest first, live and ended alike, each
+    /// with the number of approvals it accepted. Refused for a project this
+    /// host does not know.
+    pub fn grants(&self, project: &str) -> Result<Vec<GrantUses>> {
+        let project: Project = get(self.conn(), "project", project)?;
+        let grants: Vec<Grant> = list(
+            self.conn(),
+            "project_id = ?1 ORDER BY id DESC",
+            &[&project.id],
+        )?;
+        let mut count = self
+            .conn()
+            .prepare("SELECT count(*) FROM approvals WHERE grant_id = ?1")?;
+        grants
+            .into_iter()
+            .map(|grant| {
+                let uses = count.query_row(params![grant.id], |row| row.get(0))?;
+                Ok(GrantUses { grant, uses })
+            })
+            .collect()
     }
 
     /// `away.start`. Owner only. Writes the `away` approval, accepted, and any

@@ -1190,6 +1190,17 @@ async fn spawn_not_forwardable_from_the_board() {
             "/api/v1/projects/alpha",
             json!({"idempotency_key": "k-4", "host": "peer", "rev": 1, "capacity": 1}),
         ),
+        (
+            "POST",
+            "/api/v1/projects/alpha/grants",
+            json!({"idempotency_key": "k-5", "host": "peer", "kind": "merge",
+                "conditions": {"v": 1, "actions": ["squash"]}}),
+        ),
+        (
+            "DELETE",
+            "/api/v1/grants/0000001",
+            json!({"idempotency_key": "k-6", "host": "peer"}),
+        ),
     ] {
         let answer = send(&app, mutation(method, path, body, &[("cookie", &cookie)])).await;
         let error = refusal(&answer, StatusCode::BAD_GATEWAY);

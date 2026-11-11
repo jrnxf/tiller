@@ -16,6 +16,7 @@ import type {
   QuotaResponse,
 } from "./api-types.ts";
 import { awayBrief } from "./fixtures-away.ts";
+import { grantMutation, grantsFor } from "./fixtures-grants.ts";
 import { memoryMutation } from "./fixtures-memory.ts";
 import {
   FIXTURE_HEAD_SHA,
@@ -168,10 +169,16 @@ let recapMarkedAt: string | null = null;
 // The projects added since the server started, listed after the fixture's.
 const added = new Map<string, Project>();
 
-// The fields Edit project saved since the server started, by project.
+// The fields the Edit tab saved since the server started, by project.
 const edited = new Map<string, ProjectFields>();
 
-// `GET /api/v1/projects/{id}`: one of this host's projects as Edit project
+// One of this host's projects, not deleted or archived.
+function localProject(id: string): boolean {
+  const project = added.get(id) ?? currentProject(id);
+  return !!project && !project.host && !gone(id);
+}
+
+// `GET /api/v1/projects/{id}`: one of this host's projects as the Edit tab
 // reads it. alpha sets every field, so the dialog opens on all of them.
 function projectFieldsFor(id: string): ProjectFields | undefined {
   const project = added.get(id) ?? currentProject(id);
@@ -356,6 +363,8 @@ export function withoutDeleted(path: string, body: unknown, scenario: Scenario):
   }
   const fields = /^\/api\/v1\/projects\/([^/]+)$/.exec(pathname);
   if (fields?.[1] && body === undefined) return projectFieldsFor(fields[1]);
+  const grants = /^\/api\/v1\/projects\/([^/]+)\/grants$/.exec(pathname);
+  if (grants?.[1]) return localProject(grants[1]) ? grantsFor(grants[1]) : undefined;
   if (deleted.size + retired.size + added.size + switched.size === 0 || body === undefined) {
     return body;
   }
@@ -550,7 +559,8 @@ function forwarded(
   const host = body.host;
   if (typeof host !== "string") return null;
   if (
-    /\/(stage|focus|label|delete|retire|bug-project|deps)$/.test(path) ||
+    /\/(stage|focus|label|delete|retire|bug-project|deps|grants)$/.test(path) ||
+    path.startsWith("/api/v1/grants/") ||
     path === projectsPath ||
     (method === "PATCH" && /^\/api\/v1\/projects\/[^/]+$/.test(path)) ||
     /\/memory\//.test(path) ||
@@ -1154,6 +1164,27 @@ function handle(
       return { reply: refused(404, "not_found", `no intervention ${relabel[1]}`), followUps: [] };
     }
     return { reply: recorded(done, null, null), followUps: [] };
+  }
+  const grant = grantMutation(method, path, body, localProject);
+  if (grant) {
+    if (!grant.ok) return refusal(grant.status, grant.code, grant.message);
+    return {
+      reply: recorded(grant.data, null, null),
+      followUps: [
+        {
+          delayMs: 100,
+          event: {
+            kind: grant.data.revoked_at ? "grant.revoked" : "grant.created",
+            txn: grant.data.revoked_at ? "grant.revoke" : "grant.create",
+            entity: "grant",
+            entity_id: grant.data.id,
+            rev_after: null,
+            card_id: null,
+            entity_state: null,
+          },
+        },
+      ],
+    };
   }
   // A holdout eval plans against the scenario's quota, as the daemon's does.
   const quota = path.startsWith("/api/v1/memory/proposals/")

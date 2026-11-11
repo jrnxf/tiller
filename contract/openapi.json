@@ -2616,6 +2616,84 @@
         }
       }
     },
+    "/api/v1/grants/{id}": {
+      "delete": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "revoke_grant",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A grant's ULID or its short form",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevokeGrant"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the revoked grant; revoking a revoked grant returns it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/health": {
       "get": {
         "tags": [
@@ -3916,6 +3994,120 @@
           },
           "422": {
             "description": "`refused`: an agent that did not stop, an executing approval, the fleet project, or another host's project or agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/grants": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "project_grants",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectGrants"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "create_grant",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateGrant"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the new grant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`usage`: the kind, the conditions or `expires` is not one a grant takes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
             "content": {
               "application/json": {
                 "schema": {
@@ -6021,6 +6213,43 @@
         },
         "additionalProperties": false
       },
+      "CreateGrant": {
+        "type": "object",
+        "description": "`POST /api/v1/projects/{id}/grants`, as `tiller grant create` does. Owner\nonly, local to the owning host; it is not forwarded to a peer.",
+        "required": [
+          "idempotency_key",
+          "kind",
+          "conditions"
+        ],
+        "properties": {
+          "conditions": {
+            "type": "object",
+            "description": "The version 1 conditions object (`authority.md` section 6)."
+          },
+          "expires": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the grant ends, as `--expires` takes it; it sets\n`conditions.expires_at`."
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label. Refused: a grant is not forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`merge` or `land_direct`."
+          }
+        },
+        "additionalProperties": false
+      },
       "DecideBody": {
         "type": "object",
         "description": "`POST /api/v1/approvals/{id}/decide`.",
@@ -6541,6 +6770,64 @@
           },
           "source": {
             "type": "string"
+          }
+        }
+      },
+      "GrantRow": {
+        "type": "object",
+        "description": "One grant row and how many approvals it accepted.",
+        "required": [
+          "id",
+          "short",
+          "project_id",
+          "kind",
+          "conditions",
+          "granted_at",
+          "granted_by",
+          "uses"
+        ],
+        "properties": {
+          "conditions": {
+            "type": "object",
+            "description": "The version 1 conditions object (`authority.md` section 6). An\n`away_approval_id` marks a grant away mode made."
+          },
+          "granted_at": {
+            "type": "string"
+          },
+          "granted_by": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`merge` or `land_direct`."
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "revoke_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revoked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Null while the grant is live. A grant past its `expires_at` stops\nmatching without being revoked."
+          },
+          "short": {
+            "type": "string",
+            "description": "The last 7 characters of the id, as `tiller grant revoke` takes it."
+          },
+          "uses": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The approvals the grant accepted."
           }
         }
       },
@@ -8575,6 +8862,25 @@
           }
         }
       },
+      "ProjectGrants": {
+        "type": "object",
+        "description": "`GET /api/v1/projects/{id}/grants`: every standing grant of the project,\nnewest first, live and ended alike (`authority.md`, Standing grants).",
+        "required": [
+          "project",
+          "grants"
+        ],
+        "properties": {
+          "grants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GrantRow"
+            }
+          },
+          "project": {
+            "type": "string"
+          }
+        }
+      },
       "ProjectOpenPr": {
         "type": "object",
         "description": "An open pull request of a project's card.",
@@ -9144,6 +9450,33 @@
             "type": "string"
           }
         }
+      },
+      "RevokeGrant": {
+        "type": "object",
+        "description": "`DELETE /api/v1/grants/{id}`, as `tiller grant revoke` does. Owner only,\nlocal to the owning host.",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label. Refused: a revoke is not forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the grant ends; \"revoked by the owner\" when absent."
+          }
+        },
+        "additionalProperties": false
       },
       "RunDetail": {
         "type": "object",

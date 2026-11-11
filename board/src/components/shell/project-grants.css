@@ -1,0 +1,242 @@
+/* A project's grants in its dialog: the live ones with a Revoke each, the
+   ended ones faded under them, and the New grant form. */
+
+.dialog.ps-dialog {
+  width: min(560px, 100%);
+}
+
+.ps-tabs {
+  margin-top: 12px;
+}
+
+.ps-tabs button {
+  height: 28px;
+}
+
+.dialog p.gr-intro,
+.dialog p.ps-edit-intro {
+  margin-top: 14px;
+  font-size: var(--fs-small);
+}
+
+.gr-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding-bottom: 4px;
+}
+
+.gr-head h3,
+.dialog h3.gr-sub {
+  margin: 0;
+  font-size: var(--fs-small);
+  font-weight: var(--w-semibold);
+  color: var(--fg-1);
+}
+
+.gr-count {
+  font-size: var(--fs-mini);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-3);
+}
+
+.gr-sp {
+  flex: 1;
+}
+
+.gr-head .btn.sm {
+  gap: 6px;
+}
+
+.dialog h3.gr-sub {
+  margin-top: 18px;
+  padding-bottom: 4px;
+}
+
+.gr-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gr-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line-1);
+}
+
+.gr-body {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-small);
+  line-height: 1.5;
+  color: var(--fg-2);
+}
+
+.gr-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.gr-title b {
+  font-weight: var(--w-medium);
+  color: var(--fg-1);
+}
+
+.gr-body code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-1);
+  overflow-wrap: anywhere;
+}
+
+.gr-title code.gr-id {
+  color: var(--fg-3);
+}
+
+.gr-body ul {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  list-style: disc;
+}
+
+.gr-body li::marker {
+  color: var(--fg-4);
+}
+
+.gr-meta {
+  display: block;
+  margin-top: 4px;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.gr-ended .gr-body {
+  opacity: 0.7;
+}
+
+.dialog p.gr-empty {
+  padding: 12px 0 4px;
+  border-top: 1px solid var(--line-1);
+  font-size: var(--fs-small);
+  color: var(--fg-3);
+}
+
+.dialog p.gr-note {
+  margin-top: 4px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r8);
+  background: var(--bg-1);
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.gr-receipt {
+  margin-top: 12px;
+}
+
+/* The New grant form. */
+.gr-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.gr-fieldset legend {
+  padding: 0;
+}
+
+.gr-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.gr-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r6);
+  background: var(--bg-card);
+  color: var(--fg-1);
+  font-family: var(--mono);
+  font-size: var(--fs-mini);
+  cursor: pointer;
+}
+
+.gr-chip:has(input:checked) {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.gr-chip input,
+.gr-check input {
+  margin: 0;
+  accent-color: var(--accent-solid);
+}
+
+.gr-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gr-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-small);
+  color: var(--fg-1);
+  cursor: pointer;
+}
+
+.gr-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.gr-high {
+  margin-top: 12px;
+}
+
+.gr-seg {
+  align-self: flex-start;
+  max-width: 100%;
+}
+
+.gr-seg button {
+  height: 28px;
+}
+
+.pa-f input[type="datetime-local"].note-in {
+  max-width: 240px;
+}
+
+@media (max-width: 480px) {
+  .gr-row {
+    flex-wrap: wrap;
+  }
+
+  .gr-row .btn.sm {
+    margin-left: auto;
+  }
+
+  .gr-pair {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pa-f input[type="datetime-local"].note-in {
+    max-width: none;
+  }
+}
