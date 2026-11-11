@@ -69,6 +69,7 @@ test("the limits count characters the way the daemon does", () => {
     cardBody: 100_000,
     comment: 20_000,
     answer: 20_000,
+    steer: 20_000,
     askNote: 8000,
   });
   // One emoji is two UTF-16 units and one character.

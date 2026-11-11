@@ -302,7 +302,11 @@ fn write_wait(tx: &mut Tx<'_>, card_id: &str, wait: &Wait) -> Result<()> {
 
 fn write_memory(tx: &mut Tx<'_>, plan: &Plan) -> Result<()> {
     let boundary = meta(tx.conn(), "boundary")?.ok_or_else(|| {
-        Error::refused("host", "local", "state.db has no boundary; run tiller init")
+        Error::refused(
+            "host",
+            "local",
+            format!("state.db has no boundary; {}", crate::RUN_INIT),
+        )
     })?;
     // (source id, base revision id) per target document.
     let mut targets: HashMap<String, (String, String)> = HashMap::new();

@@ -421,10 +421,9 @@ impl App {
             return Err(Failure::from(Error::Refused {
                 entity: "host",
                 id: String::new(),
-                fact: "state.db is not initialized; run tiller owner set tiller, then tiller init"
-                    .into(),
+                fact: tiller_core::not_initialized(),
             })
-            .hint(tiller_daemon::api::INIT_HINT));
+            .hint(tiller_core::INIT_HINT));
         }
         Ok(Store::open(&self.db)?)
     }

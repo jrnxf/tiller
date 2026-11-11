@@ -284,8 +284,12 @@ pub fn quota_floor(config: &SpawnConfig, role: RunRole) -> Option<f64> {
 }
 
 pub(crate) fn local_host(store: &Store) -> Result<String> {
-    meta(store.conn(), "host_id")?
-        .ok_or_else(|| SpawnError::Usage("this host is not initialized; run tiller init".into()))
+    meta(store.conn(), "host_id")?.ok_or_else(|| {
+        SpawnError::Usage(format!(
+            "this host is not initialized; {}",
+            tiller_core::RUN_INIT
+        ))
+    })
 }
 
 /// A start the quota floor refused: holds the card until the weekly reset

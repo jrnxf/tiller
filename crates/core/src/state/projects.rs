@@ -237,13 +237,7 @@ pub(crate) fn local_host_id(conn: &rusqlite::Connection) -> Result<String> {
         row.get(0)
     })
     .optional()?
-    .ok_or_else(|| {
-        Error::refused(
-            "host",
-            "local",
-            "state.db is not initialized; run tiller init",
-        )
-    })
+    .ok_or_else(|| Error::refused("host", "local", crate::not_initialized()))
 }
 
 /// This host's own row, refused like [`local_host_id`] before `tiller init`.

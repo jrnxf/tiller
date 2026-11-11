@@ -295,6 +295,78 @@ fn a_blocked_hold_whose_dependencies_already_closed_keeps_its_reason() {
     );
 }
 
+/// A one-card bundle with `title` and `body` lines.
+fn write_text_bundle(dir: &Path, title: &str, body: &[&str]) {
+    let projects = json!([{"id": "beta", "repo": "example/beta", "remote": null,
+                           "default_branch": "main", "delivery": "no-mistakes", "capacity": 2, "added": "2026-09-01"}])
+    .to_string();
+    let cards = format!(
+        "{}\n",
+        json!({"id": "beta-long", "project": "beta", "title": title, "column": "queued",
+               "kind": "ship", "priority": 1, "since": "2026-10-01", "hold": null,
+               "pr": null, "runs": [], "depends_on": [],
+               "category": null, "size": null, "done": null, "body": body})
+    );
+    std::fs::write(dir.join("projects.json"), &projects).unwrap();
+    std::fs::write(dir.join("cards.jsonl"), &cards).unwrap();
+    std::fs::write(dir.join("memory.jsonl"), "").unwrap();
+    let manifest = json!({
+        "schema": "tiller-import/v1", "mode": "dry", "host_label": "host-a",
+        "generated_at": "2026-11-01T21:05:00+00:00",
+        "counts": {"projects": 1, "cards": 1, "inflight": 0, "memory": 0},
+        "files": {"projects.json": sha256(&projects), "cards.jsonl": sha256(&cards), "memory.jsonl": sha256("")},
+    });
+    std::fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
+}
+
+/// An imported card takes the same title and body caps as every other
+/// writer (`protocol.md` 7.4): a longer one refuses the whole import, names
+/// the card, and writes nothing.
+#[test]
+fn an_imported_card_over_the_caps_refuses_the_import() {
+    use tiller_core::limits::{BODY_MAX_CHARS, TITLE_MAX_CHARS};
+
+    let world = World::initialized();
+    let bundle = world.dir.path().join("bundle");
+    std::fs::create_dir_all(&bundle).unwrap();
+    let path = bundle.to_str().unwrap();
+    let before = events(&world);
+    let long_body = "b".repeat(BODY_MAX_CHARS);
+    for (title, body, cap) in [
+        (
+            "é".repeat(TITLE_MAX_CHARS + 1),
+            vec![],
+            format!("title is at most {TITLE_MAX_CHARS} characters"),
+        ),
+        // Two lines join with a newline: one character over.
+        (
+            "Long".to_owned(),
+            vec![long_body.as_str(), ""],
+            format!("body is at most {BODY_MAX_CHARS} characters"),
+        ),
+    ] {
+        write_text_bundle(&bundle, &title, &body);
+        for args in [vec!["import", path, "--dry-run"], vec!["import", path]] {
+            let out = world.run(&args);
+            // The plan echoes the long title, so only the error is shown.
+            assert_eq!(
+                (out.code, out.error_code()),
+                (5, "refused"),
+                "{}",
+                out.json["error"]
+            );
+            let said = out.json["error"]["message"].as_str().unwrap();
+            assert_eq!(said, format!("card beta-long: {cap}"));
+            assert_eq!(events(&world), before, "a refused import wrote");
+        }
+    }
+
+    write_text_bundle(&bundle, &"é".repeat(TITLE_MAX_CHARS), &[long_body.as_str()]);
+    world.must(&["import", path]);
+    let shown = world.must(&["card", "show", "beta-1"]);
+    assert_eq!(shown.data()["card"]["body"], long_body.as_str());
+}
+
 #[test]
 fn a_blocked_hold_with_an_open_dependency_stays_a_dependency() {
     let world = World::initialized();

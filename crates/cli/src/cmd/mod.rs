@@ -30,7 +30,6 @@ use clap::Args;
 use serde_json::Value;
 use tiller_core::Store;
 use tiller_core::domain::{Card, CardKind, Effort, Run, RunRole, Session, Size};
-use tiller_core::limits::{BODY_MAX_CHARS, TITLE_MAX_CHARS, within};
 use tiller_core::state::{find, get, list, resolve_card, resolve_id};
 
 use crate::app::{Failure, body_input};
@@ -86,7 +85,6 @@ impl CardFields {
             .title
             .ok_or_else(|| Failure::usage("a new card needs --title"))?;
         let body = body_input(self.body, self.body_file.as_deref())?;
-        card_text(Some(&title), body.as_deref())?;
         Ok(tiller_core::state::cards::NewCard {
             project_id: project_id.to_owned(),
             kind,
@@ -111,14 +109,6 @@ impl CardFields {
             "acceptance": self.acceptance, "category": self.category, "fixes": self.fixes,
         })
     }
-}
-
-/// A usage error when a card's title or body runs past the API's caps
-/// (`protocol.md` 7.4, "Length caps"), so the CLI takes what the board takes.
-pub fn card_text(title: Option<&str>, body: Option<&str>) -> Result<(), Failure> {
-    within("title", title.unwrap_or_default(), TITLE_MAX_CHARS)?;
-    within("body", body.unwrap_or_default(), BODY_MAX_CHARS)?;
-    Ok(())
 }
 
 /// An edit flag as the core takes it: empty clears, anything else sets.

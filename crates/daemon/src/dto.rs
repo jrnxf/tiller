@@ -1253,7 +1253,8 @@ pub struct EditCard {
     pub title: Option<String>,
     #[serde(default)]
     pub priority: Option<i64>,
-    /// At most 100,000 characters (`protocol.md` 7.4).
+    /// At most 100,000 characters (`protocol.md` 7.4). An empty body clears
+    /// it, as `tiller card edit --body ""` does.
     #[schema(max_length = 100000)]
     #[serde(default)]
     pub body: Option<String>,

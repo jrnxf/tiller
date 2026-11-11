@@ -17,7 +17,7 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 | Capability | CLI | Board | Notes |
 |---|---|---|---|
 | Create a card | Full: `card create` | Part | The board takes project, kind, title, priority, category and body. It has no size, acceptance, fixes or ask link. It also records a Board ask and notes the orchestrator. |
-| Edit a card | Full: `card edit` | Part | The board edits title, body and priority. An empty value clears a field on the CLI. The API sets an empty body to an empty string. |
+| Edit a card | Full: `card edit` | Part | The board edits title, body and priority. An empty value clears a field on the CLI. An empty body clears it on the API too: the store decides, so both paths match. |
 | Comment on a card | Full: `card comment` | Full | Both need a live orchestrator to read the comment. Both cap a comment at 20,000 characters. |
 | Hold and release | Full: `card hold`, `card unhold` | Full | Both on the card page. The CLI accepts a date, a local datetime or RFC 3339. The board sends an instant it builds from a Lisbon date and time. |
 | Close a card | Full: `card close --outcome` | Part | The board Close dialog offers Done, Won't do and Duplicate, and always asks for a reason. |
@@ -83,5 +83,4 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 - **The board sets few config keys.** It sets only the keys a start reads, as the fix flow in Settings "Starting agents".
 - **Project add stays narrower on the board.** The spec keeps `--checks`, `--remote`, `--default-branch` and the deploy flags on the CLI (state.md).
 - **Reason not recorded: actor `board` and `owner`.** Authority gives both the same rights. No doc says why they are separate actors.
-- **Reason not recorded: an empty body on edit.** The CLI clears the field. The API sets an empty string.
 - **Reason not recorded: CLI-only controls.** Dependencies, `land`, grants, `orchestrator start --restart`, `peer accept`, `serve` and `pane`, and the memory undo route (the API has it, and no surface calls it).

@@ -7769,7 +7769,7 @@
               "string",
               "null"
             ],
-            "description": "At most 100,000 characters (`protocol.md` 7.4).",
+            "description": "At most 100,000 characters (`protocol.md` 7.4). An empty body clears\nit, as `tiller card edit --body \"\"` does.",
             "maxLength": 100000
           },
           "host": {

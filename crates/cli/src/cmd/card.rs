@@ -6,11 +6,10 @@ use tiller_core::domain::{
     Approval, Artifact, Attention, CardDep, CardOutcome, CardState, Column, Hold,
     HoldReleaseReason, Obligation, Pr, Project, Review, Run, Session,
 };
-use tiller_core::limits::{COMMENT_MAX_CHARS, within};
 use tiller_core::state::cards::{CardEdit, DispatchOverride};
 use tiller_core::state::{get, list, resolve_card};
 
-use super::{CardFields, KeyArg, card_of, card_text, clearable, parse_dispatch, tag};
+use super::{CardFields, KeyArg, card_of, clearable, parse_dispatch, tag};
 use crate::app::{App, Done, Failure, Outcome, text_input};
 use crate::lisbon;
 
@@ -238,7 +237,6 @@ fn create(app: &App, args: Create) -> Done {
 }
 
 fn edit(app: &App, args: Edit) -> Done {
-    card_text(args.title.as_deref(), args.body.as_deref())?;
     let size = match args.size {
         None => None,
         Some(text) if text.is_empty() => Some(None),
@@ -371,7 +369,6 @@ fn reopen(app: &App, args: Reasoned) -> Done {
 
 fn comment(app: &App, args: Comment) -> Done {
     let text = text_input(args.text.clone(), args.stdin.clone(), "the comment")?;
-    within("a comment", &text, COMMENT_MAX_CHARS)?;
     let mut store = app.write()?;
     let keyed = app.key(
         &store,

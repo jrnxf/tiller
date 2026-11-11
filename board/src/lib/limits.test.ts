@@ -5,7 +5,7 @@ import { expect, test } from "vitest";
 
 import { LIMITS } from "./limits";
 
-// The daemon API and the CLI check the caps in crates/core/src/limits.rs. The
+// The store checks the caps in crates/core/src/limits.rs for every writer. The
 // board must refuse exactly what they refuse, so its numbers are those.
 const rust = readFileSync(
   resolve(import.meta.dirname, "../../../crates/core/src/limits.rs"),
@@ -24,6 +24,7 @@ test("the board's caps are the core's", () => {
     cardBody: rustCap("BODY_MAX_CHARS"),
     comment: rustCap("COMMENT_MAX_CHARS"),
     answer: rustCap("ANSWER_MAX_CHARS"),
+    steer: rustCap("STEER_MAX_CHARS"),
     askNote: rustCap("ASK_NOTE_MAX_CHARS"),
   });
 });

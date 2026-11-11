@@ -269,8 +269,12 @@ fn add(
     }
     // This host's label is a word on the peer's command line.
     check_label(&this.label)?;
-    let host_id = meta(store.conn(), "host_id")?
-        .ok_or_else(|| Failure::refused("state.db has no host id; run tiller init"))?;
+    let host_id = meta(store.conn(), "host_id")?.ok_or_else(|| {
+        Failure::refused(format!(
+            "state.db has no host id; {}",
+            tiller_core::RUN_INIT
+        ))
+    })?;
     // The peer an earlier pairing under this label reached. Only the same
     // peer may renew it, which the answer's host id shows (`peer.pair`).
     let paired_to = store

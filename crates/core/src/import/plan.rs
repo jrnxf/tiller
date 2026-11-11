@@ -13,6 +13,7 @@ use crate::domain::lifecycle::{allowed_outcomes, outcome_allowed, outcome_satisf
 use crate::domain::*;
 use crate::error::{Error, Result};
 use crate::ids::{self, FLEET_PROJECT};
+use crate::limits;
 use crate::state::find;
 use crate::state::projects::{first_card_seq, meta};
 use crate::time::Timestamp;
@@ -204,13 +205,8 @@ impl Plan {
 
 /// Works out the plan for `bundle` against the database behind `conn`.
 pub fn plan(conn: &Connection, bundle: &Bundle, now: Timestamp) -> Result<Plan> {
-    let boundary = meta(conn, "boundary")?.ok_or_else(|| {
-        Error::refused(
-            "host",
-            "local",
-            "state.db is not initialized; run tiller init",
-        )
-    })?;
+    let boundary = meta(conn, "boundary")?
+        .ok_or_else(|| Error::refused("host", "local", crate::not_initialized()))?;
     if let Some(theirs) = &bundle.manifest.boundary
         && *theirs != boundary
     {
@@ -428,7 +424,7 @@ fn plan_projects(
             return Err(Error::refused(
                 "project",
                 FLEET_PROJECT,
-                "state.db has no fleet project; run tiller init",
+                format!("state.db has no fleet project; {}", crate::RUN_INIT),
             ));
         }
         let own_cards: Vec<&CardPlan> = cards.iter().filter(|c| &c.project_id == id).collect();
@@ -688,6 +684,9 @@ fn plan_card(
         _ => None,
     }
     .filter(|text| !text.trim().is_empty());
+    // The caps every other writer takes (`protocol.md` 7.4), naming the card.
+    limits::card_text(Some(&card.title), body.as_deref())
+        .map_err(|error| refuse(error.to_string()))?;
 
     Ok(CardPlan {
         legacy_id: card.id.clone(),

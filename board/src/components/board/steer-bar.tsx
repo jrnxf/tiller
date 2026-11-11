@@ -53,7 +53,7 @@ export function SteerBar({
   const [last, setLast] = useState<Last | null>(null);
   const [asking, setAsking] = useState(false);
   const line = text.trim();
-  const over = isTooLong(line, LIMITS.comment);
+  const over = isTooLong(line, LIMITS.steer);
 
   const sendSteer = useCallback(
     (idempotency_key: string) =>
@@ -111,7 +111,7 @@ export function SteerBar({
       </form>
       <div className="av-steer-st">
         {over ? (
-          <LimitNote what="message" text={line} limit={LIMITS.comment} />
+          <LimitNote what="message" text={line} limit={LIMITS.steer} />
         ) : steer.error ? (
           <ActionFailure error={steer.error} host={undefined} />
         ) : last?.kind === "interrupt" ? (

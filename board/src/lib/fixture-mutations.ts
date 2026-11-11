@@ -558,6 +558,10 @@ function addProject(body: Record<string, unknown>): MutationResult {
   };
 }
 
+// tiller_core::not_initialized(): init-hint.test.ts keeps the two equal.
+const NOT_INITIALIZED =
+  "state.db is not initialized; run tiller owner set tiller, then tiller init";
+
 function refusal(status: number, code: string, message: string): MutationResult {
   return { reply: refused(status, code, message), followUps: [] };
 }
@@ -703,7 +707,7 @@ function floorOf(value: unknown): number | null | undefined | false {
 // checked against its `rev` and refused as the daemon refuses them.
 function editHost(body: Record<string, unknown>, scenario: Scenario): MutationResult {
   const fields = hostFieldsFor(scenario);
-  if (!fields) return refusal(400, "usage", "state.db is not initialized; run tiller init");
+  if (!fields) return refusal(400, "usage", NOT_INITIALIZED);
   if (body.rev !== fields.rev) {
     return {
       reply: refused(
@@ -1146,7 +1150,7 @@ function cancelFixtureCard(card: string, body: Record<string, unknown>): Mutatio
 // `POST /api/v1/bug-project`: this host's pick, checked against its `rev`.
 function pickBugProject(body: Record<string, unknown>, scenario: Scenario): MutationResult {
   const machine = localMachine(scenario);
-  if (!machine) return refusal(400, "usage", "state.db is not initialized; run tiller init");
+  if (!machine) return refusal(400, "usage", NOT_INITIALIZED);
   if (body.rev !== machine.rev) {
     return {
       reply: refused(

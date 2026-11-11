@@ -664,7 +664,10 @@ pub fn start(
         .find(|host| host.kind == HostKind::Local)
         .map(|host| host.id.clone())
         .ok_or_else(|| {
-            tiller_core::Error::Unavailable("state.db has no local host; run tiller init".into())
+            tiller_core::Error::Unavailable(format!(
+                "state.db has no local host; {}",
+                tiller_core::RUN_INIT
+            ))
         })?;
     let settings = Settings::load(home);
 

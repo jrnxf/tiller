@@ -33,7 +33,7 @@ pub fn migrate(paths: &Paths, target: usize, now: Timestamp) -> Result<Migrated>
         return Err(Error::refused(
             "state.db",
             paths.db.display().to_string(),
-            "does not exist; run tiller init",
+            format!("does not exist; {}", crate::RUN_INIT),
         ));
     }
     migrate_with(paths, target, now, migrate::to_version)

@@ -533,8 +533,13 @@ fn origin(conn: &rusqlite::Connection, actor: &Actor, what: &str) -> Result<Orig
 }
 
 pub(super) fn host_boundary(conn: &rusqlite::Connection) -> Result<String> {
-    meta(conn, "boundary")?
-        .ok_or_else(|| Error::refused("host", "local", "state.db has no boundary; run tiller init"))
+    meta(conn, "boundary")?.ok_or_else(|| {
+        Error::refused(
+            "host",
+            "local",
+            format!("state.db has no boundary; {}", crate::RUN_INIT),
+        )
+    })
 }
 
 /// One `evidence` row and its `evidence.captured` event.

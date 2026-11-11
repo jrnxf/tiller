@@ -23,6 +23,23 @@ pub mod state;
 pub mod store;
 pub mod time;
 
+/// The commands that make `state.db`, one per line, in the order to run them,
+/// named in every answer before it exists. `tiller init` refuses while the
+/// owner marker names another system, so the owner hands the host to Tiller
+/// first (`tiller owner set tiller` is a no-op when the marker already says so).
+/// The board's setup screen shows each line as its own command.
+pub const INIT_HINT: &str =
+    "tiller owner set tiller\ntiller init --host-label <label> --lane-capacity <n>";
+
+/// The same two steps as one clause, for the end of a refusal before
+/// `tiller init`: "state.db is not initialized; run ...".
+pub const RUN_INIT: &str = "run tiller owner set tiller, then tiller init";
+
+/// The refusal every read and write gives before `tiller init`.
+pub fn not_initialized() -> String {
+    format!("state.db is not initialized; {RUN_INIT}")
+}
+
 pub use error::{Error, Result};
 pub use store::{Actor, Applied, Ctx, NewEvent, Store, Tx};
 pub use time::Timestamp;

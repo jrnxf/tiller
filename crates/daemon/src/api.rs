@@ -34,10 +34,10 @@ use tiller_core::domain::{
 };
 use tiller_core::domain::{Boundary, Delivery, GrantKind, InterventionKind, Stage};
 use tiller_core::host_config;
-use tiller_core::limits::{
-    ANSWER_MAX_CHARS, ASK_NOTE_MAX_CHARS, BODY_MAX_CHARS, COMMENT_MAX_CHARS, TITLE_MAX_CHARS,
-    within,
-};
+// The store checks every cap. The API checks them again before a mutation
+// is forwarded, so text over a cap is refused here, not after a trip over
+// the link to a peer.
+use tiller_core::limits::{self, ANSWER_MAX_CHARS, COMMENT_MAX_CHARS, STEER_MAX_CHARS, within};
 use tiller_core::state::approvals::{Decision, NewGrant};
 use tiller_core::state::asks::NewAsk;
 use tiller_core::state::cards::{CardEdit, NewCard};
@@ -515,20 +515,11 @@ impl IntoResponse for ApiError {
 
 pub(crate) type ApiResult<T> = Result<Json<T>, ApiError>;
 
-/// The commands that make `state.db`, one per line, in the order to run them,
-/// named in every answer before it exists. `tiller init` refuses while the
-/// owner marker names another system, so the owner hands the host to Tiller
-/// first (`tiller owner set tiller` is a no-op when the marker already says so).
-/// The board's setup screen shows each line as its own command.
-pub const INIT_HINT: &str =
-    "tiller owner set tiller\ntiller init --host-label <label> --lane-capacity <n>";
+pub use tiller_core::INIT_HINT;
 
 /// The 503 every read and write answers before `tiller init`.
 pub(crate) fn uninitialized() -> ApiError {
-    ApiError::from(Error::Unavailable(
-        "state.db is not initialized; run tiller owner set tiller, then tiller init".into(),
-    ))
-    .hint(INIT_HINT)
+    ApiError::from(Error::Unavailable(tiller_core::not_initialized())).hint(INIT_HINT)
 }
 
 /// The 503 every mutation answers while `state.db` is damaged.
@@ -1846,12 +1837,7 @@ impl Mutation {
             Op::CreateCard => {
                 let request: CreateCard = body(bytes)?;
                 let kind: CardKind = request.kind.parse()?;
-                within("title", &request.title, TITLE_MAX_CHARS)?;
-                within(
-                    "body",
-                    request.body.as_deref().unwrap_or(""),
-                    BODY_MAX_CHARS,
-                )?;
+                limits::card_text(Some(&request.title), request.body.as_deref())?;
                 (
                     request.idempotency_key.clone(),
                     request.host.clone(),
@@ -1860,16 +1846,7 @@ impl Mutation {
             }
             Op::EditCard => {
                 let request: EditCard = body(bytes)?;
-                within(
-                    "title",
-                    request.title.as_deref().unwrap_or(""),
-                    TITLE_MAX_CHARS,
-                )?;
-                within(
-                    "body",
-                    request.body.as_deref().unwrap_or(""),
-                    BODY_MAX_CHARS,
-                )?;
+                limits::card_text(request.title.as_deref(), request.body.as_deref())?;
                 (
                     request.idempotency_key.clone(),
                     request.host.clone(),
@@ -1959,7 +1936,7 @@ impl Mutation {
             }
             Op::AskNote => {
                 let request: AskNote = body(bytes)?;
-                within("an ask", request.text.trim(), ASK_NOTE_MAX_CHARS)?;
+                limits::ask(&request.text)?;
                 (
                     request.idempotency_key.clone(),
                     request.host.clone(),
@@ -3187,9 +3164,10 @@ async fn pair_host(
     // This host's label is a word on the new host's command line.
     check_label(&start.this.label)?;
     let host_id = start.host_id.ok_or_else(|| {
-        ApiError::from(Error::Unavailable(
-            "state.db has no host id; run tiller init".into(),
-        ))
+        ApiError::from(Error::Unavailable(format!(
+            "state.db has no host id; {}",
+            tiller_core::RUN_INIT
+        )))
     })?;
 
     // Step 2: the key, under a pending name until the new host accepts it.
@@ -4952,7 +4930,7 @@ async fn steer_agent(
             "a steer is one line; send each line on its own",
         ));
     }
-    within("the message", &text, COMMENT_MAX_CHARS)?;
+    within("the message", &text, STEER_MAX_CHARS)?;
     mutate(
         &state,
         key(&request.idempotency_key)?,
@@ -5817,6 +5795,8 @@ pub(crate) mod tests {
     /// text at the cap is taken.
     #[tokio::test]
     async fn long_text_is_refused_at_its_cap() {
+        use tiller_core::limits::{ANSWER_MAX_CHARS, BODY_MAX_CHARS, TITLE_MAX_CHARS};
+
         let fleet = Fleet::new();
         let home = fleet.dir.path();
         let app = app(home, Assets::of::<Fixture>());
@@ -5884,6 +5864,51 @@ pub(crate) mod tests {
         .await;
         assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
         assert_eq!(cards(&fleet), before + 1);
+    }
+
+    /// An empty body on an edit clears the body, as `tiller card edit --body
+    /// ""` does: the store decides, so the two paths cannot differ.
+    #[tokio::test]
+    async fn an_empty_body_on_an_edit_clears_it() {
+        let mut fleet = Fleet::new();
+        let card = fleet
+            .store
+            .card_create(
+                &Ctx::new(Actor::Owner),
+                None,
+                tiller_core::state::cards::NewCard {
+                    project_id: "alpha".into(),
+                    kind: tiller_core::domain::CardKind::Ship,
+                    title: "Clear me".into(),
+                    body: Some("Old notes".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap()
+            .value;
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let cookie = owner_cookie(fleet.dir.path());
+        let headers = [("cookie", cookie.as_str())];
+        let edited = send(
+            &app,
+            mutation(
+                "PATCH",
+                &format!("/api/v1/cards/{}", card.id),
+                json!({"idempotency_key": "k-clear", "rev": card.rev, "body": ""}),
+                &headers,
+            ),
+        )
+        .await;
+        assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+        let stored: Option<String> = fleet
+            .store
+            .conn()
+            .query_row("SELECT body FROM cards WHERE id = ?1", [&card.id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored, None);
     }
 
     /// The owner check reads `board-owner` on the blocking pool: a slow
