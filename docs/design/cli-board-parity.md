@@ -2,7 +2,7 @@
 
 What the owner can do from the `tiller` CLI, what from the board, and where the two differ. Both surfaces call the same core functions in `tiller-core`, so a rule such as "close cancels the open obligations" holds on both. This page lists the surfaces, not the rules. The rules live in [`../spec/state.md`](../spec/state.md), [`../spec/protocol.md`](../spec/protocol.md) (sections 6 and 7) and [`../spec/authority.md`](../spec/authority.md).
 
-Checked against the code on Tuesday 2026-11-10 (Lisbon time). The Health checks row was added on Wednesday 2026-11-11. The last two bullets of "Differences that are intended" gave no reason until Wednesday 2026-11-11 (Lisbon time). They now do, and the Edit, Land, Grants, Start an orchestrator and Memory rows were corrected to match the code. The Grants and Memory statuses and the Restart note were corrected again the same day.
+Checked against the code on Tuesday 2026-11-10 (Lisbon time). The Health checks row was added on Wednesday 2026-11-11. The last two bullets of "Differences that are intended" gave no reason until Wednesday 2026-11-11 (Lisbon time). They now do, and the Edit, Land, Grants, Start an orchestrator and Memory rows were corrected to match the code. The Grants and Memory statuses and the Restart note were corrected again the same day. The Memory and "Board only" entries were checked again, and the Retros and Backups rows added, on Wednesday 2026-11-11 (Lisbon time).
 
 How to read the table:
 
@@ -51,7 +51,9 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 | Host lanes, floors, label and boundary | Full: `host edit` | Full | The board edits this host only, in its Settings > Hosts card, with the floors in GB. Both refuse a rename while a peer is paired and a boundary change once anything records the boundary. |
 | File a Tiller bug | Full: `bug file` | No | The board closes or moves a triage card, but does not file one. |
 | Peers | Full: `peer add`, `accept`, `list`, `remove`, `revoke`, `serve`, `pane` | Part | The board adds a host, lists both ends of each link, unpairs a host (`remove`) and revokes a board's key (`revoke`). Accept, serve and pane stay in the CLI. |
-| Memory | Part: `mem note`, `propose`, `approve`, `retro`, `learn` | Part | The board edits, decides (Keep or Discard), shows revisions and undoes an applied change (`memory.md` section 7). The CLI has no undo, so it does not cover the board's change history. |
+| Memory | Part: `mem note`, `propose`, `approve`, `learn` | Part | The board edits, decides (Keep or Discard), shows revisions and undoes an applied change (`memory.md` section 7). The CLI has no undo, so it does not cover the board's change history. |
+| Retros | Full: `retro list`, `show`, `run`, `finish`, `sweep` | Part | Memory lists a project's retros. Health shows the newest one that did not finish. Run again is `retro run` for a retro whose curator did not finish: the daemon claims it by the same rules and runs the curator itself, on this host only. A waiting retro shows the `tiller retro run` command instead. The board has no dry run, `show`, `finish` or `sweep`. |
+| Backups | Part: `backup`, `restore`, `export` | Part | Settings > Backups shows only to the owner. Back up now takes one as `tiller backup` does. The board lists the recent backups, which the CLI does not. Export and restore stay in a terminal, and the section shows their commands. |
 | Read the fleet | Full: board, agents, machines, quota, health, events, snapshot | Full | |
 | Health checks | Full: `tiller doctor` | Part | The board runs this host's checks in its Settings > Hosts card, with Check again and Run now on a failing poller. A paired peer's card reads that peer's checks over the link, read-only, with no buttons and no pollers (`protocol.md` 7.3). The CLI checks only the host it runs on. |
 | Owner marker | Full: `owner set`, `owner show` | No | While the marker names another system, both surfaces refuse every mutation with `owner_marker` (exit 6, HTTP 403). The check is in the store, so they share it (`recovery.md` R20). The board shows the refusal in the daemon's words. It has no read-only banner yet. |
@@ -65,6 +67,7 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 - Relabelling an intervention.
 - Editing memory and reading its revisions.
 - Undoing an applied memory change.
+- Listing the recent backups.
 - Folder, checkout and setup previews, and the start settings.
 - Signals and contributions on the Health page.
 - Editing an away window in place.
