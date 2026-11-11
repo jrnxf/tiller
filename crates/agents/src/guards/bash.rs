@@ -2,7 +2,7 @@
 //! `sh -c`, `eval`, wrappers and substitutions, against the rules of
 //! `authority.md` sections 8 to 10.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -796,15 +796,30 @@ impl Walker<'_, '_> {
                         // `direnv exec DIR COMMAND`, or `direnv exec FILE`
                         // when the path is a file: it runs the file. A path
                         // that can only be a directory has one reading. What
-                        // is a directory now may not be one when direnv runs.
+                        // is a directory now may not be one when direnv
+                        // runs, and direnv drops a trailing `/` first.
                         let path = words.get(i + 2);
                         let dir = path.is_some_and(|path| {
                             path.fixed
-                                && (path.is(".") || path.is("..") || path.text.ends_with('/'))
+                                && path
+                                    .text
+                                    .split('/')
+                                    .all(|part| matches!(part, "" | "." | ".."))
                         });
                         let mut starts = vec![Start::At(i + 3)];
-                        if !dir {
-                            starts.push(Start::At(i + 2));
+                        match path {
+                            Some(path) if !dir && path.fixed && path.text.ends_with('/') => {
+                                // direnv runs `tiller/` as `tiller`.
+                                let mut file = vec![Arg::fixed(path.text.trim_end_matches('/'))];
+                                file.extend_from_slice(&words[i + 3..]);
+                                if let Some(found) =
+                                    self.exec(&file, command, script, false, appended)
+                                {
+                                    return Some(found);
+                                }
+                            }
+                            _ if !dir => starts.push(Start::At(i + 2)),
+                            _ => {}
                         }
                         match self.starts(starts, words, command, script, appended) {
                             Step::Next(next) => i = next,
@@ -1018,48 +1033,40 @@ impl Walker<'_, '_> {
     /// the next program, and each of several is checked as its own command.
     fn starts(
         &mut self,
-        starts: Vec<Start>,
+        mut starts: Vec<Start>,
         words: &[Arg],
         command: &Simple,
         script: &Script,
         appended: bool,
     ) -> Step {
-        let starts = distinct_starts(starts, words.len());
+        starts.retain(|start| match start {
+            Start::At(start) => *start < words.len(),
+            Start::Shell => true,
+        });
+        starts.sort_unstable();
+        starts.dedup();
         match starts.as_slice() {
             [] => Step::Done(None),
             [Start::At(start)] => Step::Next(*start),
-            _ => Step::Done(self.check_starts(starts, words, command, script, appended)),
-        }
-    }
-
-    /// Checks each place a command may start as its own command.
-    fn check_starts(
-        &mut self,
-        starts: Vec<Start>,
-        words: &[Arg],
-        command: &Simple,
-        script: &Script,
-        appended: bool,
-    ) -> Option<Denial> {
-        distinct_starts(starts, words.len())
-            .into_iter()
-            .find_map(|start| match start {
+            _ => Step::Done(starts.into_iter().find_map(|start| match start {
                 Start::At(start) => self.exec(&words[start..], command, script, false, appended),
                 Start::Shell => self.stdin_script(command, script),
-            })
+            })),
+        }
     }
 
     /// `nix` at `words[at]`. `nix develop` and `nix shell` run the words
     /// after `-c` or `--command`, and a shell that reads standard input when
-    /// they have no command. nix takes every setting as a flag, so the guard
-    /// cannot name all its flags. A `-c` after a flag it does not know may
-    /// be that flag's value, so it starts a reading and the words after it
-    /// are still read as flags. The first `-c` that is surely the flag ends
-    /// nix's own words, and so does `--`. A word not known before it runs
-    /// may be any flag. `nix run` runs a program that is not known before it
-    /// runs, with the words after `--`; nix 2.3 `nix run` reads `-c` like
-    /// `nix shell`. `None` when nix runs no command it is given, so nix is
-    /// the program.
+    /// they have no command. The guard splits nix's words the way nix does
+    /// (`-Lc` is `-L -c`, `-L-c` is `-L` and then `-c`, `-j4` is `-j 4`) and
+    /// counts the values of the flags it knows. nix takes every setting as a
+    /// flag, so the guard cannot name all its flags. A `-c` that may be an
+    /// unknown flag's value starts a reading, and the words after it are
+    /// still read as nix's flags. The first `-c` that is surely the flag
+    /// ends nix's words, and so does `--`. A word not known before it runs
+    /// may be any flag. `nix run` runs a program not known before it runs;
+    /// nix 2.3 `nix run` reads `-c` like `nix shell`. `None` when nix runs
+    /// no command it is given, so nix is the program.
     fn nix(
         &mut self,
         words: &[Arg],
@@ -1077,130 +1084,138 @@ impl Walker<'_, '_> {
                     .iter()
                     .any(|name| word.is(name))
         });
-        let mut starts = Vec::new();
-        let mut sure = None;
-        let mut end = tail.len();
-        // The next words that are surely a flag's value, and those that may
-        // be. A flag is surely a flag only outside the words that may be an
-        // earlier flag's value, and only then are its values sure.
-        let (mut values, mut maybe) = (0_usize, 0_usize);
-        for (k, word) in tail.iter().enumerate() {
-            let next = at + 2 + k;
-            let free = maybe == 0;
-            maybe = maybe.saturating_sub(1);
-            if values > 0 {
-                values -= 1;
-                // A value that looks like `-c` starts a reading as well, in
-                // case nix takes more values than the guard counts.
-                if word.fixed && nix_flag(&word.text).command == Some(None) {
-                    starts.push(Start::At(next));
+        let mut list = tail.iter().cloned().collect::<VecDeque<_>>();
+        // nix's own words, the commands it may run, and the one it surely runs.
+        let mut own = Vec::new();
+        let mut readings = Vec::new();
+        let mut sure = false;
+        let mut unread = false;
+        // The next words that may be the value of a flag the guard does not
+        // know.
+        let mut maybe = 0_usize;
+        while let Some(word) = list.pop_front() {
+            if word.fixed
+                && let Some(parts) = nix_cluster(&word.text)
+            {
+                for part in parts.into_iter().rev() {
+                    list.push_front(Arg::fixed(&part));
                 }
                 continue;
             }
+            let free = maybe == 0;
+            maybe = maybe.saturating_sub(1);
             if !word.fixed {
-                // It may be `-i`, `-u NAME` or `-c PROGRAM`.
-                if let Some(found) = self.unreadable_options("nix", &words[at..]) {
-                    return Some(Step::Done(Some(found)));
+                // It may be `-i`, `-u NAME`, `-c PROGRAM` or `-c`.
+                if !unread {
+                    unread = true;
+                    if let Some(found) = self.unreadable_options("nix", &words[at..]) {
+                        return Some(Step::Done(Some(found)));
+                    }
                 }
-                starts.push(Start::At(next));
+                readings.push(list.iter().cloned().collect::<Vec<_>>());
+                own.push(word);
                 maybe = 2;
                 continue;
             }
             if free && word.is("--") {
-                end = k;
                 break;
             }
-            let flag = nix_flag(&word.text);
-            if shell && let Some(found) = self.nix_env(&flag, word, &tail[k + 1..], shown) {
+            let flag = word.text.clone();
+            own.push(word);
+            if !flag.starts_with('-') {
+                continue;
+            }
+            if shell && let Some(found) = self.nix_env(&flag, list.front(), list.get(1), shown) {
                 return Some(Step::Done(Some(found)));
             }
-            if free {
-                values = flag.values;
-            } else {
-                maybe = maybe.max(flag.values);
-            }
-            maybe = maybe.max(flag.maybe);
-            let Some(attached) = flag.command else {
+            if flag == "-c" || flag == "--command" {
+                readings.push(list.iter().cloned().collect());
+                if free {
+                    sure = true;
+                    break;
+                }
                 continue;
-            };
-            let follows = attached.is_none();
-            match attached {
-                // `-c/path`: the command starts with `/path`.
-                Some(program) => {
-                    let mut spliced = vec![Arg::fixed(&program)];
-                    spliced.extend_from_slice(&words[next..]);
-                    if let Some(found) = self.exec(&spliced, command, script, false, appended) {
-                        return Some(Step::Done(Some(found)));
+            }
+            match nix_flag_values(&flag) {
+                Ok(values) if free => {
+                    for _ in 0..values {
+                        let Some(value) = list.pop_front() else {
+                            break;
+                        };
+                        // A value that looks like `-c` starts a reading as
+                        // well, in case nix takes more values than the
+                        // guard counts.
+                        if value.is("-c") || value.is("--command") {
+                            readings.push(list.iter().cloned().collect());
+                        }
+                        own.push(value);
                     }
                 }
-                None => starts.push(Start::At(next)),
-            }
-            if free && flag.sure {
-                sure = Some((k, follows));
-                end = k;
-                break;
+                Ok(values) | Err(values) => maybe = maybe.max(values),
             }
         }
-        if tail[..end].iter().any(|word| word.is("run"))
+        if own.iter().any(|word| word.is("run"))
             && let Some(found) = self.unknown_program(&words[at..])
         {
             return Some(Step::Done(Some(found)));
         }
-        let Some((first, follows)) = sure else {
-            // No command for sure: a shell may read standard input. Check
-            // each reading, then nix is the program, with its own checks.
-            if shell {
-                starts.push(Start::Shell);
-            }
-            let found = self.check_starts(starts, words, command, script, appended);
-            return found.map(|found| Step::Done(Some(found)));
-        };
-        // nix's own words before the command name files it may write
-        // (`--profile`, `--out-link`).
-        if let Some(found) = self.arg_paths("nix", &tail[..first], shown) {
+        // nix's own words name files it may write (`--profile`,
+        // `--out-link`). With no command, nix is the program, with these
+        // checks and the rest of its own.
+        if sure && let Some(found) = self.arg_paths("nix", &own, shown) {
             return Some(Step::Done(Some(found)));
         }
-        if !follows {
-            // `-c/path` was the command, and it is checked already.
-            let found = self.check_starts(starts, words, command, script, appended);
-            return Some(Step::Done(found));
+        for reading in &readings {
+            if !reading.is_empty()
+                && let Some(found) = self.exec(reading, command, script, false, appended)
+            {
+                return Some(Step::Done(Some(found)));
+            }
         }
-        Some(self.starts(starts, words, command, script, appended))
+        if !sure
+            && shell
+            && let Some(found) = self.stdin_script(command, script)
+        {
+            return Some(Step::Done(Some(found)));
+        }
+        sure.then_some(Step::Done(None))
     }
 
     /// The environment flags of `nix develop` and `nix shell`: `-i`
     /// (`--ignore-env`) clears it, `-u NAME` unsets a variable and `-s NAME
     /// VALUE` sets one, read with the rules of `env`.
-    fn nix_env(&self, flag: &NixFlag, word: &Arg, after: &[Arg], shown: &str) -> Option<Denial> {
-        if flag.clears {
+    fn nix_env(
+        &self,
+        flag: &str,
+        name: Option<&Arg>,
+        value: Option<&Arg>,
+        shown: &str,
+    ) -> Option<Denial> {
+        if matches!(flag, "-i" | "--ignore-env" | "--ignore-environment") {
             return self.deny(
                 Code::Identity,
-                format!(
-                    "nix {} clears the environment, which strips the session's identity",
-                    word.text
-                ),
+                format!("nix {flag} clears the environment, which strips the session's identity"),
                 shown,
             );
         }
-        let name = after.first()?;
-        if flag.unsets {
+        let name = name?;
+        if matches!(flag, "-u" | "--unset-env-var" | "--unset") {
             return self.unset("nix", name, shown);
         }
-        if flag.sets && !name.fixed {
+        if !matches!(flag, "-s" | "--set-env-var") {
+            return None;
+        }
+        if !name.fixed {
             return self.deny(
                 Code::Identity,
                 format!(
-                    "nix {} sets a variable whose name is not known before it runs, which may be the session's identity",
-                    word.text
+                    "nix {flag} sets a variable whose name is not known before it runs, which may be the session's identity"
                 ),
                 shown,
             );
         }
-        if flag.sets {
-            let value = after.get(1).cloned().unwrap_or_else(|| Arg::fixed(""));
-            return self.assign(&name.text, &value, shown);
-        }
-        None
+        let value = value.cloned().unwrap_or_else(|| Arg::fixed(""));
+        self.assign(&name.text, &value, shown)
     }
 
     /// `nix-shell` runs its last `--run` or `--command` string, and a shell
@@ -3528,96 +3543,49 @@ const SCRIPT_READERS: &[&str] = &[
     ".",
 ];
 
-/// What one `nix` word may be, read the way nix splits a short cluster:
-/// `-Lic` is `-L -i -c`, and from the first character that is not a letter
-/// the rest is one more word (`-j4`, `-c/bin/x`). A flag that takes a value
-/// takes the next of those words, so `-kc` is `-k` with the value `-c`.
-#[derive(Default)]
-struct NixFlag {
-    /// `-i`, `--ignore-env` or `--ignore-environment`.
-    clears: bool,
-    /// `-c` or `--command`: `Some(None)` when the command starts at the
-    /// next word, and `Some(Some(program))` when the rest of the cluster
-    /// is the program.
-    command: Option<Option<String>>,
-    /// The `-c` is the flag itself, not the value of a letter before it.
-    sure: bool,
-    /// `-u NAME`, `--unset-env-var NAME` or `--unset NAME`.
-    unsets: bool,
-    /// `-s NAME VALUE` or `--set-env-var NAME VALUE`.
-    sets: bool,
-    /// How many of the next words are surely this flag's values.
-    values: usize,
-    /// How many of the next words may be this flag's values, for a flag
-    /// the guard does not know.
-    maybe: usize,
-}
-
-fn nix_flag(text: &str) -> NixFlag {
-    let mut flag = NixFlag::default();
-    if let Some(long) = text.strip_prefix("--") {
-        if long.is_empty() {
-            return flag;
-        }
-        match nix_long_values(long) {
-            Some(values) => flag.values = values,
-            None => flag.maybe = 2,
-        }
-        flag.clears = matches!(long, "ignore-env" | "ignore-environment");
-        flag.unsets = matches!(long, "unset-env-var" | "unset");
-        flag.sets = long == "set-env-var";
-        if long == "command" {
-            flag.command = Some(None);
-            flag.sure = true;
-        }
-        return flag;
+/// A short cluster split the way nix splits it: one flag per letter, and
+/// from the first character that is not a letter, the rest as one more
+/// word (`-Lc` is `-L -c`, `-j4` is `-j 4`, `-L-c` is `-L -c`). nix splits
+/// that word again only when it reads it as a flag, not as a value.
+/// `None` for a word that is not a cluster.
+fn nix_cluster(text: &str) -> Option<Vec<String>> {
+    let cluster = text.strip_prefix('-')?;
+    let mut chars = cluster.char_indices();
+    let (_, first) = chars.next()?;
+    if !first.is_ascii_alphabetic() || cluster.len() == 1 {
+        return None;
     }
-    let Some(cluster) = text.strip_prefix('-') else {
-        return flag;
-    };
-    let letters = cluster
-        .bytes()
-        .take_while(u8::is_ascii_alphabetic)
-        .map(char::from)
-        .collect::<Vec<_>>();
-    if letters.is_empty() {
-        return flag;
-    }
-    // The first letter that takes a value, and its place in the cluster.
-    let mut valued = None;
-    for (at, &letter) in letters.iter().enumerate() {
-        if letter == 'c' {
-            let rest = &cluster[at + 1..];
-            let program = rest
-                .starts_with(|c: char| !c.is_ascii_alphabetic())
-                .then(|| rest.to_owned());
-            flag.command = Some(program);
-            flag.sure = valued.is_none();
-            if flag.sure {
-                return flag;
-            }
+    let mut parts = vec![format!("-{first}")];
+    for (at, letter) in chars {
+        if !letter.is_ascii_alphabetic() {
+            parts.push(cluster[at..].to_owned());
             break;
         }
-        if valued.is_none() {
-            flag.clears |= letter == 'i';
-            // `-k NAME`, `-s NAME VALUE`, `-u NAME`, `-I PATH`, `-f FILE`,
-            // `-j N`, `-o PATH`.
-            if "ksuIfjo".contains(letter) {
-                valued = Some((at, letter));
-            }
-        }
+        parts.push(format!("-{letter}"));
     }
-    if let Some((at, letter)) = valued {
-        let needs: usize = if letter == 's' { 2 } else { 1 };
-        // The words the cluster itself splits into after the letter.
-        let inside = letters.len() - at - 1 + usize::from(letters.len() < cluster.len());
-        flag.values = needs.saturating_sub(inside);
-        if inside == 0 {
-            flag.unsets = letter == 'u';
-            flag.sets = letter == 's';
+    Some(parts)
+}
+
+/// How many words a `nix` flag takes as its values: `Ok` when the guard
+/// knows, `Err` with the most it may take when it does not. nix takes
+/// every setting as a flag: `--no-NAME` for a setting that is on or off
+/// takes none, and `--extra-NAME` takes one.
+fn nix_flag_values(flag: &str) -> Result<usize, usize> {
+    if let Some(long) = flag.strip_prefix("--") {
+        if long.starts_with("no-") {
+            return Ok(0);
         }
+        if long.starts_with("extra-") {
+            return Ok(1);
+        }
+        return nix_long_values(long).ok_or(2);
     }
-    flag
+    match flag {
+        "-L" | "-v" | "-i" => Ok(0),
+        "-k" | "-u" | "-I" | "-f" | "-j" | "-o" => Ok(1),
+        "-s" => Ok(2),
+        _ => Err(1),
+    }
 }
 
 /// How many words follow a long `nix` flag as its values, for the flags of
@@ -3631,6 +3599,8 @@ fn nix_long_values(name: &str) -> Option<usize> {
         "commit-lock-file",
         "configure",
         "debug",
+        "debugger",
+        "derivation",
         "dry-run",
         "fallback",
         "help",
@@ -3640,7 +3610,9 @@ fn nix_long_values(name: &str) -> Option<usize> {
         "install",
         "installcheck",
         "json",
+        "keep-failed",
         "keep-going",
+        "keep-outputs",
         "no-link",
         "no-registries",
         "no-update-lock-file",
@@ -3649,10 +3621,15 @@ fn nix_long_values(name: &str) -> Option<usize> {
         "offline",
         "print-build-logs",
         "print-out-paths",
+        "pure-eval",
         "quiet",
+        "read-only",
         "rebuild",
         "recreate-lock-file",
         "refresh",
+        "relaxed-sandbox",
+        "repair",
+        "sandbox",
         "show-trace",
         "stdin",
         "unpack",
@@ -3700,17 +3677,6 @@ fn nix_long_values(name: &str) -> Option<usize> {
     [NONE, ONE, TWO]
         .iter()
         .position(|names| names.contains(&name))
-}
-
-/// `starts` in order, once each, without a place past the last word.
-fn distinct_starts(mut starts: Vec<Start>, len: usize) -> Vec<Start> {
-    starts.retain(|start| match start {
-        Start::At(start) => *start < len,
-        Start::Shell => true,
-    });
-    starts.sort_unstable();
-    starts.dedup();
-    starts
 }
 
 /// A remote command that reads a script on standard input. With no command,

@@ -1722,6 +1722,17 @@ fn nix_command_forms_are_read() {
             "git log --format=%s | nix develop -c grep 'gh pr merge'",
             None,
         ),
+        // nix splits again the rest of a cluster that is a flag.
+        ("nix develop -L-c tiller approve 01JABC", OWNER),
+        ("nix develop -vL-c tiller approve 01JABC", OWNER),
+        ("nix develop -L-c/bin/sh -c 'tiller approve 01JABC'", OWNER),
+        ("nix develop -L-i -c true", ID),
+        // `-k` takes `-L` as its value, so `-c` is the flag.
+        ("nix develop -kLc grep -i foo data.txt", None),
+        // A setting that is on or off takes no value.
+        ("nix develop --no-sandbox -c grep -i foo data.txt", None),
+        // A short flag the guard does not know may take a value.
+        ("nix develop -X -c -c tiller approve 01JABC", OWNER),
         // `--redirect` takes two values.
         (
             "nix develop --redirect a -c -c sh -c 'gh pr merge 12'",
@@ -1820,8 +1831,13 @@ fn direnv_exec_reads_both_shapes() {
         ("direnv exec . cargo test", None),
         ("direnv exec /home/user/pool/3/alpha tiller status x", None),
         ("direnv allow", None),
-        // A path that ends in `/` can only be a directory.
-        ("direnv exec /home/user/tiller/ cargo test", None),
+        // direnv drops a trailing `/`, so the path may still be a file.
+        (
+            "direnv exec /usr/bin/tiller/ approve 01JABC",
+            Some(Code::GuardTamper),
+        ),
+        ("direnv exec tiller/ approve 01JABC", OWNER),
+        ("direnv exec ../.. tiller status x", None),
     ]);
 }
 
