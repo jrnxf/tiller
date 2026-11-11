@@ -448,6 +448,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         let _ = stopping.send(true);
     };
     let retros = state.0.retros.clone();
+    let evals = state.0.evals.clone();
     let server = axum::serve(listener, api::router(state)).with_graceful_shutdown(shutdown);
     let mut stopped = stop.clone();
     tokio::select! {
@@ -466,6 +467,9 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
     // A curator the board started is stopped with everything it started,
     // and its retro ends `unfinished`, so it can run again.
     let _ = tokio::task::spawn_blocking(move || retros.stop(DRAIN)).await;
+    // A holdout eval the board started is stopped the same way, and records
+    // nothing.
+    let _ = tokio::task::spawn_blocking(move || evals.stop(DRAIN)).await;
     // An older binary never writes to a newer database, not even its stop
     // event.
     let fatal = *fatal.lock().unwrap_or_else(PoisonError::into_inner);

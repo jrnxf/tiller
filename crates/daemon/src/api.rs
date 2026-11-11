@@ -5501,6 +5501,44 @@ pub(crate) mod tests {
         terminal: Option<Arc<dyn Terminal>>,
         ssh: Vec<OsString>,
     ) -> Router {
+        app_evals(
+            home,
+            assets,
+            damage,
+            peers,
+            herdr,
+            terminal,
+            ssh,
+            memory::eval::Evals::default(),
+        )
+    }
+
+    /// The board API with `evals` as its holdout evals, so a test can stop
+    /// them the way the daemon does when it stops.
+    pub(crate) fn app_with_evals(home: &std::path::Path, evals: memory::eval::Evals) -> Router {
+        app_evals(
+            home,
+            Assets::of::<Fixture>(),
+            Damage::default(),
+            Peers::idle(),
+            Cli::local(),
+            None,
+            vec!["ssh".into()],
+            evals,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn app_evals(
+        home: &std::path::Path,
+        assets: Assets,
+        damage: Damage,
+        peers: Arc<Peers>,
+        herdr: Cli,
+        terminal: Option<Arc<dyn Terminal>>,
+        ssh: Vec<OsString>,
+        evals: memory::eval::Evals,
+    ) -> Router {
         let (_newest_tx, newest) = watch::channel(0);
         let (_stop_tx, stop) = watch::channel(false);
         router(AppState::new(Inner {
@@ -5522,7 +5560,7 @@ pub(crate) mod tests {
             sessions: auth::Sessions::default(),
             streams: sse::Streams::default(),
             ssh,
-            evals: memory::eval::Evals::default(),
+            evals,
             backups: crate::backups::BackupJobs::default(),
             retros: crate::retros::Retros::default(),
         }))

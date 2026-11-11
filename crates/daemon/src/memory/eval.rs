@@ -6,10 +6,15 @@
 //! A run takes model quota, so a start is refused under this host's quota
 //! floor for new work, and the plan says how many model runs and how much
 //! of the week it will probably take. One eval runs at a time. A run that
-//! records nothing keeps its reason here until the daemon stops.
+//! records nothing keeps its reason here until the daemon stops. A run the
+//! daemon stops is stopped with everything its runner started, and only
+//! the newest runs' directories stay under `<home>/evals`.
 
 use std::path::{Path as FsPath, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -25,6 +30,7 @@ use tiller_core::state::approvals::active_away;
 use tiller_core::state::learning::{self, Learning};
 use tiller_core::state::list;
 use tiller_core::{Actor, Ctx, Error, Store, Timestamp, ids};
+use tiller_herdr::process::Interrupt;
 use utoipa::ToSchema;
 
 use super::dto::{MemoryEvalJob, MemoryEvalPlan, MemoryEvalQuota};
@@ -32,8 +38,12 @@ use super::{Writer, refused, scrub, write};
 use crate::api::{ApiResult, AppState, board_ctx, body, guard, key, not_forwarded, read};
 use crate::dto::{ErrorBody, MutationResponse};
 
-/// The most finished jobs kept for the board.
+/// The most finished jobs kept for the board, and the most run
+/// directories kept under `<home>/evals`.
 const KEPT: usize = 20;
+
+/// Why a run the daemon stopped recorded nothing.
+const STOPPED: &str = "the daemon stopped before the holdout eval finished; nothing recorded";
 
 /// `POST /api/v1/memory/proposals/{id}/eval`.
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
@@ -51,13 +61,31 @@ struct Job {
     view: MemoryEvalJob,
 }
 
+#[derive(Default)]
+struct Shared {
+    jobs: Mutex<Vec<Job>>,
+    /// The threads that run an eval; the daemon waits for them when it
+    /// stops.
+    threads: Mutex<Vec<JoinHandle<()>>>,
+    /// Set when the daemon stops: every running eval is stopped with
+    /// everything it started.
+    stop: Arc<AtomicBool>,
+}
+
 /// The evals the board started: the running one and the failed ones.
 #[derive(Clone, Default)]
-pub struct Evals(Arc<Mutex<Vec<Job>>>);
+pub struct Evals(Arc<Shared>);
 
 impl Evals {
     fn lock(&self) -> MutexGuard<'_, Vec<Job>> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.0.jobs.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn threads(&self) -> MutexGuard<'_, Vec<JoinHandle<()>>> {
+        self.0
+            .threads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// What the memory view shows, newest first.
@@ -94,6 +122,40 @@ impl Evals {
         jobs.drain(..over);
     }
 
+    /// Runs `run` on a thread of its own, which the daemon stops with it.
+    /// `run` gets the interrupt the stop raises.
+    fn spawn(&self, run: impl FnOnce(&Interrupt) + Send + 'static) -> std::io::Result<()> {
+        let interrupt = Interrupt::flag(Arc::clone(&self.0.stop));
+        let handle = std::thread::Builder::new()
+            .name("holdout-eval".into())
+            .spawn(move || run(&interrupt))?;
+        let mut threads = self.threads();
+        threads.retain(|thread| !thread.is_finished());
+        threads.push(handle);
+        Ok(())
+    }
+
+    /// Whether the daemon is stopping.
+    fn stopping(&self) -> bool {
+        self.0.stop.load(Ordering::SeqCst)
+    }
+
+    /// Stops every running eval, with everything its runner started, and
+    /// waits up to `wait` for each to say how it ended.
+    pub fn stop(&self, wait: Duration) {
+        self.0.stop.store(true, Ordering::SeqCst);
+        let threads: Vec<JoinHandle<()>> = self.threads().drain(..).collect();
+        let deadline = Instant::now() + wait;
+        for thread in threads {
+            while !thread.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if thread.is_finished() {
+                let _ = thread.join();
+            }
+        }
+    }
+
     /// A run that recorded: the suggestion's holdout shows it from now on.
     fn recorded(&self, key: &str) {
         self.lock().retain(|job| job.key != key);
@@ -103,6 +165,28 @@ impl Evals {
         if let Some(job) = self.lock().iter_mut().find(|job| job.key == key) {
             job.view.error = Some(error);
             job.view.finished_at = Some(Timestamp::now().to_string());
+        }
+    }
+}
+
+/// Removes all but the newest `keep` run directories under `evals` (each
+/// named by a ULID, so the newest sort last), so `<home>/evals` does not
+/// grow with every run. Anything else there is left alone.
+fn prune(evals: &FsPath, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(evals) else {
+        return;
+    };
+    let mut runs: Vec<PathBuf> = entries
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| entry.file_name().to_str().is_some_and(ids::is_ulid))
+        .map(|entry| entry.path())
+        .collect();
+    runs.sort();
+    let over = runs.len().saturating_sub(keep);
+    for old in runs.drain(..over) {
+        if let Err(error) = std::fs::remove_dir_all(&old) {
+            tracing::warn!(%error, run = ?old.file_name(), "could not remove an old holdout eval's directory");
         }
     }
 }
@@ -386,7 +470,10 @@ pub(crate) async fn eval_start(
             let members = learning::members_sha256_of(w.store.conn(), &set.id)?;
             let candidate = holdout::render_candidate(w.store.conn(), &set, &home)
                 .map_err(|error| holdout_error(&proposal, error))?;
-            let out = home.join("evals").join(ids::new_ulid());
+            // The newest runs' results stay, this one's among them.
+            let runs = home.join("evals");
+            prune(&runs, KEPT.saturating_sub(1));
+            let out = runs.join(ids::new_ulid());
             let job = MemoryEvalJob {
                 proposal_id: proposal,
                 change_set: set.name.clone(),
@@ -400,26 +487,30 @@ pub(crate) async fn eval_start(
             let registry = evals.clone();
             let job_key = key.to_owned();
             let key = key.to_owned();
-            let started = std::thread::Builder::new()
-                .name("holdout-eval".into())
-                .spawn(move || {
-                    let recorded = holdout::run(&evals_dir, &out, &candidate, members)
-                        .map_err(|error| error.to_string())
-                        .and_then(|result| {
-                            let mut store =
-                                Store::open_current(&db).map_err(|error| error.to_string())?;
-                            store
-                                .eval_run_record(&Ctx::new(Actor::Daemon), &set.id, result)
-                                .map_err(|error| error.to_string())
-                        });
-                    match recorded {
-                        Ok(_) => evals.recorded(&key),
-                        Err(error) => {
-                            tracing::warn!(%error, change_set = %set.name, "the holdout eval recorded nothing");
-                            evals.failed(&key, error);
+            let started = registry.spawn(move |interrupt| {
+                let recorded = holdout::run(&evals_dir, &out, &candidate, members, interrupt)
+                    .map_err(|error| {
+                        if evals.stopping() {
+                            STOPPED.to_owned()
+                        } else {
+                            error.to_string()
                         }
+                    })
+                    .and_then(|result| {
+                        let mut store =
+                            Store::open_current(&db).map_err(|error| error.to_string())?;
+                        store
+                            .eval_run_record(&Ctx::new(Actor::Daemon), &set.id, result)
+                            .map_err(|error| error.to_string())
+                    });
+                match recorded {
+                    Ok(_) => evals.recorded(&key),
+                    Err(error) => {
+                        tracing::warn!(%error, change_set = %set.name, "the holdout eval recorded nothing");
+                        evals.failed(&key, error);
                     }
-                });
+                }
+            });
             if let Err(error) = started {
                 let error = format!("start the holdout eval: {error}");
                 registry.failed(&job_key, error.clone());

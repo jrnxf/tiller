@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -17,6 +18,7 @@ use tiller_core::domain::{ChangeSet, ChangeSetMember};
 use tiller_core::state::learning::EvalResult;
 use tiller_core::state::list;
 use tiller_core::state::memory::MEMORY_REPO;
+use tiller_herdr::process::{self, Ended, Interrupt};
 
 /// Runs per case when a case's frontmatter names none (`evals/README.md`).
 pub const DEFAULT_RUNS: u64 = 3;
@@ -152,14 +154,19 @@ pub fn pins(evals_dir: &Path) -> BTreeMap<String, String> {
 
 /// What a `claude plugin eval --json` result says (`evals/run.sh`).
 pub fn parse_result(path: &Path) -> Result<EvalResult> {
+    parse_named(path, &path.display().to_string())
+}
+
+/// [`parse_result`], its errors naming the file `shown`.
+fn parse_named(path: &Path, shown: &str) -> Result<EvalResult> {
     let text = std::fs::read_to_string(path)
-        .map_err(|error| HoldoutError::Usage(format!("{}: {error}", path.display())))?;
+        .map_err(|error| HoldoutError::Usage(format!("{shown}: {error}")))?;
     let value: Value = serde_json::from_str(&text)
-        .map_err(|error| HoldoutError::Usage(format!("{} is not JSON: {error}", path.display())))?;
+        .map_err(|error| HoldoutError::Usage(format!("{shown} is not JSON: {error}")))?;
     let aggregates = &value["aggregates"];
-    let cases_total = aggregates["casesTotal"].as_i64().ok_or_else(|| {
-        HoldoutError::Usage(format!("{} has no aggregates.casesTotal", path.display()))
-    })?;
+    let cases_total = aggregates["casesTotal"]
+        .as_i64()
+        .ok_or_else(|| HoldoutError::Usage(format!("{shown} has no aggregates.casesTotal")))?;
     Ok(EvalResult {
         members_sha256: None,
         candidate_sha256: None,
@@ -277,12 +284,35 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// The runner, as errors name it: never the checkout's path, which the
+/// board shows to whoever reads it.
+const RUNNER: &str = "evals/run.sh";
+
+/// Where the runner leaves its result, under `out`.
+const RESULT: &str = "sealed/result.json";
+
+/// How often a run checks whether it was interrupted.
+const POLL: Duration = Duration::from_millis(100);
+
+/// No deadline cuts a run: the runner's own timeouts bound each case.
+const NO_DEADLINE: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+
 /// Runs `<evals_dir>/evals/run.sh --split holdout` on `candidate`, its
 /// results under `out`, and returns the result to record, bound to
 /// `members` (the set's members hash, taken before the run) and to the
-/// candidate's hash. A runner that cannot start, exits non-zero or leaves
-/// no `sealed/result.json` is `Unavailable`, and nothing is to be recorded.
-pub fn run(evals_dir: &Path, out: &Path, candidate: &str, members: String) -> Result<EvalResult> {
+/// candidate's hash. The runner leads its own process group, and the group
+/// goes when the runner ends or `interrupt` is caught, so nothing it
+/// started outlives the run. A runner that cannot start, exits non-zero,
+/// is interrupted or leaves no `sealed/result.json` is `Unavailable`, and
+/// nothing is to be recorded. Errors name the runner and the result
+/// relative to the checkout and `out`, never a full path.
+pub fn run(
+    evals_dir: &Path,
+    out: &Path,
+    candidate: &str,
+    members: String,
+    interrupt: &Interrupt,
+) -> Result<EvalResult> {
     std::fs::create_dir_all(out)?;
     // An earlier run's sealed result must not be read as this one's.
     let sealed = out.join("sealed");
@@ -291,37 +321,53 @@ pub fn run(evals_dir: &Path, out: &Path, candidate: &str, members: String) -> Re
     }
     let candidate_path = out.join("candidate.md");
     std::fs::write(&candidate_path, candidate)?;
-    let runner = evals(evals_dir).join("run.sh");
-    let status = Command::new(&runner)
+    let mut command = Command::new(evals(evals_dir).join("run.sh"));
+    command
         .args(["--split", "holdout", "--candidate"])
         .arg(&candidate_path)
         .arg("--out")
         .arg(out)
         .current_dir(evals_dir)
-        .stdin(Stdio::null())
-        .status()
-        .map_err(|error| {
-            HoldoutError::Unavailable(format!("cannot run {}: {error}", runner.display()))
-        })?;
-    let result_path = out.join("sealed/result.json");
+        .stdin(Stdio::null());
+    process::own_group(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| HoldoutError::Unavailable(format!("cannot run {RUNNER}: {error}")))?;
+    let now = Instant::now();
+    let deadline = now.checked_add(NO_DEADLINE).unwrap_or(now);
+    let status = match process::wait_all(&mut child, deadline, POLL, Some(interrupt)) {
+        Ended::Exited(status) => status,
+        Ended::Interrupted => {
+            return Err(HoldoutError::Unavailable(format!(
+                "{RUNNER} was interrupted; nothing recorded"
+            )));
+        }
+        Ended::TimedOut => {
+            return Err(HoldoutError::Unavailable(format!(
+                "{RUNNER} ran past its deadline; nothing recorded"
+            )));
+        }
+        Ended::Failed(error) => {
+            return Err(HoldoutError::Unavailable(format!(
+                "waiting for {RUNNER} failed: {error}; nothing recorded"
+            )));
+        }
+    };
+    let result_path = out.join(RESULT);
     if !status.success() || !result_path.exists() {
         // run.sh exits non-zero when a case failed to load even when the
         // rest scored, so a result is recorded only from a clean run.
         return Err(HoldoutError::Unavailable(format!(
-            "{} exited {}{}; nothing recorded",
-            runner.display(),
+            "{RUNNER} exited {} and left {}{RESULT}; nothing recorded",
             status.code().map_or_else(
                 || "on a signal".to_owned(),
                 |code| format!("with code {code}")
             ),
-            if result_path.exists() {
-                format!(" (its result is at {})", result_path.display())
-            } else {
-                " and left no sealed/result.json".to_owned()
-            }
+            if result_path.exists() { "" } else { "no " },
         )));
     }
-    let mut result = parse_result(&result_path)?;
+    let mut result = parse_named(&result_path, RESULT)
+        .map_err(|error| HoldoutError::Unavailable(error.to_string()))?;
     result.members_sha256 = Some(members);
     result.candidate_sha256 = Some(sha256_hex(candidate.as_bytes()));
     let pins = pins(evals_dir);

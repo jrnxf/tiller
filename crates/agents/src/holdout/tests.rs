@@ -1,4 +1,6 @@
 use std::os::unix::fs::PermissionsExt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::*;
 
@@ -101,7 +103,14 @@ printf '{"aggregates":{"casesTotal":2,"casesPassed":2,"overallScore":0.9},"costU
     let out = tempfile::tempdir().unwrap();
     // A stale sealed result from an earlier run is cleared first.
     write(&out.path().join("sealed/old.json"), "{}");
-    let result = run(dir.path(), out.path(), "the candidate\n", "m1".into()).unwrap();
+    let result = run(
+        dir.path(),
+        out.path(),
+        "the candidate\n",
+        "m1".into(),
+        &idle(),
+    )
+    .unwrap();
     assert_eq!((result.cases_total, result.cases_passed), (2, 2));
     assert_eq!(result.members_sha256.as_deref(), Some("m1"));
     assert_eq!(
@@ -123,13 +132,107 @@ printf '{"aggregates":{"casesTotal":1,"casesPassed":1}}' > "$6/sealed/result.jso
 exit 3"#,
     );
     let out = tempfile::tempdir().unwrap();
-    let error = run(dir.path(), out.path(), "c", "m".into()).unwrap_err();
+    let error = run(dir.path(), out.path(), "c", "m".into(), &idle()).unwrap_err();
     let HoldoutError::Unavailable(message) = error else {
         panic!("expected unavailable, got {error:?}");
     };
-    assert!(message.contains("its result is at"), "{message}");
+    assert_eq!(
+        message,
+        "evals/run.sh exited with code 3 and left sealed/result.json; nothing recorded"
+    );
 
     let missing = tempfile::tempdir().unwrap();
-    let error = run(missing.path(), out.path(), "c", "m".into()).unwrap_err();
-    assert!(matches!(error, HoldoutError::Unavailable(m) if m.contains("cannot run")));
+    let error = run(missing.path(), out.path(), "c", "m".into(), &idle()).unwrap_err();
+    let HoldoutError::Unavailable(message) = error else {
+        panic!("expected unavailable, got {error:?}");
+    };
+    assert!(
+        message.starts_with("cannot run evals/run.sh: "),
+        "{message}"
+    );
+    // Errors never name where the checkout or the run's directory is.
+    for place in [missing.path(), out.path()] {
+        assert!(!message.contains(place.to_str().unwrap()), "{message}");
+    }
+}
+
+#[test]
+fn a_result_that_does_not_parse_is_named_by_its_place_in_the_run() {
+    let dir = checkout();
+    runner(
+        dir.path(),
+        r#"mkdir -p "$6/sealed"
+printf 'not json' > "$6/sealed/result.json""#,
+    );
+    let out = tempfile::tempdir().unwrap();
+    let error = run(dir.path(), out.path(), "c", "m".into(), &idle()).unwrap_err();
+    let HoldoutError::Unavailable(message) = error else {
+        panic!("expected unavailable, got {error:?}");
+    };
+    assert!(
+        message.starts_with("sealed/result.json is not JSON"),
+        "{message}"
+    );
+}
+
+fn idle() -> Interrupt {
+    Interrupt::flag(Arc::new(AtomicBool::new(false)))
+}
+
+fn gone(pid: &str) -> bool {
+    let out = Command::new("ps")
+        .args(["-o", "stat=", "-p", pid])
+        .output()
+        .unwrap();
+    let stat = String::from_utf8_lossy(&out.stdout);
+    stat.trim().is_empty() || stat.trim_start().starts_with('Z')
+}
+
+#[test]
+fn an_interrupted_run_stops_the_runner_and_what_it_started() {
+    let dir = checkout();
+    runner(
+        dir.path(),
+        "sleep 300 &\necho $! > \"$6/grandchild.pid\"\necho $$ > \"$6/runner.pid\"\nwait",
+    );
+    let out = tempfile::tempdir().unwrap();
+    let flag = Arc::new(AtomicBool::new(false));
+    let raise = Arc::clone(&flag);
+    let pids = out.path().to_owned();
+    let watcher = std::thread::spawn(move || {
+        let read = |name: &str| {
+            std::fs::read_to_string(pids.join(name))
+                .ok()
+                .map(|pid| pid.trim().to_owned())
+                .filter(|pid| !pid.is_empty())
+        };
+        for _ in 0..200 {
+            if let (Some(runner), Some(grandchild)) = (read("runner.pid"), read("grandchild.pid")) {
+                raise.store(true, Ordering::SeqCst);
+                return Some((runner, grandchild));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        raise.store(true, Ordering::SeqCst);
+        None
+    });
+    let error = run(
+        dir.path(),
+        out.path(),
+        "c",
+        "m".into(),
+        &Interrupt::flag(flag),
+    )
+    .unwrap_err();
+    let (runner, grandchild) = watcher.join().unwrap().expect("the runner never started");
+    let stopped = gone(&runner) && gone(&grandchild);
+    // Whatever happened, take every process this test started down with it.
+    for pid in [&runner, &grandchild] {
+        let _ = Command::new("kill").args(["-KILL", pid]).status();
+    }
+    assert!(stopped, "the runner or its child outlived the interrupt");
+    assert!(
+        matches!(&error, HoldoutError::Unavailable(m) if m == "evals/run.sh was interrupted; nothing recorded"),
+        "{error:?}"
+    );
 }

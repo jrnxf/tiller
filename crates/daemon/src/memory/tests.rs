@@ -19,9 +19,9 @@ use tiller_core::{Actor, Ctx, Error, NewEvent, ids};
 use tiller_herdr::testing::{Fleet, owner};
 
 use super::apply::Repo;
-use crate::api::tests::{Answer, app_with_peers, get, mutation, owner_cookie, send};
+use super::eval::Evals;
+use crate::api::tests::{Answer, app_with_evals, get, mutation, owner_cookie, send};
 use crate::dto::{ErrorBody, ErrorDetail, MutationResponse};
-use crate::peer::link::Peers;
 
 const ALPHA: &str = "projects/alpha.md";
 
@@ -29,13 +29,20 @@ struct Home {
     fleet: Fleet,
     app: Router,
     cookie: String,
+    evals: Evals,
 }
 
 fn home() -> Home {
     let fleet = Fleet::new();
-    let app = app_with_peers(fleet.dir.path(), Peers::idle());
+    let evals = Evals::default();
+    let app = app_with_evals(fleet.dir.path(), evals.clone());
     let cookie = owner_cookie(fleet.dir.path());
-    Home { fleet, app, cookie }
+    Home {
+        fleet,
+        app,
+        cookie,
+        evals,
+    }
 }
 
 impl Home {
@@ -1134,16 +1141,123 @@ async fn a_holdout_eval_that_records_nothing_keeps_its_reason() {
     let view = settled(&home, "alpha").await;
     let job = &view["evals"][0];
     assert_eq!(job["proposal_id"], proposal.as_str());
-    assert!(
-        job["error"]
-            .as_str()
-            .unwrap()
-            .contains("exited with code 3"),
-        "{job}"
-    );
+    let error = job["error"].as_str().unwrap();
+    assert!(error.contains("evals/run.sh exited with code 3"), "{job}");
+    // The board names the runner, not where the checkout or the home is.
+    for place in [checkout.path(), home.path()] {
+        assert!(!error.contains(place.to_str().unwrap()), "{error}");
+    }
     let shown = suggestion(&view, &proposal);
     assert_eq!(shown["gate"]["ok"], false);
     assert_eq!(shown["eval_clears"], true, "it can run again");
+}
+
+fn gone(pid: &str) -> bool {
+    let out = Command::new("ps")
+        .args(["-o", "stat=", "-p", pid])
+        .output()
+        .unwrap();
+    let stat = String::from_utf8_lossy(&out.stdout);
+    stat.trim().is_empty() || stat.trim_start().starts_with('Z')
+}
+
+/// The entries under `<home>/evals`, oldest run first.
+fn run_dirs(home: &Home) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(home.path().join("evals"))
+        .map(|dirs| {
+            dirs.filter_map(Result::ok)
+                .map(|dir| dir.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_the_daemon_stops_its_holdout_eval_and_what_it_started() {
+    let home = home();
+    home.add("k-1", "alpha", RULE_SECTION, "Run the slow suite")
+        .await;
+    let proposal = propose(&home, "alpha", "The parser test flakes");
+    // A runner that starts a child of its own, as run.sh starts claude, and
+    // then waits.
+    let checkout = evals_checkout(
+        "sleep 300 &\necho $! > \"$6/grandchild.pid\"\necho $$ > \"$6/runner.pid\"\nwait",
+    );
+    point_at(&home, checkout.path());
+    weekly(&home, 60.0);
+    ok(&home
+        .post(
+            &format!("/api/v1/memory/proposals/{proposal}/eval"),
+            json!({"idempotency_key": "e-1"}),
+        )
+        .await);
+    let pid = |name: &str| {
+        let dir = home.path().join("evals").join(run_dirs(&home).first()?);
+        Some(
+            std::fs::read_to_string(dir.join(name))
+                .ok()?
+                .trim()
+                .to_owned(),
+        )
+    };
+    let mut pids = None;
+    for _ in 0..100 {
+        if let (Some(runner), Some(grandchild)) = (pid("runner.pid"), pid("grandchild.pid")) {
+            pids = Some((runner, grandchild));
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let (runner, grandchild) = pids.expect("the stand-in runner never started");
+    assert!(!gone(&runner) && !gone(&grandchild));
+
+    let evals = home.evals.clone();
+    tokio::task::spawn_blocking(move || evals.stop(std::time::Duration::from_secs(5)))
+        .await
+        .unwrap();
+    let stopped = gone(&runner) && gone(&grandchild);
+    // Whatever happened, take every process this test started down with it.
+    for pid in [&runner, &grandchild] {
+        let _ = Command::new("kill").args(["-KILL", pid]).status();
+    }
+    assert!(stopped, "the runner or its child outlived the daemon");
+    let view = home.view("alpha").await;
+    assert_eq!(
+        view["evals"][0]["error"],
+        "the daemon stopped before the holdout eval finished; nothing recorded"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_daemon_keeps_only_the_newest_holdout_eval_directories() {
+    let home = home();
+    home.add("k-1", "alpha", RULE_SECTION, "Run the slow suite")
+        .await;
+    let proposal = propose(&home, "alpha", "The parser test flakes");
+    let checkout = evals_checkout("exit 3");
+    point_at(&home, checkout.path());
+    weekly(&home, 60.0);
+    // Something else in the folder is not a run's, and stays.
+    std::fs::create_dir_all(home.path().join("evals/notes")).unwrap();
+    let mut first = None;
+    for run in 0..21 {
+        ok(&home
+            .post(
+                &format!("/api/v1/memory/proposals/{proposal}/eval"),
+                json!({"idempotency_key": format!("e-{run}")}),
+            )
+            .await);
+        settled(&home, "alpha").await;
+        if run == 0 {
+            first = run_dirs(&home).into_iter().find(|name| name != "notes");
+        }
+    }
+    let dirs = run_dirs(&home);
+    assert!(dirs.contains(&"notes".to_owned()), "{dirs:?}");
+    assert_eq!(dirs.len(), 21, "20 runs and the notes: {dirs:?}");
+    assert!(!dirs.contains(&first.unwrap()), "{dirs:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

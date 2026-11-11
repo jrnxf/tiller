@@ -891,7 +891,20 @@ fn eval(app: &App, args: LearnEval) -> Done {
                     .tempdir()?
                     .keep(),
             };
-            holdout::run(&evals_dir, &out, &candidate, members).map_err(holdout_failure)?
+            // In its own group the runner no longer gets the terminal's
+            // Ctrl-C, so tiller catches it and stops the group itself.
+            let interrupt = Interrupt::catch().map_err(|error| {
+                Failure::new(
+                    "internal",
+                    1,
+                    format!("cannot watch for interrupts: {error}"),
+                )
+            })?;
+            holdout::run(&evals_dir, &out, &candidate, members, &interrupt).map_err(|error| {
+                // The error names the result relative to the run; the
+                // owner's terminal also gets where the run is.
+                holdout_failure(error).hint(format!("the run's files are in {}", out.display()))
+            })?
         }
     };
     let recorded = store.eval_run_record(&app.ctx(), &set.id, result)?;

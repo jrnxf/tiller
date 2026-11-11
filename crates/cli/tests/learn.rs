@@ -879,11 +879,15 @@ fn the_eval_runner_appends_the_candidate_and_records_the_run() {
         "{}",
         half.json
     );
-    assert!(
-        half.json["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("its result is at")
+    assert_eq!(
+        half.json["error"]["message"],
+        "evals/run.sh exited with code 1 and left sealed/result.json; nothing recorded",
+        "{}",
+        half.json
+    );
+    assert_eq!(
+        half.json["error"]["hint"],
+        format!("the run's files are in {}", out2.display()).as_str()
     );
     let both = world.run(&[
         "learn",
