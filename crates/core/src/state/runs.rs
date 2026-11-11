@@ -2050,17 +2050,18 @@ impl Store {
             if let (Some(session_id), Some(verdict)) = (&new.session_id, new.verdict) {
                 let session: Session = get(tx.conn(), "session", session_id)?;
                 let newer = session.activity_observed_at.is_none_or(|at| new.observed_at > at);
-                // An ended session stays ended: a line stamped after the
-                // end, read in the transcript's retention window, or a hook
-                // that comes late, is kept as a row but moves nothing
-                // (`protocol.md` 5). A line stamped before the end that
-                // Claude Code flushed late still moves it as usual, so a
-                // session ended with no `Ended` verdict (a relaunch, a
-                // failed spawn) takes its last state.
-                let ended = session
-                    .ended_at
-                    .is_some_and(|end| new.observed_at > end)
-                    && verdict != Activity::Ended;
+                // A line read in the transcript's retention window, or a
+                // hook that comes late, is kept as a row, but an ended
+                // session never looks live again (`protocol.md` 5). Once it
+                // reads `ended` it stays there. One ended with no `Ended`
+                // verdict (a relaunch, a failed spawn) may still settle into
+                // a resting state, such as the idle of a turn's last line
+                // flushed late, but never into one that waits or works. No
+                // clock is compared, so skew between hosts cannot reopen it.
+                let ended = session.ended_at.is_some()
+                    && !(verdict == Activity::Ended
+                        || session.activity != Activity::Ended
+                            && matches!(verdict, Activity::Idle | Activity::Errored));
                 idle_held_until = herdr_idle_held(&session, &new);
                 if newer && !ended && idle_held_until.is_none() {
                     tx.conn().execute(
