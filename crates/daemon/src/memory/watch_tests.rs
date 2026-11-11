@@ -235,13 +235,13 @@ async fn the_boards_own_write_is_not_an_outside_change() {
     let mut watcher = Watcher::new(home, Store::open(&fleet.db).unwrap());
     look(&mut watcher);
 
-    let edit = |key: &'static str, text: &'static str| {
+    let edit_in = |project: &'static str, key: &'static str, text: &'static str| {
         let app = app.clone();
         let cookie = cookie.clone();
         async move {
-            let view = get(&app, "/api/v1/memory?scope=fleet").await;
+            let view = get(&app, &format!("/api/v1/memory?scope={project}")).await;
             let view: Value = serde_json::from_str(&view.body).unwrap();
-            let body = json!({"idempotency_key": key, "project": "fleet", "op": "add",
+            let body = json!({"idempotency_key": key, "project": project, "op": "add",
                               "section": RULE_SECTION, "text": text,
                               "base_blob": view["doc"]["blob"]});
             let answer = send(
@@ -252,6 +252,7 @@ async fn the_boards_own_write_is_not_an_outside_change() {
             assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
         }
     };
+    let edit = |key: &'static str, text: &'static str| edit_in("fleet", key, text);
     let root = Repo::at(home).root().to_owned();
     // The first edit makes the repo; the second commits on top of it. Each
     // time the watcher reads the new HEAD and writes nothing.
@@ -312,17 +313,26 @@ async fn the_boards_own_write_is_not_an_outside_change() {
         Some(vec!["projects/alpha.md".to_owned()])
     );
 
+    // Two of Tiller's commits, to two documents, in one window: the first
+    // commit's document is Tiller's write too, though `HEAD` did not write
+    // it.
+    edit("k-6", "Keep the sixth line").await;
+    edit_in("alpha", "k-7", "Keep the seventh line").await;
+    look(&mut watcher);
+    assert_eq!(look(&mut watcher), None);
+    assert_eq!(changes(&watcher).len(), 4, "no change since k-5");
+
     // Tiller commits the bytes it writes, with no clean filter between, so
     // a filter in the repo does not make its own write look like an
     // outside one.
     git(
         &root,
-        &["config", "filter.shout.clean", "sed s/sixth/SIXTH/"],
+        &["config", "filter.shout.clean", "sed s/eighth/EIGHTH/"],
     );
     std::fs::write(root.join(".git/info/attributes"), "fleet.md filter=shout\n").unwrap();
-    edit("k-6", "Keep the sixth line").await;
+    edit("k-8", "Keep the eighth line").await;
     let stored = git(&root, &["show", "HEAD:fleet.md"]);
-    assert!(stored.contains("Keep the sixth line"), "{stored}");
+    assert!(stored.contains("Keep the eighth line"), "{stored}");
     look(&mut watcher);
     assert_eq!(look(&mut watcher), None);
 }

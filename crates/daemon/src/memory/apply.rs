@@ -273,7 +273,17 @@ impl Repo {
         Ok(found)
     }
 
-    /// The paths `commit` added, changed or removed against its parent (or
+    /// The commits reachable from `to` and not from `from` (every commit of
+    /// `to` when `from` is `None`), each before its parents.
+    pub(crate) fn commits_between(&self, from: Option<&str>, to: &str) -> Result<Vec<String>> {
+        let not = from.map(|from| format!("^{from}"));
+        let mut args = vec!["rev-list", "--topo-order", to];
+        args.extend(not.as_deref());
+        let out = self.git(None, &args, None)?;
+        Ok(out.lines().map(str::to_owned).collect())
+    }
+
+    /// The paths `commit` added, changed or removed against its parents (or
     /// all its files, for a first commit).
     pub(crate) fn written_by(&self, commit: &str) -> Result<HashSet<String>> {
         let out = self.git(
@@ -283,6 +293,7 @@ impl Repo {
                 "--no-commit-id",
                 "--name-only",
                 "-r",
+                "-m",
                 "--root",
                 "-z",
                 commit,

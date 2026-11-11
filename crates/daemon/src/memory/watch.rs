@@ -20,11 +20,13 @@
 //!
 //! Tiller's own commit is not an outside change. When `HEAD` is the commit
 //! of a revision Tiller recorded since the last look, a changed document
-//! that commit wrote, and whose bytes are still the commit's, is Tiller's
-//! write: that write's own events already refreshed the board. The change
-//! names only the other documents (one the commit did not write, or one
-//! changed again since), and when there are none the watcher writes nothing.
-//! That check runs two git processes, after the lock is released.
+//! whose last commit since that look is one Tiller recorded, and whose
+//! bytes are still `HEAD`'s, is Tiller's write: that write's own events
+//! already refreshed the board. The change names only the other documents
+//! (one an outside commit or an editor's save wrote last, or one changed
+//! again since), and when there are none the watcher writes nothing. That
+//! check runs a few git processes (one for each new commit, and two more),
+//! after the lock is released.
 //!
 //! A missing repo is not an error. It has no `HEAD` and no documents, and a
 //! repo made or replaced later is a change like any other. A document that
@@ -305,7 +307,7 @@ impl Watcher {
         }
         let changed = match self.tiller_commit(before, next) {
             Some(commit) => {
-                let outside = self.not_at(commit, next, changed)?;
+                let outside = self.not_at(before, commit, next, changed)?;
                 if outside.is_empty() {
                     return Ok(None);
                 }
@@ -385,17 +387,45 @@ impl Watcher {
         recorded.then_some(head)
     }
 
-    /// The documents of `changed` that Tiller's `commit` does not explain:
-    /// one it did not write (an outside commit under it, or an editor's
-    /// save), and one it wrote whose bytes, as `next` read them, are not
-    /// the file at `commit`. Tiller commits the bytes it writes, with no
-    /// git filter between (`git apply --cached`), so the bytes compare
-    /// as they are. Two git processes read it all.
-    fn not_at(&self, commit: &str, next: &Seen, changed: Vec<String>) -> Result<Vec<String>> {
-        let wrote = self.repo.written_by(commit)?;
+    /// The documents of `changed` that Tiller's commits since `before` do
+    /// not explain: one whose last commit since then is not Tiller's (an
+    /// outside commit, or none: an editor's save), and one whose bytes, as
+    /// `next` read them, are not the file at `commit` (`HEAD`). Tiller
+    /// commits the bytes it writes, with no git filter between (`git apply
+    /// --cached`), so the bytes compare as they are.
+    fn not_at(
+        &self,
+        before: &Seen,
+        commit: &str,
+        next: &Seen,
+        changed: Vec<String>,
+    ) -> Result<Vec<String>> {
+        if changed.is_empty() {
+            return Ok(changed);
+        }
+        let tillers = self
+            .store
+            .mem_commits_since(before.tiller.as_ref().map(|tiller| tiller.seq))?;
+        // A history rewritten since the last look (the old `HEAD` gone)
+        // explains nothing.
+        let commits = match self.repo.commits_between(before.head.as_deref(), commit) {
+            Ok(commits) => commits,
+            Err(error) => {
+                tracing::warn!(%error, "the memory watcher cannot list the new commits");
+                return Ok(changed);
+            }
+        };
+        // Each path's newest commit says whether Tiller wrote it last.
+        let mut last: BTreeMap<String, bool> = BTreeMap::new();
+        for each in &commits {
+            let mine = tillers.contains(each);
+            for path in self.repo.written_by(each)? {
+                last.entry(path).or_insert(mine);
+            }
+        }
         let mine: Vec<String> = changed
             .iter()
-            .filter(|path| wrote.contains(*path))
+            .filter(|path| last.get(*path) == Some(&true))
             .cloned()
             .collect();
         let at = self.repo.bytes_at(commit, &mine)?;
@@ -414,10 +444,6 @@ impl Watcher {
     }
 }
 
-/// How the digest of a document that cannot be read starts. No sha256 hex
-/// digest does.
-const UNREADABLE: &str = "unreadable: ";
-
 /// A document's digest; `None` when it is not there. One that cannot be read
 /// has a digest of its own, so it is a change and the look goes on.
 fn digest(repo: &Repo, path: &str) -> Option<String> {
@@ -427,7 +453,8 @@ fn digest(repo: &Repo, path: &str) -> Option<String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
             tracing::warn!(path, %error, "the memory watcher cannot read a document");
-            Some(format!("{UNREADABLE}{:?}", error.kind()))
+            // No sha256 hex digest starts so.
+            Some(format!("unreadable: {:?}", error.kind()))
         }
     }
 }
