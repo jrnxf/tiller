@@ -1658,3 +1658,38 @@ test("Reject needs no reason and is bound to the head the page shows", async () 
   expect(posted[0]?.body).toMatchObject({ decision: "reject", head_sha: FIXTURE_HEAD_SHA });
   expect(Object.keys(posted[0]?.body ?? {})).not.toContain("reason");
 });
+
+test("a card page chunk that fails to load leaves no unhandled rejection", async () => {
+  stubApi("default");
+  const queryClient = createTestQueryClient();
+  hydrateFromSnapshot(queryClient, fixtureSnapshot("default"));
+  const router = createAppRouter(
+    queryClient,
+    createMemoryHistory({ initialEntries: [`/?card=${CARD_43}`] }),
+  );
+  await router.load();
+  // Offline, say, or a build that replaced the chunk. Not a vi.spyOn: a spy
+  // reads the promise it returns, which marks the rejection as handled.
+  let asked = 0;
+  router.loadRouteChunk = () => {
+    asked += 1;
+    return Promise.reject(new Error("Failed to fetch dynamically imported module"));
+  };
+  const unhandled = vi.fn();
+  process.on("unhandledRejection", unhandled);
+  try {
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    );
+    await screen.findByTestId("card-drawer");
+    await waitFor(() => expect(asked).toBe(1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(unhandled).not.toHaveBeenCalled();
+    // The drawer still shows the card.
+    expect(screen.getByTestId("card-drawer")).toBeTruthy();
+  } finally {
+    process.off("unhandledRejection", unhandled);
+  }
+});
