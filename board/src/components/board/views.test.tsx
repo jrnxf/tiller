@@ -882,8 +882,10 @@ test("opening the drawer fetches the card page's route chunk, so the full page n
     queryClient,
     createMemoryHistory({ initialEntries: [`/?card=${CARD_43}`] }),
   );
+  const chunk = vi.spyOn(router, "loadRouteChunk");
   const preload = vi.spyOn(router, "preloadRoute");
   await router.load();
+  chunk.mockClear();
   render(
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
@@ -891,16 +893,15 @@ test("opening the drawer fetches the card page's route chunk, so the full page n
   );
   await screen.findByTestId("card-drawer");
 
-  // Once, for this card's page, with no hover or click to ask for it.
-  await waitFor(() => expect(preload).toHaveBeenCalledTimes(1));
-  expect(preload).toHaveBeenCalledWith({
-    to: "/cards/$cardId",
-    params: { cardId: CARD_43 },
-    search: { owner: undefined },
-  });
+  // Once, for the card page's code, with no hover or click to ask for it.
+  await waitFor(() => expect(chunk).toHaveBeenCalledTimes(1));
+  expect(chunk).toHaveBeenCalledWith(router.routesById["/cards/$cardId"]);
+  // Only the code: the drawer reads the card itself, so the page's loader
+  // does not run (and fail) a second time for a card that cannot be read.
+  expect(preload).not.toHaveBeenCalled();
   // Another render of the same open drawer does not ask again.
   await act(async () => {});
-  expect(preload).toHaveBeenCalledTimes(1);
+  expect(chunk).toHaveBeenCalledTimes(1);
 });
 
 test("the board with no card open fetches no card page", async () => {
@@ -908,8 +909,9 @@ test("the board with no card open fetches no card page", async () => {
   const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot("default"));
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: ["/"] }));
-  const preload = vi.spyOn(router, "preloadRoute");
+  const chunk = vi.spyOn(router, "loadRouteChunk");
   await router.load();
+  chunk.mockClear();
   render(
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
@@ -917,7 +919,7 @@ test("the board with no card open fetches no card page", async () => {
   );
   await screen.findByTestId("board");
   await act(async () => {});
-  expect(preload).not.toHaveBeenCalled();
+  expect(chunk).not.toHaveBeenCalledWith(router.routesById["/cards/$cardId"]);
 });
 
 test("Close and Escape shut the drawer", async () => {
