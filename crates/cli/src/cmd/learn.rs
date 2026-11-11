@@ -482,14 +482,20 @@ pub(crate) fn claim(
     let launch = match prepare(tools, config, store, &claimed.value, &session_id) {
         Ok(launch) => launch,
         Err(failure) => {
-            // The claim stored the caller's key, so the end is unkeyed: the
-            // same key on another write would be refused.
+            // The end is its own write, at the time it ended. The claim
+            // stored the caller's key, so the end is unkeyed: the same key
+            // on another write would be refused.
+            let end = tiller_core::Ctx {
+                now: tiller_core::Timestamp::now(),
+                ..ctx.unkeyed()
+            };
             unfinished(
                 store,
-                &ctx.unkeyed(),
+                &end,
                 &claimed.value.id,
                 &note("the curator could not be prepared", &failure),
-            )?;
+            )
+            .map_err(ClaimError::State)?;
             return Err(failure.into());
         }
     };
@@ -499,7 +505,8 @@ pub(crate) fn claim(
         session_id,
         argv: launch.argv,
         env: launch.env,
-        timeout_minutes: config.curator_timeout_minutes,
+        // The curator is cut after at least a minute.
+        timeout_minutes: config.curator_timeout_minutes.max(1),
     })
 }
 
@@ -533,7 +540,7 @@ pub(crate) fn launch(claimed: &Claimed, interrupt: &Interrupt) -> Result<Ran, Fa
         &claimed.argv,
         &claimed.env,
         &claimed.scratch,
-        Duration::from_secs(claimed.timeout_minutes.max(1) * 60),
+        Duration::from_secs(claimed.timeout_minutes * 60),
         interrupt,
     )
 }
@@ -568,8 +575,11 @@ pub(crate) fn end(
     }
     let note = match (&ran.stopped, ran.exit) {
         (Some(Stopped::Cut), _) => format!(
-            "curator cut after {} minutes without finishing the retro",
-            claimed.timeout_minutes
+            "curator cut after {} without finishing the retro",
+            match claimed.timeout_minutes {
+                1 => "1 minute".to_owned(),
+                minutes => format!("{minutes} minutes"),
+            }
         ),
         (Some(Stopped::Interrupted), _) => {
             format!("curator stopped: {interrupted} before the retro was finished")
@@ -605,7 +615,7 @@ pub(crate) fn unfinished(
     ctx: &tiller_core::Ctx,
     retro: &str,
     note: &str,
-) -> Result<Retro, Failure> {
+) -> tiller_core::Result<Retro> {
     let finished = store.retro_finish(
         ctx,
         None,
@@ -652,7 +662,7 @@ pub(crate) fn board_run(
                         &claimed.retro.value.id,
                         &note("the curator could not be started", &failure),
                     )
-                    .map_err(|failure| failure.message.clone())?;
+                    .map_err(|error| Failure::from(error).message.clone())?;
                     Err(failure.message.clone())
                 }
             }
