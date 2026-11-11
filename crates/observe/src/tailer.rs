@@ -134,8 +134,9 @@ pub struct Tailer {
     transcript_intake: bool,
     /// Set after a truncation, or for a file read from the start: entries
     /// up to this offset may be read a second time, so each is checked
-    /// against the recorded uuids. `u64::MAX` until the first poll takes
-    /// the file's length. Cleared once the tailer reads past it: a line
+    /// against the recorded uuids. After a truncation it is the larger of
+    /// the new length and the offset read before. For a file read from the
+    /// start it is `u64::MAX` until the first poll takes the file's length. Cleared once the tailer reads past it: a line
     /// appended later is new, and the uuid scan is not free.
     dedupe: Option<u64>,
 }
@@ -189,8 +190,11 @@ impl Tailer {
         };
         let len = file.metadata().map_err(io)?.len();
         if len < self.offset {
+            // A rewrite in progress puts the old lines back after this
+            // poll, so the repeats run up to what was read before, or to
+            // the new length if the file is already longer.
+            self.dedupe = Some(len.max(self.offset));
             self.offset = 0;
-            self.dedupe = Some(len);
         } else if self.dedupe == Some(u64::MAX) {
             self.dedupe = Some(len);
         }
@@ -520,23 +524,25 @@ mod tests {
         let path = dir.path().join("t.jsonl");
         let orchestrator = session(&store, &fleet.orchestrator);
         let first = user("u1", "2026-11-02T10:00:00Z", json!(INTERRUPT_MARKERS[0]));
-        append(
-            &path,
-            &[
-                first.clone(),
-                user("u2", "2026-11-02T10:00:01Z", json!(INTERRUPT_MARKERS[0])),
-            ],
-        );
+        let second = user("u2", "2026-11-02T10:00:01Z", json!(INTERRUPT_MARKERS[0]));
+        append(&path, &[first.clone(), second.clone()]);
         let mut tailer = Tailer::resume(&store, &orchestrator, &path, false).unwrap();
         assert_eq!(tailer.poll(&mut store).unwrap(), 2);
 
-        // Replaced by a shorter file that repeats u1, then grows with u3.
+        // Rewritten in place: truncated, then the old lines come back one
+        // poll at a time, then it grows with u3.
         std::fs::write(&path, "").unwrap();
         append(&path, &[first]);
         assert_eq!(
             tailer.poll(&mut store).unwrap(),
             0,
             "u1 is not recorded twice"
+        );
+        append(&path, &[second]);
+        assert_eq!(
+            tailer.poll(&mut store).unwrap(),
+            0,
+            "u2, written back after the poll that saw the truncation, is not recorded twice"
         );
         append(
             &path,
