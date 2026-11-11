@@ -1,8 +1,8 @@
 import { expect, test } from "vitest";
 
 import type { PollerHealth } from "../../lib/api-types";
-import { doctorFor, pollersFor } from "../../lib/fixture-doctor";
-import { checkLines, needsYou, pollerTitle } from "./check-lines";
+import { doctorFor, mergeAppFor, peerDoctorFor, pollersFor } from "../../lib/fixture-doctor";
+import { checkLines, mergeAppProblem, needsYou, peerCheckLines, pollerTitle } from "./check-lines";
 import type { Words } from "./check-lines";
 
 const NOW = Date.parse("2026-11-11T10:00:00Z");
@@ -71,6 +71,37 @@ test("the merge App and the merge gates are the Merge App section's, not the hos
   const lines = checkLines(doctorFor("default", NOW), pollersFor("default", NOW));
   expect(lines.some((line) => line.key === "merge-gates")).toBe(false);
   expect(lines.some((line) => line.key === "check:merge app")).toBe(false);
+});
+
+test("the Merge App section's problems are one line for the count, red when the key has leaked", () => {
+  const gates = doctorFor("default", NOW).merge_gates;
+  const missing = mergeAppFor("default");
+  expect(mergeAppProblem(missing, gates)).toEqual([
+    { key: "merge-app", tone: "amber", title: "Merge App" },
+  ]);
+  expect(mergeAppProblem({ ...missing, status: "fail" }, gates)[0]?.tone).toBe("red");
+  // A ready key with a repo still on detect is still one problem.
+  const ready = mergeAppFor("merge-ready");
+  expect(mergeAppProblem(ready, doctorFor("merge-ready", NOW).merge_gates)).toHaveLength(1);
+  const enforced = doctorFor("merge-ready", NOW).merge_gates.filter(
+    (gate) => gate.merge_gate === "enforced",
+  );
+  expect(mergeAppProblem(ready, enforced)).toEqual([]);
+  // Unread health and no gates: nothing to count.
+  expect(mergeAppProblem(undefined, [])).toEqual([]);
+});
+
+test("a peer's card has its own merge App and gates, grouped by verdict", () => {
+  const report = peerDoctorFor("host-d", NOW);
+  if (!report) throw new Error("no fixture report for host-d");
+  const lines = peerCheckLines(report);
+  expect(lines.find((line) => line.key === "check:merge app")?.title).toBe("Merge App");
+  const gates = lines.find((line) => line.key === "merge-gates");
+  expect(gates?.tone).toBe("green");
+  expect(text(gates?.detail)).toBe("gamma, fleet (enforced): the ruleset check holds.");
+  // A peer's pollers live in its daemon: none come over the link.
+  expect(lines.some((line) => line.key.startsWith("poller"))).toBe(false);
+  expect(peerDoctorFor("host-e", NOW)).toBeUndefined();
 });
 
 test.each([

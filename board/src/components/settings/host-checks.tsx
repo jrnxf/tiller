@@ -2,12 +2,12 @@ import { useCallback, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import type { DaemonHealth, Machine, PollerHealth } from "../../lib/api-types";
-import { doctorQuery, healthQuery } from "../../lib/queries";
+import { ReadError, doctorQuery, healthQuery } from "../../lib/queries";
 import { sendMutation } from "../attention/api";
 import { useAction } from "../attention/use-action";
 import { RetryIcon } from "../board/icons";
-import { checkLines, whenText } from "./check-lines";
-import type { CheckLine } from "./check-lines";
+import { checkLines, peerCheckLines, whenText } from "./check-lines";
+import type { CheckLine, Words } from "./check-lines";
 import { CardLine, HostCardSection } from "./host-card";
 
 // Run now on a failing poller: it polls at once instead of waiting out its
@@ -145,39 +145,75 @@ function LocalChecks({ health, owner }: { health: DaemonHealth; owner: boolean }
   );
 }
 
-// A peer's checks run on that host; this board reads only its own. A herdr
-// machine has no daemon to check: this host's herdr poller reads it.
-function RemoteChecks({
-  machine,
-  peer,
-  board,
-}: {
-  machine: Machine;
-  peer: boolean;
-  board: string;
-}) {
+// Why a peer's checks did not come, in the daemon's words: a link that is
+// not live, or a peer that cannot run them.
+function unsent(label: string, error: Error): Words {
+  const read = error instanceof ReadError ? error : null;
+  return [
+    `${label} did not send them: ${(read?.reason ?? error.message).replace(/\.$/, "")}.`,
+    read?.code === "peer_unreachable"
+      ? " They show again once its link is live."
+      : " Run tiller doctor in a shell on that host.",
+  ];
+}
+
+// A paired peer's checks: the peer runs them when its card opens and sends
+// the report over the link. This board only reads them, so the card has no
+// buttons; the fixes are made on that host.
+function PeerChecks({ machine }: { machine: Machine }) {
+  const doctor = useQuery(doctorQuery(machine.label));
+  const checked = whenText(doctor.data?.checked_at);
+  const meta = doctor.isFetching
+    ? `Running the checks on ${machine.label}`
+    : checked
+      ? `Read from ${machine.label}, last run ${checked}`
+      : null;
+  return (
+    <HostCardSection title="Checks" meta={meta}>
+      <ul className="set-lines" aria-live="polite" data-testid="peer-checks">
+        {doctor.isError ? (
+          <CardLine
+            testid="check-unreadable"
+            tone="amber"
+            title="Checks"
+            detail={unsent(machine.label, doctor.error)}
+          />
+        ) : null}
+        {doctor.data
+          ? peerCheckLines(doctor.data).map((line) => (
+              <CardLine
+                key={line.key}
+                testid={`check-${line.key}`}
+                tone={line.tone}
+                title={line.title}
+                sub={line.sub}
+                detail={line.detail}
+                end={
+                  line.end?.kind === "note" ? (
+                    <span className="set-line-r">{line.end.text}</span>
+                  ) : null
+                }
+              />
+            ))
+          : null}
+      </ul>
+    </HostCardSection>
+  );
+}
+
+// A herdr machine has no daemon to check: this host's herdr poller reads it.
+function HerdrChecks({ machine, board }: { machine: Machine; board: string }) {
   return (
     <HostCardSection title="Checks">
       <ul className="set-lines">
-        {peer ? (
-          <CardLine
-            testid="check-elsewhere"
-            tone={null}
-            title={`Run on ${machine.label}`}
-            detail={[
-              `Each host checks its own tools and pollers. Open the board ${machine.label} serves to see its checks.`,
-            ]}
-          />
-        ) : (
-          <CardLine
-            testid="check-elsewhere"
-            tone={null}
-            title="No daemon to check"
-            detail={[
-              `${machine.label} runs agents through herdr only. Its herdr poller is in the checks of ${board}.`,
-            ]}
-          />
-        )}
+        <CardLine
+          testid="check-elsewhere"
+          tone={null}
+          title="No daemon to check"
+          detail={[
+            `${machine.label} runs agents through herdr only. Its herdr poller is in the checks of ${board}.`,
+          ]}
+        />
       </ul>
     </HostCardSection>
   );
@@ -200,7 +236,9 @@ export function HostChecks({
 }) {
   return machine.kind === "local" ? (
     <LocalChecks health={health} owner={owner} />
+  ) : peer ? (
+    <PeerChecks machine={machine} />
   ) : (
-    <RemoteChecks machine={machine} peer={peer} board={board} />
+    <HerdrChecks machine={machine} board={board} />
   );
 }

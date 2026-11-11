@@ -26,7 +26,9 @@ function serve(owner: boolean, logout: [number, unknown] = [200, { owner: false 
       if (logout[0] === 200) signedIn = false;
       return new Response(JSON.stringify(logout[1]), { status: logout[0] });
     }
-    if (path === "/api/v1/health" || path === "/api/v1/machines") {
+    // A peer's checks, as the link answers them.
+    const peerChecks = path.startsWith("/api/v1/doctor?");
+    if (path === "/api/v1/health" || path === "/api/v1/machines" || peerChecks) {
       return new Response(JSON.stringify(fixtureResource(path, "federated")));
     }
     if (path === "/api/v1/peers" && !init?.method) {
@@ -125,7 +127,8 @@ test("Settings lists every host in one table, this one a row like the others", a
   expect(within(row("host-a")).getByText("0.1.0-pre.17")).toBeTruthy();
   expect(cell("host-a", "Process").textContent).toBe("4242");
   expect(cell("host-a", "Started").textContent).toMatch(/^\w{3} \d{1,2} \w{3}, \d{2}:\d{2}up 3 h/);
-  expect(within(row("host-a")).getByText("Serves this board")).toBeTruthy();
+  // No merge App: the row counts it, though the checks cannot be read here.
+  expect(within(row("host-a")).getByTestId("host-needs-you").textContent).toBe("1 check needs you");
   expect(cell("host-a", "Version").querySelector("small")?.textContent).toMatch(/^Schema \d+$/);
   expect(cell("host-d", "Version").querySelector("small")).toBeNull();
   expect(cell("host-d", "Process").textContent).toBe("-");
@@ -175,7 +178,8 @@ test("a browser that is not the owner sees no peer link and no boards list", asy
   const row = await within(panel).findByTestId("host-host-d");
   fireEvent.click(within(row).getByRole("button", { name: "host-d" }));
   const card = await screen.findByTestId("host-card-host-d");
-  expect(await within(card).findByText("Run on host-d")).toBeTruthy();
+  // A browser that is not the owner still reads the peer's checks.
+  expect(await within(card).findByTestId("check-merge-gates")).toBeTruthy();
   expect(within(card).queryByRole("region", { name: "Peer link" })).toBeNull();
   expect(screen.queryByRole("region", { name: "Boards that reach this host" })).toBeNull();
 });
@@ -183,15 +187,18 @@ test("a browser that is not the owner sees no peer link and no boards list", asy
 test("without the hosts list, the host serving this board still has its row", async () => {
   serve(true);
   const served = globalThis.fetch;
+  // The merge App is ready, so nothing on this host needs the owner.
+  const health = fixtureResource("/api/v1/health", "merge-ready") as DaemonHealth;
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) =>
     String(input) === "/api/v1/machines"
       ? new Response("{}", { status: 500 })
-      : served(input, init),
+      : String(input) === "/api/v1/health"
+        ? new Response(JSON.stringify(health))
+        : served(input, init),
   );
   renderSettings();
   const panel = await screen.findByRole("region", { name: "Hosts" });
   const row = await within(panel).findByTestId("host-This host");
-  const health = fixtureResource("/api/v1/health", "federated") as DaemonHealth;
   expect(panel.querySelectorAll("tbody tr")).toHaveLength(1);
   expect(within(row).getByText(health.version)).toBeTruthy();
   expect(within(row).getByText(`Schema ${health.schema}`)).toBeTruthy();

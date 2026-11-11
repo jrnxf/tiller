@@ -3056,8 +3056,22 @@
         "tags": [
           "reads"
         ],
-        "summary": "The checks `tiller doctor` runs, run on this host now (`protocol.md`\n7.3). Local only: a peer's checks run on that host.",
+        "summary": "The checks `tiller doctor` runs, run now on this host or, with\n`?host=<label>`, on a paired peer (`protocol.md` 7.3). A peer runs its own\nchecks and sends them as a `query` answer; the board only reads them.",
         "operationId": "doctor",
+        "parameters": [
+          {
+            "name": "host",
+            "in": "query",
+            "description": "A host id or label.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -3068,7 +3082,17 @@
               }
             }
           },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "503": {
+            "description": "`unavailable`, or `peer_unreachable` for a peer",
             "content": {
               "application/json": {
                 "schema": {

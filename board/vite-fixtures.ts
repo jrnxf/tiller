@@ -6,7 +6,13 @@ import type { Connect, Plugin } from "vite";
 
 import type { BoardRow } from "./src/lib/api-types.ts";
 import { fixtureMutation, withoutDeleted } from "./src/lib/fixture-mutations.ts";
-import { SCENARIOS, bootScript, fixtureResource, fixtureSnapshot } from "./src/lib/fixtures.ts";
+import {
+  FixtureRefusal,
+  SCENARIOS,
+  bootScript,
+  fixtureResource,
+  fixtureSnapshot,
+} from "./src/lib/fixtures.ts";
 import type { Scenario } from "./src/lib/fixtures.ts";
 import {
   FIXTURE_COLS,
@@ -394,6 +400,10 @@ function apiMiddleware(): Connect.NextHandleFunction {
     if (url === "/api/v1/snapshot") return sendJson(res, snapshotOf(scenario));
 
     const resource = withoutDeleted(url, fixtureResource(url, scenario), scenario);
+    if (resource instanceof FixtureRefusal) {
+      res.statusCode = resource.status;
+      return sendJson(res, resource.body);
+    }
     if (resource !== undefined) return sendJson(res, resource);
     res.statusCode = 404;
     sendJson(res, { ok: false, error: "not found" });

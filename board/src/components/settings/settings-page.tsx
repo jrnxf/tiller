@@ -16,13 +16,14 @@ import {
 } from "../../lib/queries";
 import { signOut } from "../../lib/session";
 import { useStore } from "../../lib/store";
+import { useTick } from "../board/ago";
 import { formatAge, secondsSince } from "../board/format";
 import { Segmented } from "../ui/segmented";
 import { ChevronIcon, PlusIcon } from "../shell/icons";
 import { AddHostForm } from "./add-host";
 import { Backups } from "./backups";
 import type { Paired } from "./add-host";
-import { checkLines, needsYou, whenText } from "./check-lines";
+import { checkLines, mergeAppProblem, needsYou, whenText } from "./check-lines";
 import type { Tone } from "./check-lines";
 import { HostCard } from "./host-card";
 import { Fact } from "./fact";
@@ -97,6 +98,14 @@ function hostStatus(
 // row says so instead of guessing.
 const NOT_REPORTED = "Only the host serving this board reports this";
 
+// "up 3 h": it moves with the clock, since health is read only every few
+// minutes.
+function Uptime({ startedAt }: { startedAt: string }) {
+  useTick();
+  const up = secondsSince(startedAt);
+  return up === null ? null : <small>up {formatAge(up)}</small>;
+}
+
 // One row per host, this one among them: version, start, process and status.
 // A click opens the host's card under it; a row whose checks need the owner
 // says how many in its status.
@@ -124,7 +133,6 @@ function HostRow({
   const version = local ? health.version : (machine.version ?? null);
   const view = machineRowView(machine, undefined, board.version);
   const started = whenText(health.started_at);
-  const up = secondsSince(health.started_at);
   const card = `host-card-${machine.id}`;
   return (
     <>
@@ -166,7 +174,7 @@ function HostRow({
           {local ? (
             <>
               {started ?? "unknown"}
-              {up === null ? null : <small>up {formatAge(up)}</small>}
+              <Uptime startedAt={health.started_at} />
             </>
           ) : (
             <span className="set-muted" title={NOT_REPORTED}>
@@ -257,7 +265,12 @@ function Hosts({
     });
   // The serving host's checks, for the count its row shows while closed.
   const doctor = useQuery(doctorQuery());
-  const attention = needsYou(checkLines(doctor.data, health.pollers ?? []));
+  // The Merge App section's problems count once here, though only that
+  // section shows them.
+  const attention = needsYou([
+    ...checkLines(doctor.data, health.pollers ?? []),
+    ...mergeAppProblem(health.merge_app, doctor.data?.merge_gates ?? []),
+  ]);
   const opener = useRef<HTMLButtonElement>(null);
   const close = useCallback(() => {
     setAdding(false);

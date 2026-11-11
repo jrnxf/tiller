@@ -16,6 +16,7 @@ import type {
   CardPr,
   CheckoutCheck,
   DaemonHealth,
+  DoctorReport,
   ContributionsResponse,
   EventLine,
   Machine,
@@ -59,7 +60,7 @@ import {
   signalsPath,
 } from "./queries.ts";
 import { awayFor } from "./fixtures-away.ts";
-import { doctorFor, pollersFor } from "./fixture-doctor.ts";
+import { doctorFor, mergeAppFor, peerDoctorFor, pollersFor } from "./fixture-doctor.ts";
 
 export type Scenario =
   | "default"
@@ -85,7 +86,9 @@ export type Scenario =
   // A paused run, a dead pane and a silent orchestrator (P11).
   | "lifecycle"
   // A project delete blocked by a live run, then by a live session (P15).
-  | "delete-blocked";
+  | "delete-blocked"
+  // The merge App ready, two repos enforced and one still on detect (P24).
+  | "merge-ready";
 
 // The scenarios with paired peers. `stale-sessions` has them so a peer's older
 // sessions show on this host's board.
@@ -116,6 +119,7 @@ export const SCENARIOS: readonly Scenario[] = [
   "backup-failed",
   "lifecycle",
   "delete-blocked",
+  "merge-ready",
 ];
 
 const WEEKLY_FLOOR_PERCENT = 3;
@@ -1741,15 +1745,49 @@ function healthFor(scenario: Scenario, now: number): DaemonHealth {
     schema: 12,
     pid: 4242,
     started_at: minutes(now, -3 * 60),
-    merge_app: {
-      status: "missing",
-      app_id: null,
-      detail:
-        "Create the merge App and put its app-id and private-key.pem in /home/user/.tiller/forge-app (docs/plan/merge-app-setup.md). Until then every project runs as detect.",
-    },
+    merge_app: mergeAppFor(scenario),
     pollers: pollersFor(scenario, now),
     tools,
   };
+}
+
+// A read the stand-in server refuses, with the daemon's status and body.
+export class FixtureRefusal {
+  readonly status: number;
+  readonly body: unknown;
+
+  constructor(status: number, body: unknown) {
+    this.status = status;
+    this.body = body;
+  }
+}
+
+// `GET /api/v1/doctor?host=`: this host's checks, a live peer's as it sends
+// them, 503 `peer_unreachable` for a peer whose link is not live, and 404
+// for a label that names no daemon (a herdr machine has none).
+function doctorRead(
+  scenario: Scenario,
+  url: URL,
+  now: number,
+): DoctorReport | FixtureRefusal | undefined {
+  const host = url.searchParams.get("host");
+  if (!host) return doctorFor(scenario, now);
+  const machine = machinesFor(scenario, now).machines.find(
+    (one) => one.label === host || one.id === host,
+  );
+  if (machine?.kind === "local") return doctorFor(scenario, now);
+  if (!machine?.peer_scope) return undefined;
+  if (machine.link !== "live") {
+    return new FixtureRefusal(503, {
+      ok: false,
+      error: {
+        code: "peer_unreachable",
+        message: `${host} is unreachable; its link is not live`,
+        hint: "the board shows its cached row; try again once the link is live",
+      },
+    });
+  }
+  return peerDoctorFor(host, now);
 }
 
 export function fixtureResource(
@@ -1782,7 +1820,7 @@ export function fixtureResource(
   if (run?.[1]) return runDetailFor(run[1], now);
   if (url.pathname === recapPath) return recapFor(served, now, null);
   if (url.pathname === "/api/v1/health") return healthFor(served, now);
-  if (url.pathname === "/api/v1/doctor") return doctorFor(served, now);
+  if (url.pathname === "/api/v1/doctor") return doctorRead(served, url, now);
   if (url.pathname === "/api/v1/projects/checkout") return checkoutFor(url);
   if (url.pathname.startsWith("/api/v1/memory")) {
     settleRetros(now);

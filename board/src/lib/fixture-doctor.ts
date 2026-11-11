@@ -1,10 +1,17 @@
-import type { DoctorCheck, DoctorGate, DoctorReport, PollerHealth } from "./api-types.ts";
+import type {
+  DoctorCheck,
+  DoctorGate,
+  DoctorReport,
+  MergeAppHealth,
+  PollerHealth,
+} from "./api-types.ts";
 import type { Scenario } from "./fixtures.ts";
 
 // The fixture board host's checks, as `GET /api/v1/doctor` runs them, and its
 // pollers, as `GET /api/v1/health` lists them. The default host has a poller
 // that keeps failing and no merge App; the federated one lacks a tool, which
-// only gets a hint. Run now on a failing poller makes its next poll succeed.
+// only gets a hint; the `merge-ready` one has its merge App ready. Run now on
+// a failing poller makes its next poll succeed.
 
 const at = (now: number, minutes: number) => new Date(now + minutes * 60_000).toISOString();
 
@@ -62,13 +69,44 @@ export function runPollerFixture(source: string, now: number): PollerHealth | un
   return pollersFor("default", now).find((poller) => poller.source === source);
 }
 
-// Every fixture project runs as detect: the stand-in host has no merge App.
+// A fixture project runs as detect while its host has no merge App. With
+// the App ready (`merge-ready`, and the peer host-d), the ruleset check has
+// moved some to enforced.
 const gate = (project: string): DoctorGate => ({
   project,
   merge_gate: "detect",
   status: "warn",
   detail: "merge gate: detection only; merges are detected, not prevented",
 });
+
+const enforced = (project: string, now: number): DoctorGate => ({
+  project,
+  merge_gate: "enforced",
+  status: "ok",
+  last_changed_at: at(now, -26 * 60),
+  detail: "the ruleset check holds",
+});
+
+const APP_ID = 1234567;
+
+const MERGE_APP_READY: DoctorCheck = {
+  name: "merge app",
+  status: "ok",
+  required: false,
+  detail: `App ${APP_ID} with its key in /home/user/.tiller/forge-app`,
+};
+
+// The merge App key as `GET /api/v1/health` reads it on the fixture host.
+export function mergeAppFor(scenario: Scenario): MergeAppHealth {
+  return scenario === "merge-ready"
+    ? { status: "ok", app_id: APP_ID, detail: MERGE_APP_READY.detail }
+    : {
+        status: "missing",
+        app_id: null,
+        detail:
+          "Create the merge App and put its app-id and private-key.pem in /home/user/.tiller/forge-app (docs/plan/merge-app-setup.md). Until then every project runs as detect.",
+      };
+}
 
 const ok = (name: string, detail: string, version?: string): DoctorCheck => ({
   name,
@@ -80,6 +118,7 @@ const ok = (name: string, detail: string, version?: string): DoctorCheck => ({
 
 export function doctorFor(scenario: Scenario, now: number): DoctorReport {
   const missingTool = scenario === "federated";
+  const ready = scenario === "merge-ready";
   const checks: DoctorCheck[] = [
     ok("git", "answers --version", "git version 2.47.1"),
     ok("treehouse", "answers --version", "treehouse 0.9.2"),
@@ -113,13 +152,15 @@ export function doctorFor(scenario: Scenario, now: number): DoctorReport {
       detail: "no other process is running",
       code: "not_running",
     },
-    {
-      name: "merge app",
-      status: "warn",
-      required: false,
-      detail:
-        "no merge App key at /home/user/.tiller/forge-app/private-key.pem, so every project runs as detect (docs/plan/merge-app-setup.md)",
-    },
+    ready
+      ? MERGE_APP_READY
+      : {
+          name: "merge app",
+          status: "warn",
+          required: false,
+          detail:
+            "no merge App key at /home/user/.tiller/forge-app/private-key.pem, so every project runs as detect (docs/plan/merge-app-setup.md)",
+        },
     {
       name: "config drift",
       status: "ok",
@@ -131,6 +172,45 @@ export function doctorFor(scenario: Scenario, now: number): DoctorReport {
     checked_at: new Date(now).toISOString(),
     ok: true,
     checks,
-    merge_gates: [gate("alpha"), gate("beta"), gate("gamma")],
+    merge_gates: ready
+      ? [enforced("alpha", now), enforced("beta", now), gate("gamma")]
+      : [gate("alpha"), gate("beta"), gate("gamma")],
+  };
+}
+
+// A paired peer's checks, as it answers `GET /api/v1/doctor?host=<label>`
+// over a live link. host-d has the merge App ready and its repos enforced,
+// and runs another no-mistakes daemon than its CLI; host-f has no merge
+// App, so its repo runs as detect. `undefined` for a peer whose link is not
+// live.
+export function peerDoctorFor(label: string, now: number): DoctorReport | undefined {
+  if (label !== "host-d" && label !== "host-f") return undefined;
+  const local = doctorFor("default", now);
+  const checks = local.checks.map((check): DoctorCheck => {
+    if (check.name === "merge app") {
+      return label === "host-d"
+        ? MERGE_APP_READY
+        : {
+            ...check,
+            detail:
+              "no merge App key at /home/user/.tiller/forge-app/private-key.pem, so every project runs as detect",
+          };
+    }
+    if (check.name === "no-mistakes daemon" && label === "host-d") {
+      return {
+        ...check,
+        status: "warn",
+        detail:
+          "daemon runs no-mistakes version v1.104.0 (pid 2210), CLI is v1.106.1; restart the daemon",
+      };
+    }
+    return check;
+  });
+  return {
+    checked_at: at(now, -0.1),
+    ok: true,
+    checks,
+    merge_gates:
+      label === "host-d" ? [enforced("gamma", now), enforced("fleet", now)] : [gate("atlas")],
   };
 }

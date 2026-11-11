@@ -25,7 +25,7 @@ use super::forward::{self, Mutate};
 use super::nonces;
 use super::{Frame, Hello, PeerQueries, PeerSnapshot, Timing, Welcome, federation_accept};
 use crate::api::{ApiError, pane_tail_of};
-use crate::dto::{ErrorBody, MachinesResponse};
+use crate::dto::{Doctor, ErrorBody, MachinesResponse};
 use crate::sse::{self, Opening};
 use crate::views::{self, Filter, LocalHealth};
 
@@ -395,7 +395,8 @@ impl Link<'_> {
         Ok(seq)
     }
 
-    /// One allowlisted single-entity GET, as the board API would answer it.
+    /// One allowlisted single-entity GET, or this host's checks, as the
+    /// board API would answer it.
     fn answer(&self, path: &str) -> (u16, Value) {
         match self.read(path) {
             Ok(body) => (StatusCode::OK.as_u16(), body),
@@ -421,8 +422,30 @@ impl Link<'_> {
                 }
                 serde_json::to_value(detail)
             }
+            Query::Doctor => serde_json::to_value(self.doctor()?),
         };
         body.map_err(|error| ApiError::from(tiller_core::Error::from(error)))
+    }
+
+    /// The checks `tiller doctor` runs, run on this host now, as its own
+    /// board's `GET /api/v1/doctor` answers them. Read only: the board host
+    /// shows them and can act on none.
+    fn doctor(&self) -> Result<Doctor, ApiError> {
+        let checked_at = Timestamp::now();
+        let report = self
+            .config
+            .orchestrators
+            .as_ref()
+            .and_then(|services| services.doctor())
+            .ok_or_else(|| {
+                tiller_core::Error::Unavailable("this host cannot run its checks".into())
+            })?;
+        Ok(Doctor {
+            checked_at: checked_at.to_string(),
+            ok: report.ok,
+            checks: report.checks,
+            merge_gates: report.merge_gates,
+        })
     }
 }
 
@@ -436,6 +459,7 @@ enum Query {
     Card(String),
     Timeline(String, Option<i64>),
     Run(String),
+    Doctor,
 }
 
 fn parse_query(path: &str) -> Result<Query, ApiError> {
@@ -456,9 +480,10 @@ fn parse_query(path: &str) -> Result<Query, ApiError> {
         ["cards", id] if before.is_none() => Query::Card((*id).to_owned()),
         ["cards", id, "timeline"] => Query::Timeline((*id).to_owned(), before),
         ["runs", id] if before.is_none() => Query::Run((*id).to_owned()),
+        ["doctor"] if before.is_none() => Query::Doctor,
         _ => {
             return Err(usage(
-                "a query is cards/{id}, cards/{id}/timeline or runs/{id}",
+                "a query is cards/{id}, cards/{id}/timeline, runs/{id} or doctor",
             ));
         }
     };
@@ -518,7 +543,10 @@ mod tests {
             parse_query("runs/01JC").ok(),
             Some(Query::Run("01JC".into()))
         );
+        assert_eq!(parse_query("doctor").ok(), Some(Query::Doctor));
         for refused in [
+            "doctor?before=4",
+            "doctor/again",
             "cards/alpha-1?host=other",
             "cards",
             "board",

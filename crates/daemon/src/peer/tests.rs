@@ -1935,6 +1935,125 @@ fn read_scope_cannot_ask_or_start() {
     assert!(starter.seen.lock().unwrap().is_empty(), "the starter ran");
 }
 
+// -- a peer's checks -----------------------------------------------------------------
+
+/// A peer's binary that runs its checks: one missing tool and one gate on
+/// detect, so the board host can tell the peer's report from its own.
+struct PeerDoctor;
+
+impl OrchestratorStart for PeerDoctor {
+    fn start(
+        &self,
+        _store: &mut Store,
+        _ctx: &tiller_core::Ctx,
+        _project: &str,
+        _restart: bool,
+    ) -> Result<tiller_core::Applied<tiller_agents::spawn::orchestrator::Orchestrator>, StartError>
+    {
+        Err(StartError::Refused {
+            exit: 5,
+            code: "stub_refused",
+            message: "the stub starter refuses".into(),
+            hint: None,
+            current: None,
+        })
+    }
+
+    fn doctor(&self) -> Option<crate::dto::DoctorReport> {
+        use crate::dto::{CheckStatus, DoctorCheck, DoctorGate, DoctorReport};
+        Some(DoctorReport {
+            ok: false,
+            checks: vec![DoctorCheck::missing(
+                "gh",
+                true,
+                "gh is not on PATH of the peer",
+            )],
+            merge_gates: vec![DoctorGate {
+                project: "alpha".into(),
+                merge_gate: "detect".into(),
+                status: CheckStatus::Warn,
+                last_changed_at: None,
+                detail: "detection only".into(),
+            }],
+        })
+    }
+}
+
+/// `GET /api/v1/doctor?host=<peer>` is a `query` the peer answers with its
+/// own checks, run there. Neither host writes anything for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peers_checks_are_read_over_the_link() {
+    let pair = pair();
+    let wire = Wire::new(pair.peer.dir.path()).with_starter(Arc::new(PeerDoctor));
+    let (peers, _stop) = start(pair.board.dir.path(), wire);
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let before = (last_seq(&pair.board), last_seq(&pair.peer));
+
+    let answer = get(&app, "/api/v1/doctor?host=peer").await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    let report: crate::dto::Doctor = serde_json::from_str(&answer.body).unwrap();
+    assert!(!report.ok);
+    assert_eq!(report.checks[0].detail, "gh is not on PATH of the peer");
+    assert_eq!(report.merge_gates[0].project, "alpha");
+    assert!(!report.checked_at.is_empty());
+    assert_eq!((last_seq(&pair.board), last_seq(&pair.peer)), before);
+
+    // This host by its label is its own checks (this test app has none to
+    // run). A label that names no host is 404, never this host's checks.
+    let own = get(&app, "/api/v1/doctor?host=test-host").await;
+    assert_eq!(own.status, StatusCode::SERVICE_UNAVAILABLE, "{}", own.body);
+    let error: ErrorBody = serde_json::from_str(&own.body).unwrap();
+    assert_eq!(error.error.code, "unavailable");
+    let missing = get(&app, "/api/v1/doctor?host=no-such-host").await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
+}
+
+/// A peer that is not live is 503 `peer_unreachable` at once. A peer whose
+/// binary has no checks to run says so in its own words.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peers_checks_need_a_live_peer_that_can_run_them() {
+    let pair = pair();
+    let up = Arc::new(AtomicBool::new(false));
+    let switch = Switch {
+        home: pair.peer.dir.path().to_owned(),
+        up: up.clone(),
+    };
+    let (peers, _stop) = start(pair.board.dir.path(), switch);
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    until("the down view", || {
+        peers.federation().peer("peer").map(|_| ())
+    })
+    .await;
+    let down = get(&app, "/api/v1/doctor?host=peer").await;
+    assert_eq!(
+        down.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        down.body
+    );
+    let error: ErrorBody = serde_json::from_str(&down.body).unwrap();
+    assert_eq!(error.error.code, "peer_unreachable");
+
+    // `Switch` serves with no starter: the peer's own 503 comes back.
+    up.store(true, Ordering::SeqCst);
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let answer = get(&app, "/api/v1/doctor?host=peer").await;
+    assert_eq!(
+        answer.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        answer.body
+    );
+    let error: ErrorBody = serde_json::from_str(&answer.body).unwrap();
+    assert_eq!(error.error.code, "unavailable");
+    assert!(
+        error.error.message.contains("cannot run its checks"),
+        "{}",
+        answer.body
+    );
+}
+
 /// G25 on the peer: an ask or a start for a project another host owns is
 /// refused before anything is written.
 #[test]

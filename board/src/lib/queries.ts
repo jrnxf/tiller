@@ -155,10 +155,11 @@ const healthPath: QueryPath = "/api/v1/health";
 export const healthQuery = () => readQuery<DaemonHealth>(healthPath);
 
 // The checks `tiller doctor` runs, run on the board's host each time the host
-// card opens or the owner asks again, so never cached.
+// card opens or the owner asks again, so never cached. With a peer's label
+// the peer runs them and the board reads its answer.
 const doctorPath: QueryPath = "/api/v1/doctor";
-export const doctorQuery = () =>
-  queryOptions({ ...readQuery<DoctorReport>(doctorPath), staleTime: 0 });
+export const doctorQuery = (host?: string) =>
+  queryOptions({ ...readQuery<DoctorReport>(withParams(doctorPath, { host })), staleTime: 0 });
 
 // The fields `tiller host edit` sets on this host, and what it holds and has
 // free now. Read fresh each time its card opens, so a save goes against the

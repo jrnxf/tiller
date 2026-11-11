@@ -2,7 +2,7 @@
 
 What the owner can do from the `tiller` CLI, what from the board, and where the two differ. Both surfaces call the same core functions in `tiller-core`, so a rule such as "close cancels the open obligations" holds on both. This page lists the surfaces, not the rules. The rules live in [`../spec/state.md`](../spec/state.md), [`../spec/protocol.md`](../spec/protocol.md) (sections 6 and 7) and [`../spec/authority.md`](../spec/authority.md).
 
-Checked against the code on Tuesday 2026-11-10 (Lisbon time).
+Checked against the code on Tuesday 2026-11-10 (Lisbon time). The Health checks row was added on Wednesday 2026-11-11.
 
 How to read the table:
 
@@ -51,6 +51,7 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 | Peers | Full: `peer add`, `accept`, `list`, `remove`, `revoke`, `serve`, `pane` | Part | The board adds a host, lists both ends of each link, unpairs a host (`remove`) and revokes a board's key (`revoke`). Accept, serve and pane stay in the CLI. |
 | Memory | Full: `mem note`, `propose`, `approve`, `retro`, `learn` | Part | The board edits, decides (Keep or Discard) and shows revisions. |
 | Read the fleet | Full: board, agents, machines, quota, health, events, snapshot | Full | |
+| Health checks | Full: `tiller doctor` | Part | The board runs this host's checks in its Settings > Hosts card, with Check again and Run now on a failing poller. A paired peer's card reads that peer's checks over the link, read-only, with no buttons and no pollers (`protocol.md` 7.3). The CLI checks only the host it runs on. |
 | Owner marker | Full: `owner set`, `owner show` | No | While the marker names another system, both surfaces refuse every mutation with `owner_marker` (exit 6, HTTP 403). The check is in the store, so they share it (`recovery.md` R20). The board shows the refusal in the daemon's words. It has no read-only banner yet. |
 | Sign in | Full: `tiller board --login` issues a code | Full | The board signs in with the code and signs out. |
 | Run the daemon | Full: `tiller daemon` | No | |

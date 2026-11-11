@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import type { DaemonHealth, PollerHealth } from "../../lib/api-types";
 import type { Scenario } from "../../lib/fixtures";
-import { fixtureResource } from "../../lib/fixtures";
+import { FixtureRefusal, fixtureResource } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
 import { signedOutStore } from "../../lib/session";
 import { SettingsPage } from "./settings-page";
@@ -12,11 +12,27 @@ import { createTestQueryClient } from "../../test-app";
 
 // The fixture host's health, doctor report and hosts list. Run now on a
 // poller answers with that poller polled, and health lists it so after.
-function serve(scenario: Scenario, { owner = true, doctor = true } = {}) {
+function serve(
+  scenario: Scenario,
+  {
+    owner = true,
+    doctor = true,
+    startedAt,
+  }: { owner?: boolean; doctor?: boolean; startedAt?: string } = {},
+) {
   const ran = new Map<string, PollerHealth>();
   const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
     if (path === "/api/v1/session") return new Response(JSON.stringify({ owner }));
+    if (path.startsWith("/api/v1/doctor?")) {
+      const read = fixtureResource(path, scenario);
+      if (read instanceof FixtureRefusal) {
+        return new Response(JSON.stringify(read.body), { status: read.status });
+      }
+      return read === undefined
+        ? new Response(JSON.stringify({ ok: false, error: { code: "not_found" } }), { status: 404 })
+        : new Response(JSON.stringify(read));
+    }
     if (path === "/api/v1/doctor" && !doctor) {
       const error = { code: "unavailable", message: "the checks are not wired" };
       return new Response(JSON.stringify({ ok: false, error }), { status: 503 });
@@ -46,7 +62,9 @@ function serve(scenario: Scenario, { owner = true, doctor = true } = {}) {
     if (path === "/api/v1/health") {
       const health = fixtureResource(path, scenario) as DaemonHealth;
       const pollers = health.pollers.map((poller) => ran.get(poller.source) ?? poller);
-      return new Response(JSON.stringify({ ...health, pollers }));
+      return new Response(
+        JSON.stringify({ ...health, pollers, started_at: startedAt ?? health.started_at }),
+      );
     }
     if (path === "/api/v1/machines" || path === "/api/v1/doctor") {
       return new Response(JSON.stringify(fixtureResource(path, scenario)));
@@ -93,7 +111,8 @@ test("the host row says how many checks need you, and opens into a card with the
   renderSettings();
   const panel = await screen.findByRole("region", { name: "Hosts" });
   const row = within(panel).getByTestId("host-host-a");
-  expect((await within(row).findByTestId("host-needs-you")).textContent).toBe("1 check needs you");
+  // The failing poller, and the Merge App section's problem counted once.
+  expect((await within(row).findByTestId("host-needs-you")).textContent).toBe("2 checks need you");
   expect(within(panel).queryByTestId("host-card-host-a")).toBeNull();
 
   const { toggle, card } = await openHost("host-a");
@@ -125,8 +144,11 @@ test("Run now polls the failing poller, and its line and the row count say it is
   const call = fetch.mock.calls.find(([path]) => String(path) === "/api/v1/pollers/reconcile/run");
   expect(call?.[1]?.method).toBe("POST");
   expect(JSON.parse(String(call?.[1]?.body))).toEqual({ idempotency_key: expect.any(String) });
+  // The Merge App problem stays; Run now does not fix it.
   const row = screen.getByTestId("host-host-a");
-  await waitFor(() => expect(within(row).queryByTestId("host-needs-you")).toBeNull());
+  await waitFor(() =>
+    expect(within(row).getByTestId("host-needs-you").textContent).toBe("1 check needs you"),
+  );
 });
 
 test("Check again runs the checks once more", async () => {
@@ -158,19 +180,63 @@ test("checks that cannot be run from the board say so and point to the shell", a
   expect(within(card).getByTestId("check-poller:reconcile")).toBeTruthy();
 });
 
-test("a peer's card points to its own board, and a herdr machine's to this host", async () => {
-  serve("federated");
+test("a peer's card shows the checks it sends, read-only, and a herdr machine's points to this host", async () => {
+  const fetch = serve("federated");
   renderSettings();
   const peer = (await openHost("host-d")).card;
-  expect(within(peer).getByTestId("check-elsewhere").textContent).toContain(
-    "Open the board host-d serves to see its checks.",
+  const daemon = await within(peer).findByTestId("check-tool:no-mistakes daemon");
+  expect(daemon.textContent).toContain("CLI is v1.106.1");
+  expect(calls(fetch, "/api/v1/doctor?host=host-d")).toBe(1);
+  // The peer's merge App and gates are in its card: this board's Merge App
+  // section is this host's.
+  expect(within(peer).getByTestId("check-check:merge app").textContent).toContain("App 1234567");
+  expect(within(peer).getByTestId("check-merge-gates").textContent).toContain(
+    "gamma, fleet (enforced): the ruleset check holds.",
   );
+  expect(peer.textContent).toMatch(/Read from host-d, last run \w{3} \d{1,2} \w{3}, \d{2}:\d{2}/);
+  // Read-only: no Check again, no Run now.
+  expect(within(within(peer).getByTestId("peer-checks")).queryByRole("button")).toBeNull();
+  expect(within(peer).queryByRole("button", { name: "Check again" })).toBeNull();
+  expect(peer.textContent).not.toMatch(/firstmate/i);
+
+  const down = (await openHost("host-e")).card;
+  expect((await within(down).findByTestId("check-unreadable")).textContent).toBe(
+    "Checkshost-e did not send them: host-e is unreachable; its link is not live. They show again once its link is live.",
+  );
+
   const herdr = (await openHost("host-b")).card;
   expect(within(herdr).getByTestId("check-elsewhere").textContent).toBe(
     "No daemon to checkhost-b runs agents through herdr only. Its herdr poller is in the checks of host-a.",
   );
   // A peer's own checks are not this board's to count.
   expect(within(screen.getByTestId("host-host-d")).queryByTestId("host-needs-you")).toBeNull();
+});
+
+test("the host row counts the Merge App problem once, and gamma on detect is one problem", async () => {
+  serve("merge-ready");
+  renderSettings();
+  const row = await screen.findByTestId("host-host-a");
+  // The App is ready and alpha and beta are enforced; gamma still runs as
+  // detect, which is one problem however many repos wait.
+  expect((await within(row).findByTestId("host-needs-you")).textContent).toBe("1 check needs you");
+  const section = screen.getByTestId("merge-app");
+  expect(await within(section).findAllByText("Enforced")).toHaveLength(2);
+  expect(within(section).getAllByText("Detect")).toHaveLength(1);
+});
+
+test("the uptime in the host row moves with the clock", async () => {
+  // 59 min 30 s up: a minute later the row reads 1 h without a new read.
+  serve("merge-ready", { startedAt: new Date(Date.now() - 59.5 * 60_000).toISOString() });
+  renderSettings();
+  const row = await screen.findByTestId("host-host-a");
+  await within(row).findByText("up 59 min");
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    vi.setSystemTime(Date.now() + 60_000);
+    await within(row).findByText("up 1 h", undefined, { timeout: 2500 });
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("the Merge App problem shows once, in its own section, not again in the host card", async () => {

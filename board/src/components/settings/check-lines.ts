@@ -1,4 +1,11 @@
-import type { CheckStatus, DoctorCheck, DoctorReport, PollerHealth } from "../../lib/api-types";
+import type {
+  CheckStatus,
+  DoctorCheck,
+  DoctorGate,
+  DoctorReport,
+  MergeAppHealth,
+  PollerHealth,
+} from "../../lib/api-types";
 
 // The host card's check lines, worded for the board from the report `tiller
 // doctor` makes (`GET /api/v1/doctor`) and the pollers `/api/v1/health`
@@ -227,7 +234,8 @@ const OTHER_SYSTEM: Record<string, { detail: Words }> = {
 };
 
 // The Merge App section above the hosts shows this check and the merge gates
-// (merge-app.tsx), so the host card does not say it again.
+// (merge-app.tsx), so this host's card does not say it again. A peer's card
+// does (`peerCheckLines`).
 const MERGE_APP = "merge app";
 
 const TITLES: Record<string, string> = {
@@ -288,6 +296,61 @@ export function checkLines(
     ...checks.filter((check) => !TOOLS.has(check.name) && check.name !== MERGE_APP).map(checkLine),
   ];
   return lines;
+}
+
+// A peer's merge gates in its card, one clause per gate and verdict: "alpha,
+// beta (detect): detection only; ...". This board's own gates are in the
+// Merge App section instead.
+function gateLine(gates: DoctorGate[]): CheckLine | null {
+  if (gates.length === 0) return null;
+  const tone = worst(gates.map((gate) => TONE[gate.status]));
+  const groups = new Map<string, { gate: string; text: string; projects: string[] }>();
+  for (const gate of gates) {
+    const text = gate.detail.replace(/^merge gate:\s*/, "");
+    const group = groups.get(`${gate.merge_gate}\n${text}`);
+    if (group) group.projects.push(gate.project);
+    else
+      groups.set(`${gate.merge_gate}\n${text}`, {
+        gate: gate.merge_gate,
+        text,
+        projects: [gate.project],
+      });
+  }
+  const detail: Words = [...groups.values()].map(
+    ({ gate, text, projects }, index) =>
+      `${index > 0 ? " " : ""}${projects.join(", ")} (${gate}): ${text}${/[.!?]$/.test(text) ? "" : "."}`,
+  );
+  return {
+    key: "merge-gates",
+    tone,
+    title: "Merge gates",
+    sub: `${gates.length} ${gates.length === 1 ? "project" : "projects"}`,
+    detail,
+    ...(tone === "green" ? { end: OK } : {}),
+  };
+}
+
+// A paired peer's checks, read from it and shown read-only. Its pollers live
+// in that daemon, so the report is all there is. The Merge App section on
+// this board is this host's, so the peer's merge App key and gates show in
+// the peer's card.
+export function peerCheckLines(report: DoctorReport): CheckLine[] {
+  const app = report.checks.find((check) => check.name === MERGE_APP);
+  const gates = gateLine(report.merge_gates);
+  return [
+    ...checkLines(report, []),
+    ...(app ? [{ ...checkLine(app), title: "Merge App" }] : []),
+    ...(gates ? [gates] : []),
+  ];
+}
+
+// The Merge App section's problems (merge-app.tsx), counted once for the
+// host row: the host's key and every gate on detect are one topic, as the
+// section is one. The card does not show it again.
+export function mergeAppProblem(app: MergeAppHealth | undefined, gates: DoctorGate[]): CheckLine[] {
+  const key: Tone[] = !app || app.status === "ok" ? [] : [app.status === "fail" ? "red" : "amber"];
+  const tone = worst([...key, ...gates.map((gate) => TONE[gate.status])]);
+  return tone === "green" ? [] : [{ key: "merge-app", tone, title: "Merge App" }];
 }
 
 // What the host row's status says when its card holds problems: "2 checks

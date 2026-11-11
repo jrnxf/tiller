@@ -1130,13 +1130,26 @@ async fn peer_read<T: for<'de> Deserialize<'de>>(
     path: String,
     card: &str,
 ) -> Result<T, ApiError> {
-    let Some((status, body)) = state.0.peers.query(&view.host_id, path).await else {
+    peer_query(state, view, path, || {
         let cached = views::peer_board(view, None, Filter::All)
             .rows
             .into_iter()
             .find(|row| names(row, card));
-        let current = cached.and_then(|row| serde_json::to_value(row).ok());
-        return Err(ApiError::peer_unreachable(&view.label, current));
+        cached.and_then(|row| serde_json::to_value(row).ok())
+    })
+    .await
+}
+
+/// A `query` to a peer, answered as its own API answers. With no answer it
+/// is 503 `peer_unreachable`, with what `cached` finds in `current`.
+async fn peer_query<T: for<'de> Deserialize<'de>>(
+    state: &AppState,
+    view: &PeerView,
+    path: String,
+    cached: impl FnOnce() -> Option<Value>,
+) -> Result<T, ApiError> {
+    let Some((status, body)) = state.0.peers.query(&view.host_id, path).await else {
+        return Err(ApiError::peer_unreachable(&view.label, cached()));
     };
     if status != StatusCode::OK.as_u16() {
         return Err(ApiError::from((status, body)));
@@ -1510,11 +1523,39 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
 /// How long Run now waits for the poll it asked for.
 const POLL_NOW_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// The checks `tiller doctor` runs, run on this host now (`protocol.md`
-/// 7.3). Local only: a peer's checks run on that host.
-#[utoipa::path(get, path = "/api/v1/doctor", tag = "reads",
-    responses((status = 200, body = Doctor), (status = 503, body = ErrorBody)))]
-async fn doctor(State(state): State<AppState>) -> ApiResult<Doctor> {
+/// The checks `tiller doctor` runs, run now on this host or, with
+/// `?host=<label>`, on a paired peer (`protocol.md` 7.3). A peer runs its own
+/// checks and sends them as a `query` answer; the board only reads them.
+#[utoipa::path(get, path = "/api/v1/doctor", tag = "reads", params(HostQuery),
+    responses((status = 200, body = Doctor), (status = 404, body = ErrorBody),
+              (status = 503, body = ErrorBody, description = "`unavailable`, or `peer_unreachable` for a peer")))]
+async fn doctor(
+    State(state): State<AppState>,
+    Query(query): Query<HostQuery>,
+) -> ApiResult<Doctor> {
+    if let Some(host) = query.host {
+        let peers = state.0.peers.federation();
+        if let Some(view) = peers.peer(&host) {
+            return peer_query(&state, view, "doctor".to_owned(), || None)
+                .await
+                .map(Json);
+        }
+        // Any other label must name this host: a herdr machine has no
+        // daemon to check.
+        read(&state, move |store| {
+            let this = store.this_host()?;
+            if this.id == host || this.label == host {
+                Ok(())
+            } else {
+                Err(Error::NotFound {
+                    entity: "host",
+                    id: host,
+                    candidates: Vec::new(),
+                })
+            }
+        })
+        .await?;
+    }
     let Some(services) = state.0.orchestrators.clone() else {
         return Err(Error::Unavailable("this daemon cannot run its checks".into()).into());
     };
