@@ -104,7 +104,7 @@ function writeBoard(queryClient: QueryClient, row: BoardRow) {
     upsertBoardRow(old, row),
   );
   queryClient.invalidateQueries({
-    queryKey: ["api"],
+    queryKey: API_KEY_PREFIX,
     predicate: (query) => {
       const path = String(query.queryKey[1] ?? "");
       return path.startsWith("/api/v1/board") && path !== "/api/v1/board?filter=all";
@@ -187,6 +187,43 @@ function refetchMatching(queryClient: QueryClient, matches: (path: string) => bo
   });
 }
 
+// Reads that many kinds of event move, such as the Health signals and the
+// contributions. Each event marks them stale at once, so a screen that opens
+// reads them fresh. The ones on screen fetch again at most once a tick, after
+// a burst, and not once per event on a busy fleet.
+const COALESCE_MS = 1000;
+const due = new WeakMap<QueryClient, Map<string, (path: string) => boolean>>();
+
+function refetchSoon(queryClient: QueryClient, name: string, matches: (path: string) => boolean) {
+  void queryClient.invalidateQueries({
+    queryKey: API_KEY_PREFIX,
+    predicate: (query) => matches(String(query.queryKey[1] ?? "")),
+    refetchType: "none",
+  });
+  const waiting = due.get(queryClient);
+  if (waiting) {
+    waiting.set(name, matches);
+    return;
+  }
+  const next = new Map([[name, matches]]);
+  due.set(queryClient, next);
+  setTimeout(() => {
+    due.delete(queryClient);
+    for (const matcher of next.values()) {
+      void queryClient.refetchQueries({
+        queryKey: API_KEY_PREFIX,
+        type: "active",
+        // A screen that mounted meanwhile has read it already.
+        predicate: (query) =>
+          query.state.isInvalidated && matcher(String(query.queryKey[1] ?? "")),
+      });
+    }
+  }, COALESCE_MS);
+}
+
+const isSignals = (path: string) => path === signalsPath;
+const isContributions = (path: string) => path.startsWith(CONTRIBUTIONS_PREFIX);
+
 // `/api/v1/projects/<id>/setup`, whatever the project.
 const PROJECT_SETUP_PATH = /^\/api\/v1\/projects\/[^/?]+\/setup$/;
 
@@ -232,7 +269,14 @@ const RECAP_KINDS = new Set([
   "recap.seen",
 ]);
 
-export function applyChange(queryClient: QueryClient, event: ChangeEvent): void {
+// `peer` is set for a peer's change: the rules for this host's own reads (its
+// settings, its project setup, its Health signals and its contributions) do
+// not run, since the peer's config, cards and runs do not move them.
+export function applyChange(
+  queryClient: QueryClient,
+  event: ChangeEvent,
+  { peer = false }: { peer?: boolean } = {},
+): void {
   const state = event.entity_state;
 
   if (RECAP_KINDS.has(event.kind)) {
@@ -243,16 +287,18 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
   const list = ENTITY_LISTS[event.entity];
   if (!state && list !== undefined && !gone) refetchPaths(queryClient, list);
 
-  if (SIGNAL_ENTITIES.has(event.entity)) refetchPaths(queryClient, signalsPath);
-  if (event.entity === "pr" || event.entity === "card") {
+  // Health numbers are this host's own (protocol.md section 7.3).
+  if (!peer && SIGNAL_ENTITIES.has(event.entity)) refetchSoon(queryClient, "signals", isSignals);
+  if (!peer && (event.entity === "pr" || event.entity === "card")) {
     // The contributions list names each PR with its card's title.
-    refetchMatching(queryClient, (path) => path.startsWith(CONTRIBUTIONS_PREFIX));
+    refetchSoon(queryClient, "contributions", isContributions);
   }
 
   switch (event.entity) {
     case "config":
       // `tiller config set` in a terminal moves what Settings and the project
       // detail show, and no screen of the board sent it.
+      if (peer) break;
       refetchPaths(queryClient, startSettingsPath);
       refetchPaths(queryClient, hostConfigPath);
       refetchMatching(queryClient, (path) => PROJECT_SETUP_PATH.test(path));
@@ -284,6 +330,8 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
       if (gone) {
         onProjectGone(queryClient, event.entity_id);
       } else if (state) writeProject(queryClient, state as Project);
+      // These read this host's project of that id, not the peer's.
+      if (peer) break;
       queryClient.invalidateQueries({
         queryKey: queryKeyFor(projectSetupPath(event.entity_id)),
         refetchType: "active",
@@ -361,7 +409,7 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
     default:
       if (REFETCH_ENTITIES.has(event.entity)) {
         queryClient.invalidateQueries({
-          queryKey: ["api"],
+          queryKey: API_KEY_PREFIX,
           predicate: (query) => {
             const path = String(query.queryKey[1] ?? "");
             return path.startsWith("/api/v1/agents") || path.startsWith("/api/v1/runs/");
@@ -437,7 +485,7 @@ function applyPeerChange(queryClient: QueryClient, event: PeerEvent): void {
     });
     return;
   }
-  applyChange(queryClient, change);
+  applyChange(queryClient, change, { peer: true });
 }
 
 function ofHost<T extends { host?: string; link?: Machine["link"] }>(host: string) {
@@ -607,15 +655,31 @@ export function connectEvents(options: EventsOptions): () => void {
     try {
       const snapshot = await fetchSnapshot();
       if (stopped) return;
-      // Exact, not max: after a restored database the newest seq goes down.
-      // Changes applied meanwhile can be newer than the snapshot, and those
-      // are not replayed.
-      lastSeq = Math.max(refreshFromSnapshot(queryClient, snapshot), floor ?? -1);
-      pending = false;
-      floor = null;
+      // A change applied while the snapshot was in flight can be newer than
+      // it, and the snapshot just wrote the older row back: its reads are
+      // fetched again too.
+      const undone = floor !== null && floor > snapshot.last_event_seq;
+      const seq = refreshFromSnapshot(queryClient, snapshot, undone);
       failures = 0;
-    } catch {
-      if (!stopped) {
+      // A `reset` came while this snapshot was in flight, and it may be older
+      // than that reset (a restored database). The resync stays pending, with
+      // the cursor where it was, until the next snapshot lands.
+      if (!again) {
+        // The max is against `floor` (the changes applied since the reset),
+        // never against the old cursor: after a restored database the newest
+        // seq goes down.
+        lastSeq = Math.max(seq, floor ?? -1);
+        pending = false;
+        floor = null;
+      }
+    } catch (error) {
+      if (stopped) {
+        // Nothing more to do.
+      } else if (isSignedOut(error)) {
+        // This browser's cookie is gone: no snapshot will land.
+        stop();
+        signedOutStore.set(true);
+      } else {
         failures += 1;
         resyncTimer = setTimeout(() => void resync(), Math.min(1000 * 2 ** (failures - 1), 30_000));
       }
@@ -673,6 +737,8 @@ export function connectEvents(options: EventsOptions): () => void {
     next.addEventListener("reset", (message) => {
       pending = true;
       floor = (JSON.parse(message.data) as { seq: number }).seq;
+      // A new reason to try: the wait starts short again.
+      failures = 0;
       void resync();
     });
   }

@@ -42,14 +42,20 @@ export function hydrateFromSnapshot(queryClient: QueryClient, snapshot: Snapshot
 // with no boot snapshot). The snapshot covers six reads; every other read in
 // the cache (an open card, its timeline, memory, Settings, Health) is only
 // marked stale, so the ones on screen fetch again and the rest fetch when they
-// next mount. The UI stays put: nothing is cleared first. Returns the
+// next mount. The UI stays put: nothing is cleared first. With `all`, the six
+// are marked stale too: a change newer than the snapshot was applied while it
+// was in flight, and the snapshot wrote the older rows back. Returns the
 // snapshot's seq.
-export function refreshFromSnapshot(queryClient: QueryClient, snapshot: Snapshot): number {
+export function refreshFromSnapshot(
+  queryClient: QueryClient,
+  snapshot: Snapshot,
+  all = false,
+): number {
   const seq = hydrateFromSnapshot(queryClient, snapshot);
   const hydrated = new Set(Object.keys(snapshot.queries));
   void queryClient.invalidateQueries({
     queryKey: API_KEY_PREFIX,
-    predicate: (query) => !hydrated.has(String(query.queryKey[1] ?? "")),
+    predicate: (query) => all || !hydrated.has(String(query.queryKey[1] ?? "")),
     refetchType: "active",
   });
   return seq;
