@@ -107,39 +107,50 @@ fn claude(program: &[OsString]) -> Check {
 /// binary the daemon's pid runs (`tools::running_daemon_version`) and
 /// compared with the CLI's: a daemon on another version than its CLI is a
 /// warning, the shape of the Firstmate regression where an upgraded CLI kept
-/// talking to an old daemon. `status` is what `daemon status` printed and
-/// `daemon` the daemon binary's version line, both read while the CLI was.
-fn no_mistakes(
-    cli: &Check,
+/// talking to an old daemon. `cli` is the CLI's version line, `status` what
+/// `daemon status` printed and `daemon` the daemon binary's version line.
+fn no_mistakes_daemon(
+    cli: Option<&str>,
     status: Result<Option<String>, String>,
     daemon: Option<String>,
 ) -> Check {
-    const NAME: &str = "no-mistakes daemon";
-    if cli.status != Status::Ok {
-        return Check::new(NAME, false, Status::Warn, "the no-mistakes CLI is missing");
-    }
     let running = match status {
         Ok(line) => line.unwrap_or_else(|| "running".into()),
-        Err(error) => return Check::missing(NAME, false, error),
+        Err(error) => return Check::missing("no-mistakes daemon", false, error),
     };
-    no_mistakes_skew(&running, cli.version.as_deref(), daemon)
+    no_mistakes_skew(&running, cli, daemon)
 }
 
-/// The no-mistakes CLI and its daemon. The three reads run at the same time,
-/// so the pair costs one probe timeout, not the sum of them.
-fn no_mistakes_pair() -> (Check, Check) {
+/// The no-mistakes CLI and its daemon, each put as soon as it is known. The
+/// daemon's reads start with the CLI's, so a slow daemon never holds the CLI
+/// line, and a missing CLI is put at once without waiting for them. Its
+/// binary's version is read after `ps` names it: when both are slow, the
+/// daemon line can miss the report's deadline and reads as late.
+fn no_mistakes_pair(put: &mut dyn FnMut(Check)) {
     std::thread::scope(|scope| {
         let status =
             scope.spawn(|| tools::run_first_line("no-mistakes".as_ref(), &[], "daemon status"));
         let daemon = scope.spawn(tools::running_daemon_version);
         let cli = tool("no-mistakes", false, &["no-mistakes".into()]);
+        // The slots fill in order: the CLI's line, then its daemon's.
+        let found = cli.status == Status::Ok;
+        let version = cli.version.clone();
+        put(cli);
+        if !found {
+            put(Check::new(
+                "no-mistakes daemon",
+                false,
+                Status::Warn,
+                "the no-mistakes CLI is missing",
+            ));
+            return;
+        }
         let status = status
             .join()
             .unwrap_or_else(|_| Err("daemon status stopped before it answered".into()));
         let daemon = daemon.join().ok().flatten();
-        let check = no_mistakes(&cli, status, daemon);
-        (cli, check)
-    })
+        put(no_mistakes_daemon(version.as_deref(), status, daemon));
+    });
 }
 
 /// The verdict on a running daemon, given the CLI's version line and the
@@ -443,7 +454,8 @@ fn process_list(deadline: Instant) -> Result<String, String> {
     let (first, rest) = program.split_first().ok_or("no command is configured")?;
     let left = deadline.saturating_duration_since(Instant::now());
     tools::run_within(first, rest, ["-axo", "args="], left).map_err(|error| {
-        if error.starts_with("did not answer") {
+        // Killed at the deadline: worded as every other late probe.
+        if Instant::now() >= deadline {
             late()
         } else {
             error
@@ -561,7 +573,8 @@ fn firstmate(list: Result<String, String>, marker: Option<&str>, daemon: bool) -
 /// its tools hang.
 pub const REPORT_DEADLINE: Duration = Duration::from_secs(7);
 
-// A tool that answers inside its own timeout answers inside the report's.
+// A tool that answers inside its own timeout answers inside the report's;
+// only a probe that chains two reads can be late.
 const _: () = assert!(PROBE_TIMEOUT.as_millis() < REPORT_DEADLINE.as_millis());
 
 /// What a probe still running at [`REPORT_DEADLINE`] reports.
@@ -710,11 +723,7 @@ pub fn report(app: &App) -> Report {
             Check::missing("no-mistakes", false, late()),
             Check::missing("no-mistakes daemon", false, late()),
         ],
-        |put| {
-            let (cli, daemon) = no_mistakes_pair();
-            put(cli);
-            put(daemon);
-        },
+        no_mistakes_pair,
     );
     probes.ready(hooks());
     let marker = app.owner_marker();

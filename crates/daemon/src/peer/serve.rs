@@ -282,10 +282,12 @@ impl Link<'_> {
                     match parse_query(&path) {
                         // The checks can take seconds: they run on a thread
                         // of their own, and the answer goes out below. A run
-                        // that has already ended answers its own queries
-                        // first, so this one gets a new run.
+                        // whose answer has come answers its own queries
+                        // first, so this one gets a new run; one still going
+                        // answers this one too.
                         Ok(Query::Doctor) => {
-                            self.send_checks(output)?;
+                            // The key row was read just above.
+                            self.send_checks(output, false)?;
                             self.checks.ask(id, self.config);
                         }
                         query => {
@@ -329,7 +331,7 @@ impl Link<'_> {
                 tick = Instant::now();
                 self.recheck(output)?;
             }
-            self.send_checks(output)?;
+            self.send_checks(output, true)?;
             self.send_events(output, false)?;
             if beat.elapsed() >= timing.beat {
                 beat = Instant::now();
@@ -345,13 +347,15 @@ impl Link<'_> {
     }
 
     /// The answer of a run of the checks that has ended, to each query that
-    /// waits for it.
-    fn send_checks(&mut self, output: &mut impl Write) -> Result<(), ServeError> {
+    /// waits for it. `recheck` reads the key row first, which may have
+    /// changed while the checks ran.
+    fn send_checks(&mut self, output: &mut impl Write, recheck: bool) -> Result<(), ServeError> {
         let Some((ids, http_status, body)) = self.checks.done() else {
             return Ok(());
         };
-        // The key row may have changed while the checks ran.
-        self.recheck(output)?;
+        if recheck {
+            self.recheck(output)?;
+        }
         for id in ids {
             send(
                 output,

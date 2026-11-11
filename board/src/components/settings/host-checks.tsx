@@ -180,7 +180,7 @@ function PeerChecks({ machine }: { machine: Machine }) {
     ? `Running the checks on ${machine.label}`
     : checked
       ? stale
-        ? `Read from ${machine.label}, last good run ${checked}`
+        ? `Last good read from ${machine.label}, ${checked}`
         : `Read from ${machine.label}, last run ${checked}`
       : null;
   return (

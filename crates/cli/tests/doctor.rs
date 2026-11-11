@@ -151,11 +151,11 @@ fn hung_tools_do_not_hold_the_report_past_its_deadline() {
     let out = world.run(&["doctor"]);
     let took = started.elapsed();
     // Before, the probes ran one after another: 15 s for the three tools,
-    // then 30 s for the process list. Now they end at the 7 s deadline; the
-    // margin is for a loaded machine, and the hung tools sleep 30 s, so a
-    // report that waited for any of them would still fail.
+    // then 30 s for the process list. Now they end at the 7 s deadline,
+    // inside the 10 s a board host waits for a peer's answer; two probe
+    // timeouts one after another would pass that.
     assert!(
-        took < std::time::Duration::from_secs(15),
+        took < std::time::Duration::from_secs(10),
         "took {took:?}: {}",
         out.json
     );
