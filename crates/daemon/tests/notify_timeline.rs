@@ -73,18 +73,35 @@ fn a_notification_herdr_refused_does_not_read_as_sent() {
     assert!(report.notified.is_empty());
     assert_eq!(
         w.lines(),
-        vec![
-            "could not notify you about an item".to_owned(),
-            "tried to notify you about an item".to_owned(),
-        ]
+        vec!["could not notify you about an item".to_owned()]
     );
 }
 
 #[test]
-fn a_notification_herdr_took_reads_as_tried_and_never_as_failed() {
+fn a_notification_herdr_took_reads_as_sent() {
     let mut w = World::new();
     w.open_decision();
     assert_eq!(w.notifier.pass(at(4)).unwrap().notified.len(), 1);
+    assert_eq!(w.lines(), vec!["notified you about an item".to_owned()]);
+}
+
+/// A crash between the write-ahead record and the send leaves no outcome.
+#[test]
+fn a_record_with_no_outcome_reads_as_tried() {
+    let mut w = World::new();
+    w.open_decision();
+    let item: String = w
+        .fleet
+        .store
+        .conn()
+        .query_row(
+            "SELECT entity_id FROM events WHERE kind = 'attention.opened'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let ctx = tiller_core::Ctx::at(tiller_core::Actor::Daemon, at(4));
+    w.fleet.store.notification_record(&ctx, &item).unwrap();
     assert_eq!(
         w.lines(),
         vec!["tried to notify you about an item".to_owned()]

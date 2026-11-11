@@ -20,6 +20,9 @@ use crate::time::Timestamp;
 pub const DEFAULT_WINDOW_MINUTES: i64 = 24 * 60;
 
 /// The events worth a recap line: what the owner would want to hear happened.
+/// The notify kinds (`attention.notified`, `attention.notify_sent`,
+/// `attention.notify_failed`) stay out: the item's own `attention.opened` line
+/// is the news, and a failed ping shows on the card timeline.
 const RECAP_KINDS: &str = "'card.created', 'card.closed', 'run.started', 'run.ended', \
     'attention.opened', 'attention.answered', 'attention.withdrawn', 'approval.requested', \
     'approval.decided', 'approval.finished', 'pr.opened', 'pr.merged', 'deploy.finished'";

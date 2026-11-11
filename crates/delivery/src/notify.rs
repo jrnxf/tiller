@@ -5,11 +5,13 @@
 //! The record comes first. `notification.record` writes `attention.notified`
 //! for the item, once, and only a call that applied sends: a restart or a
 //! second pass finds the event and stays quiet, and a send that fails is
-//! logged, never repeated. The record only says the daemon tried, so a refused
-//! send writes `attention.notify_failed` after it (`notification.fail`), and
-//! the card timeline shows that the owner was not pinged. Only items opened within [`NEW_MINUTES`] and still
-//! current count as new, so a daemon started on an old database does not
-//! announce its backlog.
+//! logged, never repeated. The record only says the daemon tried, so the send
+//! then writes its outcome: `attention.notify_sent` (`notification.sent`) when
+//! it went out, `attention.notify_failed` (`notification.fail`) when herdr
+//! refused it. A crash between the record and the outcome leaves the record
+//! alone, and the card timeline reads it as a try. Only items opened within
+//! [`NEW_MINUTES`] and still current count as new, so a daemon started on an
+//! old database does not announce its backlog.
 
 use std::time::Duration;
 
@@ -66,7 +68,10 @@ impl<H: Herdr> Notifier<H> {
                 continue;
             }
             match self.herdr.notify(&title, &body) {
-                Ok(()) => report.notified.push(item.id),
+                Ok(()) => {
+                    self.store.notification_sent(&ctx, &item.id)?;
+                    report.notified.push(item.id);
+                }
                 Err(error) => {
                     tracing::warn!(item = %item.id, %error, "herdr notification failed");
                     self.store

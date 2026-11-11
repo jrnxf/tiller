@@ -175,7 +175,7 @@ fn a_refused_send_is_recorded_once_and_never_retried() {
 }
 
 #[test]
-fn a_sent_notification_writes_no_failure() {
+fn a_sent_notification_writes_its_outcome_once() {
     let mut w = World::new();
     let item = w.open(AttentionKind::Decision, "Raise capacity?", 2);
     assert_eq!(
@@ -184,6 +184,70 @@ fn a_sent_notification_writes_no_failure() {
     );
     assert_eq!(
         kinds(&w, &item.id),
-        ["attention.opened", "attention.notified"]
+        [
+            "attention.opened",
+            "attention.notified",
+            "attention.notify_sent"
+        ]
+    );
+
+    // At most once: a second pass and a restart write nothing more, and a
+    // late outcome call applies nothing on an item that has its outcome.
+    let mut restarted = Notifier::new(w.fleet.open(), w.herdr.clone());
+    assert!(w.notifier.pass(at(5)).unwrap().notified.is_empty());
+    assert!(restarted.pass(at(6)).unwrap().notified.is_empty());
+    let ctx = tiller_core::Ctx::at(tiller_core::Actor::Daemon, at(7));
+    assert!(
+        w.fleet
+            .store
+            .notification_sent(&ctx, &item.id)
+            .unwrap()
+            .replayed
+    );
+    assert!(
+        w.fleet
+            .store
+            .notification_fail(&ctx, &item.id, "late")
+            .unwrap()
+            .replayed
+    );
+    assert_eq!(kinds(&w, &item.id).len(), 3);
+}
+
+#[test]
+fn a_record_alone_takes_one_outcome_and_only_one() {
+    let mut w = World::new();
+    let item = w.open(AttentionKind::Decision, "Raise capacity?", 2);
+    let ctx = tiller_core::Ctx::at(tiller_core::Actor::Daemon, at(4));
+    // No record yet: an outcome applies nothing.
+    assert!(
+        w.fleet
+            .store
+            .notification_sent(&ctx, &item.id)
+            .unwrap()
+            .replayed
+    );
+    w.fleet.store.notification_record(&ctx, &item.id).unwrap();
+    assert!(
+        !w.fleet
+            .store
+            .notification_sent(&ctx, &item.id)
+            .unwrap()
+            .replayed
+    );
+    assert!(
+        w.fleet
+            .store
+            .notification_fail(&ctx, &item.id, "late")
+            .unwrap()
+            .replayed
+    );
+    assert_eq!(
+        kinds(&w, &item.id),
+        [
+            "attention.opened",
+            "attention.notified",
+            "attention.notify_sent"
+        ]
     );
 }

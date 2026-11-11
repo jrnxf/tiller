@@ -1338,14 +1338,21 @@ fn freshness(store: &Store, active: Option<&Run>, prs: &[Pr]) -> Result<Vec<Fres
 }
 
 /// `GET /api/v1/cards/{id}/timeline`: newest first, `TIMELINE_PAGE` at a
-/// time, older than `before` when given.
+/// time, older than `before` when given. One notification is one line: the
+/// write-ahead `attention.notified` record is left out once an outcome
+/// (`attention.notify_sent` or `attention.notify_failed`) follows it.
 pub fn timeline(store: &Store, reference: &str, before: Option<i64>) -> Result<TimelineResponse> {
     let card = store.card(reference)?;
     let before = before.unwrap_or(i64::MAX);
     let page = TIMELINE_PAGE + 1;
     let mut events: Vec<Event> = list(
         store.conn(),
-        "card_id = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3",
+        "card_id = ?1 AND seq < ?2
+           AND NOT (kind = 'attention.notified' AND EXISTS (
+                SELECT 1 FROM events AS outcome
+                WHERE outcome.entity_id = events.entity_id
+                  AND outcome.kind IN ('attention.notify_sent', 'attention.notify_failed')))
+         ORDER BY seq DESC LIMIT ?3",
         &[&card.id, &before, &page],
     )?;
     let more = events.len() > usize::try_from(TIMELINE_PAGE).unwrap_or(usize::MAX);
@@ -1428,7 +1435,9 @@ fn timeline_text(event: &Event) -> String {
         "review_pass.started" => "started a review pass".to_owned(),
         "review_pass.finished" => "finished a review pass".to_owned(),
         "attention.opened" => "raised an item for you".to_owned(),
+        // The write-ahead record, shown only when no outcome followed it.
         "attention.notified" => "tried to notify you about an item".to_owned(),
+        "attention.notify_sent" => "notified you about an item".to_owned(),
         "attention.notify_failed" => "could not notify you about an item".to_owned(),
         "attention.answered" => "answered an item".to_owned(),
         "attention.withdrawn" => "withdrew an item".to_owned(),
@@ -2234,6 +2243,10 @@ mod tests {
         assert_eq!(
             text("attention.notified", serde_json::json!({})),
             "tried to notify you about an item"
+        );
+        assert_eq!(
+            text("attention.notify_sent", serde_json::json!({})),
+            "notified you about an item"
         );
         assert_eq!(
             text("attention.notify_failed", serde_json::json!({})),

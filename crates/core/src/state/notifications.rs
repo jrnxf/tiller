@@ -1,8 +1,9 @@
 //! `notification.record`: the daemon's write-ahead record that it is about to
-//! notify the owner of an attention item (`protocol.md` 3.4, P36), and
-//! `notification.fail`, the record that the send did not go out.
+//! notify the owner of an attention item (`protocol.md` 3.4, P36), then
+//! `notification.sent` or `notification.fail`, the record of how the send
+//! ended.
 
-use rusqlite::OptionalExtension;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::json;
 
 use super::projects::require_daemon;
@@ -47,11 +48,34 @@ impl Store {
         })
     }
 
+    /// `notification.sent` (daemon): writes `attention.notify_sent` for an
+    /// item whose `attention.notified` record exists and has no outcome yet,
+    /// once. The record came first and only says the daemon tried. This is
+    /// the outcome when the send went out, so the timeline can say the owner
+    /// was notified.
+    pub fn notification_sent(&mut self, ctx: &Ctx, item: &str) -> Result<Applied<Attention>> {
+        require_daemon(&ctx.actor, "notification.sent")?;
+        self.write(ctx, "notification.sent", None, |tx| {
+            let id = resolve_id(tx.conn(), "attention", "attention item", item)?;
+            let item: Attention = get(tx.conn(), "attention item", &id)?;
+            if !awaiting_outcome(tx.conn(), &item.id)? {
+                return Ok(item);
+            }
+            tx.event(
+                NewEvent::new("attention", &item.id, "attention.notify_sent")
+                    .rev(item.rev)
+                    .card(&item.card_id)
+                    .payload(json!({"kind": item.kind})),
+            )?;
+            Ok(item)
+        })
+    }
+
     /// `notification.fail` (daemon): writes `attention.notify_failed` for an
-    /// item whose `attention.notified` record exists, once. The record came
-    /// first so a crash never sends twice, which means it says the daemon
-    /// tried. This is the outcome when the send was refused: the timeline
-    /// then shows the owner was not pinged.
+    /// item whose `attention.notified` record exists and has no outcome yet,
+    /// once. The record came first so a crash never sends twice, which means
+    /// it says the daemon tried. This is the outcome when the send was
+    /// refused: the timeline then shows the owner was not pinged.
     pub fn notification_fail(
         &mut self,
         ctx: &Ctx,
@@ -62,18 +86,7 @@ impl Store {
         self.write(ctx, "notification.fail", None, |tx| {
             let id = resolve_id(tx.conn(), "attention", "attention item", item)?;
             let item: Attention = get(tx.conn(), "attention item", &id)?;
-            let seen = |kind: &str| -> Result<bool> {
-                Ok(tx
-                    .conn()
-                    .query_row(
-                        "SELECT seq FROM events WHERE kind = ?1 AND entity_id = ?2",
-                        [kind, &item.id],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .optional()?
-                    .is_some())
-            };
-            if !seen("attention.notified")? || seen("attention.notify_failed")? {
+            if !awaiting_outcome(tx.conn(), &item.id)? {
                 return Ok(item);
             }
             tx.event(
@@ -85,4 +98,21 @@ impl Store {
             Ok(item)
         })
     }
+}
+
+/// Whether the item has its write-ahead `attention.notified` record and no
+/// outcome (`attention.notify_sent` or `attention.notify_failed`) yet.
+fn awaiting_outcome(conn: &Connection, item: &str) -> Result<bool> {
+    let seen = |kinds: &str| -> Result<bool> {
+        Ok(conn
+            .query_row(
+                &format!("SELECT seq FROM events WHERE kind IN ({kinds}) AND entity_id = ?1"),
+                [item],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some())
+    };
+    Ok(seen("'attention.notified'")?
+        && !seen("'attention.notify_sent', 'attention.notify_failed'")?)
 }

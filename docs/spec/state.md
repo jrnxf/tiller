@@ -470,7 +470,8 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `outbox.ack` | `tiller inbox <id>` in the target session, or its `UserPromptSubmit` hook on the wake-up line | `delivered` (or `pending`, when the session found it by polling) | `outbox` (`acked`) | `outbox.acked` |
 | `outbox.fail` | daemon | attempts exhausted or target gone with no successor | `outbox` (`failed`) | `outbox.failed`; a `recovery` attention item when the message was an answer |
 | `notification.record` | daemon | attention item open; no `attention.notified` event for it yet | `events` | `attention.notified` |
-| `notification.fail` | daemon | the item has an `attention.notified` record and no `attention.notify_failed` yet; the send to the owner was refused | `events` | `attention.notify_failed` |
+| `notification.sent` | daemon | the item has an `attention.notified` record and no outcome yet (`attention.notify_sent` or `attention.notify_failed`); the send to the owner went out | `events` | `attention.notify_sent` |
+| `notification.fail` | daemon | the item has an `attention.notified` record and no outcome yet; the send to the owner was refused | `events` | `attention.notify_failed` |
 | `outbox.retarget` | daemon | target session ended; a successor session exists for the same run or project | `outbox.target_session_id`, `target_pane_id` | `outbox.retargeted` |
 | `obligation.open` | orchestrator; daemon inside `approval.finish` (the deploy watch) | card open | `obligations` | `obligation.opened` |
 | `obligation.cancel` | orchestrator, owner | obligation `open` | `obligations.state` | `obligation.cancelled` |
