@@ -124,8 +124,9 @@ fn insert_card(tx: &mut Tx<'_>, new: &NewCard, ask_id: Option<&str>) -> Result<C
     };
     let seq = project.next_card_seq;
     tx.conn().execute(
-        "UPDATE projects SET next_card_seq = next_card_seq + 1, rev = rev + 1 WHERE id = ?1",
-        [&project.id],
+        "UPDATE projects SET next_card_seq = next_card_seq + 1, rev = rev + 1, edited_at = ?2
+         WHERE id = ?1",
+        params![project.id, tx.now()],
     )?;
     let id = ids::new_ulid();
     let display_id = ids::display_id(&project.id, seq);
@@ -829,6 +830,7 @@ impl Store {
                 card.rev,
                 expected_rev,
                 Some((first, current[first].clone())),
+                None,
             )?;
             if changed.is_empty() {
                 return Ok(card);

@@ -592,6 +592,10 @@ pub struct Project {
     pub delivery: String,
     pub capacity: i64,
     pub rev: i64,
+    /// When `rev` last moved: an edit, a stage change, a new card. Null only
+    /// on a peer row from a tiller that predates it.
+    #[serde(default)]
+    pub edited_at: Option<String>,
     /// `pre-launch` or `launched`.
     pub stage: String,
     /// The mode builders and the land loop follow: `delivery`, or

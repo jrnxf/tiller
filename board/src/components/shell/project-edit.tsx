@@ -3,6 +3,7 @@ import { useCallback, useEffect, useId, useState } from "react";
 import type { RefObject } from "react";
 
 import type { MutationResponse, Project, ProjectChecks, ProjectFields } from "../../lib/api-types";
+import { formatLisbonDay } from "../../lib/clock";
 import { projectFieldsQuery, projectsPath, queryKeyFor } from "../../lib/queries";
 import { sendMutation } from "../attention/api";
 import { useAction } from "../attention/use-action";
@@ -317,10 +318,15 @@ function EditForm({
   const armed = changed && valid && !pending && !stale;
   const busy = pending;
 
+  // When the other change happened, in Lisbon time, from the refusal's
+  // `current`. A daemon that predates `edited_at` leaves the time out.
+  const editedAt = stale ? error?.current?.edited_at : undefined;
+  const when = typeof editedAt === "string" ? formatLisbonDay(editedAt) : null;
+  const changedAfter = `${opened.name} changed${when ? ` on ${when},` : ""} after you opened it`;
   const conflictText = conflict
     ? conflict.lines.length > 0
-      ? `Not saved: ${opened.name} changed after you opened it. ${conflict.lines.join(" ")} Load the new values, then save again. Your changes to other fields stay.`
-      : `Not saved: ${opened.name} changed after you opened it, but none of these fields did. Load the new values, then save again.`
+      ? `Not saved: ${changedAfter}. ${conflict.lines.join(" ")} Load the new values, then save again. Your changes to other fields stay.`
+      : `Not saved: ${changedAfter}, but none of these fields did. Load the new values, then save again.`
     : null;
 
   return (
@@ -547,7 +553,7 @@ function EditForm({
       </div>
       {stale ? (
         <p className="refusal" role="alert">
-          {conflictText ?? `Not saved: ${opened.name} changed after you opened it.`}
+          {conflictText ?? `Not saved: ${changedAfter}.`}
         </p>
       ) : error && error !== handled ? (
         <p className="refusal" role="alert">

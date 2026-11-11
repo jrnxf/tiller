@@ -10,13 +10,10 @@
 use jiff::{Timestamp, ToSpan};
 use serde_json::Value;
 use tiller_core::Error;
-use tiller_core::time::lisbon::{offset_hours, zone};
 
 /// `Tue 2026-11-03 14:00` for an instant, in Lisbon time.
 pub fn display(ts: Timestamp) -> String {
-    ts.to_zoned(zone(offset_hours(ts)))
-        .strftime("%a %Y-%m-%d %H:%M")
-        .to_string()
+    tiller_core::time::lisbon::display(ts)
 }
 
 /// Parses a `--until` style input: RFC 3339 with an offset, a date (09:00

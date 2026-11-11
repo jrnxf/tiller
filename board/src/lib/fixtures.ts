@@ -342,6 +342,7 @@ function launched(
     reviewed_through_sha: null,
     reviewed_at: null,
     stage_changed_at: null,
+    edited_at: "2026-11-02T10:00:00.000Z",
     next_review_due: null,
     review_overdue: false,
     review_open: null,
@@ -366,6 +367,7 @@ const DELTA = launched("delta", "direct-pr", 2, 1, {
   reviewed_through_sha: "5b7d20e9c4a1f386d02e8b57a9c3140f6e2d8a71",
   reviewed_at: "2026-10-31T07:12:00.000Z",
   stage_changed_at: "2026-11-02T16:05:00.000Z",
+  edited_at: "2026-11-02T16:05:00.000Z",
   review_open: "final",
 });
 

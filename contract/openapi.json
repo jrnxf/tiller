@@ -10231,6 +10231,13 @@
           "delivery": {
             "type": "string"
           },
+          "edited_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When `rev` last moved: an edit, a stage change, a new card. Null only\non a peer row from a tiller that predates it."
+          },
           "effective_delivery": {
             "type": "string",
             "description": "The mode builders and the land loop follow: `delivery`, or\n`direct-pr` for a pre-launch project that otherwise runs `no-mistakes`."

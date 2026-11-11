@@ -422,6 +422,7 @@ impl Store {
                 project.rev,
                 expected_rev,
                 Some(("stage", json!(project.stage))),
+                Some(project.edited_at),
             )?;
             let mut staged = Staged {
                 project: project.clone(),
@@ -453,7 +454,8 @@ impl Store {
                         ));
                     }
                     tx.conn().execute(
-                        "UPDATE projects SET stage = ?2, reviewed_through_sha = ?3, stage_changed_at = ?4, rev = rev + 1
+                        "UPDATE projects SET stage = ?2, reviewed_through_sha = ?3, stage_changed_at = ?4, rev = rev + 1,
+                                             edited_at = ?4
                          WHERE id = ?1",
                         params![project.id, stage, head, tx.now()],
                     )?;
@@ -471,7 +473,8 @@ impl Store {
                 }
                 Stage::Launched => {
                     tx.conn().execute(
-                        "UPDATE projects SET stage = ?2, stage_changed_at = ?3, rev = rev + 1 WHERE id = ?1",
+                        "UPDATE projects SET stage = ?2, stage_changed_at = ?3, rev = rev + 1, edited_at = ?3
+                         WHERE id = ?1",
                         params![project.id, stage, tx.now()],
                     )?;
                     tx.event(
@@ -670,8 +673,8 @@ impl Store {
                 ));
             }
             tx.conn().execute(
-                "UPDATE projects SET reviewed_through_sha = ?2, rev = rev + 1 WHERE id = ?1",
-                params![project.id, head],
+                "UPDATE projects SET reviewed_through_sha = ?2, rev = rev + 1, edited_at = ?3 WHERE id = ?1",
+                params![project.id, head, tx.now()],
             )?;
             tx.event(
                 NewEvent::new("project", &project.id, "project.reviewed")

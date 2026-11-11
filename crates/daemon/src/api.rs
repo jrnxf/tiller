@@ -481,6 +481,7 @@ impl From<Error> for ApiError {
                 id,
                 current_rev,
                 field,
+                edited_at,
                 ..
             } => {
                 api.body.error.entity = Some((*entity).to_owned());
@@ -488,6 +489,9 @@ impl From<Error> for ApiError {
                 let mut current = json!({"rev": current_rev});
                 if let Some((name, value)) = field {
                     current[name] = value.clone();
+                }
+                if let Some(at) = edited_at {
+                    current["edited_at"] = json!(at);
                 }
                 api.body.error.current = Some(current);
             }
@@ -7586,7 +7590,16 @@ pub(crate) mod tests {
         assert_eq!(body["replayed"], true, "{body}");
 
         // The rev the board read is stale now: a conflict that names the
-        // stored value of the field it tried to change.
+        // stored value of the field it tried to change, and when the other
+        // edit happened.
+        let listed = get(&app, "/api/v1/projects").await;
+        let listed: Value = serde_json::from_str(&listed.body).unwrap();
+        let edited_at = listed["projects"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["id"] == "alpha"))
+            .map(|row| row["edited_at"].clone())
+            .unwrap();
+        assert!(edited_at.is_string(), "{listed}");
         let stale = send(
             &app,
             edit("k-edit-10", json!({"rev": rev, "capacity": 3}), &cookie),
@@ -7596,7 +7609,13 @@ pub(crate) mod tests {
         let body: Value = serde_json::from_str(&stale.body).unwrap();
         assert_eq!(
             body["error"]["current"],
-            json!({"rev": rev + 1, "capacity": 2})
+            json!({"rev": rev + 1, "capacity": 2, "edited_at": edited_at})
+        );
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("; it changed ")),
+            "{body}"
         );
 
         let cleared = send(

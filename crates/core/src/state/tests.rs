@@ -495,6 +495,79 @@ fn stale_rev_with_matching_values_conflicts_unless_its_key_replays() {
     assert_eq!(error.code(), "conflict");
 }
 
+/// A project keeps when its `rev` last moved, and a stale-rev conflict on it
+/// says when that was, in Lisbon time with the weekday: an edit, a new card
+/// and a stage change each move it.
+#[test]
+fn a_project_conflict_says_when_the_other_change_happened() {
+    let (mut store, _) = memory_store();
+    let at = |text: &str| Ctx {
+        now: text.parse::<Timestamp>().unwrap(),
+        ..owner()
+    };
+    let added = store.project("alpha").unwrap();
+    assert_eq!(added.edited_at, added.added_at, "a new project");
+
+    // Summer time: 14:05 UTC is 15:05 in Lisbon.
+    let edited = store
+        .project_edit(
+            &at("2026-07-14T14:05:09.000Z"),
+            "alpha",
+            added.rev,
+            ProjectEdit {
+                capacity: Some(5),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap()
+        .value;
+    assert_eq!(edited.edited_at.to_string(), "2026-07-14T14:05:09.000Z");
+    let error = store
+        .project_edit(
+            &owner(),
+            "alpha",
+            added.rev,
+            ProjectEdit {
+                capacity: Some(6),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "conflict: project alpha is at rev {}, you sent {}; it changed Tue 2026-07-14 15:05; capacity is now 5",
+            edited.rev, added.rev
+        )
+    );
+    let Error::Conflict { edited_at, .. } = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(edited_at.as_deref(), Some(&edited.edited_at));
+
+    // Winter time: Lisbon is UTC. A new card moves the project's rev.
+    store
+        .card_create(
+            &at("2026-11-03T14:00:00.000Z"),
+            None,
+            card(CardKind::Ship, "moves the rev"),
+            None,
+        )
+        .unwrap();
+    let carded = store.project("alpha").unwrap();
+    assert_eq!(carded.rev, edited.rev + 1);
+    assert_eq!(carded.edited_at.to_string(), "2026-11-03T14:00:00.000Z");
+    let error = store
+        .project_stage(&owner(), "alpha", edited.rev, Stage::PreLaunch, None)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("; it changed Tue 2026-11-03 14:00;"),
+        "{error}"
+    );
+}
+
 /// The dispatch override is owner only (`authority.md` section 3).
 #[test]
 fn dispatch_override_is_owner_only() {

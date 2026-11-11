@@ -265,6 +265,7 @@ mod tests {
             stage: tiller_core::domain::Stage::Launched,
             reviewed_through_sha: None,
             stage_changed_at: None,
+            edited_at: Timestamp::now(),
         }
     }
 

@@ -69,7 +69,7 @@ function serve(other?: Partial<ProjectFields>) {
               error: {
                 code: "stale",
                 message: `conflict: project alpha is at rev ${stored.rev}, you sent ${String(body.rev)}`,
-                current: { rev: stored.rev },
+                current: { rev: stored.rev, edited_at: "2026-11-03T14:00:00Z" },
               },
             },
             409,
@@ -173,7 +173,7 @@ test("a project changed elsewhere is not overwritten: the dialog says what moved
 
   const alert = await dialog.findByText(/Builder slots is now 5\./);
   expect(alert.textContent).toBe(
-    "Not saved: alpha changed after you opened it. Builder slots is now 5. Load the new values, then save again. Your changes to other fields stay.",
+    "Not saved: alpha changed on Tue 3 Nov, 14:00, after you opened it. Builder slots is now 5. Load the new values, then save again. Your changes to other fields stay.",
   );
   fireEvent.click(dialog.getByRole("button", { name: "Load new values" }));
   expect(dialog.getByRole("group", { name: "Builder slots" }).textContent).toContain("5");

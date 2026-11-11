@@ -906,6 +906,7 @@ fn project_shape(
         reviewed_through_sha: project.reviewed_through_sha,
         reviewed_at: at_opt(reviewed_at),
         stage_changed_at: at_opt(project.stage_changed_at),
+        edited_at: Some(at(project.edited_at)),
         next_review_due: at_opt(next),
         review_overdue,
         review_open,

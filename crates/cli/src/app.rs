@@ -234,14 +234,19 @@ impl From<Error> for Failure {
                 current_rev,
                 sent_rev,
                 field,
+                edited_at,
             } => {
                 failure.entity = Some(entity.to_owned());
                 failure.id = Some(id);
-                failure.current = Some(json!({
+                let mut current = json!({
                     "rev": current_rev,
                     "sent_rev": sent_rev,
                     "field": field.map(|(name, value)| json!({"name": name, "value": value})),
-                }));
+                });
+                if let Some(at) = edited_at {
+                    current["edited_at"] = json!(at);
+                }
+                failure.current = Some(current);
                 failure.hint = Some(format!("read the {entity} again and retry with its rev"));
             }
             Error::Refused { entity, id, .. } => {

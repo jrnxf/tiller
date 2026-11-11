@@ -144,6 +144,7 @@ function peerProject(host: string, id: string, delivery: string, now: number): P
     reviewed_through_sha: null,
     reviewed_at: null,
     stage_changed_at: null,
+    edited_at: new Date(now).toISOString(),
     next_review_due: null,
     review_overdue: false,
     review_open: null,

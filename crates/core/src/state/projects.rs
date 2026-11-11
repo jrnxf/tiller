@@ -316,6 +316,7 @@ pub(crate) fn edit_project(
         project.rev,
         expected_rev,
         Some((first, current[first].clone())),
+        Some(project.edited_at),
     )?;
     if changed.is_empty() {
         return Ok(project);
@@ -342,7 +343,7 @@ pub(crate) fn edit_project(
     tx.conn().execute(
         "UPDATE projects SET name = ?2, repo = ?3, remote = ?4, default_branch = ?5, delivery = ?6,
                     checks = ?7, capacity = ?8, deploy_workflow = ?9, deploy_environment = ?10,
-                    deploy_timeout_minutes = ?11, rev = rev + 1
+                    deploy_timeout_minutes = ?11, rev = rev + 1, edited_at = ?12
              WHERE id = ?1",
         params![
             next.id,
@@ -356,6 +357,7 @@ pub(crate) fn edit_project(
             next.deploy_workflow,
             next.deploy_environment,
             next.deploy_timeout_minutes,
+            tx.now(),
         ],
     )?;
     tx.event(
@@ -576,7 +578,7 @@ impl Store {
                 "boundary" => json!(kept),
                 field => serde_json::to_value(&host)?[field].clone(),
             };
-            check_rev("host", &host.id, host.rev, expected_rev, Some((first, now)))?;
+            check_rev("host", &host.id, host.rev, expected_rev, Some((first, now)), None)?;
             if changed.is_empty() {
                 return Ok(host);
             }
@@ -736,7 +738,7 @@ impl Store {
                 return Err(Error::refused("project", &project.id, fact));
             }
             tx.conn().execute(
-                "UPDATE projects SET retired_at = ?2, rev = rev + 1 WHERE id = ?1",
+                "UPDATE projects SET retired_at = ?2, rev = rev + 1, edited_at = ?2 WHERE id = ?1",
                 params![project.id, tx.now()],
             )?;
             tx.event(
@@ -766,8 +768,8 @@ impl Store {
                 return Err(Error::refused("project", &project.id, "project is retired"));
             }
             tx.conn().execute(
-                "UPDATE projects SET merge_gate = ?2, rev = rev + 1 WHERE id = ?1",
-                params![project.id, gate],
+                "UPDATE projects SET merge_gate = ?2, rev = rev + 1, edited_at = ?3 WHERE id = ?1",
+                params![project.id, gate, tx.now()],
             )?;
             tx.event(
                 NewEvent::new("project", &project.id, "project.merge_gate_changed")

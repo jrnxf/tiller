@@ -129,6 +129,11 @@ pub mod lisbon {
         ts.to_zoned(zone(offset_hours(ts))).datetime()
     }
 
+    /// `Tue 2026-11-03 14:00`: the instant in Lisbon time, with its weekday.
+    pub fn display(ts: jiff::Timestamp) -> String {
+        local(ts).strftime("%a %Y-%m-%d %H:%M").to_string()
+    }
+
     /// A Lisbon wall-clock time as an instant, or `None` for the hour that
     /// does not exist at the spring changeover. The hour that repeats in
     /// autumn resolves to the earlier instant.

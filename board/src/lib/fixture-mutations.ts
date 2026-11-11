@@ -276,7 +276,11 @@ function editProject(id: string, body: Record<string, unknown>): MutationResult 
         409,
         "stale",
         `conflict: project ${id} is at rev ${fields.rev}, you sent ${String(body.rev)}`,
-        first ? { rev: fields.rev, [first]: fields[first] } : { rev: fields.rev },
+        {
+          rev: fields.rev,
+          ...(first ? { [first]: fields[first] } : {}),
+          ...(project.edited_at ? { edited_at: project.edited_at } : {}),
+        },
       ),
       followUps: [],
     };
@@ -326,6 +330,7 @@ function editProject(id: string, body: Record<string, unknown>): MutationResult 
     delivery: next.delivery,
     capacity: next.capacity,
     rev: next.rev,
+    edited_at: new Date().toISOString(),
     effective_delivery: project.stage === "pre-launch" && direct ? "direct-pr" : next.delivery,
   };
   edited.set(id, next);
@@ -475,6 +480,7 @@ function restaged(project: Project, stage: Project["stage"]): Project {
     effective_delivery: prelaunch && direct ? "direct-pr" : project.delivery,
     reviewed_through_sha: project.reviewed_through_sha ?? FIXTURE_HEAD_SHA,
     stage_changed_at: at.toISOString(),
+    edited_at: at.toISOString(),
     next_review_due: prelaunch ? nextSaturday(at) : null,
     review_overdue: false,
     review_open: prelaunch ? null : "final",
@@ -534,6 +540,7 @@ function addProject(body: Record<string, unknown>): MutationResult {
     reviewed_through_sha: null,
     reviewed_at: null,
     stage_changed_at: null,
+    edited_at: new Date().toISOString(),
     next_review_due: null,
     review_overdue: false,
     review_open: null,

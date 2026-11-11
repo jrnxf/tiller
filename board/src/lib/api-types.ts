@@ -518,6 +518,9 @@ export interface Project extends Federated {
   reviewed_through_sha: string | null;
   reviewed_at: string | null;
   stage_changed_at: string | null;
+  // When `rev` last moved: an edit, a stage change, a new card. Null only on a
+  // peer row from a tiller that predates it.
+  edited_at: string | null;
   // The next weekly review, only while pre-launch.
   next_review_due: string | null;
   // A weekly review came due 24 hours ago or more and no pass started.
