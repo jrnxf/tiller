@@ -25,7 +25,7 @@
 //! already refreshed the board. The change names only the other documents
 //! (one an outside commit or an editor's save wrote last, or one changed
 //! again since), and when there are none the watcher writes nothing. That
-//! check runs three git processes, after the lock is released.
+//! check runs two git processes, after the lock is released.
 //!
 //! A missing repo is not an error. It has no `HEAD` and no documents, and a
 //! repo made or replaced later is a change like any other. A document that
@@ -64,6 +64,9 @@ const RACY: Duration = Duration::from_secs(2);
 
 const FLEET: &str = "fleet.md";
 const PROJECTS: &str = "projects";
+/// The most new commits one look reads to tell Tiller's writes from outside
+/// ones.
+const WALK: usize = 100;
 
 /// What a stat says about one file: enough to see it rewritten, replaced or
 /// touched.
@@ -407,9 +410,19 @@ impl Watcher {
             .mem_commits_since(before.tiller.as_ref().map(|tiller| tiller.seq))?;
         // Each changed path's newest commit, along first parents, says
         // whether Tiller wrote it last. An outside merge owns all it brought
-        // in.
+        // in. More new commits than a poll should read explain nothing: the
+        // change then names every changed document, and the board reads them
+        // again.
+        let history = self.repo.history(before.head.as_deref(), commit, WALK)?;
+        if history.len() > WALK {
+            tracing::warn!(
+                limit = WALK,
+                "the memory watcher found too many new commits to read"
+            );
+            return Ok(changed);
+        }
         let mut last: BTreeMap<&String, bool> = BTreeMap::new();
-        for (each, wrote) in self.repo.history(before.head.as_deref(), commit)? {
+        for (each, wrote) in history {
             let mine = tillers.contains(&each);
             for path in changed.iter().filter(|path| wrote.contains(*path)) {
                 last.entry(path).or_insert(mine);

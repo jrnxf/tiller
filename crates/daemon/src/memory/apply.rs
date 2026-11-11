@@ -5,6 +5,7 @@
 //! Nothing here writes outside `<repo>/.git` and the one canonical file the
 //! approval names.
 
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
@@ -274,42 +275,50 @@ impl Repo {
 
     /// Each commit reachable from `to` and not from `from` (every commit of
     /// `to` when `from` is `None`, or names a commit the repo no longer
-    /// has), newest first along first parents, with the paths it wrote. A
-    /// merge wrote every path it changed against its first parent, so the
-    /// changes it brought in are its own. One git process reads it all.
+    /// has), newest first along first parents, with the paths it wrote: at
+    /// most `limit` of them and one more, so a caller can tell a longer
+    /// list. A merge wrote every path it changed against its first parent,
+    /// so the changes it brought in are its own. The flags fix what the
+    /// owner's git config could change. One git process reads it all.
     pub(crate) fn history(
         &self,
         from: Option<&str>,
         to: &str,
-    ) -> Result<Vec<(String, Vec<String>)>> {
-        let from = match from {
-            Some(from) => {
-                let probe = format!("{from}^{{commit}}");
-                self.try_git(None, &["cat-file", "-e", &probe], None)?
-                    .map(|_| from)
-            }
-            None => None,
-        };
+        limit: usize,
+    ) -> Result<Vec<(String, HashSet<String>)>> {
+        let count = format!("--max-count={}", limit + 1);
         let not = from.map(|from| format!("^{from}"));
         let mut args = vec![
             "log",
             "--first-parent",
-            "-m",
+            "--diff-merges=first-parent",
+            "--root",
+            "--no-show-signature",
             "--no-renames",
+            "--no-color",
             "--name-only",
             "-z",
+            "--ignore-missing",
+            &count,
             "--format=%x01%H",
             to,
         ];
         args.extend(not.as_deref());
         let out = self.git(None, &args, None)?;
-        let mut commits: Vec<(String, Vec<String>)> = Vec::new();
+        let mut commits: Vec<(String, HashSet<String>)> = Vec::new();
         for field in out.split('\0') {
-            let field = field.strip_prefix('\n').unwrap_or(field);
-            if let Some(commit) = field.strip_prefix('\u{1}') {
-                commits.push((commit.to_owned(), Vec::new()));
-            } else if let (false, Some((_, paths))) = (field.is_empty(), commits.last_mut()) {
-                paths.push(field.to_owned());
+            // A commit's field is its marker and its hash, alone; a path
+            // field follows the newline that ends the commit's line.
+            let commit = field
+                .strip_prefix('\u{1}')
+                .filter(|hash| hash.len() >= 40 && hash.bytes().all(|b| b.is_ascii_hexdigit()));
+            if let Some(commit) = commit {
+                commits.push((commit.to_owned(), HashSet::new()));
+                continue;
+            }
+            let path = field.strip_prefix('\n').unwrap_or(field);
+            if let (false, Some((_, paths))) = (path.is_empty(), commits.last_mut()) {
+                paths.insert(path.to_owned());
             }
         }
         Ok(commits)

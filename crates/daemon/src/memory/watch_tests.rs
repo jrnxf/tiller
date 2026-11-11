@@ -346,6 +346,11 @@ async fn the_boards_own_write_is_not_an_outside_change() {
     assert_eq!(look(&mut watcher), None);
     assert_eq!(changes(&watcher).len(), 4, "no change since k-5");
 
+    // The owner's git config does not change how the watcher reads the
+    // history.
+    git(&root, &["config", "log.diffMerges", "combined"]);
+    git(&root, &["config", "log.showRoot", "false"]);
+
     // On another branch, an outside merge of Tiller's branch that keeps
     // that branch's text of Tiller's document owns the text, though Tiller
     // wrote the document too; Tiller then commits on that branch.
@@ -372,6 +377,32 @@ async fn the_boards_own_write_is_not_an_outside_change() {
         ],
     );
     edit("k-7d", "Keep the line after the second merge").await;
+    look(&mut watcher);
+    assert_eq!(
+        look(&mut watcher),
+        Some(vec!["projects/alpha.md".to_owned()])
+    );
+
+    // A merge into Tiller's branch that takes the other branch's text of
+    // Tiller's document whole owns that text too.
+    let base = git(&root, &["rev-parse", "HEAD"]);
+    git(
+        &root,
+        &["checkout", "--quiet", "-b", "outside", base.trim()],
+    );
+    commit(&root, "projects/alpha.md", "# Alpha, from outside\n");
+    git(&root, &["checkout", "--quiet", "other"]);
+    edit_in("alpha", "k-7e", "Keep the line the second merge drops").await;
+    git(
+        &root,
+        &["merge", "--quiet", "--no-commit", "-X", "theirs", "outside"],
+    );
+    git(
+        &root,
+        &["checkout", "--quiet", "outside", "--", "projects/alpha.md"],
+    );
+    git(&root, &["commit", "--quiet", "--no-gpg-sign", "--no-edit"]);
+    edit("k-7f", "Keep the line after the third merge").await;
     look(&mut watcher);
     assert_eq!(
         look(&mut watcher),
