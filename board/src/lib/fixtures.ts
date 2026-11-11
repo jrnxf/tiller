@@ -92,6 +92,8 @@ export type Scenario =
   | "delete-blocked"
   // The merge App ready, two repos enforced and one still on detect (P24).
   | "merge-ready"
+  // The merge App key on the host but readable by others (P24).
+  | "merge-exposed"
   // Two agents on a dialog no hook asked for: the folder trust dialog, and
   // one the board cannot read (P7).
   | "dialog";
@@ -127,6 +129,7 @@ export const SCENARIOS: readonly Scenario[] = [
   "lifecycle",
   "delete-blocked",
   "merge-ready",
+  "merge-exposed",
   "dialog",
 ];
 

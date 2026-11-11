@@ -410,10 +410,21 @@
   justify-self: end;
 }
 
-/* The merge App's commands, under their step. */
-.set-line-c {
+/* The merge App's commands, under their step, with what to read first. */
+.set-line-x {
   grid-column: 2 / -1;
   margin: 6px 0 2px;
+}
+
+.set-line-x p {
+  margin: 0 0 4px;
+  font-size: var(--fs-mini);
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.set-line-c {
+  margin: 6px 0 0;
   padding: 10px 12px;
   border: 1px solid var(--line-1);
   border-radius: var(--r8);

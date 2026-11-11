@@ -23,14 +23,46 @@ const NEW_APP = "https://github.com/settings/apps/new";
 const INSTALLATIONS = "https://github.com/settings/installations";
 const rulesets = (repo: string) => `https://github.com/${repo}/settings/rules`;
 
-// Step 4 of the setup doc, for the owner's own terminal.
-const KEY_COMMANDS = [
-  "mkdir -p ~/.tiller/forge-app",
-  "chmod 700 ~/.tiller/forge-app",
-  "echo 1234567 > ~/.tiller/forge-app/app-id",
-  "mv /path/to/tiller-merge.*.private-key.pem ~/.tiller/forge-app/private-key.pem",
-  "chmod 600 ~/.tiller/forge-app/private-key.pem",
-].join("\n");
+// Step 4 of the setup doc, for the owner's own terminal. The daemon reads
+// `<home>/forge-app`, and health names that folder only in its prose, so the
+// commands take the home from `$TILLER_HOME` the way the daemon does. Health
+// never has the App ID while the commands show, so the ID and the download
+// are placeholders, and bash and zsh refuse a line that still holds one.
+const DIR = 'dir="${TILLER_HOME:-$HOME/.tiller}/forge-app"';
+const SET_ID = 'echo <APP_ID> > "$dir/app-id"';
+const SET_KEY = [
+  'mv <DOWNLOADED_KEY.pem> "$dir/private-key.pem"',
+  'chmod 600 "$dir/private-key.pem"',
+];
+const SETUP = [DIR, 'mkdir -p "$dir"', 'chmod 700 "$dir"', SET_ID, ...SET_KEY];
+const PRIVATE = ['chmod 600 "${TILLER_HOME:-$HOME/.tiller}/forge-app/private-key.pem"'];
+
+const HOME_NOTE =
+  "The commands use $TILLER_HOME when your shell sets it, and the default ~/.tiller when it does not. Check that the folder matches the one named above.";
+const PLACEHOLDER_NOTE =
+  "Replace <APP_ID> and <DOWNLOADED_KEY.pem> with yours first. The shell refuses those lines until you do.";
+const ROTATE_NOTE =
+  "If anyone else could have read the key, rotate it: generate a new key on the App's page, replace private-key.pem (mode 600), then delete the old key on GitHub.";
+
+// What the owner runs for each key status, and what to read first. An
+// exposed key needs only its mode. A `warn` names the file Tiller cannot
+// use: the `app-id` file, or the key file.
+function keyFix(app: MergeAppHealth): { lines: string[]; notes: string[] } {
+  if (app.status === "fail") return { lines: PRIVATE, notes: [HOME_NOTE, ROTATE_NOTE] };
+  const notes = [HOME_NOTE, PLACEHOLDER_NOTE];
+  if (app.status === "warn" && app.detail.includes("/app-id: ")) {
+    return { lines: [DIR, SET_ID], notes };
+  }
+  if (app.status === "warn") return { lines: [DIR, ...SET_KEY], notes };
+  return { lines: SETUP, notes };
+}
+
+// The daemon's reason as a sentence: a capital first and a stop at the end.
+function sentence(text: string): string {
+  const trimmed = text.trim();
+  const capital = trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+  return /[.!?]$/.test(capital) ? capital : `${capital}.`;
+}
 
 const STATUS_TEXT: Record<MergeAppHealth["status"], string> = {
   ok: "Ready",
@@ -39,9 +71,23 @@ const STATUS_TEXT: Record<MergeAppHealth["status"], string> = {
   fail: "Key exposed",
 };
 
-function GitHubLink({ href }: { href: string }) {
+const KEY_TITLE: Record<MergeAppHealth["status"], string> = {
+  ok: "Place the key and the App ID",
+  missing: "Place the key and the App ID",
+  warn: "Fix the key or the App ID",
+  fail: "Make the key private",
+};
+
+// Every link reads "Open on GitHub", and its name says which page.
+function GitHubLink({ href, label }: { href: string; label: string }) {
   return (
-    <a className="btn sm" href={href} target="_blank" rel="noreferrer">
+    <a
+      className="btn sm"
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      aria-label={`Open on GitHub: ${label}`}
+    >
       <ExternalIcon />
       Open on GitHub
     </a>
@@ -49,8 +95,7 @@ function GitHubLink({ href }: { href: string }) {
 }
 
 // A done step is a green dot and "Done". A step to do is amber (red for an
-// exposed key) with its fix on the right. A step that waits on an earlier one
-// is a plain dot.
+// exposed key) with its fix on the right.
 function Step({
   testid,
   tone,
@@ -60,7 +105,7 @@ function Step({
   extra,
 }: {
   testid: string;
-  tone: Tone | null;
+  tone: Tone;
   title: string;
   detail?: string;
   end?: ReactNode;
@@ -78,17 +123,16 @@ function Step({
   );
 }
 
-function HostSteps({ app, host }: { app: MergeAppHealth; host: string | null }) {
-  const [shown, setShown] = useState(false);
-  const ready = app.status === "ok";
+// Step 1 of the doc. Health sees only the key, and any key on the host,
+// usable or not, means the App exists.
+function AppStep({ app, host }: { app: MergeAppHealth; host: string | null }) {
+  const missing = app.status === "missing";
+  const tone = app.status === "ok" ? "ok" : app.status === "fail" ? "fail" : "missing";
   return (
     <HostCardSection
       title={host ?? "This host"}
       meta={
-        <span
-          className={`set-status ${ready ? "ok" : app.status === "fail" ? "fail" : "missing"}`}
-          data-testid="merge-app-status"
-        >
+        <span className={`set-status ${tone}`} role="status" data-testid="merge-app-status">
           {STATUS_TEXT[app.status]}
         </span>
       }
@@ -96,25 +140,40 @@ function HostSteps({ app, host }: { app: MergeAppHealth; host: string | null }) 
       <ul className="set-lines">
         <Step
           testid="merge-step-app"
-          tone={ready ? "green" : "amber"}
+          tone={missing ? "amber" : "green"}
           title="Create the App"
           detail={
-            ready
-              ? app.app_id === null
-                ? "The App has a key."
-                : `App ${app.app_id}, with the permissions Tiller needs`
-              : "Name it tiller-merge. Give it Contents, Pull requests and Workflows read and write, and no webhook."
+            missing
+              ? "Name it tiller-merge. Give it Contents, Pull requests and Workflows read and write, Checks read-only, and no webhook."
+              : app.status === "ok" && app.app_id !== null
+                ? `App ${app.app_id} has its key on this host.`
+                : "A key for the App is on this host."
           }
-          end={<GitHubLink href={NEW_APP} />}
+          end={<GitHubLink href={NEW_APP} label="new App" />}
         />
+      </ul>
+    </HostCardSection>
+  );
+}
+
+// Step 4 of the doc, last as the doc has it: the key goes in after the
+// rulesets exist.
+function KeyStep({ app, host }: { app: MergeAppHealth; host: string | null }) {
+  const [shown, setShown] = useState(false);
+  const ready = app.status === "ok";
+  const fix = keyFix(app);
+  const last = app.status === "missing" ? " Do this last, after each repo's ruleset exists." : "";
+  return (
+    <HostCardSection title={`The key on ${host ?? "this host"}`}>
+      <ul className="set-lines">
         <Step
           testid="merge-step-key"
           tone={ready ? "green" : app.status === "fail" ? "red" : "amber"}
-          title="Place the key and the App ID"
+          title={KEY_TITLE[app.status]}
           detail={
             ready
               ? "The key is in place and only you can read it."
-              : `${app.detail} Run the commands in your own terminal, not in an agent.`
+              : `${sentence(app.detail)}${last} Run the commands in your own terminal, not in an agent.`
           }
           end={
             <button
@@ -128,9 +187,14 @@ function HostSteps({ app, host }: { app: MergeAppHealth; host: string | null }) 
           }
           extra={
             shown && !ready ? (
-              <pre className="set-line-c" data-testid="merge-commands">
-                {KEY_COMMANDS}
-              </pre>
+              <div className="set-line-x">
+                {fix.notes.map((note) => (
+                  <p key={note}>{note}</p>
+                ))}
+                <pre className="set-line-c" data-testid="merge-commands">
+                  {fix.lines.join("\n")}
+                </pre>
+              </div>
             ) : null
           }
         />
@@ -139,23 +203,25 @@ function HostSteps({ app, host }: { app: MergeAppHealth; host: string | null }) 
   );
 }
 
+// Steps 2 and 3 of the doc, for one gated repo. A repo on detect is missing
+// the install or the ruleset, and the check does not say which, so both stay
+// open and the install step asks the owner to check, not to install.
 function RepoSteps({
   gate,
   repo,
   app,
-  action,
 }: {
   gate: DoctorGate;
   repo: string | undefined;
   app: MergeAppHealth;
-  action: ReactNode;
 }) {
   const enforced = gate.merge_gate === "enforced";
   const changed = whenText(gate.last_changed_at);
-  // Until the host's App is ready the ruleset step waits on it. After that, a
-  // repo on detect is missing the install or the ruleset, and the check does
-  // not say which, so both stay open.
-  const waits = app.status !== "ok";
+  const name = repo ?? gate.project;
+  const until =
+    app.status === "ok"
+      ? "Merges are detected, not prevented, until it holds."
+      : `${app.status === "missing" ? "Add it before the key. " : ""}The daemon checks it only once the key works, and until then merges are detected, not prevented.`;
   return (
     <HostCardSection
       title={repo ? `github.com/${repo}` : gate.project}
@@ -164,7 +230,6 @@ function RepoSteps({
           {enforced ? "Enforced" : "Detect"}
         </span>
       }
-      action={enforced ? null : action}
     >
       <ul className="set-lines" data-testid={`merge-repo-${gate.project}`}>
         <Step
@@ -172,35 +237,42 @@ function RepoSteps({
           tone={enforced ? "green" : "amber"}
           title="App installed on the repo"
           detail={
-            enforced ? undefined : "Install App, then Only select repositories, and pick this repo."
+            enforced
+              ? undefined
+              : "Check that the App is installed on this repo. If it is not: Install App, then Only select repositories, and pick this repo."
           }
-          end={<GitHubLink href={INSTALLATIONS} />}
+          end={<GitHubLink href={INSTALLATIONS} label={`install the App on ${name}`} />}
         />
         <Step
           testid={`merge-step-ruleset-${gate.project}`}
-          tone={enforced ? "green" : waits ? null : "amber"}
+          tone={enforced ? "green" : "amber"}
           title="Ruleset holds"
           detail={
             enforced
               ? `${changed ? `Enforced since ${changed}. ` : ""}The daemon checks again about every hour.`
-              : "Default branch. Only the App bypasses. Pull request, status checks, no force push. Merges are detected, not prevented, until it holds."
+              : `Default branch. Only the App bypasses. Pull request, status checks, no force push. ${until}`
           }
-          end={repo ? <GitHubLink href={rulesets(repo)} /> : null}
+          end={repo ? <GitHubLink href={rulesets(repo)} label={`rulesets of ${repo}`} /> : null}
         />
       </ul>
     </HostCardSection>
   );
 }
 
-// Settings > Merge App: the steps that make a repo's merge gate hold, for the
-// host and for each gated repo. It reads what `tiller doctor` reads (the
-// host's merge App key from health, each project's gate from the doctor
+// Settings > Merge App: the steps that make a repo's merge gate hold, in the
+// setup doc's order: create the App, then each gated repo's install and
+// ruleset, then the host's key, last. It reads what `tiller doctor` reads
+// (the host's merge App key from health, each project's gate from the doctor
 // report) and links to the GitHub page for each step GitHub owns.
 export function MergeAppSection({ app, host }: { app: MergeAppHealth; host: string | null }) {
   const client = useQueryClient();
   const doctor = useQuery(doctorQuery());
   const gates = doctor.data?.merge_gates ?? [];
   const setups = useQueries({ queries: gates.map((gate) => projectSetupQuery(gate.project)) });
+  // Nothing refetches health on its own, so while any step is open one Check
+  // again reads the key and every repo again.
+  const open =
+    app.status !== "ok" || doctor.isError || gates.some((gate) => gate.merge_gate !== "enforced");
   const again = () => {
     void doctor.refetch();
     void client.invalidateQueries({ queryKey: healthQuery().queryKey });
@@ -208,18 +280,6 @@ export function MergeAppSection({ app, host }: { app: MergeAppHealth; host: stri
       void client.invalidateQueries({ queryKey: queryKeyFor(projectSetupPath(gate.project)) });
     }
   };
-  const checkAgain = (
-    <button
-      type="button"
-      className="btn sm"
-      onClick={again}
-      disabled={doctor.isFetching}
-      aria-busy={doctor.isFetching || undefined}
-    >
-      <RetryIcon />
-      Check again
-    </button>
-  );
   return (
     <section className="set-sec" aria-label="Merge App" data-testid="merge-app">
       <div className="set-sec-h">
@@ -227,9 +287,21 @@ export function MergeAppSection({ app, host }: { app: MergeAppHealth; host: stri
           <h2>Merge App</h2>
           <p>The App is the only identity that may merge to a gated repo's default branch.</p>
         </div>
+        {open ? (
+          <button
+            type="button"
+            className="btn sm"
+            onClick={again}
+            disabled={doctor.isFetching}
+            aria-busy={doctor.isFetching || undefined}
+          >
+            <RetryIcon />
+            Check again
+          </button>
+        ) : null}
       </div>
-      <div className="set-card set-merge">
-        <HostSteps app={app} host={host} />
+      <div className="set-card">
+        <AppStep app={app} host={host} />
         {doctor.isError ? (
           <HostCardSection title="Repos">
             <ul className="set-lines">
@@ -248,9 +320,9 @@ export function MergeAppSection({ app, host }: { app: MergeAppHealth; host: stri
             gate={gate}
             repo={setups[index]?.data?.repo ?? undefined}
             app={app}
-            action={checkAgain}
           />
         ))}
+        <KeyStep app={app} host={host} />
       </div>
     </section>
   );

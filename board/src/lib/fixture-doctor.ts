@@ -10,7 +10,8 @@ import type { Scenario } from "./fixtures.ts";
 // The fixture board host's checks, as `GET /api/v1/doctor` runs them, and its
 // pollers, as `GET /api/v1/health` lists them. The default host has a poller
 // that keeps failing and no merge App; the federated one lacks a tool, which
-// only gets a hint; the `merge-ready` one has its merge App ready. Run now on
+// only gets a hint; the `merge-ready` one has its merge App ready, and the
+// `merge-exposed` one has its key readable by others. Run now on
 // a failing poller makes its next poll succeed.
 
 const at = (now: number, minutes: number) => new Date(now + minutes * 60_000).toISOString();
@@ -96,8 +97,13 @@ const MERGE_APP_READY: DoctorCheck = {
   detail: `App ${APP_ID} with its key in /home/user/.tiller/forge-app`,
 };
 
+// The `merge-exposed` host has its key, but the group can read it.
+const EXPOSED =
+  "the merge App key is not used, so every project runs as detect: /home/user/.tiller/forge-app/private-key.pem is readable by group or others (mode 644); run chmod 600 on it";
+
 // The merge App key as `GET /api/v1/health` reads it on the fixture host.
 export function mergeAppFor(scenario: Scenario): MergeAppHealth {
+  if (scenario === "merge-exposed") return { status: "fail", app_id: null, detail: EXPOSED };
   return scenario === "merge-ready"
     ? { status: "ok", app_id: APP_ID, detail: MERGE_APP_READY.detail }
     : {
@@ -154,13 +160,15 @@ export function doctorFor(scenario: Scenario, now: number): DoctorReport {
     },
     ready
       ? MERGE_APP_READY
-      : {
-          name: "merge app",
-          status: "warn",
-          required: false,
-          detail:
-            "no merge App key at /home/user/.tiller/forge-app/private-key.pem, so every project runs as detect (docs/plan/merge-app-setup.md)",
-        },
+      : scenario === "merge-exposed"
+        ? { name: "merge app", status: "fail", required: false, detail: EXPOSED }
+        : {
+            name: "merge app",
+            status: "warn",
+            required: false,
+            detail:
+              "no merge App key at /home/user/.tiller/forge-app/private-key.pem, so every project runs as detect (docs/plan/merge-app-setup.md)",
+          },
     {
       name: "config drift",
       status: "ok",
