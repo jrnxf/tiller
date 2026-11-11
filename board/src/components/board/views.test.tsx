@@ -21,6 +21,7 @@ import { receiptsStore } from "../../lib/receipts";
 import { boardPath, projectsPath, queryKeyFor } from "../../lib/queries";
 import { createAppRouter } from "../../lib/router";
 import { applyChange } from "../../lib/sse";
+import { CHECK_DELAY_MS } from "../shell/project-add";
 import { ArchiveProject } from "../shell/project-archive";
 import { ProjectDetail } from "../shell/project-stage";
 import { DeleteProject } from "../shell/project-delete";
@@ -1398,7 +1399,14 @@ test("deleting a project with a working card lists the agents it stops and the w
 
 // ---- Project add ----
 
+// The Add project dialog checks the folder once typing has stopped for
+// CHECK_DELAY_MS. Under fake time this skips that wait instead of sleeping it
+// out, so a test does not spend the delay of its waitFor's timeout.
+const settle = () => act(() => vi.advanceTimersByTimeAsync(CHECK_DELAY_MS));
+
 test("adding a project closes the dialog, or keeps it open to show the add's warning", async () => {
+  // Fake time still moves with the clock, so the waits below run as usual.
+  vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "clearTimeout"] });
   const warning =
     "cards continue at alpha-9: the deleted project's run branches are left (tiller/alpha-8-build)";
   const posted = stubApi("default");
@@ -1422,6 +1430,7 @@ test("adding a project closes the dialog, or keeps it open to show the add's war
     expect(dialog.textContent).not.toContain("config set checkouts.<id> before");
     fireEvent.change(within(dialog).getByLabelText("Id"), { target: { value: id } });
     fireEvent.click(within(dialog).getByRole("button", { name: mode }));
+    await settle();
     const submit = within(dialog).getByRole("button", { name: "Add project" });
     await waitFor(() => expect((submit as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(submit);
@@ -1443,10 +1452,6 @@ test("adding a project closes the dialog, or keeps it open to show the add's war
   fireEvent.click(done);
   expect(screen.queryByRole("dialog")).toBeNull();
 });
-
-// The Add project dialog checks the folder once typing has stopped for 300 ms.
-// Under fake time this skips that wait instead of sleeping it out.
-const settle = () => act(() => vi.advanceTimersByTimeAsync(300));
 
 test("Add project checks the local checkout on the daemon and says what it will do", async () => {
   // Fake time still moves with the clock, so the waits below run as usual.
