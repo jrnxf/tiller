@@ -121,6 +121,7 @@ const scopeOf = (scope: string) => (scope === FLEET ? undefined : scope);
 
 // How long focus waits for the document a change made before it gives up.
 const FOCUS_WAIT_MS = 10_000;
+const MODIFIERS = new Set(["Shift", "Control", "Alt", "Meta"]);
 
 const isMissing = (error: unknown) => error instanceof ReadError && error.status === 404;
 
@@ -1199,14 +1200,23 @@ function Doc({ data }: { data: MemoryResponse }) {
   // waits only so long, and only until the owner clicks or types elsewhere:
   // focus that comes back late would take them from what they moved on to.
   const wanted = useRef<{ focus: Focus; until: number } | null>(null);
+  // Counts the owner's clicks and keys. A write notes it when it starts, and
+  // when it lands gives focus back only if the owner did nothing meanwhile.
+  const moves = useRef(0);
   const [, wake] = useReducer((n: number) => n + 1, 0);
   const setFocus = (at: Focus) => {
     wanted.current = { focus: at, until: Date.now() + FOCUS_WAIT_MS };
     wake();
   };
+  const focusAfter = (at: Focus, since: number) => {
+    if (moves.current === since) setFocus(at);
+  };
   useEffect(() => {
-    // Capture runs before the handler that may ask for focus again.
-    const movedOn = () => {
+    // Capture runs before the handler that may ask for focus again. A
+    // modifier key alone is not a move: it starts a shortcut or a selection.
+    const movedOn = (event: Event) => {
+      if (event instanceof KeyboardEvent && MODIFIERS.has(event.key)) return;
+      moves.current += 1;
       wanted.current = null;
     };
     document.addEventListener("pointerdown", movedOn, true);
@@ -1331,9 +1341,10 @@ function Doc({ data }: { data: MemoryResponse }) {
     if (!editor) return;
     const { key } = editor;
     const from = doc.blob;
+    const since = moves.current;
     setEditor({ ...editor, frozen: resolved });
     void edit(EDITOR, section, body, note).then((landed) => {
-      if (landed) setFocus({ section, at, from });
+      if (landed) focusAfter({ section, at, from }, since);
       setEditor((now) => {
         if (now?.key !== key) return now;
         return landed ? null : { ...now, frozen: null };
@@ -1393,13 +1404,14 @@ function Doc({ data }: { data: MemoryResponse }) {
       return;
     }
     const from = doc.blob;
+    const since = moves.current;
     void edit(
       lineScope(section, removal.nth, removal.text),
       section,
       { op: "remove", index: removing.index },
       "Removed.",
     ).then((landed) => {
-      if (landed) setFocus({ section, at: position, from });
+      if (landed) focusAfter({ section, at: position, from }, since);
     });
   };
 
@@ -1585,8 +1597,8 @@ function NotFound({ scope }: { scope: string }) {
   );
 }
 
-// While the first read of a document is still going (a failed open is read
-// once more), the page says so instead of showing nothing.
+// While the page has no copy of the document yet (a failed open that the owner
+// asked to read again), it says it is reading instead of showing nothing.
 function Reading() {
   return (
     <div className="m2-wrap">

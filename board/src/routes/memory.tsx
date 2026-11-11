@@ -19,8 +19,8 @@ export const Route = createFileRoute("/memory")({
   }),
   loaderDeps: ({ search }) => ({ doc: search.doc }),
   // The document is read once, with no retry (the client's default is one):
-  // a failed open shows the page at once, and the page's own read retries it
-  // while the page says it is reading.
+  // a failed open shows the section's note at once. Its Retry reads the
+  // document again, and the page says it is reading until the read answers.
   loader: ({ context, deps }) =>
     Promise.allSettled([
       context.queryClient.ensureQueryData({ ...memoryQuery(deps.doc), retry: false }),

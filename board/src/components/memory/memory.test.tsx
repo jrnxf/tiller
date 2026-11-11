@@ -1367,3 +1367,46 @@ test("focus does not come back to a saved row when the read after the save is la
   expect(page().getByText("Stop new dispatch at 3% of the week.")).toBeTruthy();
   expect(document.activeElement).toBe(document.body);
 });
+
+test("focus does not come back to a saved row when the owner clicks while the save is going", async () => {
+  await renderMemory();
+  const fixture = globalThis.fetch;
+  let land: (() => void) | undefined;
+  const held = new Promise<void>((done) => {
+    land = done;
+  });
+  vi.stubGlobal("fetch", async (path: string, init?: RequestInit) => {
+    if (path === "/api/v1/memory/edits") await held;
+    return fixture(path, init);
+  });
+
+  fireEvent.click(lineOf(SECOND));
+  type(draftBox(), "Stop new dispatch at 3% of the week.");
+  fireEvent.keyDown(draftBox(), { key: "Enter" });
+  await flush();
+  // The owner clicks on empty space before the save lands.
+  fireEvent.pointerDown(document.body);
+  land?.();
+  await waitFor(() => expect(screen.queryByRole("textbox")).toBeNull());
+  await settle();
+
+  expect(page().getByText("Stop new dispatch at 3% of the week.")).toBeTruthy();
+  expect(document.activeElement).toBe(document.body);
+});
+
+test("a modifier key alone does not stop focus coming back to a saved row", async () => {
+  const { queryClient } = await renderMemory();
+
+  fireEvent.click(lineOf(SECOND));
+  type(draftBox(), "Stop new dispatch at 3% of the week.");
+  stubMemoryReads(() => 500);
+  fireEvent.keyDown(draftBox(), { key: "Enter" });
+  await waitFor(() => expect(screen.queryByRole("textbox")).toBeNull());
+
+  fireEvent.keyDown(document.body, { key: "Shift" });
+  stubDaemon();
+  await readAgain(queryClient);
+  await settle();
+
+  expect(document.activeElement).toBe(editButton(lineOf("Stop new dispatch at 3% of the week.")));
+});
