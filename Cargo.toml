@@ -8,6 +8,7 @@ members = [
     "crates/delivery",
     "crates/herdr",
     "crates/observe",
+    "crates/panes",
     "crates/reconcile",
     "crates/replay",
 ]
@@ -29,6 +30,7 @@ tiller-daemon = { path = "crates/daemon" }
 tiller-delivery = { path = "crates/delivery" }
 tiller-herdr = { path = "crates/herdr" }
 tiller-observe = { path = "crates/observe" }
+tiller-panes = { path = "crates/panes" }
 tiller-reconcile = { path = "crates/reconcile" }
 tiller-replay = { path = "crates/replay" }
 

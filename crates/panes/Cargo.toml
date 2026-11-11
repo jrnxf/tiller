@@ -1,0 +1,27 @@
+[package]
+name = "tiller-panes"
+description = "The terminal holder's protocol, framing and client, and the Panes trait (terminal-holder.md 2.4, 4.1, 4.2)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+# The in-memory `FakePanes`, for other crates' tests.
+testing = []
+
+[dependencies]
+jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ulid.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
