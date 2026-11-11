@@ -311,9 +311,9 @@ The holder encodes each name for the app's current mode: legacy, application cur
 | Interrupt | `agents/control.rs:224-258` | `keys(["esc"])`, and an observation with source `holder` |
 | Stop: Escape, `/exit` at an empty composer, prove the agent gone | `agents/control.rs:651-790` | The same steps. "Gone" is now the `exited` event, with no polling |
 | Stop an orchestrator, close a pane, teardown | `control.rs:848`, `spawn/mod.rs:659,1166`, `control/project.rs:280` | `forget(pane)` once the stop steps proved the agent gone (the pane `exited`). When the owner forced the stop, `close(pane, 3 s)` first, then `forget`, as today. The `dead_panes` guard above covers clean |
-| `dead_panes`: closes only the run's bare-shell panes, and refuses while one still runs an agent ("a live pane is never closed") | `spawn/mod.rs:1114-1140` | The check stays, on holder facts. A run's panes are those whose `key` is one of its sessions. Clean and teardown `forget` the `exited` ones, and refuse while any is `running`. No bare shell exists any more, because the holder runs `claude` with no shell under it |
+| `dead_panes`: closes only the run's bare-shell panes, and refuses while one still runs an agent ("a live pane is never closed") | `spawn/mod.rs:1134-1165` | The check stays, on holder facts. A run's panes are those whose `key` is one of its sessions. Clean and teardown `forget` the `exited` ones, and refuse while any is `running`. No bare shell exists any more, because the holder runs `claude` with no shell under it |
 | Owner notification | `delivery/notify.rs:70` | The `Notify` trait and the command notifier (section 7) |
-| Open in herdr (focus) | `api.rs:5255` (`focus`), `herdr/front.rs`, `cli/cmd/spawn.rs:525-545` | Open in terminal (section 5.3): `switch` when an attach client runs, else start the terminal app with `tiller attach` |
+| Open in herdr (focus) | `api.rs:5290` (`focus`), `herdr/front.rs`, `cli/cmd/spawn.rs:525-545` | Open in terminal (section 5.3): `switch` when an attach client runs, else start the terminal app with `tiller attach` |
 | Live view (observe and control streams) | `daemon/mirror.rs`, `api.rs:4424` (`terminal`) | `Live::subscribe` (section 5.1) |
 | Fit | `api.rs:4759` (`terminal_fit`), `mirror.rs` `Fits` | A lease on the subscription (section 2.6). `mirror-fits.json` and `restore_left` go away |
 | Keys and paste from the board | `api.rs:4526` (`terminal_input`) | `keys` and `paste` |
@@ -321,7 +321,7 @@ The holder encodes each name for the app's current mode: legacy, application cur
 | History | `api.rs:4808` (`terminal_history`, `read_recent` at 4851, 1,000 rows) | `screen({recent: lines})`, still capped at 1,000 rows for the API |
 | Tail for a saved machine | `api.rs:4873` (`terminal_tail`), `cli/cmd/run.rs:247-275`, `views.rs` `pane_tail_of` | Local panes: `screen(visible)`. Saved machines go away (section 8). A peer's pane has no tail, as `protocol.md` 10.7 says today. Its live view is the peer pane link |
 | Remote poller per saved machine | `daemon/workers.rs:589-630` (`MachinesSource`, `HerdrSource::remote`) | Goes away. Peers have their own link (section 8) |
-| Local poller | `daemon/workers.rs:674-757` (`HerdrSource::local`) | `HolderSource`: `watch` events, plus `list` every 30 s and after each reconnect. The poller name is `holder` |
+| Local poller | `daemon/workers.rs:809` (`HerdrSource::local`, in `start`) | `HolderSource`: `watch` events, plus `list` every 30 s and after each reconnect. The poller name is `holder` |
 | Token counts reported to herdr | `report_tokens` | Goes away (it was herdr sidebar metadata) |
 | Tool version | `daemon/workers.rs:228-234`, `reconcile/tools.rs` | `tools.holder` from `welcome.holder`. `tools.herdr` goes away |
 | `tiller doctor` herdr check | `cli/cmd/doctor.rs:65-82` | A `holder` check: the socket answers, the proto matches, and the holder version equals the daemon's (a warning when it differs, since an upgrade is due) |
