@@ -16,7 +16,7 @@ const MISSING: MergeAppHealth = {
   status: "missing",
   app_id: null,
   detail:
-    "Create the merge App and put its app-id and private-key.pem in /home/user/.tiller/forge-app.",
+    "Create the merge App and put its app-id and private-key.pem in /home/user/.tiller/forge-app (docs/plan/merge-app-setup.md). Until then every project runs as detect.",
 };
 
 const EXPOSED: MergeAppHealth = {
@@ -275,6 +275,62 @@ test("a key file Tiller cannot use gets only the key lines", () => {
   ]);
 });
 
+// The daemon's wording around the folder, as `merge_app_health` writes it.
+const warnOn = (path: string, why: string): MergeAppHealth => ({
+  status: "warn",
+  app_id: null,
+  detail: `the merge App key is not used, so every project runs as detect: ${path}: ${why}`,
+});
+
+function firstLine(app: MergeAppHealth): string | undefined {
+  cleanup();
+  renderSection(app);
+  fireEvent.click(screen.getByRole("button", { name: "Show commands" }));
+  return commandLines()[0];
+}
+
+test("the folder is the daemon's App folder, with a space or an earlier forge-app in it", () => {
+  serve(report([]));
+  expect(
+    firstLine(warnOn("/home/user name/.tiller/forge-app/app-id", "not a numeric App id")),
+  ).toBe("dir='/home/user name/.tiller/forge-app'");
+  expect(
+    firstLine(
+      warnOn("/srv/forge-app/tiller/forge-app/private-key.pem", "not a PEM RSA private key"),
+    ),
+  ).toBe("dir='/srv/forge-app/tiller/forge-app'");
+  // A relative home gives no absolute folder, so the board falls back.
+  expect(firstLine(warnOn("home/.tiller/forge-app/app-id", "not a numeric App id"))).toBe(
+    'dir="${TILLER_HOME:-$HOME/.tiller}/forge-app"',
+  );
+});
+
+test("a file Tiller cannot open gets a look at the folder, and step 1 cannot tell", () => {
+  serve(report([]));
+  renderSection(
+    warnOn("/home/user/.tiller/forge-app/private-key.pem", "Permission denied (os error 13)"),
+  );
+  const app = screen.getByTestId("merge-step-app");
+  expect(app.getAttribute("data-tone")).toBe("amber");
+  expect(app.textContent).toContain("cannot tell whether the App exists");
+  fireEvent.click(screen.getByRole("button", { name: "Show commands" }));
+  expect(commandLines()).toEqual(["dir='/home/user/.tiller/forge-app'", 'ls -la "$dir"']);
+  expect(screen.getByText(/^Tiller cannot open the file/)).toBeTruthy();
+});
+
+test("an app-id file that is not there gets its line, and the App exists", () => {
+  serve(report([]));
+  renderSection(
+    warnOn("/home/user/.tiller/forge-app/app-id", "No such file or directory (os error 2)"),
+  );
+  expect(screen.getByTestId("merge-step-app").getAttribute("data-tone")).toBe("green");
+  fireEvent.click(screen.getByRole("button", { name: "Show commands" }));
+  expect(commandLines()).toEqual([
+    "dir='/home/user/.tiller/forge-app'",
+    'echo <APP_ID> > "$dir/app-id"',
+  ]);
+});
+
 test("a detail that names no folder falls back to $TILLER_HOME, and says so", () => {
   serve(report([]));
   renderSection({ status: "missing", app_id: null, detail: "no merge App key" });
@@ -289,7 +345,7 @@ test("a folder with a quote in it stays one shell word", () => {
     status: "fail",
     app_id: null,
     detail:
-      "the merge App key is not used: /home/user/o'brien/forge-app/private-key.pem is readable",
+      "the merge App key is not used, so every project runs as detect: /home/user/o'brien/forge-app/private-key.pem is readable by group or others (mode 644); run chmod 600 on it",
   });
   fireEvent.click(screen.getByRole("button", { name: "Show commands" }));
   expect(commandLines()[0]).toBe("dir='/home/user/o'\\''brien/forge-app'");

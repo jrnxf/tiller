@@ -38,19 +38,52 @@ const SET_KEY = [
 ];
 const SETUP = ['mkdir -p "$dir"', 'chmod 700 "$dir"', SET_ID, ...SET_KEY];
 const PRIVATE = ['chmod 600 "$dir/private-key.pem"'];
+const LOOK = ['ls -la "$dir"'];
 
 const HOME_NOTE =
   "The commands use $TILLER_HOME when your shell sets it, and the default ~/.tiller when it does not. Check that it is the home the daemon uses.";
 const PLACEHOLDER_NOTE =
-  "Replace <APP_ID> with your App ID and <DOWNLOADED_KEY.pem> with the full path of the key GitHub downloaded. Until you do, those lines fail and change nothing.";
+  "Replace <APP_ID> with your App ID, and <DOWNLOADED_KEY.pem> with the full path of the key GitHub downloaded, starting with / or $HOME (a ~ does not expand inside the quotes). Until you do, those lines fail and change nothing.";
 const ROTATE_NOTE =
   "If anyone else could have read the key, rotate it: on GitHub, Settings, Developer settings, GitHub Apps, open the App, generate a new key, replace private-key.pem (mode 600), then delete the old key.";
+const ACCESS_NOTE =
+  "Tiller cannot open the file, so writing it again would not help. Check its owner and mode: it must be yours, and the key must be a file with mode 600.";
 
-// The App folder the daemon names in health's detail, or null when the
-// detail names none (a path with a space, or a daemon that words it
-// otherwise).
-function appDir(detail: string): string | null {
-  return /(\/\S*?\/forge-app)(?=$|[/\s.)])/.exec(detail)?.[1] ?? null;
+// What health's detail says, read from the daemon's own wording
+// (`merge_app_health` and `KeyError`): the App folder, and on a `warn` the
+// file Tiller cannot use and why. A folder is read only when it is absolute
+// and the wording is known; anything else is null, and the board falls
+// back to `$TILLER_HOME`.
+interface KeyDetail {
+  dir: string | null;
+  file: "app-id" | "key" | null;
+  why: string | null;
+}
+
+function readDetail(detail: string): KeyDetail {
+  const error =
+    /detect: (\/.*\/forge-app)\/(app-id|private-key\.pem)(?:: (.*)| is readable by group or others)/.exec(
+      detail,
+    );
+  if (error) {
+    return {
+      dir: error[1] ?? null,
+      file: error[2] === "app-id" ? "app-id" : "key",
+      why: error[3] ?? null,
+    };
+  }
+  const named = / in (\/.*\/forge-app)(?: \(|$)/.exec(detail);
+  return { dir: named?.[1] ?? null, file: null, why: null };
+}
+
+// Whether a key file is on the host, so the App exists: an exposed key, an
+// `app-id` problem (Tiller reads it only after the key file passes), or a
+// key file whose contents are not a key.
+function keyOnHost(app: MergeAppHealth): boolean {
+  if (app.status === "ok" || app.status === "fail") return true;
+  if (app.status !== "warn") return false;
+  const { file, why } = readDetail(app.detail);
+  return file === "app-id" || (file === "key" && /^not a (PEM|usable)/.test(why ?? ""));
 }
 
 // One shell word, quoted as it is.
@@ -58,18 +91,21 @@ const quoted = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
 
 // What the owner runs for each key status, and what to read first. An
 // exposed key needs only its mode. A `warn` names the file Tiller cannot
-// use: the `app-id` file, or the key file.
+// use: an `app-id` that is missing or not a number gets its line, a key
+// that is not a key gets the key lines, and a file Tiller cannot open gets
+// a look at the folder, since writing it again would not help.
 function keyFix(app: MergeAppHealth): { lines: string[]; notes: string[] } {
-  const dir = appDir(app.detail);
+  const { dir, file, why } = readDetail(app.detail);
   const head = dir ? [`dir=${quoted(dir)}`] : ['dir="${TILLER_HOME:-$HOME/.tiller}/forge-app"'];
   const home = dir ? [] : [HOME_NOTE];
   if (app.status === "fail") return { lines: [...head, ...PRIVATE], notes: [...home, ROTATE_NOTE] };
   const notes = [...home, PLACEHOLDER_NOTE];
-  if (app.status === "warn" && app.detail.includes("/app-id: ")) {
-    return { lines: [...head, SET_ID], notes };
-  }
-  if (app.status === "warn") return { lines: [...head, ...SET_KEY], notes };
-  return { lines: [...head, ...SETUP], notes };
+  if (app.status !== "warn") return { lines: [...head, ...SETUP], notes };
+  const blocked = why !== null && (/os error/.test(why) || why === "not a file");
+  const absent = why !== null && /os error 2\)/.test(why);
+  if (file === "app-id" && (absent || !blocked)) return { lines: [...head, SET_ID], notes };
+  if (file === "key" && !blocked) return { lines: [...head, ...SET_KEY], notes };
+  return { lines: [...head, ...LOOK], notes: [...home, ACCESS_NOTE] };
 }
 
 const STATUS_TEXT: Record<MergeAppHealth["status"], string> = {
@@ -79,9 +115,11 @@ const STATUS_TEXT: Record<MergeAppHealth["status"], string> = {
   fail: "Key exposed",
 };
 
+const PLACE = "Place the key and the App ID";
+
 const KEY_TITLE: Record<MergeAppHealth["status"], string> = {
-  ok: "Place the key and the App ID",
-  missing: "Place the key and the App ID",
+  ok: PLACE,
+  missing: PLACE,
   warn: "Fix the key or the App ID",
   fail: "Make the key private",
 };
@@ -131,10 +169,11 @@ function Step({
   );
 }
 
-// Step 1 of the doc. Health sees only the key, and any key on the host,
-// usable or not, means the App exists.
+// Step 1 of the doc. Health sees only the key, and a key file on the host,
+// usable or not, means the App exists. When Tiller cannot even open the
+// folder or the file, it cannot tell.
 function AppStep({ app, host }: { app: MergeAppHealth; host: string | null }) {
-  const missing = app.status === "missing";
+  const missing = !keyOnHost(app);
   const tone = app.status === "ok" ? "ok" : app.status === "fail" ? "fail" : "missing";
   return (
     <HostCardSection
@@ -152,7 +191,7 @@ function AppStep({ app, host }: { app: MergeAppHealth; host: string | null }) {
           title="Create the App"
           detail={
             missing
-              ? "Name it tiller-merge. Give it Contents, Pull requests and Workflows read and write, Checks read-only, and no webhook."
+              ? `${app.status === "warn" ? "Tiller cannot open the key, so it cannot tell whether the App exists. If it does not: " : ""}Name it tiller-merge. Give it Contents, Pull requests and Workflows read and write, Checks read-only, and no webhook.`
               : app.status === "ok" && app.app_id !== null
                 ? `App ${app.app_id} has its key on this host.`
                 : "A key for the App is on this host."
@@ -169,7 +208,7 @@ function AppStep({ app, host }: { app: MergeAppHealth; host: string | null }) {
 function KeyStep({ app, host }: { app: MergeAppHealth; host: string | null }) {
   const [shown, setShown] = useState(false);
   const ready = app.status === "ok";
-  const fix = keyFix(app);
+  const fix = shown && !ready ? keyFix(app) : null;
   const last = app.status === "missing" ? " Do this last, after each repo's ruleset exists." : "";
   return (
     <HostCardSection title={`The key on ${host ?? "this host"}`}>
@@ -194,7 +233,7 @@ function KeyStep({ app, host }: { app: MergeAppHealth; host: string | null }) {
             </button>
           }
           extra={
-            shown && !ready ? (
+            fix ? (
               <div className="set-line-x">
                 {fix.notes.map((note) => (
                   <p key={note}>{note}</p>
