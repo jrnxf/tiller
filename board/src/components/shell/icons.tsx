@@ -277,3 +277,20 @@ export const WarnIcon = () => (
     />
   </svg>
 );
+
+export const UnlinkIcon = () => (
+  <Icon>
+    <path
+      d="M6.5 9.5 4.8 11.2a2 2 0 0 1-2.8-2.8L3.7 6.7M9.5 6.5l1.7-1.7a2 2 0 0 1 2.8 2.8l-1.7 1.7M3 3l2 2M13 13l-2-2"
+      strokeLinecap="round"
+      {...stroke}
+    />
+  </Icon>
+);
+
+export const KeyIcon = () => (
+  <Icon>
+    <circle cx="5.5" cy="10.5" r="2.8" {...stroke} />
+    <path d="m7.5 8.5 5.5-5.5M11 5l1.6 1.6M9.6 6.4l1.2 1.2" strokeLinecap="round" {...stroke} />
+  </Icon>
+);

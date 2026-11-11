@@ -839,7 +839,7 @@ pub(crate) fn key(idempotency_key: &str) -> Result<String, ApiError> {
 }
 
 /// One mutation on the blocking pool with the board's actor and the key.
-async fn mutate(
+pub(crate) async fn mutate(
     state: &AppState,
     key: String,
     mutation: impl FnOnce(&mut Store, &Ctx, &str) -> tiller_core::Result<Done> + Send + 'static,
@@ -870,7 +870,7 @@ async fn mutate(
 }
 
 /// What a mutation hands back to [`mutate`].
-struct Done {
+pub(crate) struct Done {
     data: Value,
     events: Vec<i64>,
     replayed: bool,
@@ -880,7 +880,7 @@ struct Done {
 }
 
 impl Done {
-    fn of<T: Serialize>(applied: Applied<T>) -> tiller_core::Result<Self> {
+    pub(crate) fn of<T: Serialize>(applied: Applied<T>) -> tiller_core::Result<Self> {
         Ok(Self {
             data: serde_json::to_value(&applied.value)?,
             events: applied.events,
@@ -975,7 +975,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/start-settings", get(start_settings))
         .route("/api/v1/host-config", get(host_config_read))
         .route("/api/v1/config", post(set_config))
-        .route("/api/v1/peers", post(add_peer))
+        .route("/api/v1/peers", get(crate::pairings::list).post(add_peer))
+        .route(
+            "/api/v1/peers/{label}",
+            axum::routing::delete(crate::pairings::unpair),
+        )
+        .route(
+            "/api/v1/peer-keys/{id}",
+            axum::routing::delete(crate::pairings::revoke),
+        )
         .route("/api/v1/host", get(host_fields).patch(edit_host))
         .route(
             "/api/v1/backups",
@@ -5403,7 +5411,8 @@ async fn app_shell(
         project_grants, create_grant, revoke_grant,
         away_start, away_edit, away_end, away_brief, host_fields, edit_host, crate::backups::list, crate::backups::take, pick_bug_project, recap, mark_recap_seen, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, memory::repropose, memory::eval::eval_plan,
-        memory::eval::eval_start, crate::retros::list_retros, crate::retros::run_retro, session, login_code, logout
+        memory::eval::eval_start, crate::retros::list_retros, crate::retros::run_retro,
+        crate::pairings::list, crate::pairings::unpair, crate::pairings::revoke, session, login_code, logout
     ),
     components(schemas(ChangeEvent, ResetEvent, PeerEvent, LinkEvent, PeerResetEvent, TerminalLine, ErrorBody, ErrorDetail)),
     tags(
@@ -5441,7 +5450,7 @@ pub(crate) mod tests {
     struct Missing;
 
     const PORT: u16 = 7421;
-    const HOST: &str = "127.0.0.1:7421";
+    pub(crate) const HOST: &str = "127.0.0.1:7421";
 
     fn app(home: &std::path::Path, assets: Assets) -> Router {
         app_with(home, assets, Damage::default())
@@ -7975,7 +7984,7 @@ pub(crate) mod tests {
         mutation("POST", "/api/v1/peers", body, &headers)
     }
 
-    fn error_of(answer: &Answer) -> Value {
+    pub(crate) fn error_of(answer: &Answer) -> Value {
         let body: Value = serde_json::from_str(&answer.body).unwrap();
         body["error"].clone()
     }

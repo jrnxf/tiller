@@ -3952,7 +3952,111 @@
         }
       }
     },
+    "/api/v1/peer-keys/{id}": {
+      "delete": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "revoke",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The accepted key's id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairingEnd"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the revoked key; revoking a revoked key returns it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/peers": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PeerList"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": [
           "mutations"
@@ -4019,6 +4123,84 @@
           },
           "503": {
             "description": "`peer_unreachable`: ssh did not reach the new host, or it gave no answer in 30 s",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/peers/{label}": {
+      "delete": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "unpair",
+        "parameters": [
+          {
+            "name": "label",
+            "in": "path",
+            "description": "The paired host's label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairingEnd"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the host row, no longer paired; a host not paired is a no-op",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
             "content": {
               "application/json": {
                 "schema": {
@@ -5408,6 +5590,52 @@
   },
   "components": {
     "schemas": {
+      "AcceptedKey": {
+        "type": "object",
+        "description": "A board whose key this host accepted: `tiller peer list`'s `accepted`.",
+        "required": [
+          "id",
+          "viewer_label",
+          "viewer_host_id",
+          "scope",
+          "fingerprint",
+          "accepted_at",
+          "rev"
+        ],
+        "properties": {
+          "accepted_at": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "rev": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "revoked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set once the key is revoked; a revoked key never comes back."
+          },
+          "scope": {
+            "type": "string",
+            "description": "`read` or `act`."
+          },
+          "viewer_host_id": {
+            "type": "string",
+            "description": "The board host's `meta.host_id`."
+          },
+          "viewer_label": {
+            "type": "string"
+          }
+        }
+      },
       "AddPeer": {
         "type": "object",
         "description": "`POST /api/v1/peers`: Add a host in Settings pairs this host with another\none, as `tiller peer add` does (`protocol.md` 10.1, From the board).",
@@ -9345,6 +9573,57 @@
         ],
         "description": "An owner-only change an option applies when the owner picks it\n(`state.md`, Attention)."
       },
+      "PairedPeer": {
+        "type": "object",
+        "description": "A host this board is paired with: `tiller peer list`'s `peers`.",
+        "required": [
+          "label",
+          "scope"
+        ],
+        "properties": {
+          "fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`SHA256:` and the base64 SHA-256 of the public key this board signs\nwith; `None` when the key file is missing or does not parse."
+          },
+          "label": {
+            "type": "string"
+          },
+          "peer_host_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The peer's `meta.host_id`."
+          },
+          "scope": {
+            "type": "string",
+            "description": "`read` or `act`."
+          }
+        }
+      },
+      "PairingEnd": {
+        "type": "object",
+        "description": "`DELETE /api/v1/peers/{label}` and `DELETE /api/v1/peer-keys/{id}`.",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Refused unless absent or this host: a pairing is never forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "PauseBody": {
         "type": "object",
         "description": "`POST /api/v1/agents/{session}/pause`: `tiller run pause` on the\nsession's run.",
@@ -9427,6 +9706,30 @@
           },
           "host_id": {
             "type": "string"
+          }
+        }
+      },
+      "PeerList": {
+        "type": "object",
+        "description": "`GET /api/v1/peers`.",
+        "required": [
+          "paired",
+          "accepted"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AcceptedKey"
+            },
+            "description": "Oldest first, revoked keys too."
+          },
+          "paired": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PairedPeer"
+            },
+            "description": "By label."
           }
         }
       },

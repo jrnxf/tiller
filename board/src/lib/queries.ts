@@ -5,6 +5,7 @@ import type {
   AwayBriefResponse,
   AttentionResponse,
   BackupList,
+  PeerList,
   BoardFilter,
   BoardResponse,
   CardDetail,
@@ -170,6 +171,11 @@ export const hostFieldsQuery = () =>
 export const backupsPath: QueryPath = "/api/v1/backups";
 export const backupsQuery = () =>
   queryOptions({ ...readQuery<BackupList>(backupsPath), staleTime: 0 });
+
+// Both ends of this host's links: the hosts this board paired with and the
+// boards whose keys this host accepted. The owner's.
+export const peersPath: QueryPath = "/api/v1/peers";
+export const peersQuery = () => queryOptions({ ...readQuery<PeerList>(peersPath), staleTime: 0 });
 
 export const signalsPath: QueryPath = "/api/v1/signals";
 export const signalsQuery = () => readQuery<SignalsResponse>(signalsPath);

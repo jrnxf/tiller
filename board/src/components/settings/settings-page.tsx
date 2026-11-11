@@ -30,6 +30,7 @@ import { HostChecks } from "./host-checks";
 import { HostConfigSections } from "./host-config-sections";
 import { HostEdit } from "./host-edit";
 import { MergeAppSection } from "./merge-app";
+import { BoardsReach, PeerLink } from "./peer-link";
 import { SettingField } from "./setting-field";
 import "./settings.css";
 
@@ -208,6 +209,7 @@ function HostRow({
                 owner={owner}
               />
               {local ? <HostEdit owner={owner} peers={peers} /> : null}
+              {!local && owner ? <PeerLink machine={machine} board={board.label} /> : null}
             </HostCard>
           </td>
         </tr>
@@ -512,6 +514,7 @@ export function SettingsPage() {
       {health ? (
         <Hosts machines={machines} health={health} owner={session?.owner ?? false} />
       ) : null}
+      {session?.owner ? <BoardsReach board={host ?? "this host"} /> : null}
       {session?.owner ? <Backups host={host} /> : null}
       {startSettings ? (
         <StartSettingsSection

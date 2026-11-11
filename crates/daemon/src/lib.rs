@@ -9,6 +9,7 @@ pub mod forge;
 pub mod memory;
 pub mod mirror;
 pub mod owner;
+pub mod pairings;
 pub mod peer;
 pub mod prompt;
 pub mod quota;

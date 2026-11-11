@@ -143,6 +143,22 @@ impl Store {
         })
     }
 
+    /// Revokes the accepted key with this id, and only that key: the board
+    /// names a row, so a label never stands in for it. `NotFound` when no
+    /// key has the id; revoking a revoked key returns it.
+    pub fn peer_revoke_key(&mut self, ctx: &Ctx, id: &str) -> Result<Applied<PeerKey>> {
+        require_owner(&ctx.actor, "peer.revoke")?;
+        required("id", id)?;
+        self.write(ctx, "peer.revoke", None, |tx| {
+            let key: PeerKey = get(tx.conn(), "peer key", id)?;
+            if key.revoked_at.is_some() {
+                return Ok(key);
+            }
+            revoke(tx, &key, "owner")?;
+            get(tx.conn(), "peer key", &key.id)
+        })
+    }
+
     /// `peer.pair`, on the board host, after the peer accepted and the key
     /// file was written: marks the host row paired, adding it when the label
     /// is new. A label paired to another peer is refused; `tiller peer
@@ -609,6 +625,17 @@ pub fn remove_key_file(path: &Path) -> Result<()> {
     }
 }
 
+/// `tiller peer remove` and the board's Unpair, one path for both:
+/// `peer.remove`, then the key file, after the commit (`state.md` section 8).
+/// A crash between the two leaves a key file for an unpaired label, which the
+/// next `peer add` replaces.
+pub fn unpair(store: &mut Store, ctx: &Ctx, home: &Path, label: &str) -> Result<Applied<Host>> {
+    check_label(label)?;
+    let applied = store.peer_remove(ctx, label)?;
+    remove_key_file(&key_path(home, label)?)?;
+    Ok(applied)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -991,6 +1018,45 @@ mod tests {
         store
             .peer_pair(&owner(), pairing("host-b", "01JC00000000000000000PEER2"))
             .unwrap();
+    }
+
+    #[test]
+    fn unpair_clears_the_row_then_deletes_the_key_file() {
+        let mut store = store();
+        let home = tempfile::tempdir().unwrap();
+        store
+            .peer_pair(&owner(), pairing("host-b", PEER_HOST))
+            .unwrap();
+        let path = key_path(home.path(), "host-b").unwrap();
+        let key = generate_key().unwrap();
+        write_key_file(&path, &KeyFile::new("host-b", PeerScope::Act, &key)).unwrap();
+
+        let ctx = session(&store);
+        assert_eq!(
+            unpair(&mut store, &ctx, home.path(), "host-b")
+                .unwrap_err()
+                .code(),
+            "forbidden"
+        );
+        assert!(path.exists(), "a refused unpair keeps the key file");
+
+        let removed = unpair(&mut store, &owner(), home.path(), "host-b").unwrap();
+        assert_eq!(kinds(&store, &removed.events), ["host.edited"]);
+        assert_eq!(removed.value.peer_scope, None);
+        assert!(!path.exists(), "the key file goes after the commit");
+
+        // Again: a natural no-op, and the missing key file is fine.
+        assert!(
+            unpair(&mut store, &owner(), home.path(), "host-b")
+                .unwrap()
+                .replayed
+        );
+        assert_eq!(
+            unpair(&mut store, &owner(), home.path(), "-x")
+                .unwrap_err()
+                .code(),
+            "usage"
+        );
     }
 
     #[test]

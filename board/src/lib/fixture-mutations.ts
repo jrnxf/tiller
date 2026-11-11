@@ -41,6 +41,7 @@ import {
   startSettingsFor,
 } from "./fixture-settings.ts";
 import { backupsFor, takeBackup } from "./fixtures-backups.ts";
+import { anyUnpaired, peerLinkMutation, peersFor, withoutUnpaired } from "./fixtures-peers.ts";
 import { recapFor } from "./fixtures-recap.ts";
 import {
   agentsPath,
@@ -351,7 +352,7 @@ function editProject(id: string, body: Record<string, unknown>): MutationResult 
 // deleted or archived project's own previews are gone (a 404).
 export function withoutDeleted(path: string, body: unknown, scenario: Scenario): unknown {
   const pathname = new URL(path, "http://localhost").pathname;
-  const triaged = withTriage(pathname, body, scenario);
+  const triaged = withUnpaired(pathname, withTriage(pathname, body, scenario));
   if (triaged !== body) return triaged;
   const depended = withDeps(pathname, body, scenario);
   if (depended !== body) return depended;
@@ -362,6 +363,7 @@ export function withoutDeleted(path: string, body: unknown, scenario: Scenario):
   if (pathname === "/api/v1/host-config") return hostConfigFor();
   if (pathname === "/api/v1/host") return hostFieldsFor(scenario);
   if (pathname === "/api/v1/backups") return backupsFor(scenario);
+  if (pathname === "/api/v1/peers") return peersFor(scenario);
   const setup = /^\/api\/v1\/projects\/([^/]+)\/setup$/.exec(pathname);
   if (setup?.[1] && (body !== undefined || !gone(setup[1]))) {
     const saved = edited.get(setup[1]);
@@ -568,6 +570,8 @@ function forwarded(
   if (
     /\/(stage|focus|label|delete|retire|bug-project|deps|grants)$/.test(path) ||
     path.startsWith("/api/v1/grants/") ||
+    path.startsWith("/api/v1/peers/") ||
+    path.startsWith("/api/v1/peer-keys/") ||
     path === projectsPath ||
     (method === "PATCH" && /^\/api\/v1\/projects\/[^/]+$/.test(path)) ||
     /\/memory\//.test(path) ||
@@ -719,7 +723,10 @@ function editHost(body: Record<string, unknown>, scenario: Scenario): MutationRe
       );
     }
     const { machines } = fixtureResponses(scenario)[machinesPath] as { machines: Machine[] };
-    const paired = machines.filter((machine) => machine.peer_scope).map((machine) => machine.label);
+    const paired = machines
+      .map(withoutUnpaired)
+      .filter((machine) => machine.peer_scope)
+      .map((machine) => machine.label);
     paired.sort();
     if (paired.length > 0) {
       return refusal(
@@ -770,6 +777,56 @@ function editHost(body: Record<string, unknown>, scenario: Scenario): MutationRe
     rev: fields.rev + 1,
   };
   return { reply: recorded(host, null, null), followUps: [hostEdited(scenario, fields.id)] };
+}
+
+// The machines read after an Unpair: that host is no longer a peer.
+function withUnpaired(pathname: string, body: unknown): unknown {
+  if (pathname !== machinesPath || !body || !anyUnpaired()) return body;
+  const { machines } = body as { machines: Machine[] };
+  return { machines: machines.map(withoutUnpaired) };
+}
+
+// Unpair and Revoke key, with the event each commits: `host.edited` on the
+// unpaired host's row, `peer.revoked` on the key.
+function linkMutation(method: string, path: string, scenario: Scenario): MutationResult | null {
+  const reply = peerLinkMutation(method, path, scenario);
+  if (!reply) return null;
+  if (!reply.ok) return refusal(reply.status, reply.code, reply.message);
+  if (reply.kind === "revoke") {
+    const key = reply.data;
+    const event = {
+      kind: "peer.revoked",
+      txn: "peer.revoke",
+      entity: "peer_key",
+      entity_id: key.id,
+      rev_after: key.rev,
+      card_id: null,
+      entity_state: key,
+    };
+    return { reply: recorded(key, null, null), followUps: [{ delayMs: 100, event }] };
+  }
+  const { machines } = fixtureResponses(scenario)[machinesPath] as { machines: Machine[] };
+  const row = machines.find((machine) => machine.label === reply.label);
+  if (!row) return refusal(404, "not_found", `no host ${reply.label}`);
+  const host = withoutUnpaired(row);
+  // A host not paired is a no-op: its row as it is, and no event.
+  const followUps: FollowUp[] = reply.changed
+    ? [
+        {
+          delayMs: 100,
+          event: {
+            kind: "host.edited",
+            txn: "peer.remove",
+            entity: "host",
+            entity_id: row.id,
+            rev_after: row.rev + 1,
+            card_id: null,
+            entity_state: host,
+          },
+        },
+      ]
+    : [];
+  return { reply: recorded(host, null, null), followUps };
 }
 
 function cardEvent(kind: string, txn: string, row: BoardRow): FollowUp {
@@ -1106,6 +1163,8 @@ function handle(
   if (method === "POST" && path === "/api/v1/backups") {
     return { reply: recorded(takeBackup(), null, null), followUps: [] };
   }
+  const link = linkMutation(method, path, scenario);
+  if (link) return link;
   if (method === "POST" && path === "/api/v1/cards" && body.category === "tiller-bug") {
     return createBug(body);
   }

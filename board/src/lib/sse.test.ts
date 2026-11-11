@@ -18,6 +18,7 @@ import {
   attentionPath,
   boardPath,
   machinesPath,
+  peersPath,
   projectsPath,
   queryKeyFor,
   quotaPath,
@@ -781,6 +782,42 @@ test("a config event refetches the open Settings read without a reload", async (
   await vi.waitFor(() => {
     expect(observer.getCurrentResult().data).toEqual({ pool_root: "/home/user/pool" });
   });
+  unsubscribe();
+});
+
+test("only a pairing change on a host row refetches the peer list", async () => {
+  const queryClient = seededClient();
+  const read = vi.fn(async () => ({ paired: [], accepted: [] }));
+  const observer = new QueryObserver(queryClient, {
+    queryKey: queryKeyFor(peersPath),
+    queryFn: read,
+    staleTime: Infinity,
+  });
+  const unsubscribe = observer.subscribe(() => {});
+  await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+  const machine = queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath))
+    ?.machines[0];
+  if (!machine) throw new Error("fixture has no machine");
+  const edit = (txn: string) =>
+    applyChange(
+      queryClient,
+      event({
+        kind: "host.edited",
+        txn,
+        entity: "host",
+        entity_id: machine.id,
+        entity_state: machine,
+      }),
+    );
+
+  edit("peer.hello");
+  edit("host.edit");
+  await Promise.resolve();
+  expect(read).toHaveBeenCalledTimes(1);
+  edit("peer.remove");
+  await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  edit("peer.pair");
+  await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(3));
   unsubscribe();
 });
 

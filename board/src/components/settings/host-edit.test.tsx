@@ -261,7 +261,7 @@ test("paired peers keep the label: it says to unpair first", async () => {
   const identity = section(card, "Label and boundary");
   expect(within(identity).getByLabelText<HTMLInputElement>("Label").disabled).toBe(true);
   expect(identity.textContent).toMatch(
-    /know this host by this label\. Unpair first to rename it\./,
+    /know this host by this label\. Unpair each in its own host card to rename it\./,
   );
 });
 

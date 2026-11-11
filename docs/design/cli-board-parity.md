@@ -48,7 +48,7 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 | Pick the bug project | Full: `host edit --bug-project`, `--no-bug-project` | Full | |
 | Host lanes, floors, label and boundary | Full: `host edit` | Full | The board edits this host only, in its Settings > Hosts card, with the floors in GB. Both refuse a rename while a peer is paired and a boundary change once anything records the boundary. |
 | File a Tiller bug | Full: `bug file` | No | The board closes or moves a triage card, but does not file one. |
-| Peers | Full: `peer add`, `accept`, `list`, `remove`, `revoke`, `serve`, `pane` | Part | The board adds a host. |
+| Peers | Full: `peer add`, `accept`, `list`, `remove`, `revoke`, `serve`, `pane` | Part | The board adds a host, lists both ends of each link, unpairs a host (`remove`) and revokes a board's key (`revoke`). Accept, serve and pane stay in the CLI. |
 | Memory | Full: `mem note`, `propose`, `approve`, `retro`, `learn` | Part | The board edits, decides (Keep or Discard) and shows revisions. |
 | Read the fleet | Full: board, agents, machines, quota, health, events, snapshot | Full | |
 | Owner marker | Full: `owner set`, `owner show` | No | While the marker names another system, both surfaces refuse every mutation with `owner_marker` (exit 6, HTTP 403). The check is in the store, so they share it (`recovery.md` R20). The board shows the refusal in the daemon's words. It has no read-only banner yet. |
@@ -80,4 +80,4 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 - **Project add stays narrower on the board.** The spec keeps `--checks`, `--remote`, `--default-branch` and the deploy flags on the CLI (state.md).
 - **Reason not recorded: actor `board` and `owner`.** Authority gives both the same rights. No doc says why they are separate actors.
 - **Reason not recorded: an empty body on edit.** The CLI clears the field. The API sets an empty string.
-- **Reason not recorded: CLI-only controls.** Dependencies, `land`, grants, `orchestrator start --restart`, peer management beyond add, and the memory undo route (the API has it, and no surface calls it).
+- **Reason not recorded: CLI-only controls.** Dependencies, `land`, grants, `orchestrator start --restart`, `peer accept`, `serve` and `pane`, and the memory undo route (the API has it, and no surface calls it).

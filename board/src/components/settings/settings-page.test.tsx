@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import type { DaemonHealth } from "../../lib/api-types";
 import { fixtureResource } from "../../lib/fixtures";
+import { peersFor } from "../../lib/fixtures-peers";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
 import { signedOutStore } from "../../lib/session";
 import { SettingsPage } from "./settings-page";
@@ -27,6 +28,9 @@ function serve(owner: boolean, logout: [number, unknown] = [200, { owner: false 
     }
     if (path === "/api/v1/health" || path === "/api/v1/machines") {
       return new Response(JSON.stringify(fixtureResource(path, "federated")));
+    }
+    if (path === "/api/v1/peers" && !init?.method) {
+      return new Response(JSON.stringify(peersFor("federated")));
     }
     return new Response("{}", { status: 404 });
   });
@@ -140,6 +144,40 @@ test("Settings lists every host in one table, this one a row like the others", a
   // No report: no version and no guess.
   expect(within(row("host-g")).getByText("Not reported")).toBeTruthy();
   expect(within(row("host-b")).getByText("herdr machine, no version to read")).toBeTruthy();
+});
+
+test("a paired host's card has its peer link, and the boards that reach this host follow Hosts", async () => {
+  serve(true);
+  renderSettings();
+  const panel = await screen.findByRole("region", { name: "Hosts" });
+  const row = await within(panel).findByTestId("host-host-d");
+  fireEvent.click(within(row).getByRole("button", { name: "host-d" }));
+  const card = await screen.findByTestId("host-card-host-d");
+  const link = await within(card).findByRole("region", { name: "Peer link" });
+  expect(within(link).getByRole("button", { name: "Unpair..." })).toBeTruthy();
+  // This host's own card has no peer link: it is not paired with itself.
+  fireEvent.click(within(panel).getByRole("button", { name: "host-a" }));
+  const own = await screen.findByTestId("host-card-host-a");
+  expect(within(own).queryByRole("region", { name: "Peer link" })).toBeNull();
+
+  const boards = await screen.findByRole("region", { name: "Boards that reach this host" });
+  const order = [...document.querySelectorAll(".settings-page > section")].map((section) =>
+    section.getAttribute("aria-label"),
+  );
+  expect(order.indexOf("Boards that reach this host")).toBe(order.indexOf("Hosts") + 1);
+  expect(within(boards).getByTestId("board-key-host-d")).toBeTruthy();
+});
+
+test("a browser that is not the owner sees no peer link and no boards list", async () => {
+  serve(false, undefined, false);
+  renderSettings();
+  const panel = await screen.findByRole("region", { name: "Hosts" });
+  const row = await within(panel).findByTestId("host-host-d");
+  fireEvent.click(within(row).getByRole("button", { name: "host-d" }));
+  const card = await screen.findByTestId("host-card-host-d");
+  expect(await within(card).findByText("Run on host-d")).toBeTruthy();
+  expect(within(card).queryByRole("region", { name: "Peer link" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "Boards that reach this host" })).toBeNull();
 });
 
 test("without the hosts list, the host serving this board still has its row", async () => {
@@ -257,7 +295,11 @@ test("Add a host opens a form that Pair arms only with a label and an alias, and
   fireEvent.click(within(form).getByRole("button", { name: "Cancel" }));
   expect(within(panel).queryByRole("form")).toBeNull();
   expect(within(panel).getByRole("button", { name: "Add a host" })).toBeTruthy();
-  expect(fetch).not.toHaveBeenCalledWith("/api/v1/peers", expect.anything());
+  expect(
+    fetch.mock.calls.some(
+      ([path, init]) => String(path) === "/api/v1/peers" && init?.method === "POST",
+    ),
+  ).toBe(false);
 });
 
 test("Pair sends the pairing, shows its progress, and lists the new host", async () => {
@@ -276,7 +318,9 @@ test("Pair sends the pairing, shows its progress, and lists the new host", async
   expect(within(form).getByRole<HTMLButtonElement>("button", { name: "Cancel" }).disabled).toBe(
     true,
   );
-  const call = fetch.mock.calls.find(([path]) => String(path) === "/api/v1/peers");
+  const call = fetch.mock.calls.find(
+    ([path, init]) => String(path) === "/api/v1/peers" && init?.method === "POST",
+  );
   const sent = JSON.parse(String(call?.[1]?.body)) as Record<string, unknown>;
   expect(sent).toEqual({
     label: "host-z",

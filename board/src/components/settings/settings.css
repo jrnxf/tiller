@@ -893,6 +893,20 @@
   font-size: var(--fs-mini);
 }
 
+/* A paired host's link, in its card: the facts under the head, then the
+   running agents and Unpair. */
+.set-facts.set-link-facts {
+  margin-top: 0;
+}
+
+.set-link-facts .mono {
+  font-family: var(--mono);
+}
+
+.set-link-facts .v {
+  white-space: nowrap;
+}
+
 .set-hfoot {
   display: flex;
   align-items: center;

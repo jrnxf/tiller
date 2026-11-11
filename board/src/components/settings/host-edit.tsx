@@ -436,7 +436,7 @@ function Identity({
   const save = () => (edit.boundary === undefined ? action.trigger() : setConfirming(true));
   const keep = useRef<HTMLButtonElement>(null);
   const labelHelp = paired
-    ? `${peers.join(", ")} ${peers.length === 1 ? "knows" : "know"} this host by this label. Unpair first to rename it.`
+    ? `${peers.join(", ")} ${peers.length === 1 ? "knows" : "know"} this host by this label. Unpair each in its own host card to rename it.`
     : labelBad
       ? "A letter or digit, then letters, digits, _ or -. At most 64."
       : "Peers and the board know this host by it.";

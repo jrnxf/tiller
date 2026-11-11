@@ -627,10 +627,7 @@ fn list(app: &App) -> Done {
 fn remove(app: &App, label: &str) -> Done {
     check_label(label)?;
     let mut store = app.write()?;
-    let applied = store.peer_remove(&app.ctx(), label)?;
-    // After the commit (`state.md` section 8): a crash before this leaves a
-    // key file for an unpaired label, which the next `peer add` replaces.
-    peers::remove_key_file(&peers::key_path(&app.home, label)?)?;
+    let applied = peers::unpair(&mut store, &app.ctx(), &app.home, label)?;
     Ok(Outcome::applied(applied))
 }
 

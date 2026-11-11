@@ -645,6 +645,35 @@ export interface BackupList {
   backups: BackupRow[];
 }
 
+// A host this board is paired with, in `GET /api/v1/peers`.
+export interface PairedPeer {
+  label: string;
+  peer_host_id: string | null;
+  scope: PeerScope;
+  // `SHA256:...` of the key this board signs with; null when its key file is
+  // missing or does not parse.
+  fingerprint: string | null;
+}
+
+// A board whose key this host accepted, in `GET /api/v1/peers`.
+export interface AcceptedKey {
+  id: string;
+  viewer_label: string;
+  viewer_host_id: string;
+  scope: PeerScope;
+  fingerprint: string;
+  accepted_at: string;
+  // Set once revoked; a revoked key never comes back.
+  revoked_at: string | null;
+  rev: number;
+}
+
+// `GET /api/v1/peers` (owner only): both ends of this host's links.
+export interface PeerList {
+  paired: PairedPeer[];
+  accepted: AcceptedKey[];
+}
+
 // GET /api/v1/host: the fields `tiller host edit` sets on this host, what it
 // holds and has free now, and the `rev` an edit is sent against.
 export interface HostFields {
