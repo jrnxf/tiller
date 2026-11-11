@@ -2979,6 +2979,91 @@ fn project_edit_refuses_a_gerrit_remote_unless_local_only() {
     assert!(error.to_string().contains("Gerrit"), "{error}");
 }
 
+/// The default branch is stored trimmed, on an add and on an edit, so a run
+/// never branches from ` main `.
+#[test]
+fn project_add_and_edit_store_the_default_branch_trimmed() {
+    let (mut store, _) = memory_store();
+    let mut new = project_input("kappa", None, Delivery::DirectPush);
+    new.default_branch = Some(" main ".into());
+    let added = store.project_add(&owner(), new.clone()).unwrap();
+    assert_eq!(added.value.default_branch, "main");
+    assert!(store.project_add(&owner(), new).unwrap().replayed);
+
+    let rev = store.project("kappa").unwrap().rev;
+    let edited = store
+        .project_edit(
+            &owner(),
+            "kappa",
+            rev,
+            ProjectEdit {
+                default_branch: Some(" trunk\t".into()),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(edited.value.default_branch, "trunk");
+    let error = store
+        .project_edit(
+            &owner(),
+            "kappa",
+            edited.value.rev,
+            ProjectEdit {
+                default_branch: Some("   ".into()),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::Usage(_)), "{error}");
+}
+
+/// An edit that changes the remote records the forge it found, as
+/// `project.added` does. An edit that leaves the remote and delivery alone
+/// records none.
+#[test]
+fn project_edit_records_the_forge_of_a_new_remote() {
+    let (mut store, _) = memory_store();
+    store
+        .project_add(&owner(), project_input("lambda", None, Delivery::DirectPr))
+        .unwrap();
+    let rev = store.project("lambda").unwrap().rev;
+    let edited = store
+        .project_edit(
+            &owner(),
+            "lambda",
+            rev,
+            ProjectEdit {
+                remote: Some(Some("https://github.com/example/lambda.git".into())),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap();
+    store
+        .project_edit(
+            &owner(),
+            "lambda",
+            edited.value.rev,
+            ProjectEdit {
+                name: Some("Lambda".into()),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap();
+    let events: Vec<String> = store
+        .conn()
+        .prepare(
+            "SELECT payload FROM events WHERE kind = 'project.edited' AND entity_id = ?1 ORDER BY seq",
+        )
+        .unwrap()
+        .query_map(["lambda"], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events[0].contains("\"forge\":\"github\""), "{}", events[0]);
+    assert!(!events[1].contains("\"forge\""), "{}", events[1]);
+}
+
 /// P16: an edit that sets a GitHub remote fills `repo` from it, as an add does.
 #[test]
 fn project_edit_reads_the_repo_from_a_github_remote() {

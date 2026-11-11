@@ -281,6 +281,15 @@ pub(crate) fn edit_project(
     edit: &ProjectEdit,
 ) -> Result<Project> {
     let project: Project = get(tx.conn(), "project", project_id)?;
+    // A run branches from the default branch, so it is stored trimmed.
+    let edit = &ProjectEdit {
+        default_branch: edit
+            .default_branch
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_owned),
+        ..edit.clone()
+    };
     let mut next = project.clone();
     let mut changed = serde_json::Map::new();
     let mut named = None;
@@ -326,6 +335,7 @@ pub(crate) fn edit_project(
     }
     required("project name", &next.name)?;
     required("default branch", &next.default_branch)?;
+    let mut forge = None;
     if changed.contains_key("remote") || changed.contains_key("delivery") {
         // The forge check of an add: the repo a GitHub remote names, and no
         // delivery mode Gerrit cannot run.
@@ -341,7 +351,12 @@ pub(crate) fn edit_project(
         };
         let rederive = changed.contains_key("remote") && edit.repo.is_none() && followed;
         let mut repo = if rederive { None } else { next.repo.clone() };
-        detect_forge(&next.id, next.remote.as_deref(), next.delivery, &mut repo)?;
+        forge = Some(detect_forge(
+            &next.id,
+            next.remote.as_deref(),
+            next.delivery,
+            &mut repo,
+        )?);
         // A repo that names the same GitHub repo in another case keeps the
         // case the owner chose.
         let same =
@@ -374,10 +389,16 @@ pub(crate) fn edit_project(
             tx.now(),
         ],
     )?;
+    // An edit that ran the forge check records the forge it found, as
+    // `project.added` does.
+    let mut payload = json!({"changed": changed, "expected_rev": expected_rev});
+    if let Some(forge) = forge {
+        payload["forge"] = json!(forge);
+    }
     tx.event(
         NewEvent::new("project", &project.id, "project.edited")
             .rev(project.rev + 1)
-            .payload(json!({"changed": changed, "expected_rev": expected_rev})),
+            .payload(payload),
     )?;
     if next.capacity > project.capacity {
         super::runs::note_slot_open(
@@ -692,10 +713,15 @@ impl Store {
             )));
         }
         required("project name", &new.name)?;
-        if let Some(branch) = &new.default_branch {
+        let mut new = new;
+        // A run branches from the default branch, so it is stored trimmed.
+        if let Some(branch) = &mut new.default_branch {
+            *branch = branch.trim().to_owned();
             required("default branch", branch)?;
         }
-        let (new, forge) = resolve_forge(new)?;
+        // Done before the write, so a replay of the same add compares
+        // against what was stored.
+        let forge = detect_forge(&new.id, new.remote.as_deref(), new.delivery, &mut new.repo)?;
         self.write(ctx, "project.add", None, |tx| {
             let host_id = local_host_id(tx.conn())?;
             if let Some(existing) = find::<Project>(tx.conn(), "id = ?1", &[&new.id])? {
@@ -821,20 +847,12 @@ fn check_plan(checks: &Value) -> Result<()> {
     CheckPlan::parse(checks).map(drop).map_err(Error::Usage)
 }
 
-/// Forge detection at `project.add` (P10): reads the remote URL, fills in
-/// `repo` from a GitHub remote when none was given, and refuses a delivery
-/// mode Tiller cannot run against a Gerrit remote. Returns the project to
-/// add and the forge's name for the `project.added` event. Done before the
-/// write so a replay of the same add compares against what was stored.
-fn resolve_forge(mut new: NewProject) -> Result<(NewProject, &'static str)> {
-    let forge = detect_forge(&new.id, new.remote.as_deref(), new.delivery, &mut new.repo)?;
-    Ok((new, forge))
-}
-
-/// The forge check `project.add` and `project.edit` share: fills `repo` from
-/// a GitHub remote when none is set, and refuses a delivery mode Tiller cannot
-/// run against a Gerrit remote. Returns the forge's name.
-fn detect_forge(
+/// The forge check (P10) that `project.add`, `project.edit` and
+/// `import.apply` share: fills `repo` from a GitHub remote when none is set,
+/// and refuses a delivery mode Tiller cannot run against a Gerrit remote.
+/// Returns the forge's name for the `project.added` or `project.edited`
+/// event.
+pub(crate) fn detect_forge(
     id: &str,
     remote: Option<&str>,
     delivery: Delivery,

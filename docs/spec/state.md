@@ -512,7 +512,7 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `peer.remove` | owner, on the board host (`tiller peer remove <label>`, or the board's `DELETE /api/v1/peers/{label}`, actor `board`) | `peer_scope` set | `hosts.peer_scope` and `peer_host_id` null (the row stays as a herdr machine); the key file is deleted after the commit, except on a replay of the same key; a delete that fails leaves the row committed, warns, and lists the label in `key_files_left` until a later call deletes it | `host.edited` |
 | `config.set` | owner | key known; value valid | the config file, outside `state.db` | `config.changed` |
 | `health.relabel` | owner, on this host only (`Actor::Peer` is refused; it is not in the forwarding allowlist) | the intervention exists; a label equal to the current one writes nothing | `intervention_labels` (set, or deleted when the label is cleared) | `intervention.relabeled` (`from`, `to`, `classified`, `cleared`) |
-| `import.apply` | `tiller import` | manifest valid; `meta.import_manifest_sha256` differs (a second import is a no-op) | every table, with `legacy_id` set | one `import.applied` plus the per-row events, all under `actor = import` |
+| `import.apply` | `tiller import` | manifest valid; `meta.import_manifest_sha256` differs (a second import is a no-op); each project it adds passes the forge check of `project.add` (a Gerrit remote takes only `local-only`), else the whole bundle is refused, naming the project | every table, with `legacy_id` set | one `import.applied` plus the per-row events, all under `actor = import` |
 
 ### Deleting a project
 

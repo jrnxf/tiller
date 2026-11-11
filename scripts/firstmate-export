@@ -401,6 +401,13 @@ function exportProjects({ opts, data, config, ask }) {
     if (registryRepo && fromGit && registryRepo.toLowerCase() !== fromGit.toLowerCase()) {
       ask('Projects', `${id}: data/projects.md names ${registryRepo} but the checkout's origin is ${fromGit}. Used ${registryRepo} (1: keep it, 2: use the checkout's).`)
     }
+    // Tiller's forge check (crates/core/src/domain/forge.rs): an ssh remote on
+    // port 29418 is Gerrit, which Tiller does not publish to, and the importer
+    // refuses any other delivery for it.
+    if (originUrl && delivery !== 'local-only' && /^ssh:\/\/[^/]*:29418(\/|$)/.test(originUrl.trim())) {
+      ask('Projects', `${id}: the checkout's origin is a Gerrit remote (SSH port 29418), which Tiller does not publish to, so delivery "${delivery}" became local-only (1: keep local-only, 2: point the checkout at another remote).`)
+      delivery = 'local-only'
+    }
     if (originUrl && !fromGit) {
       ask('Projects', `${id}: the checkout's origin is not a GitHub remote, so repo is null and its PRs will not link (1: leave it, 2: set repo by hand).`)
     }

@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 use crate::ids::{self, FLEET_PROJECT};
 use crate::limits;
 use crate::state::find;
-use crate::state::projects::{first_card_seq, meta};
+use crate::state::projects::{detect_forge, first_card_seq, meta};
 use crate::time::Timestamp;
 
 /// The git blob of an empty file: the base every legacy placement diff is
@@ -436,7 +436,11 @@ fn plan_projects(
                     .map_err(|error| Error::refused("project", legacy_id, error.to_string()))?,
                 p.repo.clone().filter(|r| !r.is_empty()),
                 p.remote.clone().filter(|r| !r.is_empty()),
-                p.default_branch.clone().filter(|b| !b.is_empty()),
+                p.default_branch
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|b| !b.is_empty())
+                    .map(str::to_owned),
                 p.capacity,
                 p.added.as_deref().map(bundle_time).transpose()?,
                 p.checks.clone().filter(|checks| !checks.is_null()),
@@ -455,6 +459,18 @@ fn plan_projects(
         if let Some(checks) = &checks {
             CheckPlan::parse(checks)
                 .map_err(|error| Error::refused("project", legacy_id, error))?;
+        }
+        // The forge check of `project.add`, on a project this import writes:
+        // a Gerrit remote takes only local-only. The repo it would fill in
+        // from a GitHub remote is not used: the bundle's repo is imported as
+        // it is.
+        if !exists {
+            detect_forge(legacy_id, remote.as_deref(), delivery, &mut repo.clone()).map_err(
+                |error| match error {
+                    Error::Usage(fact) => Error::refused("project", legacy_id, fact),
+                    other => other,
+                },
+            )?;
         }
         out.push(ProjectPlan {
             legacy_id: legacy_id.clone(),
