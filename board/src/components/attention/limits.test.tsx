@@ -62,7 +62,13 @@ afterEach(() => {
 const long = (limit: number) => "a".repeat(limit + 1);
 
 test("the limits count characters the way the daemon does", () => {
-  expect(LIMITS).toEqual({ cardTitle: 1000, cardBody: 100_000, comment: 20_000, answer: 20_000 });
+  expect(LIMITS).toEqual({
+    cardTitle: 1000,
+    cardBody: 100_000,
+    comment: 20_000,
+    answer: 20_000,
+    askNote: 8000,
+  });
   // One emoji is two UTF-16 units and one character.
   expect(charCount("\u{1F600}")).toBe(1);
   expect(isTooLong("\u{1F600}".repeat(1000), 1000)).toBe(false);

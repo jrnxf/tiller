@@ -18,16 +18,16 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 |---|---|---|---|
 | Create a card | Full: `card create` | Part | The board takes project, kind, title, priority, category and body. It has no size, acceptance, fixes or ask link. It also records a Board ask and notes the orchestrator. |
 | Edit a card | Full: `card edit` | Part | The board edits title, body and priority. An empty value clears a field on the CLI. The API sets an empty body to an empty string. |
-| Comment on a card | Full: `card comment` | Full | Both need a live orchestrator to read the comment. The API caps a comment at 20,000 characters. |
+| Comment on a card | Full: `card comment` | Full | Both need a live orchestrator to read the comment. Both cap a comment at 20,000 characters. |
 | Hold and release | Full: `card hold`, `card unhold` | Full | Both on the card page. The CLI accepts a date, a local datetime or RFC 3339. The board sends an instant it builds from a Lisbon date and time. |
 | Close a card | Full: `card close --outcome` | Part | The board Close dialog offers Done, Won't do and Duplicate, and always asks for a reason. |
 | Complete an ops card | Full: `card complete --evidence` | No | The board closes an ops card as Done, which uses the reason as evidence. |
 | Cancel and reopen | Full: `card cancel`, `card reopen` | Full | Both need a reason. |
 | Card dependencies | Full: `card dep add`, `card dep rm` | No | |
 | Read cards | Full: `card show`, `card list`, `card timeline` | Full | The card page and the lanes. |
-| Add a note to the orchestrator | Full: `ask note` | Full | The Ask dialog sends one note per mentioned project. The board caps a note at 8,000 characters. |
+| Add a note to the orchestrator | Full: `ask note` | Full | The Ask dialog sends one note per mentioned project. Both cap a note at 8,000 characters. |
 | Resolve, link and list asks | Full: `ask resolve`, `ask link`, `ask list`, `ask show` | No | These are orchestrator tools. |
-| Answer an attention item | Full: `attention answer` | Part | The CLI can cite a chat ask with `--ask`. The board answer has no ask citation. The API caps an answer at 20,000 characters. |
+| Answer an attention item | Full: `attention answer` | Part | The CLI can cite a chat ask with `--ask`. The board answer has no ask citation. Both cap a typed answer at 20,000 characters. An answer cited with `--ask` is the owner's recorded words and has no cap. |
 | Withdraw an attention item | Full: `attention withdraw` | Part | The board withdraws only stale items, with a fixed reason, and does not forward the call to a peer. |
 | Open and list attention | Full: `attention open`, `attention list` | Part | The board lists the items in the Inbox. `attention open` is an agent tool. |
 | Decide an approval | Full: `approve` | Full | An accept names the head commit. The CLI takes `--sha` and the board sends the head it shows. |
@@ -79,7 +79,6 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 - **The board sets few config keys.** It sets only the keys a start reads, as the fix flow in Settings "Starting agents".
 - **Project add stays narrower on the board.** The spec keeps `--checks`, `--remote`, `--default-branch` and the deploy flags on the CLI (state.md).
 - **Reason not recorded: actor `board` and `owner`.** Authority gives both the same rights. No doc says why they are separate actors.
-- **Reason not recorded: API length caps.** The API caps a title at 1,000, a body at 100,000, a comment or answer at 20,000 and an ask note at 8,000 characters. The CLI has no cap. The spec says only that the CLI has none.
 - **Reason not recorded: the owner marker.** The CLI refuses a write under a foreign marker with exit 6. The daemon's board path has no marker check of its own. It has the damage and read-only state.
 - **Reason not recorded: an empty body on edit.** The CLI clears the field. The API sets an empty string.
 - **Reason not recorded: CLI-only controls.** Dependencies, `land`, grants, `host edit`, `project edit`, `orchestrator start --restart`, peer management beyond add, and the memory undo route (the API has it, and no surface calls it).

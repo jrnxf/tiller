@@ -3,6 +3,7 @@
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 use tiller_core::domain::{AnsweredVia, Ask, AskSource, Attention, AttentionKind};
+use tiller_core::limits::{ANSWER_MAX_CHARS, within};
 use tiller_core::state::attention::{NewAttention, stale};
 use tiller_core::state::{get, list, resolve_id};
 
@@ -139,11 +140,11 @@ fn answer(app: &App, args: Answer) -> Done {
             let ask = chat_ask(&store, app, reference)?;
             (ask.text.clone(), AnsweredVia::Chat, Some(ask.id))
         }
-        None => (
-            text_input(args.text.clone(), args.stdin.clone(), "the answer")?,
-            AnsweredVia::Cli,
-            None,
-        ),
+        None => {
+            let words = text_input(args.text.clone(), args.stdin.clone(), "the answer")?;
+            within("an answer", &words, ANSWER_MAX_CHARS)?;
+            (words, AnsweredVia::Cli, None)
+        }
     };
     // The same words replay; a different answer is refused by the core.
     let keyed = app.key(

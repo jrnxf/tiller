@@ -6,6 +6,7 @@ import type { CSSProperties } from "react";
 import type { Project, SettingProblem } from "../../lib/api-types";
 import { askFor, mentionedKeys, messageFor } from "../../lib/ask-plan";
 import type { AskPiece } from "../../lib/ask-plan";
+import { LIMITS, isTooLong } from "../../lib/limits";
 import { isFederated, ownerOf, projectKey, standingOf } from "../../lib/peers";
 import { projectColor } from "../../lib/project-color";
 import {
@@ -28,8 +29,6 @@ import type { AskTarget, Outcome } from "./ask-send";
 import "./ask-dialog.css";
 import { useNamedProjects } from "../board/peer-state";
 import { readFailure } from "./project-dialog";
-
-const ASK_MAX_CHARS = 8000;
 
 // The editor and its parts load when the dialog first opens, not with the board.
 const AskEditor = lazy(async () => ({ default: (await import("./ask-editor")).AskEditor }));
@@ -214,7 +213,7 @@ function AskBody({
   const failed = targets.filter(
     (target) => outcomes[projectKey(target.project)]?.status === "failed",
   );
-  const tooLong = targets.some((target) => target.text.length > ASK_MAX_CHARS);
+  const tooLong = targets.some((target) => isTooLong(target.text.trim(), LIMITS.askNote));
   const blocked = picked.some((entry) => entry.off !== null);
   const canSend =
     !unread &&
@@ -258,7 +257,7 @@ function AskBody({
     } else if (message === "") {
       hint = "Say what they should do.";
     } else if (tooLong) {
-      hint = `The ask is longer than ${ASK_MAX_CHARS} characters.`;
+      hint = `The ask is longer than ${LIMITS.askNote} characters.`;
     }
   }
 

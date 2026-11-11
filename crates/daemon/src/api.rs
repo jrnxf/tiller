@@ -32,6 +32,10 @@ use tiller_core::domain::{
     PeerScope, Session,
 };
 use tiller_core::domain::{Delivery, InterventionKind, Stage};
+use tiller_core::limits::{
+    ANSWER_MAX_CHARS, ASK_NOTE_MAX_CHARS, BODY_MAX_CHARS, COMMENT_MAX_CHARS, TITLE_MAX_CHARS,
+    within,
+};
 use tiller_core::state::approvals::Decision;
 use tiller_core::state::asks::NewAsk;
 use tiller_core::state::cards::{CardEdit, NewCard};
@@ -1628,11 +1632,7 @@ impl Mutation {
             }
             Op::AskNote => {
                 let request: AskNote = body(bytes)?;
-                if request.text.trim().chars().count() > ASK_NOTE_MAX_CHARS {
-                    return Err(ApiError::usage(format!(
-                        "an ask is at most {ASK_NOTE_MAX_CHARS} characters"
-                    )));
-                }
+                within("an ask", request.text.trim(), ASK_NOTE_MAX_CHARS)?;
                 (
                     request.idempotency_key.clone(),
                     request.host.clone(),
@@ -2301,26 +2301,6 @@ fn restart_done(restarted: &RestartStaleResponse) -> Result<Done, Error> {
         approval_id: None,
         warning: (failed > 0).then(|| format!("{failed} session(s) did not restart")),
     })
-}
-
-/// The longest ask the board's box records: it is noted whole to the
-/// orchestrator, and again at every orchestrator start until it is resolved.
-const ASK_NOTE_MAX_CHARS: usize = 8000;
-/// The longest card title, card body, comment and answer the API takes
-/// (`protocol.md` 7.4), in characters.
-const TITLE_MAX_CHARS: usize = 1_000;
-const BODY_MAX_CHARS: usize = 100_000;
-const COMMENT_MAX_CHARS: usize = 20_000;
-const ANSWER_MAX_CHARS: usize = 20_000;
-
-/// 400 when `text` runs past `max` characters.
-fn within(what: &str, text: &str, max: usize) -> Result<(), ApiError> {
-    if text.chars().count() > max {
-        return Err(ApiError::usage(format!(
-            "{what} is at most {max} characters"
-        )));
-    }
-    Ok(())
 }
 
 #[utoipa::path(get, path = "/api/v1/projects/{id}/delete", tag = "reads",

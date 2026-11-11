@@ -4,6 +4,7 @@
 use clap::{Args, Subcommand};
 use serde_json::json;
 use tiller_core::domain::{Ask, AskCard, AskSource, Card};
+use tiller_core::limits::{ASK_NOTE_MAX_CHARS, within};
 use tiller_core::state::asks::{NewAsk, Resolution};
 use tiller_core::state::{get, list, resolve_id};
 
@@ -91,6 +92,7 @@ pub fn run(app: &App, cmd: Cmd) -> Done {
 
 fn note(app: &App, args: Note) -> Done {
     let text = text_input(args.text.clone(), args.stdin.clone(), "the note")?;
+    within("an ask", text.trim(), ASK_NOTE_MAX_CHARS)?;
     let mut store = app.write()?;
     let keyed = app.key(
         &store,
