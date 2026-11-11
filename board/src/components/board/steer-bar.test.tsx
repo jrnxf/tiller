@@ -135,6 +135,35 @@ test("an unconfirmed interrupt says so, and a second press is a new key", async 
   expect(calls[0]?.body.idempotency_key).not.toBe(calls[1]?.body.idempotency_key);
 });
 
+test("a pending interrupt counts down the daemon's watch of the pane", async () => {
+  vi.useFakeTimers();
+  try {
+    let answer: ((reply: Response) => void) | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise<Response>((resolve) => (answer = resolve))),
+    );
+    bar();
+    fireEvent.click(interruptButton());
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toContain("The board watches the pane for 10 s");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Interrupt" }));
+    await act(async () => {});
+    expect(dialog.textContent).toContain("Watching the pane: 10 s left");
+    await act(async () => vi.advanceTimersByTime(1_000));
+    expect(dialog.textContent).toContain("Watching the pane: 9 s left");
+    await act(async () => vi.advanceTimersByTime(8_500));
+    expect(dialog.textContent).toContain("Watching the pane: 1 s left");
+    await act(async () => vi.advanceTimersByTime(1_000));
+    expect(dialog.textContent).toContain("Watching the pane: reading the result");
+    const reply = interrupted("confirmed");
+    await act(async () => answer?.(new Response(JSON.stringify(reply.body), { status: 200 })));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test("a refused interrupt keeps the dialog open with the reason", async () => {
   const message = "alpha-42 is not working; nothing was sent";
   stubDaemon([{ status: 422, body: { ok: false, error: { code: "refused", message } } }]);

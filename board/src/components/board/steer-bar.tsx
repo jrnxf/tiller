@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
 import type { Interrupted, MutationResponse, SteerBody, SteerQueued } from "../../lib/api-types";
@@ -201,6 +201,23 @@ function InterruptResult({ data, at }: { data: Interrupted; at: string }) {
   );
 }
 
+// How long the daemon watches the pane after the Escape before it answers.
+const WATCH_S = 10;
+
+// The whole seconds left of the daemon's watch, counted from the press at
+// `since`, or null when nothing is being watched.
+function useWatchLeft(pending: boolean, since: number | null): number | null {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!pending) return;
+    const timer = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(timer);
+  }, [pending]);
+  if (!pending || since === null) return null;
+  const elapsed = Math.max(0, now - since) / 1000;
+  return Math.max(0, Math.ceil(WATCH_S - elapsed));
+}
+
 function InterruptDialog({
   sessionId,
   name,
@@ -226,6 +243,12 @@ function InterruptDialog({
   // and a new dialog is a new press.
   const [press] = useState(() => `${sessionId}:interrupt:${Date.now()}`);
   const action = useAction({ binding: press, send, onRecorded });
+  const [pressedAt, setPressedAt] = useState<number | null>(null);
+  const left = useWatchLeft(action.pending, pressedAt);
+  const interrupt = useCallback(() => {
+    setPressedAt(Date.now());
+    action.trigger();
+  }, [action]);
   const keep = useRef<HTMLButtonElement>(null);
   return (
     <Modal
@@ -245,7 +268,13 @@ function InterruptDialog({
         <dt>Works</dt>
         <dd>{NOT_WORKING}</dd>
         <dt>Check</dt>
-        <dd>The board watches the pane for 10 s</dd>
+        <dd>
+          {left === null
+            ? `The board watches the pane for ${WATCH_S} s`
+            : left > 0
+              ? `Watching the pane: ${left} s left`
+              : "Watching the pane: reading the result"}
+        </dd>
         <dt>Twice</dt>
         <dd>A second press is not the same as one. It can cancel a dialog the agent opens next.</dd>
       </dl>
@@ -264,7 +293,7 @@ function InterruptDialog({
           type="button"
           className="btn danger"
           disabled={action.pending || action.recorded}
-          onClick={action.trigger}
+          onClick={interrupt}
         >
           <EscIcon />
           {action.pending ? "Checking..." : "Interrupt"}
