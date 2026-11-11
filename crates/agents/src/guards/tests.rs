@@ -1105,6 +1105,278 @@ fn identity_stripping_denied() {
     }
 }
 
+// -- Wrapper option parsing ---------------------------------------------------
+
+/// Runs each case for every role: `None` is an allow.
+#[track_caller]
+fn verdicts(cases: &[(&str, Option<Code>)]) {
+    for role in Role::ALL {
+        for (command, verdict) in cases {
+            match verdict {
+                Some(code) => denied(role, command, *code),
+                None => allowed(role, command),
+            }
+        }
+    }
+}
+
+/// B2: `env` reads its options the way GNU `getopt_long` does.
+#[test]
+fn env_options_parse_like_getopt() {
+    const ID: Option<Code> = Some(Code::Identity);
+    verdicts(&[
+        // Bundled short options.
+        ("env -iu FOO tiller status x", ID),
+        ("env -vi tiller status x", ID),
+        ("env -0i tiller status x", ID),
+        // Attached and detached values.
+        ("env -uTILLER_SESSION_ID tiller status x", ID),
+        ("env -vuCLAUDECODE tiller status x", ID),
+        ("env --unset CLAUDECODE tiller status x", ID),
+        ("env -C /home/user -i tiller status x", ID),
+        ("env -C/home/user -i tiller status x", ID),
+        ("env -a name -i tiller status x", ID),
+        // Long options and their unique prefixes.
+        ("env --ignore-environment tiller status x", ID),
+        ("env --ignore-env tiller status x", ID),
+        ("env --uns=CLAUDECODE tiller status x", ID),
+        // `-` after the options, also after `--`.
+        ("env - tiller status x", ID),
+        ("env -- - tiller status x", ID),
+        // A name the guard cannot read.
+        ("env -u \"$NAME\" tiller status x", ID),
+        // `-S` splits its value into more `env` arguments.
+        ("env -S '-i tiller status x'", ID),
+        ("env -S'-i' tiller status x", ID),
+        ("env -vS '-u CLAUDECODE' tiller status x", ID),
+        ("env --split-string='-i' tiller status x", ID),
+        ("env -S '-C /home/user -i' tiller status x", ID),
+        ("env -S 'gh pr merge 12'", Some(Code::Merge)),
+        ("env -S'gh pr' merge 12", Some(Code::Merge)),
+        ("env -S 'FOO=1 gh pr merge 12'", Some(Code::Merge)),
+        // Assignments after the options, also after `--`.
+        ("env -- PATH=./bin tiller status x", Some(Code::GuardTamper)),
+        ("env -i0 -- gh pr merge 12", ID),
+        ("env -- gh pr merge 12", Some(Code::Merge)),
+        ("env -C /home/user gh pr merge 12", Some(Code::Merge)),
+        // An option env does not take: fail closed on a protected command.
+        ("env --bogus gh pr merge 12", Some(Code::Merge)),
+        ("env FOO=1 cargo test", None),
+        ("env -u FOO cargo test", None),
+        ("env -uFOO -C /home/user/pool/3/alpha cargo test", None),
+        ("env -S 'cargo test --workspace'", None),
+        ("env -- cargo build", None),
+        ("env --bogus cargo test", None),
+    ]);
+}
+
+/// B2: the `exec` builtin reads `-c`, `-l` and `-a NAME` in any cluster.
+#[test]
+fn exec_options_parse_like_the_builtin() {
+    const ID: Option<Code> = Some(Code::Identity);
+    verdicts(&[
+        ("exec -c tiller status x", ID),
+        ("exec -cl tiller status x", ID),
+        ("exec -lc tiller status x", ID),
+        ("exec -a name -c tiller status x", ID),
+        ("exec -ca name tiller status x", ID),
+        ("exec -la name gh pr merge 12", Some(Code::Merge)),
+        ("exec -aname gh pr merge 12", Some(Code::Merge)),
+        ("exec -a gh -- gh pr merge 12", Some(Code::Merge)),
+        ("exec cargo test", None),
+        ("exec -a name cargo build", None),
+        ("exec -l cargo build", None),
+    ]);
+}
+
+/// B3: programs that run their remaining words as a command are unwrapped
+/// after their options and operands, so the inner command gets its checks.
+#[test]
+fn command_runners_unwrap_after_their_options() {
+    const MERGE: Option<Code> = Some(Code::Merge);
+    verdicts(&[
+        ("strace -f gh pr merge 12", MERGE),
+        ("strace -o /tmp/t gh pr merge 12", MERGE),
+        ("strace -otrace gh pr merge 12", MERGE),
+        ("strace -fo trace gh pr merge 12", MERGE),
+        ("strace -e trace=network gh pr merge 12", MERGE),
+        ("strace --output=trace gh pr merge 12", MERGE),
+        ("strace --output trace gh pr merge 12", MERGE),
+        (
+            "strace -E TILLER_SESSION_ID tiller status x",
+            Some(Code::Identity),
+        ),
+        (
+            "strace -E PATH=./bin tiller status x",
+            Some(Code::GuardTamper),
+        ),
+        ("ltrace -o trace gh pr merge 12", MERGE),
+        ("ltrace -S -s 80 gh pr merge 12", MERGE),
+        ("nice gh pr merge 12", MERGE),
+        ("nice -n 5 gh pr merge 12", MERGE),
+        ("nice -n5 gh pr merge 12", MERGE),
+        ("nice --adjustment=5 gh pr merge 12", MERGE),
+        ("nice --adj 5 gh pr merge 12", MERGE),
+        ("nice -5 gh pr merge 12", MERGE),
+        ("nice --10 gh pr merge 12", MERGE),
+        ("ionice -c 3 gh pr merge 12", MERGE),
+        ("ionice -c3 -n7 -t gh pr merge 12", MERGE),
+        ("timeout 30 gh pr merge 12", MERGE),
+        ("timeout -s KILL 30 gh pr merge 12", MERGE),
+        ("timeout -sKILL -k 5 30 gh pr merge 12", MERGE),
+        ("timeout --signal=KILL 30 gh pr merge 12", MERGE),
+        ("timeout --kill-after 5 30 gh pr merge 12", MERGE),
+        ("timeout -fv 30 gh pr merge 12", MERGE),
+        ("timeout --foreground -- 30 gh pr merge 12", MERGE),
+        ("nohup gh pr merge 12", MERGE),
+        ("nohup -- gh pr merge 12", MERGE),
+        ("chrt 5 gh pr merge 12", MERGE),
+        ("chrt -f 5 gh pr merge 12", MERGE),
+        ("chrt -T 1000 -d 0 gh pr merge 12", MERGE),
+        (
+            "chrt --sched-runtime=1000 --deadline 0 gh pr merge 12",
+            MERGE,
+        ),
+        ("chrt -o gh pr merge 12", MERGE),
+        ("taskset 0x3 gh pr merge 12", MERGE),
+        ("taskset -c 0-2 gh pr merge 12", MERGE),
+        ("taskset -ac 1 gh pr merge 12", MERGE),
+        ("setsid gh pr merge 12", MERGE),
+        ("setsid -cw gh pr merge 12", MERGE),
+        ("setsid --fork gh pr merge 12", MERGE),
+        ("stdbuf -oL gh pr merge 12", MERGE),
+        ("stdbuf -o L gh pr merge 12", MERGE),
+        ("stdbuf --output=L -e0 gh pr merge 12", MERGE),
+        ("unshare -r gh pr merge 12", MERGE),
+        ("unshare -Ur gh pr merge 12", MERGE),
+        ("unshare --map-user 0 gh pr merge 12", MERGE),
+        ("unshare -R /home/user gh pr merge 12", MERGE),
+        ("unshare --mount=/home/user/ns -m gh pr merge 12", MERGE),
+        ("nsenter -t 1 -m gh pr merge 12", MERGE),
+        ("nsenter -t1 -m/proc/1/ns/mnt gh pr merge 12", MERGE),
+        ("nsenter --target 1 --mount gh pr merge 12", MERGE),
+        ("setpriv --ruid 0 gh pr merge 12", MERGE),
+        ("setpriv --nnp -d gh pr merge 12", MERGE),
+        ("setpriv --reset-env tiller status x", Some(Code::Identity)),
+        ("runuser -u nobody gh pr merge 12", MERGE),
+        ("runuser -unobody -- gh pr merge 12", MERGE),
+        ("runuser nobody -c 'gh pr merge 12'", MERGE),
+        ("runuser -c 'gh pr merge 12' nobody", MERGE),
+        ("runuser --command='gh pr merge 12' nobody", MERGE),
+        (
+            "runuser -l nobody -c 'tiller status x'",
+            Some(Code::Identity),
+        ),
+        ("runuser - nobody", Some(Code::Identity)),
+        ("runuser -P -u nobody tiller status x", Some(Code::Identity)),
+        ("chroot / gh pr merge 12", MERGE),
+        ("chroot --userspec=1:1 / gh pr merge 12", MERGE),
+        ("chroot --userspec 1:1 --skip-chdir / gh pr merge 12", MERGE),
+        ("fakeroot gh pr merge 12", MERGE),
+        ("fakeroot -u gh pr merge 12", MERGE),
+        ("fakeroot -l libfakeroot.so gh pr merge 12", MERGE),
+        ("fakeroot --lib libfakeroot.so -- gh pr merge 12", MERGE),
+        ("flock -w 5 /tmp/l gh pr merge 12", MERGE),
+        ("flock -w5 /tmp/l gh pr merge 12", MERGE),
+        ("flock -xn /tmp/l gh pr merge 12", MERGE),
+        ("flock --timeout=5 /tmp/l gh pr merge 12", MERGE),
+        ("flock /tmp/l --command 'gh pr merge 12'", MERGE),
+        ("/usr/bin/time -f %e gh pr merge 12", MERGE),
+        ("/usr/bin/time -o out -a gh pr merge 12", MERGE),
+        ("/usr/bin/time --format=%e gh pr merge 12", MERGE),
+        ("caffeinate -i gh pr merge 12", MERGE),
+        ("caffeinate -t 60 gh pr merge 12", MERGE),
+        ("caffeinate -dimsu -w 123 gh pr merge 12", MERGE),
+        ("systemd-inhibit gh pr merge 12", MERGE),
+        ("systemd-inhibit --what=idle gh pr merge 12", MERGE),
+        ("systemd-inhibit --why x --no-pager gh pr merge 12", MERGE),
+        // Runners nest.
+        (
+            "nice -n 5 timeout -s INT 30 strace -f gh pr merge 12",
+            MERGE,
+        ),
+        // An option the runner does not take: fail closed on a protected
+        // command.
+        ("timeout --bogus 30 gh pr merge 12", MERGE),
+        ("timeout \"$OPTS\" 30 gh pr merge 12", MERGE),
+        // The forms that run no command.
+        ("ionice -p 1234", None),
+        ("chrt -p 1234", None),
+        ("chrt -m", None),
+        ("taskset -p 1234", None),
+        ("taskset -cp 1 1234", None),
+        ("flock 9", None),
+        ("strace -f ls", None),
+        ("nice -n 5 cargo build", None),
+        ("nice -5 cargo build", None),
+        ("timeout 30 cargo nextest run", None),
+        ("timeout -s INT 30 cargo test", None),
+        ("timeout --bogus 30 cargo test", None),
+        ("timeout \"$SECONDS\" cargo test", None),
+        ("stdbuf -oL cargo test", None),
+        ("taskset -c 0-3 cargo build", None),
+        ("setsid -f cargo build", None),
+        ("flock -w 5 /tmp/l cargo build", None),
+        ("/usr/bin/time -v cargo build", None),
+        ("caffeinate -i cargo build", None),
+    ]);
+}
+
+/// B3: `tcsh`, `csh` and `pwsh` run a command string, like `sh -c`.
+#[test]
+fn more_shells_run_their_command_string() {
+    const MERGE: Option<Code> = Some(Code::Merge);
+    verdicts(&[
+        ("tcsh -c 'gh pr merge 12'", MERGE),
+        ("csh -fc 'gh pr merge 12'", MERGE),
+        ("echo 'gh pr merge 12' | tcsh", MERGE),
+        ("pwsh -c 'gh pr merge 12'", MERGE),
+        ("pwsh -NoProfile -Command gh pr merge 12", MERGE),
+        ("pwsh -command 'gh pr merge 12'", MERGE),
+        ("pwsh --command 'gh pr merge 12'", MERGE),
+        ("pwsh -ExecutionPolicy Bypass -c 'gh pr merge 12'", MERGE),
+        (
+            "pwsh -EncodedCommand ZwBoACAAcAByACAAbQBlAHIAZwBlACAAMQAyAA==",
+            MERGE,
+        ),
+        (
+            "pwsh -nop -ec ZwBoACAAcAByACAAbQBlAHIAZwBlACAAMQAyAA==",
+            MERGE,
+        ),
+        ("echo 'gh pr merge 12' | pwsh -Command -", MERGE),
+        ("tcsh -c 'echo hi'", None),
+        ("pwsh -c 'Get-ChildItem'", None),
+        ("pwsh -File build.ps1", None),
+        ("pwsh build.ps1", None),
+    ]);
+}
+
+/// Owner decision, Wednesday 2026-11-11: a word the guard cannot read in
+/// the PR number slot is the number; one after it can only be a flag, so it
+/// is read as the flag the rule checks for.
+#[test]
+fn gh_unreadable_word_after_the_positional_is_the_flag() {
+    verdicts(&[
+        ("gh pr close 5 $FLAG", Some(Code::Merge)),
+        ("gh pr close $PR $FLAG", Some(Code::Merge)),
+        ("gh pr close $FLAG 5", Some(Code::Merge)),
+        ("gh pr close 5 \"$(printf -- -d)\"", Some(Code::Merge)),
+        ("gh pr close 5 -$LETTER", Some(Code::Merge)),
+        ("gh pr close 5 --delete-$REST", Some(Code::Merge)),
+        ("gh-axi pr close 5 $FLAG", Some(Code::Merge)),
+        ("gh repo edit example/alpha $FLAG", Some(Code::DefaultPush)),
+        ("gh pr close $PR", None),
+        ("gh pr close \"$PR\" -c done", None),
+        ("gh pr close 5 -c \"$MSG\"", None),
+        ("gh pr close 5 -c$MSG", None),
+        ("gh pr close 5 --comment \"$MSG\"", None),
+        ("gh pr close 5 --comment=\"$MSG\"", None),
+        ("gh pr close -R \"$REPO\" $PR", None),
+        ("gh repo edit $REPO --description \"$TEXT\"", None),
+        ("gh repo edit --homepage \"$URL\"", None),
+    ]);
+}
+
 #[test]
 fn tiller_shadowing_denied() {
     for command in [

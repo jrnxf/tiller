@@ -10,6 +10,7 @@
 //! answer in the transport Claude Code reads.
 
 mod bash;
+mod options;
 pub mod shell;
 
 #[cfg(test)]

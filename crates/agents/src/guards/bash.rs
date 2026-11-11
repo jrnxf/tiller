@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::options::{self, Parse, Runner};
 use super::shell::{self, Redirect, Script, Simple, Word};
 use super::{Code, Context, Denial, is_packaged, is_secret_path, path_denial, resolve};
 use crate::roles::Role;
@@ -13,14 +14,14 @@ use crate::roles::Role;
 /// A word as the classifier sees it: its text, with every variable and
 /// lookup it could resolve statically filled in.
 #[derive(Clone, Debug)]
-struct Arg {
-    text: String,
+pub(super) struct Arg {
+    pub(super) text: String,
     /// The text is exactly what the shell will pass.
-    fixed: bool,
+    pub(super) fixed: bool,
 }
 
 impl Arg {
-    fn fixed(text: &str) -> Self {
+    pub(super) fn fixed(text: &str) -> Self {
         Arg {
             text: text.to_owned(),
             fixed: true,
@@ -68,29 +69,103 @@ fn review_approves(args: &[Arg]) -> bool {
     false
 }
 
+/// The flags of a `gh` command that take a value, and how many positional
+/// arguments it takes after its command words.
+struct GhFlags {
+    /// Short flags that take a value: the rest of their cluster, or the
+    /// next word.
+    short: &'static str,
+    /// Long flags that take a value: after `=`, or the next word.
+    long: &'static [&'static str],
+    /// The positional arguments the command takes.
+    slots: usize,
+}
+
+const PR_CLOSE: GhFlags = GhFlags {
+    short: "cR",
+    long: &["comment", "repo"],
+    slots: 1,
+};
+
+const REPO_EDIT: GhFlags = GhFlags {
+    short: "Rdh",
+    long: &[
+        "repo",
+        "description",
+        "homepage",
+        "default-branch",
+        "add-topic",
+        "remove-topic",
+        "visibility",
+    ],
+    slots: 1,
+};
+
+/// Text in a word that is not known before it runs.
+fn unread(arg: &Arg, text: &str) -> bool {
+    !arg.fixed && text.contains(['$', '`', '*', '?', '['])
+}
+
 /// Whether `gh` reads the flag `-<short>` or `--<long>`: alone, with
-/// `=value`, or inside a cluster of short flags such as `-dc`. A letter in
-/// `values` takes the rest of its cluster as its value, so the cluster ends
-/// there (`-cd` is a comment "d", not a delete).
-fn gh_flag(args: &[Arg], short: Option<char>, long: &str, values: &str) -> bool {
-    args.iter().any(|arg| {
+/// `=value`, or inside a cluster of short flags such as `-dc`. A short flag
+/// that takes a value takes the rest of its cluster, so the cluster ends
+/// there (`-cd` is a comment "d", not a delete). A word the guard cannot
+/// read counts as the flag when it can only be a flag: in a flag name, or
+/// past the positional arguments the command takes.
+fn gh_flag(args: &[Arg], short: Option<char>, long: &str, flags: &GhFlags) -> bool {
+    let mut words: usize = 0;
+    let mut unknown = 0;
+    let mut j = 0;
+    let mut operands = false;
+    while let Some(arg) = args.get(j) {
         let text = arg.text.as_str();
-        if let Some(name) = text.strip_prefix("--") {
-            return name == long || name.strip_prefix(long).is_some_and(|r| r.starts_with('='));
+        j += 1;
+        if operands {
+            words += 1;
+            continue;
         }
-        let (Some(short), Some(cluster)) = (short, text.strip_prefix('-')) else {
-            return false;
-        };
-        for letter in cluster.chars() {
-            if letter == short {
+        if arg.is("--") {
+            operands = true;
+            continue;
+        }
+        if let Some(name) = text.strip_prefix("--") {
+            let (key, value) = match name.split_once('=') {
+                Some((key, _)) => (key, true),
+                None => (name, false),
+            };
+            if key == long || unread(arg, key) {
                 return true;
             }
-            if letter == '=' || values.contains(letter) {
-                return false;
+            if !value && flags.long.contains(&key) {
+                j += 1;
             }
+            continue;
         }
-        false
-    })
+        if let Some(cluster) = text.strip_prefix('-').filter(|c| !c.is_empty()) {
+            for (at, letter) in cluster.char_indices() {
+                if Some(letter) == short || unread(arg, &cluster[at..at + letter.len_utf8()]) {
+                    return true;
+                }
+                if letter == '=' {
+                    break;
+                }
+                if flags.short.contains(letter) {
+                    if at + letter.len_utf8() == cluster.len() {
+                        j += 1;
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
+        if unread(arg, text) {
+            unknown += 1;
+        } else {
+            words += 1;
+        }
+    }
+    // The first two words are the command (`pr close`).
+    unknown > 0 && words.saturating_sub(2) + unknown > flags.slots
 }
 
 /// The base `gh pr edit` sets:`--base <b>`, `--base=<b>`, `-B <b>` or
@@ -154,7 +229,9 @@ const XARGS_WITH_ARG: &[&str] = &[
     "--max-lines",
 ];
 
-const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish"];
+const SHELLS: &[&str] = &[
+    "sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish", "tcsh", "csh",
+];
 
 const HTTP_CLIENTS: &[&str] = &[
     "curl", "wget", "http", "https", "xh", "httpie", "aria2c", "nc", "ncat", "netcat", "telnet",
@@ -343,6 +420,13 @@ pub(super) fn classify(command: &str, ctx: &Context<'_>) -> Option<Denial> {
         remote: false,
     };
     walker.text(command, true)
+}
+
+/// What a wrapper leaves: the index where the next program starts, or the
+/// decision when the wrapper settles it.
+enum Step {
+    Next(usize),
+    Done(Option<Denial>),
 }
 
 struct Walker<'a, 'b> {
@@ -619,88 +703,33 @@ impl Walker<'_, '_> {
                 j
             };
             match basename(&program.text) {
-                "env" => {
-                    let mut j = i + 1;
-                    while let Some(word) = words.get(j) {
-                        let text = word.text.as_str();
-                        let unset = text
-                            .strip_prefix("--unset=")
-                            .or_else(|| text.strip_prefix("-u").filter(|v| !v.is_empty()));
-                        if text == "-i" || text == "--ignore-environment" || text == "-" {
-                            return self.deny(
-                                Code::Identity,
-                                "env -i strips the session's identity",
-                                shown,
-                            );
-                        } else if text == "-u" || text == "--unset" || unset.is_some() {
-                            let name = match unset {
-                                Some(name) => name.to_owned(),
-                                None => {
-                                    j += 1;
-                                    words.get(j).map(|w| w.text.clone()).unwrap_or_default()
-                                }
-                            };
-                            if name.starts_with("TILLER_") || name == "CLAUDECODE" {
-                                return self.deny(
-                                    Code::Identity,
-                                    format!("env -u {name} strips the session's identity"),
-                                    shown,
-                                );
-                            }
-                        } else if text == "-S"
-                            || text == "--split-string"
-                            || text.starts_with("-S")
-                            || text.starts_with("--split-string=")
-                        {
-                            let inline = text
-                                .strip_prefix("--split-string=")
-                                .or_else(|| text.strip_prefix("-S").filter(|v| !v.is_empty()));
-                            let (split, after) = match inline {
-                                Some(split) => (split.to_owned(), j + 1),
-                                None => (
-                                    words.get(j + 1).map(|w| w.text.clone()).unwrap_or_default(),
-                                    j + 2,
-                                ),
-                            };
-                            let mut joined = split;
-                            for word in words.iter().skip(after) {
-                                joined.push(' ');
-                                joined.push_str(&shell_quote(&word.text));
-                            }
-                            return self.text(&joined, false);
-                        } else if text == "-C" || text == "--chdir" {
-                            j += 1;
-                        } else if text == "--" {
-                            j += 1;
-                            break;
-                        } else if let Some((name, value)) = text.split_once('=')
-                            && !text.starts_with('-')
-                        {
-                            if let Some(found) = self.assign(name, &Arg::fixed(value), &shown) {
-                                return Some(found);
-                            }
-                        } else if !text.starts_with('-') {
-                            break;
-                        }
-                        j += 1;
-                    }
-                    i = j;
-                }
+                "env" => match self.env(words, i, command, script, appended, &shown) {
+                    Step::Next(next) => i = next,
+                    Step::Done(found) => return found,
+                },
                 "command" => {
                     if rest.first().is_some_and(|w| w.is("-v") || w.is("-V")) {
                         return None;
                     }
                     i = skip(i + 1, &[]);
                 }
-                "builtin" | "nohup" | "busybox" => i += 1,
-                "exec" => i = skip(i + 1, &["-a"]),
-                "nice" => i = skip(i + 1, &["-n", "--adjustment"]),
-                "time" => i = skip(i + 1, &["-f", "-o", "--format", "--output"]),
-                "setsid" => i = skip(i + 1, &[]),
-                "stdbuf" => i = skip(i + 1, &["-i", "-o", "-e"]),
-                "ionice" => i = skip(i + 1, &["-c", "-n", "-p", "-P", "-u"]),
-                "taskset" => i = skip(i + 1, &[]) + 1,
-                "timeout" => i = skip(i + 1, &["-s", "-k", "--signal", "--kill-after"]) + 1,
+                "builtin" | "busybox" => i += 1,
+                "exec" => match options::parse(options::EXEC, false, rest) {
+                    Parse::Unsure => return self.unreadable_options("exec", &words[i..]),
+                    Parse::Read { found, next } => {
+                        if let Some(clear) = found.iter().find(|option| option.name == "c") {
+                            return self.deny(
+                                Code::Identity,
+                                format!(
+                                    "exec {} clears the environment, which strips the session's identity",
+                                    clear.spelling
+                                ),
+                                shown,
+                            );
+                        }
+                        i += 1 + next;
+                    }
+                },
                 "sudo" | "doas" => {
                     i = skip(
                         i + 1,
@@ -780,20 +809,6 @@ impl Walker<'_, '_> {
                     return self.payload(payload, false);
                 }
                 "direnv" if rest.first().is_some_and(|w| w.is("exec")) => i += 3,
-                "flock" => {
-                    let mut j = skip(i + 1, &["-w", "-E", "--timeout", "--conflict-exit-code"]) + 1;
-                    if words
-                        .get(j)
-                        .is_some_and(|w| w.is("-c") || w.is("--command"))
-                    {
-                        let payload = words.get(j + 1)?;
-                        return self.payload(payload, false);
-                    }
-                    if words.get(j).is_some_and(|w| w.is("--")) {
-                        j += 1;
-                    }
-                    i = j;
-                }
                 "su" => {
                     let at = rest.iter().position(|w| w.is("-c") || w.is("--command"))?;
                     let payload = rest.get(at + 1)?;
@@ -809,7 +824,19 @@ impl Walker<'_, '_> {
                         return self.text(&joined, false);
                     }
                 }
-                _ => break,
+                name => {
+                    let step = match options::runner(name) {
+                        Some(runner) if name == "runuser" => {
+                            self.runuser(runner, words, i, command, script, appended, &shown)
+                        }
+                        Some(runner) => self.runner(name, runner, words, i, &shown),
+                        None => break,
+                    };
+                    match step {
+                        Step::Next(next) => i = next,
+                        Step::Done(found) => return found,
+                    }
+                }
             }
         }
         let program = &words[i];
@@ -841,6 +868,292 @@ impl Walker<'_, '_> {
                 )
             })
         }
+    }
+
+    /// `env` at `words[at]`: its options, then `-` and the assignments
+    /// before the command. A `-S` string is split into more arguments and
+    /// read again in their place, as `env` does.
+    fn env(
+        &mut self,
+        words: &[Arg],
+        at: usize,
+        command: &Simple,
+        script: &Script,
+        appended: bool,
+        shown: &str,
+    ) -> Step {
+        let tail = &words[at + 1..];
+        let (found, next) = match options::parse(options::ENV, false, tail) {
+            Parse::Unsure => return Step::Done(self.unreadable_options("env", &words[at..])),
+            Parse::Read { found, next } => (found, next),
+        };
+        for option in &found {
+            let Some(value) = &option.value else {
+                if option.name == "ignore-environment" {
+                    return Step::Done(self.deny(
+                        Code::Identity,
+                        "env -i strips the session's identity",
+                        shown,
+                    ));
+                }
+                continue;
+            };
+            match option.name {
+                "unset" => {
+                    if let Some(found) = self.unset("env", value, shown) {
+                        return Step::Done(Some(found));
+                    }
+                }
+                // BSD `env -P`: the path that finds the program.
+                "P" => {
+                    return Step::Done(self.deny(
+                        Code::GuardTamper,
+                        "env -P sets the search path, which changes which tiller runs",
+                        shown,
+                    ));
+                }
+                "split-string" => {
+                    let split = value
+                        .fixed
+                        .then(|| options::split_string(&value.text))
+                        .flatten();
+                    let Some(split) = split else {
+                        return Step::Done(self.unreadable_options("env", &words[at..]));
+                    };
+                    let mut spliced = vec![words[at].clone()];
+                    spliced.extend(split);
+                    spliced.extend_from_slice(&tail[option.end..]);
+                    return Step::Done(self.exec(&spliced, command, script, false, appended));
+                }
+                _ => {}
+            }
+        }
+        let mut j = at + 1 + next;
+        if words.get(j).is_some_and(|word| word.is("-")) {
+            return Step::Done(self.deny(
+                Code::Identity,
+                "env - strips the session's identity",
+                shown,
+            ));
+        }
+        while let Some(word) = words.get(j)
+            && let Some((name, value)) = word.text.split_once('=')
+        {
+            if !word.fixed && name.contains(['$', '`']) {
+                return Step::Done(self.unreadable_options("env", &words[at..]));
+            }
+            let value = Arg {
+                text: value.to_owned(),
+                fixed: word.fixed,
+            };
+            if let Some(found) = self.assign(name, &value, shown) {
+                return Step::Done(Some(found));
+            }
+            j += 1;
+        }
+        Step::Next(j)
+    }
+
+    /// A program from the runner list at `words[at]`: its options and
+    /// operands, after which its command starts.
+    fn runner(
+        &mut self,
+        name: &str,
+        runner: &Runner,
+        words: &[Arg],
+        at: usize,
+        shown: &str,
+    ) -> Step {
+        let (found, next) = match options::parse(runner.options, runner.numeric, &words[at + 1..]) {
+            Parse::Unsure => return Step::Done(self.unreadable_options(name, &words[at..])),
+            Parse::Read { found, next } => (found, next),
+        };
+        if let Some(found) = self.runner_options(name, runner, &found, shown) {
+            return Step::Done(Some(found));
+        }
+        if found
+            .iter()
+            .any(|option| runner.no_command.contains(&option.name))
+        {
+            return Step::Done(None);
+        }
+        let mut start = at + 1 + next;
+        for _ in 0..runner.operands {
+            let Some(operand) = words.get(start) else {
+                return Step::Done(None);
+            };
+            let number = operand.fixed && operand.text.parse::<i64>().is_ok();
+            if runner.numeric_operand && !number {
+                break;
+            }
+            start += 1;
+        }
+        if name == "flock" {
+            if words
+                .get(start)
+                .is_some_and(|w| w.is("-c") || w.is("--command"))
+            {
+                return Step::Done(
+                    words
+                        .get(start + 1)
+                        .and_then(|payload| self.payload(payload, false)),
+                );
+            }
+            if words.get(start).is_some_and(|w| w.is("--")) {
+                start += 1;
+            }
+        }
+        Step::Next(start)
+    }
+
+    /// The options of a runner that change the environment.
+    fn runner_options(
+        &self,
+        name: &str,
+        runner: &Runner,
+        found: &[options::Found],
+        shown: &str,
+    ) -> Option<Denial> {
+        for option in found {
+            if runner.clears.contains(&option.name) {
+                return self.deny(
+                    Code::Identity,
+                    format!(
+                        "{name} {} clears the environment, which strips the session's identity",
+                        option.spelling
+                    ),
+                    shown,
+                );
+            }
+            if runner.env.contains(&option.name)
+                && let Some(value) = &option.value
+            {
+                let found = match value.text.split_once('=') {
+                    Some((var, text)) => {
+                        if !value.fixed && var.contains(['$', '`']) {
+                            self.unset(name, value, shown)
+                        } else {
+                            let set = Arg {
+                                text: text.to_owned(),
+                                fixed: value.fixed,
+                            };
+                            self.assign(var, &set, shown)
+                        }
+                    }
+                    None => self.unset(name, value, shown),
+                };
+                if found.is_some() {
+                    return found;
+                }
+            }
+        }
+        None
+    }
+
+    /// `runuser -u USER COMMAND`, or the `su` form `runuser [-] USER
+    /// [SHELL ARGS]`, where `-c COMMAND` may sit on either side of the user.
+    #[allow(clippy::too_many_arguments)]
+    fn runuser(
+        &mut self,
+        runner: &Runner,
+        words: &[Arg],
+        at: usize,
+        command: &Simple,
+        script: &Script,
+        appended: bool,
+        shown: &str,
+    ) -> Step {
+        let (found, next) = match options::parse(runner.options, false, &words[at + 1..]) {
+            Parse::Unsure => return Step::Done(self.unreadable_options("runuser", &words[at..])),
+            Parse::Read { found, next } => (found, next),
+        };
+        if let Some(found) = self.runner_options("runuser", runner, &found, shown) {
+            return Step::Done(Some(found));
+        }
+        if let Some(pty) = found.iter().find(|option| option.name == "pty") {
+            return Step::Done(self.deny(
+                Code::Identity,
+                format!(
+                    "runuser {} fakes a terminal, which strips the session's identity",
+                    pty.spelling
+                ),
+                shown,
+            ));
+        }
+        for option in &found {
+            if ["command", "session-command"].contains(&option.name)
+                && let Some(found) = option
+                    .value
+                    .as_ref()
+                    .and_then(|payload| self.payload(payload, false))
+            {
+                return Step::Done(Some(found));
+            }
+        }
+        let start = at + 1 + next;
+        if found.iter().any(|option| option.name == "user") {
+            return Step::Next(start);
+        }
+        let mut user = start;
+        if words.get(user).is_some_and(|word| word.is("-")) {
+            return Step::Done(self.deny(
+                Code::Identity,
+                "runuser - clears the environment, which strips the session's identity",
+                shown,
+            ));
+        }
+        // The words after the user go to the user's shell.
+        user += 1;
+        match words.get(user..) {
+            Some(args) if !args.is_empty() => {
+                Step::Done(self.shell(args, command, script, appended))
+            }
+            _ => Step::Done(None),
+        }
+    }
+
+    /// A variable a program unsets (`env -u`, `strace -E NAME`).
+    fn unset(&self, program: &str, name: &Arg, shown: &str) -> Option<Denial> {
+        if !name.fixed {
+            return self.deny(
+                Code::Identity,
+                format!(
+                    "{program} unsets {}, which the guard cannot read and could strip the session's identity",
+                    name.text
+                ),
+                shown,
+            );
+        }
+        (name.text.starts_with("TILLER_") || name.text == "CLAUDECODE").then(|| {
+            Denial::new(
+                Code::Identity,
+                format!("{program} -u {} strips the session's identity", name.text),
+                shown,
+            )
+        })
+    }
+
+    /// A wrapper whose options the guard cannot read: an option it does not
+    /// take, or a word not known before it runs. Fail closed when the
+    /// command names a protected one.
+    fn unreadable_options(&self, program: &str, words: &[Arg]) -> Option<Denial> {
+        let shown = texts(words);
+        if self.remote {
+            return self.deny(
+                Code::Peer,
+                format!("the remote {program} options could not be read and could run tiller"),
+                shown,
+            );
+        }
+        protected(&shown).then(|| {
+            Denial::new(
+                guessed_code(&shown),
+                format!(
+                    "the {program} options could not be read and the command names a protected one"
+                ),
+                shown.clone(),
+            )
+        })
     }
 
     fn unknown_program(&self, words: &[Arg]) -> Option<Denial> {
@@ -885,6 +1198,9 @@ impl Walker<'_, '_> {
         }
         if SHELLS.contains(&name) {
             return self.shell(args, command, script, appended);
+        }
+        if name == "pwsh" {
+            return self.pwsh(args, command, script, appended);
         }
         if HTTP_CLIENTS.contains(&name) {
             return self.deny(Code::HttpClient, format!("{name} is an HTTP client"), shown);
@@ -1137,6 +1453,85 @@ impl Walker<'_, '_> {
             // forge ruleset on a gated project.
             return None;
         }
+        self.stdin_script(command, script)
+    }
+
+    /// `pwsh`: `-Command` runs the rest of the words as one command,
+    /// `-EncodedCommand` runs the base64 of UTF-16LE text, and `-Command -`
+    /// or no command reads standard input. Parameters take any prefix of
+    /// their name, in any case.
+    fn pwsh(
+        &mut self,
+        args: &[Arg],
+        command: &Simple,
+        script: &Script,
+        appended: bool,
+    ) -> Option<Denial> {
+        const VALUES: &[&str] = &[
+            "executionpolicy",
+            "inputformat",
+            "outputformat",
+            "windowstyle",
+            "workingdirectory",
+            "configurationname",
+            "configurationfile",
+            "custompipename",
+            "settingsfile",
+        ];
+        let mut j = 0;
+        while let Some(arg) = args.get(j) {
+            let Some(name) = arg
+                .text
+                .strip_prefix("--")
+                .or_else(|| arg.text.strip_prefix('-'))
+                .filter(|name| !name.is_empty())
+            else {
+                if !arg.fixed {
+                    return self.unreadable_options("pwsh", args);
+                }
+                // A script file, as with `-File`.
+                return None;
+            };
+            if !arg.fixed {
+                return self.unreadable_options("pwsh", args);
+            }
+            let name = name.to_ascii_lowercase();
+            let name = name.split_once(':').map_or(name.as_str(), |(n, _)| n);
+            if "command".starts_with(name) {
+                let rest = args.get(j + 1..).unwrap_or_default();
+                return match rest {
+                    [] if appended => self.stdin_script(command, script),
+                    [] => None,
+                    [only] if only.is("-") => self.stdin_script(command, script),
+                    _ => {
+                        let payload = Arg {
+                            text: texts(rest),
+                            fixed: rest.iter().all(|word| word.fixed),
+                        };
+                        self.payload(&payload, false)
+                    }
+                };
+            }
+            if "encodedcommand".starts_with(name) || name == "ec" {
+                let value = args.get(j + 1)?;
+                return match pwsh_decode(value) {
+                    Some(text) => self.payload(&Arg { text, fixed: true }, false),
+                    None => self.unreadable_options("pwsh", args),
+                };
+            }
+            if "file".starts_with(name) {
+                return None;
+            }
+            let value = VALUES.iter().any(|long| long.starts_with(name))
+                || ["ep", "if", "of", "wd"].contains(&name);
+            j += if value { 2 } else { 1 };
+        }
+        self.stdin_script(command, script)
+    }
+
+    /// A shell that reads its script on standard input: a redirect into it,
+    /// or a pipe from the other commands.
+    fn stdin_script(&mut self, command: &Simple, script: &Script) -> Option<Denial> {
         for redirect in command.redirects.iter().filter(|r| r.stdin_text) {
             if let Some(found) = self.text(&redirect.target.text, false) {
                 return Some(found);
@@ -1872,7 +2267,7 @@ impl Walker<'_, '_> {
                     shown,
                 );
             }
-            "pr" if sub == "close" && gh_flag(args, Some('d'), "delete-branch", "cR") => {
+            "pr" if sub == "close" && gh_flag(args, Some('d'), "delete-branch", &PR_CLOSE) => {
                 return self.deny(
                     Code::Merge,
                     "gh pr close --delete-branch deletes a branch",
@@ -1886,7 +2281,7 @@ impl Walker<'_, '_> {
                     shown,
                 );
             }
-            "repo" if sub == "edit" && gh_flag(args, None, "default-branch", "R") => {
+            "repo" if sub == "edit" && gh_flag(args, None, "default-branch", &REPO_EDIT) => {
                 return self.deny(
                     Code::DefaultPush,
                     "gh repo edit --default-branch moves the default branch",
@@ -2510,8 +2905,21 @@ fn is_sha(text: &str) -> bool {
     (7..=40).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-fn shell_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', r"'\''"))
+/// The text of a `pwsh -EncodedCommand` value: base64 of UTF-16LE.
+fn pwsh_decode(value: &Arg) -> Option<String> {
+    use base64::Engine as _;
+    if !value.fixed {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value.text.as_bytes())
+        .ok()?;
+    let (pairs, rest) = bytes.as_chunks::<2>();
+    if !rest.is_empty() {
+        return None;
+    }
+    let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+    String::from_utf16(&units).ok()
 }
 
 fn resolve_from(dir: &Path, text: &str, ctx: &Context<'_>) -> PathBuf {
