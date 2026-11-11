@@ -16,7 +16,7 @@ use tiller_core::memory::{self as doc, NOTE_SECTION, RULE_SECTION, document_path
 use tiller_core::state::learning::EvalResult;
 use tiller_core::state::peers::NewPairing;
 use tiller_core::{Actor, Ctx, Error, NewEvent, ids};
-use tiller_herdr::testing::{Fleet, owner};
+use tiller_herdr::testing::{Fleet, eventually, gone, owner};
 
 use super::apply::Repo;
 use super::eval::Evals;
@@ -1185,15 +1185,6 @@ async fn a_failed_holdout_eval_is_still_shown_after_a_restart() {
     assert_eq!(view["evals"].as_array().unwrap().len(), 1, "{view}");
 }
 
-fn gone(pid: &str) -> bool {
-    let out = Command::new("ps")
-        .args(["-o", "stat=", "-p", pid])
-        .output()
-        .unwrap();
-    let stat = String::from_utf8_lossy(&out.stdout);
-    stat.trim().is_empty() || stat.trim_start().starts_with('Z')
-}
-
 /// The entries under `<home>/evals`, oldest run first.
 fn run_dirs(home: &Home) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(home.path().join("evals"))
@@ -1250,7 +1241,8 @@ async fn stopping_the_daemon_stops_its_holdout_eval_and_what_it_started() {
     tokio::task::spawn_blocking(move || evals.stop(std::time::Duration::from_secs(5)))
         .await
         .unwrap();
-    let stopped = gone(&runner) && gone(&grandchild);
+    // The stop reaps the runner; the rest of its group goes a moment later.
+    let stopped = eventually(|| gone(&runner) && gone(&grandchild));
     // Whatever happened, take every process this test started down with it.
     for pid in [&runner, &grandchild] {
         let _ = Command::new("kill").args(["-KILL", pid]).status();
@@ -1291,6 +1283,37 @@ async fn the_daemon_keeps_only_the_newest_holdout_eval_directories() {
     assert!(dirs.contains(&"notes".to_owned()), "{dirs:?}");
     assert_eq!(dirs.len(), 21, "20 runs and the notes: {dirs:?}");
     assert!(!dirs.contains(&first.unwrap()), "{dirs:?}");
+}
+
+/// A start whose run never begins removes no earlier run's directory.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_that_fails_removes_no_old_holdout_eval_directory() {
+    let home = home();
+    home.add("k-1", "alpha", RULE_SECTION, "Run the slow suite")
+        .await;
+    let proposal = propose(&home, "alpha", "The parser test flakes");
+    let checkout = evals_checkout("exit 3");
+    point_at(&home, checkout.path());
+    weekly(&home, 60.0);
+    let mut old: Vec<String> = (0..25).map(|_| ids::new_ulid()).collect();
+    old.sort();
+    for name in &old {
+        std::fs::create_dir_all(home.path().join("evals").join(name)).unwrap();
+    }
+    home.evals.fail_next_spawn();
+    let answer = home
+        .post(
+            &format!("/api/v1/memory/proposals/{proposal}/eval"),
+            json!({"idempotency_key": "e-1"}),
+        )
+        .await;
+    assert_eq!(
+        answer.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        answer.body
+    );
+    assert_eq!(run_dirs(&home), old);
 }
 
 #[tokio::test(flavor = "multi_thread")]

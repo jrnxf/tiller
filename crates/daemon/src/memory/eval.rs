@@ -71,6 +71,9 @@ struct Shared {
     /// Set when the daemon stops: every running eval is stopped with
     /// everything it started.
     stop: Arc<AtomicBool>,
+    /// Set by a test: the next eval's thread does not start.
+    #[cfg(test)]
+    no_thread: AtomicBool,
 }
 
 /// The evals the board started: the running one and the failed ones.
@@ -149,7 +152,14 @@ impl Evals {
 
     /// Runs `run` on a thread of its own, which the daemon stops with it.
     /// `run` gets the interrupt the stop raises.
-    fn spawn(&self, run: impl FnOnce(&Interrupt) + Send + 'static) -> std::io::Result<()> {
+    pub(crate) fn spawn(
+        &self,
+        run: impl FnOnce(&Interrupt) + Send + 'static,
+    ) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self.0.no_thread.swap(false, Ordering::SeqCst) {
+            return Err(std::io::Error::other("no thread for the test"));
+        }
         let interrupt = Interrupt::flag(Arc::clone(&self.0.stop));
         let handle = std::thread::Builder::new()
             .name("holdout-eval".into())
@@ -160,6 +170,12 @@ impl Evals {
         Ok(())
     }
 
+    /// Makes the next [`Evals::spawn`] fail, as a host out of threads would.
+    #[cfg(test)]
+    pub(crate) fn fail_next_spawn(&self) {
+        self.0.no_thread.store(true, Ordering::SeqCst);
+    }
+
     /// Whether the daemon is stopping.
     fn stopping(&self) -> bool {
         self.0.stop.load(Ordering::SeqCst)
@@ -167,10 +183,22 @@ impl Evals {
 
     /// Stops every running eval, with everything its runner started, and
     /// waits up to `wait` for each to say how it ended.
+    #[cfg(test)]
     pub fn stop(&self, wait: Duration) {
+        self.signal();
+        self.wait(Instant::now() + wait);
+    }
+
+    /// Raises the stop flag, which stops every running eval with
+    /// everything its runner started.
+    pub fn signal(&self) {
         self.0.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Waits until `deadline` for each eval [`Evals::signal`] stopped to
+    /// say how it ended.
+    pub fn wait(&self, deadline: Instant) {
         let threads: Vec<JoinHandle<()>> = self.threads().drain(..).collect();
-        let deadline = Instant::now() + wait;
         for thread in threads {
             while !thread.is_finished() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(20));
@@ -515,9 +543,7 @@ pub(crate) async fn eval_start(
             let members = learning::members_sha256_of(w.store.conn(), &set.id)?;
             let candidate = holdout::render_candidate(w.store.conn(), &set, &home)
                 .map_err(|error| holdout_error(&proposal, error))?;
-            // The newest runs' results stay, this one's among them.
             let runs = home.join("evals");
-            prune(&runs, KEPT.saturating_sub(1));
             let out = runs.join(ids::new_ulid());
             let job = MemoryEvalJob {
                 proposal_id: proposal,
@@ -534,6 +560,9 @@ pub(crate) async fn eval_start(
             let set_id = set.id.clone();
             let key = key.to_owned();
             let started = registry.spawn(move |interrupt| {
+                // The newest runs' results stay, this one's among them. Done
+                // here, off the writer, and only for a run that started.
+                prune(&runs, KEPT.saturating_sub(1));
                 let recorded = holdout::run(&evals_dir, &out, &candidate, members, interrupt)
                     .map_err(|error| {
                         if evals.stopping() {

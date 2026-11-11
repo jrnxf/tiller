@@ -14,7 +14,7 @@ use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tiller_agents::land::{DaemonLock, LandError};
@@ -104,6 +104,23 @@ pub enum Ended {
     /// Starting the workers panicked. The CLI exits 1, so the service
     /// manager restarts the daemon (and gives up after its start limit).
     WorkersFailed,
+}
+
+/// Stops the curators and holdout evals the board started, each with
+/// everything it started, and waits up to `wait` in all for them to say how
+/// they ended. A curator's retro ends `unfinished`, so it can run again; an
+/// eval records nothing. Both are told to stop before either is waited
+/// for, so a slow curator does not keep an eval spending quota.
+pub(crate) fn stop_board_runs(
+    retros: &crate::retros::Retros,
+    evals: &crate::memory::eval::Evals,
+    wait: Duration,
+) {
+    retros.signal();
+    evals.signal();
+    let deadline = Instant::now() + wait;
+    retros.wait(deadline);
+    evals.wait(deadline);
 }
 
 /// Why a daemon stopped itself.
@@ -469,12 +486,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
             let _ = tokio::time::timeout(DRAIN, handle).await;
         }
     }
-    // A curator the board started is stopped with everything it started,
-    // and its retro ends `unfinished`, so it can run again.
-    let _ = tokio::task::spawn_blocking(move || retros.stop(DRAIN)).await;
-    // A holdout eval the board started is stopped the same way, and records
-    // nothing.
-    let _ = tokio::task::spawn_blocking(move || evals.stop(DRAIN)).await;
+    let _ = tokio::task::spawn_blocking(move || stop_board_runs(&retros, &evals, DRAIN)).await;
     // An older binary never writes to a newer database, not even its stop
     // event.
     let fatal = *fatal.lock().unwrap_or_else(PoisonError::into_inner);

@@ -171,16 +171,26 @@ impl Retros {
     }
 
     /// Stops every running curator and waits up to `wait` for each run to
-    /// record how it ended. The flag is set under the claims lock, so a Run
-    /// again still claiming has started its run before the runs are taken,
-    /// and one that claims later is refused.
+    /// record how it ended.
+    #[cfg(test)]
     pub fn stop(&self, wait: Duration) {
-        {
-            let _claiming = self.claiming();
-            self.0.stop.store(true, Ordering::SeqCst);
-        }
+        self.signal();
+        self.wait(Instant::now() + wait);
+    }
+
+    /// Raises the stop flag, which stops every running curator. It is set
+    /// under the claims lock, so a Run again still claiming has started its
+    /// run before [`Retros::wait`] takes the runs, and one that claims later
+    /// is refused.
+    pub fn signal(&self) {
+        let _claiming = self.claiming();
+        self.0.stop.store(true, Ordering::SeqCst);
+    }
+
+    /// Waits until `deadline` for each run [`Retros::signal`] stopped to
+    /// record how it ended.
+    pub fn wait(&self, deadline: Instant) {
         let handles: Vec<JoinHandle<()>> = self.runs().drain(..).collect();
-        let deadline = Instant::now() + wait;
         for handle in handles {
             while !handle.is_finished() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(20));
@@ -520,6 +530,9 @@ mod tests {
         Exits(&'static str),
         /// When the daemon stops it.
         UntilStopped,
+        /// Only once the test sets this flag, stop or not, as a curator
+        /// slow to end.
+        Holds(Arc<AtomicBool>),
     }
 
     /// Claims as `tiller retro run` does and plays the next ending; no
@@ -566,6 +579,12 @@ mod tests {
                             }
                             "curator stopped: the daemon stopped before the retro was finished"
                                 .to_owned()
+                        }
+                        Ending::Holds(released) => {
+                            while !released.load(Ordering::SeqCst) {
+                                std::thread::sleep(Duration::from_millis(10));
+                            }
+                            "curator released".to_owned()
                         }
                     };
                     let mut store = Store::open_current(&db).map_err(|e| e.to_string())?;
@@ -913,6 +932,75 @@ mod tests {
         assert_eq!(body["data"]["id"], R1);
         assert_eq!(body["data"]["outcome"], "unfinished");
         assert!(retros.runs().is_empty());
+    }
+
+    /// A running curator that ends only once `released` is set, and a
+    /// running holdout eval that runs `eval`.
+    fn slow_runs(
+        released: &Arc<AtomicBool>,
+        eval: impl FnOnce(&tiller_herdr::process::Interrupt) + Send + 'static,
+    ) -> (Fleet, Retros, crate::memory::eval::Evals) {
+        let fleet = fleet();
+        let mut store = fleet.open();
+        let curator = FakeCurator {
+            db: fleet.db.clone(),
+            endings: Mutex::new(vec![Ending::Holds(Arc::clone(released))].into()),
+        };
+        let Ok(run) = curator.retro_run(&mut store, &Ctx::new(Actor::Board), R1) else {
+            panic!("the claim is refused");
+        };
+        let retros = Retros::default();
+        retros.start(R1, run).unwrap();
+        let evals = crate::memory::eval::Evals::default();
+        evals.spawn(eval).unwrap();
+        (fleet, retros, evals)
+    }
+
+    /// The daemon's stop raises the eval's flag at once, not after the
+    /// curators' wait, so a running eval spends no quota meanwhile.
+    #[test]
+    fn a_slow_curator_does_not_delay_the_eval_stop() {
+        let released = Arc::new(AtomicBool::new(false));
+        let caught = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&caught);
+        let (_fleet, retros, evals) = slow_runs(&released, move |interrupt| {
+            while !interrupt.caught() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            seen.store(true, Ordering::SeqCst);
+        });
+        let stopper = {
+            let (retros, evals) = (retros.clone(), evals.clone());
+            std::thread::spawn(move || {
+                crate::server::stop_board_runs(&retros, &evals, Duration::from_secs(60));
+            })
+        };
+        let stopped = tiller_herdr::testing::eventually(|| caught.load(Ordering::SeqCst));
+        released.store(true, Ordering::SeqCst);
+        stopper.join().unwrap();
+        assert!(
+            stopped,
+            "the eval was not stopped while a curator still ran"
+        );
+    }
+
+    /// Both waits share one deadline: a stop of runs that never end takes
+    /// the wait once, not once per kind.
+    #[test]
+    fn the_stop_waits_once_for_curators_and_evals() {
+        let released = Arc::new(AtomicBool::new(false));
+        let held = Arc::clone(&released);
+        let (_fleet, retros, evals) = slow_runs(&released, move |_| {
+            while !held.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let wait = Duration::from_secs(2);
+        let started = std::time::Instant::now();
+        crate::server::stop_board_runs(&retros, &evals, wait);
+        let took = started.elapsed();
+        released.store(true, Ordering::SeqCst);
+        assert!(took < wait * 2, "the stop took {took:?}");
     }
 
     /// Stopping waits for a Run again that is still claiming, so its run is
