@@ -1138,7 +1138,9 @@ fn a_session_that_cannot_see_state_db_is_told_it_ran_sandboxed() {
     assert!(error.contains(&packaged), "{error}");
     let out = World::new().run(&["handoff", "show"]);
     assert!(
-        out.json["error"].to_string().contains("run tiller init"),
+        out.json["error"]
+            .to_string()
+            .contains("run tiller owner set tiller, then tiller init"),
         "{}",
         out.json
     );

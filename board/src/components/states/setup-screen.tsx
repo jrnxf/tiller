@@ -8,8 +8,8 @@ import { useAppearance } from "../shell/shell";
 export const SETUP_POLL_MS = 2_000;
 
 // The daemon runs, but this machine has no state.db yet: a fresh install
-// whose service started before anyone set it up. The screen names the one
-// command to run and opens the board by itself once the daemon serves it.
+// whose service started before anyone set it up. The screen names the
+// commands to run and opens the board by itself once the daemon serves it.
 export function SetupScreen({ command, onReady }: { command: string; onReady: () => void }) {
   useAppearance();
 
@@ -43,20 +43,28 @@ export function SetupScreen({ command, onReady }: { command: string; onReady: ()
         </div>
         <h1>Set up Tiller on this machine</h1>
         <p>
-          The daemon is running, but this machine has no Tiller state yet. Run this once in a
-          terminal, with a name for this machine and how many agents it may run at once:
+          The daemon is running, but this machine has no Tiller state yet. Run these in a terminal,
+          one at a time, in this order. The first hands this machine to Tiller, because{" "}
+          <code>tiller init</code> refuses while another system owns it. The second takes a name for
+          this machine and how many agents it may run at once:
         </p>
-        <pre>
-          {/* Wraps between words only, never inside a flag. */}
-          <code>
-            {command.split(" ").map((word, index) => (
-              <span key={index}>
-                {index > 0 ? " " : null}
-                <span className="word">{word}</span>
-              </span>
-            ))}
-          </code>
-        </pre>
+        <ol className="setup-steps">
+          {command.split("\n").map((line) => (
+            <li key={line}>
+              <pre>
+                {/* Wraps between words only, never inside a flag. */}
+                <code>
+                  {line.split(" ").map((word, index) => (
+                    <span key={index}>
+                      {index > 0 ? " " : null}
+                      <span className="word">{word}</span>
+                    </span>
+                  ))}
+                </code>
+              </pre>
+            </li>
+          ))}
+        </ol>
         <p className="sub">
           On a work machine, add <code>--boundary work</code>.
         </p>

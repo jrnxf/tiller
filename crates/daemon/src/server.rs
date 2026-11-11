@@ -431,8 +431,8 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         // this log is where the owner looks first.
         tracing::warn!(
             home = %config.home.display(),
-            "state.db is not initialized; the API answers 503 until `{}` runs",
-            api::INIT_HINT,
+            "state.db is not initialized; the API answers 503 until these run, in order: {}",
+            api::INIT_HINT.replace('\n', "; "),
         );
     }
 

@@ -724,3 +724,39 @@ fn a_rewritten_body_file_is_a_different_command_for_the_derived_key() {
     let retry = create("second body");
     assert!(retry.replayed());
 }
+
+#[test]
+fn a_command_before_init_names_owner_set_before_init() {
+    let world = World::new();
+    let out = world.run(&["project", "list"]);
+    assert!(!out.ok(), "{}", out.json);
+    let hint = out.json["error"]["hint"].as_str().unwrap_or_default();
+    let lines: Vec<&str> = hint.lines().collect();
+    assert_eq!(lines.len(), 2, "{hint}");
+    assert_eq!(lines[0], "tiller owner set tiller", "{hint}");
+    assert!(lines[1].starts_with("tiller init "), "{hint}");
+
+    // The commands the hint names work from this state, in that order.
+    assert!(world.run(&["owner", "set", "tiller"]).ok());
+    assert!(
+        world
+            .run(&["init", "--host-label", "host-a", "--lane-capacity", "2"])
+            .ok()
+    );
+}
+
+#[test]
+fn init_refuses_while_another_system_owns_the_host_and_names_owner_set() {
+    let world = World::new();
+    std::fs::create_dir_all(world.home()).unwrap();
+    std::fs::write(world.home().join("owner"), "firstmate\n").unwrap();
+    let init = world.run(&["init", "--host-label", "host-a", "--lane-capacity", "2"]);
+    assert_eq!(init.error_code(), "owner_marker", "{}", init.json);
+    assert_eq!(init.json["error"]["hint"], "tiller owner set tiller");
+    assert!(world.run(&["owner", "set", "tiller"]).ok());
+    assert!(
+        world
+            .run(&["init", "--host-label", "host-a", "--lane-capacity", "2"])
+            .ok()
+    );
+}

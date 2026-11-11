@@ -17,8 +17,9 @@ const UNINITIALIZED = {
   ok: false,
   error: {
     code: "unavailable",
-    message: "unavailable: state.db is not initialized; run tiller init",
-    hint: "tiller init --host-label <label> --lane-capacity <n>",
+    message:
+      "unavailable: state.db is not initialized; run tiller owner set tiller, then tiller init",
+    hint: "tiller owner set tiller\ntiller init --host-label <label> --lane-capacity <n>",
   },
 };
 
@@ -179,7 +180,7 @@ test("a machine nobody has set up boots to the setup screen with the daemon's co
   const boot = await loadBoot(document.implementation.createHTMLDocument());
   expect(boot).toEqual({
     kind: "setup",
-    command: "tiller init --host-label <label> --lane-capacity <n>",
+    command: "tiller owner set tiller\ntiller init --host-label <label> --lane-capacity <n>",
   });
 });
 
@@ -189,6 +190,9 @@ test("a 503 from a set-up daemon boots the board, not the setup screen", async (
   expect(boot).toEqual({ kind: "board", snapshot: null });
 });
 
+const SETUP_COMMANDS =
+  "tiller owner set tiller\ntiller init --host-label <label> --lane-capacity <n>";
+
 test("the setup screen opens the board once tiller init has run", async () => {
   vi.useFakeTimers();
   const answers: Record<string, unknown> = {
@@ -196,15 +200,13 @@ test("the setup screen opens the board once tiller init has run", async () => {
   };
   stubDaemon(answers);
   const onReady = vi.fn();
-  render(
-    <SetupScreen
-      command="tiller init --host-label <label> --lane-capacity <n>"
-      onReady={onReady}
-    />,
-  );
-  expect(screen.getByTestId("setup-screen").textContent).toContain(
+  render(<SetupScreen command={SETUP_COMMANDS} onReady={onReady} />);
+  // Each command is its own copyable block, owner set first.
+  const blocks = screen.getAllByRole("listitem").map((item) => item.textContent);
+  expect(blocks).toEqual([
+    "tiller owner set tiller",
     "tiller init --host-label <label> --lane-capacity <n>",
-  );
+  ]);
 
   await act(() => vi.advanceTimersByTimeAsync(SETUP_POLL_MS));
   expect(onReady).not.toHaveBeenCalled();
@@ -223,7 +225,7 @@ test("a refused read carries the daemon's reason and hint", async () => {
   expect(error).toBeInstanceOf(ReadError);
   expect(error).toMatchObject({
     status: 503,
-    reason: "state.db is not initialized; run tiller init",
-    hint: "tiller init --host-label <label> --lane-capacity <n>",
+    reason: "state.db is not initialized; run tiller owner set tiller, then tiller init",
+    hint: "tiller owner set tiller\ntiller init --host-label <label> --lane-capacity <n>",
   });
 });

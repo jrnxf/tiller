@@ -451,13 +451,18 @@ impl IntoResponse for ApiError {
 
 pub(crate) type ApiResult<T> = Result<Json<T>, ApiError>;
 
-/// The command that makes `state.db`, named in every answer before it exists.
-pub const INIT_HINT: &str = "tiller init --host-label <label> --lane-capacity <n>";
+/// The commands that make `state.db`, one per line, in the order to run them,
+/// named in every answer before it exists. `tiller init` refuses while the
+/// owner marker names another system, so the owner hands the host to Tiller
+/// first (`tiller owner set tiller` is a no-op when the marker already says so).
+/// The board's setup screen shows each line as its own command.
+pub const INIT_HINT: &str =
+    "tiller owner set tiller\ntiller init --host-label <label> --lane-capacity <n>";
 
 /// The 503 every read and write answers before `tiller init`.
 pub(crate) fn uninitialized() -> ApiError {
     ApiError::from(Error::Unavailable(
-        "state.db is not initialized; run tiller init".into(),
+        "state.db is not initialized; run tiller owner set tiller, then tiller init".into(),
     ))
     .hint(INIT_HINT)
 }

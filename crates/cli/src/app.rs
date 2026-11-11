@@ -421,7 +421,8 @@ impl App {
             return Err(Failure::from(Error::Refused {
                 entity: "host",
                 id: String::new(),
-                fact: "state.db is not initialized; run tiller init".into(),
+                fact: "state.db is not initialized; run tiller owner set tiller, then tiller init"
+                    .into(),
             })
             .hint(tiller_daemon::api::INIT_HINT));
         }

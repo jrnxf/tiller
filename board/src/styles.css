@@ -1425,6 +1425,20 @@ kbd {
   user-select: all;
 }
 
+.setup-card .setup-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.setup-card .setup-steps pre {
+  margin: 10px 0 0;
+}
+
+.setup-card .setup-steps + .sub {
+  margin-top: 14px;
+}
+
 .setup-card pre .word {
   white-space: nowrap;
 }
