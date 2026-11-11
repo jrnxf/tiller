@@ -30,6 +30,16 @@ pub struct Repo {
 #[derive(Debug)]
 pub struct Lock(#[allow(dead_code)] File);
 
+/// What [`Repo::try_lock`] found.
+#[derive(Debug)]
+pub enum TryLock {
+    Held(Lock),
+    /// A writer holds it.
+    Busy,
+    /// There is no repo to lock.
+    NoRepo,
+}
+
 /// A commit that moved `HEAD`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Committed {
@@ -67,7 +77,7 @@ impl Repo {
         &self.root
     }
 
-    fn git_dir(&self) -> PathBuf {
+    pub(crate) fn git_dir(&self) -> PathBuf {
         self.root.join(".git")
     }
 
@@ -165,7 +175,35 @@ impl Repo {
         Ok(Lock(file))
     }
 
-    fn head(&self) -> Result<Option<String>> {
+    /// Takes the lock only when it is free, for the watcher: it never waits
+    /// on a writer and never makes the repo.
+    pub fn try_lock(&self) -> Result<TryLock> {
+        if !self.git_dir().is_dir() {
+            return Ok(TryLock::NoRepo);
+        }
+        let file = match OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.git_dir().join("tiller.lock"))
+        {
+            Ok(file) => file,
+            // The repo went away between the check and the open.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(TryLock::NoRepo);
+            }
+            Err(error) => return Err(internal("lock file", error)),
+        };
+        match file.try_lock() {
+            Ok(()) => Ok(TryLock::Held(Lock(file))),
+            Err(fs::TryLockError::WouldBlock) => Ok(TryLock::Busy),
+            Err(fs::TryLockError::Error(error)) => Err(internal("lock", error)),
+        }
+    }
+
+    /// The commit at `HEAD`; `None` when the repo or its first commit is
+    /// not there yet.
+    pub fn head(&self) -> Result<Option<String>> {
         if !self.git_dir().is_dir() {
             return Ok(None);
         }

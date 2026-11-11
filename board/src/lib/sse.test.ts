@@ -486,8 +486,15 @@ test("a review pass or obligation event marks the projects stale", () => {
   }
 });
 
-test("a proposal or memory event marks every memory view and revision stale, and nothing else", () => {
-  for (const entity of ["proposal", "memory", "memory_revision", "eval_run", "change_set"]) {
+test("a proposal, memory or outside repo edit event marks every memory view and revision stale, and nothing else", () => {
+  for (const entity of [
+    "proposal",
+    "memory",
+    "memory_revision",
+    "eval_run",
+    "change_set",
+    "memory_repo",
+  ]) {
     const queryClient = seededClient();
     const view = queryKeyFor("/api/v1/memory?scope=alpha");
     const revision = queryKeyFor("/api/v1/memory/revisions/01JREV");

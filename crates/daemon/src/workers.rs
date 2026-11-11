@@ -744,6 +744,7 @@ pub fn start(
         Lavish::new(tools.lavish.clone(), tools.review_hosts.clone()),
     );
     let quota = crate::quota::Feed::new(open()?, tools.quota.clone(), settings.quota_providers);
+    let memory = crate::memory::watch::Watcher::new(home, open()?);
 
     let mut handles = Vec::new();
     spawn(registry, herdr, stop, &mut handles);
@@ -759,6 +760,7 @@ pub fn start(
     spawn(registry, transcripts, stop, &mut handles);
     spawn(registry, quota, stop, &mut handles);
     spawn(registry, pages, stop, &mut handles);
+    spawn(registry, memory, stop, &mut handles);
     Ok(handles)
 }
 

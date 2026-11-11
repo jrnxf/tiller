@@ -10,6 +10,7 @@
 pub mod apply;
 pub mod dto;
 pub mod scrub;
+pub mod watch;
 
 use std::path::PathBuf;
 
