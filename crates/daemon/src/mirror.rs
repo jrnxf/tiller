@@ -75,12 +75,14 @@ const FIT_DIFFS: u32 = 64;
 /// Where the sizes to give back are kept, under the daemon's home.
 const FITS_FILE: &str = "mirror-fits.json";
 
-/// The mirror's shared state: open views, the input budget and the Fits.
+/// The mirror's shared state: open views, the input budget, the Fits, and
+/// the lock each session's prompt answers take in turn.
 #[derive(Debug)]
 pub struct Mirrors {
     viewers: Arc<AtomicUsize>,
     budget: Mutex<Budget>,
     fits: Arc<Fits>,
+    answers: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// A token bucket: `INPUT_RATE` inputs a second, `INPUT_BURST` at once.
@@ -111,7 +113,22 @@ impl Mirrors {
                 at: Instant::now(),
             }),
             fits: Arc::new(Fits::at(home.join(FITS_FILE))),
+            answers: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Waits for the session's turn to answer its prompt: one answer at a
+    /// time, so a second tap reads the screen only after the first one's
+    /// keys went (`protocol.md` 7.4). The turn ends when the guard drops.
+    pub async fn answer_turn(&self, session: &str) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut answers = self.answers.lock().unwrap_or_else(PoisonError::into_inner);
+            // A lock no answer holds or waits on is dropped, so the map
+            // keeps only the sessions answering now.
+            answers.retain(|_, lock| Arc::strong_count(lock) > 1);
+            answers.entry(session.to_owned()).or_default().clone()
+        };
+        lock.lock_owned().await
     }
 
     pub fn fits(&self) -> Arc<Fits> {

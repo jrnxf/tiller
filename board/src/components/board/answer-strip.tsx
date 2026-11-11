@@ -37,6 +37,26 @@ type Answer =
     }
   | { kind: "refused"; at: string; detail: string };
 
+// A prompt read that failed: `status` is the daemon's, or null when it did
+// not answer or found no dialog yet.
+class ReadError extends Error {
+  constructor(
+    message: string,
+    readonly status: number | null,
+  ) {
+    super(message);
+  }
+}
+
+// A read is tried again only when a later one could find what this one did
+// not: no dialog drawn yet, no answer, or a server fault. A refusal (a saved
+// machine's agent, a session that waits on nothing) stays one.
+function tryAgain(failures: number, error: Error): boolean {
+  if (failures >= 2) return false;
+  const status = error instanceof ReadError ? error.status : null;
+  return status === null || status >= 500;
+}
+
 // The waiting agent, for the question "No, exit" asks first: its name, and
 // its card and run for the facts.
 export interface StripAgent {
@@ -49,7 +69,7 @@ export interface StripAgent {
 // Prompt). The screen is read once each time the agent's session says it
 // waits, on a permission prompt or on an answer, never polled, though a read
 // that finds no dialog is tried twice more, as the hook can beat the dialog's
-// draw. A tap carries the dialog it was drawn from, and the daemon types
+// draw (a refused read is not). A tap carries the dialog it was drawn from, and the daemon types
 // nothing if the screen no longer shows it. A numbered dialog's buttons show
 // their digits; a cursor menu's show none, as its rows have none.
 export function AnswerStrip({
@@ -89,14 +109,16 @@ export function AnswerStrip({
     queryKey: ["prompt", sessionId, next],
     queryFn: async ({ signal }) => {
       const result = await readPane<PromptRead>(promptPath(sessionId), signal);
-      if (!result.ok) throw new Error(result.detail);
-      if (result.body.reason === "no_dialog") throw new Error("no dialog on the screen yet");
+      if (!result.ok) throw new ReadError(result.detail, result.status);
+      if (result.body.reason === "no_dialog") {
+        throw new ReadError("no dialog on the screen yet", null);
+      }
       return result.body;
     },
     enabled: next !== null,
     staleTime: Infinity,
     gcTime: 0,
-    retry: 2,
+    retry: tryAgain,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });

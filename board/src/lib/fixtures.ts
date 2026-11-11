@@ -1026,6 +1026,11 @@ function attentionFor(
       },
     ],
   };
+  // The `dialog` scenario's beta-7 worker waits on a menu, so it has not gone
+  // quiet: the stale recovery decision about it would contradict that.
+  if (scenario === "dialog") {
+    local.items = local.items.filter((item) => item.id !== "01JATTN0000000000000000002");
+  }
   if (!hasPeers(scenario)) return local;
   const peer = peerAttention(now, board.rows);
   return {

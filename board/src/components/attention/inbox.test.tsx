@@ -1,4 +1,8 @@
+import { readFileSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
+
 import { QueryClientProvider } from "@tanstack/react-query";
+import type { QueryClient } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -55,6 +59,8 @@ let reads: string[] = [];
 let screens: PromptDialog[] = [];
 // A tail read finds herdr down.
 let tailFails = false;
+// A prompt read is refused: the agent runs on a saved machine.
+let promptRefused = false;
 
 const DIALOG: PromptDialog = {
   layout: "permission",
@@ -113,6 +119,13 @@ function stubDaemon(scenario: Scenario, hold = false) {
     const read = /^\/api\/v1\/agents\/([^/]+)\/prompt$/.exec(path);
     if (read?.[1]) {
       reads.push(read[1]);
+      if (promptRefused) {
+        const error = {
+          code: "refused",
+          message: "the agent runs on the saved machine host-b; nothing was read",
+        };
+        return new Response(JSON.stringify({ ok: false, error }), { status: 422 });
+      }
       const prompt = (screens.length > 1 ? screens.shift() : screens[0]) ?? null;
       const body = {
         session_id: read[1],
@@ -130,9 +143,14 @@ function stubDaemon(scenario: Scenario, hold = false) {
   });
 }
 
-async function renderInbox(scenario: Scenario = "default", item?: string) {
+async function renderInbox(
+  scenario: Scenario = "default",
+  item?: string,
+  prepare?: (queryClient: QueryClient) => void,
+) {
   const queryClient = createTestQueryClient();
   hydrateFromSnapshot(queryClient, fixtureSnapshot(scenario, Date.parse("2026-11-02T12:00:00Z")));
+  prepare?.(queryClient);
   const path = item ? `/inbox?item=${item}` : "/inbox";
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: [path] }));
   await router.load();
@@ -157,6 +175,7 @@ beforeEach(() => {
   reads = [];
   screens = [DIALOG];
   tailFails = false;
+  promptRefused = false;
   vi.stubGlobal("matchMedia", (query: string) => ({
     matches: false,
     media: query,
@@ -590,6 +609,31 @@ test("a changed screen types nothing, and the new options show", async () => {
   expect(calls).toHaveLength(1);
 });
 
+test("a later prompt of the same session answered elsewhere never shows the earlier receipt", async () => {
+  stubDaemon("default");
+  const { queryClient } = await renderInbox("default", `perm-${SESSION_C}`);
+  fireEvent.click(await screen.findByRole("button", { name: "Answer 1: Yes" }));
+  await flush();
+  const key = attentionQuery().queryKey;
+  const first = queryClient.getQueryData<AttentionResponse>(key);
+  const prompt = first?.permission_prompts.find((row) => row.session_id === SESSION_C);
+  if (!first || !prompt) throw new Error("no prompt in the fixture");
+  const setPrompts = (permission_prompts: AttentionResponse["permission_prompts"]) =>
+    act(() => {
+      queryClient.setQueryData<AttentionResponse>(key, { ...first, permission_prompts });
+    });
+  // Prompt A leaves the inbox: this tab answered it.
+  setPrompts([]);
+  expect(await screen.findByText("Answered")).toBeTruthy();
+  // The same session asks prompt B, and the owner answers it in the pane.
+  setPrompts([{ ...prompt, since: "2026-11-02T12:01:00.000Z" }]);
+  expect(await screen.findByRole("button", { name: "Answer 1: Yes" })).toBeTruthy();
+  setPrompts([]);
+  expect(await screen.findByText("Not in the inbox any more")).toBeTruthy();
+  expect(screen.getByText("It was answered or withdrawn elsewhere.")).toBeTruthy();
+  expect(screen.queryByText(/Sent 1 · Yes/)).toBeNull();
+});
+
 test("with no dialog on the screen, the detail shows what the hook recorded", async () => {
   stubDaemon("default");
   screens = [];
@@ -607,6 +651,9 @@ test("an agent waiting on a dialog no hook asked for is a row in Permission prom
   const prompts = screen.getByRole("region", { name: "Permission prompts" });
   expect(within(prompts).getByText("alpha-42-build waits on a dialog")).toBeTruthy();
   expect(within(prompts).getByText("beta-7-build waits on a dialog")).toBeTruthy();
+  // beta-7's worker waits on a menu, so the scenario has no stale "went
+  // quiet" decision for it beside the dialog row.
+  expect(screen.queryByText(/went quiet/)).toBeNull();
 });
 
 test("the folder trust dialog is answered from its detail, with no digits", async () => {
@@ -687,6 +734,16 @@ test("a dialog the board cannot read shows no buttons, only the pane and View li
   expect(screen.queryByText("Trust this folder?")).toBeNull();
 });
 
+test("a pane tail keeps each terminal row whole and scrolls inside its box", () => {
+  // jsdom lays nothing out, so this holds the rules. A wrapped row breaks a
+  // dialog's box on a phone; the tail scrolls sideways, never the page.
+  const css = readFileSync(resolvePath(import.meta.dirname, "inbox.css"), "utf8");
+  const term = css.match(/\n\.term\s*\{([^}]*)\}/)?.[1] ?? "";
+  expect(term).toMatch(/white-space:\s*pre;/);
+  expect(term).toMatch(/overflow-x:\s*auto/);
+  expect(term).not.toMatch(/overflow-wrap/);
+});
+
 test("a pane that cannot be read still offers View live", async () => {
   stubDaemon("dialog");
   screens = [];
@@ -744,6 +801,62 @@ test("the pane button says where to find a remote agent's pane", async () => {
   expect(screen.getByRole("status").textContent).toMatch(
     /^Focused on host-b - select host-b in herdr's sidebar,/,
   );
+});
+
+// Moves a session's agent to host-b, a saved remote machine.
+function onSavedMachine(sessionId: string) {
+  const moved = (row: AgentRow) =>
+    row.session_id === sessionId ? { ...row, host_id: HOST_B } : row;
+  return (queryClient: QueryClient) =>
+    queryClient.setQueryData<AgentsResponse>(agentsQuery().queryKey, (agents) => {
+      const rows = agents?.orchestrators ?? [];
+      const found = rows.some(
+        (row) =>
+          row.session_id === sessionId ||
+          row.workers.some((worker) => worker.session_id === sessionId),
+      );
+      const [first, ...rest] = rows;
+      if (!first) throw new Error("no orchestrator in the fixture");
+      if (!found) {
+        const worker: AgentRow = { ...first, session_id: sessionId, host_id: HOST_B, workers: [] };
+        return { orchestrators: [{ ...first, workers: [...first.workers, worker] }, ...rest] };
+      }
+      return {
+        orchestrators: rows.map((row) => ({ ...moved(row), workers: row.workers.map(moved) })),
+      };
+    });
+}
+
+test("a refused prompt read is not tried again", async () => {
+  stubDaemon("default");
+  promptRefused = true;
+  await renderInbox("default", `perm-${SESSION_C}`);
+  expect(await screen.findByText("What the pane is asking", {}, { timeout: 4000 })).toBeTruthy();
+  expect(reads).toEqual([SESSION_C]);
+});
+
+test("a permission prompt on a saved machine says to answer it in herdr there", async () => {
+  stubDaemon("default");
+  await renderInbox("default", `perm-${SESSION_C}`, onSavedMachine(SESSION_C));
+  expect(
+    screen.getByText(/runs on the saved machine host-b\. Answer it in herdr on host-b\./),
+  ).toBeTruthy();
+  expect(screen.getByText("What the pane is asking")).toBeTruthy();
+  await flush();
+  expect(reads).toEqual([]);
+  expect(screen.queryByRole("button", { name: /^Answer \d/ })).toBeNull();
+});
+
+test("a dialog on a saved machine says to answer it in herdr there, not in the live view", async () => {
+  stubDaemon("dialog");
+  await renderInbox("dialog", `dialog-${SESSION_MENU}`, onSavedMachine(SESSION_MENU));
+  expect(
+    screen.getByText(/runs on the saved machine host-b\. Answer it in herdr on host-b\./),
+  ).toBeTruthy();
+  expect(screen.queryByText(/Look at the live terminal and answer there/)).toBeNull();
+  expect(await screen.findByText("What the pane shows")).toBeTruthy();
+  await flush();
+  expect(reads).toEqual([]);
 });
 
 test("pressing O twice while the first focus is in flight focuses once", async () => {

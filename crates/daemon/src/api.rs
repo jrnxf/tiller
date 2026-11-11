@@ -4604,6 +4604,26 @@ async fn read_dialog(
     Ok(prompt::read(&screen, &wait))
 }
 
+/// How long an answer holds its session's turn for the dialog to leave the
+/// screen, and how often it looks.
+const DIALOG_LEFT_WAIT: std::time::Duration = std::time::Duration::from_millis(800);
+const DIALOG_LEFT_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Waits, a short while at most, for the dialog an answer went to to leave
+/// the pane: the agent redraws a moment after it reads the keys. A second
+/// answer waits on this turn, so it reads the redrawn screen. A read that
+/// fails ends the wait; the answer was sent either way.
+async fn dialog_left(state: &AppState, pane: &str, wait: prompt::Wait, screen: &str) {
+    let until = tokio::time::Instant::now() + DIALOG_LEFT_WAIT;
+    while tokio::time::Instant::now() < until {
+        tokio::time::sleep(DIALOG_LEFT_EVERY).await;
+        match read_dialog(state, pane, wait.clone()).await {
+            Ok(Some(dialog)) if dialog.prompt.screen == screen => continue,
+            _ => return,
+        }
+    }
+}
+
 /// The dialog on a waiting agent's screen, for the board's answer buttons
 /// (`protocol.md` 7.4): a permission dialog, or a cursor menu of a known
 /// layout. The screen is read only while the agent's session says it waits.
@@ -4678,6 +4698,10 @@ async fn prompt_answer(
     .await?;
     let (session_id, pane) = local_pane(&state, session).await?;
     spend_input(&state)?;
+    // Two taps on one dialog (two tabs, two devices) take turns: the second
+    // reads the screen only after the first one's keys went and the dialog
+    // left it, so it finds the screen changed and types nothing.
+    let _turn = state.0.mirrors.answer_turn(&session_id).await;
     let changed = || {
         ApiError::new(
             StatusCode::CONFLICT,
@@ -4689,7 +4713,7 @@ async fn prompt_answer(
     let wait = waiting_on(&state, session_id.clone())
         .await?
         .ok_or_else(changed)?;
-    let dialog = read_dialog(&state, &pane, wait)
+    let dialog = read_dialog(&state, &pane, wait.clone())
         .await?
         .filter(|dialog| dialog.prompt.screen == request.screen)
         .ok_or_else(changed)?;
@@ -4706,6 +4730,7 @@ async fn prompt_answer(
     .await
     .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
     .map_err(|error| pane_error(&pane, &error))?;
+    dialog_left(&state, &pane, wait, &request.screen).await;
     Ok(Json(MutationResponse {
         ok: true,
         replayed: false,
@@ -9176,7 +9201,10 @@ esac"#,
             r#"echo "$*" >> '{dir}/calls'
 case "$*" in
 *"pane read"*)
+  [ -e '{dir}/slow' ] && sleep 0.3
   if [ -e '{dir}/screen' ]; then cat '{dir}/screen'; else printf 'one\n\033[34mtwo\033[0m\n'; fi;;
+*"pane send-keys"*)
+  mv '{dir}/after-keys' '{dir}/screen' 2>/dev/null || true;;
 *"pane layout"*)
   read cols rows < '{dir}/size'
   for pane; do :; done
@@ -9442,6 +9470,15 @@ esac"#,
         let answer = format!("/api/v1/agents/{session}/prompt/answer");
         let press = |screen: &str, option: u8| json!({"option": option, "screen": screen});
         let calls = || std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
+        // The keys sent, in order: an answer also reads the screen after it
+        // sent them, for the dialog to leave.
+        let keys = || {
+            calls()
+                .lines()
+                .filter(|line| line.contains("send-keys"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
 
         // Both pass every mirror guard.
         for (path, body) in [(&read, json!({})), (&answer, press("x", 1))] {
@@ -9495,7 +9532,10 @@ esac"#,
         assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
         let sent: Value = serde_json::from_str(&sent.body).unwrap();
         assert_eq!(sent["data"]["sent"]["option"], 4);
-        assert_eq!(calls().lines().last(), Some("pane send-keys w2:p1 4"));
+        assert_eq!(
+            keys().last().map(String::as_str),
+            Some("pane send-keys w2:p1 4")
+        );
 
         // A parallel tool call observed after the dialog opened leaves the
         // tool it asks about alone.
@@ -9533,6 +9573,15 @@ esac"#,
         let answer = format!("/api/v1/agents/{session}/prompt/answer");
         let press = |screen: &str, option: u8| json!({"option": option, "screen": screen});
         let calls = || std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
+        // The keys sent, in order: an answer also reads the screen after it
+        // sent them, for the dialog to leave.
+        let keys = || {
+            calls()
+                .lines()
+                .filter(|line| line.contains("send-keys"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
         let trust = include_str!("../../herdr/tests/fixtures/claude/trust-dialog.ansi");
         std::fs::write(dir.join("screen"), trust).unwrap();
 
@@ -9574,12 +9623,15 @@ esac"#,
         let sent = send(&app, mutation("POST", &answer, press(screen, 2), &owner)).await;
         assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
         assert_eq!(
-            calls().lines().last(),
+            keys().last().map(String::as_str),
             Some("pane send-keys w2:p1 down enter")
         );
         let sent = send(&app, mutation("POST", &answer, press(screen, 1), &owner)).await;
         assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
-        assert_eq!(calls().lines().last(), Some("pane send-keys w2:p1 enter"));
+        assert_eq!(
+            keys().last().map(String::as_str),
+            Some("pane send-keys w2:p1 enter")
+        );
 
         // A permission wait never reads the trust dialog.
         waiting(&fleet, &session, "Bash");
@@ -9588,6 +9640,62 @@ esac"#,
         assert_eq!(other["reason"], "no_dialog", "{other}");
         let late = send(&app, mutation("POST", &answer, press(screen, 2), &owner)).await;
         assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
+    }
+
+    #[tokio::test]
+    async fn two_answers_to_one_dialog_take_turns_and_only_the_first_types() {
+        let mut fleet = Fleet::new();
+        let session = fleet.worker("w2:p1");
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+        let app = mirror_app(&fleet, dir);
+        let cookie = owner_cookie(fleet.dir.path());
+        let owner = [("cookie", cookie.as_str())];
+        let read = format!("/api/v1/agents/{session}/prompt");
+        let answer = format!("/api/v1/agents/{session}/prompt/answer");
+        let calls = || std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
+        let trust = include_str!("../../herdr/tests/fixtures/claude/trust-dialog.ansi");
+        std::fs::write(dir.join("screen"), trust).unwrap();
+        fleet
+            .open()
+            .conn()
+            .execute(
+                "UPDATE sessions SET activity = 'waiting_input', activity_observed_at = ?2
+                 WHERE id = ?1",
+                rusqlite::params![session, at(0)],
+            )
+            .unwrap();
+        let shown = send(&app, mutation("POST", &read, json!({}), &owner)).await;
+        let shown: Value = serde_json::from_str(&shown.body).unwrap();
+        let screen = shown["prompt"]["screen"].as_str().unwrap().to_owned();
+
+        // The agent redraws once it reads the keys. Each screen read takes a
+        // while, so two answers that did not take turns would both read the
+        // dialog before either typed.
+        std::fs::write(dir.join("after-keys"), "Working on it\n").unwrap();
+        std::fs::write(dir.join("slow"), "").unwrap();
+        let tap = || {
+            send(
+                &app,
+                mutation(
+                    "POST",
+                    &answer,
+                    json!({"option": 2, "screen": screen}),
+                    &owner,
+                ),
+            )
+        };
+        let (first, second) = tokio::join!(tap(), tap());
+        let mut statuses = [first.status, second.status];
+        statuses.sort();
+        assert_eq!(
+            statuses,
+            [StatusCode::OK, StatusCode::CONFLICT],
+            "{} / {}",
+            first.body,
+            second.body
+        );
+        assert_eq!(calls().matches("send-keys").count(), 1, "{}", calls());
     }
 
     #[tokio::test]
