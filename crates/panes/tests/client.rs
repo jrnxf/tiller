@@ -394,8 +394,8 @@ fn a_subscription_yields_the_repaint_then_output_and_raw_input_reaches_the_pane(
         Some(Update::Output(b"ls\r\n".to_vec()))
     );
     // The resize goes from another thread while this one waits in recv.
-    let resizer = subscription.resizer();
-    let resizing = thread::spawn(move || resizer.resize(100, 30).unwrap());
+    let handle = subscription.handle();
+    let resizing = thread::spawn(move || handle.resize(100, 30).unwrap());
     assert_eq!(
         subscription.recv().unwrap(),
         Some(Update::Resized {
@@ -569,6 +569,55 @@ fn a_lagged_subscriber_is_told_and_its_stream_ends() {
 }
 
 #[test]
+fn a_close_before_the_pane_exits_is_unreachable_not_the_end() {
+    // The holder closes the stream with no exit and no lagged: it may have
+    // died, so the pane's state is unknown.
+    let holder = subscription_holder(|_, _| {});
+    let client = HolderClient::connect(&holder.path, "daemon").unwrap();
+    let mut subscription = client
+        .subscribe(&"p1".into(), Subscribe::default())
+        .unwrap();
+    assert!(matches!(
+        subscription.recv(),
+        Ok(Some(Update::Repaint { .. }))
+    ));
+    let err = subscription.recv().unwrap_err();
+    assert!(matches!(err, PanesError::Unreachable(_)), "{err:?}");
+    assert_eq!(subscription.recv().unwrap(), None);
+    drop(subscription);
+    drop(client);
+    holder.join();
+}
+
+#[test]
+fn a_handle_ends_a_subscription_that_waits_in_recv() {
+    let holder = subscription_holder(|peer, _| {
+        // Quiet until the client ends the stream.
+        assert_eq!(peer.frame(), None);
+    });
+    let client = HolderClient::connect(&holder.path, "daemon").unwrap();
+    let mut subscription = client
+        .subscribe(&"p1".into(), Subscribe::default())
+        .unwrap();
+    assert!(matches!(
+        subscription.recv(),
+        Ok(Some(Update::Repaint { .. }))
+    ));
+    let handle = subscription.handle();
+    let ending = thread::spawn(move || {
+        thread::sleep(std::time::Duration::from_millis(50));
+        handle.end();
+        handle
+    });
+    assert_eq!(subscription.recv().unwrap(), None);
+    let handle = ending.join().unwrap();
+    assert!(handle.resize(100, 30).is_err());
+    drop(subscription);
+    drop(client);
+    holder.join();
+}
+
+#[test]
 fn an_error_with_no_id_on_a_subscription_ends_the_stream() {
     let (closed, connection_closed) = std::sync::mpsc::channel();
     let holder = subscription_holder(move |peer, _| {
@@ -657,7 +706,7 @@ fn a_resize_refused_keeps_the_stream_and_an_ok_for_no_resize_breaks_it() {
 }
 
 #[test]
-fn dropping_a_subscription_ends_its_connection_while_a_resizer_lives() {
+fn dropping_a_subscription_ends_its_connection_while_a_handle_lives() {
     let holder = subscription_holder(|peer, _| {
         assert_eq!(peer.frame(), None);
     });
@@ -665,9 +714,9 @@ fn dropping_a_subscription_ends_its_connection_while_a_resizer_lives() {
     let subscription = client
         .subscribe(&"p1".into(), Subscribe::default())
         .unwrap();
-    let resizer = subscription.resizer();
+    let handle = subscription.handle();
     drop(subscription);
-    assert!(resizer.resize(100, 30).is_err());
+    assert!(handle.resize(100, 30).is_err());
     drop(client);
     holder.join();
 }

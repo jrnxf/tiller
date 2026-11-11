@@ -29,6 +29,9 @@ const LEN_BYTES: usize = 4;
 /// The `stream` or `num` prefix of a kind 1 or kind 2 body.
 const ADDRESS_BYTES: usize = 4;
 
+/// The most [`read_frame`] reserves for a body before its bytes come.
+const PREALLOC_MAX: usize = 1024 * 1024;
+
 /// One frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame {
@@ -201,7 +204,9 @@ pub fn read_frame<R: Read>(mut input: R) -> Result<Option<Frame>, FrameError> {
     }
     let address = address(&head[LEN_BYTES + 1..head_len]);
     let want = len - 1 - address_len;
-    let mut rest = Vec::new();
+    // Room for the body up front, but not more than a bare `len` prefix
+    // could make a reader hold before any body byte arrives.
+    let mut rest = Vec::with_capacity(want.min(PREALLOC_MAX));
     input.by_ref().take(want as u64).read_to_end(&mut rest)?;
     if rest.len() < want {
         return Err(FrameError::Truncated {

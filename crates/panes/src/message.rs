@@ -236,35 +236,36 @@ impl Request {
     /// `bad_request`, each with the message's `id` when it has one, so the
     /// holder can answer it.
     pub fn decode(text: &str) -> Result<Self, Undecodable> {
-        #[derive(Deserialize)]
-        struct Probe {
-            #[serde(rename = "type")]
-            kind: Option<serde_json::Value>,
-            id: Option<serde_json::Value>,
-        }
-        let probe: Probe = serde_json::from_str(text).map_err(|err| Undecodable {
-            id: None,
-            code: ErrorCode::BadRequest,
-            message: format!("not a JSON object: {err}"),
-        })?;
+        // An object only: serde would also take an array, with its first
+        // element as the type.
+        let object: serde_json::Map<String, serde_json::Value> = serde_json::from_str(text)
+            .map_err(|err| Undecodable {
+                id: None,
+                code: ErrorCode::BadRequest,
+                message: format!("not a JSON object: {err}"),
+            })?;
         // An id that is not a request id is answered without one; the full
         // decode below names what is wrong with it.
-        let id = probe.id.as_ref().and_then(serde_json::Value::as_u64);
-        let Some(kind) = probe.kind.as_ref().and_then(serde_json::Value::as_str) else {
+        let id = object.get("id").and_then(serde_json::Value::as_u64);
+        let Some(kind) = object
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+        else {
             return Err(Undecodable {
                 id,
                 code: ErrorCode::BadRequest,
                 message: "the message has no type".into(),
             });
         };
-        if !Self::TYPES.contains(&kind) {
+        if !Self::TYPES.contains(&kind.as_str()) {
             return Err(Undecodable {
                 id,
                 code: ErrorCode::Unsupported,
                 message: format!("unknown request type {kind:?}"),
             });
         }
-        serde_json::from_str(text).map_err(|err| Undecodable {
+        serde_json::from_value(serde_json::Value::Object(object)).map_err(|err| Undecodable {
             id,
             code: ErrorCode::BadRequest,
             message: format!("{kind}: {err}"),
@@ -580,7 +581,7 @@ mod tests {
     fn a_bad_request_keeps_its_id() {
         let err = Request::decode(r#"{"type":"spawn","id":3,"key":"k"}"#).unwrap_err();
         assert_eq!((err.id, err.code), (Some(3), ErrorCode::BadRequest));
-        for text in ["", "[1]", "not json", r#"{"id":4}"#] {
+        for text in ["", "[1]", r#"["list",7]"#, "not json", r#"{"id":4}"#] {
             let err = Request::decode(text).unwrap_err();
             assert_eq!(err.code, ErrorCode::BadRequest, "{text:?}");
         }

@@ -18,7 +18,7 @@ pub mod paths;
 #[cfg(any(test, feature = "testing"))]
 pub mod fake;
 
-pub use client::{HolderClient, Resizer, Subscribe, Subscription, Update};
+pub use client::{HolderClient, StreamHandle, Subscribe, Subscription, Update};
 pub use error::{PanesError, Result};
 pub use message::{Exit, Listing, Meta, Pane, PaneId, PaneState, Size, Spawn};
 pub use panes::Panes;
