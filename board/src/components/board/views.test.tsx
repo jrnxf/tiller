@@ -838,6 +838,52 @@ test("the drawer expands to the full page, and Back returns to the board with th
   expect(await screen.findByTestId("card-drawer")).toBeTruthy();
 });
 
+test("opening the drawer fetches the card page's route chunk, so the full page needs no wait", async () => {
+  stubApi("default");
+  const queryClient = createQueryClient();
+  hydrateFromSnapshot(queryClient, fixtureSnapshot("default"));
+  const router = createAppRouter(
+    queryClient,
+    createMemoryHistory({ initialEntries: [`/?card=${CARD_43}`] }),
+  );
+  const preload = vi.spyOn(router, "preloadRoute");
+  await router.load();
+  render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
+  await screen.findByTestId("card-drawer");
+
+  // Once, for this card's page, with no hover or click to ask for it.
+  await waitFor(() => expect(preload).toHaveBeenCalledTimes(1));
+  expect(preload).toHaveBeenCalledWith({
+    to: "/cards/$cardId",
+    params: { cardId: CARD_43 },
+    search: { owner: undefined },
+  });
+  // Another render of the same open drawer does not ask again.
+  await act(async () => {});
+  expect(preload).toHaveBeenCalledTimes(1);
+});
+
+test("the board with no card open fetches no card page", async () => {
+  stubApi("default");
+  const queryClient = createQueryClient();
+  hydrateFromSnapshot(queryClient, fixtureSnapshot("default"));
+  const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: ["/"] }));
+  const preload = vi.spyOn(router, "preloadRoute");
+  await router.load();
+  render(
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  );
+  await screen.findByTestId("board");
+  await act(async () => {});
+  expect(preload).not.toHaveBeenCalled();
+});
+
 test("Close and Escape shut the drawer", async () => {
   stubApi("default");
   const { router } = await renderApp("default", `/?card=${CARD_43}`);

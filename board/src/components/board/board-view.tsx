@@ -1,6 +1,6 @@
 import { Tooltip } from "@base-ui/react/tooltip";
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate, useRouter } from "@tanstack/react-router";
 import { Component, Suspense, useEffect } from "react";
 import type { ReactNode } from "react";
 import type { CSSProperties } from "react";
@@ -111,6 +111,12 @@ class DrawerBoundary extends Component<{ children: ReactNode }, { failed: boolea
 // room and stay in view. Expanding it opens the full card page.
 function CardDrawer({ cardId, owner }: { cardId: string; owner: string | undefined }) {
   const navigate = useNavigate();
+  const router = useRouter();
+  // "Open the full page" is a link to the card route. Fetch that route's code
+  // once now, so the click does not wait for it on a slow network.
+  useEffect(() => {
+    void router.preloadRoute({ to: "/cards/$cardId", params: { cardId }, search: { owner } });
+  }, [router, cardId, owner]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented || shortcutsBlocked(event)) return;
