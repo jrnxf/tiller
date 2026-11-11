@@ -145,16 +145,27 @@ const ASK_SOURCE: Record<AskSource, string> = {
 const UNTAGGED = "Waiting for the orchestrator to tag this ask";
 
 // An ask that is not a card yet: what was asked, and why it is not a card. A
-// peer's ask carries no text, so its tile says only that it waits.
-function AskTile({ ask }: { ask: NonNullable<Tile["ask"]> }) {
+// peer's ask carries no text, so its tile says only that it waits, and its
+// host chip says whose it is. Like a card, it dims with its lane or its link.
+function AskTile({ ask, lane }: { ask: NonNullable<Tile["ask"]>; lane: LaneHealth["kind"] }) {
   const source = ask.source ? ASK_SOURCE[ask.source] : null;
   const summary = ask.summary || null;
+  const standing = useStanding(ask);
   return (
-    <div className="card" title={summary ? `${summary}\n${UNTAGGED}` : UNTAGGED}>
+    <div
+      className={`card${lane === "disconnected" || standing.dim ? " dim" : ""}`}
+      data-peer-state={standing.peer ? (standing.dim ? "stale" : "live") : undefined}
+      title={summary ? `${summary}\n${UNTAGGED}` : UNTAGGED}
+    >
       <div className="c-top">
         <Status mark="asked" />
         <span className="id">ask</span>
         {source ? <span className="lab sm">{source}</span> : null}
+        {standing.dim ? (
+          <span className="c-age">
+            <AsOf asOf={standing.asOf} />
+          </span>
+        ) : null}
       </div>
       <div className="c-title">
         <span>{summary ?? UNTAGGED}</span>
@@ -165,6 +176,7 @@ function AskTile({ ask }: { ask: NonNullable<Tile["ask"]> }) {
         </div>
       ) : null}
       <div className="c-chips">
+        <HostChip entity={ask} />
         <span className="lab sm">
           <Ago at={ask.received_at} prefix="asked" />
         </span>
@@ -181,7 +193,7 @@ export function TileView({ tile, lane = "ok" }: { tile: Tile; lane?: LaneHealth[
       </Glide>
     );
   }
-  if (tile.ask) return <AskTile ask={tile.ask} />;
+  if (tile.ask) return <AskTile ask={tile.ask} lane={lane} />;
   return null;
 }
 

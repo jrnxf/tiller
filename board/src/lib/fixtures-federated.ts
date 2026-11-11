@@ -10,6 +10,7 @@
 //   host-g  refused          the pairing's key was revoked; no rows
 import type {
   AgentRow,
+  AskedRow,
   AttentionItem,
   AttentionResponse,
   BoardRow,
@@ -203,6 +204,31 @@ function peerCard(
     ...(extras.filedFrom ? { filed_from: extras.filedFrom } : {}),
     ...tag(host, now),
   };
+}
+
+// The peers' unresolved asks. A peer link carries no ask text. host-d's is in
+// its `fleet`, a slug this host uses too; host-e's is behind a link that is down.
+export function peerAsks(now: number): AskedRow[] {
+  return [
+    {
+      id: "01JPASKD00000000000000000D",
+      project_id: "fleet",
+      session_id: null,
+      received_at: at(now, 3),
+      age_seconds: 180,
+      source: "prompt",
+      ...tag("host-d", now),
+    },
+    {
+      id: "01JPASKE00000000000000000E",
+      project_id: "ledger",
+      session_id: null,
+      received_at: at(now, 9),
+      age_seconds: 540,
+      source: "board",
+      ...tag("host-e", now),
+    },
+  ];
 }
 
 export function peerRows(now: number): BoardRow[] {

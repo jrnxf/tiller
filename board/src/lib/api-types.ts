@@ -50,7 +50,8 @@ export interface BoardRow extends Federated {
   filed_from?: string | null;
 }
 
-export interface AskedRow {
+// A peer's ask carries the federated fields, like its cards.
+export interface AskedRow extends Federated {
   id: string;
   project_id: string;
   session_id: string | null;

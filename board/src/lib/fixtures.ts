@@ -35,6 +35,7 @@ import type {
 } from "./api-types.ts";
 import {
   peerAgents,
+  peerAsks,
   peerAttention,
   peerMachines,
   peerProjects,
@@ -820,7 +821,10 @@ function boardFor(scenario: Scenario, now: number): BoardResponse {
   if (scenario === "blocked") return { rows: blockedRows(now), asked: [] };
   if (scenario === "degraded") return { rows: degradedRows(now), asked: [] };
   if (hasPeers(scenario)) {
-    return { rows: [...defaultRows(now), ...bugRows(now), ...peerRows(now)], asked: [] };
+    return {
+      rows: [...defaultRows(now), ...bugRows(now), ...peerRows(now)],
+      asked: peerAsks(now),
+    };
   }
   if (scenario === "busy") {
     return {
