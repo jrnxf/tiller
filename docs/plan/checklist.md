@@ -591,7 +591,7 @@ the orchestrator - 30 min - after S1b and S1c
 - [ ] H10 Reconcile, observe and state: R18, R21, R22, the 11.1 migration
 - [ ] H11 Daemon API and peers: live view, Fit as a lease, Open in terminal, the peer pane link
 - [ ] H12 Board copy and `terminal-open.ts`, screenshots in both themes at 1440 px and 390 px
-- [ ] H13 `crates/herdr` and the section 10 code rows done; `git grep -i herdr` finds only history (ADRs, `probe/`, the export, the specs' [H] before-the-cutover notes), and no test name says herdr
+- [ ] H13 `crates/herdr` and the section 10 code rows done; `git grep -i herdr` finds only history (ADRs, superseded docs such as `herdr-layout.md`, `probe/`, the export, the specs' [H] before-the-cutover notes), and no test name says herdr
 - [ ] H14 The 4 h soak, the full CI gate and `nix flake check`
 - [ ] Delivered, each one
 

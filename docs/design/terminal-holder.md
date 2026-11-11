@@ -119,7 +119,7 @@ A `pane` record is:
 ```json
 {"pane":"p01JD...","num":7,"key":"<session ulid>","pid":4242,"argv":["claude","--resume","..."],
  "cwd":"/home/user/src/alpha","started_at":"...","state":"running","exit":null,
- "cols":120,"rows":40,"meta":{"label":"◆ alpha · orchestrator","project":"alpha","role":"orchestrator","session":"..."},
+ "cols":120,"rows":40,"meta":{"label":"alpha","project":"alpha","role":"orchestrator","session":"..."},
  "title":"alpha","last_output_at":"...","attach_clients":0,"subscribers":1}
 ```
 
@@ -310,7 +310,7 @@ The holder encodes each name for the app's current mode: legacy, application cur
 | Composer read and line submit with Enter pacing | `delivery/outbox.rs:277-295,537-557`, `herdr/submit.rs` | `screen(visible, ansi)` and `classify` as today. `submit.rs` moves to `tiller-panes` with no change in logic: `input(line)`, wait `Pacing.settle`, `keys(["enter"])`, read back, press again up to `PRESSES` (4). Section 4.5 says why it stays |
 | Interrupt | `agents/control.rs:224-258` | `keys(["esc"])`, and an observation with source `holder` |
 | Stop: Escape, `/exit` at an empty composer, prove the agent gone | `agents/control.rs:651-790` | The same steps. "Gone" is now the `exited` event, with no polling |
-| Stop an orchestrator, close a pane, teardown | `control.rs:848`, `spawn/mod.rs:650,1149`, `control/project.rs:280` | `forget(pane)` once the stop steps proved the agent gone (the pane `exited`). When the owner forced the stop, `close(pane, 3 s)` first, then `forget`, as today. The `dead_panes` guard above covers clean |
+| Stop an orchestrator, close a pane, teardown | `control.rs:848`, `spawn/mod.rs:659,1166`, `control/project.rs:280` | `forget(pane)` once the stop steps proved the agent gone (the pane `exited`). When the owner forced the stop, `close(pane, 3 s)` first, then `forget`, as today. The `dead_panes` guard above covers clean |
 | `dead_panes`: closes only the run's bare-shell panes, and refuses while one still runs an agent ("a live pane is never closed") | `spawn/mod.rs:1114-1140` | The check stays, on holder facts. A run's panes are those whose `key` is one of its sessions. Clean and teardown `forget` the `exited` ones, and refuse while any is `running`. No bare shell exists any more, because the holder runs `claude` with no shell under it |
 | Owner notification | `delivery/notify.rs:70` | The `Notify` trait and the command notifier (section 7) |
 | Open in herdr (focus) | `api.rs:5255` (`focus`), `herdr/front.rs`, `cli/cmd/spawn.rs:525-545` | Open in terminal (section 5.3): `switch` when an attach client runs, else start the terminal app with `tiller attach` |

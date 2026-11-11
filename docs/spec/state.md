@@ -32,7 +32,7 @@ Project ids are short lowercase slugs, 2 to 32 characters: words of lowercase le
 
 No word of a project id starts with a digit, so the first hyphen-separated part of a display id that does is its card number: `acme-web2-staging-12` is card 12 of `acme-web2-staging`, and `acme-web2-staging-12-build-2` is that card's second build. A display id splits at its last hyphen, and `foo-12` is never a project id. Ids from before schema 7 had no hyphen and at most 16 characters; they still parse unchanged.
 
-Runs are addressed through their card and role: `alpha-42 build`. The agent's pane label (the holder pane's `meta.label` [H], made by `agents::labels`; herdr's agent name until the cutover) is `<display id>-<role>`, `alpha-42-build`; a second run of the same role on the same card appends its attempt number, `alpha-42-build-2` (`runs.attempt`).
+Runs are addressed through their card and role: `alpha-42 build`. The agent's name (`name` in the API [H], herdr's agent name and `herdr_name` until the cutover) is `<display id>-<role>`, `alpha-42-build`, derived from the run; a second run of the same role on the same card appends its attempt number, `alpha-42-build-2` (`runs.attempt`). The pane's label is another thing: the holder pane's `meta.label` [H], which `agents::labels` makes from today's `worker_label` and `orchestrator_label` (`alpha`, `├ alpha-42 build`), as the herdr workspace label is made today.
 
 Asks, attention items, approvals and outbox messages are addressed by ULID. The board shows them with their card's display id beside them; the CLI prints both.
 
