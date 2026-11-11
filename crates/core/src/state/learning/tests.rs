@@ -961,3 +961,45 @@ fn a_failed_eval_is_kept_until_its_set_records_a_run() {
     assert_eq!(failed[0].failure.error, "again");
     assert!(failed_evals(store.conn(), 0).unwrap().is_empty());
 }
+
+/// A failure stops showing once its proposal is decided, and once any set
+/// that holds the proposal records a run, not only the set it failed in.
+#[test]
+fn a_failed_eval_clears_when_its_proposal_moves_on() {
+    let (mut store, _) = memory_store();
+    proposal(&store, P1, "--- a\n+++ b\n@@ -0,0 +1 @@\n+one\n");
+    let first = store
+        .change_set_create(&owner(), "tighter briefs", &[P1.into()], 10)
+        .unwrap()
+        .value;
+    let daemon = Ctx::new(Actor::Daemon);
+    store
+        .eval_run_fail(&daemon, &first.id, failure(P1, "first"))
+        .unwrap();
+    store.change_set_abandon(&owner(), &first.id).unwrap();
+    assert_eq!(failed_evals(store.conn(), 20).unwrap().len(), 1);
+
+    // A passing run of the same proposal in a new set clears it.
+    let second = store
+        .change_set_create(&owner(), "tighter briefs again", &[P1.into()], 10)
+        .unwrap()
+        .value;
+    store
+        .eval_run_record(&owner(), &second.id, passing())
+        .unwrap();
+    assert!(failed_evals(store.conn(), 20).unwrap().is_empty());
+
+    // A proposal that is no longer proposed shows no failure.
+    store
+        .eval_run_fail(&daemon, &second.id, failure(P1, "again"))
+        .unwrap();
+    assert_eq!(failed_evals(store.conn(), 20).unwrap().len(), 1);
+    store
+        .conn()
+        .execute(
+            "UPDATE proposals SET state = 'discarded' WHERE id = ?1",
+            [P1],
+        )
+        .unwrap();
+    assert!(failed_evals(store.conn(), 20).unwrap().is_empty());
+}

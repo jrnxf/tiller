@@ -136,21 +136,25 @@ pub struct FailedEval {
 /// characters.
 pub const EVAL_ERROR_MAX_CHARS: usize = 2_000;
 
-/// The newest failed holdout eval of each proposal, newest first and at most
-/// `limit`, leaving out one whose change set recorded a run after it.
+/// The newest failed holdout eval of each proposal that is still proposed,
+/// newest first and at most `limit`. A failure is left out once any set
+/// holding its proposal records a run after it.
 pub fn failed_evals(conn: &Connection, limit: usize) -> Result<Vec<FailedEval>> {
     let mut statement = conn.prepare(
         "SELECT failed.payload, failed.at FROM events AS failed
+         JOIN proposals ON proposals.id = json_extract(failed.payload, '$.proposal_id')
          WHERE failed.kind = 'eval_run.failed'
+           AND proposals.state = 'proposed'
            AND failed.seq = (
                SELECT max(newer.seq) FROM events AS newer
                WHERE newer.kind = 'eval_run.failed'
-                 AND json_extract(newer.payload, '$.proposal_id')
-                     = json_extract(failed.payload, '$.proposal_id'))
+                 AND json_extract(newer.payload, '$.proposal_id') = proposals.id)
            AND NOT EXISTS (
                SELECT 1 FROM events AS recorded
+               JOIN change_set_members AS member
+                 ON member.change_set_id = json_extract(recorded.payload, '$.change_set')
                WHERE recorded.kind = 'eval_run.recorded' AND recorded.seq > failed.seq
-                 AND json_extract(recorded.payload, '$.change_set') = failed.entity_id)
+                 AND member.proposal_id = proposals.id)
          ORDER BY failed.seq DESC LIMIT ?1",
     )?;
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);

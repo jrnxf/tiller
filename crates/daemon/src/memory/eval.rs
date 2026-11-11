@@ -89,9 +89,9 @@ impl Evals {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// What the memory view shows, newest first: this daemon's jobs, then
-    /// the failures its `eval_run.failed` events keep for every other
-    /// proposal, so a failure outlives a restart.
+    /// What the memory view shows, newest start first and at most [`KEPT`]:
+    /// this daemon's jobs, and the failures its `eval_run.failed` events
+    /// keep for every other proposal, so a failure outlives a restart.
     pub fn jobs(&self, conn: &rusqlite::Connection) -> tiller_core::Result<Vec<MemoryEvalJob>> {
         let mut jobs: Vec<MemoryEvalJob> = self
             .lock()
@@ -100,9 +100,6 @@ impl Evals {
             .map(|job| job.view.clone())
             .collect();
         for failed in learning::failed_evals(conn, KEPT)? {
-            if jobs.len() >= KEPT {
-                break;
-            }
             if jobs
                 .iter()
                 .any(|job| job.proposal_id == failed.failure.proposal_id)
@@ -119,6 +116,9 @@ impl Evals {
                 finished_at: Some(failed.finished_at),
             });
         }
+        // A stable sort keeps the in-memory order for equal starts.
+        jobs.sort_by_key(|job| std::cmp::Reverse(job.started_at.parse::<Timestamp>().ok()));
+        jobs.truncate(KEPT);
         Ok(jobs)
     }
 
