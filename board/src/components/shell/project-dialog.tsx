@@ -8,7 +8,7 @@ import { Modal } from "../ui/modal";
 export const FLEET_PROJECT = "fleet";
 
 // "builder on alpha-42", or "orchestrator".
-function agentName(agent: ProjectAgent): string {
+export function agentName(agent: ProjectAgent): string {
   return agent.card ? `${agent.role} on ${agent.card}` : agent.role;
 }
 

@@ -31,9 +31,21 @@ export function sessionDrafted(session: string): boolean {
   return changes.get(session)?.drafted === true;
 }
 
+// The ids of the cards Cancel card ended.
+const cancelled = new Set<string>();
+
+export function cancelCard(card: string): void {
+  cancelled.add(card);
+}
+
+export function cardCancelled(card: string): boolean {
+  return cancelled.has(card);
+}
+
 // Back to the scenario's starting point, for tests.
 export function resetLifecycleFixture(): void {
   changes.clear();
+  cancelled.clear();
 }
 
 const minutes = (now: number, delta: number) => new Date(now + delta * 60_000).toISOString();

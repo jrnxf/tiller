@@ -29,7 +29,7 @@ import {
   orchestratorSession,
   startOrchestratorFixture,
 } from "./fixtures.ts";
-import { changeSession, sessionDrafted, sessionStopped } from "./fixtures-lifecycle.ts";
+import { cancelCard, changeSession, sessionDrafted, sessionStopped } from "./fixtures-lifecycle.ts";
 import { runPollerFixture } from "./fixture-doctor.ts";
 import type { Scenario } from "./fixtures.ts";
 import { relabelFixture } from "./fixtures-signals.ts";
@@ -1115,6 +1115,32 @@ function closeCard(id: string, body: Record<string, unknown>): MutationResult {
   };
 }
 
+// `POST /api/v1/cards/{id}/cancel`, by id or display id as the daemon takes
+// it: the card moves to Cancelled and its runs end.
+function cancelFixtureCard(card: string, body: Record<string, unknown>): MutationResult {
+  const board = fixtureResponses("federated")[boardPath()] as BoardResponse;
+  const known = knownCard(card) ?? board.rows.find((row) => row.display_id === card);
+  const row = known ? (closedCards.get(known.id) ?? known) : undefined;
+  if (!row) return refusal(404, "not_found", `no card ${card}`);
+  if (typeof body.reason !== "string" || body.reason.trim() === "") {
+    return refusal(400, "usage", "the reason is empty");
+  }
+  const closed: BoardRow = {
+    ...row,
+    column: "done",
+    badge: "cancelled",
+    needs_you: false,
+    closed_at: new Date().toISOString(),
+    rev: row.rev + 1,
+  };
+  closedCards.set(row.id, closed);
+  cancelCard(row.id);
+  return {
+    reply: recorded({ card: closed }, null, null),
+    followUps: [cardEvent("card.closed", "card.cancel", closed)],
+  };
+}
+
 // `POST /api/v1/bug-project`: this host's pick, checked against its `rev`.
 function pickBugProject(body: Record<string, unknown>, scenario: Scenario): MutationResult {
   const machine = localMachine(scenario);
@@ -1178,6 +1204,8 @@ function handle(
   if (path === "/api/v1/away") return awayMutation(method);
   const close = /^\/api\/v1\/cards\/([^/]+)\/close$/.exec(path);
   if (method === "POST" && close?.[1]) return closeCard(close[1], body);
+  const cancel = /^\/api\/v1\/cards\/([^/]+)\/cancel$/.exec(path);
+  if (method === "POST" && cancel?.[1]) return cancelFixtureCard(cancel[1], body);
   const deps = /^\/api\/v1\/cards\/([^/]+)\/deps$/.exec(path);
   if ((method === "POST" || method === "DELETE") && deps?.[1]) {
     return depMutation(method, deps[1], body, scenario);

@@ -41,7 +41,7 @@ import {
   peerSnapshot,
   workerActivity,
 } from "./fixtures-federated.ts";
-import { withLifecycle } from "./fixtures-lifecycle.ts";
+import { cardCancelled, withLifecycle } from "./fixtures-lifecycle.ts";
 import { memoryResource } from "./fixtures-memory.ts";
 import { retrosResource, settleRetros } from "./fixtures-retros.ts";
 import { recapFor } from "./fixtures-recap.ts";
@@ -83,7 +83,9 @@ export type Scenario =
   | "backing-up"
   | "backup-failed"
   // A paused run, a dead pane and a silent orchestrator (P11).
-  | "lifecycle";
+  | "lifecycle"
+  // A project delete blocked by a live run, then by a live session (P15).
+  | "delete-blocked";
 
 // The scenarios with paired peers. `stale-sessions` has them so a peer's older
 // sessions show on this host's board.
@@ -113,6 +115,7 @@ export const SCENARIOS: readonly Scenario[] = [
   "backing-up",
   "backup-failed",
   "lifecycle",
+  "delete-blocked",
 ];
 
 const WEEKLY_FLOOR_PERCENT = 3;
@@ -1530,21 +1533,55 @@ function liveAgentsFor(
   projectId: string,
   now: number,
 ): ProjectAgent[] {
-  const orchestrator = agentsFor(
-    board,
-    projectsFor(scenario, now),
-    now,
-    scenario,
-  ).orchestrators.find((agent) => agent.project_id === projectId && !isPeerRow(agent));
-  if (!orchestrator) return [];
+  // A worker whose orchestrator was stopped is listed on its own, and a
+  // cancelled card's run has ended.
   const display = new Map(board.rows.map((row) => [row.id, row.display_id]));
-  return [orchestrator, ...orchestrator.workers].map((agent) => ({
-    role: agent.role === "build" ? "builder" : agent.role,
-    session: agent.session_id,
-    card: agent.card_id ? (display.get(agent.card_id) ?? null) : null,
-    run: agent.card_id ? (agent.run_id ?? null) : null,
-    local: true,
-  }));
+  return agentsFor(board, projectsFor(scenario, now), now, scenario)
+    .orchestrators.filter((agent) => agent.project_id === projectId && !isPeerRow(agent))
+    .flatMap((agent) => [agent, ...agent.workers])
+    .filter((agent) => !(agent.card_id && cardCancelled(agent.card_id)))
+    .map((agent) => ({
+      role: agent.role === "build" ? "builder" : agent.role,
+      session: agent.session_id,
+      card: agent.card_id ? (display.get(agent.card_id) ?? null) : null,
+      run: agent.card_id ? (agent.run_id ?? null) : null,
+      local: true,
+    }));
+}
+
+const unblocked = { refused: null, unblock: null };
+
+// What blocks a delete in the `delete-blocked` scenario, one thing at a time
+// as the daemon reports it: a working card's live run until the card is
+// cancelled, then the orchestrator's live session until it is stopped.
+function blockerFor(
+  projectId: string,
+  working: BoardRow[],
+  agents: ProjectAgent[],
+): Pick<ProjectDeletePreview, "refused" | "unblock"> {
+  const live = working.find((row) => !cardCancelled(row.id));
+  if (live) {
+    return {
+      refused: `builder run on ${live.display_id} is live; end it first`,
+      unblock: {
+        step: "cancel its card",
+        command: `tiller card cancel ${live.display_id} --reason "deleting project ${projectId}"`,
+        action: { id: "card.cancel", target: live.display_id },
+      },
+    };
+  }
+  const session = agents.find((agent) => agent.card === null)?.session;
+  if (session) {
+    return {
+      refused: `orchestrator session ${session} is live; end it first`,
+      unblock: {
+        step: "stop its agent",
+        command: `tiller agent stop ${session}`,
+        action: { id: "agent.stop", target: session },
+      },
+    };
+  }
+  return unblocked;
 }
 
 // What deleting a fixture project would remove, counted from its board rows,
@@ -1562,6 +1599,7 @@ function deletePreviewFor(
   const rows = board.rows.filter((row) => row.project_id === projectId && !row.host);
   const started = rows.filter((row) => row.column !== "queued");
   const working = rows.filter((row) => row.column === "working");
+  const agents = liveAgentsFor(scenario, board, projectId, now);
   return {
     project: projectId,
     removed: {
@@ -1576,9 +1614,8 @@ function deletePreviewFor(
       events: rows.length * 9 + 6,
     },
     unlinked: projectId === "gamma" ? { "cards.fixes_card_id": 1 } : {},
-    refused: null,
-    unblock: null,
-    agents: liveAgentsFor(scenario, board, projectId, now),
+    ...(scenario === "delete-blocked" ? blockerFor(projectId, working, agents) : unblocked),
+    agents,
     unlanded: working.map((row, index) => ({
       path: `/home/user/worktrees/${row.display_id}`,
       branch: `tiller/${row.display_id}`,

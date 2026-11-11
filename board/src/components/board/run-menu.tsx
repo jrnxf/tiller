@@ -199,11 +199,15 @@ export function RunDialogs({
   dialog,
   onClose,
   onOpen,
+  onStopped,
 }: {
   target: RunTarget;
   dialog: RunDialog | null;
   onClose: () => void;
-  onOpen: () => void;
+  // Opens the agent's pane in herdr; without it the dialogs offer no Open.
+  onOpen?: () => void;
+  // Called once a stop is recorded, before the dialog closes.
+  onStopped?: (warning: string | null) => void;
 }) {
   switch (dialog) {
     case "pause":
@@ -211,7 +215,7 @@ export function RunDialogs({
     case "relaunch":
       return <RelaunchDialog target={target} onClose={onClose} />;
     case "stop":
-      return <StopDialog target={target} onClose={onClose} onOpen={onOpen} />;
+      return <StopDialog target={target} onClose={onClose} onOpen={onOpen} onStopped={onStopped} />;
     default:
       return null;
   }
@@ -457,10 +461,12 @@ function StopDialog({
   target,
   onClose,
   onOpen,
+  onStopped,
 }: {
   target: RunTarget;
   onClose: () => void;
-  onOpen: () => void;
+  onOpen: (() => void) | undefined;
+  onStopped: ((warning: string | null) => void) | undefined;
 }) {
   const refresh = useRefreshAgents();
   const send = useCallback(
@@ -478,9 +484,10 @@ function StopDialog({
         `Stopped ${target.name}`,
         response.warning ?? "Its pane is closed and its session ended.",
       );
+      onStopped?.(response.warning ?? null);
       onClose();
     },
-    [refresh, onClose, target.name],
+    [refresh, onClose, onStopped, target.name],
   );
   // Each dialog is one press: its key is kept for a retry after a refusal.
   const [press] = useState(() => `${target.sessionId}:stop:${Date.now()}`);
@@ -502,10 +509,12 @@ function StopDialog({
           or Cancel card on the card page ends it and stops the agent.
         </p>
         <div className="dialog-actions">
-          <button type="button" className="btn" onClick={onOpen}>
-            <PaneIcon />
-            Open in herdr
-          </button>
+          {onOpen ? (
+            <button type="button" className="btn" onClick={onOpen}>
+              <PaneIcon />
+              Open in herdr
+            </button>
+          ) : null}
           <button ref={keep} type="button" className="btn" onClick={onClose}>
             Close
           </button>
@@ -545,10 +554,12 @@ function StopDialog({
         >
           Keep running
         </button>
-        <button type="button" className="btn" disabled={action.pending} onClick={onOpen}>
-          <PaneIcon />
-          Open in herdr
-        </button>
+        {onOpen ? (
+          <button type="button" className="btn" disabled={action.pending} onClick={onOpen}>
+            <PaneIcon />
+            Open in herdr
+          </button>
+        ) : null}
         <button
           type="button"
           className="btn danger"

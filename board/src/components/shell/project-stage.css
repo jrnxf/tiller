@@ -368,22 +368,69 @@
   color: var(--fg-3);
 }
 
-.delete-next {
-  margin-top: 10px;
-  font-size: var(--fs-mini);
-  color: var(--fg-2);
+/* What blocks a delete: the fact, a line under it, and on the right the
+   action that clears it or what happened to it */
+.pdialog-section .delete-blocks {
+  gap: 0;
 }
 
-.delete-next code {
-  display: block;
-  margin-top: 6px;
-  padding: 6px 8px;
-  border-radius: var(--r8);
-  border: 1px solid var(--line-2);
-  font-family: var(--mono);
+.pdialog-section .delete-blocks li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 1px 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line-1);
+}
+
+.pdialog-section .delete-blocks li:first-child {
+  padding-top: 2px;
+  border-top: 0;
+}
+
+.pdialog-section .delete-blocks li:last-child {
+  padding-bottom: 0;
+}
+
+.delete-blocks .t {
+  min-width: 0;
+  font-size: var(--fs-small);
   color: var(--fg-1);
   overflow-wrap: anywhere;
-  user-select: all;
+}
+
+.delete-blocks .m {
+  grid-column: 1;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.delete-blocks .btn,
+.delete-blocks .r {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+
+.delete-blocks .btn.sm {
+  height: 24px;
+  padding: 0 8px;
+}
+
+.delete-blocks .r {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-mini);
+  color: var(--green-text);
+}
+
+.delete-blocks .r.wait {
+  color: var(--fg-3);
+}
+
+.delete-blocks .r .icon {
+  width: 13px;
+  height: 13px;
 }
 
 .delete-confirm {

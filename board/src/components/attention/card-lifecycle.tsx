@@ -8,6 +8,7 @@ import { serverNow } from "../../lib/clock";
 import { LIMITS, isTooLong } from "../../lib/limits";
 import { lisbonDate, lisbonInstant } from "../../lib/lisbon-input";
 import { hostField, ownerOf } from "../../lib/peers";
+import type { Owned } from "../../lib/peers";
 import { cardQuery } from "../../lib/queries";
 import { ChevronDownIcon } from "../board/icons";
 import { CheckIcon } from "../shell/icons";
@@ -353,8 +354,24 @@ function CloseDialog({ card, onClose }: { card: BoardRow; onClose: () => void })
   );
 }
 
-function CancelDialog({ card, onClose }: { card: BoardRow; onClose: () => void }) {
-  const [reason, setReason] = useState("");
+// The card Cancel card acts on: a board row, or a card known only by its
+// display id, as a refused project delete names it.
+export type CancelTarget = Owned & Pick<BoardRow, "id" | "display_id">;
+
+// Cancel card's confirm. `reason` fills the field to start with, and
+// `onCancelled` runs once the cancel is recorded, before the dialog closes.
+export function CancelDialog({
+  card,
+  onClose,
+  reason: initial = "",
+  onCancelled,
+}: {
+  card: CancelTarget;
+  onClose: () => void;
+  reason?: string;
+  onCancelled?: (reason: string) => void;
+}) {
+  const [reason, setReason] = useState(initial);
   const send = useCallback(
     (idempotency_key: string) =>
       sendMutation("POST", `/api/v1/cards/${card.id}/cancel`, {
@@ -364,10 +381,14 @@ function CancelDialog({ card, onClose }: { card: BoardRow; onClose: () => void }
       }),
     [card, reason],
   );
+  const recorded = useCallback(() => {
+    onCancelled?.(reason.trim());
+    onClose();
+  }, [onCancelled, onClose, reason]);
   const action = useAction({
     binding: `${card.id}:cancel:${reason.trim()}`,
     send,
-    onRecorded: onClose,
+    onRecorded: recorded,
   });
   const keep = useRef<HTMLButtonElement>(null);
   return (
