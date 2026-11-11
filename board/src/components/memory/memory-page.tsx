@@ -119,29 +119,34 @@ function colorOf(projects: { id: string }[], id: string): string {
 // so it is never asked for by name (one cache entry, one request).
 const scopeOf = (scope: string) => (scope === FLEET ? undefined : scope);
 
+// How long focus waits for the document a change made before it gives up.
+const FOCUS_WAIT_MS = 10_000;
+
 const isMissing = (error: unknown) => error instanceof ReadError && error.status === 404;
 
 const running = (job: MemoryEvalJob) => job.finished_at === null;
 
 // A document that is not there will not be there on a second read, so the page
 // says so at once; any other failure is read once more.
-export const retryUnlessMissing = (failures: number, error: unknown) =>
-  !isMissing(error) && failures < 1;
+const retryUnlessMissing = (failures: number, error: unknown) => !isMissing(error) && failures < 1;
 
 // One document's answer, or `null` when the daemon has no such document, which
-// the page says plainly instead of failing. Any other failure goes to the
-// section's note, with its retry. `undefined` means the read is still going.
+// the page says plainly instead of failing. A first read that fails goes to the
+// section's note, with its retry. A read again that fails keeps the document on
+// screen, with any open draft. `undefined` means the first read is still going.
 function useDocAnswer(scope: string): MemoryResponse | null | undefined {
   const query = useQuery({
     ...memoryQuery(scopeOf(scope)),
     retry: retryUnlessMissing,
-    throwOnError: (error) => !isMissing(error),
+    throwOnError: (error, read) => read.state.data === undefined && !isMissing(error),
     // A run that fails records nothing, so no event says it ended: the page
     // reads again while one runs.
     refetchInterval: (read) => (read.state.data?.evals.some(running) ? 5000 : false),
   });
-  if (query.data) return query.data;
-  return isMissing(query.error) ? null : undefined;
+  // A document removed since it was read is gone, even though its old answer
+  // is still held.
+  if (isMissing(query.error)) return null;
+  return query.data;
 }
 
 // One tab per memory document, the shared one first. A tab shows the
@@ -904,8 +909,13 @@ function DocSection({
           resolved.position === position;
         const refusal = ctl.refusalFor(lineScope(section.title, nth, line.text));
         return (
-          // Keyed by its text, so a landed edit starts the line afresh.
-          <div className="a-item" key={`${nth}:${line.text}`}>
+          // Keyed by its memory, so a line changed elsewhere keeps its row and
+          // an open editor keeps its caret. A line with no memory yet is keyed
+          // by its text.
+          <div
+            className="a-item"
+            key={line.memory_id ? `id:${line.memory_id}` : `text:${nth}:${line.text}`}
+          >
             <LineRow
               line={line}
               projects={projects}
@@ -1185,13 +1195,27 @@ function Doc({ data }: { data: MemoryResponse }) {
   // The proposal whose holdout eval the dialog is about to start.
   const [evaluating, setEvaluating] = useState<string | null>(null);
   // Where focus goes next, held outside state: it is read by the effect below
-  // and never shown. `wake` renders once more so the effect looks again.
-  const wanted = useRef<Focus | null>(null);
+  // and never shown. `wake` renders once more so the effect looks again. It
+  // waits only so long, and only until the owner clicks or types elsewhere:
+  // focus that comes back late would take them from what they moved on to.
+  const wanted = useRef<{ focus: Focus; until: number } | null>(null);
   const [, wake] = useReducer((n: number) => n + 1, 0);
   const setFocus = (at: Focus) => {
-    wanted.current = at;
+    wanted.current = { focus: at, until: Date.now() + FOCUS_WAIT_MS };
     wake();
   };
+  useEffect(() => {
+    // Capture runs before the handler that may ask for focus again.
+    const movedOn = () => {
+      wanted.current = null;
+    };
+    document.addEventListener("pointerdown", movedOn, true);
+    document.addEventListener("keydown", movedOn, true);
+    return () => {
+      document.removeEventListener("pointerdown", movedOn, true);
+      document.removeEventListener("keydown", movedOn, true);
+    };
+  }, []);
   const locked = doc.dirty || pending;
   const local = projects.projects.filter((project) => !isPeerRow(project));
 
@@ -1237,8 +1261,14 @@ function Doc({ data }: { data: MemoryResponse }) {
   // Focus returns to the row or button the editor, or the removed line, left
   // behind, once the page shows the document as the change made it.
   useEffect(() => {
-    const focus = wanted.current;
-    if (!focus || locked) return;
+    const held = wanted.current;
+    if (!held) return;
+    if (Date.now() > held.until) {
+      wanted.current = null;
+      return;
+    }
+    const focus = held.focus;
+    if (locked) return;
     if (focus.from !== null && doc.blob === focus.from) return;
     wanted.current = null;
     const active = document.activeElement;
@@ -1555,9 +1585,25 @@ function NotFound({ scope }: { scope: string }) {
   );
 }
 
+// While the first read of a document is still going (a failed open is read
+// once more), the page says so instead of showing nothing.
+function Reading() {
+  return (
+    <div className="m2-wrap">
+      <article className="m2-doc" aria-busy="true">
+        <header className="m2-head">
+          <p className="m2-sub" role="status">
+            Reading this memory document...
+          </p>
+        </header>
+      </article>
+    </div>
+  );
+}
+
 function DocView({ scope }: { scope: string }) {
   const answer = useDocAnswer(scope);
-  if (answer === undefined) return null;
+  if (answer === undefined) return <Reading />;
   if (answer === null) return <NotFound scope={scope} />;
   return <Doc data={answer} />;
 }

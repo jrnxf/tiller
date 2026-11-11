@@ -1237,3 +1237,133 @@ test("undo of a discard brings the suggestion back for review", async () => {
   // It is a new proposal, so Keep waits for its own holdout run.
   expect(within(back).getByRole("button", { name: "Run holdout eval..." })).toBeTruthy();
 });
+
+// Reads that fail or wait.
+
+const MEMORY_READ = /^\/api\/v1\/memory(\?|$)/;
+
+// The stand-in daemon, with each memory document read answered by `answer`
+// instead when it gives a status, or never answered when it says "hang".
+// Every other read and write goes to the fixture as before.
+function stubMemoryReads(answer: (path: string) => number | "hang" | null) {
+  const fixture = globalThis.fetch;
+  vi.stubGlobal("fetch", async (path: string, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    const given = method === "GET" && MEMORY_READ.test(path) ? answer(path) : null;
+    if (given === null) return fixture(path, init);
+    reads.push(path);
+    if (given === "hang") return new Promise<Response>(() => {});
+    return new Response("{}", { status: given });
+  });
+}
+
+test("a read that fails in the background keeps the document and the open draft", async () => {
+  const { queryClient } = await renderMemory();
+
+  fireEvent.click(lineOf(FIRST));
+  type(draftBox(), DRAFT);
+  stubMemoryReads(() => 500);
+  await readAgain(queryClient);
+  await settle();
+
+  expect(screen.queryAllByTestId("section-unavailable")).toEqual([]);
+  expect(draftBox().value).toBe(DRAFT);
+  expect(page().getByRole("heading", { level: 1, name: "host / host-a" })).toBeTruthy();
+});
+
+test("a line changed elsewhere keeps the same editor, so the caret stays where it was", async () => {
+  const { queryClient } = await renderMemory();
+
+  fireEvent.click(lineOf(FIRST));
+  const box = draftBox();
+  type(box, DRAFT);
+  box.setSelectionRange(2, 2);
+  rewriteElsewhere(0, "Rewritten from another tab.");
+  await readAgain(queryClient);
+  await settle();
+
+  expect(screen.getByRole("alert").textContent).toMatch(/This line changed while you were editing/);
+  expect(draftBox()).toBe(box);
+  expect(box.selectionStart).toBe(2);
+});
+
+test("a document removed since it was read says it was not found", async () => {
+  const { queryClient } = await renderMemory("/memory?doc=alpha");
+  expect(page().getByRole("heading", { level: 1, name: "alpha" })).toBeTruthy();
+
+  stubMemoryReads((path) => (path.includes("scope=alpha") ? 404 : null));
+  await readAgain(queryClient);
+  await settle();
+
+  expect(page().getByRole("heading", { level: 1, name: "Not found" })).toBeTruthy();
+});
+
+test("a failed open reads the document once and says so at once", async () => {
+  stubMemoryReads(() => 500);
+  await renderMemory();
+  expect((await screen.findAllByTestId("section-unavailable")).length).toBeGreaterThan(0);
+
+  // The loader's one read, with no retry; the page shows the note from it.
+  expect(reads.filter((path) => MEMORY_READ.test(path))).toHaveLength(1);
+});
+
+test("while a failed open is read again, the page says it is reading", async () => {
+  let first = true;
+  stubMemoryReads(() => {
+    if (!first) return "hang";
+    first = false;
+    return 500;
+  });
+  await renderMemory();
+  await screen.findAllByTestId("section-unavailable");
+
+  for (const retry of screen.getAllByRole("button", { name: "Retry" })) fireEvent.click(retry);
+  await settle();
+
+  expect(page().getByRole("status").textContent).toBe("Reading this memory document...");
+  expect(screen.getByRole("article").getAttribute("aria-busy")).toBe("true");
+  expect(page().queryByRole("heading", { level: 1 })).toBeNull();
+});
+
+test("focus does not come back to a saved row once the owner has moved on", async () => {
+  const { queryClient } = await renderMemory();
+
+  fireEvent.click(lineOf(SECOND));
+  type(draftBox(), "Stop new dispatch at 3% of the week.");
+  // The save lands, and the read after it fails, so the page still shows
+  // the document as it was before the save.
+  stubMemoryReads(() => 500);
+  fireEvent.keyDown(draftBox(), { key: "Enter" });
+  await waitFor(() => expect(screen.queryByRole("textbox")).toBeNull());
+  expect(document.activeElement).toBe(document.body);
+
+  // The owner clicks on empty space; later the document is read again.
+  fireEvent.pointerDown(document.body);
+  stubDaemon();
+  await readAgain(queryClient);
+  await settle();
+
+  expect(page().getByText("Stop new dispatch at 3% of the week.")).toBeTruthy();
+  expect(document.activeElement).toBe(document.body);
+});
+
+test("focus does not come back to a saved row when the read after the save is late", async () => {
+  const { queryClient } = await renderMemory();
+
+  fireEvent.click(lineOf(SECOND));
+  type(draftBox(), "Stop new dispatch at 3% of the week.");
+  stubMemoryReads(() => 500);
+  fireEvent.keyDown(draftBox(), { key: "Enter" });
+  await waitFor(() => expect(screen.queryByRole("textbox")).toBeNull());
+
+  // A minute later the stream says the document changed.
+  const later = Date.now() + 60_000;
+  vi.spyOn(Date, "now").mockReturnValue(later);
+  stubDaemon();
+  await readAgain(queryClient);
+  await settle();
+  vi.restoreAllMocks();
+
+  expect(page().getByText("Stop new dispatch at 3% of the week.")).toBeTruthy();
+  expect(document.activeElement).toBe(document.body);
+});
