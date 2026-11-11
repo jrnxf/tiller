@@ -121,19 +121,21 @@ impl Frame {
         Ok(out)
     }
 
-    /// Builds a frame from its kind and body, as read off the wire.
-    fn from_parts(kind: u8, body: Vec<u8>) -> Result<Self, FrameError> {
+    /// Builds a frame from its kind and body, as read off the wire. The
+    /// body becomes the frame's bytes in place, with no copy.
+    fn from_parts(kind: u8, mut body: Vec<u8>) -> Result<Self, FrameError> {
         match kind {
             KIND_MESSAGE => Ok(Frame::Message(String::from_utf8(body)?)),
             KIND_OUTPUT | KIND_INPUT => {
-                let Some((address, bytes)) = body.split_first_chunk::<ADDRESS_BYTES>() else {
+                let Some(address) = body.first_chunk::<ADDRESS_BYTES>() else {
                     return Err(FrameError::NoAddress {
                         kind,
                         len: body.len(),
                     });
                 };
                 let address = u32::from_be_bytes(*address);
-                let bytes = bytes.to_vec();
+                body.drain(..ADDRESS_BYTES);
+                let bytes = body;
                 Ok(if kind == KIND_OUTPUT {
                     Frame::Output {
                         stream: address,
@@ -162,6 +164,14 @@ fn check_len(len: u32) -> Result<usize, FrameError> {
     Ok(len as usize)
 }
 
+/// Checks a frame's kind before its body is read.
+fn check_kind(kind: u8) -> Result<u8, FrameError> {
+    match kind {
+        KIND_MESSAGE | KIND_OUTPUT | KIND_INPUT => Ok(kind),
+        other => Err(FrameError::UnknownKind(other)),
+    }
+}
+
 /// Writes one frame and flushes it.
 pub fn write_frame<W: Write>(mut out: W, frame: &Frame) -> Result<(), FrameError> {
     out.write_all(&frame.to_bytes()?)?;
@@ -170,27 +180,32 @@ pub fn write_frame<W: Write>(mut out: W, frame: &Frame) -> Result<(), FrameError
 }
 
 /// Reads one frame. `Ok(None)` is a clean end of the stream between frames;
-/// an end inside a frame is [`FrameError::Truncated`]. A bad `len` is
-/// rejected before its body is read.
+/// an end inside a frame is [`FrameError::Truncated`]. A bad `len` or kind
+/// is rejected before the body is read, and the body's buffer grows as its
+/// bytes arrive, so a bare `len` prefix never claims 16 MiB.
 pub fn read_frame<R: Read>(mut input: R) -> Result<Option<Frame>, FrameError> {
-    let mut prefix = [0u8; LEN_BYTES];
-    let got = fill(&mut input, &mut prefix)?;
+    let mut head = [0u8; LEN_BYTES + 1];
+    let got = fill(&mut input, &mut head)?;
     if got == 0 {
         return Ok(None);
     }
     if got < LEN_BYTES {
         return Err(FrameError::Truncated { buffered: got });
     }
-    let len = check_len(u32::from_be_bytes(prefix))?;
-    let mut rest = vec![0u8; len];
-    let got = fill(&mut input, &mut rest)?;
-    if got < len {
+    let len = check_len(u32::from_be_bytes([head[0], head[1], head[2], head[3]]))?;
+    if got < head.len() {
+        return Err(FrameError::Truncated { buffered: got });
+    }
+    let kind = check_kind(head[LEN_BYTES])?;
+    let want = len - 1;
+    let mut body = Vec::new();
+    input.by_ref().take(want as u64).read_to_end(&mut body)?;
+    if body.len() < want {
         return Err(FrameError::Truncated {
-            buffered: LEN_BYTES + got,
+            buffered: head.len() + body.len(),
         });
     }
-    let body = rest.split_off(1);
-    Frame::from_parts(rest[0], body).map(Some)
+    Frame::from_parts(kind, body).map(Some)
 }
 
 /// Reads until `buf` is full or the stream ends, and says how much it read.
@@ -214,6 +229,9 @@ fn fill<R: Read>(input: &mut R, buf: &mut [u8]) -> io::Result<usize> {
 #[derive(Debug, Default)]
 pub struct Decoder {
     buf: Vec<u8>,
+    /// Where the next frame starts in `buf`. Frames taken before it are
+    /// dropped on the next push, in one move.
+    start: usize,
 }
 
 impl Decoder {
@@ -222,33 +240,42 @@ impl Decoder {
     }
 
     pub fn push(&mut self, bytes: &[u8]) {
+        if self.start > 0 {
+            self.buf.drain(..self.start);
+            self.start = 0;
+        }
         self.buf.extend_from_slice(bytes);
     }
 
     /// The next whole frame, or `None` until more bytes arrive. A bad `len`
     /// is rejected as soon as its 4 bytes are in, before the body arrives.
     pub fn next_frame(&mut self) -> Result<Option<Frame>, FrameError> {
-        let Some(prefix) = self.buf.first_chunk::<LEN_BYTES>() else {
+        let pending = &self.buf[self.start..];
+        let Some(prefix) = pending.first_chunk::<LEN_BYTES>() else {
             return Ok(None);
         };
         let len = check_len(u32::from_be_bytes(*prefix))?;
-        if self.buf.len() < LEN_BYTES + len {
+        let Some(&kind) = pending.get(LEN_BYTES) else {
             return Ok(None);
-        }
-        let mut frame: Vec<u8> = self.buf.drain(..LEN_BYTES + len).collect();
-        let body = frame.split_off(LEN_BYTES + 1);
-        Frame::from_parts(frame[LEN_BYTES], body).map(Some)
+        };
+        let kind = check_kind(kind)?;
+        let Some(body) = pending.get(LEN_BYTES + 1..LEN_BYTES + len) else {
+            return Ok(None);
+        };
+        let body = body.to_vec();
+        self.start += LEN_BYTES + len;
+        Frame::from_parts(kind, body).map(Some)
     }
 
     /// Bytes held for a frame not yet whole. Nonzero at the end of the
     /// stream means it ended inside a frame.
     pub fn buffered(&self) -> usize {
-        self.buf.len()
+        self.buf.len() - self.start
     }
 
     /// Checks the end of the stream: an error when it ended inside a frame.
     pub fn finish(&self) -> Result<(), FrameError> {
-        match self.buf.len() {
+        match self.buffered() {
             0 => Ok(()),
             buffered => Err(FrameError::Truncated { buffered }),
         }
@@ -448,6 +475,44 @@ mod tests {
             let err = decoder.next_frame().unwrap_err();
             assert!(expected(&err), "{wire:?}: {err}");
         }
+        // An unknown kind is refused before its body arrives.
+        let head = [0, 0, 0, 200, 9];
+        assert!(matches!(
+            read_frame(&head[..]),
+            Err(FrameError::UnknownKind(9))
+        ));
+        let mut decoder = Decoder::new();
+        decoder.push(&head);
+        assert!(matches!(
+            decoder.next_frame(),
+            Err(FrameError::UnknownKind(9))
+        ));
+    }
+
+    #[test]
+    fn one_push_of_many_frames_gives_each_in_order() {
+        let frames: Vec<Frame> = (0..1000)
+            .map(|n| Frame::Output {
+                stream: n,
+                bytes: vec![n as u8; (n % 7) as usize],
+            })
+            .collect();
+        let mut wire = Vec::new();
+        for frame in &frames {
+            frame.encode(&mut wire).unwrap();
+        }
+        let mut decoder = Decoder::new();
+        decoder.push(&wire[..wire.len() - 1]);
+        let mut got = Vec::new();
+        while let Some(frame) = decoder.next_frame().unwrap() {
+            got.push(frame);
+        }
+        assert_eq!(got.len(), frames.len() - 1);
+        decoder.push(&wire[wire.len() - 1..]);
+        got.extend(decoder.next_frame().unwrap());
+        assert_eq!(got, frames);
+        assert_eq!(decoder.buffered(), 0);
+        decoder.finish().unwrap();
     }
 
     #[test]

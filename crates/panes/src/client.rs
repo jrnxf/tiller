@@ -5,28 +5,36 @@
 //! against another caller's. Each [`Subscription`] has a connection of its
 //! own: its kind 1 frames never wait behind a request, and a size it sets
 //! through its lease ends when it is dropped, because its connection ends.
+//! A [`Resizer`] sends a subscription's resizes from another thread while
+//! one thread waits in [`Subscription::recv`].
 //!
 //! A connection that fails (no answer in time, a closed socket, a bad frame)
 //! is not used again: every later call on that client is `Unreachable`, and
 //! the caller connects again. Nothing here retries, so a holder restart is
 //! never hidden behind a quiet reconnect.
 
-use std::io::BufReader;
+use std::collections::VecDeque;
+use std::io::{self, BufReader};
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use crate::error::{PanesError, Result};
 use crate::frame::{Frame, read_frame, write_frame};
 use crate::handshake::{Hello, ProtoRange, SUPPORTED, Welcome};
-use crate::message::{Exit, HolderMessage, Listing, Pane, PaneId, Request, Spawn, SyncMode};
+use crate::message::{
+    ErrorCode, Exit, HolderMessage, Listing, Pane, PaneId, Request, Spawn, SyncMode,
+};
 use crate::panes::Panes;
+use crate::paths::check_socket_path;
 
 /// How long the handshake may take.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long a request may wait for its reply.
+/// How long a request may wait for its reply, and how long a write may
+/// block.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One handshaken connection.
@@ -38,6 +46,9 @@ struct Conn {
 impl Conn {
     /// Connects to `path` and does the handshake as `client`.
     fn open(path: &Path, client: &str) -> Result<(Self, Welcome)> {
+        // A path too long for the socket address is a setup mistake, not a
+        // holder that is down: say so, and do not leave the caller retrying.
+        check_socket_path(path).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
         let stream = UnixStream::connect(path)
             .map_err(|err| PanesError::Unreachable(format!("{}: {err}", path.display())))?;
         let timeout = Some(HANDSHAKE_TIMEOUT);
@@ -115,17 +126,29 @@ impl Conn {
         }
     }
 
-    /// Sends `request` and reads until its reply. Messages for nobody (a
-    /// type from a newer holder) are skipped; an `error` reply is the error.
+    /// Sends `request` and reads until its reply, for at most
+    /// [`REQUEST_TIMEOUT`] in all. Messages for nobody (a type from a newer
+    /// holder) are skipped; an `error` reply is the error. An `error` with no
+    /// `id` answers this request, the only one in flight.
     fn call(&mut self, name: &'static str, request: &Request) -> Result<HolderMessage> {
         let id = request.id();
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
         self.send(request)?;
         loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(PanesError::Unreachable(format!(
+                    "the holder did not answer {name} in {} s",
+                    REQUEST_TIMEOUT.as_secs()
+                )));
+            }
+            self.writer.set_read_timeout(Some(left))?;
             let message = self.read_message()?;
             if message == HolderMessage::Unknown {
                 continue;
             }
-            if message.reply_to() != id {
+            let unaddressed_error = matches!(message, HolderMessage::Error { id: None, .. });
+            if message.reply_to() != id && !unaddressed_error {
                 return Err(PanesError::Protocol(format!(
                     "{name} (id {id:?}) got a message for another request: {message:?}"
                 )));
@@ -246,7 +269,7 @@ impl HolderClient {
         // byte is written, so the connection stays.
         let wire = frame.to_bytes().map_err(|err| PanesError::Refused {
             request: "raw input",
-            code: crate::message::ErrorCode::BadRequest,
+            code: ErrorCode::BadRequest,
             message: err.to_string(),
         })?;
         self.with_conn(|conn| {
@@ -259,8 +282,21 @@ impl HolderClient {
 
     /// Subscribes to a pane's output on a connection of its own. The
     /// [`Subscription`] yields one repaint, then live output.
+    ///
+    /// A holder with another `instance` than [`HolderClient::welcome`]'s
+    /// started after this client connected, and none of the panes this
+    /// client knows are in it (R21). That is `Unreachable`, and the client
+    /// is retired, so the caller connects again and sees the new instance.
     pub fn subscribe(&self, pane: &PaneId, opts: Subscribe) -> Result<Subscription> {
-        let (mut conn, _) = Conn::open(&self.path, &self.client)?;
+        let (mut conn, welcome) = Conn::open(&self.path, &self.client)?;
+        if welcome.instance != self.welcome.instance {
+            let why = format!(
+                "the terminal holder restarted: instance {} is now {}",
+                self.welcome.instance, welcome.instance
+            );
+            *self.conn() = Err(why.clone());
+            return Err(PanesError::Unreachable(format!("{why}; connect again")));
+        }
         conn.set_timeout(Some(REQUEST_TIMEOUT))?;
         let request = Request::Subscribe {
             id: self.id(),
@@ -275,14 +311,19 @@ impl HolderClient {
         };
         // Output may be quiet for hours; only writes keep a limit.
         conn.writer.set_read_timeout(None)?;
+        let Conn { reader, writer } = conn;
         Ok(Subscription {
-            pane: pane.clone(),
             stream,
             cols,
             rows,
-            lease: format!("stream-{stream}"),
-            conn,
-            next_id: AtomicU64::new(request.id().map_or(1, |id| id + 1)),
+            reader,
+            resizer: Resizer(Arc::new(ResizeSide {
+                pane: pane.clone(),
+                lease: format!("stream-{stream}"),
+                writer: Mutex::new(writer),
+                next_id: AtomicU64::new(request.id().map_or(1, |id| id + 1)),
+                pending: Mutex::new(VecDeque::new()),
+            })),
             state: StreamState::AwaitingRepaint,
         })
     }
@@ -330,6 +371,9 @@ pub enum Update {
     Resized { cols: u16, rows: u16 },
     /// The pane's child was reaped.
     Exited(Exit),
+    /// The holder cut this subscription because it fell behind its queue.
+    /// Nothing more comes; subscribe again for a fresh repaint.
+    Lagged,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -345,23 +389,20 @@ enum StreamState {
 }
 
 /// A pane's output on a connection of its own. Dropping it ends the
-/// connection, and with it any size it set.
+/// connection, and with it any size it set, even while a [`Resizer`] lives.
 pub struct Subscription {
-    pane: PaneId,
     stream: u32,
     cols: u16,
     rows: u16,
-    /// The lease id this subscription's `resize` names.
-    lease: String,
-    conn: Conn,
-    next_id: AtomicU64,
+    reader: BufReader<UnixStream>,
+    resizer: Resizer,
     state: StreamState,
 }
 
 impl std::fmt::Debug for Subscription {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Subscription")
-            .field("pane", &self.pane)
+            .field("pane", &self.resizer.0.pane)
             .field("stream", &self.stream)
             .field("cols", &self.cols)
             .field("rows", &self.rows)
@@ -370,9 +411,88 @@ impl std::fmt::Debug for Subscription {
     }
 }
 
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        // A Resizer holds the same socket; shut it so the holder sees the
+        // subscription end now, and a later resize fails.
+        let _ = self.reader.get_ref().shutdown(Shutdown::Both);
+    }
+}
+
+/// Sends a [`Subscription`]'s resizes. It is `Send` and `Clone`, so one
+/// thread can resize while another waits in [`Subscription::recv`]. The
+/// holder's answers come through `recv`.
+#[derive(Clone)]
+pub struct Resizer(Arc<ResizeSide>);
+
+struct ResizeSide {
+    pane: PaneId,
+    /// The lease id this subscription's resizes name.
+    lease: String,
+    writer: Mutex<UnixStream>,
+    next_id: AtomicU64,
+    /// The ids of resizes sent and not yet answered, oldest first.
+    pending: Mutex<VecDeque<u64>>,
+}
+
+impl std::fmt::Debug for Resizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Resizer")
+            .field("pane", &self.0.pane)
+            .field("lease", &self.0.lease)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Resizer {
+    /// Asks the holder to set the PTY to this size, under the subscription's
+    /// lease (the board's Fit). The answer comes through
+    /// [`Subscription::recv`] as [`Update::Resized`], or as an error.
+    pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        let side = &self.0;
+        let id = side.next_id.fetch_add(1, Ordering::Relaxed);
+        let request = Request::Resize {
+            id,
+            pane: side.pane.clone(),
+            cols,
+            rows,
+            lease: side.lease.clone(),
+        };
+        let text = serde_json::to_string(&request)
+            .map_err(|err| PanesError::Protocol(format!("a request did not encode: {err}")))?;
+        let writer = side.writer.lock().unwrap_or_else(PoisonError::into_inner);
+        // The id is pending before its bytes leave, so a fast answer finds it.
+        side.pending().push_back(id);
+        let sent = write_frame(&*writer, &Frame::Message(text)).map_err(PanesError::from_frame);
+        if sent.is_err() {
+            side.pending().retain(|pending| *pending != id);
+        }
+        sent
+    }
+}
+
+impl ResizeSide {
+    fn pending(&self) -> MutexGuard<'_, VecDeque<u64>> {
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Takes the pending resize this reply answers: the one with its `id`,
+    /// or with no `id`, the oldest, since the holder answers in order.
+    fn answered(&self, id: Option<u64>) -> Option<u64> {
+        let mut pending = self.pending();
+        match id {
+            Some(id) => {
+                let at = pending.iter().position(|pending| *pending == id)?;
+                pending.remove(at)
+            }
+            None => pending.pop_front(),
+        }
+    }
+}
+
 impl Subscription {
     pub fn pane(&self) -> &PaneId {
-        &self.pane
+        &self.resizer.0.pane
     }
 
     /// The `stream` number on this subscription's kind 1 frames.
@@ -385,22 +505,14 @@ impl Subscription {
         (self.cols, self.rows)
     }
 
-    /// Asks the holder to set the PTY to this size, under this
-    /// subscription's lease (the board's Fit). The holder's answer comes
-    /// through [`Subscription::recv`] as [`Update::Resized`], or as an error.
-    pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
-        let request = Request::Resize {
-            id: self.next_id.fetch_add(1, Ordering::Relaxed),
-            pane: self.pane.clone(),
-            cols,
-            rows,
-            lease: self.lease.clone(),
-        };
-        let sent = self.conn.send(&request);
-        if sent.is_err() {
-            self.state = StreamState::Ended;
-        }
-        sent
+    /// A handle that sends this subscription's resizes from another thread.
+    pub fn resizer(&self) -> Resizer {
+        self.resizer.clone()
+    }
+
+    /// [`Resizer::resize`] on this subscription.
+    pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        self.resizer.resize(cols, rows)
     }
 
     /// The next update. `None` once the stream has ended: the holder closed
@@ -413,7 +525,7 @@ impl Subscription {
         }
         let result = self.read_update();
         match &result {
-            Ok(None) => self.state = StreamState::Ended,
+            Ok(None | Some(Update::Lagged)) => self.state = StreamState::Ended,
             Err(err) if !keeps_connection(err) => self.state = StreamState::Ended,
             _ => {}
         }
@@ -422,7 +534,7 @@ impl Subscription {
 
     fn read_update(&mut self) -> Result<Option<Update>> {
         loop {
-            let Some(frame) = self.conn.read()? else {
+            let Some(frame) = read_frame(&mut self.reader).map_err(PanesError::from_frame)? else {
                 return Ok(None);
             };
             match frame {
@@ -458,15 +570,30 @@ impl Subscription {
                         }
                         self.state = StreamState::Repainting { cols, rows };
                     }
-                    HolderMessage::Ok {
-                        cols: Some(cols),
-                        rows: Some(rows),
-                        ..
-                    } => return Ok(Some(Update::Resized { cols, rows })),
-                    HolderMessage::Exited { pane, exit } if pane == self.pane => {
+                    HolderMessage::Ok { id, cols, rows } => {
+                        let (Some(_), Some(cols), Some(rows)) =
+                            (self.resizer.0.answered(Some(id)), cols, rows)
+                        else {
+                            return Err(PanesError::Protocol(format!(
+                                "an ok (id {id}) that answers no resize of stream {}",
+                                self.stream
+                            )));
+                        };
+                        return Ok(Some(Update::Resized { cols, rows }));
+                    }
+                    HolderMessage::Exited { pane, exit } if pane == *self.pane() => {
                         return Ok(Some(Update::Exited(exit)));
                     }
-                    HolderMessage::Error { code, message, .. } => {
+                    HolderMessage::Lagged { stream } if stream == self.stream => {
+                        return Ok(Some(Update::Lagged));
+                    }
+                    HolderMessage::Error { id, code, message } => {
+                        if self.resizer.0.answered(id).is_none() {
+                            return Err(PanesError::Protocol(format!(
+                                "an error (id {id:?}) that answers no resize of stream {}: {code}: {message}",
+                                self.stream
+                            )));
+                        }
                         return Err(PanesError::from_reply("resize", code, message));
                     }
                     HolderMessage::Unknown => {}

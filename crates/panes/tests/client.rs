@@ -72,11 +72,17 @@ impl Peer {
     }
 }
 
+const INSTANCE: &str = "01JDINSTANCE00000000000000";
+
 fn welcome(proto: u32) -> Welcome {
+    welcome_from(proto, INSTANCE)
+}
+
+fn welcome_from(proto: u32, instance: &str) -> Welcome {
     Welcome {
         proto,
         holder: "0.1.0-test".into(),
-        instance: "01JDINSTANCE00000000000000".into(),
+        instance: instance.into(),
         boot_id: "boot".into(),
         started_at: "2026-11-11T12:00:00Z".parse().unwrap(),
         features: Vec::new(),
@@ -366,7 +372,9 @@ fn a_subscription_yields_the_repaint_then_output_and_raw_input_reaches_the_pane(
         subscription.recv().unwrap(),
         Some(Update::Output(b"ls\r\n".to_vec()))
     );
-    subscription.resize(100, 30).unwrap();
+    // The resize goes from another thread while this one waits in recv.
+    let resizer = subscription.resizer();
+    let resizing = thread::spawn(move || resizer.resize(100, 30).unwrap());
     assert_eq!(
         subscription.recv().unwrap(),
         Some(Update::Resized {
@@ -374,6 +382,7 @@ fn a_subscription_yields_the_repaint_then_output_and_raw_input_reaches_the_pane(
             rows: 30
         })
     );
+    resizing.join().unwrap();
     let Some(Update::Exited(exit)) = subscription.recv().unwrap() else {
         panic!("expected the exit");
     };
@@ -441,4 +450,192 @@ fn subscribing_to_a_missing_pane_is_not_found() {
     assert!(matches!(err, PanesError::NotFound(_)), "{err:?}");
     drop(client);
     holder.join();
+}
+
+#[test]
+fn an_error_with_no_id_answers_the_request_in_flight_and_keeps_the_connection() {
+    let holder = Holder::serve(vec![Box::new(|mut peer: Peer| {
+        peer.handshake(SUPPORTED);
+        let _ = peer.request();
+        // The spec's answer to a request type the holder does not know.
+        peer.send_frame(&Frame::Message(
+            r#"{"type":"error","code":"unsupported"}"#.into(),
+        ));
+        let Request::List { id } = peer.request() else {
+            panic!("expected list");
+        };
+        peer.send(&HolderMessage::Panes {
+            id,
+            listing: Listing {
+                instance: INSTANCE.into(),
+                panes: Vec::new(),
+            },
+        });
+    })]);
+    let client = HolderClient::connect(&holder.path, "daemon").unwrap();
+    let err = client.list().unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            PanesError::Refused {
+                code: ErrorCode::Unsupported,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(client.list().unwrap().panes.is_empty());
+    holder.join();
+}
+
+/// Serves a request connection that only waits for the client to go, then
+/// a subscription connection that runs `script` after `subscribed`.
+fn subscription_holder(script: impl FnOnce(&mut Peer, u32) + Send + 'static) -> Holder {
+    Holder::serve(vec![
+        Box::new(|mut peer: Peer| {
+            peer.handshake(SUPPORTED);
+            assert_eq!(peer.frame(), None);
+        }),
+        Box::new(move |mut peer: Peer| {
+            peer.handshake(SUPPORTED);
+            let id = peer.request().id().unwrap();
+            peer.send(&HolderMessage::Subscribed {
+                id,
+                stream: 5,
+                cols: 80,
+                rows: 24,
+            });
+            peer.send(&HolderMessage::Repaint {
+                stream: 5,
+                cols: 80,
+                rows: 24,
+            });
+            peer.send_frame(&Frame::Output {
+                stream: 5,
+                bytes: b"$ ".to_vec(),
+            });
+            script(&mut peer, 5);
+        }),
+    ])
+}
+
+#[test]
+fn a_lagged_subscriber_is_told_and_its_stream_ends() {
+    let holder = subscription_holder(|peer, stream| {
+        peer.send(&HolderMessage::Lagged { stream });
+        // The holder may keep the connection open; the stream is over anyway.
+        assert_eq!(peer.frame(), None);
+    });
+    let client = HolderClient::connect(&holder.path, "daemon").unwrap();
+    let mut subscription = client
+        .subscribe(&"p1".into(), Subscribe::default())
+        .unwrap();
+    assert!(matches!(
+        subscription.recv(),
+        Ok(Some(Update::Repaint { .. }))
+    ));
+    assert_eq!(subscription.recv().unwrap(), Some(Update::Lagged));
+    assert_eq!(subscription.recv().unwrap(), None);
+    drop(subscription);
+    drop(client);
+    holder.join();
+}
+
+#[test]
+fn a_resize_refused_keeps_the_stream_and_an_ok_for_no_resize_breaks_it() {
+    let holder = subscription_holder(|peer, _| {
+        let id = peer.request().id();
+        peer.send(&HolderMessage::Error {
+            id,
+            code: ErrorCode::BadRequest,
+            message: "a size of 0".into(),
+        });
+        peer.send(&HolderMessage::Ok {
+            id: 99,
+            cols: Some(80),
+            rows: Some(24),
+        });
+        assert_eq!(peer.frame(), None);
+    });
+    let client = HolderClient::connect(&holder.path, "daemon").unwrap();
+    let mut subscription = client
+        .subscribe(&"p1".into(), Subscribe::default())
+        .unwrap();
+    assert!(matches!(
+        subscription.recv(),
+        Ok(Some(Update::Repaint { .. }))
+    ));
+    subscription.resize(0, 0).unwrap();
+    let err = subscription.recv().unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            PanesError::Refused {
+                request: "resize",
+                code: ErrorCode::BadRequest,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    let err = subscription.recv().unwrap_err();
+    assert!(matches!(err, PanesError::Protocol(_)), "{err:?}");
+    assert_eq!(subscription.recv().unwrap(), None);
+    drop(subscription);
+    drop(client);
+    holder.join();
+}
+
+#[test]
+fn dropping_a_subscription_ends_its_connection_while_a_resizer_lives() {
+    let holder = subscription_holder(|peer, _| {
+        assert_eq!(peer.frame(), None);
+    });
+    let client = HolderClient::connect(&holder.path, "daemon").unwrap();
+    let subscription = client
+        .subscribe(&"p1".into(), Subscribe::default())
+        .unwrap();
+    let resizer = subscription.resizer();
+    drop(subscription);
+    assert!(resizer.resize(100, 30).is_err());
+    drop(client);
+    holder.join();
+}
+
+#[test]
+fn a_restarted_holder_on_subscribe_retires_the_client() {
+    let holder = Holder::serve(vec![
+        Box::new(|mut peer: Peer| {
+            peer.handshake(SUPPORTED);
+            assert_eq!(peer.frame(), None);
+        }),
+        Box::new(|mut peer: Peer| {
+            let _ = peer.request();
+            peer.send(&HolderMessage::Welcome(welcome_from(
+                SUPPORTED.max,
+                "01JDOTHERINSTANCE000000000",
+            )));
+        }),
+    ]);
+    let client = HolderClient::connect(&holder.path, "daemon").unwrap();
+    let err = client
+        .subscribe(&"p1".into(), Subscribe::default())
+        .unwrap_err();
+    assert!(matches!(&err, PanesError::Unreachable(_)), "{err:?}");
+    assert!(err.to_string().contains("restarted"), "{err}");
+    let err = client.list().unwrap_err();
+    assert!(err.to_string().contains("connect again"), "{err}");
+    drop(client);
+    holder.join();
+}
+
+#[test]
+fn a_socket_path_too_long_is_a_setup_error_not_unreachable() {
+    let path = PathBuf::from(format!("/home/user/{}/run/holder.sock", "a".repeat(120)));
+    let err = HolderClient::connect(&path, "daemon").unwrap_err();
+    let PanesError::Io(io) = &err else {
+        panic!("expected an io error, got {err:?}");
+    };
+    assert_eq!(io.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(err.to_string().contains("TILLER_HOME"), "{err}");
 }

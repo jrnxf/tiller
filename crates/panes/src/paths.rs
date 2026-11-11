@@ -1,18 +1,11 @@
-//! Where the holder's socket lives (`terminal-holder.md` 2.3).
+//! Where the holder's socket lives (`terminal-holder.md` 2.3). The caller
+//! resolves the Tiller home (`TILLER_HOME`) as it does for everything else.
 
 use std::path::{Path, PathBuf};
 
 /// The longest socket path macOS takes (`sun_path`), and so the longest the
 /// holder accepts on every host.
 pub const SUN_PATH_MAX: usize = 104;
-
-/// The Tiller home: `TILLER_HOME`, else `~/.tiller`.
-pub fn home_from_env() -> PathBuf {
-    std::env::var_os("TILLER_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".tiller")))
-        .unwrap_or_else(|| PathBuf::from(".tiller"))
-}
 
 /// The holder's run directory, `<home>/run`, kept at mode `0700`.
 pub fn run_dir(home: &Path) -> PathBuf {

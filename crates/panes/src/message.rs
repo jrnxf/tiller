@@ -347,6 +347,11 @@ pub enum HolderMessage {
         pane: PaneId,
         exit: Exit,
     },
+    /// The holder cut subscription `stream`, which fell behind its queue.
+    /// The subscriber may subscribe again for a fresh repaint.
+    Lagged {
+        stream: u32,
+    },
     Error {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<u64>,
@@ -372,6 +377,7 @@ impl HolderMessage {
             | HolderMessage::Refused(_)
             | HolderMessage::Repaint { .. }
             | HolderMessage::Exited { .. }
+            | HolderMessage::Lagged { .. }
             | HolderMessage::Unknown => None,
         }
     }
@@ -617,6 +623,10 @@ mod tests {
                 },
             },
             json!({"type":"exited","pane":"p1","exit":{"code":3,"signal":null,"at":"2026-11-11T12:00:00Z"}}),
+        );
+        round_trip_reply(
+            HolderMessage::Lagged { stream: 11 },
+            json!({"type":"lagged","stream":11}),
         );
         round_trip_reply(
             HolderMessage::Error {
