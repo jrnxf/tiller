@@ -492,15 +492,19 @@ pub(crate) fn claim(
                 ..ctx.unkeyed()
             };
             let what = "the curator could not be prepared";
-            return Err(
-                match end_unstarted(store, &end, &claimed.value.id, what, failure) {
-                    (failure, None) => failure.into(),
-                    (failure, Some(error)) => ClaimError::Unended {
-                        error: Box::new(error),
-                        failure,
-                    },
-                },
+            let id = &claimed.value.id;
+            let notes = format!(
+                "{}; {id} stays claimed until its timeout passes",
+                note(what, &failure)
             );
+            return Err(match end_unstarted(store, &end, id, what, failure) {
+                (failure, None) => failure.into(),
+                (failure, Some(error)) => ClaimError::Unended {
+                    error: Box::new(error),
+                    failure,
+                    notes,
+                },
+            });
         }
     };
     Ok(Claimed {
@@ -520,11 +524,13 @@ pub(crate) enum ClaimError {
     State(tiller_core::Error),
     Refused(Failure),
     /// The run could not be prepared and its retro could not be ended
-    /// `unfinished` either: `failure` names both, and `error` is the store's
-    /// own, which the daemon checks for damage.
+    /// `unfinished` either: `failure` names both, for the CLI. `error` is the
+    /// store's own, which the daemon checks for damage, and `notes` the
+    /// cause and hint it shows after that error.
     Unended {
         error: Box<tiller_core::Error>,
         failure: Failure,
+        notes: String,
     },
 }
 

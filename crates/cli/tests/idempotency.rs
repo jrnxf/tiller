@@ -875,8 +875,8 @@ fn a_body_file_and_the_same_body_are_one_request() {
     assert_eq!(retry.data()["id"], first.data()["id"]);
 }
 
-/// A followup link takes no card fields, so it never reads a body: not a
-/// file that is gone, and not stdin.
+/// A followup link takes no card fields, so it never reads a body: a body
+/// file that is gone does not fail it.
 #[test]
 fn a_followup_link_reads_no_body() {
     let world = World::initialized();
