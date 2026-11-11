@@ -538,13 +538,8 @@ export function CardPage({
   const blockers = detail.deps
     .filter((dep) => dep.released_at === null)
     .map((dep) => dep.display_id);
-  // The daemon does not forward a dependency change (protocol.md section 7.4).
-  const peerHost = ownerOf(column);
-  const depsOff = peerHost
-    ? `${peerHost} owns this card: change its dependencies on that host`
-    : standing.canAct
-      ? null
-      : standing.reason;
+  // A peer's card dependency change is forwarded (protocol.md section 7.4).
+  const depsOff = standing.canAct ? null : standing.reason;
 
   return (
     <div className={`card-page${variant === "drawer" ? " in-drawer" : ""}`} data-testid="card-page">
@@ -553,7 +548,7 @@ export function CardPage({
           <Link
             to="/"
             search={(prev) => ({ host: prev.host, card: cardId, owner })}
-            className="btn ghost sm"
+            className="btn sm"
           >
             <ChevronLeftIcon />
             Board

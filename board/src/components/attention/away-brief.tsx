@@ -145,7 +145,7 @@ export function AwayBriefDetail({ brief, ctx }: { brief: AwayBrief; ctx: Context
       <Link
         to="/inbox"
         search={({ host }) => ({ host })}
-        className="btn ghost sm in-back"
+        className="btn sm in-back"
         aria-label="Back to the inbox"
       >
         <BackIcon />

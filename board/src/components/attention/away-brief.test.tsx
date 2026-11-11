@@ -119,3 +119,10 @@ test("an approval event refreshes the brief", async () => {
   });
   expect(queryClient.getQueryState(queryKeyFor(awayBriefPath))?.isInvalidated).toBe(true);
 });
+
+test("the brief's back link is a bordered button, not a ghost", async () => {
+  await renderInbox("away-back");
+  const back = screen.getByRole("link", { name: "Back to the inbox" });
+  expect([...back.classList]).toContain("btn");
+  expect([...back.classList]).not.toContain("ghost");
+});

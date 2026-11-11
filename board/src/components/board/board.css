@@ -1484,9 +1484,6 @@ a.card:hover {
   color: var(--fg-1);
   font-weight: var(--w-medium);
 }
-.cp-nav .btn {
-  margin-left: -8px;
-}
 .card-page h4 {
   font-size: var(--fs-t3);
   line-height: 1.3;

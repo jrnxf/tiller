@@ -343,16 +343,30 @@ test("the card page's comment goes to the card's host, and is off for a down pee
   expect(comment.title).toContain("host-e is unreachable");
 });
 
-// The daemon does not forward a dependency change (protocol.md section 7.4).
-test("a peer's card shows its dependencies, and Add is off and says why", async () => {
-  stubApi("federated");
+// A dependency change is forwarded to the card's host (protocol.md section 7.4).
+test("a peer's card adds a dependency on its own host, and is off for a down peer", async () => {
+  const posted = stubApi("federated");
   await renderApp("federated", `/cards/${GAMMA_12_D}?owner=host-d`);
   const row = await screen.findByTestId("depends-on");
   const add = within(row).getByRole("button", { name: "Add" }) as HTMLButtonElement;
-  expect(add.disabled).toBe(true);
-  expect(add.parentElement?.title).toBe(
-    "host-d owns this card: change its dependencies on that host",
-  );
+  expect(add.disabled).toBe(false);
+  fireEvent.click(add);
+  const list = await screen.findByRole("listbox", { name: "Cards" });
+  // Only host-d's own cards: this host's gamma cards share the display ids.
+  await waitFor(() => expect(within(list).getAllByRole("option").length).toBeGreaterThan(0));
+  const options = within(list).getAllByRole("option");
+  fireEvent.click(options[0] as HTMLElement);
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]?.path).toBe(`/api/v1/cards/${GAMMA_12_D}/deps`);
+  expect(posted[0]?.method).toBe("POST");
+  expect(posted[0]?.body.host).toBe("host-d");
+  cleanup();
+
+  await renderApp("federated", `/cards/${LEDGER_5_E}?owner=host-e`);
+  const down = await screen.findByTestId("depends-on");
+  const off = within(down).getByRole("button", { name: "Add" }) as HTMLButtonElement;
+  expect(off.disabled).toBe(true);
+  expect(off.parentElement?.title).toContain("host-e is unreachable");
 });
 
 test("a forward the peer did not confirm reads 'Sent, not confirmed' and a retry keeps its key", async () => {

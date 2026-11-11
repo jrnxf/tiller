@@ -658,3 +658,10 @@ test("a recap event refetches the recap", async () => {
     expect.objectContaining({ queryKey: ["api", "/api/v1/recap"] }),
   );
 });
+
+test("an item's back link is a bordered button, not a ghost", async () => {
+  await renderInbox("default", RETRY);
+  const back = screen.getByRole("link", { name: "Back to the inbox" });
+  expect([...back.classList]).toContain("btn");
+  expect([...back.classList]).not.toContain("ghost");
+});

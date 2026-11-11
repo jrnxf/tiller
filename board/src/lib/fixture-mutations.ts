@@ -568,7 +568,7 @@ function forwarded(
   const host = body.host;
   if (typeof host !== "string") return null;
   if (
-    /\/(stage|focus|label|delete|retire|bug-project|deps|grants)$/.test(path) ||
+    /\/(stage|focus|label|delete|retire|bug-project|grants)$/.test(path) ||
     path.startsWith("/api/v1/grants/") ||
     path.startsWith("/api/v1/peers/") ||
     path.startsWith("/api/v1/peer-keys/") ||
@@ -918,9 +918,11 @@ function withTriage(pathname: string, body: unknown, scenario: Scenario): unknow
 // (false).
 const depChanges = new Map<string, Map<string, boolean>>();
 
-function localRows(scenario: Scenario): BoardRow[] {
+// The rows of one host: this host's own, or a peer's by its label. A
+// dependency joins two cards of the same host.
+function hostRows(scenario: Scenario, host: string | undefined): BoardRow[] {
   const board = fixtureResponses(scenario)[boardPath()] as BoardResponse;
-  return board.rows.filter((row) => !row.host);
+  return board.rows.filter((row) => (row.host ?? undefined) === host);
 }
 
 function openDeps(detail: CardDetail): string[] {
@@ -933,9 +935,10 @@ function withDepsOn(detail: CardDetail, rows: BoardRow[]): CardDetail {
   const changes = depChanges.get(detail.card.id);
   if (!changes) return detail;
   const now = new Date().toISOString();
+  // A removed dependency keeps the time it was released, if it was.
   const deps: CardDep[] = detail.deps.map((dep) =>
-    changes.get(dep.display_id) === false && dep.released_at === null
-      ? { ...dep, released_at: now, release_reason: "removed" }
+    changes.get(dep.display_id) === false && dep.release_reason !== "removed"
+      ? { ...dep, released_at: dep.released_at ?? now, release_reason: "removed" }
       : dep,
   );
   for (const [on, adds] of changes) {
@@ -965,7 +968,7 @@ function rebadged(detail: CardDetail): BoardRow {
 
 function cardRead(id: string, scenario: Scenario): CardDetail | undefined {
   const read = fixtureResource(`/api/v1/cards/${id}`, scenario) as CardDetail | undefined;
-  return read ? withDepsOn(read, localRows(scenario)) : undefined;
+  return read ? withDepsOn(read, hostRows(scenario, read.column.host)) : undefined;
 }
 
 // The reads a dependency change touched: the card's own read and its board row.
@@ -976,13 +979,14 @@ function withDeps(pathname: string, body: unknown, scenario: Scenario): unknown 
     return {
       ...board,
       rows: board.rows.map((row) =>
-        row.host || !depChanges.has(row.id) ? row : (cardRead(row.id, scenario)?.column ?? row),
+        depChanges.has(row.id) ? (cardRead(row.id, scenario)?.column ?? row) : row,
       ),
     };
   }
   const detail = /^\/api\/v1\/cards\/([^/]+)$/.exec(pathname);
   if (!detail?.[1]) return body;
-  return withDepsOn(body as CardDetail, localRows(scenario));
+  const read = body as CardDetail;
+  return withDepsOn(read, hostRows(scenario, read.column.host));
 }
 
 // `POST` and `DELETE /api/v1/cards/{id}/deps`, with the checks the core makes:
@@ -993,7 +997,7 @@ function depMutation(
   body: Record<string, unknown>,
   scenario: Scenario,
 ): MutationResult {
-  const rows = localRows(scenario);
+  const rows = hostRows(scenario, typeof body.host === "string" ? body.host : undefined);
   const card = rows.find((row) => row.id === id || row.display_id === id);
   if (!card) return refusal(404, "not_found", `no card ${id}`);
   const on = typeof body.depends_on === "string" ? body.depends_on : "";
@@ -1004,9 +1008,12 @@ function depMutation(
   const open = openDeps(before);
   const changes = depChanges.get(card.id) ?? new Map<string, boolean>();
   if (method === "DELETE") {
-    // Natural: no open dependency to release is a no-op.
-    if (!open.includes(target.display_id))
-      return { reply: recorded(null, null, null), followUps: [] };
+    // Natural: with none left to remove, nothing changes. A released
+    // dependency is still on the card, so it can be removed.
+    const kept = before.deps.some(
+      (dep) => dep.display_id === target.display_id && dep.release_reason !== "removed",
+    );
+    if (!kept) return { reply: recorded(null, null, null), followUps: [] };
     changes.set(target.display_id, false);
   } else if (!open.includes(target.display_id)) {
     const refuse = (fact: string) => refusal(422, "refused", `card ${card.display_id}: ${fact}`);

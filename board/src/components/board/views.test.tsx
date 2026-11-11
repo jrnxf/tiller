@@ -968,15 +968,16 @@ test("a blocked card page names its blockers once and a held card says Held", as
 
 const GAMMA_14 = "01JCARD0000000000000000014";
 
-test("the Depends on row shows a chip per dependency, with an x only on an open one", async () => {
+test("the Depends on row shows a chip per dependency, each with an x", async () => {
   stubApi("blocked");
   await renderApp("blocked", `/cards/${GAMMA_14}`);
   const row = await screen.findByTestId("depends-on");
   const chips = within(row).getAllByTestId("dep-chip");
   expect(chips.map((chip) => chip.textContent)).toEqual(["gamma-12Working", "gamma-11Landed"]);
   expect(within(row).getByRole("button", { name: "Remove gamma-12" })).toBeTruthy();
-  // gamma-11 landed, so it no longer holds the card: there is nothing to remove.
-  expect(within(row).queryByRole("button", { name: "Remove gamma-11" })).toBeNull();
+  // gamma-11 landed, so it no longer holds the card, but it can still be
+  // taken off it.
+  expect(within(row).getByRole("button", { name: "Remove gamma-11" })).toBeTruthy();
   // The row adds no second "Blocked by": Status already says it.
   expect(row.textContent).not.toMatch(/blocked by/i);
 });
@@ -1017,24 +1018,62 @@ test("Add lists the project's open cards and turns off the one that would make a
   expect("host" in (posted[0]?.body ?? {})).toBe(false);
 });
 
-test("the x removes an open dependency, and a refusal shows in the row", async () => {
+test("the x asks first: Keep sends nothing, Remove sends the remove", async () => {
   const posted = stubApi("blocked");
   await renderApp("blocked", `/cards/${GAMMA_14}`);
   const row = await screen.findByTestId("depends-on");
   fireEvent.click(within(row).getByRole("button", { name: "Remove gamma-12" }));
+  const dialog = await screen.findByRole("dialog", { name: "Remove gamma-12?" });
+  const buttons = within(dialog).getAllByRole("button");
+  // Keep is focused, and Remove, the act, is on the right.
+  expect(buttons.map((button) => button.textContent)).toEqual(["Keep", "Remove"]);
+  expect(document.activeElement).toBe(buttons[0]);
+  expect(buttons[1]?.className).toBe("btn danger");
+  fireEvent.click(buttons[0] as HTMLElement);
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(posted).toHaveLength(0);
+
+  fireEvent.click(within(row).getByRole("button", { name: "Remove gamma-12" }));
+  const again = await screen.findByRole("dialog", { name: "Remove gamma-12?" });
+  fireEvent.click(within(again).getByRole("button", { name: "Remove" }));
   await waitFor(() => expect(posted).toHaveLength(1));
   expect(posted[0]).toMatchObject({
     path: `/api/v1/cards/${GAMMA_14}/deps`,
     method: "DELETE",
     body: { depends_on: "gamma-12" },
   });
-  cleanup();
+  expect("host" in (posted[0]?.body ?? {})).toBe(false);
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
 
+test("a released dependency can be removed too", async () => {
+  const posted = stubApi("blocked");
+  await renderApp("blocked", `/cards/${GAMMA_14}`);
+  const row = await screen.findByTestId("depends-on");
+  fireEvent.click(within(row).getByRole("button", { name: "Remove gamma-11" }));
+  const dialog = await screen.findByRole("dialog", { name: "Remove gamma-11?" });
+  expect(dialog.textContent).toContain("gamma-14 no longer waits on gamma-11.");
+  fireEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]).toMatchObject({ method: "DELETE", body: { depends_on: "gamma-11" } });
+});
+
+test("a refused remove shows in the dialog, which stays open", async () => {
   stubApi("blocked", 422);
   await renderApp("blocked", `/cards/${GAMMA_14}`);
-  const refused = await screen.findByTestId("depends-on");
-  fireEvent.click(within(refused).getByRole("button", { name: "Remove gamma-12" }));
-  expect((await within(refused).findByRole("alert")).textContent).toBe("herdr is down");
+  const row = await screen.findByTestId("depends-on");
+  fireEvent.click(within(row).getByRole("button", { name: "Remove gamma-12" }));
+  const dialog = await screen.findByRole("dialog", { name: "Remove gamma-12?" });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
+  expect((await within(dialog).findByRole("alert")).textContent).toBe("herdr is down");
+});
+
+test("the card page's Board link is a bordered button, not a ghost", async () => {
+  stubApi("blocked");
+  await renderApp("blocked", `/cards/${GAMMA_14}`);
+  const page = await screen.findByTestId("card-page");
+  const back = within(page).getByRole("link", { name: "Board" });
+  expect(back.className).toBe("btn sm");
 });
 
 test("a closed card shows its dependencies read-only", async () => {

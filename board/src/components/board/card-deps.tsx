@@ -1,15 +1,17 @@
 import { Popover } from "@base-ui/react/popover";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useId, useRef, useState } from "react";
+import { useCallback, useId, useRef, useState } from "react";
 
 import type { BoardRow, CardDep, CardDetail } from "../../lib/api-types";
-import { ownerOf } from "../../lib/peers";
+import { hostField, ownerOf } from "../../lib/peers";
 import { boardQuery, cardQuery } from "../../lib/queries";
 import { ActionFailure } from "../attention/action-failure";
 import { ActionError, sendMutation } from "../attention/api";
+import { useAction } from "../attention/use-action";
 import { ulid } from "../attention/ulid";
 import { CloseIcon, PlusIcon } from "../shell/icons";
+import { Modal } from "../ui/modal";
 import { depStateText, statusMark } from "./badge";
 import { Status } from "./icons";
 
@@ -37,8 +39,7 @@ function DepChip({
 }: {
   dep: CardDep;
   owner?: string;
-  // Unset when the chip cannot be removed: the card is closed, or the
-  // dependency is already released.
+  // Unset when the chip cannot be removed: the card is closed.
   onRemove?: () => void;
   off: string | null;
   pending: boolean;
@@ -67,7 +68,7 @@ function DepChip({
   );
 }
 
-// The cards this one may wait on: open cards of the same project on this host,
+// The cards this one may wait on: open cards of the same project on its host,
 // less the card itself and the cards it already waits on. A card that waits on
 // this one is listed but cannot be picked, since adding it would make a loop.
 function candidatesFor(detail: CardDetail, rows: BoardRow[]) {
@@ -78,7 +79,7 @@ function candidatesFor(detail: CardDetail, rows: BoardRow[]) {
   const loops = new Set(detail.waiting_on_this ?? []);
   const kept = rows.filter(
     (row) =>
-      !row.host &&
+      ownerOf(row) === ownerOf(detail.column) &&
       row.project_id === card.project_id &&
       row.column !== "done" &&
       row.id !== card.id &&
@@ -214,8 +215,74 @@ function DepPicker({
   );
 }
 
+// Remove is destructive, so it asks first. Keep is focused, so Enter keeps.
+function RemoveDep({
+  detail,
+  dep,
+  onRemoved,
+  onClose,
+}: {
+  detail: CardDetail;
+  dep: CardDep;
+  onRemoved: () => void;
+  onClose: () => void;
+}) {
+  const { card, column } = detail;
+  const send = useCallback(
+    (idempotency_key: string) =>
+      sendMutation<CardDep | null>("DELETE", `/api/v1/cards/${card.id}/deps`, {
+        depends_on: dep.display_id,
+        ...hostField(column),
+        idempotency_key,
+      }),
+    [card.id, column, dep.display_id],
+  );
+  // Each dialog is one press: its key is kept for a retry after a failure.
+  const [press] = useState(() => `${card.id}:dep-rm:${dep.display_id}:${Date.now()}`);
+  const action = useAction({ binding: press, send, onRecorded: onRemoved });
+  const keep = useRef<HTMLButtonElement>(null);
+  const released = dep.released_at !== null;
+  return (
+    <Modal
+      className="dialog"
+      labelledBy="dep-rm-title"
+      describedBy="dep-rm-body"
+      dismissable={!action.pending}
+      onClose={onClose}
+      initialFocus={keep}
+    >
+      <h2 id="dep-rm-title">Remove {dep.display_id}?</h2>
+      <p id="dep-rm-body">
+        {released
+          ? `${card.display_id} no longer waits on ${dep.display_id}. Remove takes it off this card.`
+          : `${card.display_id} stops waiting on ${dep.display_id}, so it can start before ${dep.display_id} is done.`}
+      </p>
+      <ActionFailure error={action.error} host={ownerOf(column)} />
+      <div className="dialog-actions">
+        <button
+          ref={keep}
+          type="button"
+          className="btn"
+          disabled={action.pending}
+          onClick={onClose}
+        >
+          Keep
+        </button>
+        <button
+          type="button"
+          className="btn danger"
+          disabled={action.pending}
+          onClick={action.trigger}
+        >
+          Remove
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
 // The Depends on row of a card's details: a chip per card it waits on, or has
-// waited on, with an x to remove an open one, and Add (state.md, `dep.add` and
+// waited on, with an x that asks to remove it, and Add (state.md, `dep.add` and
 // `dep.release`). A removed dependency leaves the row. The core refuses a loop,
 // a closed card and an unknown one; the picker turns the loops off first.
 export function DependsOn({
@@ -237,19 +304,23 @@ export function DependsOn({
   const queryClient = useQueryClient();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<ActionError | null>(null);
+  const [removing, setRemoving] = useState<CardDep | null>(null);
   const { card, column } = detail;
   // Open dependencies come first.
   const shown = detail.deps.filter((dep) => dep.release_reason !== "removed");
   shown.sort((a, b) => Number(a.released_at !== null) - Number(b.released_at !== null));
 
-  const change = (method: "POST" | "DELETE", dependsOn: string) => {
+  const refresh = () =>
+    queryClient.invalidateQueries({ queryKey: cardQuery(cardId, owner).queryKey });
+  const add = (dependsOn: string) => {
     setPending(true);
     setError(null);
-    sendMutation(method, `/api/v1/cards/${card.id}/deps`, {
+    sendMutation("POST", `/api/v1/cards/${card.id}/deps`, {
       depends_on: dependsOn,
+      ...hostField(column),
       idempotency_key: ulid(),
     })
-      .then(() => queryClient.invalidateQueries({ queryKey: cardQuery(cardId, owner).queryKey }))
+      .then(refresh)
       .catch((caught: unknown) => setError(failureOf(caught)))
       .finally(() => setPending(false));
   };
@@ -267,11 +338,7 @@ export function DependsOn({
               owner={owner}
               off={off}
               pending={pending}
-              onRemove={
-                closed || dep.released_at !== null
-                  ? undefined
-                  : () => change("DELETE", dep.display_id)
-              }
+              onRemove={closed ? undefined : () => setRemoving(dep)}
             />
           ))}
         </span>
@@ -280,7 +347,7 @@ export function DependsOn({
             detail={detail}
             off={off}
             pending={pending}
-            onPick={(row) => change("POST", row.display_id)}
+            onPick={(row) => add(row.display_id)}
           />
         )}
         {error ? (
@@ -289,6 +356,17 @@ export function DependsOn({
           </span>
         ) : null}
       </dd>
+      {removing ? (
+        <RemoveDep
+          detail={detail}
+          dep={removing}
+          onClose={() => setRemoving(null)}
+          onRemoved={() => {
+            setRemoving(null);
+            void refresh();
+          }}
+        />
+      ) : null}
     </>
   );
 }
