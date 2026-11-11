@@ -1368,8 +1368,8 @@ test("focus does not come back to a saved row when the read after the save is la
   expect(document.activeElement).toBe(document.body);
 });
 
-test("focus does not come back to a saved row when the owner clicks while the save is going", async () => {
-  await renderMemory();
+// Saves the second line with the write held until `land` is called.
+async function saveHeld() {
   const fixture = globalThis.fetch;
   let land: (() => void) | undefined;
   const held = new Promise<void>((done) => {
@@ -1379,19 +1379,38 @@ test("focus does not come back to a saved row when the owner clicks while the sa
     if (path === "/api/v1/memory/edits") await held;
     return fixture(path, init);
   });
-
   fireEvent.click(lineOf(SECOND));
   type(draftBox(), "Stop new dispatch at 3% of the week.");
   fireEvent.keyDown(draftBox(), { key: "Enter" });
   await flush();
+  return async () => {
+    land?.();
+    await waitFor(() => expect(screen.queryByRole("textbox")).toBeNull());
+    await settle();
+  };
+}
+
+test("focus does not come back to a saved row when the owner clicks while the save is going", async () => {
+  await renderMemory();
+  const land = await saveHeld();
   // The owner clicks on empty space before the save lands.
   fireEvent.pointerDown(document.body);
-  land?.();
-  await waitFor(() => expect(screen.queryByRole("textbox")).toBeNull());
-  await settle();
+  await land();
 
   expect(page().getByText("Stop new dispatch at 3% of the week.")).toBeTruthy();
   expect(document.activeElement).toBe(document.body);
+});
+
+test("a press in the editor while its save is going still lets focus come back", async () => {
+  await renderMemory();
+  const land = await saveHeld();
+  // Enter again, held, and a click to place the caret: all in the editor.
+  fireEvent.keyDown(draftBox(), { key: "Enter" });
+  fireEvent.keyDown(draftBox(), { key: "Enter", repeat: true });
+  fireEvent.pointerDown(draftBox());
+  await land();
+
+  expect(document.activeElement).toBe(editButton(lineOf("Stop new dispatch at 3% of the week.")));
 });
 
 test("a modifier key alone does not stop focus coming back to a saved row", async () => {
@@ -1404,6 +1423,7 @@ test("a modifier key alone does not stop focus coming back to a saved row", asyn
   await waitFor(() => expect(screen.queryByRole("textbox")).toBeNull());
 
   fireEvent.keyDown(document.body, { key: "Shift" });
+  fireEvent.keyDown(document.body, { key: "AltGraph" });
   stubDaemon();
   await readAgain(queryClient);
   await settle();

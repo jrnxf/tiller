@@ -121,7 +121,23 @@ const scopeOf = (scope: string) => (scope === FLEET ? undefined : scope);
 
 // How long focus waits for the document a change made before it gives up.
 const FOCUS_WAIT_MS = 10_000;
-const MODIFIERS = new Set(["Shift", "Control", "Alt", "Meta"]);
+const MODIFIERS = new Set([
+  "Alt",
+  "AltGraph",
+  "CapsLock",
+  "Control",
+  "Fn",
+  "FnLock",
+  "Hyper",
+  "Meta",
+  "NumLock",
+  "OS",
+  "ScrollLock",
+  "Shift",
+  "Super",
+  "Symbol",
+  "SymbolLock",
+]);
 
 const isMissing = (error: unknown) => error instanceof ReadError && error.status === 404;
 
@@ -1212,10 +1228,15 @@ function Doc({ data }: { data: MemoryResponse }) {
     if (moves.current === since) setFocus(at);
   };
   useEffect(() => {
-    // Capture runs before the handler that may ask for focus again. A
-    // modifier key alone is not a move: it starts a shortcut or a selection.
+    // Capture runs before the handler that may ask for focus again. These
+    // are not a move: a modifier key alone (it starts a shortcut or a
+    // selection), a held key, a press in the editor (the one a save is about
+    // to close), and a press on the page's scrollbar.
     const movedOn = (event: Event) => {
-      if (event instanceof KeyboardEvent && MODIFIERS.has(event.key)) return;
+      if (event instanceof KeyboardEvent && (event.repeat || MODIFIERS.has(event.key))) return;
+      const target = event.target;
+      if (target === document.documentElement) return;
+      if (target instanceof Element && target.closest(".ed")) return;
       moves.current += 1;
       wanted.current = null;
     };
