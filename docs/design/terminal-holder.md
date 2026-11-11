@@ -310,7 +310,7 @@ The holder encodes each name for the app's current mode: legacy, application cur
 | Composer read and line submit with Enter pacing | `delivery/outbox.rs:277-295,537-557`, `herdr/submit.rs` | `screen(visible, ansi)` and `classify` as today. `submit.rs` moves to `tiller-panes` with no change in logic: `input(line)`, wait `Pacing.settle`, `keys(["enter"])`, read back, press again up to `PRESSES` (4). Section 4.5 says why it stays |
 | Interrupt | `agents/control.rs:224-258` | `keys(["esc"])`, and an observation with source `holder` |
 | Stop: Escape, `/exit` at an empty composer, prove the agent gone | `agents/control.rs:651-790` | The same steps. "Gone" is now the `exited` event, with no polling |
-| Stop an orchestrator, close a pane, teardown | `control.rs:848`, `spawn/mod.rs:650,1149`, `control/project.rs:280` | `close(pane, 3 s)`, only after the stop steps proved the agent gone or the owner forced it, as today. The `dead_panes` guard above covers clean |
+| Stop an orchestrator, close a pane, teardown | `control.rs:848`, `spawn/mod.rs:650,1149`, `control/project.rs:280` | `forget(pane)` once the stop steps proved the agent gone (the pane `exited`). When the owner forced the stop, `close(pane, 3 s)` first, then `forget`, as today. The `dead_panes` guard above covers clean |
 | `dead_panes`: closes only the run's bare-shell panes, and refuses while one still runs an agent ("a live pane is never closed") | `spawn/mod.rs:1114-1140` | The check stays, on holder facts. A run's panes are those whose `key` is one of its sessions. Clean and teardown `forget` the `exited` ones, and refuse while any is `running`. No bare shell exists any more, because the holder runs `claude` with no shell under it |
 | Owner notification | `delivery/notify.rs:70` | The `Notify` trait and the command notifier (section 7) |
 | Open in herdr (focus) | `api.rs:5255` (`focus`), `herdr/front.rs`, `cli/cmd/spawn.rs:525-545` | Open in terminal (section 5.3): `switch` when an attach client runs, else start the terminal app with `tiller attach` |
@@ -600,7 +600,7 @@ The doc rows land in H01, before the code, so that each builder builds against a
 | Observation source CHECK `'herdr'` | `'holder'` added. Old rows keep `'herdr'` as history. The CHECK needs a table rebuild in SQLite |
 | `sessions.pane_id`, `outbox.target_pane_id` | Names kept. The values are now holder pane ids |
 | Config `[spawn] herdr`, `herdr_socket`, `[herdr] terminal`, `terminal_exec`, host-config `herdr.terminal`, env `TILLER_HERDR` | `[holder] socket` and `default_size`, `[attach] terminal`, `terminal_exec` and `prefix`, `[notify] command`, and host-config `attach.terminal`. A config that still names a herdr key starts fine, logs a warning, and `tiller doctor` says which key to remove |
-| DTO and CLI JSON `herdr_name`, `pane_tail` from saved machines, `herdr_terminal`, `tools.herdr`, `stale_reason: herdr_link_down` | `name`, `pane_tail` from local panes only, `attach_terminal` and `tools.holder`. `herdr_link_down` goes. The `cli/tests/snapshots` files are updated |
+| DTO and CLI JSON `herdr_name`, `pane_tail` from saved machines, `herdr_terminal`, `tools.herdr`, `stale_reason` values `herdr_link_down`, `host_asleep` and `poll_failed` | `name`, `pane_tail` from local panes only, `attach_terminal` and `tools.holder`. The three herdr `stale_reason` values go, and the local host gets `holder_down` (`protocol.md` 9, R18). The `cli/tests/snapshots` files are updated |
 
 The migration follows R11: a pre-migration copy, one transaction, and no hook ever migrates.
 
@@ -668,7 +668,7 @@ Each task but S1P, HA1 and H15 is one builder, one branch, one worktree and one 
 | H10 (`holder-port`) | Reconcile, observe and state: `HolderSource`, ladder, R18, R21 and R22, `holder` observations, the migration of 11.1, config keys | H09 | 6 h |
 | H11 (`holder-port`) | Daemon API and peers: live view on `subscribe`, Fit as a lease, history, prompt, input, Open in terminal, peer pane link, the saved-machine paths removed | H10, H07 | 5 h |
 | H12 (`holder-port`) | Board: copy, `terminal-open.ts`, stream semantics, the tail UI for saved machines removed, screenshots in both themes at 1440 and 390 px | H11 | 4 h |
-| H13 (`holder-port`) | Delete `crates/herdr` and every herdr name left (section 10 code rows, roles, flake, demo, scripts). Set `services.tiller.holder.enable` to default to the daemon's `enable`. `git grep -i herdr` finds only history: `probe/`, `scripts/firstmate-export` and its fixtures, ADRs and superseded docs | H12, H08 | 3 h |
+| H13 (`holder-port`) | Delete `crates/herdr` and every herdr name left (section 10 code rows, roles, flake, demo, scripts). Set `services.tiller.holder.enable` to default to the daemon's `enable`. `git grep -i herdr` finds only history: `probe/`, `scripts/firstmate-export` and its fixtures, ADRs, superseded docs and the specs' [H] notes on what came before the cutover. Tests with herdr in their name are renamed | H12, H08 | 3 h |
 | H14 (`holder-port`) | End-to-end soak on a test home with `fake-agent` panes: 4 h of daemon restarts, 3 live upgrades and a holder kill, with no gap in any counter. Then the full CI gate and `nix flake check` | H13 | 6 h (4 h is the soak itself) |
 | H15 | Cutover on the live tiller, with the owner (section 11.3), after the owner merges `holder-port` | H14 | 1 h |
 
