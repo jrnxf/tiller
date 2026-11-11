@@ -86,10 +86,13 @@ test("the dot colour is explained on the card", () => {
 });
 
 test("the red stand-in week shows its runway on every day of any week", () => {
-  // From Monday 20:00 to Tuesday 14:00 UTC, a week after the first reset.
+  // Monday 9 November 2026 21:00 and Tuesday 10 November 13:00 Lisbon time,
+  // the gap a week after the first reset; Tuesday 10 November 14:00, the
+  // reset itself; and Tuesday 13 July 2027 14:30 Lisbon time, in summer.
   for (const at of [
     "2026-11-09T21:00:00.000Z",
     "2026-11-10T13:00:00.000Z",
+    "2026-11-10T14:00:00.000Z",
     "2027-07-13T13:30:00.000Z",
   ]) {
     const now = Date.parse(at);
