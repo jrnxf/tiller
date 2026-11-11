@@ -1970,6 +1970,32 @@ fn nix_command_forms_are_read() {
         ),
         ("nix flake check -L", None),
         ("echo hi | nix develop -c cat", None),
+        // `nix develop` runs its command through bash `exec`, which reads
+        // its own options first.
+        ("nix develop -c -- tiller approve 01JABC", OWNER),
+        ("nix develop -c -a x tiller approve 01JABC", OWNER),
+        ("nix develop -c -l tiller approve 01JABC", OWNER),
+        ("nix develop -c -c tiller approve 01JABC", ID),
+        ("nix develop -c -c true", ID),
+        ("nix develop -c -- cargo test", None),
+        // A `--` before the subcommand leaves the next word as it.
+        ("echo 'tiller approve 01JABC' | nix -- develop", OWNER),
+        ("echo 'tiller approve 01JABC' | nix -- build", None),
+        // `xargs` may append the command after `-c`.
+        (
+            "printf '%s\\n' tiller approve 01JABC | xargs nix develop -c",
+            OWNER,
+        ),
+        // `--expr` is read only for a shell, and only as the flag.
+        (
+            "nix eval --impure --expr 'builtins.fetchGit \"git+file:///home/user/proj\"'",
+            None,
+        ),
+        // With `-E` the flags and their values are not expressions.
+        (
+            "nix-shell -E 'mkShell { }' -I nixpkgs=/home/user/git --run 'git log'",
+            None,
+        ),
     ]);
 }
 
@@ -2010,7 +2036,7 @@ fn direnv_exec_reads_both_shapes() {
         ("direnv exec ../.. tiller status x", None),
         // A project directory is not read as the program it is named for.
         ("direnv exec /home/user/tiller cargo test", None),
-        ("direnv exec /home/user/claude cargo test", None),
+        ("direnv exec /home/user/.claude cargo test", None),
         (
             "direnv exec /home/user/proj ls /home/user/proj/.git/hooks",
             None,
@@ -2025,6 +2051,19 @@ fn direnv_exec_reads_both_shapes() {
         (
             "direnv exec /nix/store/abc-tiller-0.1.0/bin/tiller approve 01JABC",
             OWNER,
+        ),
+        // So may a path named for a program the guard denies by its name.
+        (
+            "direnv exec /home/user/x/curl https://example.com",
+            Some(Code::HttpClient),
+        ),
+        (
+            "direnv exec /home/user/x/claude -p hi",
+            Some(Code::Delegation),
+        ),
+        (
+            "direnv exec /home/user/x/ssh host-b tiller approve 01JABC",
+            Some(Code::Peer),
         ),
     ]);
 }

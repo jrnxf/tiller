@@ -1148,20 +1148,6 @@ impl Walker<'_, '_> {
         shown: &str,
     ) -> Option<Option<Denial>> {
         let tail = &words[at + 1..];
-        // `nix --expr`: the expression's `shellHook` runs too. Any word may
-        // be the flag, as a value nix does not take.
-        for (k, word) in tail.iter().enumerate() {
-            if (!word.fixed || word.is("--expr"))
-                && let Some(expr) = tail.get(k + 1)
-                && protected(&expr.text)
-            {
-                return Some(self.deny(
-                    guessed_code(&expr.text),
-                    "the nix expression may run a protected command in its shell hook",
-                    shown,
-                ));
-            }
-        }
         // Each word, and whether it is a later part of a split cluster:
         // nix splits a word only when it reads it as a flag, so the parts
         // share the place of the word they came from.
@@ -1218,6 +1204,15 @@ impl Walker<'_, '_> {
                 continue;
             }
             if free && word.is("--") {
+                // nix still takes the first word after `--` as the
+                // subcommand when it has none.
+                if !known && let Some((next, _)) = list.front() {
+                    shell |= !next.fixed
+                        || ["develop", "dev-shell", "shell", "run"]
+                            .iter()
+                            .any(|name| next.is(name));
+                    run |= next.is("run");
+                }
                 break;
             }
             let flag = word.text.clone();
@@ -1294,8 +1289,23 @@ impl Walker<'_, '_> {
                 Ok(values) | Err(values) => maybe = maybe.max(values),
             }
         }
+        // `nix develop --expr`: the expression's `shellHook` runs too. Any
+        // `--expr` may be the flag, as a value nix does not take.
+        if shell
+            && let Some(expr) = tail
+                .windows(2)
+                .find(|pair| pair[0].is("--expr") && protected(&pair[1].text))
+        {
+            return Some(self.deny(
+                guessed_code(&expr[1].text),
+                "the nix expression may run a protected command in its shell hook",
+                shown,
+            ));
+        }
+        // `xargs nix develop` or `xargs nix develop -c`: the input may be
+        // nix's flags or the command.
         if appended
-            && sure.is_none()
+            && sure.as_ref().is_none_or(Vec::is_empty)
             && let Some(found) = self.appended_input("nix", command, script)
         {
             return Some(Some(found));
@@ -1318,14 +1328,24 @@ impl Walker<'_, '_> {
         {
             return Some(Some(found));
         }
+        // `nix develop` runs its command through the bash `exec` builtin,
+        // which reads `--`, `-a NAME`, `-c` and `-l` first. `nix shell`
+        // runs it as it is, which `exec` reads the same way.
+        let sure = sure.map(|reading| {
+            let mut words = vec![Arg::fixed("exec")];
+            words.extend(reading);
+            words
+        });
         if let Some(reading) = &sure
-            && !reading.is_empty()
+            && reading.len() > 1
             && let Some(found) = self.exec(reading, command, script, false, appended)
         {
             return Some(Some(found));
         }
         for reading in &readings.list {
-            if let Some(found) = self.exec(reading, command, script, false, appended) {
+            let mut words = vec![Arg::fixed("exec")];
+            words.extend_from_slice(reading);
+            if let Some(found) = self.exec(&words, command, script, false, appended) {
                 return Some(Some(found));
             }
         }
@@ -1406,14 +1426,12 @@ impl Walker<'_, '_> {
         {
             return Some(found);
         }
-        // `-E` (in any cluster) reads every other word as an expression,
-        // whose `shellHook` runs too.
-        let expr = args.iter().any(|word| {
-            !word.fixed
-                || word.is("--expr")
-                || (word.fixed && nix_split(&word.text).iter().any(|part| part == "-E"))
-        });
-        if expr && let Some(word) = args.iter().find(|word| protected(&word.text)) {
+        // `-E` (in any cluster or place) reads the words that are not flags
+        // or their values as expressions, whose `shellHook` runs too.
+        let expr = args
+            .iter()
+            .any(|word| word.is("--expr") || nix_split(&word.text).iter().any(|part| part == "-E"));
+        if expr && let Some(word) = nix_shell_exprs(args).find(|word| protected(&word.text)) {
             return self.deny(
                 guessed_code(&word.text),
                 "the nix-shell expression may run a protected command in its shell hook",
@@ -3818,13 +3836,35 @@ fn piped_texts(command: &Simple, script: &Script) -> Vec<String> {
     texts
 }
 
+/// The words of `nix-shell` that are not flags or their values, or the
+/// strings of `--run` and `--command`: with `-E`, its expressions.
+fn nix_shell_exprs(args: &[Arg]) -> impl Iterator<Item = &Arg> {
+    let mut skip = 0;
+    args.iter().filter(move |word| {
+        if skip > 0 {
+            skip -= 1;
+            return false;
+        }
+        if !word.text.starts_with('-') {
+            return true;
+        }
+        skip = match word.text.as_str() {
+            "--run" | "--command" | "-I" | "-A" | "--attr" | "--keep" | "-k" | "--include" => 1,
+            "--arg" | "--argstr" | "--option" => 2,
+            _ => 0,
+        };
+        false
+    })
+}
+
 /// Whether `direnv exec PATH` is read with PATH as the program as well,
 /// for a path that `filepath.Clean` left (`path`). A bare name is found
 /// on PATH, and a path in a `bin` directory is a program. Any other path
 /// is most often a project directory, so it is read as a program only
-/// when its name is a shell, a wrapper or a program the guard reads by its
-/// words: a project named `tiller` or `claude` is not read as that
-/// program. A tiller outside the package cannot reach the state anyway.
+/// when its name is one the guard has rules for: a shell, a wrapper, a
+/// program it reads by its words or denies by its name. A project named
+/// `tiller` is not read as `tiller`: a tiller outside the package cannot
+/// reach the state.
 fn direnv_file(path: &str) -> bool {
     const READS: &[&str] = &[
         "env",
@@ -3846,14 +3886,25 @@ fn direnv_file(path: &str) -> bool {
         "gh",
         "gh-axi",
         "eval",
+        "ssh",
+        "mosh",
+        "et",
     ];
     let Some((dir, name)) = path.rsplit_once('/') else {
         return true;
     };
     let parent = dir.rsplit('/').next().unwrap_or_default();
     matches!(parent, "bin" | "sbin")
-        || SHELLS.contains(&name)
-        || READS.contains(&name)
+        || [
+            SHELLS,
+            READS,
+            HTTP_CLIENTS,
+            PTY_ALLOCATORS,
+            NESTED_AGENTS,
+            SCHEDULERS,
+        ]
+        .iter()
+        .any(|names| names.contains(&name))
         || options::runner(name).is_some()
 }
 
