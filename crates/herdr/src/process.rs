@@ -12,7 +12,7 @@
 use std::io;
 use std::process::{Child, Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Puts the child `command` spawns in a new process group, led by the child.
@@ -125,9 +125,10 @@ fn try_wait_all(child: &mut Child) -> io::Result<Option<ExitStatus>> {
 ///
 /// tokio never removes a signal handler, so the handlers stay installed for
 /// the rest of the process. While no `Interrupt` from [`Interrupt::catch`]
-/// lives, one of those signals ends the process with exit code 128 plus the
-/// signal's number (130 for SIGINT, 143 for SIGTERM, 129 for SIGHUP), as a
-/// shell reports a command those signals killed.
+/// lives, one of those signals ends the process as it would with no
+/// handlers: the signal's default action is put back and the signal raised
+/// again, so a shell sees a command the signal killed (exit code 130 for
+/// SIGINT, 143 for SIGTERM, 129 for SIGHUP).
 pub struct Interrupt {
     caught: Arc<AtomicBool>,
     /// Whether this one came from [`Interrupt::catch`] and is in [`HELD`].
@@ -138,9 +139,10 @@ pub struct Interrupt {
 /// A signal raises each one, or ends the process when there are none.
 static HELD: Mutex<Vec<Arc<AtomicBool>>> = Mutex::new(Vec::new());
 
-/// The handlers' listener, started by the first [`Interrupt::catch`] and
-/// kept for the rest of the process, as the handlers are.
-static LISTENER: OnceLock<Result<(), String>> = OnceLock::new();
+/// Whether the handlers' listener runs. The first [`Interrupt::catch`]
+/// that starts it keeps it for the rest of the process, as the handlers
+/// are; a start that failed is tried again by the next one.
+static LISTENING: Mutex<bool> = Mutex::new(false);
 
 /// The held flags, even after a thread panicked while holding the lock.
 fn held() -> std::sync::MutexGuard<'static, Vec<Arc<AtomicBool>>> {
@@ -186,12 +188,14 @@ fn listen() -> io::Result<()> {
                 };
                 loop {
                     let number = tokio::select! {
-                        _ = int.recv() => 2,
-                        _ = term.recv() => 15,
-                        _ = hup.recv() => 1,
+                        _ = int.recv() => signal_hook::consts::SIGINT,
+                        _ = term.recv() => signal_hook::consts::SIGTERM,
+                        _ = hup.recv() => signal_hook::consts::SIGHUP,
                     };
                     let held = held();
                     if held.is_empty() {
+                        let _ = signal_hook::low_level::emulate_default_handler(number);
+                        // Only if the signal did not end the process.
                         std::process::exit(128 + number);
                     }
                     for flag in held.iter() {
@@ -213,10 +217,15 @@ impl Interrupt {
         let caught = Arc::new(AtomicBool::new(false));
         // Held before the handlers exist, so no signal falls between them.
         held().push(Arc::clone(&caught));
-        let started = LISTENER.get_or_init(|| listen().map_err(|error| error.to_string()));
-        if let Err(error) = started {
-            held().retain(|flag| !Arc::ptr_eq(flag, &caught));
-            return Err(io::Error::other(error.clone()));
+        let mut listening = LISTENING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !*listening {
+            if let Err(error) = listen() {
+                held().retain(|flag| !Arc::ptr_eq(flag, &caught));
+                return Err(error);
+            }
+            *listening = true;
         }
         Ok(Self { caught, held: true })
     }
@@ -393,8 +402,8 @@ mod tests {
     /// `a_signal_after_the_interrupt_ends_the_process` runs.
     const SIGNALLED_CHILD: &str = "TILLER_TEST_SIGNALLED_CHILD";
 
-    /// Once no `Interrupt` holds the signals, SIGTERM ends the process with
-    /// exit code 143, as it would with no handlers; while a later one holds
+    /// Once no `Interrupt` holds the signals, SIGTERM kills the process, as
+    /// it would with no handlers; while a later one holds
     /// them, it catches them again. Run in a copy of this test binary, since
     /// the signal ends the process it reaches.
     #[test]
@@ -422,7 +431,12 @@ mod tests {
             .stderr(Stdio::null())
             .status()
             .unwrap();
-        assert_eq!(status.code(), Some(143), "{status:?}");
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            status.signal(),
+            Some(signal_hook::consts::SIGTERM),
+            "{status:?}"
+        );
         assert!(started.elapsed() < Duration::from_secs(10));
     }
 

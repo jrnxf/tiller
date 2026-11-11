@@ -17,6 +17,7 @@ rusqlite.workspace = true
 rustix = { workspace = true, features = ["process"] }
 serde.workspace = true
 serde_json.workspace = true
+signal-hook.workspace = true
 tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
 tiller-core.workspace = true
