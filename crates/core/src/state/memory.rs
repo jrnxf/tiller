@@ -1035,6 +1035,21 @@ fn measured_after(
 /// Holds a Keep of `proposal`, which leaves `text` in the document at
 /// `path`, to the startup budget, and records the count it leaves on it. A
 /// refusal names `kept`, the proposal the owner decided.
+/// The document's text once `diff` is applied to `text`, for the startup
+/// budget count. A diff the strict reader cannot apply refuses the Keep of
+/// `kept`, even one `git apply` would take: a change that cannot be counted
+/// does not get past the budget.
+fn after_keep(text: &str, diff: &str, kept: &str) -> Result<String> {
+    doc::apply_diff(text, diff).ok_or_else(|| {
+        Error::refused(
+            "proposal",
+            kept,
+            "its diff does not apply exactly to the current text, so its startup memory cannot \
+             be counted; re-propose it on the current text",
+        )
+    })
+}
+
 fn budget(
     tx: &mut Tx<'_>,
     proposal: &Proposal,
@@ -1542,10 +1557,8 @@ impl Store {
                 return Err(Error::refused("proposal", &proposal.id, fact));
             }
             if proposal.base_blob == file.head_blob {
-                // A diff that does not apply fails in `mem.apply`, as before.
-                if let Some(text) = doc::apply_diff(&file.text, &proposal.diff) {
-                    budget(tx, &proposal, &proposal.id, &path, &text, read)?;
-                }
+                let text = after_keep(&file.text, &proposal.diff, &proposal.id)?;
+                budget(tx, &proposal, &proposal.id, &path, &text, read)?;
                 let approval = decide(tx, &proposal, true)?;
                 return Ok(Pending {
                     proposal_id: proposal.id,
@@ -1558,7 +1571,7 @@ impl Store {
             let rows = mapped(tx.conn(), &source.id, &sections)?;
             let (diff, mut fields) = rebased_diff(&proposal, &path, file, &sections, &rows)?;
             fields["rebased_from"] = json!(proposal.id);
-            let text = doc::apply_diff(&file.text, &diff);
+            let text = after_keep(&file.text, &diff, &proposal.id)?;
             let old = decide(tx, &proposal, true)?;
             let rebased = insert_proposal(
                 tx,
@@ -1580,11 +1593,9 @@ impl Store {
             );
             mark_stale(tx, &old, &why)?;
             set_proposal(tx, &proposal, "stale", "proposal.stale", &why)?;
-            if let Some(text) = text {
-                // Refused as the proposal the owner kept: the rebased one
-                // is rolled back with the refusal.
-                budget(tx, &rebased, &proposal.id, &path, &text, read)?;
-            }
+            // Refused as the proposal the owner kept: the rebased one is
+            // rolled back with the refusal.
+            budget(tx, &rebased, &proposal.id, &path, &text, read)?;
             let approval = decide(tx, &rebased, true)?;
             Ok(Pending {
                 proposal_id: rebased.id,
@@ -1596,8 +1607,8 @@ impl Store {
     /// The startup budget check a Keep of `proposal` on `file` runs, without
     /// deciding it, for `tiller mem approve --dry-run`: the count each role
     /// would have after it, or the Keep's refusal with the numbers. `None`
-    /// when the proposal was made against another text or its diff does not
-    /// apply, which the Keep itself reports.
+    /// when the proposal was made against another text, which the Keep
+    /// itself reports.
     pub fn mem_keep_budget(
         &self,
         proposal: &str,
@@ -1608,9 +1619,7 @@ impl Store {
         if proposal.base_blob != file.head_blob {
             return Ok(None);
         }
-        let Some(text) = doc::apply_diff(&file.text, &proposal.diff) else {
-            return Ok(None);
-        };
+        let text = after_keep(&file.text, &proposal.diff, &proposal.id)?;
         let path = document_path(&proposal.project_id);
         memory_budget::check(
             self.conn(),

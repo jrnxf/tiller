@@ -131,7 +131,8 @@ pub(super) fn check(
 
 /// One role's startup tokens in `project` now and with the change: the
 /// approved set `loadable` gives, with the changed document's text swapped
-/// for the one it leaves.
+/// for the one it leaves. The count does not depend on the documents'
+/// order, so a new document is counted at the end.
 fn count(
     conn: &rusqlite::Connection,
     change: &Change<'_>,
@@ -158,18 +159,17 @@ fn count(
             })?;
             texts.insert(doc.blob_sha.clone(), text);
         }
+    }
+    let texts = &*texts;
+    for doc in &docs {
         let text = texts.get(&doc.blob_sha).map_or("", String::as_str);
-        let sort = (
-            doc.project_id != FLEET_PROJECT,
-            doc.canonical_path.clone(),
-            doc.source_id.clone(),
-        );
-        now.push((sort.clone(), text.to_owned()));
+        let path = doc.canonical_path.as_str();
+        now.push((path, text));
         if doc.source_id == change.source_id {
             loads = true;
-            after.push((sort, change.after.to_owned()));
+            after.push((path, change.after));
         } else {
-            after.push((sort, text.to_owned()));
+            after.push((path, text));
         }
     }
     if !loads {
@@ -177,20 +177,11 @@ fn count(
         // the role and project load it at all.
         let loaded_here = change.project_id == FLEET_PROJECT || change.project_id == project;
         if loaded_here {
-            let sort = (
-                change.project_id != FLEET_PROJECT,
-                change.path.to_owned(),
-                change.source_id.to_owned(),
-            );
-            after.push((sort, change.after.to_owned()));
+            after.push((change.path, change.after));
         }
     }
-    after.sort_by(|a, b| a.0.cmp(&b.0));
-    let render = |docs: &[((bool, String, String), String)]| {
-        tokens(&render_loaded(
-            docs.iter()
-                .map(|((_, path, _), text)| (path.as_str(), text.as_str())),
-        ))
-    };
-    Ok((render(&now), render(&after)))
+    Ok((
+        tokens(&render_loaded(now.iter().copied())),
+        tokens(&render_loaded(after.iter().copied())),
+    ))
 }

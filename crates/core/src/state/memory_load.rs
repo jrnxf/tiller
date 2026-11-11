@@ -147,7 +147,8 @@ impl Store {
     }
 
     /// Every live Tiller document of this host's boundary that launches
-    /// skip, for any role or project, fleet first: the Health warning.
+    /// skip, in any project and for any role it names (one that names no
+    /// role loads nowhere), fleet first: the Health warning.
     pub fn mem_skipped_all(&self) -> Result<Vec<Skipped>> {
         skipped(self.conn(), None)
     }
@@ -401,7 +402,7 @@ fn skipped(conn: &rusqlite::Connection, scope: Option<(&str, &str)>) -> Result<V
            AND s.boundary = ?2
            AND s.canonical_repo IS NOT NULL AND s.canonical_path IS NOT NULL
            AND (?3 IS NULL OR s.project_id IN (?1, ?3))
-           AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(s.roles) WHERE value = ?4))
+           AND EXISTS (SELECT 1 FROM json_each(s.roles) WHERE ?4 IS NULL OR value = ?4)
            AND NOT EXISTS (SELECT 1 FROM memory_revisions
                            WHERE source_id = s.id AND review = 'approved')
            AND (SELECT blob_sha FROM memory_revisions WHERE source_id = s.id

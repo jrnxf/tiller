@@ -255,16 +255,18 @@ fn approve(app: &App, args: ApproveArgs) -> Done {
                     ));
                 }
                 // Each one is counted on the approved set as it is now, not
-                // after the ones before it in this run.
-                let file = repo.state(&document_path(&p.project_id), &list)?;
-                Ok(
-                    match store.mem_keep_budget(&p.id, &file, &|sha| repo.blob(sha)) {
-                        Ok(_) => with(p, "would_approve", json!({})),
-                        Err(error) => {
-                            with(p, "would_refuse", json!({"reason": refusal(p, error)?}))
-                        }
-                    },
-                )
+                // after the ones before it in this run. An error is that
+                // proposal's, as the real run records it, and the rest go on.
+                let counted = repo
+                    .state(&document_path(&p.project_id), &list)
+                    .and_then(|file| store.mem_keep_budget(&p.id, &file, &|sha| repo.blob(sha)));
+                Ok(match counted {
+                    Ok(_) => with(p, "would_approve", json!({})),
+                    Err(error @ tiller_core::Error::Refused { .. }) => {
+                        with(p, "would_refuse", json!({"reason": refusal(p, error)?}))
+                    }
+                    Err(error) => with(p, "would_fail", json!({"reason": error.to_string()})),
+                })
             })
             .collect::<Result<Vec<Value>, Failure>>()?;
         let count = |what: &str| results.iter().filter(|r| r["result"] == what).count();
@@ -272,6 +274,7 @@ fn approve(app: &App, args: ApproveArgs) -> Done {
             "dry_run": true,
             "would_approve": count("would_approve"),
             "would_refuse": count("would_refuse"),
+            "would_fail": count("would_fail"),
             "skipped": count("skipped"),
             "results": results,
         })));

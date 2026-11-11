@@ -444,6 +444,49 @@ fn keep_over_the_startup_budget_is_refused() {
     assert_eq!(proposal(&store, &suggested).state, "proposed");
 }
 
+/// A diff that does not apply exactly cannot be counted, so its Keep is
+/// refused, not let past the budget for `git apply` to take.
+#[test]
+fn a_keep_whose_diff_cannot_be_counted_is_refused() {
+    let (mut store, _) = memory_store();
+    let suggested = agent_proposal(&mut store, "alpha", "", "Run the slow suite", None);
+    let diff = doc::unified_diff(&document_path("alpha"), "- other\n", "- other\n- new\n");
+    store
+        .write(&Ctx::new(Actor::Daemon), "test.tamper", None, |tx| {
+            tx.conn().execute(
+                "UPDATE proposals SET diff = ?2, diff_sha256 = ?3 WHERE id = ?1",
+                params![suggested, diff, doc::sha256_hex(diff.as_bytes())],
+            )?;
+            tx.event(NewEvent::new("proposal", &suggested, "proposal.created").rev(2))?;
+            Ok(())
+        })
+        .unwrap();
+    measured(&mut store, "short", &[&suggested]);
+    let error = store
+        .mem_decide(
+            &owner(),
+            &suggested,
+            true,
+            EMPTY_BLOB,
+            &file(""),
+            &[],
+            &no_blobs,
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .ends_with("its diff does not apply exactly to the current text, so its startup memory cannot be counted; re-propose it on the current text"),
+        "{error}"
+    );
+    assert_eq!(proposal(&store, &suggested).state, "proposed");
+    assert!(
+        store
+            .mem_keep_budget(&suggested, &file(""), &no_blobs)
+            .is_err()
+    );
+}
+
 /// A fleet document loads in every project, and alone in one with no
 /// document of its own: its Keep is counted there too.
 #[test]

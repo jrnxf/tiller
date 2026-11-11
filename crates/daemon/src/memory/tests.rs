@@ -680,6 +680,24 @@ async fn the_document_list_names_a_document_a_launch_skips() {
         .collect();
     assert_eq!(skipped["alpha"], json!("it has no approved revision"));
     assert_eq!(skipped["fleet"], Value::Null);
+
+    // A document no role loads is not one a launch skips.
+    home.fleet
+        .open()
+        .conn()
+        .execute(
+            "UPDATE memory_sources SET roles = '[]' WHERE project_id = 'alpha'",
+            [],
+        )
+        .unwrap();
+    let view = home.view("fleet").await;
+    let alpha = view["docs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["project_id"] == "alpha")
+        .unwrap();
+    assert_eq!(alpha["skipped"], Value::Null);
 }
 
 #[tokio::test(flavor = "multi_thread")]
