@@ -7,6 +7,7 @@ import type {
   AgentRow,
   AgentsResponse,
   AttentionResponse,
+  BoardResponse,
   PromptDialog,
 } from "../../lib/api-types";
 import { hydrateFromSnapshot } from "../../lib/boot";
@@ -19,7 +20,7 @@ import {
 } from "../../lib/fixtures";
 import type { Scenario } from "../../lib/fixtures";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
-import { agentsQuery, attentionQuery } from "../../lib/queries";
+import { agentsQuery, attentionQuery, boardPath, queryKeyFor } from "../../lib/queries";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
 import { applyChange } from "../../lib/sse";
@@ -30,6 +31,7 @@ import { createTestQueryClient, loadRouteChunks } from "../../test-app";
 await loadRouteChunks();
 
 const RETRY = "01JATTN0000000000000000000";
+const RETRY_CARD = "01JCARD0000000000000000041";
 const MERGE = "01JATTN0000000000000000001";
 const QUIET = "01JATTN0000000000000000002";
 const CAPACITY = "01JATTN0000000000000000003";
@@ -947,4 +949,59 @@ test("an item's back link is a bordered button, not a ghost", async () => {
   const back = screen.getByRole("link", { name: "Back to the inbox" });
   expect([...back.classList]).toContain("btn");
   expect([...back.classList]).not.toContain("ghost");
+});
+
+// P31: an undated wait is an open decision, not a hold. A month after it
+// opened it still sits under Needs you and in Decisions as current, and the
+// board shows no alarm for its age: no stale mark, no amber age, nothing set
+// apart. The snapshot's server clock reads 2026-11-02 12:00.
+test("an undated hold a month old shows under Needs you and never alarms", async () => {
+  stubDaemon("default");
+  const { router, queryClient } = await renderInbox();
+  act(() => {
+    queryClient.setQueryData<AttentionResponse>(attentionQuery().queryKey, (attention) =>
+      attention
+        ? {
+            ...attention,
+            items: attention.items.map((item) =>
+              item.id === RETRY ? { ...item, opened_at: "2026-10-03T12:00:00.000Z" } : item,
+            ),
+          }
+        : attention,
+    );
+    // The waiting session is still observed on every pass.
+    queryClient.setQueryData<BoardResponse>(queryKeyFor(boardPath()), (board) =>
+      board
+        ? {
+            ...board,
+            rows: board.rows.map((row) =>
+              row.id === RETRY_CARD ? { ...row, observed_at: "2026-11-02T11:59:50.000Z" } : row,
+            ),
+          }
+        : board,
+    );
+  });
+
+  const decisions = screen.getByRole("region", { name: "Decisions" });
+  const row = within(decisions).getByTestId(`inbox-row-${RETRY}`);
+  expect(row.querySelector(".old, .warn")).toBeNull();
+  const gone = screen.queryByRole("region", { name: "No longer current" });
+  expect(gone ? within(gone).queryByTestId(`inbox-row-${RETRY}`) : null).toBeNull();
+
+  await act(async () => {
+    await router.navigate({ to: "/inbox", search: { item: RETRY } });
+  });
+  expect((await screen.findByTestId("current")).textContent).toContain("Still waiting");
+  expect(screen.getByText(/30d 0h ago/)).toBeTruthy();
+
+  await act(async () => {
+    await router.navigate({ to: "/", search: { filter: "needs" } });
+  });
+  const tile = (await screen.findByText("Pick the retry policy for the export job")).closest("a");
+  if (!tile) throw new Error("no tile for the held card");
+  expect(tile.dataset.attn).toBe("true");
+  expect(tile.querySelector(".obs")).toBeTruthy();
+  expect(tile.querySelector(".obs.old")).toBeNull();
+  expect(tile.textContent).toContain("Decision");
+  expect(tile.textContent).not.toMatch(/stale/i);
 });
