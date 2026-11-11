@@ -4,7 +4,7 @@ import { afterEach, expect, test, vi } from "vitest";
 
 import type { AgentsResponse } from "../../lib/api-types";
 import { agentsPath, queryKeyFor } from "../../lib/queries";
-import { ReloadBanner } from "./reload-banner";
+import { ReloadBanner, watchForStaleBoard } from "./reload-banner";
 import { createTestQueryClient } from "../../test-app";
 
 afterEach(() => {
@@ -45,4 +45,19 @@ test("offers a reload when the daemon comes back on a new version", async () => 
   vi.stubGlobal("location", { ...window.location, reload });
   screen.getByRole("button", { name: "Reload" }).click();
   expect(reload).toHaveBeenCalled();
+});
+
+test("offers a reload when a part of this board is gone from the daemon", async () => {
+  // An upgrade replaced the files this tab would load its next screen from.
+  const stop = watchForStaleBoard(window);
+  setup("0.1.0-pre.21");
+  expect(screen.queryByTestId("reload-banner")).toBeNull();
+  await act(async () => {
+    window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+  });
+  const banner = await screen.findByTestId("reload-banner");
+  expect(banner.textContent).toContain(
+    "Part of the board could not load. Tiller may have been updated since this tab opened. Reload to get the current board.",
+  );
+  stop();
 });

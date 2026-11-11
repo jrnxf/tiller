@@ -4,6 +4,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
 import "./styles.css";
+import { watchForStaleBoard } from "./components/states/reload-banner";
 import { SetupScreen } from "./components/states/setup-screen";
 import { SignedOutScreen } from "./components/states/signed-out-screen";
 import { hydrateFromSnapshot, loadBoot } from "./lib/boot";
@@ -62,6 +63,9 @@ if (boot.kind === "signed-out") {
   const queryClient = createQueryClient();
   const lastEventSeq = boot.snapshot ? hydrateFromSnapshot(queryClient, boot.snapshot) : null;
 
+  // A tab left open across an upgrade asks for screens the new daemon no
+  // longer has: the banner offers the reload that fixes it.
+  watchForStaleBoard(window);
   const router = createAppRouter(queryClient);
   // Load the first route before rendering, so the first paint is the finished
   // screen and not a frame of nothing.
