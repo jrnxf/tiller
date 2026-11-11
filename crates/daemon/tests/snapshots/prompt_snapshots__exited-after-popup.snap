@@ -1,0 +1,9 @@
+---
+source: crates/daemon/tests/prompt_snapshots.rs
+expression: "(parse(& screen, \"Bash\"),\nread(& screen, & Wait :: Permission(\"Bash\".to_owned())),\nread(& screen, & Wait :: Input),)"
+---
+(
+    None,
+    None,
+    None,
+)

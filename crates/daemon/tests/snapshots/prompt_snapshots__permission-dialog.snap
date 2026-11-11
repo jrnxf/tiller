@@ -1,0 +1,72 @@
+---
+source: crates/daemon/tests/prompt_snapshots.rs
+expression: "(parse(& screen, \"Bash\"),\nread(& screen, & Wait :: Permission(\"Bash\".to_owned())),\nread(& screen, & Wait :: Input),)"
+---
+(
+    Some(
+        PromptDialog {
+            layout: Permission,
+            tool: "Bash",
+            title: "Bash command",
+            command: Some(
+                "rm -f nothing-here.txt && touch made.txt",
+            ),
+            folder: None,
+            question: "Do you want to proceed?",
+            options: [
+                PromptOption {
+                    n: 1,
+                    text: "Yes",
+                },
+                PromptOption {
+                    n: 2,
+                    text: "Yes, and don't ask again for rm -f nothing-here.txt and touch made.txt commands in /home/user/project",
+                },
+                PromptOption {
+                    n: 3,
+                    text: "Yes, and switch to auto mode · auto mode handles these prompts for you",
+                },
+                PromptOption {
+                    n: 4,
+                    text: "No",
+                },
+            ],
+            screen: "bd31b89a5e686cb78e78fe90cd164f4c7cd42bd9f5cc180ad95715dd01045cfe",
+        },
+    ),
+    Some(
+        Dialog {
+            prompt: PromptDialog {
+                layout: Permission,
+                tool: "Bash",
+                title: "Bash command",
+                command: Some(
+                    "rm -f nothing-here.txt && touch made.txt",
+                ),
+                folder: None,
+                question: "Do you want to proceed?",
+                options: [
+                    PromptOption {
+                        n: 1,
+                        text: "Yes",
+                    },
+                    PromptOption {
+                        n: 2,
+                        text: "Yes, and don't ask again for rm -f nothing-here.txt and touch made.txt commands in /home/user/project",
+                    },
+                    PromptOption {
+                        n: 3,
+                        text: "Yes, and switch to auto mode · auto mode handles these prompts for you",
+                    },
+                    PromptOption {
+                        n: 4,
+                        text: "No",
+                    },
+                ],
+                screen: "bd31b89a5e686cb78e78fe90cd164f4c7cd42bd9f5cc180ad95715dd01045cfe",
+            },
+            cursor: 0,
+        },
+    ),
+    None,
+)

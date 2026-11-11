@@ -1,0 +1,34 @@
+---
+source: crates/daemon/tests/prompt_snapshots.rs
+expression: "(parse(& screen, \"Bash\"),\nread(& screen, & Wait :: Permission(\"Bash\".to_owned())),\nread(& screen, & Wait :: Input),)"
+---
+(
+    None,
+    None,
+    Some(
+        Dialog {
+            prompt: PromptDialog {
+                layout: Trust,
+                tool: "",
+                title: "Accessing workspace:",
+                command: None,
+                folder: Some(
+                    "/home/user/project",
+                ),
+                question: "Is this a project you created or one you trust?",
+                options: [
+                    PromptOption {
+                        n: 1,
+                        text: "No, exit",
+                    },
+                    PromptOption {
+                        n: 2,
+                        text: "Yes, I trust this folder",
+                    },
+                ],
+                screen: "61b508556df15f3edb5b72df5a1ad315e2301645a71beb9e2827b3ff8dc2a006",
+            },
+            cursor: 1,
+        },
+    ),
+)

@@ -1,0 +1,7 @@
+---
+source: crates/herdr/tests/composer_snapshots.rs
+expression: "classify(& fixture(\"draft\"))"
+---
+Holds(
+    "half typed draft",
+)

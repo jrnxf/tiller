@@ -1,0 +1,5 @@
+---
+source: crates/herdr/tests/composer_snapshots.rs
+expression: "classify(& fixture(\"empty-manual-mode\"))"
+---
+Empty
