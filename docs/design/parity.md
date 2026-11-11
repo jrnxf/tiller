@@ -270,8 +270,8 @@ Each bundle input maps to at least one row.
 
 | Commitment | Row |
 |---|---|
-| Parked product app, re-ask due Sun 2026-11-01 | P30 |
-| Parked pre-launch review, re-ask Sat 2026-11-07 | P30 |
+| Held product app, re-ask due Sun 2026-11-01 | P30 |
+| Held pre-launch review, re-ask Sat 2026-11-07 | P30 |
 | Release held for the developer's explicit word, no date | P31 |
 | T0.2 starts when T0.1 lands | P32 |
 | T0.6 starts when T0.4 reports | P32 |

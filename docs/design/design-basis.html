@@ -498,7 +498,7 @@ form.decide-form textarea:focus { border-color:var(--accent); box-shadow:0 0 0 3
           <div>
             <div class="iconrow"><svg class="si"><use href="#s-asked"/></svg>Asked<span class="muted">dashed</span></div>
             <div class="iconrow"><svg class="si"><use href="#s-queued"/></svg>Queued<span class="muted">ring</span></div>
-            <div class="iconrow"><svg class="si"><use href="#s-parked"/></svg>Parked<span class="muted">paused hold</span></div>
+            <div class="iconrow"><svg class="si"><use href="#s-parked"/></svg>Held<span class="muted">paused hold</span></div>
             <div class="iconrow"><svg class="si"><use href="#s-working"/></svg>Working<span class="muted">half</span></div>
             <div class="iconrow"><svg class="si"><use href="#s-needs"/></svg>Needs you<span class="muted">solid</span></div>
             <div class="iconrow"><svg class="si"><use href="#s-landing"/></svg>Landing<span class="muted">three quarters</span></div>
@@ -597,7 +597,7 @@ form.decide-form textarea:focus { border-color:var(--accent); box-shadow:0 0 0 3
       desc:"Logged by the UserPromptSubmit hook the moment you sent it. It turns into a card, or a [chat] reply, when the mate tags its answer.",
       thread:[ ["i-user","<b>You</b> asked in the alpha mate's pane","4 s"], ["i-bolt","<b>Hook</b> logged ask-7f3, waiting for the mate's tag","4 s"] ] },
     { id:"alpha-click-fallbacks-review", project:"alpha", col:"queued", status:"s-parked", kind:"scout", pri:3,
-      title:"Review click fallbacks from a week of debug logs", meta:"Parked until Tue 3 Nov",
+      title:"Review click fallbacks from a week of debug logs", meta:"Held until Tue 3 Nov",
       desc:"Wait for a week of alpha debug logs before judging the click fallbacks. The hold lifts by date; nothing is running.",
       props:{ Hold:"Until Tuesday 2026-11-03", Since:"Tuesday 2026-10-27" },
       thread:[ ["i-user","<b>You</b> asked for a review after a week of logs","Tue 27 Oct"], ["i-bolt","<b>Mate</b> parked it with a dated hold","Tue 27 Oct"] ] },
@@ -634,7 +634,7 @@ form.decide-form textarea:focus { border-color:var(--accent); box-shadow:0 0 0 3
       title:"Bump the pinned alpha-remote-hook to alpha 0.1.0-pre.25", meta:"Merged Sun 1 Nov",
       desc:"Reads stdin even when it queues nothing.", props:{ PR:"example/dot#70", Merged:"Sunday 2026-11-01" }, thread:[ ["i-check","<b>Merged</b>","Sun 1 Nov"] ] },
     { id:"herdr-upstream-watch", project:"firstmate", col:"queued", status:"s-parked", kind:"captain", pri:4,
-      title:"Follow herdr discussion #5582", meta:"Parked until Mon 9 Nov",
+      title:"Follow herdr discussion #5582", meta:"Held until Mon 9 Nov",
       desc:"Waiting on herdr maintainers' reply. Update from today's research: herdr agent focus <pane-id> already works for local agent panes; switching the local window to a remote machine is still missing.",
       props:{ Hold:"Until Monday 2026-11-09", Since:"Monday 2026-10-26" },
       thread:[ ["i-user","<b>You</b> opened discussion 5582","Mon 26 Oct"], ["i-bolt","<b>Research</b> found a +1 noting agent focus works","Sun 1 Nov"] ] },
@@ -771,7 +771,7 @@ form.decide-form textarea:focus { border-color:var(--accent); box-shadow:0 0 0 3
     state.selected = "card:" + id;
     peekCrumb.innerHTML = `<span class="pj" style="background:${p.color}">${esc(p.letter)}</span><span>${esc(p.name)}</span><svg><use href="#i-chevr"/></svg><b>${esc(c.id)}</b>`;
     const col = cols.find(x => x.id === c.col);
-    const props = Object.assign({ Status:`${icon(c.status)}${c.status === "s-parked" ? "Parked" : col.name}`, Priority:`<span class="pri"><svg><use href="#p-${c.pri}"/></svg></span>${["None","Urgent","High","Medium","Low"][c.pri]}`, Kind:`<span class="lab"><span class="dot" style="background:${kinds[c.kind]}"></span>${esc(c.kind)}</span>` }, c.props || {});
+    const props = Object.assign({ Status:`${icon(c.status)}${c.status === "s-parked" ? "Held" : col.name}`, Priority:`<span class="pri"><svg><use href="#p-${c.pri}"/></svg></span>${["None","Urgent","High","Medium","Low"][c.pri]}`, Kind:`<span class="lab"><span class="dot" style="background:${kinds[c.kind]}"></span>${esc(c.kind)}</span>` }, c.props || {});
     let h = `<h4>${esc(c.title)}</h4><p class="desc">${esc(c.desc)}</p><dl class="props">` +
       Object.entries(props).map(([k,v]) => `<dt>${esc(k)}</dt><dd>${typeof v === "string" && v.startsWith("<") ? v : esc(v)}</dd>`).join("") + `</dl>`;
     if (c.decision) {
