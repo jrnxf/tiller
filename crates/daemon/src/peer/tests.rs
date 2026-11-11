@@ -1172,6 +1172,86 @@ async fn a_refused_link_tries_again_slowly() {
     );
 }
 
+/// A peer that refuses the first `before` hellos, then welcomes one link
+/// and refuses it mid-session, then refuses every hello after. It records
+/// when each connection began.
+struct Scripted {
+    home: PathBuf,
+    before: usize,
+    began: Arc<Mutex<Vec<Instant>>>,
+}
+
+impl Connector for Scripted {
+    fn connect(&self, _target: &Target) -> Connecting {
+        let n = {
+            let mut began = self.began.lock().unwrap();
+            began.push(Instant::now());
+            began.len()
+        };
+        let refused = |reason: &str| Frame::Refused {
+            reason: reason.into(),
+            message: None,
+        };
+        let opening = (|| {
+            if n != self.before + 1 {
+                return Ok::<_, std::io::Error>(refused("accept_off").line()?);
+            }
+            let store =
+                Store::open_current(self.home.join("state.db")).map_err(std::io::Error::other)?;
+            let host = store.this_host().map_err(std::io::Error::other)?;
+            let welcome = Frame::Welcome(Welcome {
+                host_id: host.id,
+                label: host.label,
+                schema_version: tiller_core::migrate::LATEST,
+                tiller_version: "test".into(),
+                server_time: Timestamp::now().to_string(),
+            });
+            Ok(welcome.line()? + &refused("revoked").line()?)
+        })();
+        Box::pin(async move {
+            let (mut peer, ours) = tokio::io::duplex(1 << 16);
+            peer.write_all(opening?.as_bytes()).await?;
+            Ok(Connection {
+                reader: Box::new(tokio::io::BufReader::new(ours)),
+                writer: Box::new(tokio::io::sink()),
+                child: None,
+            })
+        })
+    }
+}
+
+/// protocol.md: the refused backoff starts over once a link is welcomed.
+/// A welcomed session that the peer then refuses waits the first step, not
+/// the step the refusals before the welcome had reached.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_welcomed_link_starts_the_refused_backoff_over() {
+    let pair = pair();
+    let began = Arc::new(Mutex::new(Vec::new()));
+    let (stop_tx, stop) = watch::channel(false);
+    let mut timing = quick();
+    timing.refused_backoff = [ms(50), ms(50), ms(50), Duration::from_secs(5)];
+    let _peers = Peers::start(
+        pair.board.dir.path().to_owned(),
+        Arc::new(Scripted {
+            home: pair.peer.dir.path().to_owned(),
+            before: 3,
+            began: began.clone(),
+        }),
+        timing,
+        Damage::default(),
+        stop,
+    );
+    // Three refused hellos, the welcomed session, and the try after it.
+    until("the try after the welcomed session", || {
+        (began.lock().unwrap().len() >= 5).then_some(())
+    })
+    .await;
+    let began = began.lock().unwrap().clone();
+    let gap = began[4] - began[3];
+    assert!(gap < Duration::from_secs(2), "waited {gap:?}");
+    drop(stop_tx);
+}
+
 #[test]
 fn spawn_not_forwardable() {
     let pair = pair();

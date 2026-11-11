@@ -726,7 +726,14 @@ async fn run_link(
     let mut welcomed = false;
     loop {
         let began = Instant::now();
-        let ended = link.session(&*connector, &mut welcomed).await;
+        let mut this_welcomed = false;
+        let ended = link.session(&*connector, &mut this_welcomed).await;
+        if this_welcomed {
+            // A welcomed session starts the refused backoff over, also when
+            // the peer refuses it mid-session (protocol.md).
+            welcomed = true;
+            refusals = 0;
+        }
         tracing::info!(peer = %link.pairing.label, ?ended, "peer link ended");
         let delay = match ended {
             Ended::Lost(error) => {
@@ -735,7 +742,6 @@ async fn run_link(
                 if began.elapsed() >= timing.live {
                     attempt = 0;
                 }
-                refusals = 0;
                 link.set(LinkState::Down, None, Some(error)).await;
                 attempt += 1;
                 timing.backoff(attempt - 1)
