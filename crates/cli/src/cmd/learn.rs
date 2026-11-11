@@ -1061,8 +1061,8 @@ mod tests {
             "-c".to_owned(),
             "echo 'half way'; exec sleep 300".to_owned(),
         ];
-        let ran = run_with_timeout(&argv, &[], dir.path(), Duration::from_millis(500), &idle())
-            .unwrap();
+        let ran =
+            run_with_timeout(&argv, &[], dir.path(), Duration::from_millis(500), &idle()).unwrap();
         assert_eq!(ran.stopped, Some(Stopped::Cut));
         assert_eq!(ran.stdout.trim(), "half way");
     }

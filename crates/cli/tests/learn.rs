@@ -499,7 +499,11 @@ fn a_run_that_cannot_start_keeps_its_cause_when_the_end_fails_too() {
     let error = &failed.json["error"];
     let message = error["message"].as_str().unwrap();
     assert!(message.starts_with("cannot start "), "{}", failed.json);
-    assert!(message.contains("the test refuses the end"), "{}", failed.json);
+    assert!(
+        message.contains("the test refuses the end"),
+        "{}",
+        failed.json
+    );
     assert_eq!(
         error["hint"], "set spawn.claude in config.toml",
         "{}",
