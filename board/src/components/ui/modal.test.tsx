@@ -386,15 +386,57 @@ test("a tap whose click comes a moment after the finger lifts still finds its bu
   expect(document.activeElement).toBe(opener);
 });
 
-// A page whose dialog opens from plain text in a panel that takes focus only
-// from script.
-function Panel() {
+test("a second tap on the same button within a second keeps it as the opener", async () => {
+  vi.useFakeTimers();
+  try {
+    render(<Page />);
+    (document.activeElement as HTMLElement | null)?.blur();
+    const opener = screen.getByRole("button", { name: "Open" });
+    // A first tap whose click went nowhere.
+    fireEvent.pointerDown(opener);
+    fireEvent.pointerUp(opener);
+    await vi.advanceTimersByTimeAsync(900);
+    // A second tap, whose click comes late: the first tap's wait ends first.
+    fireEvent.pointerDown(opener);
+    fireEvent.pointerUp(opener);
+    await vi.advanceTimersByTimeAsync(200);
+    fireEvent.click(opener);
+    fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+    expect(document.activeElement).toBe(opener);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a press with no click is forgotten a second after the lift", async () => {
+  vi.useFakeTimers();
+  try {
+    const { rerender } = render(<Pushed open={false} />);
+    (document.activeElement as HTMLElement | null)?.blur();
+    const mark = screen.getByRole("button", { name: "Mark" });
+    fireEvent.pointerDown(mark);
+    fireEvent.pointerUp(mark);
+    await vi.advanceTimersByTimeAsync(1000);
+    rerender(<Pushed open />);
+    rerender(<Pushed open={false} />);
+    expect(document.activeElement).not.toBe(mark);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+// A page whose dialog opens from a button in a card that takes focus only from
+// script. Safari and Firefox on macOS focus the card, not the button, on a click.
+function Card() {
   const [isOpen, setOpen] = useState(false);
   return (
-    <div tabIndex={-1} data-testid="panel">
-      <span onClick={() => setOpen(true)}>Open from text</span>
+    <div tabIndex={-1} data-testid="card">
+      <p>Some text</p>
+      <button type="button" onClick={() => setOpen(true)}>
+        Run
+      </button>
       {isOpen ? (
-        <Modal className="dialog" label="Panel dialog" onClose={() => setOpen(false)}>
+        <Modal className="dialog" label="Card dialog" onClose={() => setOpen(false)}>
           <button type="button">Inside</button>
         </Modal>
       ) : null}
@@ -402,12 +444,13 @@ function Panel() {
   );
 }
 
-test("a click on text in a panel that only script focuses does not make the panel the opener", () => {
-  render(<Panel />);
-  (document.activeElement as HTMLElement | null)?.blur();
-  const text = screen.getByText("Open from text");
-  fireEvent.pointerDown(text);
-  fireEvent.click(text);
+test("a click that focuses the card around a button gives focus back to the button", () => {
+  render(<Card />);
+  const run = screen.getByRole("button", { name: "Run" });
+  fireEvent.pointerDown(run);
+  // What the browser does on that mousedown.
+  screen.getByTestId("card").focus();
+  fireEvent.click(run);
   fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
-  expect(document.activeElement).not.toBe(screen.getByTestId("panel"));
+  expect(document.activeElement).toBe(run);
 });

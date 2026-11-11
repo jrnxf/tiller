@@ -11,7 +11,7 @@ import { holdInert } from "../../lib/inert";
 // The controls Tab stops on, in order, and what a dialog's opener can be.
 const CONTROLS = 'a[href], button, input, select, textarea, [contenteditable="true"], [tabindex]';
 // What a press can make the opener: a control the owner can reach, not a
-// panel that only script focuses.
+// panel or a dialog that only script focuses.
 const PRESSABLE =
   'a[href], button, input, select, textarea, [contenteditable="true"], [tabindex]:not([tabindex="-1"])';
 
@@ -28,13 +28,18 @@ let last: HTMLElement | null = null;
 // and Firefox on macOS, do not focus a button that is clicked, so a dialog it
 // opens finds its opener here.
 let pressed: HTMLElement | null = null;
+// Counts the presses, so a wait from an earlier one never forgets a later one.
+let presses = 0;
 if (typeof document !== "undefined") {
   document.addEventListener(
     "pointerdown",
     (event) => {
       const target = event.target instanceof Element ? event.target : null;
-      const control = target?.closest<HTMLElement>(PRESSABLE) ?? null;
-      pressed = control && !control.closest('[role="menu"]') ? control : null;
+      // The nearest control only: a press in a script-only panel is no
+      // control's, not the press of one further out.
+      const control = target?.closest<HTMLElement>(CONTROLS) ?? null;
+      presses += 1;
+      pressed = control?.matches(PRESSABLE) && !control.closest('[role="menu"]') ? control : null;
     },
     true,
   );
@@ -50,9 +55,9 @@ if (typeof document !== "undefined") {
   // with no click yet is kept a moment: iOS Safari can send a tap's click in
   // a later task than the lift.
   const forget = (wait: number) => () => {
-    const was = pressed;
+    const press = presses;
     setTimeout(() => {
-      if (pressed === was) pressed = null;
+      if (presses === press) pressed = null;
     }, wait);
   };
   document.addEventListener("click", forget(0), true);
@@ -77,6 +82,16 @@ if (typeof document !== "undefined") {
 function openerNow(): HTMLElement | null {
   const active = document.activeElement;
   const inMenu = active instanceof HTMLElement && active.closest('[role="menu"]') !== null;
+  // Safari, and Firefox on macOS, focus a script-only panel around a clicked
+  // button, not the button: the button is the opener.
+  if (
+    active instanceof HTMLElement &&
+    !active.matches(PRESSABLE) &&
+    pressed?.isConnected &&
+    active.contains(pressed)
+  ) {
+    return pressed;
+  }
   if (active instanceof HTMLElement && active !== document.body && !inMenu) return active;
   // A click that left focus on the page: the control it pressed.
   if (active === document.body && pressed?.isConnected) return pressed;
