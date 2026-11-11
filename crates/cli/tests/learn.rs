@@ -823,6 +823,8 @@ fn the_eval_runner_appends_the_candidate_and_records_the_run() {
         "#!/bin/sh\nset -e\n[ \"$1\" = --split ] && [ \"$2\" = holdout ] && [ \"$3\" = --candidate ] || exit 9\n\
          grep -q 'say which branch was pushed' \"$4\" || exit 8\n\
          [ \"$5\" = --out ] || exit 7\n\
+         echo \"holdout: 2 of 2 cases\"\n\
+         echo \"a note\" >&2\n\
          mkdir -p \"$6/sealed\"\n\
          printf '%s' '{\"aggregates\":{\"casesTotal\":2,\"casesPassed\":2,\"overallScore\":0.9},\"costUsd\":0.4,\"partial\":false}' > \"$6/sealed/result.json\"\n",
     )
@@ -864,6 +866,11 @@ fn the_eval_runner_appends_the_candidate_and_records_the_run() {
             .as_str()
             .unwrap()
             .ends_with("sealed/result.json")
+    );
+    // What the runner printed is in the run's log, not in tiller's answer.
+    assert_eq!(
+        std::fs::read_to_string(out.join("runner.log")).unwrap(),
+        "holdout: 2 of 2 cases\na note\n"
     );
     assert_eq!(world.must(&["learn", "gate", PROPOSAL]).data()["ok"], true);
 

@@ -2,6 +2,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use tiller_herdr::testing::{eventually, gone};
+
 use super::*;
 
 fn write(path: &Path, text: &str) {
@@ -122,6 +124,25 @@ printf '{"aggregates":{"casesTotal":2,"casesPassed":2,"overallScore":0.9},"costU
     assert!(!out.path().join("sealed/old.json").exists());
 }
 
+/// The runner's output goes to `runner.log` in the run, not to the caller's
+/// stdout (where `tiller --json` prints its answer) or its terminal, which
+/// a runner outside the foreground group would stop on.
+#[test]
+fn the_runners_output_goes_to_its_log() {
+    let dir = checkout();
+    runner(
+        dir.path(),
+        r#"echo "holdout: 2 of 2 cases"
+echo "a note" >&2
+mkdir -p "$6/sealed"
+printf '{"aggregates":{"casesTotal":2,"casesPassed":2}}' > "$6/sealed/result.json""#,
+    );
+    let out = tempfile::tempdir().unwrap();
+    run(dir.path(), out.path(), "c", "m".into(), &idle()).unwrap();
+    let log = std::fs::read_to_string(out.path().join("runner.log")).unwrap();
+    assert_eq!(log, "holdout: 2 of 2 cases\na note\n");
+}
+
 #[test]
 fn a_failed_run_records_nothing() {
     let dir = checkout();
@@ -179,15 +200,6 @@ fn idle() -> Interrupt {
     Interrupt::flag(Arc::new(AtomicBool::new(false)))
 }
 
-fn gone(pid: &str) -> bool {
-    let out = Command::new("ps")
-        .args(["-o", "stat=", "-p", pid])
-        .output()
-        .unwrap();
-    let stat = String::from_utf8_lossy(&out.stdout);
-    stat.trim().is_empty() || stat.trim_start().starts_with('Z')
-}
-
 #[test]
 fn an_interrupted_run_stops_the_runner_and_what_it_started() {
     let dir = checkout();
@@ -225,7 +237,8 @@ fn an_interrupted_run_stops_the_runner_and_what_it_started() {
     )
     .unwrap_err();
     let (runner, grandchild) = watcher.join().unwrap().expect("the runner never started");
-    let stopped = gone(&runner) && gone(&grandchild);
+    // The stop reaps the runner; the rest of its group goes a moment later.
+    let stopped = eventually(|| gone(&runner) && gone(&grandchild));
     // Whatever happened, take every process this test started down with it.
     for pid in [&runner, &grandchild] {
         let _ = Command::new("kill").args(["-KILL", pid]).status();

@@ -291,6 +291,9 @@ const RUNNER: &str = "evals/run.sh";
 /// Where the runner leaves its result, under `out`.
 const RESULT: &str = "sealed/result.json";
 
+/// Where the runner's stdout and stderr go, under `out`.
+const LOG: &str = "runner.log";
+
 /// How often a run checks whether it was interrupted.
 const POLL: Duration = Duration::from_millis(100);
 
@@ -302,7 +305,10 @@ const NO_DEADLINE: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 /// `members` (the set's members hash, taken before the run) and to the
 /// candidate's hash. The runner leads its own process group, and the group
 /// goes when the runner ends or `interrupt` is caught, so nothing it
-/// started outlives the run. A runner that cannot start, exits non-zero,
+/// started outlives the run. Its stdin is null and its output goes to
+/// `runner.log` under `out`: never to the caller's stdout, where
+/// `tiller --json` answers, and never to a terminal, where a group outside
+/// the foreground would stop on its first write. A runner that cannot start, exits non-zero,
 /// is interrupted or leaves no `sealed/result.json` is `Unavailable`, and
 /// nothing is to be recorded. Errors name the runner and the result
 /// relative to the checkout and `out`, never a full path.
@@ -321,6 +327,7 @@ pub fn run(
     }
     let candidate_path = out.join("candidate.md");
     std::fs::write(&candidate_path, candidate)?;
+    let log = std::fs::File::create(out.join(LOG))?;
     let mut command = Command::new(evals(evals_dir).join("run.sh"));
     command
         .args(["--split", "holdout", "--candidate"])
@@ -328,7 +335,9 @@ pub fn run(
         .arg("--out")
         .arg(out)
         .current_dir(evals_dir)
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
     process::own_group(&mut command);
     let mut child = command
         .spawn()
