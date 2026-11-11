@@ -11,7 +11,7 @@ exit: 0
         "card_id": "<id11>",
         "entity": "card",
         "entity_id": "<id11>",
-        "id": "<id79>",
+        "id": "<id81>",
         "idempotency_key": null,
         "kind": "card.created",
         "payload": {
@@ -20,27 +20,14 @@ exit: 0
           "kind": "ship",
           "legacy_id": null,
           "project_id": "alpha",
-          "title": "Dark mode"
+          "title": "Dark mode",
+          "via_terminal": {
+            "chain": "<chain>",
+            "mutation": "<id83>",
+            "tty": null
+          }
         },
         "rev_after": 1,
-        "seq": "<seq>",
-        "short": "<id79.short>",
-        "txn": "ask.resolve"
-      },
-      {
-        "actor": "owner",
-        "at": "<time>",
-        "card_id": "<id11>",
-        "entity": "card",
-        "entity_id": "<id11>",
-        "id": "<id81>",
-        "idempotency_key": null,
-        "kind": "card.linked",
-        "payload": {
-          "ask_id": "<id5>",
-          "relation": "created"
-        },
-        "rev_after": null,
         "seq": "<seq>",
         "short": "<id81.short>",
         "txn": "ask.resolve"
@@ -49,18 +36,46 @@ exit: 0
         "actor": "owner",
         "at": "<time>",
         "card_id": "<id11>",
+        "entity": "card",
+        "entity_id": "<id11>",
+        "id": "<id85>",
+        "idempotency_key": null,
+        "kind": "card.linked",
+        "payload": {
+          "ask_id": "<id5>",
+          "relation": "created",
+          "via_terminal": {
+            "chain": "<chain>",
+            "mutation": "<id83>",
+            "tty": null
+          }
+        },
+        "rev_after": null,
+        "seq": "<seq>",
+        "short": "<id85.short>",
+        "txn": "ask.resolve"
+      },
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "card_id": "<id11>",
         "entity": "ask",
         "entity_id": "<id17>",
-        "id": "<id83>",
+        "id": "<id87>",
         "idempotency_key": null,
         "kind": "ask.resolved",
         "payload": {
           "disposition": "followup",
-          "reason": null
+          "reason": null,
+          "via_terminal": {
+            "chain": "<chain>",
+            "mutation": "<id87>",
+            "tty": null
+          }
         },
         "rev_after": null,
         "seq": "<seq>",
-        "short": "<id83.short>",
+        "short": "<id87.short>",
         "txn": "ask.resolve"
       }
     ],

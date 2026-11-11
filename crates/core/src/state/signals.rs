@@ -73,6 +73,39 @@ pub struct WeekCounts {
     pub lost_work: i64,
     pub duplicate_dispatches: i64,
     pub unauthorized: i64,
+    /// Mutations the owner made at a terminal through the CLI, each one a
+    /// [`CliDecision`] (`authority.md` G23). Not an incident: the count is
+    /// there so the owner can spot one they did not make.
+    pub cli_decisions: i64,
+}
+
+/// How many CLI decisions the page lists, newest first.
+const LISTED_CLI_DECISIONS: i64 = 20;
+
+/// The owner's CLI mutations in `[?1, ?2)`, one row per mutation: its first
+/// event's `seq` and the card it touched. Every event of one mutation names it
+/// in `via_terminal.mutation`, so two alike in time and name stay two.
+const CLI_MUTATIONS: &str = "SELECT MIN(seq) AS seq, MAX(card_id) AS card_id FROM events
+     WHERE actor = 'owner' AND at >= ?1 AND at < ?2
+       AND json_extract(payload, '$.via_terminal') IS NOT NULL
+     GROUP BY COALESCE(json_extract(payload, '$.via_terminal.mutation'), seq)";
+
+/// One mutation the owner made through the CLI: its events carry
+/// `payload.via_terminal` (`authority.md` G23), and this is what they say of
+/// where it came from.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CliDecision {
+    pub at: Timestamp,
+    /// The mutation's name, like `approval.decide`.
+    pub txn: String,
+    /// The card it touched, when it touched one.
+    pub display_id: Option<String>,
+    /// The terminal device stdin read, like `/dev/pts/3`.
+    pub tty: Option<String>,
+    /// The parent process's executable name and pid: the shell or program
+    /// that ran the command.
+    pub parent: Option<String>,
+    pub parent_pid: Option<i64>,
 }
 
 /// One project's counts for the newest week.
@@ -96,6 +129,8 @@ pub struct Signals {
     /// The latest interventions across the weeks shown, newest first, for the
     /// developer to relabel.
     pub interventions: Vec<Intervention>,
+    /// The latest CLI decisions across the weeks shown, newest first.
+    pub cli_decisions: Vec<CliDecision>,
     pub machines_live: i64,
     pub machines_total: i64,
 }
@@ -162,6 +197,10 @@ impl Store {
             .iter()
             .map(|window| self.week_counts(*window, now))
             .collect::<Result<Vec<_>>>()?;
+        let cli_decisions = match (windows.first(), windows.last()) {
+            (Some(first), Some(last)) => self.cli_decisions(first.start, last.end)?,
+            _ => Vec::new(),
+        };
         let by_project = match windows.last() {
             Some(window) => self.project_counts(*window)?,
             None => Vec::new(),
@@ -177,9 +216,37 @@ impl Store {
             weeks,
             by_project,
             interventions,
+            cli_decisions,
             machines_live,
             machines_total,
         })
+    }
+
+    /// The latest CLI decisions in `[start, end)`, newest first, one per
+    /// mutation.
+    fn cli_decisions(&self, start: Timestamp, end: Timestamp) -> Result<Vec<CliDecision>> {
+        let mut stmt = self.conn().prepare(&format!(
+            "WITH made AS ({CLI_MUTATIONS})
+             SELECT e.at, e.txn, c.display_id,
+                    json_extract(e.payload, '$.via_terminal.tty'),
+                    json_extract(e.payload, '$.via_terminal.chain[0].name'),
+                    json_extract(e.payload, '$.via_terminal.chain[0].pid')
+             FROM made JOIN events e ON e.seq = made.seq
+             LEFT JOIN cards c ON c.id = made.card_id
+             ORDER BY made.seq DESC
+             LIMIT ?3"
+        ))?;
+        let rows = stmt.query_map(params![start, end, LISTED_CLI_DECISIONS], |row| {
+            Ok(CliDecision {
+                at: row.get(0)?,
+                txn: row.get(1)?,
+                display_id: row.get(2)?,
+                tty: row.get(3)?,
+                parent: row.get(4)?,
+                parent_pid: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     fn week_counts(&self, window: WeekWindow, now: Timestamp) -> Result<WeekCounts> {
@@ -243,6 +310,11 @@ impl Store {
             duplicate_dispatches: count(self, OVERLAPPING_RUNS, params![s, e, now])?
                 + count(self, SHARED_PANES, params![s, e, now])?,
             unauthorized: breaches("<>")?,
+            cli_decisions: count(
+                self,
+                &format!("SELECT COUNT(*) FROM ({CLI_MUTATIONS})"),
+                params![s, e],
+            )?,
         })
     }
 
@@ -646,6 +718,7 @@ mod tests {
             keys,
             [
                 "answered",
+                "cli_decisions",
                 "duplicate_dispatches",
                 "end",
                 "escaped",

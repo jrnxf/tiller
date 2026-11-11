@@ -294,11 +294,16 @@ pub struct App {
 }
 
 /// The resolved caller.
+#[derive(Clone)]
 struct Caller {
     actor: Actor,
     /// Why a caller with no session id is a script and not the owner: the
     /// owner check it failed (`authority.md` section 3).
     not_owner: Option<String>,
+    /// What the owner check saw of an owner who passed it: the terminal and
+    /// the parent chain, which every event of their mutations carries
+    /// (`authority.md` G23).
+    terminal: Option<Value>,
 }
 
 impl App {
@@ -323,18 +328,14 @@ impl App {
         }
     }
 
-    /// An `App` whose caller is already known.
-    pub fn with_caller(
-        home: PathBuf,
-        db: PathBuf,
-        actor: Actor,
-        not_owner: Option<String>,
-    ) -> Self {
+    /// Another `App` on the same state for the same caller, resolved now:
+    /// what an owner's mutations record of their terminal comes along.
+    pub fn same_caller(&self) -> Self {
         let caller = OnceLock::new();
-        let _ = caller.set(Caller { actor, not_owner });
+        let _ = caller.set(self.caller().clone());
         Self {
-            home,
-            db,
+            home: self.home.clone(),
+            db: self.db.clone(),
             caller,
             keyed: Mutex::new(None),
         }
@@ -345,10 +346,13 @@ impl App {
             // A call from an agent shell, cron or `ssh host tiller` is never
             // the owner, whatever its environment says.
             match principal::owner_at_terminal() {
-                Ok(()) => Caller::of(Actor::Owner),
+                Ok(terminal) => Caller {
+                    terminal: Some(terminal.record()),
+                    ..Caller::of(Actor::Owner)
+                },
                 Err(why) => Caller {
-                    actor: Actor::Script,
                     not_owner: Some(why),
+                    ..Caller::of(Actor::Script)
                 },
             }
         })
@@ -365,9 +369,15 @@ impl App {
     }
 
     /// The context of a mutation. After [`App::key`] it also carries the
-    /// arguments that key was resolved for.
+    /// arguments that key was resolved for. The owner's also carries what the
+    /// owner check saw, so every owner decision made through the CLI records
+    /// its terminal and parent chain (`authority.md` G23).
     pub fn ctx(&self) -> Ctx {
-        let ctx = Ctx::new(self.actor().clone());
+        let caller = self.caller();
+        let mut ctx = Ctx::new(caller.actor.clone());
+        if let Some(terminal) = &caller.terminal {
+            ctx = ctx.with_via_terminal(terminal.clone());
+        }
         let keyed = self
             .keyed
             .lock()
@@ -605,6 +615,7 @@ impl Caller {
         Self {
             actor,
             not_owner: None,
+            terminal: None,
         }
     }
 }

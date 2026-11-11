@@ -4,6 +4,7 @@
 import type {
   InterventionCounts,
   InterventionKind,
+  SignalsCliDecision,
   SignalsIntervention,
   SignalsResponse,
   SignalsWeek,
@@ -123,6 +124,35 @@ const INTERVENTIONS: Omit<SignalsIntervention, "at" | "kind" | "relabeled">[] = 
   },
 ];
 
+// The decisions the owner made at a terminal through the CLI in each week; the
+// newest week's are `CLI_DECISIONS` below.
+const CLI_DECISION_COUNTS = [2, 4, 3, 1, 2, 3, 2];
+
+// The newest week's CLI decisions, newest first.
+const CLI_DECISIONS: Omit<SignalsCliDecision, "at">[] = [
+  {
+    txn: "approval.decide",
+    display_id: "alpha-31",
+    tty: "/dev/pts/3",
+    parent: "zsh",
+    parent_pid: 48213,
+  },
+  {
+    txn: "card.close",
+    display_id: "beta-16",
+    tty: "/dev/pts/3",
+    parent: "zsh",
+    parent_pid: 48213,
+  },
+  {
+    txn: "attention.answer",
+    display_id: "gamma-9",
+    tty: "/dev/pts/1",
+    parent: "bash",
+    parent_pid: 47120,
+  },
+];
+
 // What the developer has relabeled since the server started: the dev and
 // preview servers keep it so a relabel shows up on the next read.
 const relabels = new Map<string, InterventionKind | null>();
@@ -185,12 +215,14 @@ function emptyWeeks(now: number, needed: number, firstEventAt: string | null): S
       lost_work: 0,
       duplicate_dispatches: 0,
       unauthorized: 0,
+      cli_decisions: 0,
     };
   });
   return {
     weeks,
     by_project: [],
     interventions: [],
+    cli_decisions: [],
     machines_live: 1,
     machines_total: 1,
     first_event_at: firstEventAt,
@@ -200,6 +232,14 @@ function emptyWeeks(now: number, needed: number, firstEventAt: string | null): S
 // What the fixture's store has seen: a long run of weeks, a new install whose
 // first ask came this week, or no event at all.
 export type SignalsShape = "full" | "new-install" | "no-events";
+
+// The time of item `index` of `count`, newest first: `gap` apart going back
+// from now, but never before the week began nor later than now, and no two
+// alike, even in the week's first minutes.
+function spreadAt(now: number, weekStart: number, index: number, count: number, gap: number) {
+  const share = weekStart + ((now - weekStart) * (count - index)) / (count + 1);
+  return new Date(Math.max(now - (index + 1) * gap, share)).toISOString();
+}
 
 export function signalsFor(
   unsafe: boolean,
@@ -215,12 +255,15 @@ export function signalsFor(
     const kind = label ?? item.classified;
     return {
       ...item,
-      // Spread over the newest week, never later than now.
-      at: new Date(Math.max(newest + 3_600_000, now - (index + 1) * 2.5 * 3_600_000)).toISOString(),
+      at: spreadAt(now, newest, index, INTERVENTIONS.length, 2.5 * 3_600_000),
       kind,
       relabeled: kind !== item.classified,
     };
   });
+  const cliDecisions: SignalsCliDecision[] = CLI_DECISIONS.map((item, index) => ({
+    ...item,
+    at: spreadAt(now, newest, index, CLI_DECISIONS.length, 3.5 * 3_600_000),
+  }));
   const weeks: SignalsWeek[] = ACCEPTED.map((accepted, index) => {
     const start = first + index * WEEK_MS;
     const reported = REPORTED[index] ?? 0;
@@ -250,6 +293,7 @@ export function signalsFor(
       lost_work: unsafe && last ? 1 : 0,
       duplicate_dispatches: 0,
       unauthorized: 0,
+      cli_decisions: last ? cliDecisions.length : (CLI_DECISION_COUNTS[index] ?? 0),
     };
   });
   const by_project = BY_PROJECT.map((row) => ({
@@ -263,6 +307,7 @@ export function signalsFor(
     weeks,
     by_project,
     interventions,
+    cli_decisions: cliDecisions,
     machines_live: unsafe ? 1 : 2,
     machines_total: 2,
     // Tiller has run since well before the oldest week shown.

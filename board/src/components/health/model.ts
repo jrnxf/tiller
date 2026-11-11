@@ -1,5 +1,11 @@
-import type { QuotaResponse, QuotaWindow, SignalsResponse, SignalsWeek } from "../../lib/api-types";
-import { formatLisbonRounded } from "../../lib/clock";
+import type {
+  QuotaResponse,
+  QuotaWindow,
+  SignalsCliDecision,
+  SignalsResponse,
+  SignalsWeek,
+} from "../../lib/api-types";
+import { formatLisbon, formatLisbonRounded } from "../../lib/clock";
 import { lisbonDay } from "./lisbon";
 
 // Everything the Health page says is computed here from `GET /api/v1/signals`
@@ -201,6 +207,29 @@ function machinesSentence(live: number, total: number): string {
   return `Only ${live} of ${total} machines are live.`;
 }
 
+const present = (part: string | null | undefined): part is string => Boolean(part);
+
+// One CLI decision as the Safety read names it, so the owner can tell one
+// they did not make: "approval.decide alpha-31 Sun 14:02, zsh on pts/3".
+function cliDecision(decision: SignalsCliDecision): string {
+  const head = [decision.txn, decision.display_id, formatLisbon(decision.at)].filter(present);
+  const tty = decision.tty?.replace(/^\/dev\//, "");
+  // An empty name says nothing, so it counts as none.
+  const where = decision.parent && tty ? `${decision.parent} on ${tty}` : decision.parent || tty;
+  return [head.join(" "), where].filter(present).join(", ");
+}
+
+// The sentence that names this week's newest CLI decision (authority.md G23),
+// or null when there was none. The facts carry the week's count.
+function cliSentence(response: SignalsResponse, week: SignalsWeek): string | null {
+  const [start, end] = [Date.parse(week.start), Date.parse(week.end)];
+  const newest = response.cli_decisions.find((decision) => {
+    const at = Date.parse(decision.at);
+    return at >= start && at < end;
+  });
+  return newest ? `Last from a terminal: ${cliDecision(newest)}.` : null;
+}
+
 function safety(response: SignalsResponse): Signal | null {
   const weeks = lastWeek(response);
   if (!weeks) return null;
@@ -216,6 +245,15 @@ function safety(response: SignalsResponse): Signal | null {
   ].filter((part): part is string => part !== null);
   const offline = live < machines;
   const none = hasNoEvents(response);
+  const incidentsSentence =
+    total === 0 ? "Nothing lost, sent twice or unauthorized." : `${named.join(", ")}.`;
+  // CLI decisions are not incidents: they leave the state alone, and are
+  // named so the owner can spot one they did not make.
+  const sentences = [
+    incidentsSentence,
+    machinesSentence(live, machines),
+    cliSentence(response, now),
+  ];
   return {
     id: "safety",
     title: "Safety",
@@ -224,14 +262,13 @@ function safety(response: SignalsResponse): Signal | null {
     unit: total === 1 ? "incident this week" : "incidents this week",
     read: none
       ? "Nothing has run yet, so there is nothing to check."
-      : total === 0
-        ? `Nothing lost, nothing sent twice, nothing unauthorized. ${machinesSentence(live, machines)}`
-        : `${named.join(", ")}. ${machinesSentence(live, machines)}`,
+      : sentences.filter(present).join(" "),
     facts: [
       `lost work ${now.lost_work}`,
       `duplicate dispatches ${now.duplicate_dispatches}`,
       `unauthorized actions ${now.unauthorized}`,
       `machines live ${live} of ${machines}`,
+      `CLI decisions ${now.cli_decisions}`,
     ],
     values: response.weeks.map(incidents),
     last: weeks.before ? `last week: ${incidents(weeks.before)}` : "no earlier week",

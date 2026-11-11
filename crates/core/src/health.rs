@@ -424,11 +424,13 @@ mod tests {
             lost_work: 0,
             duplicate_dispatches: 0,
             unauthorized: 0,
+            cli_decisions: 0,
         };
         let signals = Signals {
             weeks: vec![week(2, 1, 4), week(1, 0, 2)],
             by_project: Vec::new(),
             interventions: Vec::new(),
+            cli_decisions: Vec::new(),
             machines_live: 0,
             machines_total: 0,
         };

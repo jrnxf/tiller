@@ -7761,6 +7761,51 @@
           }
         }
       },
+      "SignalsCliDecision": {
+        "type": "object",
+        "description": "One mutation the owner made through the CLI, and where it came from:\nwhat its events' `payload.via_terminal` says (`authority.md` G23).",
+        "required": [
+          "at",
+          "txn"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "display_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The card it touched, when it touched one."
+          },
+          "parent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The parent process's executable name and pid."
+          },
+          "parent_pid": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "tty": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The terminal device, like `/dev/pts/3`."
+          },
+          "txn": {
+            "type": "string",
+            "description": "The mutation's name, like `approval.decide`."
+          }
+        }
+      },
       "SignalsIntervention": {
         "type": "object",
         "description": "One time the developer was needed, with the label it counts under.",
@@ -7891,6 +7936,7 @@
           "weeks",
           "by_project",
           "interventions",
+          "cli_decisions",
           "machines_live",
           "machines_total"
         ],
@@ -7900,6 +7946,13 @@
             "items": {
               "$ref": "#/components/schemas/SignalsProject"
             }
+          },
+          "cli_decisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SignalsCliDecision"
+            },
+            "description": "The latest CLI decisions across the weeks, newest first, at most 20."
           },
           "first_event_at": {
             "type": [
@@ -7948,13 +8001,19 @@
           "rework",
           "lost_work",
           "duplicate_dispatches",
-          "unauthorized"
+          "unauthorized",
+          "cli_decisions"
         ],
         "properties": {
           "answered": {
             "type": "integer",
             "format": "int64",
             "description": "Items answered in the week: the sample behind the median."
+          },
+          "cli_decisions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Mutations the owner made at a terminal through the CLI (`authority.md`\nG23). Not an incident: it is there so the owner can spot one they did\nnot make."
           },
           "duplicate_dispatches": {
             "type": "integer",

@@ -11,53 +11,21 @@ exit: 0
         "at": "<time>",
         "card_id": "<id11>",
         "entity": "outbox",
-        "entity_id": "<id87>",
-        "id": "<id89>",
+        "entity_id": "<id91>",
+        "id": "<id93>",
         "idempotency_key": null,
         "kind": "outbox.enqueued",
         "payload": {
           "kind": "note",
           "reply_to": null,
-          "target_session_id": "<id9>"
+          "target_session_id": "<id9>",
+          "via_terminal": {
+            "chain": "<chain>",
+            "mutation": "<id95>",
+            "tty": null
+          }
         },
         "rev_after": 1,
-        "seq": "<seq>",
-        "short": "<id89.short>",
-        "txn": "run.end"
-      },
-      {
-        "actor": "owner",
-        "at": "<time>",
-        "card_id": "<id11>",
-        "entity": "reservation",
-        "entity_id": "<id75>",
-        "id": "<id91>",
-        "idempotency_key": null,
-        "kind": "reservation.released",
-        "payload": {
-          "reason": "ended",
-          "run_id": "<id35>"
-        },
-        "rev_after": null,
-        "seq": "<seq>",
-        "short": "<id91.short>",
-        "txn": "run.end"
-      },
-      {
-        "actor": "owner",
-        "at": "<time>",
-        "card_id": "<id11>",
-        "entity": "run",
-        "entity_id": "<id35>",
-        "id": "<id93>",
-        "idempotency_key": null,
-        "kind": "run.ended",
-        "payload": {
-          "note": "ended abandoned while /home/user/work/alpha-1 is missing, so whether its commits landed is unknown",
-          "outcome": "abandoned",
-          "role": "builder"
-        },
-        "rev_after": 7,
         "seq": "<seq>",
         "short": "<id93.short>",
         "txn": "run.end"
@@ -66,19 +34,71 @@ exit: 0
         "actor": "owner",
         "at": "<time>",
         "card_id": "<id11>",
-        "entity": "outbox",
-        "entity_id": "<id95>",
+        "entity": "reservation",
+        "entity_id": "<id77>",
         "id": "<id97>",
+        "idempotency_key": null,
+        "kind": "reservation.released",
+        "payload": {
+          "reason": "ended",
+          "run_id": "<id35>",
+          "via_terminal": {
+            "chain": "<chain>",
+            "mutation": "<id95>",
+            "tty": null
+          }
+        },
+        "rev_after": null,
+        "seq": "<seq>",
+        "short": "<id97.short>",
+        "txn": "run.end"
+      },
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "run",
+        "entity_id": "<id35>",
+        "id": "<id95>",
+        "idempotency_key": null,
+        "kind": "run.ended",
+        "payload": {
+          "note": "ended abandoned while /home/user/work/alpha-1 is missing, so whether its commits landed is unknown",
+          "outcome": "abandoned",
+          "role": "builder",
+          "via_terminal": {
+            "chain": "<chain>",
+            "mutation": "<id95>",
+            "tty": null
+          }
+        },
+        "rev_after": 7,
+        "seq": "<seq>",
+        "short": "<id95.short>",
+        "txn": "run.end"
+      },
+      {
+        "actor": "owner",
+        "at": "<time>",
+        "card_id": "<id11>",
+        "entity": "outbox",
+        "entity_id": "<id99>",
+        "id": "<id101>",
         "idempotency_key": "ok-1",
         "kind": "outbox.enqueued",
         "payload": {
           "kind": "answer",
-          "reply_to": "<id85>",
-          "target_session_id": "<id9>"
+          "reply_to": "<id89>",
+          "target_session_id": "<id9>",
+          "via_terminal": {
+            "chain": "<chain>",
+            "mutation": "<id103>",
+            "tty": null
+          }
         },
         "rev_after": 1,
         "seq": "<seq>",
-        "short": "<id97.short>",
+        "short": "<id101.short>",
         "txn": "approval.decide"
       }
     ]

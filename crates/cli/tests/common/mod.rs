@@ -296,6 +296,11 @@ impl World {
                         *item = Value::String("<age>".into());
                     } else if matches!(key.as_str(), "seq" | "last_seq" | "last_event_seq") {
                         *item = Value::String("<seq>".into());
+                    } else if key == "via_terminal" && item.get("chain").is_some() {
+                        // The parent chain is the test runner's: its pids
+                        // and names change from run to run.
+                        item["chain"] = Value::String("<chain>".into());
+                        self.normalize(item);
                     } else if key == "events"
                         && item
                             .as_array()

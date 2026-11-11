@@ -136,6 +136,12 @@ pub struct Ctx {
     /// sent it. Every event the mutation writes carries it as
     /// `payload.via_peer` (`authority.md` section 3).
     pub via_peer: Option<Value>,
+    /// For a mutation the owner made at a terminal through the CLI: what the
+    /// owner check saw, the terminal device and the parent chain
+    /// ([`crate::authority::principal::Terminal`]). Every event the mutation
+    /// writes carries it as `payload.via_terminal`, with `mutation` set to the
+    /// `id` of the mutation's first event (`authority.md` G23).
+    pub via_terminal: Option<Value>,
     /// The arguments of the request that carries a key, so a write under
     /// that key stores them and a later request with other arguments under
     /// the same key is refused, not replayed (`protocol.md` section 6.3).
@@ -172,6 +178,7 @@ impl Ctx {
             now,
             key: None,
             via_peer: None,
+            via_terminal: None,
             args: None,
         }
     }
@@ -190,6 +197,11 @@ impl Ctx {
 
     pub fn with_via_peer(mut self, via_peer: Value) -> Self {
         self.via_peer = Some(via_peer);
+        self
+    }
+
+    pub fn with_via_terminal(mut self, via_terminal: Value) -> Self {
+        self.via_terminal = Some(via_terminal);
         self
     }
 }
@@ -401,6 +413,7 @@ impl Store {
             events: Vec::new(),
             first_entity: None,
             rebuildable: false,
+            first_event: None,
         };
         // Dropping the transaction rolls it back.
         f(&mut work)
@@ -462,6 +475,7 @@ impl Store {
             events: Vec::new(),
             first_entity: None,
             rebuildable: false,
+            first_event: None,
         };
         let value = f(&mut work)?;
         let Tx {
@@ -521,6 +535,8 @@ pub struct Tx<'c> {
     events: Vec<i64>,
     first_entity: Option<(String, String)>,
     rebuildable: bool,
+    /// The `id` of this mutation's first event.
+    first_event: Option<String>,
 }
 
 impl Tx<'_> {
@@ -559,7 +575,22 @@ impl Tx<'_> {
 
     /// Writes one event row in this transaction and returns its `seq`.
     pub fn event(&mut self, mut event: NewEvent) -> Result<i64> {
-        if let Some(via_peer) = &self.ctx.via_peer {
+        let id = ids::new_ulid();
+        let first_event = self.first_event.get_or_insert_with(|| id.clone());
+        // The terminal record also names the mutation by its first event, so
+        // two mutations alike in `at`, `txn` and actor still count as two.
+        let via_terminal = self.ctx.via_terminal.clone().map(|mut record| {
+            if record.is_object() {
+                record["mutation"] = Value::String(first_event.clone());
+            }
+            record
+        });
+        let provenance = [
+            ("via_peer", self.ctx.via_peer.clone()),
+            ("via_terminal", via_terminal),
+        ];
+        for (field, record) in provenance {
+            let Some(record) = record else { continue };
             // Payloads are objects; a bare value is kept under `value`.
             if !event.payload.is_object() {
                 let value = event.payload.take();
@@ -568,9 +599,8 @@ impl Tx<'_> {
                     event.payload["value"] = value;
                 }
             }
-            event.payload["via_peer"] = via_peer.clone();
+            event.payload[field] = record;
         }
-        let id = ids::new_ulid();
         self.tx.execute(
             "INSERT INTO events (id, at, txn, actor, entity, entity_id, kind, rev_after, card_id, payload, idempotency_key)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",

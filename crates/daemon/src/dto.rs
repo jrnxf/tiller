@@ -636,6 +636,26 @@ pub struct SignalsWeek {
     pub lost_work: i64,
     pub duplicate_dispatches: i64,
     pub unauthorized: i64,
+    /// Mutations the owner made at a terminal through the CLI (`authority.md`
+    /// G23). Not an incident: it is there so the owner can spot one they did
+    /// not make.
+    pub cli_decisions: i64,
+}
+
+/// One mutation the owner made through the CLI, and where it came from:
+/// what its events' `payload.via_terminal` says (`authority.md` G23).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct SignalsCliDecision {
+    pub at: String,
+    /// The mutation's name, like `approval.decide`.
+    pub txn: String,
+    /// The card it touched, when it touched one.
+    pub display_id: Option<String>,
+    /// The terminal device, like `/dev/pts/3`.
+    pub tty: Option<String>,
+    /// The parent process's executable name and pid.
+    pub parent: Option<String>,
+    pub parent_pid: Option<i64>,
 }
 
 /// Interventions of each kind in one week. `planned` is the routine share
@@ -687,6 +707,8 @@ pub struct SignalsResponse {
     pub by_project: Vec<SignalsProject>,
     /// The latest interventions across the weeks, newest first, to relabel.
     pub interventions: Vec<SignalsIntervention>,
+    /// The latest CLI decisions across the weeks, newest first, at most 20.
+    pub cli_decisions: Vec<SignalsCliDecision>,
     pub machines_live: i64,
     pub machines_total: i64,
     /// When the store's first event happened: the day Tiller started on this

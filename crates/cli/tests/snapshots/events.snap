@@ -17,7 +17,12 @@ exit: 0
         "payload": {
           "kind": "answer",
           "reply_to": "<id27>",
-          "target_session_id": "<id9>"
+          "target_session_id": "<id9>",
+          "via_terminal": {
+            "chain": "<chain>",
+            "mutation": "<id69>",
+            "tty": null
+          }
         },
         "rev_after": 1,
         "seq": "<seq>",
@@ -30,17 +35,22 @@ exit: 0
         "card_id": "<id11>",
         "entity": "attention",
         "entity_id": "<id33>",
-        "id": "<id69>",
-        "idempotency_key": "shell:<id71>",
+        "id": "<id71>",
+        "idempotency_key": "shell:<id73>",
         "kind": "attention.opened",
         "payload": {
           "kind": "report",
           "question": "Anything else?",
-          "run_id": null
+          "run_id": null,
+          "via_terminal": {
+            "chain": "<chain>",
+            "mutation": "<id71>",
+            "tty": null
+          }
         },
         "rev_after": 1,
         "seq": "<seq>",
-        "short": "<id69.short>",
+        "short": "<id71.short>",
         "txn": "attention.open"
       },
       {
@@ -49,15 +59,20 @@ exit: 0
         "card_id": "<id11>",
         "entity": "attention",
         "entity_id": "<id33>",
-        "id": "<id73>",
+        "id": "<id75>",
         "idempotency_key": null,
         "kind": "attention.withdrawn",
         "payload": {
-          "reason": "answered elsewhere"
+          "reason": "answered elsewhere",
+          "via_terminal": {
+            "chain": "<chain>",
+            "mutation": "<id75>",
+            "tty": null
+          }
         },
         "rev_after": 2,
         "seq": "<seq>",
-        "short": "<id73.short>",
+        "short": "<id75.short>",
         "txn": "attention.withdraw"
       },
       {
@@ -65,8 +80,8 @@ exit: 0
         "at": "<time>",
         "card_id": "<id11>",
         "entity": "reservation",
-        "entity_id": "<id75>",
-        "id": "<id77>",
+        "entity_id": "<id77>",
+        "id": "<id79>",
         "idempotency_key": null,
         "kind": "reservation.reserved",
         "payload": {
@@ -76,7 +91,7 @@ exit: 0
         },
         "rev_after": null,
         "seq": "<seq>",
-        "short": "<id77.short>",
+        "short": "<id79.short>",
         "txn": "run.start"
       },
       {

@@ -316,6 +316,134 @@ fn an_agent_shell_or_a_pipe_is_never_the_owner() {
     assert_eq!(actor, "script");
 }
 
+/// `authority.md` G23, Detected: every owner decision made through the CLI
+/// records the terminal device and the parent process chain the owner check
+/// walked, and the Health Safety signal lists it. The test's stand-in
+/// terminal reads a pipe, so the device is null; the parent is this test
+/// process. A session's or a script's mutation records neither, and the
+/// record never holds a command's arguments.
+#[test]
+fn an_owner_cli_decision_records_its_terminal_and_safety_lists_it() {
+    let world = World::initialized();
+    // The setup's orchestrator is written as the owner straight to the
+    // store, not through the CLI, so it records no terminal and is not
+    // listed.
+    world.orchestrator();
+    let created = world.must(&[
+        "card", "create", "alpha", "--kind", "ship", "--title", "One",
+    ]);
+    let (_, worker) = world.builder_run("alpha-1");
+    let approval = requested_approval(&world, &worker);
+    let decided = world.must(&["approve", &approval, "--sha", &HEAD[..10]]);
+
+    let store = world.store();
+    let payload = |seq: i64| -> serde_json::Value {
+        let text: String = store
+            .conn()
+            .query_row("SELECT payload FROM events WHERE seq = ?1", [seq], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        serde_json::from_str(&text).unwrap()
+    };
+    // Every owner command records it, a decision or not, so no command can
+    // miss it.
+    let by_cli: Vec<i64> = created
+        .events()
+        .into_iter()
+        .chain(decided.events())
+        .collect();
+    for &seq in &by_cli {
+        let record = &payload(seq)["via_terminal"];
+        assert!(record.is_object(), "event {seq} has no via_terminal");
+        assert_eq!(record["tty"], serde_json::Value::Null, "stdin is a pipe");
+        let parent = &record["chain"][0];
+        assert_eq!(parent["pid"], std::process::id(), "{record}");
+        assert!(!parent["name"].as_str().unwrap().is_empty(), "{record}");
+        let keys: Vec<_> = parent.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, ["name", "pid"], "no arguments are recorded");
+    }
+    // Each event names its mutation by the mutation's first event, so one
+    // command's events share a name and two commands' never do.
+    let named = |events: &[i64]| -> std::collections::BTreeSet<String> {
+        events
+            .iter()
+            .map(|&seq| {
+                let record = payload(seq);
+                let mutation = record["via_terminal"]["mutation"].as_str();
+                mutation.expect("names its mutation").to_owned()
+            })
+            .collect()
+    };
+    let (created_by, decided_by) = (named(&created.events()), named(&decided.events()));
+    assert_eq!(created_by.len(), 1, "{created_by:?}");
+    assert!(created_by.is_disjoint(&decided_by), "{decided_by:?}");
+
+    // A session's mutation and a script's note record no terminal.
+    let note = world.must_as(&worker, &["card", "comment", "alpha-1", "--text", "hi"]);
+    world.set_terminal(false);
+    let script = world.must(&["ask", "note", "alpha", "--text", "from cron"]);
+    world.set_terminal(true);
+    for seq in note.events().into_iter().chain(script.events()) {
+        assert!(payload(seq).get("via_terminal").is_none(), "event {seq}");
+    }
+
+    // The Safety signal lists each CLI mutation once, newest first, with
+    // where it came from, and counts it in its week.
+    let mutations: std::collections::BTreeSet<(String, String)> = by_cli
+        .iter()
+        .map(|seq| {
+            store
+                .conn()
+                .query_row("SELECT at, txn FROM events WHERE seq = ?1", [seq], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .unwrap()
+        })
+        .collect();
+    let signals = tiller_daemon::views::signals(&store, Timestamp::now()).unwrap();
+    let signals = serde_json::to_value(signals).unwrap();
+    let listed = signals["cli_decisions"].as_array().unwrap();
+    let counted: i64 = signals["weeks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|week| week["cli_decisions"].as_i64().unwrap())
+        .sum();
+    // The setup's `init` and `project add` are CLI owner mutations too.
+    let shown: std::collections::BTreeSet<(String, String)> = listed
+        .iter()
+        .map(|item| {
+            (
+                item["at"].as_str().unwrap().to_owned(),
+                item["txn"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let recorded: i64 = store
+        .conn()
+        .query_row(
+            "SELECT COUNT(DISTINCT json_extract(payload, '$.via_terminal.mutation')) FROM events
+             WHERE json_extract(payload, '$.via_terminal') IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        i64::try_from(listed.len()).unwrap(),
+        recorded,
+        "each mutation is listed once: {listed:?}"
+    );
+    assert!(shown.is_superset(&mutations), "{listed:?}");
+    assert_eq!(counted, i64::try_from(listed.len()).unwrap(), "{signals}");
+    assert_eq!(listed[0]["txn"], "approval.decide", "{listed:?}");
+    assert_eq!(listed[0]["display_id"], "alpha-1");
+    assert_eq!(listed[0]["tty"], serde_json::Value::Null);
+    for item in listed {
+        assert_eq!(item["parent_pid"], std::process::id(), "{item}");
+    }
+}
+
 /// `protocol.md` 10.1: pairing needs the owner at a terminal on both hosts,
 /// and `federation.accept = false` refuses it before anyone is asked. A
 /// refused `peer add` reaches no peer and leaves no key file.

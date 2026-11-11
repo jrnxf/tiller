@@ -674,6 +674,103 @@ mod tests {
         assert_eq!(recovery_items(&store), wrong.len() as i64);
     }
 
+    /// G23, Detected: an owner decision made through the CLI records the
+    /// terminal device and the parent chain the owner check walked, on every
+    /// event it writes, and the Health Safety signal lists it. The record
+    /// holds no arguments, so a secret on a command line never lands in
+    /// `state.db`. A decision with no record is not listed.
+    #[test]
+    fn owner_cli_decision_records_terminal() {
+        use crate::authority::principal::{Process, Terminal, owner_check};
+        use crate::state::signals::lisbon_weeks;
+
+        let mut store = Store::open_in_memory().unwrap();
+        setup(&mut store);
+        let chain = vec![
+            Process {
+                pid: 4242,
+                comm: "zsh".into(),
+                args: "-zsh".into(),
+            },
+            Process {
+                pid: 4100,
+                comm: "sshd".into(),
+                args: "sshd: user@pts/3 GITHUB_TOKEN=ghp_secret".into(),
+            },
+        ];
+        let walked = owner_check(false, true, move || Ok(chain)).unwrap();
+        let terminal = Terminal::new(Some("/dev/pts/3".into()), &walked).record();
+        assert_eq!(
+            terminal,
+            json!({
+                "tty": "/dev/pts/3",
+                "chain": [{"pid": 4242, "name": "zsh"}, {"pid": 4100, "name": "sshd"}],
+            })
+        );
+        // Two decisions in one millisecond, from one shell: still two.
+        let ctx = owner().with_via_terminal(terminal.clone());
+        let (_, first) = requested_merge(&mut store, 1, "a1b2c3d4e5f6a7b8");
+        let (_, second) = requested_merge(&mut store, 2, "0123456789abcdef");
+        let (_, unrecorded) = requested_merge(&mut store, 3, "fedcba9876543210");
+        let decided = [first, second].map(|approval| {
+            store
+                .approval_decide(&ctx, None, &approval.id, accept())
+                .unwrap()
+        });
+        store
+            .approval_decide(&owner(), None, &unrecorded.id, accept())
+            .unwrap();
+
+        let mut mutations = Vec::new();
+        for applied in &decided {
+            assert!(!applied.events.is_empty());
+            let mut named = std::collections::BTreeSet::new();
+            for seq in &applied.events {
+                let (id, payload): (String, String) = store
+                    .conn()
+                    .query_row(
+                        "SELECT id, payload FROM events WHERE seq = ?1",
+                        [seq],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap();
+                let mut payload: Value = serde_json::from_str(&payload).unwrap();
+                assert!(!payload.to_string().contains("ghp_secret"), "{payload}");
+                let record = &mut payload["via_terminal"];
+                let mutation = record["mutation"].take();
+                if *seq == applied.events[0] {
+                    assert_eq!(mutation, Value::String(id), "the first event names it");
+                }
+                named.insert(mutation.to_string());
+                record.as_object_mut().unwrap().remove("mutation");
+                assert_eq!(*record, terminal, "event {seq}");
+            }
+            assert_eq!(named.len(), 1, "one mutation, one name: {named:?}");
+            mutations.extend(named);
+        }
+        assert_ne!(mutations[0], mutations[1]);
+
+        let now = Timestamp::now();
+        let signals = store.signals(&lisbon_weeks(now, 1), now).unwrap();
+        let decisions: Vec<_> = signals
+            .cli_decisions
+            .iter()
+            .filter(|decision| decision.txn == "approval.decide")
+            .collect();
+        assert_eq!(decisions.len(), 2, "{:?}", signals.cli_decisions);
+        assert_eq!(decisions[0].at, decisions[1].at);
+        for decision in decisions {
+            assert_eq!(decision.tty.as_deref(), Some("/dev/pts/3"));
+            assert_eq!(decision.parent.as_deref(), Some("zsh"));
+            assert_eq!(decision.parent_pid, Some(4242));
+            assert!(decision.display_id.is_some(), "{decision:?}");
+        }
+        assert_eq!(
+            signals.weeks[0].cli_decisions,
+            i64::try_from(signals.cli_decisions.len()).unwrap()
+        );
+    }
+
     /// Every way the mutations decide an approval passes the detector: the
     /// owner, the board, a forwarded decision, a grant and away mode.
     #[test]

@@ -719,6 +719,23 @@ export interface SignalsWeek {
   lost_work: number;
   duplicate_dispatches: number;
   unauthorized: number;
+  // Mutations the owner made at a terminal through the CLI (authority.md
+  // G23). Not an incident: the owner reads them to spot one they did not make.
+  cli_decisions: number;
+}
+
+// One mutation the owner made through the CLI, and where it came from: what
+// its events' `payload.via_terminal` says.
+export interface SignalsCliDecision {
+  at: string;
+  // The mutation's name, like `approval.decide`.
+  txn: string;
+  display_id: string | null;
+  // The terminal device, like `/dev/pts/3`.
+  tty: string | null;
+  // The parent process's executable name and pid.
+  parent: string | null;
+  parent_pid: number | null;
 }
 
 interface SignalsProject {
@@ -736,6 +753,8 @@ export interface SignalsResponse {
   by_project: SignalsProject[];
   // The latest interventions across the weeks, newest first, to relabel.
   interventions: SignalsIntervention[];
+  // The latest CLI decisions across the weeks, newest first, at most 20.
+  cli_decisions: SignalsCliDecision[];
   machines_live: number;
   machines_total: number;
   // When the store's first event happened: the day Tiller started on this

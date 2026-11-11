@@ -2,25 +2,122 @@
 //! `CLAUDECODE`, stdin a terminal, and no Claude Code process among the
 //! caller's ancestors (the parent chain read from the OS). A CLI call with no
 //! session id that fails any of these is a script, never the owner.
+//!
+//! A caller that passes keeps what the check saw as a [`Terminal`]. Every
+//! event of its mutations carries it, so the owner can spot a decision they
+//! did not make (G23, Detected).
 
 use std::io::IsTerminal;
 use std::path::Path;
+
+use serde::Serialize;
+use serde_json::Value;
 
 /// One process in the caller's parent chain.
 #[derive(Clone, Debug)]
 pub struct Process {
     pub pid: u32,
+    /// The executable's name: the kernel's `comm` on Linux, the file name of
+    /// `ps`'s path elsewhere.
     pub comm: String,
     pub args: String,
 }
 
-/// Why this process is not the owner at a terminal, or `Ok` when it is.
-pub fn owner_at_terminal() -> Result<(), String> {
+/// What the owner check saw of a caller that passed it: the terminal device
+/// on stdin and the parent chain it walked, nearest first, so `chain[0]` is
+/// the parent process. Every event of the caller's mutations carries it as
+/// `payload.via_terminal` (`authority.md` G23, Detected). It holds a device
+/// path, pids and executable names only: never a process's arguments or the
+/// environment, which may hold secrets.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Terminal {
+    /// The device stdin reads, like `/dev/pts/3`. `None` when stdin is no
+    /// terminal, which only the command tests' stand-in lets through.
+    pub tty: Option<String>,
+    pub chain: Vec<Ancestor>,
+}
+
+/// One process of a [`Terminal`]'s chain.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Ancestor {
+    pub pid: u32,
+    /// The executable's name ([`Process::comm`]), without its directory.
+    pub name: String,
+}
+
+impl Terminal {
+    pub fn new(tty: Option<String>, chain: &[Process]) -> Self {
+        let chain = chain
+            .iter()
+            .map(|process| Ancestor {
+                pid: process.pid,
+                name: process.comm.clone(),
+            })
+            .collect();
+        Self { tty, chain }
+    }
+
+    /// The record an event's payload carries.
+    pub fn record(&self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
+    }
+}
+
+/// Why this process is not the owner at a terminal, or what the check saw
+/// when it is.
+pub fn owner_at_terminal() -> Result<Terminal, String> {
     let claudecode = std::env::var_os("CLAUDECODE").is_some_and(|value| !value.is_empty());
     if test_owner() {
-        return owner_check(claudecode, true, || Ok(Vec::new()));
+        owner_check(claudecode, true, || Ok(Vec::new()))?;
+        // The stand-in skips the chain check, but the record still names the
+        // real parent chain, so the command tests see what a release records.
+        return Ok(Terminal::new(
+            stdin_device(),
+            &ancestors().unwrap_or_default(),
+        ));
     }
-    owner_check(claudecode, std::io::stdin().is_terminal(), ancestors)
+    let chain = owner_check(claudecode, std::io::stdin().is_terminal(), ancestors)?;
+    Ok(Terminal::new(stdin_device(), &chain))
+}
+
+/// The terminal device stdin reads, when it reads one.
+fn stdin_device() -> Option<String> {
+    if !std::io::stdin().is_terminal() {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    if let Ok(path) = std::fs::read_link("/proc/self/fd/0") {
+        return Some(path.to_string_lossy().into_owned());
+    }
+    use std::os::unix::fs::MetadataExt;
+    let device = std::fs::metadata("/dev/stdin").ok()?.rdev();
+    device_named(device, &[Path::new("/dev/pts"), Path::new("/dev")])
+}
+
+/// The path of the first character device numbered `device` in `dirs`. With
+/// no `/proc` and no unsafe `ttyname`, this is how stdin's device gets its
+/// name.
+fn device_named(device: u64, dirs: &[&Path]) -> Option<String> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    // `/dev` holds hundreds of entries: look at the terminals (`ttys003`)
+    // before the rest, so a usual lookup reads a handful, not all of them.
+    let (terminals, rest): (Vec<_>, Vec<_>) = dirs
+        .iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flatten()
+        .flatten()
+        .partition(|entry| entry.file_name().to_string_lossy().starts_with("tty"));
+    terminals
+        .into_iter()
+        .chain(rest)
+        .find(|entry| {
+            // `DirEntry::metadata` does not follow a link, so `/dev/stdin`
+            // and its kin are skipped.
+            entry
+                .metadata()
+                .is_ok_and(|meta| meta.file_type().is_char_device() && meta.rdev() == device)
+        })
+        .map(|entry| entry.path().to_string_lossy().into_owned())
 }
 
 /// Test builds only: the `test-owner` feature, which `tiller-cli`'s
@@ -32,12 +129,13 @@ fn test_owner() -> bool {
 }
 
 /// The owner checks on facts read elsewhere, in the order the cheap ones
-/// come first: the parent chain is read only when the rest pass.
+/// come first: the parent chain is read only when the rest pass. It returns
+/// the chain it walked.
 pub fn owner_check(
     claudecode: bool,
     stdin_terminal: bool,
     ancestors: impl FnOnce() -> std::io::Result<Vec<Process>>,
-) -> Result<(), String> {
+) -> Result<Vec<Process>, String> {
     if claudecode {
         return Err("CLAUDECODE is set".into());
     }
@@ -47,7 +145,7 @@ pub fn owner_check(
     let chain = ancestors().map_err(|error| format!("the parent chain: {error}"))?;
     match claude_ancestor(&chain) {
         Some(pid) => Err(format!("Claude Code (pid {pid}) is among its ancestors")),
-        None => Ok(()),
+        None => Ok(chain),
     }
 }
 
@@ -162,8 +260,13 @@ fn process_table() -> std::io::Result<std::collections::HashMap<u32, (u32, Proce
         .collect();
     Ok(rows(&ps("comm")?)
         .into_iter()
-        .map(|(pid, parent, comm)| {
+        .map(|(pid, parent, path)| {
             let args = args.get(&pid).cloned().unwrap_or_default();
+            // `ps` names the executable by its path; keep its file name, as
+            // the kernel's `comm` is on Linux.
+            let comm = Path::new(&path)
+                .file_name()
+                .map_or(path.clone(), |name| name.to_string_lossy().into_owned());
             (pid, (parent, Process { pid, comm, args }))
         })
         .collect())
@@ -275,6 +378,48 @@ mod tests {
             comm: comm.into(),
             args: comm.into(),
         }
+    }
+
+    /// G23: the check hands back the chain it walked, and the record keeps
+    /// each process's pid and file name only, never its arguments.
+    #[test]
+    fn a_passed_check_records_the_chain_without_arguments() {
+        let walked = owner_check(
+            false,
+            true,
+            chain(vec![
+                process_at(30, "zsh"),
+                Process {
+                    pid: 20,
+                    comm: "sshd".into(),
+                    args: "sshd: user@pts/0 TOKEN=hunter2".into(),
+                },
+            ]),
+        )
+        .unwrap();
+        let terminal = Terminal::new(Some("/dev/pts/3".into()), &walked);
+        let record = terminal.record();
+        assert_eq!(
+            record,
+            serde_json::json!({
+                "tty": "/dev/pts/3",
+                "chain": [{"pid": 30, "name": "zsh"}, {"pid": 20, "name": "sshd"}],
+            })
+        );
+        assert!(!record.to_string().contains("hunter2"), "{record}");
+    }
+
+    /// Off Linux, stdin's device is named by its number: `/dev/null` is a
+    /// character device every host has.
+    #[test]
+    fn a_device_is_named_by_its_number() {
+        use std::os::unix::fs::MetadataExt;
+        let null = std::fs::metadata("/dev/null").unwrap().rdev();
+        assert_eq!(
+            device_named(null, &[Path::new("/dev")]).as_deref(),
+            Some("/dev/null")
+        );
+        assert_eq!(device_named(null, &[Path::new("/nonexistent")]), None);
     }
 
     #[test]

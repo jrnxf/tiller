@@ -161,12 +161,7 @@ pub fn serve(app: &App, from: String) -> Result<ExitCode, Failure> {
         timing: Timing::default(),
         herdr: Some(super::spawn::configured_herdr(app)?),
         orchestrators: Some(std::sync::Arc::new(super::spawn::BoardStart {
-            app: App::with_caller(
-                app.home.clone(),
-                app.db.clone(),
-                app.actor().clone(),
-                app.not_owner().map(str::to_owned),
-            ),
+            app: app.same_caller(),
         })),
     };
     let input = std::io::BufReader::new(std::io::stdin());

@@ -41,6 +41,7 @@ function week(over: Partial<SignalsWeek> = {}): SignalsWeek {
     lost_work: 0,
     duplicate_dispatches: 0,
     unauthorized: 0,
+    cli_decisions: 0,
     ...over,
   };
 }
@@ -57,6 +58,7 @@ function counts(
     ],
     by_project: [],
     interventions: [],
+    cli_decisions: [],
     machines_live: 2,
     machines_total: 2,
     first_event_at: "2026-01-05T09:00:00.000Z",
@@ -217,14 +219,70 @@ test("quality counts reverts and escaped bugs as problems and shows rework per l
 test("safety sums lost work, duplicate dispatches and unauthorized actions", () => {
   const clear = signal(counts(), "safety");
   expect(clear.state).toBe("good");
-  expect(clear.read).toBe(
-    "Nothing lost, nothing sent twice, nothing unauthorized. Both machines are live.",
-  );
+  expect(clear.read).toBe("Nothing lost, sent twice or unauthorized. Both machines are live.");
   expect(clear.facts).toContain("machines live 2 of 2");
+  expect(clear.facts).toContain("CLI decisions 0");
 
   const hit = signal(counts({ lost_work: 1, duplicate_dispatches: 2, unauthorized: 0 }), "safety");
   expect(hit.big).toBe(3);
   expect(hit.state).toBe("watch");
+});
+
+const decision = (at: string, txn: string, display_id: string | null) => ({
+  at,
+  txn,
+  display_id,
+  tty: "/dev/pts/3",
+  parent: "zsh",
+  parent_pid: 48213,
+});
+
+// authority.md G23, Detected: every owner decision made through the CLI
+// records its terminal and parent process, and Safety names the newest one
+// this week, so the owner can spot one they did not make.
+test("safety lists the owner's CLI decisions without counting them as incidents", () => {
+  const response: SignalsResponse = {
+    ...counts({ cli_decisions: 2 }),
+    cli_decisions: [
+      // Wed 2026-10-28 14:02 Lisbon (WET, UTC+0).
+      decision("2026-10-28T14:02:00.000Z", "approval.decide", "alpha-31"),
+      decision("2026-10-27T09:10:00.000Z", "card.close", "beta-16"),
+      // Last week's: not this week's newest.
+      decision("2026-10-20T08:00:00.000Z", "attention.answer", null),
+    ],
+  };
+  const safety = signal(response, "safety");
+  expect(safety.state).toBe("good");
+  expect(safety.big).toBe(0);
+  expect(safety.facts).toContain("CLI decisions 2");
+  expect(safety.read).toBe(
+    "Nothing lost, sent twice or unauthorized. Both machines are live. " +
+      "Last from a terminal: approval.decide alpha-31 Wed 14:02, zsh on pts/3.",
+  );
+
+  // Only last week's: nothing is named for this week.
+  const old = signal({ ...response, cli_decisions: response.cli_decisions.slice(2) }, "safety");
+  expect(old.read).not.toMatch(/terminal/);
+
+  // A decision with no card and no terminal device still reads plainly.
+  const bare = signal(
+    {
+      ...response,
+      cli_decisions: [{ ...decision("2026-10-29T10:00:00.000Z", "project.add", null), tty: null }],
+    },
+    "safety",
+  );
+  expect(bare.read).toMatch(/Last from a terminal: project\.add Thu 10:00, zsh\.$/);
+
+  // An empty parent name says nothing, so the terminal is named alone.
+  const nameless = signal(
+    {
+      ...response,
+      cli_decisions: [{ ...decision("2026-10-29T10:00:00.000Z", "project.add", null), parent: "" }],
+    },
+    "safety",
+  );
+  expect(nameless.read).toMatch(/Last from a terminal: project\.add Thu 10:00, pts\/3\.$/);
 });
 
 test("a machine that is down puts Safety on watch without calling the system broken", () => {
@@ -312,6 +370,7 @@ test("the fixture has exactly the fields the daemon's signals query returns", ()
       "lost_work",
       "duplicate_dispatches",
       "unauthorized",
+      "cli_decisions",
     ]),
   );
 });

@@ -1608,6 +1608,7 @@ pub fn signals(store: &Store, now: Timestamp) -> Result<SignalsResponse> {
                 lost_work: week.lost_work,
                 duplicate_dispatches: week.duplicate_dispatches,
                 unauthorized: week.unauthorized,
+                cli_decisions: week.cli_decisions,
             })
             .collect(),
         by_project: signals
@@ -1641,6 +1642,18 @@ pub fn signals(store: &Store, now: Timestamp) -> Result<SignalsResponse> {
                 classified: item.classified.to_string(),
                 kind: item.kind.to_string(),
                 relabeled: item.relabeled,
+            })
+            .collect(),
+        cli_decisions: signals
+            .cli_decisions
+            .into_iter()
+            .map(|decision| SignalsCliDecision {
+                at: at(decision.at),
+                txn: decision.txn,
+                display_id: decision.display_id,
+                tty: decision.tty,
+                parent: decision.parent,
+                parent_pid: decision.parent_pid,
             })
             .collect(),
         machines_live: signals.machines_live,
