@@ -2,6 +2,8 @@
 
 Written Sunday 2026-11-01, late evening Lisbon time. It is based on a read-only pass over herdr 0.9.3 (installed), the herdr 0.9.5 docs, Firstmate's herdr backend and the dotfiles' herdr config. Tags: [T] tested locally, [D] documented, [I] inferred.
 
+**Superseded at the cutover.** ADR 0004 (accepted Wednesday 2026-11-11) replaces herdr with Tiller's own terminal holder. From the terminal holder cutover (`terminal-holder.md`, section 11) this doc is history: the holder has no layout, no row tokens and no saved machines, and `terminal-holder.md` is the contract. Until the cutover this doc still describes how the live tiller lays out herdr.
+
 **Decision (the developer, Sunday 2026-11-01): Firstmate-style nested workspaces, not tabs.**
 
 ## The rule

@@ -4,6 +4,8 @@ What the owner can do from the `tiller` CLI, what from the board, and where the 
 
 Checked against the code on Tuesday 2026-11-10 (Lisbon time). The Health checks row was added on Wednesday 2026-11-11. The last two bullets of "Differences that are intended" gave no reason until Wednesday 2026-11-11 (Lisbon time). They now do, and the Edit, Land, Grants, Start an orchestrator and Memory rows were corrected to match the code. The Grants and Memory statuses and the Restart note were corrected again the same day. The Memory and "Board only" entries were checked again, and the Retros and Backups rows added, on Wednesday 2026-11-11 (Lisbon time).
 
+Text tagged [H] states the behavior after the terminal holder cutover (ADR 0004, accepted Wednesday 2026-11-11; `terminal-holder.md`, section 11). Until then herdr does that work, and the rest of this page is checked against today's code.
+
 How to read the table:
 
 - **Full**: the surface does it with the same effect.
@@ -39,7 +41,8 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 | Recap | Part: `tiller recap` | Part | Both read the same events. Only the board marks the recap seen. |
 | Start an orchestrator | Full: `orchestrator start` | Full | The board's Restart is `--restart` as `board`. It is a secondary action behind a confirmation. The lane header offers it for a silent orchestrator, and the Agents view's Run menu offers it for any orchestrator on this host. Both act only on this host, as the CLI does (`protocol.md` 7.4, commit f8d4953). |
 | Restart stale sessions | Full: `agent restart --stale` | Full | The CLI acts on this host. The board acts per host. |
-| Focus an agent | Full: `agent focus` | Part | The CLI prints the pane and machine. The board opens the configured terminal app. |
+| Focus an agent | Full: `agent focus` | Part | The CLI prints the pane and machine. The board opens the configured terminal app. [H] Both run Open in terminal (`protocol.md` 7.4): they switch an open `tiller attach` to the pane, or else open the `[attach] terminal` app on `tiller attach <session>` (`ssh -t <alias> tiller attach` for a peer's agent). Then both are Full. |
+| Attach to an agent [H] | Full: `tiller attach [<run\|session\|card>] [--read-only]` | Part: the live terminal | `tiller attach` is the owner's own terminal on the pane: raw mode, the `Ctrl-\` prefix, the switcher, and a size lease (`terminal-holder.md` 5.2). The board's live terminal streams, takes keys and fits the pane, but has no prefix keys or switcher. A peer's pane is read-only on the board and attached over `ssh -t` from a terminal. |
 | Run and session control | Full: `agent relaunch`, `resume`, `interrupt`, `stop`, `send`, `inbox`, `status`, `run`, `pr`, `done`, `obligation`, `artifact`, `review`, `handoff`, `spawn` | No | Agent tools and owner controls. |
 | Add a project | Full: `project add` | Part | The board takes id, name, repo, delivery, capacity and a checkout (a path or a clone). |
 | Edit a project | Full: `project edit` | Part | The board edits a project this host owns, `fleet` included, from the Edit button on its row. The id stays fixed. Checks are one command per line, with an optional lighter set. |
@@ -62,8 +65,8 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 
 ## Board only
 
-- The live terminal: stream, input, fit and history.
-- Answering a permission prompt in an agent pane.
+- The live terminal: stream, input, fit and history. [H] `tiller attach` gives a terminal the same stream, input and size, so only the history read stays board only.
+- Answering a permission prompt in an agent pane. [H] A key typed in `tiller attach` answers it too, as the owner (`authority.md` G29), so this stays board only as a button, not as a capability.
 - Relabelling an intervention.
 - Editing memory and reading its revisions.
 - Undoing an applied memory change.
@@ -90,4 +93,5 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 - **CLI-only controls.** Each has a reason or is a gap.
   - **`land`.** Intended. The board's Accept already starts the land, because only the daemon merges (`authority.md` section 6, G01). `tiller land` only waits for that result in a terminal.
   - **`peer accept`, `peer serve` and `peer pane`.** Intended. `accept` is the owner's step on the other host and needs a terminal or an sshd start, never a peer board (`authority.md` section 7, Peer link, Pairing, G45). `serve` and `pane` are the far end of the link, started by sshd for the owner (`protocol.md` `peer serve` and `peer pane` rows). The board's Add a host runs `accept --unattended` over ssh for the owner.
+  - **`tiller holder` and `tiller holder upgrade`** [H]. Intended. The holder is a host service that the service manager or the daemon starts, and the daemon upgrades it on its own when the binary changes (`terminal-holder.md` 6.2). The board shows the holder's version and a refused upgrade in Health (`recovery.md` R22), and needs no button.
   - **The memory undo route.** Not unused. The board's change history calls it (`board/src/components/memory/memory-page.tsx`). It is board only by design (`memory.md` section 7). The CLI has no undo. This is a gap only if the owner wants a terminal path. **Open owner question:** does the owner want a CLI undo? `memory.md` section 7 gives undo only in the board's change history and does not say whether a CLI undo is wanted.

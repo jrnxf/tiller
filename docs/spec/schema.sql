@@ -57,10 +57,11 @@ CREATE TABLE hosts (
   label          TEXT NOT NULL UNIQUE,     -- role label, e.g. host-a
   kind           TEXT NOT NULL CHECK (kind IN ('local', 'remote')),
   herdr_machine  TEXT,                     -- saved machine id; null for local
+                                           -- [H] ADR 0004: dropped at the cutover (terminal-holder.md 11.1)
   lane_capacity  INTEGER,                  -- local only: max active runs
   ram_floor_mb   INTEGER,                  -- spawn refuses below these floors
   disk_floor_mb  INTEGER,
-  -- cache (herdr poller, or the peer link): when this host was last reachable and why not
+  -- cache (herdr poller, [H] the holder poller, or the peer link): when this host was last reachable and why not
   last_seen_at   TEXT,
   stale_reason   TEXT,
   -- ADR 0003 (accepted): a paired peer on the board host; null otherwise
@@ -163,7 +164,7 @@ CREATE TABLE sessions (
   project_id            TEXT NOT NULL REFERENCES projects(id),
   run_id                TEXT REFERENCES runs(id), -- null for an orchestrator
   host_id               TEXT NOT NULL REFERENCES hosts(id),
-  pane_id               TEXT,                -- cache (herdr)
+  pane_id               TEXT,                -- cache (herdr; [H] the terminal holder)
   transcript_path       TEXT,
   harness               TEXT NOT NULL DEFAULT 'claude',  -- protocol.md section 10
   config_hash           TEXT,
@@ -494,6 +495,7 @@ CREATE TABLE observations (
   session_id   TEXT REFERENCES sessions(id),   -- null until the source can be mapped
   run_id       TEXT REFERENCES runs(id),
   source       TEXT NOT NULL CHECK (source IN ('hook', 'transcript', 'herdr', 'liveness', 'status_line')),
+                                           -- [H] the cutover adds 'holder'; 'herdr' rows stay as history
   event        TEXT NOT NULL,                  -- hook event or detected kind; mapping in protocol.md
   verdict      TEXT CHECK (verdict IN
                  ('working', 'idle', 'waiting_permission', 'waiting_input', 'errored', 'ended', 'unknown')),
@@ -617,7 +619,12 @@ CREATE INDEX handoffs_project ON handoffs(project_id, written_at);
 -- Caches of facts owned elsewhere (every row carries fetched_at)
 -- ---------------------------------------------------------------------------
 
-CREATE TABLE panes (                      -- owner: herdr
+-- [H] ADR 0004: the cutover's migration (terminal-holder.md 11.1, task H10)
+-- rebuilds this table with the holder's columns and drops every herdr row:
+--   pane_id, host_id, holder_instance, session_id, pid, label,
+--   state ('running' or 'exited'), exit_code, exit_signal, exited_at,
+--   metadata (the pane's meta, JSON), fetched_at, gone_at.
+CREATE TABLE panes (                      -- owner: herdr; [H] the terminal holder
   pane_id          TEXT NOT NULL,
   host_id          TEXT NOT NULL REFERENCES hosts(id),
   workspace_label  TEXT,

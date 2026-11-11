@@ -36,7 +36,8 @@ That gives Tiller three tests. Every one of them must hold before Firstmate is d
 | Firstmate export prompt (the import contract) | `docs/firstmate-export.md` |
 | Design basis (Linear tokens, working mock) | `docs/design/design-basis.html` (pending: the source is a Lavish file on the personal Mac; see `docs/design/README.md`) |
 | UI mocks, approved at CP-UI | `docs/design/mocks.html` (pending, as above) |
-| herdr layout recommendation | `docs/design/herdr-layout.md` |
+| herdr layout recommendation (history after the terminal holder cutover, ADR 0004) | `docs/design/herdr-layout.md` |
+| Terminal holder design and its build plan (ADR 0004) | `docs/design/terminal-holder.md` |
 | Firstmate contract docs (MIT): `captain-hold-lifecycle`, `arm-pretool-check`, `agent-control`, `subagent-guard`, `cd-guard`, `supervision-host`, `fleet-ledger`, `herdr-backend` | the Firstmate home's `docs/`: read in place; reference them, do not copy them |
 | Board conventions reference: the developer's two TanStack apps, especially their `CLAUDE.md` loader and suspense rules and their lint, format and component setup | in place: read for conventions only; never name them in the repo |
 
@@ -199,6 +200,9 @@ Wave E (day 5-6)    T3.4 degraded states | T3.5 health page, then T3.6 UI pass -
 Wave F (day 6-7)    T5.1 replay harness, then T5.2 replay run      -> CP6
 Federation          F1 spec, then F2 pairing, F3 link, F4 forwarding | F5 board UI (mocked API), then F6 e2e -> CP-F
   (beside E and F, after the owner approves ADR 0003; done before T6.3)
+Terminal holder     H01 spec | H00 snapshots, then S1a, S1b | S1c, then S1P preview (the first slice)
+  (ADR 0004)        H02, H03, H04 | H06 | HA1, then H05 | H07 | H08 on main
+                    H09 to H14 in series on holder-port, then H15 holder cutover with the owner
 Cutover             T6.1 personal Mac, T6.2 watch, T6.3 remote Linux host (after CP-F), T6.4 work Mac -> CP7 per host
 After               T7.1 health depth | T7.2 memory view, then T7.3 learning loop -> CP8
 ```
@@ -215,6 +219,7 @@ Every estimate below is agent wall-clock time for one lane, including that task'
 | Federated board (F1 to F6, ADR 0003) | 13-17.5 h | 10.5-14 h, beside waves E and F, off the day-one critical path |
 | Cutover, all three hosts | 4.5-6.5 h | 4.5-6.5 h, plus stability days between hosts |
 | After day one (M7) | 14-21 h | 10-14 h |
+| Terminal holder (H00 to H15 and the S1 slice, ADR 0004) | about 69 h | about 57 h; see `docs/design/terminal-holder.md` section 13 |
 
 Day one is higher than the 50-70 h in plan v2 for three reasons: this plan adds the spec phase (M1), counts review and CI on every task, and adds about 8-12 h for the Rust core (compile loops and async work) and the two-toolchain setup. The approved mocks moved the Health page into day one (T3.5, 2-3 h) and shrank the after-day-one health work (T7.1).
 
@@ -792,6 +797,22 @@ ADR 0003 (accepted Tuesday 2026-11-03) gives the owner one board across hosts: e
 
 ---
 
+## M5H: Terminal holder
+
+ADR 0004 (accepted Wednesday 2026-11-11) makes Tiller own its terminals: a holder process per host owns the agent PTYs, the board is the main pane UI, and `tiller attach` gives a real terminal. It replaces herdr, and `crates/herdr` goes at the holder cutover. The design and the full task table, with each task's goal, dependencies and time, are in `docs/design/terminal-holder.md` section 13; that table wins over this summary. The contracts are the [H] rules in `protocol.md`, `recovery.md`, `state.md` and `authority.md`. These tasks run beside the rest of this plan. Their own cutover, H15, switches the running Tiller from herdr to the holder; it is not M6, and the [H] tag in the specs means H15.
+
+| Group | Tasks | Lands on |
+|---|---|---|
+| Spec | H01 (the spec amendments, ADR 0004 accepted), H00 (today's parser results frozen as snapshots) | `main` |
+| First slice | S1a (protocol and client), S1b (the minimal holder), S1c (the minimal daemon wiring), S1P (the owner's preview on a test home) | S1a and S1b on `main`, S1c on `holder-port` |
+| Holder | H02 to H05 (crates, core, live output, live upgrade), H06 (service), H07 (`tiller attach`), H08 (raw fixtures); HA1 (handover audit) runs between H04 and H05 and is a report to the owner, not a PR | `main` |
+| Port | H09 to H14 (agents, reconcile, API and peers, board, herdr removed, soak) | `holder-port`, merged into `main` once by the owner |
+| Holder cutover | H15, with the owner: steps on the running Tiller, no PR | - |
+
+The slice is done when the owner types in a shell pane on the S1P preview, reloads the page and sees the same screen, and restarts the daemon with the holder up and gets the same pane back with its history. The live tiller is never deployed from `holder-port`.
+
+---
+
 ## M6: Cutover
 
 Each host goes through the bundle's `CUTOVER.md`. Rollback triggers go live at the moment of the flip: lost work, an unauthorized action, or a duplicate dispatch.
@@ -863,7 +884,7 @@ Before each flip, every kept row in the parity matrix that applies to that host 
 
 ## herdr layout
 
-Each project's orchestrator and its workers are grouped together in herdr. The full rules are in `docs/design/herdr-layout.md`. In short:
+Each project's orchestrator and its workers are grouped together in herdr. The full rules are in `docs/design/herdr-layout.md`. [H] At the terminal holder cutover (M5H, task H15) this section becomes history: the holder has no layout, and the board's Agents view and the `tiller attach` switcher list the agents by project block. In short:
 
 - **Workspaces, not tabs.** Tiller uses Firstmate-style nested workspaces, as the developer decided. Each project's orchestrator gets its own workspace, labelled with the project id.
 - **Worker workspaces.** Each worker gets its own workspace, labelled `├ <card> <role>`, with `└` on the last one. It is moved directly under its project's orchestrator through the socket API's `workspace.move`. Its agent name is `<card>-<role>`.

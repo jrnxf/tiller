@@ -488,6 +488,120 @@ ADR 0003, accepted Tuesday 2026-11-03. The owner approved it; runs in one or two
 
 ---
 
+## Terminal holder (ADR 0004)
+
+ADR 0004, accepted Wednesday 2026-11-11. A holder process per host owns the agent PTYs, in place of herdr. The briefs are the task table in `docs/design/terminal-holder.md` section 13, which wins over the short lines here; `build-plan.md` M5H gives the groups. H00 to H08, S1a and S1b merge to `main`. S1P, HA1 and H15 change no file. S1c and H09 to H14 merge to `holder-port`, which the owner merges into `main` once, before H15.
+
+### H00 Freeze today's parser results
+`sonnet` medium - 30 min - beside H01
+
+- [ ] `composer::classify` and the `prompt.rs` result for the 9 fixtures stored as `insta` snapshots, made with today's code
+- [ ] Delivered
+
+### H01 Spec amendments
+`opus` medium - 2 h - after the design doc merged
+
+- [x] ADR 0004 and `terminal-holder.md` marked accepted
+- [x] The doc rows of `terminal-holder.md` section 10 done, each changed rule tagged [H]; the code rows left for their tasks
+- [x] `Ctrl-\ ?` help screen in 5.2 with its 9.5 test; S1a, S1b, S1c and S1P in section 13, with the lowered H02 to H04 times
+- [ ] Delivered
+
+### S1a Protocol and client (first slice)
+`opus` high - 2 h - after H01 and H00
+
+- [ ] `tiller-panes`: protocol types, framing kinds 0, 1 and 2, the version handshake, `HolderClient`, the slice's `Panes` methods, `FakePanes`
+- [ ] Check: framing round trip; a handshake version mismatch
+- [ ] Delivered
+
+### S1b The minimal holder (first slice)
+`opus` high - 2.5 h - after S1a
+
+- [ ] `tiller holder`: socket at mode 0600 with the peer check, lock, PTY spawn and reaping with exit codes, `alacritty_terminal` model with `catch_unwind`, `subscribe` (repaint, then passthrough), raw input, resize, one fixed cap per client queue
+- [ ] Check: an end-to-end test that spawns a shell, types and reads the repaint; a peer check test; an exit code test
+- [ ] Delivered
+
+### S1c The minimal daemon wiring (first slice, `holder-port`)
+`opus` medium - 1.5 h - after S1a; its end-to-end test after S1b
+
+- [ ] `holder-port` created from `main`; new agents launch in the holder; the agent record keeps the pane id; the terminal and input endpoints use the holder; the daemon finds its panes after a restart
+- [ ] Check: the daemon restarts with the holder up, and the endpoint serves the same pane and takes input (a first restart test; H09 adds `fake-agent` and the tests of 9.2)
+- [ ] Delivered
+
+### S1P Preview of the first slice
+the orchestrator - 30 min - after S1b and S1c
+
+- [ ] A holder and a daemon from `holder-port` on a test home, the board on a spare port, one plain shell pane; steps written for the other hosts
+- [ ] Owner: types in the shell pane, reloads and sees the same screen, restarts the daemon and gets the same pane back with its history and input
+
+### H02 Finish `tiller-panes`, add `tiller-poll`
+`opus` medium - 3 h - after S1P
+
+- [ ] The rest of the protocol types and `Panes` methods, the `Live` trait, key names; the herdr modules moved, with `tiller-herdr` re-exporting them
+- [ ] Delivered
+
+### H03 Finish the holder core
+`opus` high - 4 h - after H02
+
+- [ ] Env, the rest of the requests other than `subscribe` and `upgrade`
+- [ ] Check: the model gate of 9.1 against the H00 snapshots
+- [ ] Delivered
+
+### H04 Live output
+`opus` high - 4.5 h - after H03
+
+- [ ] Repaint renderer, query answers and filter, sync buffering, leases, back-pressure in place of the fixed cap, limits
+- [ ] Check: the round-trip proptest and the fault tests of 9.4
+- [ ] Delivered
+
+### HA1 Handover audit
+`sonnet` medium - 30 min - after H03
+
+- [ ] The `alacritty_terminal` state the handover carries, each field with its public read and write path, reported to the owner; a gap stops H05 for the owner
+
+### H05 Live upgrade
+`opus` high - 6 h - after H04 and HA1
+
+- [ ] From HA1's field list: the handover record, preflight, dry run, re-exec and resume
+- [ ] Check: the upgrade tests of 9.3
+- [ ] Delivered
+
+### H06 Holder service
+`sonnet` medium - 3 h - after H03
+
+- [ ] `tiller holder --detach` and `upgrade`, the Nix module service and the launchd agent, the doctor `holder` check
+- [ ] Delivered
+
+### H07 `tiller attach`
+`opus` medium - 5 h - after H04
+
+- [ ] Raw mode, the prefix in both encodings, the help screen, detach restore, many clients, read-only, the switcher
+- [ ] Check: the attach tests of 9.5
+- [ ] Delivered
+
+### H08 Raw fixture recording
+`sonnet` medium - 3 h - after H04, with the owner's go (given)
+
+- [ ] Recorder, about 20 min of real sessions, scrubbed, with marks; the raw stream gate of 9.1
+- [ ] Delivered
+
+### H09 to H14 The port (`holder-port`, in series)
+6 h, 6 h, 5 h, 4 h, 3 h and 6 h - H09 after S1c, H05 and H06; each next one after the one before (H11 also after H07, H13 also after H08)
+
+- [ ] H09 Agents and delivery on `Panes`, from S1c's wiring; the restart tests of 9.2
+- [ ] H10 Reconcile, observe and state: R18, R21, R22, the 11.1 migration
+- [ ] H11 Daemon API and peers: live view, Fit as a lease, Open in terminal, the peer pane link
+- [ ] H12 Board copy and `terminal-open.ts`, screenshots in both themes at 1440 px and 390 px
+- [ ] H13 `crates/herdr` and the section 10 code rows done; `git grep -i herdr` finds only history (ADRs, superseded docs such as `herdr-layout.md`, `probe/`, the export, the specs' [H] before-the-cutover notes), and no test name says herdr
+- [ ] H14 The 4 h soak, the full CI gate and `nix flake check`
+- [ ] Delivered, each one
+
+### H15 Holder cutover
+the orchestrator, with the owner - 1 h - after the owner merges `holder-port` into `main`
+
+- [ ] The steps of `terminal-holder.md` 11.3 on the live tiller, with the owner (no PR)
+
+---
+
 ## Cutover (one host at a time)
 
 The steps, the freeze marker, the host order (Linux guest, personal Mac, work Mac) and the rollback are in [`cutover-runbook.md`](cutover-runbook.md). The T6.x numbers below follow the build plan, not the order: the Linux guest (T6.3) goes first.
