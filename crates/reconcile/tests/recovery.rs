@@ -17,7 +17,7 @@ use tiller_core::state::outbox::NewMessage;
 use tiller_core::state::projects::{HostEdit, NewProject};
 use tiller_core::state::runs::{NewRun, Relaunch, SpawnChecks};
 use tiller_herdr::fake::Screen;
-use tiller_reconcile::recovery::approvals::{LANDED_BY_ME, LANDED_NOT_ME};
+use tiller_reconcile::recovery::approvals::{LANDED_BY_ME, LANDED_NOT_ME, SUPERSEDED};
 use tiller_reconcile::sources::HostReadings;
 
 /// R02: a dead orchestrator with work in flight is resumed with the same
@@ -809,6 +809,43 @@ fn merged_pr_without_record_closes_card() {
         w.breaches("G10").is_empty(),
         "the owner's own merge is not a breach"
     );
+}
+
+/// R07: the owner's "Superseded" closes the card `superseded` by the daemon,
+/// the answer as evidence, with the runs ended `abandoned`. No pass reports
+/// an error on it, then or later, and nothing calls the merge a breach.
+#[test]
+fn superseded_answer_closes_card_superseded() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    w.scanner.list(Some(Vec::new()));
+    w.link_pr(&worker, 9, "a1a1a1a1");
+    let run = w.run_of(&worker);
+    let path = run.worktree_path.clone().unwrap();
+    w.scanner
+        .worktree(&path, "fm/work", "a1a1a1a1", false, Some(1));
+    let t0 = now();
+    w.forge.pr(REPO, 9, merged_pr("a1a1a1a1", "e1e1e1e1", t0));
+    w.pass(t0);
+    let items = w.open_items(&run.card_id);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].kind, AttentionKind::Recovery);
+    w.store_mut()
+        .attention_answer(&owner(), None, &items[0].id, SUPERSEDED, AnsweredVia::Board)
+        .unwrap();
+
+    let report = w.pass(t0.plus_minutes(1));
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert!(report.did("closed superseded"), "{report:?}");
+    let card = w.card(&run.card_id);
+    assert_eq!(card.state, CardState::Closed);
+    assert_eq!(card.outcome, Some(CardOutcome::Superseded));
+    assert_eq!(card.closed_by.as_deref(), Some("daemon"));
+    assert_eq!(w.run(&run.id).outcome, Some(RunOutcome::Abandoned));
+    let report = w.pass(t0.plus_minutes(2));
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert!(w.breaches("G10").is_empty(), "{:?}", w.breaches("G10"));
 }
 
 /// R07, G10: the same merge answered "not me" still lands the card, and

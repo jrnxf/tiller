@@ -60,7 +60,9 @@ impl CardAction {
 /// Refuses `actor` the card mutation `action` in `project_id` unless the
 /// role matrix allows it. The owner, the board, a peer board and the import
 /// keep their full reach. The daemon releases due holds and closes cards
-/// `landed` (`state.md` section 3: no other close comes from reconcile). The
+/// `landed`, and `superseded` only on the owner's answer to R07, which
+/// `card.close` checks (`state.md` section 7: no other close comes from
+/// reconcile). The
 /// project's live orchestrator acts in its own project, closes anything but
 /// `landed`, and may also create a card in another project of its host.
 /// Workers, hooks, the curator and a script do none of these.
@@ -76,9 +78,10 @@ pub fn require_card_scope(
         // here until its scope is decided.
         Actor::Owner | Actor::Board | Actor::Peer(_) | Actor::Import => Ok(()),
         Actor::Daemon => match action {
-            CardAction::ReleaseDueHold | CardAction::Close(CardOutcome::Landed) => Ok(()),
+            CardAction::ReleaseDueHold
+            | CardAction::Close(CardOutcome::Landed | CardOutcome::Superseded) => Ok(()),
             _ => Err(Error::Forbidden(format!(
-                "the daemon may not {what}; it releases due holds and closes cards landed"
+                "the daemon may not {what}; it releases due holds and closes cards landed, or superseded on the owner's answer"
             ))),
         },
         Actor::Session(id) => {

@@ -76,21 +76,12 @@ fn outside_merge_answered_then_reopened(
     w.store_mut()
         .attention_answer(&owner(), None, &recovery.id, answer, AnsweredVia::Board)
         .unwrap();
-    w.pass(t0.plus_minutes(1));
-    // The daemon closes a card `landed` on the answer; any other outcome is
-    // the owner's own close.
-    if w.card(&run.card_id).state == CardState::Open {
-        w.store_mut()
-            .card_close(
-                &owner(),
-                &run.card_id,
-                outcome,
-                Some("the owner's answer"),
-                None,
-            )
-            .unwrap();
-    }
-    assert_eq!(w.card(&run.card_id).outcome, Some(outcome));
+    // The daemon carries out either answer: it closes the card on it.
+    let report = w.pass(t0.plus_minutes(1));
+    assert!(report.errors.is_empty(), "{report:?}");
+    let closed = w.card(&run.card_id);
+    assert_eq!(closed.outcome, Some(outcome));
+    assert_eq!(closed.closed_by.as_deref(), Some("daemon"));
 
     w.store_mut()
         .card_reopen(&owner(), &run.card_id, "the fix regressed")

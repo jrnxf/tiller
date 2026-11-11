@@ -27,11 +27,12 @@ use crate::sources::PrRead;
 
 /// The answers R07's item offers. The two landed ones start with
 /// [`MARK_LANDED`], which `run.end landed` and `card.close landed` accept as
-/// the owner's confirmation.
+/// the owner's confirmation; [`SUPERSEDED`] is the answer the daemon's
+/// `card.close superseded` needs.
 pub const LANDED_BY_ME: &str = "Mark landed, it was me";
 pub const LANDED_NOT_ME: &str = "Mark landed, not me";
 pub const KEEP_OPEN: &str = "Keep open";
-pub const SUPERSEDED: &str = "Superseded";
+pub use tiller_core::state::cards::SUPERSEDED;
 
 impl Reconciler {
     pub(crate) fn approvals(&mut self, now: Timestamp, report: &mut Report) -> Result<()> {
@@ -738,7 +739,8 @@ impl Reconciler {
     /// The owner's answers to R07: either landed answer ends the card's
     /// active runs `landed` and closes the card `landed` (`closed_by =
     /// daemon`, the answer as evidence); "not me" is also a breach and the
-    /// unauthorized-action trigger; "superseded" closes the card so.
+    /// unauthorized-action trigger; "superseded" ends them `abandoned` and
+    /// closes the card `superseded`, the same way.
     fn outside_merge_answers(&mut self, now: Timestamp, report: &mut Report) -> Result<()> {
         let answered: Vec<tiller_core::domain::Attention> = list(
             self.conn(),

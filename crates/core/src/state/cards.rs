@@ -17,7 +17,7 @@ use crate::domain::lifecycle::{allowed_outcomes, outcome_satisfies_dependants};
 use crate::domain::*;
 use crate::error::{Error, Result};
 use crate::ids::{self, HOST_HEALTH_CARD};
-use crate::store::{Applied, Ctx, NewEvent, Store, Tx};
+use crate::store::{Actor, Applied, Ctx, NewEvent, Store, Tx};
 use crate::time::Timestamp;
 
 /// A card to create.
@@ -491,6 +491,11 @@ fn release_dep(tx: &mut Tx<'_>, dep: &CardDep, reason: DepReleaseReason) -> Resu
 /// approval: an outside merge, or a deploy fixed by hand (`state.md` 7).
 pub const MARK_LANDED: &str = "Mark landed";
 
+/// The option on R07's outside-merge `recovery` item that closes the card
+/// `superseded`: the only close other than `landed` the daemon makes, and
+/// only on the owner's answer (`state.md` 7, `recovery.md` R07).
+pub const SUPERSEDED: &str = "Superseded";
+
 /// The option on a deploy `recovery` item that gives up the deploy watch and
 /// leaves the card open for a new run (`state.md` 7).
 pub const REOPEN_WORK: &str = "Reopen work";
@@ -546,6 +551,26 @@ pub fn landed_evidence(conn: &rusqlite::Connection, card: &Card) -> Result<bool>
                                                  WHERE e.entity = 'attention' AND e.entity_id = a.id
                                                    AND e.kind = 'attention.answered' AND e.seq > ?3)))",
         params![card.id, MARK_LANDED, since],
+        |row| row.get(0),
+    )?)
+}
+
+/// Whether the owner answered "Superseded" to an R07 outside-merge
+/// `recovery` item on the card since it was created or last reopened: the
+/// evidence the daemon needs to close the card `superseded`.
+fn superseded_answer(conn: &rusqlite::Connection, card: &Card) -> Result<bool> {
+    let since = reopened_seq(conn, card)?;
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM attention a
+                        WHERE a.card_id = ?1 AND a.kind = 'recovery'
+                          AND lower(trim(a.answer)) = lower(?2)
+                          AND json_valid(a.evidence)
+                          AND (json_extract(a.evidence, '$.r07_pr') IS NOT NULL
+                               OR json_extract(a.evidence, '$.r07_direct_run') IS NOT NULL)
+                          AND (?3 = 0 OR EXISTS (SELECT 1 FROM events e
+                                                 WHERE e.entity = 'attention' AND e.entity_id = a.id
+                                                   AND e.kind = 'attention.answered' AND e.seq > ?3)))",
+        params![card.id, SUPERSEDED, since],
         |row| row.get(0),
     )?)
 }
@@ -997,6 +1022,16 @@ impl Store {
                         &card.display_id,
                         format!("no report artifact is recorded on the card{since}"),
                     ));
+                }
+                // The daemon's one close besides `landed`: carrying out the
+                // owner's "Superseded" to R07 (`recovery.md` R07).
+                CardOutcome::Superseded
+                    if matches!(tx.actor(), Actor::Daemon) && !superseded_answer(tx.conn(), &card)? =>
+                {
+                    let since = since_reopen(tx.conn(), &card)?;
+                    return Err(Error::Forbidden(format!(
+                        "the daemon closes a card superseded only on the owner's answer \"{SUPERSEDED}\" to its outside-merge recovery item{since}"
+                    )));
                 }
                 CardOutcome::Completed => required("evidence", evidence.unwrap_or_default())?,
                 CardOutcome::Cancelled

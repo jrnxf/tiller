@@ -9,12 +9,14 @@ use serde_json::json;
 use super::approvals::{Decision, Execution, NewApproval, NewPr, PrFetch};
 use super::asks::{NewAsk, Resolution};
 use super::attention::NewAttention;
-use super::cards::{BugRoute, CardEdit, MARK_LANDED, NewBug, NewCard, TILLER_BUG};
+use super::cards::{
+    BugRoute, CardEdit, Closed, MARK_LANDED, NewBug, NewCard, SUPERSEDED, TILLER_BUG,
+};
 use super::projects::{HostEdit, Init, NewProject, ProjectEdit};
 use super::runs::{Bind, NewObservation, NewOrchestrator, NewRun, Relaunch, SpawnChecks};
 use crate::domain::*;
 use crate::error::Error;
-use crate::store::{Actor, Ctx, Store};
+use crate::store::{Actor, Applied, Ctx, Store};
 use crate::time::Timestamp;
 
 pub(crate) const DB_ENV: &str = "TILLER_TEST_DB";
@@ -984,6 +986,95 @@ fn only_mark_landed_confirms_an_outside_merge() {
         .unwrap()
         .value;
     assert_eq!(closed.card.outcome, Some(CardOutcome::Landed));
+}
+
+/// R07's outside-merge item on `card`, answered `answer` by the owner. With
+/// `r07` false the item carries no R07 evidence.
+fn answered_outside_merge(store: &mut Store, card: &Card, r07: bool, answer: &str) {
+    let item = store
+        .attention_open(
+            &owner(),
+            None,
+            NewAttention {
+                card: card.id.clone(),
+                kind: AttentionKind::Recovery,
+                question: "PR #7 was merged outside Tiller. Was that you?".into(),
+                options: Some(json!([MARK_LANDED, SUPERSEDED])),
+                evidence: Some(
+                    if r07 {
+                        json!({"r07_pr": "pr-7"})
+                    } else {
+                        json!({})
+                    }
+                    .to_string(),
+                ),
+                ..NewAttention::default()
+            },
+        )
+        .unwrap()
+        .value;
+    store
+        .attention_answer(&owner(), None, &item.id, answer, AnsweredVia::Board)
+        .unwrap();
+}
+
+/// The daemon closes a card `superseded` only to carry out the owner's
+/// "Superseded" to an R07 item answered since the card's last reopen: never
+/// on its own, nor on another answer or another recovery item. Its other
+/// closes stay refused, and the owner's own close keeps its full reach.
+#[test]
+fn daemon_closes_superseded_only_on_the_owner_s_r07_answer() {
+    let (mut store, _) = memory_store();
+    let ship = store
+        .card_create(&owner(), None, card(CardKind::Ship, "outside"), None)
+        .unwrap()
+        .value;
+    let close = |store: &mut Store, ctx: &Ctx, outcome| {
+        store.card_close(ctx, &ship.id, outcome, Some("the owner's answer"), None)
+    };
+    let forbidden = |result: Result<Applied<Closed>, Error>| {
+        let error = result.unwrap_err();
+        assert_eq!(error.code(), "forbidden", "{error}");
+        error
+    };
+
+    let error = forbidden(close(&mut store, &daemon(), CardOutcome::Superseded));
+    assert!(
+        error.to_string().contains("only on the owner's answer"),
+        "{error}"
+    );
+    answered_outside_merge(&mut store, &ship, true, "Keep open");
+    forbidden(close(&mut store, &daemon(), CardOutcome::Superseded));
+    answered_outside_merge(&mut store, &ship, false, SUPERSEDED);
+    forbidden(close(&mut store, &daemon(), CardOutcome::Superseded));
+
+    answered_outside_merge(&mut store, &ship, true, SUPERSEDED);
+    forbidden(close(&mut store, &daemon(), CardOutcome::Cancelled));
+    let closed = close(&mut store, &daemon(), CardOutcome::Superseded)
+        .unwrap()
+        .value;
+    assert_eq!(closed.card.outcome, Some(CardOutcome::Superseded));
+    assert_eq!(closed.card.closed_by.as_deref(), Some("daemon"));
+
+    // A reopen starts the card over: the answer before it is not evidence.
+    store
+        .card_reopen(&owner(), &ship.id, "the other change was reverted")
+        .unwrap();
+    let error = forbidden(close(&mut store, &daemon(), CardOutcome::Superseded));
+    assert!(
+        error
+            .to_string()
+            .contains("since the card was last reopened"),
+        "{error}"
+    );
+    answered_outside_merge(&mut store, &ship, true, SUPERSEDED);
+    close(&mut store, &daemon(), CardOutcome::Superseded).unwrap();
+
+    store.card_reopen(&owner(), &ship.id, "once more").unwrap();
+    let closed = close(&mut store, &owner(), CardOutcome::Superseded)
+        .unwrap()
+        .value;
+    assert_eq!(closed.card.closed_by.as_deref(), Some("owner"));
 }
 
 /// A reopen starts the card over: a "Mark landed" answer given before it is
