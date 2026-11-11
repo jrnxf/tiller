@@ -22,16 +22,42 @@ use serde_json::Value;
 const WAIT: Duration = Duration::from_secs(20);
 
 struct Daemon {
-    child: Child,
+    child: Running,
     port: u16,
 }
 
-fn spawn(world: &World, args: &[&str]) -> Child {
-    daemon_command(world)
-        .args(args)
-        .env("TILLER_HERDR", "/nonexistent/herdr")
-        .spawn()
-        .unwrap()
+/// A daemon process that is killed and reaped when it goes out of scope, so a
+/// test that fails before it stops the daemon leaves none behind.
+struct Running(Child);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+impl std::ops::Deref for Running {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Running {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+fn spawn(world: &World, args: &[&str]) -> Running {
+    Running(
+        daemon_command(world)
+            .args(args)
+            .env("TILLER_HERDR", "/nonexistent/herdr")
+            .spawn()
+            .unwrap(),
+    )
 }
 
 /// The daemon command without `TILLER_HERDR`, so `config.toml` names herdr.
@@ -158,11 +184,13 @@ fn a_db_other_than_the_home_database_is_refused() {
     assert!(!world.home().exists(), "the daemon created a default home");
 
     // The environment variable is the same flag.
-    let mut child = daemon_command(&world)
-        .env("TILLER_HERDR", "/nonexistent/herdr")
-        .env("TILLER_DB", &other)
-        .spawn()
-        .unwrap();
+    let mut child = Running(
+        daemon_command(&world)
+            .env("TILLER_HERDR", "/nonexistent/herdr")
+            .env("TILLER_DB", &other)
+            .spawn()
+            .unwrap(),
+    );
     assert_eq!(wait(&mut child).code(), Some(2));
     assert!(!other.exists());
 }
@@ -498,10 +526,12 @@ fn the_daemon_drives_the_herdr_spawn_names() {
     ]);
 
     // Every failed call logs; nothing reads stderr here, so it must not fill.
-    let child = daemon_command(&world)
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let child = Running(
+        daemon_command(&world)
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let mut daemon = Daemon { child, port: 0 };
     let deadline = Instant::now() + WAIT;
     let seen = loop {
@@ -557,10 +587,12 @@ fn the_daemon_follows_a_changed_spawn_herdr_without_a_restart() {
         ]);
     };
     set(&first);
-    let child = daemon_command(&world)
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let child = Running(
+        daemon_command(&world)
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let mut daemon = Daemon { child, port: 0 };
     assert!(
         wait_for_file(&first_calls),
@@ -597,7 +629,7 @@ fn the_daemon_reads_only_spawn_and_needs_its_herdr() {
     assert!(terminate(&mut daemon).success());
 
     std::fs::write(world.home().join("config.toml"), "[spawn]\nherdr = []\n").unwrap();
-    let mut daemon = daemon_command(&world).spawn().unwrap();
+    let mut daemon = Running(daemon_command(&world).spawn().unwrap());
     let status = wait(&mut daemon);
     assert_eq!(status.code(), Some(1));
     let mut stderr = String::new();
@@ -682,12 +714,14 @@ fn the_login_link_signs_in_once_at_an_allowed_host() {
 #[test]
 fn the_login_code_signs_in_at_an_allowed_host_until_sign_out() {
     let world = World::initialized();
-    let mut child = daemon_command(&world)
-        .args(["--allow-host", "tiller.example.com"])
-        .env("TILLER_HERDR", "/nonexistent/herdr")
-        .env("TILLER_LOG", "trace")
-        .spawn()
-        .unwrap();
+    let mut child = Running(
+        daemon_command(&world)
+            .args(["--allow-host", "tiller.example.com"])
+            .env("TILLER_HERDR", "/nonexistent/herdr")
+            .env("TILLER_LOG", "trace")
+            .spawn()
+            .unwrap(),
+    );
     let line = first_line(&mut child).expect("the daemon exited before listening");
     let port = line
         .trim()
