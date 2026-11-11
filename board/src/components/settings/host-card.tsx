@@ -64,6 +64,7 @@ export function CardLine({
   sub,
   detail,
   end,
+  extra,
   testid,
 }: {
   tone: Tone | null;
@@ -71,6 +72,8 @@ export function CardLine({
   sub?: string;
   detail?: Words;
   end?: ReactNode;
+  // A block under the line, as wide as its text.
+  extra?: ReactNode;
   testid?: string;
 }) {
   return (
@@ -86,6 +89,7 @@ export function CardLine({
         </span>
       ) : null}
       {end}
+      {extra}
     </li>
   );
 }

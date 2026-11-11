@@ -59,6 +59,11 @@ test("lists each backup with its Lisbon time, size, maker and verdict, and the f
 });
 
 test("Back up now shows Backing up... while it runs, then the new backup", async () => {
+  // The daemon answers when the test lets it, so the busy state cannot be missed.
+  let finish: (() => void) | undefined;
+  const finished = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
   const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
     if (init?.method === "POST") {
@@ -66,7 +71,7 @@ test("Back up now shows Backing up... while it runs, then the new backup", async
       const reply = new Response(
         JSON.stringify(fixtureMutation("POST", path, body, "default").reply.body),
       );
-      return new Promise<Response>((resolve) => setTimeout(() => resolve(reply), 20));
+      return finished.then(() => reply);
     }
     return new Response(JSON.stringify(withoutDeleted(path, undefined, "default")));
   });
@@ -76,6 +81,7 @@ test("Back up now shows Backing up... while it runs, then the new backup", async
   fireEvent.click(button);
   const busy = await screen.findByRole("button", { name: "Backing up..." });
   expect((busy as HTMLButtonElement).disabled).toBe(true);
+  finish?.();
   await waitFor(() => expect(screen.getByRole("button", { name: "Back up now" })).toBeTruthy());
   await waitFor(() => expect(screen.getAllByTestId("backup-row")).toHaveLength(4));
   expect(screen.getAllByTestId("backup-row")[0]?.textContent).toContain("By hand");

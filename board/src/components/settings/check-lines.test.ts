@@ -41,7 +41,7 @@ test("a poller that keeps failing says how often and since when, and can be run 
     /^5 errors in a row\. Last read OK Wed 11 Nov, 09:13\. It keeps trying on its own\./,
   );
   expect(reconcile?.end?.kind).toBe("run");
-  expect(needsYou(lines)).toEqual({ tone: "red", text: "3 checks need you" });
+  expect(needsYou(lines)).toEqual({ tone: "red", text: "1 check needs you" });
 });
 
 test("a poller Run now brought back reads as fixed, and the count drops", () => {
@@ -58,7 +58,7 @@ test("a poller Run now brought back reads as fixed, and the count drops", () => 
   expect(reconcile?.tone).toBe("green");
   expect(reconcile?.end).toEqual({ kind: "note", text: "Fixed" });
   expect(text(reconcile?.detail)).toBe("Running again since 10:00. First read OK.");
-  expect(needsYou(lines)).toEqual({ tone: "amber", text: "2 checks need you" });
+  expect(needsYou(lines)).toBeNull();
 });
 
 test("the check names of the other system never reach the board", () => {
@@ -67,13 +67,10 @@ test("the check names of the other system never reach the board", () => {
   expect(all.join("\n")).not.toMatch(/firstmate/i);
 });
 
-test("merge gates that share a mode and a reason share one line", () => {
-  const lines = checkLines(doctorFor("default", NOW), []);
-  const gates = lines.filter((line) => line.key === "merge-gates");
-  expect(gates).toHaveLength(1);
-  expect(text(gates[0]?.detail)).toBe(
-    "alpha, beta, gamma (detect): detection only; merges are detected, not prevented.",
-  );
+test("the merge App and the merge gates are the Merge App section's, not the host card's", () => {
+  const lines = checkLines(doctorFor("default", NOW), pollersFor("default", NOW));
+  expect(lines.some((line) => line.key === "merge-gates")).toBe(false);
+  expect(lines.some((line) => line.key === "check:merge app")).toBe(false);
 });
 
 test.each([

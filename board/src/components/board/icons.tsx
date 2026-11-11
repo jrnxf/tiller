@@ -202,6 +202,17 @@ export const RetryIcon = () => (
   </Glyph>
 );
 
+// A link that leaves the board.
+export const ExternalIcon = () => (
+  <Glyph>
+    <path
+      d="M9.5 2.5h4v4M13.5 2.5 7.5 8.5M12 9.5v3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3"
+      {...stroke}
+      {...round}
+    />
+  </Glyph>
+);
+
 // The phone key bar's arrows and Enter.
 const ARROW = {
   left: "M10 3.5 5.5 8l4.5 4.5",

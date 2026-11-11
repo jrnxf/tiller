@@ -226,11 +226,14 @@ const OTHER_SYSTEM: Record<string, { detail: Words }> = {
   },
 };
 
+// The Merge App section above the hosts shows this check and the merge gates
+// (merge-app.tsx), so the host card does not say it again.
+const MERGE_APP = "merge app";
+
 const TITLES: Record<string, string> = {
   "hook registration": "Hooks",
   "owner marker": "Owner marker",
   firstmate: "Other system",
-  "merge app": "Merge App",
   config: "Config",
   "config drift": "Config drift",
   state: "State",
@@ -273,37 +276,6 @@ function checkLine(check: DoctorCheck): CheckLine {
   };
 }
 
-function gateLine(report: DoctorReport): CheckLine | null {
-  const gates = report.merge_gates;
-  if (gates.length === 0) return null;
-  const tone = worst(gates.map((gate) => TONE[gate.status]));
-  // One clause per gate and verdict: "alpha, beta (detect): detection only; ...".
-  const groups = new Map<string, { gate: string; text: string; projects: string[] }>();
-  for (const gate of gates) {
-    const text = gate.detail.replace(/^merge gate:\s*/, "");
-    const group = groups.get(`${gate.merge_gate}\n${text}`);
-    if (group) group.projects.push(gate.project);
-    else
-      groups.set(`${gate.merge_gate}\n${text}`, {
-        gate: gate.merge_gate,
-        text,
-        projects: [gate.project],
-      });
-  }
-  const detail: Words = [...groups.values()].map(
-    ({ gate, text, projects }, index) =>
-      `${index > 0 ? " " : ""}${projects.join(", ")} (${gate}): ${text}${/[.!?]$/.test(text) ? "" : "."}`,
-  );
-  return {
-    key: "merge-gates",
-    tone,
-    title: "Merge gates",
-    sub: `${gates.length} ${gates.length === 1 ? "project" : "projects"}`,
-    detail,
-    ...(tone === "green" ? { end: OK } : {}),
-  };
-}
-
 export function checkLines(
   report: DoctorReport | undefined,
   pollers: PollerHealth[],
@@ -313,10 +285,8 @@ export function checkLines(
   const lines = [
     ...toolLines(checks.filter((check) => TOOLS.has(check.name))),
     ...pollerLines(pollers, fixed),
-    ...checks.filter((check) => !TOOLS.has(check.name)).map(checkLine),
+    ...checks.filter((check) => !TOOLS.has(check.name) && check.name !== MERGE_APP).map(checkLine),
   ];
-  const gates = report ? gateLine(report) : null;
-  if (gates) lines.push(gates);
   return lines;
 }
 

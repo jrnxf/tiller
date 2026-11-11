@@ -66,6 +66,8 @@ Do this step last, after the ruleset exists. The daemon checks every project aga
 
 ## 5. Confirm with `tiller doctor`
 
+The board's Settings page shows the same state in its Merge App section: the host's two steps, then one block per gated repo, with a link to the GitHub page for each step GitHub owns. It only reads and links. It never reads or moves the key, and the key step stays a terminal step.
+
 Within a minute, run `tiller doctor`:
 
 1. The `merge app` check is `ok` and names the App ID. A `warn` names the problem: no key, or a file Tiller cannot use. A `fail` means the key is readable by others: run `chmod 600` on it, and rotate it if anyone else could have read it.

@@ -93,7 +93,7 @@ test("the host row says how many checks need you, and opens into a card with the
   renderSettings();
   const panel = await screen.findByRole("region", { name: "Hosts" });
   const row = within(panel).getByTestId("host-host-a");
-  expect((await within(row).findByTestId("host-needs-you")).textContent).toBe("3 checks need you");
+  expect((await within(row).findByTestId("host-needs-you")).textContent).toBe("1 check needs you");
   expect(within(panel).queryByTestId("host-card-host-a")).toBeNull();
 
   const { toggle, card } = await openHost("host-a");
@@ -126,9 +126,7 @@ test("Run now polls the failing poller, and its line and the row count say it is
   expect(call?.[1]?.method).toBe("POST");
   expect(JSON.parse(String(call?.[1]?.body))).toEqual({ idempotency_key: expect.any(String) });
   const row = screen.getByTestId("host-host-a");
-  await waitFor(() =>
-    expect(within(row).getByTestId("host-needs-you").textContent).toBe("2 checks need you"),
-  );
+  await waitFor(() => expect(within(row).queryByTestId("host-needs-you")).toBeNull());
 });
 
 test("Check again runs the checks once more", async () => {
@@ -173,4 +171,14 @@ test("a peer's card points to its own board, and a herdr machine's to this host"
   );
   // A peer's own checks are not this board's to count.
   expect(within(screen.getByTestId("host-host-d")).queryByTestId("host-needs-you")).toBeNull();
+});
+
+test("the Merge App problem shows once, in its own section, not again in the host card", async () => {
+  serve("default");
+  renderSettings();
+  const { card } = await openHost("host-a");
+  await within(card).findByTestId("check-check:config drift");
+  expect(within(card).queryByTestId("check-check:merge app")).toBeNull();
+  expect(within(card).queryByTestId("check-merge-gates")).toBeNull();
+  expect(screen.getAllByTestId("merge-app")).toHaveLength(1);
 });

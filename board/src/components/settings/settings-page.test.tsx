@@ -163,17 +163,16 @@ test("without the hosts list, the host serving this board still has its row", as
   expect(within(panel).queryByTestId("no-hosts")).toBeNull();
 });
 
-test("a merge App that is not ready is a warning above the hosts, named by its host", async () => {
+test("a merge App that is not ready is a section above the hosts, named by its host", async () => {
   serve(true);
   renderSettings();
-  const warning = await screen.findByTestId("merge-app");
-  expect(warning.getAttribute("role")).toBe("status");
-  await waitFor(() =>
-    expect(within(warning).getByText("Merge App not set up on host-a")).toBeTruthy(),
-  );
-  expect(within(warning).getByText(/^Create the merge App and put its app-id/)).toBeTruthy();
+  const section = await screen.findByTestId("merge-app");
+  expect(section.getAttribute("aria-label")).toBe("Merge App");
+  await waitFor(() => expect(within(section).getByText("host-a")).toBeTruthy());
+  expect(within(section).getByTestId("merge-app-status").textContent).toBe("Not set up");
+  expect(within(section).getByText(/^Create the merge App and put its app-id/)).toBeTruthy();
   const page = screen.getByTestId("settings");
-  expect(page.firstElementChild).toBe(warning);
+  expect(page.firstElementChild).toBe(section);
 });
 
 interface MachineRow {

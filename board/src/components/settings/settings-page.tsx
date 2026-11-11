@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
-import type { DaemonHealth, Machine, MergeAppHealth, StartSettings } from "../../lib/api-types";
+import type { DaemonHealth, Machine, StartSettings } from "../../lib/api-types";
 import { machineRowView } from "../../lib/machines";
 import type { MachineRowView, VersionMark } from "../../lib/machines";
 import { prefsStore, updatePrefs } from "../../lib/prefs";
@@ -18,7 +18,6 @@ import { signOut } from "../../lib/session";
 import { useStore } from "../../lib/store";
 import { formatAge, secondsSince } from "../board/format";
 import { Segmented } from "../ui/segmented";
-import { WarnIcon } from "../board/icons";
 import { ChevronIcon, PlusIcon } from "../shell/icons";
 import { AddHostForm } from "./add-host";
 import { Backups } from "./backups";
@@ -30,6 +29,7 @@ import { Fact } from "./fact";
 import { HostChecks } from "./host-checks";
 import { HostConfigSections } from "./host-config-sections";
 import { HostEdit } from "./host-edit";
+import { MergeAppSection } from "./merge-app";
 import { SettingField } from "./setting-field";
 import "./settings.css";
 
@@ -64,39 +64,6 @@ function Choice<Value extends string>({
         <p>{hint}</p>
       </div>
       <Segmented label={label} options={options} value={value} onChange={onChange} />
-    </div>
-  );
-}
-
-// The warning above the hosts when the merge App is not ready, as `tiller
-// doctor`'s `merge app` line words it.
-const MERGE_APP_TITLE: Record<Exclude<MergeAppHealth["status"], "ok">, string> = {
-  missing: "Merge App not set up",
-  warn: "Merge App not used",
-  fail: "Merge App key exposed",
-};
-
-// The merge App belongs to the daemon serving this board, so it is named by
-// that host's label like any other host's fact.
-function MergeApp({ app, host }: { app: MergeAppHealth; host: string | null }) {
-  const on = host ? ` on ${host}` : "";
-  if (app.status === "ok") {
-    return (
-      <p className="set-note" data-testid="merge-app">
-        <span className="set-dot green" aria-hidden="true" />
-        {app.app_id === null ? "Merge App ready" : `Merge App ${app.app_id} ready`}
-        {on}
-      </p>
-    );
-  }
-  return (
-    <div className="set-alert" data-status={app.status} role="status" data-testid="merge-app">
-      <WarnIcon />
-      <b>
-        {MERGE_APP_TITLE[app.status]}
-        {on}
-      </b>
-      <p>{app.detail}</p>
     </div>
   );
 }
@@ -541,7 +508,7 @@ export function SettingsPage() {
   const viewing = chosen !== null && hosts.includes(chosen) ? chosen : (host ?? "this host");
   return (
     <div className="settings-page" data-testid="settings">
-      {health ? <MergeApp app={health.merge_app} host={host} /> : null}
+      {health ? <MergeAppSection app={health.merge_app} host={host} /> : null}
       {health ? (
         <Hosts machines={machines} health={health} owner={session?.owner ?? false} />
       ) : null}

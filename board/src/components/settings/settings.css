@@ -125,48 +125,6 @@
   color: var(--red-text);
 }
 
-/* The merge App: a warning when it is not ready, one quiet line when it is. */
-
-.set-alert {
-  display: grid;
-  grid-template-columns: 16px minmax(0, 1fr);
-  gap: 2px 10px;
-  align-items: start;
-  padding: 12px 14px;
-  border-radius: var(--r8);
-  border: 1px solid color-mix(in srgb, var(--yellow) 30%, var(--line-2));
-  background: color-mix(in srgb, var(--yellow) 8%, var(--bg-card));
-}
-
-.set-alert[data-status="fail"] {
-  border-color: color-mix(in srgb, var(--red) 35%, var(--line-2));
-  background: color-mix(in srgb, var(--red) 7%, var(--bg-card));
-}
-
-.set-alert .icon {
-  margin-top: 1px;
-  color: var(--yellow-text);
-}
-
-.set-alert[data-status="fail"] .icon {
-  color: var(--red-text);
-}
-
-.set-alert b {
-  font-size: var(--fs-small);
-  font-weight: var(--w-semibold);
-  color: var(--fg-1);
-}
-
-.set-alert p {
-  grid-column: 2;
-  margin: 0;
-  font-size: var(--fs-mini);
-  line-height: 1.5;
-  color: var(--fg-2);
-  overflow-wrap: anywhere;
-}
-
 .set-note {
   display: flex;
   align-items: center;
@@ -445,6 +403,26 @@
   grid-column: 3;
   grid-row: 1 / span 2;
   justify-self: end;
+}
+
+/* The merge App's commands, under their step. */
+.set-line-c {
+  grid-column: 2 / -1;
+  margin: 6px 0 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r8);
+  background: var(--bg-panel);
+  font-family: var(--mono);
+  font-size: var(--fs-mini);
+  line-height: 1.6;
+  color: var(--fg-2);
+  overflow-x: auto;
+  user-select: all;
+}
+
+.set-lines li > a.btn {
+  text-decoration: none;
 }
 
 .set-line-r {
