@@ -19,6 +19,8 @@ struct Fake {
     rulesets: HashMap<u64, Value>,
     /// Set: every read fails, as on a network error.
     down: bool,
+    /// Repos whose default branch has no rules at all.
+    open: Vec<&'static str>,
     reads: RefCell<Vec<String>>,
 }
 
@@ -27,6 +29,9 @@ impl RulesetForge for Fake {
         self.reads.borrow_mut().push(format!("{repo}@{branch}"));
         if self.down {
             return Err(GateError("connection refused".into()));
+        }
+        if self.open.contains(&repo) {
+            return Ok(Vec::new());
         }
         Ok(self.rules.clone())
     }
@@ -392,7 +397,11 @@ fn a_repo_moved_back_is_checked_again_at_once() {
     let mut store = store();
     let daemon = Ctx::new(Actor::Daemon);
     let owner = Ctx::new(Actor::Owner);
-    let forge = gated();
+    // The moved-to repo has no ruleset, so each pass's verdict shows.
+    let forge = Fake {
+        open: vec!["example/moved"],
+        ..gated()
+    };
     let mut last = HashMap::new();
     let start = Instant::now();
     let move_to = |store: &mut Store, repo: &str| {
@@ -410,13 +419,16 @@ fn a_repo_moved_back_is_checked_again_at_once() {
             .unwrap();
     };
     check_due(&mut store, &forge, &APP, &daemon, &mut last, start).unwrap();
+    assert_eq!(gate_of(&store, "alpha"), MergeGate::Enforced);
     move_to(&mut store, "example/moved");
     let soon = start + Duration::from_secs(10 * 60);
     check_due(&mut store, &forge, &APP, &daemon, &mut last, soon).unwrap();
+    assert_eq!(gate_of(&store, "alpha"), MergeGate::Detect);
     move_to(&mut store, "example/alpha");
     let later = start + Duration::from_secs(20 * 60);
     let judged = check_due(&mut store, &forge, &APP, &daemon, &mut last, later).unwrap();
     assert_eq!(judged.len(), 1, "the repo moved back is judged again");
+    assert_eq!(gate_of(&store, "alpha"), MergeGate::Enforced);
     assert_eq!(
         *forge.reads.borrow(),
         [
