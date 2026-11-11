@@ -435,6 +435,27 @@ struct Reading<'r> {
     shown: &'r str,
 }
 
+/// The commands a `nix` call may run that are not sure, at most
+/// [`GUESSES`] of them, and whether there were more.
+#[derive(Default)]
+struct Readings {
+    list: Vec<Vec<Arg>>,
+    over: bool,
+}
+
+impl Readings {
+    /// The reading that starts with `head`, then the words in `rest`.
+    fn push(&mut self, head: &[String], rest: &VecDeque<(Arg, bool)>) {
+        if self.list.len() >= GUESSES {
+            self.over = true;
+            return;
+        }
+        let mut reading: Vec<Arg> = head.iter().map(|part| Arg::fixed(part)).collect();
+        reading.extend(rest.iter().map(|(word, _)| word.clone()));
+        self.list.push(reading);
+    }
+}
+
 struct Walker<'a, 'b> {
     ctx: &'a Context<'b>,
     /// Variables a script set to a static value earlier in the same call.
@@ -445,12 +466,27 @@ struct Walker<'a, 'b> {
     depth: usize,
     /// The script runs on another host through `ssh`, `mosh` or `et`.
     remote: bool,
-    /// The readings of runner options tried so far with an unread word
-    /// taken as an option. Each one can try more, so they are capped.
+    /// The readings tried so far that are not sure: a runner option, a
+    /// nix `-c` that may be a value, a direnv path that may be a file, and
+    /// each place a wrapper's command may start. Each one can try more, so
+    /// they share one budget of [`GUESSES`].
     guesses: usize,
 }
 
+/// The most readings that are not sure the Bash guard tries for one call.
+/// When they are spent, the guard fails closed on the text.
+const GUESSES: usize = 64;
+
 impl Walker<'_, '_> {
+    /// Spends one guess of the shared budget: `false` when it is spent.
+    fn guess(&mut self) -> bool {
+        if self.guesses >= GUESSES {
+            return false;
+        }
+        self.guesses += 1;
+        true
+    }
+
     fn deny(
         &self,
         code: Code,
@@ -805,6 +841,9 @@ impl Walker<'_, '_> {
                                 let dir = file == "/"
                                     || file.split('/').all(|part| matches!(part, "." | ".."));
                                 if !dir {
+                                    if !self.guess() {
+                                        return self.unreadable_options("direnv", &words[i..]);
+                                    }
                                     let mut file = vec![Arg::fixed(&file)];
                                     file.extend_from_slice(words.get(i + 3..).unwrap_or_default());
                                     if let Some(found) =
@@ -817,7 +856,7 @@ impl Walker<'_, '_> {
                             Some(_) => starts.push(Start::At(i + 2)),
                             None => {}
                         }
-                        match self.starts(starts, words, command, script, appended) {
+                        match self.starts("direnv", starts, words, command, script, appended) {
                             Step::Next(next) => i = next,
                             Step::Done(found) => return found,
                         }
@@ -1022,13 +1061,15 @@ impl Walker<'_, '_> {
         if let Some(found) = self.runner_starts(&read, at + 1, 0, &mut starts) {
             return Step::Done(Some(found));
         }
-        self.starts(starts, words, command, script, appended)
+        self.starts(name, starts, words, command, script, appended)
     }
 
     /// The places a wrapper's command may start in `words`: one place is
-    /// the next program, and each of several is checked as its own command.
+    /// the next program, and each of several is checked as its own command,
+    /// spending one guess each.
     fn starts(
         &mut self,
+        program: &str,
         mut starts: Vec<Start>,
         words: &[Arg],
         command: &Simple,
@@ -1044,10 +1085,23 @@ impl Walker<'_, '_> {
         match starts.as_slice() {
             [] => Step::Done(None),
             [Start::At(start)] => Step::Next(*start),
-            _ => Step::Done(starts.into_iter().find_map(|start| match start {
-                Start::At(start) => self.exec(&words[start..], command, script, false, appended),
-                Start::Shell => self.stdin_script(command, script),
-            })),
+            _ => {
+                for start in starts {
+                    if !self.guess() {
+                        return Step::Done(self.unreadable_options(program, words));
+                    }
+                    let found = match start {
+                        Start::At(start) => {
+                            self.exec(&words[start..], command, script, false, appended)
+                        }
+                        Start::Shell => self.stdin_script(command, script),
+                    };
+                    if found.is_some() {
+                        return Step::Done(found);
+                    }
+                }
+                Step::Done(None)
+            }
         }
     }
 
@@ -1074,13 +1128,6 @@ impl Walker<'_, '_> {
         shown: &str,
     ) -> Option<Option<Denial>> {
         let tail = &words[at + 1..];
-        // A subcommand not known before it runs may be `develop`.
-        let shell = tail.iter().any(|word| {
-            !word.fixed
-                || ["develop", "dev-shell", "shell", "run"]
-                    .iter()
-                    .any(|name| word.is(name))
-        });
         // Each word, and whether it is a later part of a split cluster:
         // nix splits a word only when it reads it as a flag, so the parts
         // share the place of the word they came from.
@@ -1089,18 +1136,19 @@ impl Walker<'_, '_> {
             .cloned()
             .map(|word| (word, false))
             .collect::<VecDeque<_>>();
-        let rest = |list: &VecDeque<(Arg, bool)>| -> Vec<Arg> {
-            list.iter().map(|(word, _)| word.clone()).collect()
-        };
         // nix's own words, the commands it may run, and the one it surely
-        // runs.
+        // runs. More readings than the budget holds cannot all be checked.
         let mut own = Vec::new();
-        let mut readings = Vec::new();
+        let mut readings = Readings::default();
         let mut sure = None;
         let mut unread = false;
+        // The subcommand is the first word that is not a flag or a value.
+        // Until the guard knows it, it may be `develop`, `shell` or `run`.
+        let (mut shell, mut run, mut known) = (false, false, false);
         // The next words that may be the value of a flag the guard does not
-        // know, and whether the last word was outside them.
-        let (mut maybe, mut free) = (0_usize, true);
+        // know, whether the last word was outside them, and whether the
+        // cluster the last word came from was.
+        let (mut maybe, mut free, mut head) = (0_usize, true, true);
         while let Some((word, part)) = list.pop_front() {
             if word.fixed
                 && let Some(parts) = nix_cluster(&word.text)
@@ -1111,18 +1159,26 @@ impl Walker<'_, '_> {
                 continue;
             }
             if !part {
+                head = maybe == 0;
+                free = head;
+                maybe = maybe.saturating_sub(1);
+            } else if head {
+                // The parts of a cluster nix surely splits are the values
+                // of a flag before them in it.
                 free = maybe == 0;
                 maybe = maybe.saturating_sub(1);
             }
             if !word.fixed {
-                // It may be `-i`, `-u NAME`, `-c PROGRAM` or `-c`.
+                // It may be the subcommand, `-i`, `-u NAME`, `-c PROGRAM`
+                // or `-c`.
+                shell |= !known;
                 if !unread {
                     unread = true;
                     if let Some(found) = self.unreadable_options("nix", &words[at..]) {
                         return Some(Some(found));
                     }
                 }
-                readings.push(rest(&list));
+                readings.push(&[], &list);
                 own.push(word);
                 maybe = 2;
                 continue;
@@ -1133,18 +1189,30 @@ impl Walker<'_, '_> {
             let flag = word.text.clone();
             own.push(word);
             if !flag.starts_with('-') {
+                if !known {
+                    shell |= ["develop", "dev-shell", "shell", "run"].contains(&flag.as_str());
+                    run |= flag == "run";
+                    // `nix env shell`: `env` takes a subcommand of its own.
+                    known = free && flag != "env";
+                }
                 continue;
             }
             let (name, value) = (list.front().map(|w| &w.0), list.get(1).map(|w| &w.0));
-            if shell && let Some(found) = self.nix_env(&flag, name, value, shown) {
+            if (shell || !known)
+                && let Some(found) = self.nix_env(&flag, name, value, shown)
+            {
                 return Some(Some(found));
             }
             if flag == "-c" || flag == "--command" {
                 if free {
-                    sure = Some(rest(&list));
+                    sure = Some(
+                        list.iter()
+                            .map(|(word, _)| word.clone())
+                            .collect::<Vec<_>>(),
+                    );
                     break;
                 }
-                readings.push(rest(&list));
+                readings.push(&[], &list);
                 continue;
             }
             match nix_flag_values(&flag) {
@@ -1153,11 +1221,16 @@ impl Walker<'_, '_> {
                         let Some((value, _)) = list.pop_front() else {
                             break;
                         };
-                        // A value that looks like `-c` starts a reading as
-                        // well, in case nix takes more values than the
-                        // guard counts.
+                        // A value that holds `-c` starts a reading as well,
+                        // in case nix takes fewer values than the guard
+                        // counts: the parts after `-c` lead the command.
                         if value.is("-c") || value.is("--command") {
-                            readings.push(rest(&list));
+                            readings.push(&[], &list);
+                        } else if value.fixed
+                            && let Some(parts) = nix_cluster(&value.text)
+                            && let Some(c) = parts.iter().position(|part| part == "-c")
+                        {
+                            readings.push(&parts[c + 1..], &list);
                         }
                         own.push(value);
                     }
@@ -1165,9 +1238,8 @@ impl Walker<'_, '_> {
                 Ok(values) | Err(values) => maybe = maybe.max(values),
             }
         }
-        if own.iter().any(|word| word.is("run"))
-            && let Some(found) = self.unknown_program(&words[at..])
-        {
+        let shell = shell || !known;
+        if run && let Some(found) = self.unknown_program(&words[at..]) {
             return Some(Some(found));
         }
         // nix's own words name files it may write (`--profile`,
@@ -1191,15 +1263,17 @@ impl Walker<'_, '_> {
         {
             return Some(Some(found));
         }
-        for reading in readings.iter().filter(|reading| !reading.is_empty()) {
-            if self.guesses >= 64 {
+        for reading in readings.list.iter().filter(|reading| !reading.is_empty()) {
+            if !self.guess() {
                 // Too many readings to check: fail closed on the text.
                 return Some(self.unreadable_options("nix", &words[at..]));
             }
-            self.guesses += 1;
             if let Some(found) = self.exec(reading, command, script, false, appended) {
                 return Some(Some(found));
             }
+        }
+        if readings.over {
+            return Some(self.unreadable_options("nix", &words[at..]));
         }
         sure.map(|_| None)
     }
@@ -1330,10 +1404,9 @@ impl Walker<'_, '_> {
         // environment, or name a file the program writes, cannot be read.
         let named =
             !runner.clears.is_empty() || !runner.env.is_empty() || !runner.writes.is_empty();
-        if named || depth >= 3 || self.guesses >= 64 {
+        if named || depth >= 3 || !self.guess() {
             return self.unreadable_options(name, &words[at..]);
         }
-        self.guesses += 1;
         for skip in [1, 2] {
             if unfixed + skip <= words.len()
                 && let Some(found) = self.runner_starts(read, unfixed + skip, depth + 1, starts)

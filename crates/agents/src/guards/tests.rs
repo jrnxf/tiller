@@ -1602,6 +1602,29 @@ fn nested_nix_readings_are_bounded() {
         ),
         (&format!("{chain}cargo test"), None),
     ]);
+    // Each `-X -c` is a reading: more than the budget fail closed.
+    let unsure = format!("nix develop{}", " -X -c".repeat(300));
+    // Each `direnv exec env` is two readings: `env` as the file or as
+    // the directory.
+    let direnv = "direnv exec env ".repeat(30);
+    let timeouts = "timeout \"$T\" ".repeat(30);
+    verdicts(&[
+        (
+            &format!("{unsure} tiller approve 01JABC"),
+            Some(Code::OwnerOnly),
+        ),
+        (&format!("{unsure} cargo test"), None),
+        (
+            &format!("{direnv}tiller approve 01JABC"),
+            Some(Code::OwnerOnly),
+        ),
+        (&format!("{direnv}cargo test"), None),
+        (
+            &format!("{timeouts}tiller approve 01JABC"),
+            Some(Code::OwnerOnly),
+        ),
+        (&format!("{timeouts}cargo test"), None),
+    ]);
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }
 
@@ -1794,6 +1817,32 @@ fn nix_command_forms_are_read() {
         ),
         // A subcommand not known before it runs may be `develop`.
         ("echo 'tiller approve 01JABC' | nix \"$SUB\"", OWNER),
+        // A short flag the guard does not know may take the next part of
+        // its cluster as its value, so the `-c` after it is not sure.
+        ("nix develop -Xc foo -c tiller approve 01JABC", OWNER),
+        ("nix develop -LXc foo -c tiller approve 01JABC", OWNER),
+        // A value that holds `-c` may be the flag, if nix takes no value.
+        ("nix develop -k -Lc tiller approve 01JABC", OWNER),
+        ("nix develop -k -c/bin/sh -c 'tiller approve 01JABC'", OWNER),
+        (
+            "nix develop --keep-env-var -vc tiller approve 01JABC",
+            OWNER,
+        ),
+        // The subcommand is the first word that is not a flag or a value.
+        ("echo 'tiller approve 01JABC' | nix build shell", None),
+        ("nix build run", None),
+        ("nix build -i .#x", None),
+        (
+            "echo 'tiller approve 01JABC' | nix --unk build develop",
+            OWNER,
+        ),
+        ("nix -i develop -c true", ID),
+        ("nix -I shell develop -i -c true", ID),
+        ("nix env shell nixpkgs#hello -i -c true", ID),
+        (
+            "echo 'tiller approve 01JABC' | nix env shell nixpkgs#hello",
+            OWNER,
+        ),
         ("nix-shell --run 'tiller approve 01JABC'", OWNER),
         (
             "nix-shell -p hello --command 'tiller approve 01JABC'",
