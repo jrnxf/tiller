@@ -685,6 +685,42 @@
   border-left: 1px solid var(--line-1);
 }
 
+/* Edit project: a command list is one command per line. */
+.pa-f .note-in.area {
+  height: 64px;
+  padding: 7px 12px;
+  line-height: 1.5;
+}
+
+.dialog p.pa-help.pa-help-top {
+  margin-top: 0;
+}
+
+.dialog p.pa-help.pa-loading {
+  margin-top: 18px;
+}
+
+/* A number with its unit inside the field, as "20 min". */
+.pa-unit {
+  position: relative;
+  display: block;
+}
+
+.pa-unit .note-in {
+  padding-right: 40px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pa-unit span {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  transform: translateY(-50%);
+  font-size: var(--fs-mini);
+  color: var(--fg-4);
+  pointer-events: none;
+}
+
 @media (max-width: 480px) {
   .dialog.pa-dialog {
     padding: 16px;

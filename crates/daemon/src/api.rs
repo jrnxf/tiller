@@ -857,6 +857,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/projects/{id}/setup", get(project_setup))
         .route(
+            "/api/v1/projects/{id}",
+            get(project_fields).patch(edit_project),
+        )
+        .route(
             "/api/v1/interventions/{id}/label",
             post(relabel_intervention),
         )
@@ -3090,6 +3094,79 @@ async fn project_setup(
     .map(Json)
 }
 
+#[utoipa::path(get, path = "/api/v1/projects/{id}", tag = "reads",
+    params(("id" = String, Path)),
+    responses((status = 200, body = ProjectFields), (status = 404, body = ErrorBody)))]
+async fn project_fields(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<ProjectFields> {
+    read(&state, move |store| {
+        let project = store.project(&id)?;
+        Ok(ProjectFields {
+            id: project.id,
+            name: project.name,
+            repo: project.repo,
+            remote: project.remote,
+            default_branch: project.default_branch,
+            delivery: project.delivery.to_string(),
+            checks: project.checks,
+            capacity: project.capacity,
+            deploy_workflow: project.deploy_workflow,
+            deploy_environment: project.deploy_environment,
+            deploy_timeout_minutes: project.deploy_timeout_minutes,
+            rev: project.rev,
+        })
+    })
+    .await
+    .map(Json)
+}
+
+#[utoipa::path(patch, path = "/api/v1/projects/{id}", tag = "mutations", request_body = EditProject,
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody),
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 409, body = ErrorBody, description = "`conflict`: `rev` is stale; `current` holds the new `rev` and the stored value of the first field the edit changes"),
+              (status = 422, body = ErrorBody, description = "`refused`: the project is retired"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn edit_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers).await?;
+    let request: EditProject = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "a project edit").await?;
+    let delivery = request
+        .delivery
+        .as_deref()
+        .map(str::parse::<Delivery>)
+        .transpose()?;
+    // An empty text clears an optional field, as `tiller project edit`'s
+    // empty flag does.
+    let clearable = |text: Option<String>| text.map(|text| Some(text).filter(|t| !t.is_empty()));
+    let edit = tiller_core::state::projects::ProjectEdit {
+        name: request.name,
+        repo: clearable(request.repo),
+        remote: clearable(request.remote),
+        default_branch: request.default_branch,
+        delivery,
+        checks: request.checks,
+        capacity: request.capacity,
+        deploy_workflow: clearable(request.deploy_workflow),
+        deploy_environment: clearable(request.deploy_environment),
+        deploy_timeout_minutes: request.deploy_timeout_minutes,
+    };
+    let rev = request.rev;
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| Done::of(store.project_edit(ctx, &id, rev, edit)?),
+    )
+    .await
+}
+
 #[utoipa::path(get, path = "/api/v1/start-settings", tag = "reads",
     responses((status = 200, body = StartSettings), (status = 503, body = ErrorBody)))]
 async fn start_settings(State(state): State<AppState>) -> ApiResult<StartSettings> {
@@ -4416,7 +4493,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, start_settings, set_config,
+        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, set_config,
         away_start, away_edit, away_end, away_brief, pick_bug_project, recap, mark_recap_seen, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, session, login_code, logout
     ),
@@ -6220,6 +6297,165 @@ pub(crate) mod tests {
 
         let missing = get(&app, "/api/v1/projects/nope/setup").await;
         assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
+    }
+
+    /// Edit a project: the board reads the fields `tiller project edit`
+    /// sets, then sends the changed ones against the `rev` it read. The
+    /// edit is owner-only, never forwarded, validated as the CLI's is, and
+    /// an empty text clears an optional field.
+    #[tokio::test]
+    async fn board_project_edit_changes_the_fields_project_edit_sets() {
+        let fleet = Fleet::new();
+        let home = fleet.dir.path();
+        let app = app(home, Assets::of::<Fixture>());
+        let cookie = owner_cookie(home);
+        let edit = |key: &str, fields: Value, cookie: &str| {
+            let mut body = json!({"idempotency_key": key});
+            if let (Some(body), Some(fields)) = (body.as_object_mut(), fields.as_object()) {
+                body.extend(fields.clone());
+            }
+            let headers: Vec<(&str, &str)> = if cookie.is_empty() {
+                vec![]
+            } else {
+                vec![("cookie", cookie)]
+            };
+            mutation("PATCH", "/api/v1/projects/alpha", body, &headers)
+        };
+        let fields = |app: Router| async move {
+            let answer = get(&app, "/api/v1/projects/alpha").await;
+            assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+            serde_json::from_str::<Value>(&answer.body).unwrap()
+        };
+
+        let before = fields(app.clone()).await;
+        assert_eq!(before["id"], "alpha");
+        assert_eq!(before["repo"], "example/alpha");
+        assert_eq!(before["default_branch"], "main");
+        assert_eq!(before["delivery"], "direct-pr");
+        assert_eq!(before["capacity"], 4);
+        assert_eq!(before["checks"], json!([]));
+        assert_eq!(before["deploy_timeout_minutes"], 60);
+        let rev = before["rev"].as_i64().unwrap();
+        let missing = get(&app, "/api/v1/projects/nope").await;
+        assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
+
+        let anonymous = send(
+            &app,
+            edit("k-edit-1", json!({"rev": rev, "capacity": 2}), ""),
+        )
+        .await;
+        assert_eq!(
+            anonymous.status,
+            StatusCode::FORBIDDEN,
+            "{}",
+            anonymous.body
+        );
+        let peer = send(
+            &app,
+            edit(
+                "k-edit-2",
+                json!({"rev": rev, "capacity": 2, "host": "laptop"}),
+                &cookie,
+            ),
+        )
+        .await;
+        assert_ne!(peer.status, StatusCode::OK, "{}", peer.body);
+        for (key, bad) in [
+            ("k-edit-3", json!({"delivery": "yolo"})),
+            ("k-edit-4", json!({"capacity": 0})),
+            ("k-edit-5", json!({"checks": {"full": "cargo test"}})),
+            ("k-edit-6", json!({"name": " "})),
+            ("k-edit-7", json!({"default_branch": ""})),
+            ("k-edit-8", json!({"deploy_timeout_minutes": 0})),
+        ] {
+            let mut fields = bad.clone();
+            fields["rev"] = json!(rev);
+            let refused = send(&app, edit(key, fields, &cookie)).await;
+            assert_eq!(
+                refused.status,
+                StatusCode::BAD_REQUEST,
+                "{bad}: {}",
+                refused.body
+            );
+        }
+        assert_eq!(
+            fields(app.clone()).await["rev"],
+            rev,
+            "a refused edit wrote"
+        );
+
+        let changed = json!({"rev": rev, "name": "Alpha", "remote": "https://example.com/alpha.git",
+            "default_branch": "trunk", "delivery": "direct-push", "capacity": 2,
+            "checks": {"full": ["cargo test"], "no_logic": []},
+            "deploy_workflow": "deploy.yml", "deploy_environment": "production",
+            "deploy_timeout_minutes": 20});
+        let applied = send(&app, edit("k-edit-9", changed.clone(), &cookie)).await;
+        assert_eq!(applied.status, StatusCode::OK, "{}", applied.body);
+        let after = fields(app.clone()).await;
+        for name in [
+            "name",
+            "remote",
+            "default_branch",
+            "delivery",
+            "capacity",
+            "checks",
+            "deploy_workflow",
+            "deploy_environment",
+            "deploy_timeout_minutes",
+        ] {
+            assert_eq!(after[name], changed[name], "{name}: {after}");
+        }
+        assert_eq!(after["repo"], "example/alpha", "an unsent field moved");
+        assert_eq!(after["rev"], rev + 1);
+        let replay = send(&app, edit("k-edit-9", changed, &cookie)).await;
+        let body: Value = serde_json::from_str(&replay.body).unwrap();
+        assert_eq!(body["replayed"], true, "{body}");
+
+        // The rev the board read is stale now: a conflict that names the
+        // stored value of the field it tried to change.
+        let stale = send(
+            &app,
+            edit("k-edit-10", json!({"rev": rev, "capacity": 3}), &cookie),
+        )
+        .await;
+        assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.body);
+        let body: Value = serde_json::from_str(&stale.body).unwrap();
+        assert_eq!(
+            body["error"]["current"],
+            json!({"rev": rev + 1, "capacity": 2})
+        );
+
+        let cleared = send(
+            &app,
+            edit(
+                "k-edit-11",
+                json!({"rev": rev + 1, "remote": "", "deploy_workflow": "",
+                    "deploy_environment": ""}),
+                &cookie,
+            ),
+        )
+        .await;
+        assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.body);
+        let after = fields(app.clone()).await;
+        assert_eq!(
+            (
+                &after["remote"],
+                &after["deploy_workflow"],
+                &after["deploy_environment"]
+            ),
+            (&Value::Null, &Value::Null, &Value::Null),
+            "{after}"
+        );
+        let events: i64 = fleet
+            .open()
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind = 'project.edited' AND entity_id = 'alpha'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 2);
     }
 
     /// The board's project add: owner-only, never forwarded, replayed by

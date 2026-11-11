@@ -1131,6 +1131,49 @@ pub struct StageProject {
     pub stage: String,
 }
 
+/// `PATCH /api/v1/projects/{id}`: `tiller project edit` from the board,
+/// against the `rev` the board read. An absent field stays as it is. An
+/// empty text clears `repo`, `remote`, `deploy_workflow` and
+/// `deploy_environment`, as an empty CLI flag does. Local to the owning
+/// host; it is not forwarded to a peer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EditProject {
+    pub idempotency_key: String,
+    /// A paired peer's label. Refused: a project edit is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+    pub rev: i64,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The GitHub repo, `owner/name`.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// The git remote builders push to.
+    #[serde(default)]
+    pub remote: Option<String>,
+    #[serde(default)]
+    pub default_branch: Option<String>,
+    /// `no-mistakes`, `no-mistakes-prod-only`, `direct-pr`, `direct-push` or
+    /// `local-only`.
+    #[serde(default)]
+    pub delivery: Option<String>,
+    /// The commands a `direct-push` builder runs: a list, or `{"full": [..],
+    /// "no_logic": [..]}` with a lighter set for a change with no logic.
+    #[serde(default)]
+    pub checks: Option<Value>,
+    /// How many builders may run at once; at least 1.
+    #[serde(default)]
+    pub capacity: Option<i64>,
+    #[serde(default)]
+    pub deploy_workflow: Option<String>,
+    #[serde(default)]
+    pub deploy_environment: Option<String>,
+    /// At least 1.
+    #[serde(default)]
+    pub deploy_timeout_minutes: Option<i64>,
+}
+
 /// `GET /api/v1/projects/{id}/delete`: what a project delete would remove,
 /// without removing anything (`state.md`, Deleting a project).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -1285,6 +1328,26 @@ pub struct ProjectSetup {
     pub checkout: Option<String>,
     /// Why `config.toml` could not be read; `checkout` is then absent.
     pub config_error: Option<String>,
+}
+
+/// `GET /api/v1/projects/{id}`: the fields `tiller project edit` sets, for
+/// one of this host's projects, with the `rev` an edit is sent against.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ProjectFields {
+    pub id: String,
+    pub name: String,
+    /// The GitHub repo, `owner/name`; absent for a project with none.
+    pub repo: Option<String>,
+    pub remote: Option<String>,
+    pub default_branch: String,
+    pub delivery: String,
+    /// A list of commands, or `{"full": [..], "no_logic": [..]}`.
+    pub checks: Value,
+    pub capacity: i64,
+    pub deploy_workflow: Option<String>,
+    pub deploy_environment: Option<String>,
+    pub deploy_timeout_minutes: i64,
+    pub rev: i64,
 }
 
 /// `POST /api/v1/projects/{id}/retire`: retire one project, off the board.

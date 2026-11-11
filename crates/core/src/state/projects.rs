@@ -234,6 +234,7 @@ pub(crate) fn edit_project(
         return Err(Error::refused("project", &project.id, "project is retired"));
     }
     required("project name", &next.name)?;
+    required("default branch", &next.default_branch)?;
     check_plan(&next.checks)?;
     positive("capacity", next.capacity)?;
     positive("deploy timeout", next.deploy_timeout_minutes)?;

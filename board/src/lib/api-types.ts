@@ -478,6 +478,28 @@ export interface ProjectSetup {
   config_error: string | null;
 }
 
+// The commands a direct-push builder runs before it reports done: a list, or a
+// full set with a lighter one for a change that touches no logic. A missing
+// `no_logic` means the full set applies to every change.
+export type ProjectChecks = string[] | { full?: string[]; no_logic?: string[] };
+
+// GET /api/v1/projects/{id}: the fields `tiller project edit` sets, and the
+// `rev` an edit is sent against.
+export interface ProjectFields {
+  id: string;
+  name: string;
+  repo: string | null;
+  remote: string | null;
+  default_branch: string;
+  delivery: string;
+  checks: ProjectChecks | null;
+  capacity: number;
+  deploy_workflow: string | null;
+  deploy_environment: string | null;
+  deploy_timeout_minutes: number;
+  rev: number;
+}
+
 // `GET /api/v1/projects/checkout`: what Add project would do with a local
 // checkout. Either `problem` is set and the rest is null, or the reverse.
 export interface CheckoutCheck {

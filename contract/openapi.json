@@ -2982,6 +2982,138 @@
         }
       }
     },
+    "/api/v1/projects/{id}": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "project_fields",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectFields"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "edit_project",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditProject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`conflict`: `rev` is stale; `current` holds the new `rev` and the stored value of the first field the edit changes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`refused`: the project is retired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{id}/asks": {
       "post": {
         "tags": [
@@ -5396,6 +5528,95 @@
         },
         "additionalProperties": false
       },
+      "EditProject": {
+        "type": "object",
+        "description": "`PATCH /api/v1/projects/{id}`: `tiller project edit` from the board,\nagainst the `rev` the board read. An absent field stays as it is. An\nempty text clears `repo`, `remote`, `deploy_workflow` and\n`deploy_environment`, as an empty CLI flag does. Local to the owning\nhost; it is not forwarded to a peer.",
+        "required": [
+          "idempotency_key",
+          "rev"
+        ],
+        "properties": {
+          "capacity": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How many builders may run at once; at least 1."
+          },
+          "checks": {
+            "description": "The commands a `direct-push` builder runs: a list, or `{\"full\": [..],\n\"no_logic\": [..]}` with a lighter set for a change with no logic."
+          },
+          "default_branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "delivery": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`no-mistakes`, `no-mistakes-prod-only`, `direct-pr`, `direct-push` or\n`local-only`."
+          },
+          "deploy_environment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "deploy_timeout_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "At least 1."
+          },
+          "deploy_workflow": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label. Refused: a project edit is not forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remote": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The git remote builders push to."
+          },
+          "repo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The GitHub repo, `owner/name`."
+          },
+          "rev": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
       "ErrorBody": {
         "type": "object",
         "required": [
@@ -7069,6 +7290,74 @@
             "propertyNames": {
               "type": "string"
             }
+          }
+        }
+      },
+      "ProjectFields": {
+        "type": "object",
+        "description": "`GET /api/v1/projects/{id}`: the fields `tiller project edit` sets, for\none of this host's projects, with the `rev` an edit is sent against.",
+        "required": [
+          "id",
+          "name",
+          "default_branch",
+          "delivery",
+          "checks",
+          "capacity",
+          "deploy_timeout_minutes",
+          "rev"
+        ],
+        "properties": {
+          "capacity": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "checks": {
+            "description": "A list of commands, or `{\"full\": [..], \"no_logic\": [..]}`."
+          },
+          "default_branch": {
+            "type": "string"
+          },
+          "delivery": {
+            "type": "string"
+          },
+          "deploy_environment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "deploy_timeout_minutes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "deploy_workflow": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "remote": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "repo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The GitHub repo, `owner/name`; absent for a project with none."
+          },
+          "rev": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },

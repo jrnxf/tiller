@@ -8,6 +8,7 @@ import type {
   BoardResponse,
   InterventionKind,
   ProjectDeletePreview,
+  ProjectFields,
   ProjectRetirePreview,
   ProjectsResponse,
 } from "./api-types.ts";
@@ -162,6 +163,173 @@ let recapMarkedAt: string | null = null;
 // The projects added since the server started, listed after the fixture's.
 const added = new Map<string, Project>();
 
+// The fields Edit project saved since the server started, by project.
+const edited = new Map<string, ProjectFields>();
+
+// `GET /api/v1/projects/{id}`: one of this host's projects as Edit project
+// reads it. alpha sets every field, so the dialog opens on all of them.
+function projectFieldsFor(id: string): ProjectFields | undefined {
+  const project = added.get(id) ?? currentProject(id);
+  if (!project || project.host || gone(id)) return undefined;
+  const saved = edited.get(id);
+  if (saved) return { ...saved, rev: project.rev };
+  const alpha = id === "alpha";
+  return {
+    id,
+    name: project.name,
+    repo: id === "fleet" ? null : `example/${id}`,
+    remote: alpha ? "git@example.com:example/alpha.git" : null,
+    default_branch: "main",
+    delivery: project.delivery,
+    checks: alpha
+      ? { full: ["cargo nextest run --workspace", "bun run --cwd board test"], no_logic: [] }
+      : [],
+    capacity: project.capacity,
+    deploy_workflow: alpha ? "deploy.yml" : null,
+    deploy_environment: alpha ? "production" : null,
+    deploy_timeout_minutes: alpha ? 20 : 60,
+    rev: project.rev,
+  };
+}
+
+const DELIVERIES = [
+  "direct-pr",
+  "local-only",
+  "no-mistakes",
+  "no-mistakes-prod-only",
+  "direct-push",
+];
+
+// The fields an edit sets, in the order the daemon names the first changed one.
+const EDIT_FIELDS = [
+  "capacity",
+  "checks",
+  "default_branch",
+  "delivery",
+  "deploy_environment",
+  "deploy_timeout_minutes",
+  "deploy_workflow",
+  "name",
+  "remote",
+  "repo",
+] as const;
+
+function commandList(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.every((command) => typeof command === "string" && command.trim() !== "")
+  );
+}
+
+// `checks` is a list of commands, or `full` with an optional `no_logic`.
+function checksProblem(value: unknown): string | null {
+  if (commandList(value)) return null;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const plan = value as Record<string, unknown>;
+    const unknown = Object.keys(plan).find((key) => key !== "full" && key !== "no_logic");
+    if (unknown) return `checks has an unknown key "${unknown}"`;
+    if ("full" in plan && !commandList(plan.full)) return "checks.full must be a list of commands";
+    if ("no_logic" in plan && !commandList(plan.no_logic)) {
+      return "checks.no_logic must be a list of commands";
+    }
+    return null;
+  }
+  return "checks must be a list of commands";
+}
+
+function positive(value: unknown): boolean {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1;
+}
+
+// `project.edit`, as `tiller project edit` runs it: the `rev` first, then each
+// field checked, and an empty text clears an optional one.
+function editProject(id: string, body: Record<string, unknown>): MutationResult {
+  const fields = projectFieldsFor(id);
+  const project = added.get(id) ?? currentProject(id);
+  if (!fields || !project) return refusal(404, "not_found", `no project ${id}`);
+  if (body.rev !== fields.rev) {
+    const first = EDIT_FIELDS.find(
+      (field) => field in body && JSON.stringify(body[field]) !== JSON.stringify(fields[field]),
+    );
+    return {
+      reply: refused(
+        409,
+        "stale",
+        `conflict: project ${id} is at rev ${fields.rev}, you sent ${String(body.rev)}`,
+        first ? { rev: fields.rev, [first]: fields[first] } : { rev: fields.rev },
+      ),
+      followUps: [],
+    };
+  }
+  const text = (field: string) => {
+    const value = body[field];
+    return typeof value === "string" ? value.trim() : null;
+  };
+  if ("name" in body && !text("name")) return refusal(400, "usage", "project name is required");
+  if ("default_branch" in body && !text("default_branch")) {
+    return refusal(400, "usage", "default branch is required");
+  }
+  if ("delivery" in body && !DELIVERIES.includes(String(body.delivery))) {
+    return refusal(400, "usage", `unknown delivery "${String(body.delivery)}"`);
+  }
+  if ("capacity" in body && !positive(body.capacity)) {
+    return refusal(400, "usage", "capacity must be at least 1");
+  }
+  if ("deploy_timeout_minutes" in body && !positive(body.deploy_timeout_minutes)) {
+    return refusal(400, "usage", "deploy timeout must be at least 1 minute");
+  }
+  const problem = "checks" in body ? checksProblem(body.checks) : null;
+  if (problem) return refusal(400, "usage", problem);
+  const optional = (field: "repo" | "remote" | "deploy_workflow" | "deploy_environment") =>
+    field in body ? text(field) || null : fields[field];
+  const next: ProjectFields = {
+    ...fields,
+    name: text("name") ?? fields.name,
+    repo: optional("repo"),
+    remote: optional("remote"),
+    default_branch: text("default_branch") ?? fields.default_branch,
+    delivery: "delivery" in body ? String(body.delivery) : fields.delivery,
+    checks: "checks" in body ? (body.checks as ProjectFields["checks"]) : fields.checks,
+    capacity: "capacity" in body ? Number(body.capacity) : fields.capacity,
+    deploy_workflow: optional("deploy_workflow"),
+    deploy_environment: optional("deploy_environment"),
+    deploy_timeout_minutes:
+      "deploy_timeout_minutes" in body
+        ? Number(body.deploy_timeout_minutes)
+        : fields.deploy_timeout_minutes,
+    rev: fields.rev + 1,
+  };
+  const direct = next.delivery === "no-mistakes" || next.delivery === "no-mistakes-prod-only";
+  const row: Project = {
+    ...project,
+    name: next.name,
+    delivery: next.delivery,
+    capacity: next.capacity,
+    rev: next.rev,
+    effective_delivery: project.stage === "pre-launch" && direct ? "direct-pr" : next.delivery,
+  };
+  edited.set(id, next);
+  if (added.has(id)) added.set(id, row);
+  else switched.set(id, row);
+  return {
+    reply: recorded(row, null, null),
+    followUps: [
+      {
+        delayMs: 100,
+        event: {
+          kind: "project.edited",
+          txn: "project.edit",
+          entity: "project",
+          entity_id: id,
+          rev_after: row.rev,
+          card_id: null,
+          entity_state: row,
+        },
+      },
+    ],
+  };
+}
+
 // A read the stand-in server answers, without the deleted projects' rows; a
 // deleted or archived project's own previews are gone (a 404).
 export function withoutDeleted(path: string, body: unknown, scenario: Scenario): unknown {
@@ -173,9 +341,16 @@ export function withoutDeleted(path: string, body: unknown, scenario: Scenario):
   }
   if (pathname === "/api/v1/start-settings") return startSettingsFor(scenario);
   const setup = /^\/api\/v1\/projects\/([^/]+)\/setup$/.exec(pathname);
-  if (setup?.[1] && (body !== undefined || !gone(setup[1])))
-    return projectSetupFor(setup[1], scenario);
-  if (deleted.size + retired.size + added.size === 0 || body === undefined) return body;
+  if (setup?.[1] && (body !== undefined || !gone(setup[1]))) {
+    const saved = edited.get(setup[1]);
+    const fresh = projectSetupFor(setup[1], scenario);
+    return saved ? { ...fresh, repo: saved.repo } : fresh;
+  }
+  const fields = /^\/api\/v1\/projects\/([^/]+)$/.exec(pathname);
+  if (fields?.[1] && body === undefined) return projectFieldsFor(fields[1]);
+  if (deleted.size + retired.size + added.size + switched.size === 0 || body === undefined) {
+    return body;
+  }
   const preview = /^\/api\/v1\/projects\/([^/]+)\/(delete|retire)$/.exec(pathname);
   if (preview?.[1] && (preview[2] === "delete" ? deleted.has(preview[1]) : gone(preview[1]))) {
     return undefined;
@@ -197,7 +372,9 @@ export function withoutDeleted(path: string, body: unknown, scenario: Scenario):
     const { projects } = body as ProjectsResponse;
     return {
       projects: [
-        ...projects.filter((project) => project.host || !gone(project.id)),
+        ...projects
+          .filter((project) => project.host || !gone(project.id))
+          .map((project) => (project.host ? project : (switched.get(project.id) ?? project))),
         ...[...added.values()].filter((project) => !gone(project.id)),
       ],
     };
@@ -367,6 +544,7 @@ function forwarded(
   if (
     /\/(stage|focus|label|delete|retire|bug-project)$/.test(path) ||
     path === projectsPath ||
+    (method === "PATCH" && /^\/api\/v1\/projects\/[^/]+$/.test(path)) ||
     /\/memory\//.test(path)
   ) {
     return refusal(502, "peer_refused", `${method} ${path} is not forwarded to ${host}`);
@@ -771,6 +949,8 @@ function handle(
     };
   }
   if (method === "POST" && path === projectsPath) return addProject(body);
+  const edit = /^\/api\/v1\/projects\/([^/]+)$/.exec(path);
+  if (method === "PATCH" && edit?.[1]) return editProject(edit[1], body);
   if (method === "POST" && path === "/api/v1/agents/restart-stale") {
     const ids = Array.isArray(body.sessions) ? body.sessions.map(String) : [];
     return {

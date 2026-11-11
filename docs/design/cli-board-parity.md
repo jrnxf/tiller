@@ -40,7 +40,7 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 | Focus an agent | Full: `agent focus` | Part | The CLI prints the pane and machine. The board opens the configured terminal app. |
 | Run and session control | Full: `agent relaunch`, `resume`, `interrupt`, `stop`, `send`, `inbox`, `status`, `run`, `pr`, `done`, `obligation`, `artifact`, `review`, `handoff`, `spawn` | No | Agent tools and owner controls. |
 | Add a project | Full: `project add` | Part | The board takes id, name, repo, delivery, capacity and a checkout (a path or a clone). |
-| Edit a project | Full: `project edit` | No | |
+| Edit a project | Full: `project edit` | Part | The board edits a project this host owns, but not `fleet`. The id stays fixed. Checks are one command per line, with an optional lighter set. |
 | Stage a project | Full: `project stage` | Part | The CLI also has `--from <commit>` for pre-launch. |
 | Retire a project | Full: `project retire` | Full | The CLI flag is `--stop-agents`. The board has a checkbox. |
 | Delete a project | Full: `project delete` | Full | The CLI asks for the id at a prompt, or takes `--yes`. The board asks for the typed id and shows a preview. |
@@ -80,4 +80,4 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 - **Project add stays narrower on the board.** The spec keeps `--checks`, `--remote`, `--default-branch` and the deploy flags on the CLI (state.md).
 - **Reason not recorded: actor `board` and `owner`.** Authority gives both the same rights. No doc says why they are separate actors.
 - **Reason not recorded: an empty body on edit.** The CLI clears the field. The API sets an empty string.
-- **Reason not recorded: CLI-only controls.** Dependencies, `land`, grants, `host edit`, `project edit`, `orchestrator start --restart`, peer management beyond add, and the memory undo route (the API has it, and no surface calls it).
+- **Reason not recorded: CLI-only controls.** Dependencies, `land`, grants, `host edit`, `orchestrator start --restart`, peer management beyond add, and the memory undo route (the API has it, and no surface calls it).

@@ -1169,21 +1169,29 @@ async fn spawn_not_forwardable_from_the_board() {
     let cookie = owner_cookie(pair.board.dir.path());
     let app = app_with_peers(pair.board.dir.path(), Peers::idle());
     let before = (last_seq(&pair.board), last_seq(&pair.peer));
-    for (path, body) in [
+    for (method, path, body) in [
         (
+            "POST",
             "/api/v1/projects/alpha/stage",
             json!({"idempotency_key": "k-1", "host": "peer", "rev": 1, "stage": "launched"}),
         ),
         (
+            "POST",
             "/api/v1/agents/w1:p1/focus",
             json!({"idempotency_key": "k-2", "host": "peer"}),
         ),
         (
+            "POST",
             "/api/v1/interventions/a-1/label",
             json!({"idempotency_key": "k-3", "host": "peer", "label": "planned"}),
         ),
+        (
+            "PATCH",
+            "/api/v1/projects/alpha",
+            json!({"idempotency_key": "k-4", "host": "peer", "rev": 1, "capacity": 1}),
+        ),
     ] {
-        let answer = send(&app, mutation("POST", path, body, &[("cookie", &cookie)])).await;
+        let answer = send(&app, mutation(method, path, body, &[("cookie", &cookie)])).await;
         let error = refusal(&answer, StatusCode::BAD_GATEWAY);
         assert_eq!(error.code, "peer_refused");
         assert_eq!(error.reason.as_deref(), Some("not_allowlisted"));

@@ -20,6 +20,7 @@ import { Modal } from "../ui/modal";
 import { ArchiveProject } from "./project-archive";
 import { DeleteProject } from "./project-delete";
 import { FLEET_PROJECT } from "./project-dialog";
+import { ProjectSettings } from "./project-settings";
 import "./project-stage.css";
 
 type Stage = Project["stage"];
@@ -189,7 +190,7 @@ function SetupFacts({ project }: { project: Project }) {
             placeholder="/home/user/checkouts/project"
             onSaved={() => setEditing(false)}
           />
-          <button type="button" className="btn sm ghost" onClick={() => setEditing(false)}>
+          <button type="button" className="btn sm" onClick={() => setEditing(false)}>
             Cancel
           </button>
         </div>
@@ -287,26 +288,41 @@ function ConfirmStage({
   );
 }
 
-// What opens under a project row: its stage facts, the stage switch, and the
-// archive and delete on the right, the delete last.
+// What opens under a project row: its stage facts, the edit and the stage
+// switch, and the archive and delete on the right, the delete last.
 export function ProjectDetail({ project, id }: { project: Project; id: string }) {
   const [confirming, setConfirming] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [receipt, setReceipt] = useState<{ key: string; text: string } | null>(null);
   const target: Stage = project.stage === "pre-launch" ? "launched" : "pre-launch";
   // The board host does not forward a stage switch (protocol.md section 7.4).
   const owner = ownerOf(project);
   const off = owner ? `${owner} owns this project: switch its stage there` : undefined;
+  // Nor an edit: the owner host edits its own project.
+  const editOff = owner ? `${owner} owns this project: edit it there` : undefined;
 
   // The dialog gives focus back to the button that opened it.
   const close = useCallback(() => {
     setConfirming(false);
   }, []);
+  const closeEdit = useCallback(() => setEditing(false), []);
 
   const onRecorded = useCallback((key: string, text: string) => setReceipt({ key, text }), []);
 
   return (
     <div className="pdetail" id={id} role="group" aria-label={`${project.name} stage`}>
       <Facts project={project} />
+      {project.id === FLEET_PROJECT ? null : (
+        <button
+          type="button"
+          className="btn stage-switch"
+          disabled={editOff !== undefined}
+          title={editOff}
+          onClick={() => setEditing(true)}
+        >
+          Edit project
+        </button>
+      )}
       {project.id === FLEET_PROJECT ? null : (
         <button
           type="button"
@@ -322,6 +338,9 @@ export function ProjectDetail({ project, id }: { project: Project; id: string })
         <div className="stage-receipt">
           <InlineReceipt receiptKey={receipt.key} text={receipt.text} />
         </div>
+      ) : null}
+      {editing ? (
+        <ProjectSettings project={project} onClose={closeEdit} onSaved={onRecorded} />
       ) : null}
       {confirming ? (
         <ConfirmStage project={project} target={target} onClose={close} onRecorded={onRecorded} />

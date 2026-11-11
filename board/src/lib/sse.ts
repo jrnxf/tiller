@@ -32,6 +32,7 @@ import {
   CONTRIBUTIONS_PREFIX,
   fetchJson,
   machinesPath,
+  projectFieldsPath,
   projectSetupPath,
   projectsPath,
   quotaPath,
@@ -260,6 +261,10 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
       } else if (state) writeProject(queryClient, state as Project);
       queryClient.invalidateQueries({
         queryKey: queryKeyFor(projectSetupPath(event.entity_id)),
+        refetchType: "active",
+      });
+      queryClient.invalidateQueries({
+        queryKey: queryKeyFor(projectFieldsPath(event.entity_id)),
         refetchType: "active",
       });
       break;
