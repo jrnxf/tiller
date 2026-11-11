@@ -226,6 +226,21 @@ test("a peer start refused by this host's cookie asks for a login, and the peer'
   await waitFor(() =>
     expect(screen.getByTestId("toast").textContent).toContain("host-d refuses this start"),
   );
+
+  // This host's owner marker names another system: not a cookie problem.
+  error = {
+    code: "owner_marker",
+    message: 'read only: the owner marker names "other", not "tiller"',
+    hint: "tiller owner set tiller",
+  };
+  await waitFor(() => expect(startIn("lane-host-d/gamma").disabled).toBe(false));
+  fireEvent.click(startIn("lane-host-d/gamma"));
+  await waitFor(() =>
+    expect(screen.getByTestId("toast").textContent).toContain(
+      'read only: the owner marker names "other"',
+    ),
+  );
+  expect(screen.getByTestId("toast").textContent).not.toContain("tiller board --login");
 });
 
 // ---- The Machines section ----

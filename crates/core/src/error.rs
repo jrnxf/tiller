@@ -44,6 +44,11 @@ pub enum Error {
     #[error("forbidden: {0}")]
     Forbidden(String),
 
+    /// The owner marker names another system, so every mutation is refused
+    /// (`owner.rs`, `recovery.md` R20). Reads keep working.
+    #[error("read only: {0}")]
+    OwnerMarker(String),
+
     /// The database stayed busy past `busy_timeout`; nothing was written.
     #[error("unavailable: {0}")]
     Unavailable(String),
@@ -68,6 +73,7 @@ impl Error {
             Error::Conflict { .. } => "conflict",
             Error::Refused { .. } => "refused",
             Error::Forbidden(_) => "forbidden",
+            Error::OwnerMarker(_) => "owner_marker",
             Error::Unavailable(_) => "unavailable",
             Error::SchemaTooNew { .. } | Error::Internal(_) => "internal",
         }
@@ -81,7 +87,7 @@ impl Error {
             Error::NotFound { .. } => 3,
             Error::Conflict { .. } => 4,
             Error::Refused { .. } => 5,
-            Error::Forbidden(_) => 6,
+            Error::Forbidden(_) | Error::OwnerMarker(_) => 6,
             Error::Unavailable(_) => 7,
         }
     }

@@ -102,7 +102,12 @@ pub async fn drain_loop(
             _ = tick.tick() => {}
             _ = stop.wait_for(|stop| *stop) => return,
         }
-        if !db.exists() || damage.reason().is_some() {
+        // A restart is outside work: none while the owner marker names
+        // another system (R20).
+        let held = db
+            .parent()
+            .is_some_and(|home| tiller_core::owner::check(home).is_err());
+        if !db.exists() || damage.reason().is_some() || held {
             continue;
         }
         let (path, starter) = (db.clone(), Arc::clone(&starter));

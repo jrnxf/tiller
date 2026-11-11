@@ -38,6 +38,8 @@ use tiller_reconcile::{Config as ReconcileConfig, Reconciler, Sources};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use crate::owner::Gated;
+
 /// What the daemon reads from `<home>/config.toml` beyond intake.
 #[derive(Clone, Debug)]
 pub struct Settings {
@@ -582,6 +584,7 @@ impl Source for Transcripts {
 /// owner adds while the daemon runs. Checks the host list every 30 s.
 pub struct Machines {
     store: Store,
+    home: PathBuf,
     db: PathBuf,
     herdr: Cli,
     registry: Registry,
@@ -619,7 +622,7 @@ impl Source for Machines {
             }
             let herdr = self.herdr.clone().on_machine(machine.clone());
             let source = HerdrSource::remote(herdr, Store::open(&self.db)?, &host.id, machine);
-            if let Ok(poller) = self.registry.register(source) {
+            if let Ok(poller) = self.registry.register(Gated::new(&self.home, source)) {
                 // Ends with the daemon, like every other poller.
                 self.runtime.spawn(poller.run(self.stop.clone()));
             }
@@ -671,6 +674,7 @@ pub fn start(
     let herdr = HerdrSource::local(tools.herdr.clone(), open()?, &local);
     let machines = Machines {
         store,
+        home: home.to_owned(),
         db: db.clone(),
         herdr: tools.herdr.clone(),
         registry: registry.clone(),
@@ -747,19 +751,22 @@ pub fn start(
     let memory = crate::memory::watch::Watcher::new(home, open()?);
 
     let mut handles = Vec::new();
-    spawn(registry, herdr, stop, &mut handles);
-    spawn(registry, machines, stop, &mut handles);
-    spawn(registry, delivery, stop, &mut handles);
-    spawn(registry, notify, stop, &mut handles);
+    // Every worker but reconcile holds its polls while the owner marker
+    // names another system (R20). A reconcile pass checks the marker
+    // itself, so it sees the flip back and runs its full pass.
+    spawn(registry, Gated::new(home, herdr), stop, &mut handles);
+    spawn(registry, Gated::new(home, machines), stop, &mut handles);
+    spawn(registry, Gated::new(home, delivery), stop, &mut handles);
+    spawn(registry, Gated::new(home, notify), stop, &mut handles);
     spawn(registry, reconcile, stop, &mut handles);
-    spawn(registry, publish, stop, &mut handles);
-    spawn(registry, land, stop, &mut handles);
-    spawn(registry, deploys, stop, &mut handles);
-    spawn(registry, gate, stop, &mut handles);
-    spawn(registry, finished, stop, &mut handles);
-    spawn(registry, transcripts, stop, &mut handles);
-    spawn(registry, quota, stop, &mut handles);
-    spawn(registry, pages, stop, &mut handles);
+    spawn(registry, Gated::new(home, publish), stop, &mut handles);
+    spawn(registry, Gated::new(home, land), stop, &mut handles);
+    spawn(registry, Gated::new(home, deploys), stop, &mut handles);
+    spawn(registry, Gated::new(home, gate), stop, &mut handles);
+    spawn(registry, Gated::new(home, finished), stop, &mut handles);
+    spawn(registry, Gated::new(home, transcripts), stop, &mut handles);
+    spawn(registry, Gated::new(home, quota), stop, &mut handles);
+    spawn(registry, Gated::new(home, pages), stop, &mut handles);
     spawn(registry, memory, stop, &mut handles);
     Ok(handles)
 }

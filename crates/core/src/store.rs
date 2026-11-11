@@ -7,7 +7,7 @@
 //! bug (invariant 3).
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -262,9 +262,17 @@ fn owner_only(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The directory of `state.db` at `path`, where its owner marker lives.
+fn home_of(path: &Path) -> Option<PathBuf> {
+    path.parent().map(Path::to_path_buf)
+}
+
 /// An open `state.db`.
 pub struct Store {
     conn: Connection,
+    /// The directory that holds `state.db` and its owner marker; none for
+    /// an in-memory database.
+    home: Option<PathBuf>,
 }
 
 impl Store {
@@ -276,13 +284,16 @@ impl Store {
         owner_only(path.as_ref())?;
         configure(&conn)?;
         crate::backup::migrate_on_open(&mut conn, path.as_ref())?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            home: home_of(path.as_ref()),
+        })
     }
 
     /// Opens `state.db` without migrating. Refuses a database whose schema is
     /// not exactly this binary's, so a hook never writes across versions.
     pub fn open_current(path: impl AsRef<Path>) -> Result<Self> {
-        let conn = Connection::open(path)?;
+        let conn = Connection::open(&path)?;
         configure(&conn)?;
         let version = migrate::current_version(&conn)?;
         if version != migrate::LATEST {
@@ -291,7 +302,10 @@ impl Store {
                 migrate::LATEST
             )));
         }
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            home: home_of(path.as_ref()),
+        })
     }
 
     /// A migrated in-memory database, for tests.
@@ -299,7 +313,7 @@ impl Store {
         let mut conn = Connection::open_in_memory()?;
         configure(&conn)?;
         migrate::up(&mut conn)?;
-        Ok(Self { conn })
+        Ok(Self { conn, home: None })
     }
 
     /// An in-memory copy of this database, for tests that run many cases
@@ -312,7 +326,17 @@ impl Store {
             return Err(Error::Internal(format!("the copy stopped: {step:?}")));
         }
         configure(&conn)?;
-        Ok(Self { conn })
+        Ok(Self { conn, home: None })
+    }
+
+    /// Refuses a mutation while the owner marker beside `state.db` names
+    /// another system (`recovery.md` R20). Read on every write, since the
+    /// owner can flip it while the store is open.
+    fn check_owner(&self) -> Result<()> {
+        match &self.home {
+            Some(home) => crate::owner::check(home),
+            None => Ok(()),
+        }
     }
 
     /// The connection, for reads. Writes go through [`Store::write`].
@@ -365,6 +389,7 @@ impl Store {
     where
         F: FnOnce(&mut Tx<'_>) -> Result<T>,
     {
+        self.check_owner()?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -396,6 +421,7 @@ impl Store {
         T: Serialize + DeserializeOwned,
         F: FnOnce(&mut Tx<'_>) -> Result<T>,
     {
+        self.check_owner()?;
         let key = key.or(ctx.key.as_deref());
         let actor = ctx.actor.to_string();
         let args = ctx

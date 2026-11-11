@@ -30,8 +30,8 @@ use utoipa::{IntoParams, ToSchema};
 use self::apply::{Lock, Repo};
 use self::dto::{MemoryLanded, MemoryResponse, MemoryRevision};
 use crate::api::{
-    ApiError, ApiResult, AppState, board_ctx, body, guard, key, not_forwarded, read, read_only,
-    request_args, uninitialized,
+    ApiError, ApiResult, AppState, board_ctx, body, guard, key, not_forwarded, read, request_args,
+    uninitialized, writable,
 };
 use crate::dto::{ErrorBody, MutationResponse, Receipt};
 
@@ -238,9 +238,7 @@ async fn write(
     + 'static,
     key: String,
 ) -> ApiResult<MutationResponse> {
-    if let Some(reason) = state.0.damage.reason() {
-        return Err(read_only(&reason));
-    }
+    writable(state)?;
     let db = state.db();
     let home = state.0.home.clone();
     let damage = state.0.damage.clone();

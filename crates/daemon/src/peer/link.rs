@@ -841,7 +841,7 @@ impl LinkTask {
             as_of: view.as_of.clone(),
             stale_reason: view.stale_reason().map(str::to_owned),
         }));
-        if self.peers.damage.reason().is_some() {
+        if self.peers.damage.reason().is_some() || tiller_core::owner::check(&self.home).is_err() {
             return;
         }
         let home = self.home.clone();

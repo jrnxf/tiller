@@ -252,6 +252,7 @@ impl From<Error> for Failure {
             }
             Error::Unavailable(_) => failure.hint = Some("retry with the same key".into()),
             Error::SchemaTooNew { .. } => failure.hint = Some("upgrade tiller".into()),
+            Error::OwnerMarker(_) => failure.hint = Some(tiller_core::owner::FLIP_BACK.into()),
             Error::Usage(_) | Error::Forbidden(_) | Error::Internal(_) => {}
         }
         failure
@@ -443,16 +444,7 @@ impl App {
     /// Refuses every mutation while `<home>/owner` names another system
     /// (`recovery.md` R20). A missing marker names none.
     pub fn check_owner_marker(&self) -> Result<(), Failure> {
-        let marker = self.owner_marker();
-        match marker.as_deref() {
-            None | Some("tiller") => Ok(()),
-            Some(other) => Err(Failure::new(
-                "owner_marker",
-                6,
-                format!("read only: the owner marker names {other:?}, not \"tiller\""),
-            )
-            .hint("tiller owner set tiller")),
-        }
+        Ok(tiller_core::owner::check(&self.home)?)
     }
 
     pub fn owner_marker(&self) -> Option<String> {

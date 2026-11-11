@@ -146,18 +146,13 @@ impl Reconciler {
         Ctx::at(Actor::Daemon, now)
     }
 
-    /// The owner marker, when it names a system other than Tiller (R20).
-    pub fn other_owner(&self) -> Option<String> {
-        let text = std::fs::read_to_string(self.config.tiller_home.join("owner")).ok()?;
-        let name = text.trim();
-        (!name.is_empty() && name != "tiller").then(|| name.to_owned())
-    }
-
     /// One pass, every step in order.
     pub fn pass(&mut self, now: Timestamp) -> Result<Report> {
         let mut report = Report::default();
-        if let Some(other) = self.other_owner() {
-            tracing::info!(owner = %other, "read only: the owner marker names another system");
+        // The store refuses every write under the marker too (R20); the
+        // pass stops here so it does no outside work either.
+        if let Err(error) = tiller_core::owner::check(&self.config.tiller_home) {
+            tracing::info!(%error, "reconcile pass skipped");
             report.read_only = true;
             self.was_read_only = true;
             return Ok(report);

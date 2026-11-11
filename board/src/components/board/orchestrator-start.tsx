@@ -34,9 +34,10 @@ async function startOrchestrator(projectId: string, host?: string): Promise<Star
     if (error.status === 0) {
       return { ok: false, message: "The daemon did not answer, so no orchestrator started." };
     }
-    // This host's 403 is the cookie; a peer's own refusal (it names the
-    // peer) is shown in its words.
-    if (error.status === 403 && error.host === null) {
+    // This host's 403 is the cookie, unless its owner marker names another
+    // system; that refusal, and a peer's own (it names the peer), is shown
+    // in its words.
+    if (error.status === 403 && error.host === null && error.code !== "owner_marker") {
       return {
         ok: false,
         message:

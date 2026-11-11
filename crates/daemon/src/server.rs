@@ -269,9 +269,8 @@ fn init_if_missing(home: &Path) -> Result<(), DaemonError> {
         return Ok(());
     }
     // A marker naming another system makes every mutation refuse (R20).
-    let marker = std::fs::read_to_string(home.join("owner")).unwrap_or_default();
-    if !matches!(marker.trim(), "" | "tiller") {
-        tracing::warn!("owner marker names another system; not creating state.db");
+    if let Err(error) = tiller_core::owner::check(home) {
+        tracing::warn!(%error, "not creating state.db");
         return Ok(());
     }
     let mut store = Store::open(&db)?;

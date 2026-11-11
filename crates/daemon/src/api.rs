@@ -382,6 +382,9 @@ impl From<Error> for ApiError {
                 api.body.error.entity = Some((*entity).to_owned());
                 api.body.error.id = Some(id.clone());
             }
+            Error::OwnerMarker(_) => {
+                api.body.error.hint = Some(tiller_core::owner::FLIP_BACK.to_owned());
+            }
             Error::Internal(_) | Error::SchemaTooNew { .. } => {
                 tracing::error!(%error, "request failed");
             }
@@ -416,6 +419,19 @@ pub(crate) fn read_only(reason: &str) -> ApiError {
         "read only: state.db failed its integrity check ({reason}); mutations are refused until the owner restores it"
     )))
     .hint("stop the daemon, then run tiller restore <file> --dry-run and again without the flag")
+}
+
+/// Refuses a mutation before any of its work while the daemon is read-only:
+/// `state.db` is damaged (`recovery.md` R10), or the owner marker names
+/// another system (R20; read on every request, since the owner can flip it
+/// while the daemon runs). The store refuses the write itself under the
+/// marker too; this check also stops the outside work some mutations do
+/// first, such as a clone, an ssh pairing or an orchestrator start.
+pub(crate) fn writable(state: &AppState) -> Result<(), ApiError> {
+    if let Some(reason) = state.0.damage.reason() {
+        return Err(read_only(&reason));
+    }
+    Ok(tiller_core::owner::check(&state.0.home)?)
 }
 
 /// Runs `read` on the blocking pool against a fresh read connection.
@@ -700,9 +716,7 @@ async fn mutate(
     key: String,
     mutation: impl FnOnce(&mut Store, &Ctx, &str) -> tiller_core::Result<Done> + Send + 'static,
 ) -> ApiResult<MutationResponse> {
-    if let Some(reason) = state.0.damage.reason() {
-        return Err(read_only(&reason));
-    }
+    writable(state)?;
     let db = state.db();
     let damage = state.0.damage.clone();
     let args = request_args();
@@ -2210,9 +2224,7 @@ async fn start_orchestrator(
     if let Some(view) = peer_for(&state, mutation.host()).await? {
         return forward(&state, &view, mutation, &bytes).await;
     }
-    if let Some(reason) = state.0.damage.reason() {
-        return Err(read_only(&reason));
-    }
+    writable(&state)?;
     let Some(starter) = state.0.orchestrators.clone() else {
         return Err(Error::Unavailable("this daemon cannot start orchestrators".into()).into());
     };
@@ -2257,9 +2269,7 @@ async fn restart_stale(
     let Parsed::RestartStale(sessions) = mutation.parsed else {
         return Err(Error::Internal("a restart parses as a restart".into()).into());
     };
-    if let Some(reason) = state.0.damage.reason() {
-        return Err(read_only(&reason));
-    }
+    writable(&state)?;
     let Some(starter) = state.0.orchestrators.clone() else {
         return Err(Error::Unavailable("this daemon cannot restart sessions".into()).into());
     };
@@ -2445,9 +2455,7 @@ async fn add_project(
     };
     // The default folder is named after the id, so it is checked first.
     ids::validate_project_id(&new.id)?;
-    if let Some(reason) = state.0.damage.reason() {
-        return Err(read_only(&reason));
-    }
+    writable(&state)?;
     // Its own task: a browser that goes away mid-clone does not leave a
     // clone with no project, or a project with no checkout.
     let task = tokio::spawn(add_with_checkout(state, key, new, checkout));
@@ -2734,9 +2742,7 @@ async fn add_peer(
     check_label(&request.label)?;
     check_alias(&request.ssh)?;
     // Refused before the new host accepts a key this host could not record.
-    if let Some(reason) = state.0.damage.reason() {
-        return Err(read_only(&reason));
-    }
+    writable(&state)?;
     // Its own task: a browser that goes away mid-ssh does not cut a pairing
     // off between the new host's accept and this host's record of it.
     let task = tokio::spawn(pair_host(state, key, request.label, request.ssh, scope));

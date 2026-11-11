@@ -51,7 +51,7 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 | Peers | Full: `peer add`, `accept`, `list`, `remove`, `revoke`, `serve`, `pane` | Part | The board adds a host. |
 | Memory | Full: `mem note`, `propose`, `approve`, `retro`, `learn` | Part | The board edits, decides (Keep or Discard) and shows revisions. |
 | Read the fleet | Full: board, agents, machines, quota, health, events, snapshot | Full | |
-| Owner marker | Full: `owner set`, `owner show` | No | |
+| Owner marker | Full: `owner set`, `owner show` | No | While the marker names another system, both surfaces refuse every mutation with `owner_marker` (exit 6, HTTP 403). The check is in the store, so they share it (`recovery.md` R20). The board shows the refusal in the daemon's words. It has no read-only banner yet. |
 | Sign in | Full: `tiller board --login` issues a code | Full | The board signs in with the code and signs out. |
 | Run the daemon | Full: `tiller daemon` | No | |
 
@@ -79,6 +79,5 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 - **The board sets few config keys.** It sets only the keys a start reads, as the fix flow in Settings "Starting agents".
 - **Project add stays narrower on the board.** The spec keeps `--checks`, `--remote`, `--default-branch` and the deploy flags on the CLI (state.md).
 - **Reason not recorded: actor `board` and `owner`.** Authority gives both the same rights. No doc says why they are separate actors.
-- **Reason not recorded: the owner marker.** The CLI refuses a write under a foreign marker with exit 6. The daemon's board path has no marker check of its own. It has the damage and read-only state.
 - **Reason not recorded: an empty body on edit.** The CLI clears the field. The API sets an empty string.
 - **Reason not recorded: CLI-only controls.** Dependencies, `land`, grants, `host edit`, `project edit`, `orchestrator start --restart`, peer management beyond add, and the memory undo route (the API has it, and no surface calls it).
