@@ -707,6 +707,10 @@ enum Stopped {
     Lost(String),
 }
 
+/// How long a stopped curator's output is read for: its group is killed,
+/// so only a process that left the group can keep the pipe open longer.
+const STOPPED_OUTPUT_WAIT: Duration = Duration::from_secs(1);
+
 /// Runs the curator in a process group of its own and stops the whole
 /// group when the curator exits, at `timeout`, when `interrupt` is caught,
 /// or when waiting for it fails, so nothing it started outlives the run
@@ -756,14 +760,14 @@ fn run_with_timeout(
         process::Ended::Failed(error) => (None, Some(Stopped::Lost(error.to_string()))),
     };
     // A process that left the curator's group can still hold stdout open
-    // past its exit, so the read shares the deadline; after a stop it is
-    // not waited for at all.
-    let stdout = match stopped {
-        None => reader
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .unwrap_or_default(),
-        Some(_) => String::new(),
+    // past its exit, so the read shares the deadline. After a stop the group
+    // is gone and the pipe ends at once, so what the curator wrote before it
+    // is kept, waiting [`STOPPED_OUTPUT_WAIT`] at most.
+    let wait = match stopped {
+        None => deadline.saturating_duration_since(Instant::now()),
+        Some(_) => STOPPED_OUTPUT_WAIT,
     };
+    let stdout = reader.recv_timeout(wait).unwrap_or_default();
     Ok(Ran {
         exit,
         stopped,
@@ -1045,5 +1049,21 @@ mod tests {
             run_with_timeout(&argv, &[], dir.path(), Duration::from_secs(60), &idle()).unwrap();
         assert_eq!((ran.exit, ran.stopped), (Some(2), None));
         assert_eq!(ran.stdout.trim(), "{\"done\":true}");
+    }
+
+    /// What a curator wrote before its cut is kept, for the owner to read
+    /// before running it again.
+    #[test]
+    fn a_cut_curator_keeps_what_it_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv = [
+            "sh".to_owned(),
+            "-c".to_owned(),
+            "echo 'half way'; exec sleep 300".to_owned(),
+        ];
+        let ran = run_with_timeout(&argv, &[], dir.path(), Duration::from_millis(500), &idle())
+            .unwrap();
+        assert_eq!(ran.stopped, Some(Stopped::Cut));
+        assert_eq!(ran.stdout.trim(), "half way");
     }
 }
