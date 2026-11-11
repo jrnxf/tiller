@@ -244,6 +244,15 @@ fn a_planted_scrub_note_key_still_asks_about_a_public_leak() {
     );
     let report = w.pass(now().plus_minutes(2));
     assert_eq!(refusals(&report), 0, "reported once: {report:?}");
+
+    // The hold passes to another actor: that refusal is reported too.
+    w.store()
+        .conn()
+        .execute("DELETE FROM idempotency_keys WHERE key = ?1", [&key])
+        .unwrap();
+    plant_key(&w, &key, Some("session:another"));
+    let report = w.pass(now().plus_minutes(3));
+    assert_eq!(refusals(&report), 1, "a new holder: {report:?}");
 }
 
 /// R19, G11: a force-push after approval is flagged (the breach names the

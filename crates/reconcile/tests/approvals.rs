@@ -99,6 +99,13 @@ fn uncertain_execution_resolves_from_forge() {
         "{}",
         items[0].question
     );
+    assert!(
+        items[0]
+            .question
+            .contains("is failed: the merge did not happen"),
+        "the item shows the state the pass recorded: {}",
+        items[0].question
+    );
 }
 
 /// R08: a `uncertain` `land_direct` is resolved from the default branch:

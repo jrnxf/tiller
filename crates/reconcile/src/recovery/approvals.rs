@@ -195,7 +195,7 @@ impl Reconciler {
             "pr_id = ?1 AND state = 'uncertain' AND kind = 'merge' ORDER BY id",
             &[&pr.id],
         )?;
-        // Each approval under its own guard: a refused write for one is
+        // Each approval under its own guard: a failed write for one is
         // reported, and the ones after it are still resolved.
         for approval in uncertain {
             if let Err(error) = self.resolve_uncertain_merge(&approval, pr, read, now, report) {
@@ -234,7 +234,13 @@ impl Reconciler {
             approval.id, finished.value.approval.state
         ));
         if finish == Finish::Failed {
-            self.failed_execution_item(approval, "the merge did not happen", now, report)?;
+            // The item shows the approval as the pass just finished it.
+            self.failed_execution_item(
+                &finished.value.approval,
+                "the merge did not happen",
+                now,
+                report,
+            )?;
         }
         Ok(())
     }
@@ -710,14 +716,20 @@ impl Reconciler {
                 return Ok(());
             }
         };
-        self.store
+        let finished = self
+            .store
             .approval_finish(&self.ctx(now), &approval.id, finish, result)?;
         report.repair(format!(
             "R08 uncertain land_direct {} resolved from the default branch: {finish:?}",
             approval.id
         ));
         if finish == Finish::Failed {
-            self.failed_execution_item(approval, "the push did not land", now, report)?;
+            self.failed_execution_item(
+                &finished.value.approval,
+                "the push did not land",
+                now,
+                report,
+            )?;
         }
         Ok(())
     }

@@ -3,7 +3,7 @@
 //! start. The pass runs its steps in order, each repair in its own
 //! transaction, and records nothing when it repairs nothing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension};
@@ -134,11 +134,12 @@ pub struct Reconciler {
     pub(crate) snapshot: Option<Snapshot>,
     pub(crate) scans: HashMap<PathBuf, WorktreeScan>,
     /// Pass keys another actor stored first that this engine has reported,
-    /// so each refusal is reported once, not on every pass.
-    pub(crate) planted: HashSet<String>,
-    /// Refusals the keyed-write helpers met this pass, for the report: the
-    /// key and its line.
-    pub(crate) refusals: Vec<(String, String)>,
+    /// with that actor and when it stored the key, so each refusal is
+    /// reported once, not on every pass.
+    pub(crate) planted: HashMap<String, (String, Timestamp)>,
+    /// Refusals the keyed-write helpers met and no returned report carried
+    /// yet: one line each.
+    pub(crate) refusals: Vec<String>,
 }
 
 impl Reconciler {
@@ -154,7 +155,7 @@ impl Reconciler {
             was_read_only: false,
             snapshot: None,
             scans: HashMap::new(),
-            planted: HashSet::new(),
+            planted: HashMap::new(),
             refusals: Vec::new(),
         }
     }
@@ -176,15 +177,12 @@ impl Reconciler {
         let mut report = Report::default();
         let result = self.steps(now, &mut report);
         // The keyed-write helpers take no report: their refusals join it
-        // here. A pass that fails drops its report, so its refusals are
-        // forgotten and the next pass reports them again.
-        let refusals = std::mem::take(&mut self.refusals);
+        // here. A pass that fails drops its report, so its refusals wait
+        // for the next report a pass returns, and their keys stay planted.
         if result.is_err() {
-            for (key, _) in &refusals {
-                self.planted.remove(key);
-            }
+            return result.map(|()| report);
         }
-        for (_, line) in refusals {
+        for line in std::mem::take(&mut self.refusals) {
             tracing::warn!(%line, "reconcile step failed");
             report.errors.push(line);
         }
@@ -438,11 +436,19 @@ impl Reconciler {
     }
 
     /// Whether this engine already met `key` held by another actor, and
-    /// that actor still holds it: the write would be refused again, so the
-    /// helpers skip it and the work before it. A key whose hold has lapsed
-    /// is tried again.
-    pub(crate) fn still_planted(&self, key: &str) -> Result<bool> {
-        Ok(self.planted.contains(key) && self.key_holder(key)?.is_some())
+    /// that same hold is still there: the write would be refused again, so
+    /// the helpers skip it and the work before it. A key whose hold lapsed
+    /// or passed to another actor is forgotten and tried again, so a later
+    /// refusal of it is reported.
+    pub(crate) fn still_planted(&mut self, key: &str) -> Result<bool> {
+        let Some(met) = self.planted.get(key) else {
+            return Ok(false);
+        };
+        if self.key_holder(key)?.as_ref() == Some(met) {
+            return Ok(true);
+        }
+        self.planted.remove(key);
+        Ok(false)
     }
 
     /// A keyed write's result, with the store's refusal of a pass key
@@ -454,12 +460,12 @@ impl Reconciler {
         match result {
             Ok(value) => Ok(Some(value)),
             Err(error @ tiller_core::Error::Refused { .. }) => {
-                if self.key_holder(key)?.is_none() {
+                let Some(holder) = self.key_holder(key)? else {
                     return Err(error);
-                }
-                if self.planted.insert(key.to_owned()) {
-                    self.refusals
-                        .push((key.to_owned(), format!("pass key {key}: {error}")));
+                };
+                if self.planted.get(key) != Some(&holder) {
+                    self.planted.insert(key.to_owned(), holder);
+                    self.refusals.push(format!("pass key {key}: {error}"));
                 }
                 Ok(None)
             }
@@ -489,7 +495,9 @@ impl Reconciler {
     /// because another actor holds the key ([`Self::planted`]), the clock
     /// starts when that actor stored the key: a planted key can bring the
     /// next step forward, never hold it back. A message the pass never
-    /// tried (no live orchestrator) starts no clock.
+    /// tried (no live orchestrator) starts no clock. The try is known only
+    /// while this engine runs: after a restart the clock waits for the next
+    /// try.
     pub(crate) fn message_at(&self, key: &str) -> Result<Option<Timestamp>> {
         let actor = Actor::Daemon.to_string();
         let own = self
@@ -500,11 +508,7 @@ impl Reconciler {
                 |row| row.get(0),
             )
             .optional()?;
-        match own {
-            Some(at) => Ok(Some(at)),
-            None if self.planted.contains(key) => Ok(self.key_holder(key)?.map(|(_, at)| at)),
-            None => Ok(None),
-        }
+        Ok(own.or_else(|| self.planted.get(key).map(|(_, at)| *at)))
     }
 
     /// Records `guard`'s breach once, under the pass key `key`. When
