@@ -14,16 +14,28 @@ use crate::store::{Applied, Ctx, NewEvent, Store};
 
 /// The event kinds of a notification's outcome, as an SQL list:
 /// `attention.notify_sent` (`notification.sent`) and
-/// `attention.notify_failed` (`notification.fail`).
-pub const OUTCOME_KINDS: &str = "'attention.notify_sent', 'attention.notify_failed'";
+/// `attention.notify_failed` (`notification.fail`). A macro, so the
+/// constants below spell the list once.
+macro_rules! outcome_kinds {
+    () => {
+        "'attention.notify_sent', 'attention.notify_failed'"
+    };
+}
+
+/// `outcome_kinds!` as a constant.
+const OUTCOME_KINDS: &str = outcome_kinds!();
 
 /// The SQL condition that leaves out a write-ahead `attention.notified`
 /// record once its outcome follows it, for a query over `events`: one
 /// notification is one timeline line (`protocol.md` 3.4).
-pub(crate) const ONE_LINE_PER_NOTIFICATION: &str = "NOT (events.kind = 'attention.notified' AND EXISTS (
+pub(crate) const ONE_LINE_PER_NOTIFICATION: &str = concat!(
+    "NOT (events.kind = 'attention.notified' AND EXISTS (
     SELECT 1 FROM events AS outcome
     WHERE outcome.entity = 'attention' AND outcome.entity_id = events.entity_id
-      AND outcome.kind IN ('attention.notify_sent', 'attention.notify_failed')))";
+      AND outcome.kind IN (",
+    outcome_kinds!(),
+    ")))"
+);
 
 impl Store {
     /// `notification.record` (daemon): writes `attention.notified` for an
@@ -126,18 +138,4 @@ fn awaiting_outcome(conn: &Connection, item: &str) -> Result<bool> {
         [item],
         |row| row.get(0),
     )?)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{ONE_LINE_PER_NOTIFICATION, OUTCOME_KINDS};
-
-    /// The timeline filter names the same outcome kinds as the constant.
-    #[test]
-    fn the_timeline_filter_names_the_outcome_kinds() {
-        assert!(
-            ONE_LINE_PER_NOTIFICATION.contains(&format!("IN ({OUTCOME_KINDS})")),
-            "{ONE_LINE_PER_NOTIFICATION}"
-        );
-    }
 }
