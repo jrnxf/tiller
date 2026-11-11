@@ -4,8 +4,46 @@
 mod common;
 
 use common::*;
-use tiller_core::domain::{AttentionKind, RunOutcome, StatusState};
+use tiller_core::domain::{AttentionKind, Effort, RunOutcome, RunRole, StatusState};
+use tiller_core::state::runs::{NewRun, SpawnChecks};
 use tiller_reconcile::sources::Cut;
+
+fn cut(w: &World, run: &str) {
+    w.harness.cut(
+        run,
+        Cut {
+            reason: "no-mistakes fix agent reached its 30 minute limit".into(),
+            done: None,
+            remains: None,
+        },
+    );
+}
+
+/// A new builder run on `card`, started by the owner.
+fn start_run(w: &mut World, card: &str, path: &str) -> String {
+    w.store_mut()
+        .run_start(
+            &owner(),
+            None,
+            NewRun {
+                card: card.to_owned(),
+                role: RunRole::Builder,
+                model: "test-model".into(),
+                effort: Effort::Medium,
+                host_id: None,
+                worktree_path: Some(path.into()),
+                branch: None,
+                base_branch: None,
+                base_sha: None,
+                config_hash: None,
+                checks: SpawnChecks::default(),
+            },
+        )
+        .unwrap()
+        .value
+        .run
+        .id
+}
 
 /// R14 (P55): the harness's own record ends the run `cut` with what was
 /// done and what remains; the worktree stays; the orchestrator is told; the
@@ -119,5 +157,54 @@ fn cut_is_recorded_only_from_harness_evidence() {
     assert_eq!(
         w.count("SELECT count(*) FROM runs WHERE outcome = 'cut'"),
         0
+    );
+}
+
+/// R14 counts only the cuts since the card was last reopened: a reopen
+/// starts the card over (`state.md` section 6), so the first cut after it
+/// is the orchestrator's again, and the second goes to the developer.
+#[test]
+fn a_cut_before_a_reopen_does_not_count() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let run = w.run_of(&worker);
+    let card = run.card_id.clone();
+    cut(&w, &run.id);
+    w.pass(now());
+    assert_eq!(w.run(&run.id).outcome, Some(RunOutcome::Cut));
+    w.store_mut()
+        .card_cancel(&owner(), &card, "wrong approach")
+        .unwrap();
+    w.store_mut()
+        .card_reopen(&owner(), &card, "try again")
+        .unwrap();
+
+    let rework = start_run(&mut w, &card, "/home/user/worktrees/rework");
+    cut(&w, &rework);
+    let report = w.pass(now().plus_minutes(1));
+    assert!(report.did("R14"), "{report:?}");
+    assert_eq!(w.run(&rework).outcome, Some(RunOutcome::Cut));
+    let recovery = |w: &World| {
+        w.open_items(&card)
+            .into_iter()
+            .filter(|item| item.kind == AttentionKind::Recovery)
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        recovery(&w).is_empty(),
+        "the first cut since the reopen is the orchestrator's: {:?}",
+        recovery(&w)
+    );
+
+    let again = start_run(&mut w, &card, "/home/user/worktrees/again");
+    cut(&w, &again);
+    w.pass(now().plus_minutes(2));
+    let items = recovery(&w);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert!(
+        items[0].question.contains("cut 2 times"),
+        "{}",
+        items[0].question
     );
 }

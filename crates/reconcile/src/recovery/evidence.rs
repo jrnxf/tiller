@@ -715,7 +715,8 @@ impl Reconciler {
 
     /// R14: a run the harness itself recorded as cut ends `cut` with a note
     /// of what was done and what remains; the worktree stays. The same cut
-    /// twice on one card goes to the developer.
+    /// twice on one card, since it was created or last reopened, goes to the
+    /// developer.
     fn cuts(&mut self, now: Timestamp, report: &mut Report) -> Result<()> {
         let runs: Vec<Run> = list(self.conn(), "ended_at IS NULL ORDER BY started_at", &[])?;
         for run in runs {
@@ -760,11 +761,7 @@ impl Reconciler {
                 format!("[{}] {} run {} was cut by the harness. {note} Relaunch as a new attempt with this note, or hand the rest to a builder.", card.display_id, run.role.short_name(), run.id),
                 Some(card.id.clone()),
             )?;
-            let cuts: i64 = self.conn().query_row(
-                "SELECT count(*) FROM runs WHERE card_id = ?1 AND outcome = 'cut'",
-                [&card.id],
-                |row| row.get(0),
-            )?;
+            let cuts = self.cuts_since(&card)?;
             if cuts >= 2 {
                 let item = format!("reconcile:R14:recovery:{}:{}", card.id, run.id);
                 if self.recovery(
@@ -786,5 +783,24 @@ impl Reconciler {
             }
         }
         Ok(())
+    }
+
+    /// R14: the card's cut runs, counting only the cuts recorded since its
+    /// last reopen. A reopen starts the card over (`state.md` section 6), so
+    /// a cut before it is not a repeat of the work after it. A run counts
+    /// by the `run.ended` event that recorded its cut; on a card never
+    /// reopened every cut row counts, with or without an event (imported
+    /// history), the same rule as [`Self::recorded_since`].
+    fn cuts_since(&self, card: &Card) -> Result<i64> {
+        let since = reopened_seq(self.conn(), card)?;
+        Ok(self.conn().query_row(
+            "SELECT count(*) FROM runs r
+             WHERE r.card_id = ?1 AND r.outcome = 'cut'
+               AND (?2 = 0 OR EXISTS (SELECT 1 FROM events e
+                                      WHERE e.entity = 'run' AND e.entity_id = r.id
+                                        AND e.kind = 'run.ended' AND e.seq > ?2))",
+            rusqlite::params![card.id, since],
+            |row| row.get(0),
+        )?)
     }
 }
