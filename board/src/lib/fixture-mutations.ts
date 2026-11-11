@@ -839,7 +839,10 @@ function linkMutation(method: string, path: string, scenario: Scenario): Mutatio
         },
       ]
     : [];
-  return { reply: recorded(host, null, null), followUps };
+  const done = recorded(host, null, null);
+  // A key file the unpair left: still applied, with why on `warning`.
+  if (reply.warning) done.body = { ...(done.body as object), warning: reply.warning };
+  return { reply: done, followUps };
 }
 
 function cardEvent(kind: string, txn: string, row: BoardRow): FollowUp {

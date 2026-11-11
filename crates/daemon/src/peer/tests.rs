@@ -161,11 +161,21 @@ fn serve_with_starter(
     from: &str,
     orchestrators: Option<Arc<dyn OrchestratorStart>>,
 ) -> UnixStream {
+    serve_timed(home, from, orchestrators, quick())
+}
+
+/// [`serve_with_starter`] on other timings.
+fn serve_timed(
+    home: &Path,
+    from: &str,
+    orchestrators: Option<Arc<dyn OrchestratorStart>>,
+    timing: Timing,
+) -> UnixStream {
     let (ours, theirs) = UnixStream::pair().unwrap();
     let config = ServeConfig {
         home: home.to_owned(),
         from: from.to_owned(),
-        timing: quick(),
+        timing,
         herdr: None,
         orchestrators,
     };
@@ -1045,6 +1055,25 @@ fn revoked_key_refused() {
         matches!(again.next(), Frame::Refused { reason, .. } if reason == "revoked"),
         "a revoked key opened a link"
     );
+}
+
+/// A revoke closes a live link before any frame after it goes out, its own
+/// `peer.revoked` event among them, not on the next tick (`protocol.md`
+/// 10.1: "an open link from that key closes at once").
+#[test]
+fn a_revoke_closes_the_link_before_its_next_frame() {
+    let pair = pair();
+    let slow_tick = Timing {
+        tick: Duration::from_secs(60),
+        ..quick()
+    };
+    let socket = serve_timed(pair.peer.dir.path(), "test-host", None, slow_tick);
+    let mut link = welcomed(&pair, SyncLink::on(socket));
+    pair.peer.open().peer_revoke(&owner(), "test-host").unwrap();
+    match link.next() {
+        Frame::Refused { reason, .. } => assert_eq!(reason, "revoked"),
+        frame => panic!("the revoked key got {frame:?} first"),
+    }
 }
 
 /// A captured `hello` sent again is refused, even inside its skew window:
@@ -2379,6 +2408,50 @@ fn pane_open(pair: &Pair, session: &str, kind: PaneKind) -> PaneOpen {
         Some(10),
         Timestamp::now(),
     )
+}
+
+/// A revoke ends a pane stream that is open at once, not on the next tick:
+/// the board host stops getting the pane's bytes as its link stops getting
+/// frames.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoke_ends_an_open_pane_stream_at_once() {
+    let mut pair = pair();
+    let session = pair.peer.worker("w2:p1");
+    let scratch = tempfile::tempdir().unwrap();
+    let config = ServeConfig {
+        home: pair.peer.dir.path().to_owned(),
+        from: "test-host".into(),
+        timing: Timing {
+            tick: Duration::from_secs(60),
+            ..quick()
+        },
+        herdr: Some(mirror_herdr(scratch.path())),
+        orchestrators: None,
+    };
+    let (mut board_out, peer_in) = tokio::io::duplex(1 << 16);
+    let (peer_out, board_in) = tokio::io::duplex(1 << 16);
+    tokio::spawn(async move {
+        let _ = pane::serve(&config, tokio::io::BufReader::new(peer_in), peer_out).await;
+    });
+    let open = Frame::PaneOpen(Box::new(pane_open(&pair, &session, PaneKind::Stream)));
+    board_out
+        .write_all(open.line().unwrap().as_bytes())
+        .await
+        .unwrap();
+    let mut lines = tokio::io::BufReader::new(board_in).lines();
+    let first = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(first.is_some(), "the stream never began");
+
+    pair.peer.open().peer_revoke(&owner(), "test-host").unwrap();
+    let ended = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Ok(Some(_)) = lines.next_line().await {}
+    })
+    .await;
+    assert!(ended.is_ok(), "the revoked key's pane stream stayed open");
+    drop(board_out);
 }
 
 #[tokio::test(flavor = "multi_thread")]

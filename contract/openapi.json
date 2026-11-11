@@ -4309,7 +4309,7 @@
         },
         "responses": {
           "200": {
-            "description": "`data` is the host row, no longer paired; a host not paired is a no-op",
+            "description": "`data` is the host row, no longer paired; a host not paired is a no-op that deletes a key file left behind. `warning` says when the row is unpaired but the key file was not deleted",
             "content": {
               "application/json": {
                 "schema": {
@@ -4347,6 +4347,16 @@
           },
           "502": {
             "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`state.db` is read only",
             "content": {
               "application/json": {
                 "schema": {
@@ -10029,7 +10039,8 @@
         "description": "`GET /api/v1/peers`.",
         "required": [
           "paired",
-          "accepted"
+          "accepted",
+          "key_files_left"
         ],
         "properties": {
           "accepted": {
@@ -10038,6 +10049,13 @@
               "$ref": "#/components/schemas/AcceptedKey"
             },
             "description": "Oldest first, revoked keys too."
+          },
+          "key_files_left": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The labels of hosts no longer paired whose key file is still here,\nby label: an unpair whose delete failed. Unpair again deletes it."
           },
           "paired": {
             "type": "array",

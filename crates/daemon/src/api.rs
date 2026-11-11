@@ -811,6 +811,23 @@ pub(crate) fn request_args() -> Option<Value> {
     REQUEST_ARGS.try_with(Clone::clone).ok()
 }
 
+/// Runs `work` in its own task, so a browser that goes away does not stop
+/// it halfway, with this request's arguments still bound ([`bind_args`]): a
+/// new task does not inherit the task-local, and without it the key would
+/// replay another request's answer.
+pub(crate) async fn detached<T: Send + 'static>(
+    work: impl Future<Output = ApiResult<T>> + Send + 'static,
+) -> ApiResult<T> {
+    let task = match request_args() {
+        Some(args) => tokio::spawn(REQUEST_ARGS.scope(args, work)),
+        None => tokio::spawn(work),
+    };
+    match task.await {
+        Ok(result) => result,
+        Err(error) => Err(Error::Internal(error.to_string()).into()),
+    }
+}
+
 /// The board's context for a write under `key`, bound to `args`.
 pub(crate) fn board_ctx(key: &str, args: Option<&Value>) -> Ctx {
     let ctx = Ctx::new(Actor::Board).with_key(key.to_owned());
@@ -886,7 +903,7 @@ impl Done {
         })
     }
 
-    fn with_warning(mut self, warning: Option<String>) -> Self {
+    pub(crate) fn with_warning(mut self, warning: Option<String>) -> Self {
         self.warning = warning;
         self
     }
@@ -2778,11 +2795,7 @@ async fn add_project(
     writable(&state)?;
     // Its own task: a browser that goes away mid-clone does not leave a
     // clone with no project, or a project with no checkout.
-    let task = tokio::spawn(add_with_checkout(state, key, new, checkout));
-    match task.await {
-        Ok(result) => result,
-        Err(error) => Err(Error::Internal(error.to_string()).into()),
-    }
+    detached(add_with_checkout(state, key, new, checkout)).await
 }
 
 /// Add project with a Local checkout: the folder checked, the clone it
@@ -3075,11 +3088,7 @@ async fn add_peer(
     writable(&state)?;
     // Its own task: a browser that goes away mid-ssh does not cut a pairing
     // off between the new host's accept and this host's record of it.
-    let task = tokio::spawn(pair_host(state, key, request.label, request.ssh, scope));
-    match task.await {
-        Ok(result) => result,
-        Err(error) => Err(Error::Internal(error.to_string()).into()),
-    }
+    detached(pair_host(state, key, request.label, request.ssh, scope)).await
 }
 
 /// Add a host's steps 2 to 4 (`protocol.md` 10.1), one pairing at a time.
@@ -3153,7 +3162,7 @@ async fn pair_host(
     }
     if start.paired.is_some() {
         return Err(label_taken(format!(
-            "{label} is already paired; pick another label, or run tiller peer remove {label} in a terminal first"
+            "{label} is already paired; pick another label, or Unpair it first in its Settings > Hosts card (or run tiller peer remove {label})"
         )));
     }
     // A host paired again under a new label would take the new key in
@@ -8384,8 +8393,9 @@ pub(crate) mod tests {
             paired.body
         );
         assert_eq!(error_of(&paired)["code"], "label_taken", "{}", paired.body);
-        assert!(
-            paired.body.contains("host-b is already paired"),
+        assert_eq!(
+            error_of(&paired)["message"],
+            "host-b is already paired; pick another label, or Unpair it first in its Settings > Hosts card (or run tiller peer remove host-b)",
             "{}",
             paired.body
         );

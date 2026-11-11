@@ -232,9 +232,6 @@ const RECAP_KINDS = new Set([
   "recap.seen",
 ]);
 
-// The mutations that add or end a pairing on a host row (state.md section 8).
-const PAIRING_TXNS = new Set(["peer.pair", "peer.remove"]);
-
 export function applyChange(queryClient: QueryClient, event: ChangeEvent): void {
   const state = event.entity_state;
 
@@ -272,9 +269,9 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
       });
       // A boundary edit moves what the host keys show.
       refetchPaths(queryClient, hostConfigPath);
-      // A pairing added or removed moves Settings' peer link block; other
-      // host edits, like a last hello, leave it.
-      if (PAIRING_TXNS.has(event.txn)) refetchPaths(queryClient, peersPath);
+      // Any host event may move Settings' peer link block: a pairing added or
+      // ended, or a key file read again (protocol.md section 7.3).
+      refetchPaths(queryClient, peersPath);
       break;
     case "peer_key":
       // An accepted or revoked key moves Boards that reach this host.

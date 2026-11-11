@@ -7,6 +7,7 @@ import { fixtureMutation, withoutDeleted } from "../../lib/fixture-mutations";
 import type { Scenario } from "../../lib/fixtures";
 import { forgetPeerChanges } from "../../lib/fixtures-peers";
 import { createQueryClient } from "../../lib/query-client";
+import { ToastHost } from "../board/toast";
 import { BoardsReach, PeerLink } from "./peer-link";
 
 function serve(scenario: Scenario, refuse?: () => Response) {
@@ -32,6 +33,22 @@ const deletes = (fetch: ReturnType<typeof serve>) =>
       path: String(input),
       body: JSON.parse(String(init?.body)) as Record<string, unknown>,
     }));
+
+const hostF: Machine = {
+  id: "01JPEERF0000000000000000F",
+  label: "host-f",
+  kind: "remote",
+  view_only: false,
+  health: "ok",
+  running_agents: 0,
+  capacity: 2,
+  free_slots: 2,
+  last_seen_at: "2026-11-11T16:04:00.000Z",
+  stale_reason: null,
+  link: "live",
+  peer_scope: "read",
+  rev: 5,
+};
 
 const hostD: Machine = {
   id: "01JPEERD0000000000000000D",
@@ -88,6 +105,9 @@ test("Unpair arms only once the label is typed, then the host leaves", async () 
   const dialog = await screen.findByRole("dialog", { name: "Unpair host-d?" });
   expect(dialog.textContent).toContain(
     "host-d leaves this board and its key file is deleted. Its projects, cards and agents stay on host-d. Pair it again with Add a host.",
+  );
+  expect(dialog.textContent).toContain(
+    "host-d still accepts host-a's key until you revoke it there, in host-d's Settings, Boards that reach this host.",
   );
   const confirm = within(dialog).getByRole<HTMLButtonElement>("button", { name: "Unpair host" });
   expect(confirm.disabled).toBe(true);
@@ -219,4 +239,62 @@ test("a host with no links shows neither block", async () => {
   );
   expect(screen.queryByRole("region", { name: "Peer link" })).toBeNull();
   expect(screen.queryByRole("region", { name: "Boards that reach this host" })).toBeNull();
+});
+
+test("a key file the Unpair left shows on the card, and Delete key file deletes it", async () => {
+  const fetch = serve("federated");
+  render(
+    <QueryClientProvider client={createQueryClient()}>
+      <PeerLink machine={hostF} board="host-a" />
+      <ToastHost />
+    </QueryClientProvider>,
+  );
+  const link = await screen.findByRole("region", { name: "Peer link" });
+  fireEvent.click(within(link).getByRole("button", { name: "Unpair..." }));
+  const unpairing = await screen.findByRole("dialog", { name: "Unpair host-f?" });
+  fireEvent.change(within(unpairing).getByLabelText("Type host-f to confirm"), {
+    target: { value: "host-f" },
+  });
+  fireEvent.click(within(unpairing).getByRole("button", { name: "Unpair host" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.getByTestId("toast").textContent).toContain("host-f's key file is still here");
+  const left = await screen.findByTestId("peer-key-file");
+  expect(left.textContent).toContain("Still here: the Unpair could not delete it");
+  const card = screen.getByRole("region", { name: "Peer link" });
+  expect(card.textContent).toContain("Unpaired");
+  expect(within(card).queryByRole("button", { name: "Unpair..." })).toBeNull();
+
+  fireEvent.click(within(card).getByRole("button", { name: "Delete key file..." }));
+  const dialog = await screen.findByRole("dialog", { name: "Delete host-f's key file?" });
+  expect(document.activeElement?.textContent).toBe("Cancel");
+  fireEvent.click(within(dialog).getByRole("button", { name: "Delete key file" }));
+  await waitFor(() => expect(screen.queryByRole("region", { name: "Peer link" })).toBeNull());
+  const [first, retry] = deletes(fetch);
+  expect([first?.path, retry?.path]).toEqual(["/api/v1/peers/host-f", "/api/v1/peers/host-f"]);
+  // A replay of the first key deletes nothing, so the retry sends its own.
+  expect(retry?.body.idempotency_key).not.toBe(first?.body.idempotency_key);
+});
+
+test("the fixture answers a revoke with the daemon's key row: its public key, no fingerprint", () => {
+  const revoked = fixtureMutation(
+    "DELETE",
+    "/api/v1/peer-keys/01JKEYD00000000000000000D1",
+    { idempotency_key: "revoke" },
+    "federated",
+  );
+  const data = (revoked.reply.body as { data: Record<string, unknown> }).data;
+  const fields = Object.keys(data);
+  fields.sort();
+  expect(fields).toEqual([
+    "accepted_at",
+    "id",
+    "public_key",
+    "rev",
+    "revoked_at",
+    "scope",
+    "viewer_host_id",
+    "viewer_label",
+  ]);
+  expect(String(data.public_key)).toMatch(/^ssh-ed25519 /);
+  expect(data.revoked_at).not.toBeNull();
 });

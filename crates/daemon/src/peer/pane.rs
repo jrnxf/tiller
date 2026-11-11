@@ -339,25 +339,39 @@ async fn stream(
         while let Ok(Some(_)) = input.next_line().await {}
         hung_up.send_replace(true);
     });
-    // Revoking the key or setting `federation.accept = false` ends an open
-    // watch within a tick, as it cuts a live `peer serve` link.
+    // Revoking the key ends an open watch at once, as it cuts a live `peer
+    // serve` link: the key row is read again whenever another connection
+    // committed (`PRAGMA data_version`), on every poll, and no line goes out
+    // once the watch is stopped. `federation.accept = false` ends it within a
+    // tick.
     let recheck = {
-        let (home, key_id, tick) = (config.home.clone(), open.key_id.clone(), config.timing.tick);
+        let mut trust = Trust::open(&config.home, &open.key_id);
+        let home = config.home.clone();
+        let (poll, tick) = (config.timing.poll, config.timing.tick);
         tokio::spawn(async move {
+            let mut accept_read = tokio::time::Instant::now();
             loop {
-                tokio::time::sleep(tick).await;
-                if !still_trusted(&home, &key_id) {
+                tokio::time::sleep(poll).await;
+                let accept_due = accept_read.elapsed() >= tick;
+                if accept_due {
+                    accept_read = tokio::time::Instant::now();
+                }
+                if !trust.still() || (accept_due && !super::federation_accept(&home)) {
                     stop_tx.send_replace(true);
                     return;
                 }
             }
         })
     };
+    let stopped = stop.clone();
     let body = mirror::stream(cli, pane, terminal, None, mirrors.fits(), stop, viewer);
     let mut lines = body.into_data_stream();
     let mut ended = Ok(());
     while let Some(chunk) = lines.next().await {
         let Ok(chunk) = chunk else { break };
+        if *stopped.borrow() {
+            break;
+        }
         if let Err(error) = output.write_all(&chunk).await {
             ended = Err(error.into());
             break;
@@ -372,15 +386,43 @@ async fn stream(
     ended
 }
 
-/// Whether the key is still unrevoked and `federation.accept` still on.
-fn still_trusted(home: &std::path::Path, key_id: &str) -> bool {
-    super::federation_accept(home)
-        && Store::open_current(home.join("state.db"))
-            .and_then(|store| store.peer_keys())
-            .is_ok_and(|keys| {
-                keys.iter()
-                    .any(|key| key.id == key_id && key.revoked_at.is_none())
-            })
+/// Whether a pane link's key is still unrevoked, read again only once
+/// another connection has committed since the last look.
+struct Trust {
+    store: Option<Store>,
+    key_id: String,
+    data_version: Option<i64>,
+}
+
+impl Trust {
+    fn open(home: &std::path::Path, key_id: &str) -> Self {
+        Self {
+            store: Store::open_current(home.join("state.db")).ok(),
+            key_id: key_id.to_owned(),
+            data_version: None,
+        }
+    }
+
+    /// A store that does not open or read is no longer trusted.
+    fn still(&mut self) -> bool {
+        let Some(store) = &self.store else {
+            return false;
+        };
+        let Ok(version) = store
+            .conn()
+            .query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))
+        else {
+            return false;
+        };
+        if self.data_version == Some(version) {
+            return true;
+        }
+        self.data_version = Some(version);
+        store.peer_keys().is_ok_and(|keys| {
+            keys.iter()
+                .any(|key| key.id == self.key_id && key.revoked_at.is_none())
+        })
+    }
 }
 
 type Begun = (

@@ -371,6 +371,10 @@ impl Link<'_> {
             return Ok(());
         }
         self.data_version = Some(version);
+        // The commit may be this key's revoke: the key row is read again
+        // before any frame goes out, so the link closes at once, not on the
+        // next tick.
+        self.recheck(output)?;
         let local = LocalHealth::default();
         loop {
             let now = Timestamp::now();

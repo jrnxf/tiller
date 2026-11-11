@@ -691,10 +691,26 @@ export interface AcceptedKey {
   rev: number;
 }
 
+// An accepted key's row, as `DELETE /api/v1/peer-keys/{id}` answers it.
+export interface PeerKey {
+  id: string;
+  viewer_label: string;
+  viewer_host_id: string;
+  // The OpenSSH public key text this host checks that board against.
+  public_key: string;
+  scope: PeerScope;
+  accepted_at: string;
+  revoked_at: string | null;
+  rev: number;
+}
+
 // `GET /api/v1/peers` (owner only): both ends of this host's links.
 export interface PeerList {
   paired: PairedPeer[];
   accepted: AcceptedKey[];
+  // Hosts no longer paired whose key file is still here: an Unpair whose
+  // delete failed. Unpair again deletes it.
+  key_files_left: string[];
 }
 
 // GET /api/v1/host: the fields `tiller host edit` sets on this host, what it

@@ -185,7 +185,10 @@ export const backupsQuery = () =>
 // Both ends of this host's links: the hosts this board paired with and the
 // boards whose keys this host accepted. The owner's.
 export const peersPath: QueryPath = "/api/v1/peers";
-export const peersQuery = () => queryOptions({ ...readQuery<PeerList>(peersPath), staleTime: 0 });
+// Each host card reads it, so a card that mounts uses the list read in the
+// last 30 s; a `host` or `peer_key` event refetches it at once.
+export const peersQuery = () =>
+  queryOptions({ ...readQuery<PeerList>(peersPath), staleTime: 30_000 });
 
 export const signalsPath: QueryPath = "/api/v1/signals";
 export const signalsQuery = () => readQuery<SignalsResponse>(signalsPath);

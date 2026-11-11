@@ -599,20 +599,18 @@ fn federation_accept(config: &toml::Table) -> bool {
 fn list(app: &App) -> Done {
     let store = app.read()?;
     let config = load_config(app)?;
-    let paired = store
-        .paired_hosts()?
+    let paired = peers::paired(&store, &app.home)?
         .into_iter()
         .map(|host| {
             let ssh = get_path(&config, &format!("peers.{}.ssh", host.label))
                 .and_then(toml::Value::as_str)
                 .map(str::to_owned);
-            let key_file = peers::key_path(&app.home, &host.label).is_ok_and(|path| path.exists());
             json!({
                 "label": host.label,
-                "scope": host.peer_scope,
+                "scope": host.scope,
                 "peer_host_id": host.peer_host_id,
                 "ssh": ssh,
-                "key_file": key_file,
+                "key_file": host.key_file,
                 // The daemon's link state and `as_of` arrive with the peer
                 // link (`protocol.md` 10.2).
                 "link": null,
@@ -629,10 +627,9 @@ fn list(app: &App) -> Done {
 }
 
 fn remove(app: &App, label: &str) -> Done {
-    check_label(label)?;
     let mut store = app.write()?;
-    let applied = peers::unpair(&mut store, &app.ctx(), &app.home, label)?;
-    Ok(Outcome::applied(applied))
+    let unpaired = peers::unpair(&mut store, &app.ctx(), &app.home, label)?;
+    Ok(Outcome::applied(unpaired.applied).with_warning(unpaired.key_file_left))
 }
 
 fn key_json(key: &tiller_core::domain::PeerKey) -> Value {

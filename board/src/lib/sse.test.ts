@@ -785,16 +785,17 @@ test("a config event refetches the open Settings read without a reload", async (
   unsubscribe();
 });
 
-test("only a pairing change on a host row refetches the peer list", async () => {
+test("every host event refetches the peer list", async () => {
   const queryClient = seededClient();
-  const read = vi.fn(async () => ({ paired: [], accepted: [] }));
+  const read = vi.fn(async () => ({ paired: [], accepted: [], key_files_left: [] }));
   const observer = new QueryObserver(queryClient, {
     queryKey: queryKeyFor(peersPath),
     queryFn: read,
     staleTime: Infinity,
   });
   const unsubscribe = observer.subscribe(() => {});
-  await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+  // The first read lands first: a refetch while it runs would join it.
+  await vi.waitFor(() => expect(observer.getCurrentResult().data).toBeDefined());
   const machine = queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath))
     ?.machines[0];
   if (!machine) throw new Error("fixture has no machine");
@@ -810,14 +811,11 @@ test("only a pairing change on a host row refetches the peer list", async () => 
       }),
     );
 
-  edit("peer.hello");
-  edit("host.edit");
-  await Promise.resolve();
-  expect(read).toHaveBeenCalledTimes(1);
-  edit("peer.remove");
-  await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
-  edit("peer.pair");
-  await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(3));
+  // A host edit, a link that moved, a pairing ended and one added.
+  for (const [n, txn] of ["host.edit", "peer.link", "peer.remove", "peer.pair"].entries()) {
+    edit(txn);
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(n + 2));
+  }
   unsubscribe();
 });
 
