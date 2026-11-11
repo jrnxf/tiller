@@ -15,6 +15,12 @@ import { askPrefillStore, prefillDoc } from "../shell/ask-prefill";
 await loadRouteChunks();
 await loadAskEditor();
 
+// jsdom lays nothing out, so a Range has no rects. A prefilled Ask box puts
+// the caret at the end and scrolls to it, which reads them.
+Range.prototype.getClientRects ??= () => [] as unknown as DOMRectList;
+Range.prototype.getBoundingClientRect ??= () =>
+  ({ x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }) as DOMRect;
+
 const ALPHA_REPLY = "01JREPLY000000000000000001";
 const BETA_REPLY = "01JREPLY000000000000000002";
 const GAMMA_REPLY = "01JREPLY000000000000000003";
