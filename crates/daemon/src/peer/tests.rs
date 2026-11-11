@@ -1307,6 +1307,40 @@ async fn same_key_twice_applies_once() {
     assert_eq!(titled(&pair.board, "made from the board"), 0);
 }
 
+/// A forwarded key is bound to its request, as a local one is (`protocol.md`
+/// 6.3): the same key with another body is the peer's 422 refusal and
+/// writes nothing, and a true retry still replays.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forwarded_key_replays_only_its_own_request() {
+    let pair = pair();
+    let (peers, _stop) = start(pair.board.dir.path(), Wire::new(pair.peer.dir.path()));
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let first = forward_create(&app, &cookie, "k-1", "made from the board").await;
+    let first = applied(&first);
+    assert!(!first.replayed);
+    let before = last_seq(&pair.peer);
+
+    let other = forward_create(&app, &cookie, "k-1", "another title").await;
+    let error = refusal(&other, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error.code, "refused");
+    assert!(
+        error.message.contains("other arguments"),
+        "{}",
+        error.message
+    );
+    assert_eq!(error.host.as_deref(), Some("peer"));
+    assert_eq!(titled(&pair.peer, "another title"), 0);
+    assert_eq!(last_seq(&pair.peer), before);
+
+    let again = forward_create(&app, &cookie, "k-1", "made from the board").await;
+    let again = applied(&again);
+    assert!(again.replayed);
+    assert_eq!(again.events, first.events);
+    assert_eq!(titled(&pair.peer, "made from the board"), 1);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn retried_504_applies_once() {
     // The peer applies the first try, and its `result` is lost on the way

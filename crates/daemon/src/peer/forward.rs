@@ -362,6 +362,7 @@ fn applied(
     }
     let ctx = Ctx::new(Actor::Peer(key.viewer_label.clone()))
         .with_key(frame.idempotency_key.clone())
+        .with_args(frame.idempotency_key.clone(), &normalized_args(frame))
         .with_via_peer(json!({
             "key_id": key.id,
             "viewer_host_id": key.viewer_host_id,
@@ -369,6 +370,23 @@ fn applied(
             "frame_id": frame.id,
         }));
     mutation.apply_here(store, &ctx, config.orchestrators.as_deref())
+}
+
+/// The arguments a forwarded key is bound to (`protocol.md` 6.3 and 10.3),
+/// as the board binds a local key (`api::bind_args`): the op, its target and
+/// the body. The body is a parsed JSON value, so its key order does not
+/// count, and its top-level `rev` is left out: it is a precondition, not an
+/// argument, and a retry after the write landed may carry the newer one.
+fn normalized_args(frame: &Mutate) -> Value {
+    let mut body = frame.body.clone();
+    if let Some(fields) = body.as_object_mut() {
+        fields.remove("rev");
+    }
+    json!({
+        "op": frame.op,
+        "target": frame.target,
+        "body": body,
+    })
 }
 
 #[cfg(test)]
@@ -389,5 +407,33 @@ mod tests {
         ] {
             assert_eq!(Op::named(refused), None, "{refused}");
         }
+    }
+
+    fn frame(target: &str, body: &str) -> Mutate {
+        Mutate {
+            id: "f-1".into(),
+            op: Op::Hold.as_str().into(),
+            target: Some(target.into()),
+            body: serde_json::from_str(body).unwrap(),
+            idempotency_key: "k-1".into(),
+            ts: "2031-01-01T00:00:00Z".into(),
+            viewer_host_id: "h-viewer".into(),
+            peer_host_id: "h-peer".into(),
+            key_id: "key-1".into(),
+            sig: String::new(),
+        }
+    }
+
+    /// A retry's `rev` and field order do not change its arguments; its
+    /// target and its other fields do.
+    #[test]
+    fn a_forwarded_key_binds_the_op_target_and_body() {
+        let base = normalized_args(&frame("c-1", r#"{"reason": "vendor", "rev": 3}"#));
+        let retry = normalized_args(&frame("c-1", r#"{"rev": 4, "reason": "vendor"}"#));
+        assert_eq!(base.to_string(), retry.to_string());
+        let elsewhere = normalized_args(&frame("c-2", r#"{"reason": "vendor", "rev": 3}"#));
+        assert_ne!(base, elsewhere);
+        let other = normalized_args(&frame("c-1", r#"{"reason": "other", "rev": 3}"#));
+        assert_ne!(base, other);
     }
 }
