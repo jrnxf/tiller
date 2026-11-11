@@ -2026,6 +2026,11 @@ fn nix_command_forms_are_read() {
             OWNER,
         ),
         ("echo src | xargs timeout 5 ls", None),
+        // A wrapper with its own program runs the input as its arguments.
+        ("printf '%s\\n' tiller approve 01JABC | xargs sudo ls", None),
+        ("git ls-files | xargs sudo git add", None),
+        ("git ls-files | xargs timeout 5 git log", None),
+        ("echo 12 | xargs nix develop -c gh pr view", None),
         // `nix shell` runs the first word as the program.
         ("nix shell nixpkgs#hello -c -c true", None),
         // `nix print-dev-env` prints the shell hook for a shell to run.
