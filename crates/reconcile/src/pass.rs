@@ -381,16 +381,52 @@ impl Reconciler {
         Ok(!applied.replayed)
     }
 
-    /// When the keyed message was first stored, if it was.
+    /// When the pass stored the keyed message, if it did. A row another
+    /// actor stored under the key is not the pass's message (`protocol.md`
+    /// 6.3), so it starts no clock.
     pub(crate) fn message_at(&self, key: &str) -> Result<Option<Timestamp>> {
+        let actor = Actor::Daemon.to_string();
         Ok(self
             .conn()
             .query_row(
-                "SELECT created_at FROM outbox WHERE idempotency_key = ?1",
-                [key],
+                "SELECT created_at FROM outbox WHERE idempotency_key = ?1 AND created_by = ?2",
+                [key, actor.as_str()],
                 |row| row.get(0),
             )
             .optional()?)
+    }
+
+    /// Records `guard`'s breach once, under the pass key `key`, and says
+    /// whether this call wrote it. A refused write (a key another actor
+    /// stored first, `protocol.md` 6.3) is reported and stops only this
+    /// write: the step's note, its recovery item and the rest of the pass
+    /// still run.
+    pub(crate) fn breach(
+        &mut self,
+        now: Timestamp,
+        key: String,
+        guard: &str,
+        card_id: &str,
+        details: Value,
+        report: &mut Report,
+    ) -> bool {
+        let written = match self.key_used(&key) {
+            Ok(true) => return false,
+            Ok(false) => self.store.guard_breach(
+                &self.ctx(now).with_key(key.clone()),
+                guard,
+                Some(card_id),
+                details,
+            ),
+            Err(error) => Err(error),
+        };
+        match written {
+            Ok(_) => true,
+            Err(error) => {
+                report.error(&format!("{guard} breach {key}"), &error);
+                false
+            }
+        }
     }
 
     /// Whether the pass's own mutation under `key` already ran: the key is

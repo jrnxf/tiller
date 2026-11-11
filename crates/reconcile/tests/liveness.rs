@@ -76,6 +76,37 @@ fn silent_worker_escalates_to_orchestrator_then_owner() {
     assert!(w.run(&run.id).ended_at.is_none());
 }
 
+/// R12: only the daemon's own notes count as an earlier silence. A worker
+/// that sends a message under a key shaped like the pass's note key does
+/// not make its first silence "the second", so the developer is not asked
+/// at once.
+#[test]
+fn a_planted_note_key_is_not_an_earlier_silence() {
+    use tiller_core::domain::OutboxKind;
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let run = w.run_of(&worker);
+    w.tool_hook(&worker, "Bash", ago(31));
+    let orchestrator = w.fleet.orchestrator_session.clone();
+    w.store_mut()
+        .outbox_send(
+            &Ctx::at(Actor::Session(worker.clone()), ago(5)),
+            Some(&format!("reconcile:R12:note:{}:planted", run.id)),
+            &orchestrator,
+            OutboxKind::Note,
+            "a note from the worker".into(),
+        )
+        .unwrap();
+    let report = w.pass(now());
+    assert!(report.did("note to the orchestrator"), "{report:?}");
+    assert!(
+        w.open_items(&run.card_id).is_empty(),
+        "{:?}",
+        w.open_items(&run.card_id)
+    );
+}
+
 /// R12: a dated pause on the run silences the escalation until it passes.
 #[test]
 fn dated_pause_silences_silent_escalation() {

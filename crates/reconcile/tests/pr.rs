@@ -163,6 +163,50 @@ fn a_breach_key_another_actor_used_does_not_silence_the_breach() {
     );
 }
 
+/// A pass key another actor planted makes one write fail, and only that
+/// write: the pass reports the refusal and carries on. PR 7's refused G30
+/// breach still lets its scrub note reach the orchestrator, and PR 8, which
+/// sorts after it, still gets its refresh and its G11 breach.
+#[test]
+fn a_planted_pass_key_stops_only_its_own_write() {
+    let mut w = World::new();
+    let poisoned = w.worker("w2:p1");
+    let other = w.worker("w3:p1");
+    w.place();
+    let pr7 = w.link_pr(&poisoned, 7, "a1a1a1a1");
+    let pr8 = w.link_pr(&other, 8, "d4d4d4d4");
+    let approval = w.approve(&other, &pr8, "d4d4d4d4", true);
+    w.forge.pr(REPO, 7, open_pr("a1a1a1a1"));
+    w.forge.pr(REPO, 8, open_pr("d4d4d4d4"));
+    w.pass(now());
+
+    let mut leaking = open_pr("b2b2b2b2");
+    leaking.body_leaks = vec!["> a line the owner wrote in chat".into()];
+    w.forge.pr(REPO, 7, leaking);
+    w.forge.descends("a1a1a1a1", "b2b2b2b2");
+    let key = format!("reconcile:G30:{pr7}:b2b2b2b2");
+    plant_key(&w, &key, Some(&format!("session:{poisoned}")));
+    w.forge.pr(REPO, 8, open_pr("e5e5e5e5"));
+    let report = w.pass(now().plus_minutes(1));
+
+    assert!(
+        report.errors.iter().any(|error| error.contains(&key)),
+        "{report:?}"
+    );
+    assert!(!report.did("G30"), "{report:?}");
+    assert!(
+        w.notes()
+            .iter()
+            .any(|n| n.body.contains("PR #7 body fails the scrub")),
+        "{:?}",
+        w.notes()
+    );
+    assert!(report.did("G11"), "{report:?}");
+    assert_eq!(w.pr(&pr8).head_sha.as_deref(), Some("e5e5e5e5"));
+    assert_eq!(w.approval(&approval).state, ApprovalState::Stale);
+    assert_eq!(w.breaches("G11").len(), 1);
+}
+
 /// R19, G11: a force-push after approval is flagged (the breach names the
 /// staled approvals), the approval is stale, and the developer is asked.
 #[test]
