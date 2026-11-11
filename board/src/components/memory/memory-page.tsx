@@ -1230,12 +1230,11 @@ function Doc({ data }: { data: MemoryResponse }) {
   useEffect(() => {
     // Capture runs before the handler that may ask for focus again. These
     // are not a move: a modifier key alone (it starts a shortcut or a
-    // selection), a held key, a press in the editor (the one a save is about
-    // to close), and a press on the page's scrollbar.
+    // selection), and a press in the editor, the one a save is about to
+    // close (a second or held Enter, a click to place the caret).
     const movedOn = (event: Event) => {
-      if (event instanceof KeyboardEvent && (event.repeat || MODIFIERS.has(event.key))) return;
+      if (event instanceof KeyboardEvent && MODIFIERS.has(event.key)) return;
       const target = event.target;
-      if (target === document.documentElement) return;
       if (target instanceof Element && target.closest(".ed")) return;
       moves.current += 1;
       wanted.current = null;
