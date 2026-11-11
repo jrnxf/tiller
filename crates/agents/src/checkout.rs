@@ -13,6 +13,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use tiller_core::domain::forge::{self, Forge};
+use tiller_herdr::process::{self, Ended};
 
 /// How long a clone may take before it is stopped.
 pub const CLONE_LIMIT: Duration = Duration::from_secs(10 * 60);
@@ -265,7 +266,7 @@ pub fn clone(plan: &Plan, limit: Duration) -> Result<Option<Undo>, CheckoutError
     let mut command = no_prompt(Command::new("git"));
     // Its own process group, so a stop reaches the transport helpers git
     // starts as well as git itself.
-    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    process::own_group(&mut command);
     let mut child = command
         .args(["clone", "--quiet", "--", remote])
         .arg(path)
@@ -277,24 +278,8 @@ pub fn clone(plan: &Plan, limit: Duration) -> Result<Option<Undo>, CheckoutError
         )
         .spawn()
         .map_err(|error| CheckoutError::Clone(format!("git clone did not start: {error}")))?;
-    let started = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() >= limit => {
-                stop(&mut child);
-                return Err(undo(CheckoutError::Clone(format!(
-                    "the clone of {remote} took over {} minutes and was stopped",
-                    limit.as_secs() / 60
-                ))));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-            Err(error) => {
-                stop(&mut child);
-                return Err(undo(CheckoutError::Clone(format!("git clone: {error}"))));
-            }
-        }
-    };
+    let status =
+        finish(&mut child, limit, remote).map_err(|why| undo(CheckoutError::Clone(why)))?;
     if !status.success() {
         let why = read_all(stderr);
         return Err(undo(CheckoutError::Clone(format!(
@@ -335,13 +320,29 @@ fn claim_folder(path: &Path) -> Result<Undo, CheckoutError> {
     Ok(Undo::Empty(path.to_path_buf()))
 }
 
-/// Stops a clone: git and every helper in its process group, then reaps git.
-fn stop(child: &mut std::process::Child) {
-    use rustix::process::{Pid, Signal, kill_process_group};
-    if kill_process_group(Pid::from_child(child), Signal::KILL).is_err() {
-        let _ = child.kill();
+/// Waits for the clone of `remote`, polling every 100 ms. Past `limit`, or
+/// when waiting fails, git and every helper in its process group are
+/// stopped (`tiller_herdr::process`), and the error says why.
+fn finish(
+    child: &mut std::process::Child,
+    limit: Duration,
+    remote: &str,
+) -> Result<std::process::ExitStatus, String> {
+    match process::wait(
+        child,
+        Instant::now() + limit,
+        Duration::from_millis(100),
+        None,
+    ) {
+        Ended::Exited(status) => Ok(status),
+        Ended::TimedOut => Err(format!(
+            "the clone of {remote} took over {} minutes and was stopped",
+            limit.as_secs() / 60
+        )),
+        Ended::Failed(error) => Err(format!("git clone: {error}")),
+        // No interrupt is passed, so none is caught.
+        Ended::Interrupted => Err("git clone: interrupted".to_owned()),
     }
-    let _ = child.wait();
 }
 
 /// Removes what a clone put in a folder that was empty before it.
@@ -778,11 +779,11 @@ mod tests {
     }
 
     #[test]
-    fn a_stopped_clone_takes_its_helpers_with_it() {
+    fn a_clone_past_its_limit_is_stopped_with_its_helpers() {
         let dir = tempfile::tempdir().unwrap();
         let helper = dir.path().join("helper");
         let mut command = Command::new("sh");
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        process::own_group(&mut command);
         let mut child = command
             .arg("-c")
             .arg(format!("sleep 30 & echo $! > '{}'; wait", helper.display()))
@@ -798,7 +799,16 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(5), "no helper");
             std::thread::sleep(Duration::from_millis(10));
         };
-        stop(&mut child);
+        let why = finish(
+            &mut child,
+            Duration::from_millis(200),
+            "https://example.com/web.git",
+        )
+        .unwrap_err();
+        assert_eq!(
+            why,
+            "the clone of https://example.com/web.git took over 0 minutes and was stopped"
+        );
         // Gone, or a zombie waiting on whoever reaps orphans here.
         let alive = || {
             let out = Command::new("ps")
