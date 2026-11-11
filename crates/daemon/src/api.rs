@@ -2612,6 +2612,7 @@ async fn project_delete_preview(
         unblock: preview.unblock.map(|unblock| DeleteUnblock {
             step: unblock.step,
             command: unblock.command,
+            action: unblock.action.map(delete_action),
         }),
         agents: preview.agents.into_iter().map(project_agent).collect(),
         unlanded: preview
@@ -2635,6 +2636,17 @@ async fn project_delete_preview(
             })
             .collect(),
     }))
+}
+
+fn delete_action(action: tiller_core::state::deletion::UnblockAction) -> DeleteAction {
+    use tiller_core::state::deletion::UnblockActionId;
+    DeleteAction {
+        id: match action.id {
+            UnblockActionId::AgentStop => DeleteActionId::AgentStop,
+            UnblockActionId::CardCancel => DeleteActionId::CardCancel,
+        },
+        target: action.target,
+    }
 }
 
 fn project_agent(agent: tiller_core::state::deletion::LiveAgent) -> ProjectAgent {

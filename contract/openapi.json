@@ -7370,6 +7370,30 @@
         },
         "additionalProperties": false
       },
+      "DeleteAction": {
+        "type": "object",
+        "description": "A step past a refused delete as the board takes it: `agent.stop` on a\nsession (`POST /api/v1/agents/{session}/stop`) or `card.cancel` on a\ncard's display id (`POST /api/v1/cards/{id}/cancel`).",
+        "required": [
+          "id",
+          "target"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/DeleteActionId"
+          },
+          "target": {
+            "type": "string",
+            "description": "The session for `agent.stop`, the card's display id for\n`card.cancel`."
+          }
+        }
+      },
+      "DeleteActionId": {
+        "type": "string",
+        "enum": [
+          "agent.stop",
+          "card.cancel"
+        ]
+      },
       "DeleteProject": {
         "type": "object",
         "description": "`POST /api/v1/projects/{id}/delete`: the hard delete of one project.\nLocal to the owning host; it is not forwarded to a peer.",
@@ -7402,12 +7426,23 @@
           "step"
         ],
         "properties": {
+          "action": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DeleteAction",
+                "description": "The same step as an action the board takes through its own route,\nwhen it is one."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "command": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The command that starts it, when there is one."
+            "description": "The command that starts it, when there is one. The CLI prints it;\nthe board reads `action` instead."
           },
           "step": {
             "type": "string",

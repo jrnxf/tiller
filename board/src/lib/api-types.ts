@@ -790,11 +790,19 @@ interface ProjectOpenPr {
   url: string;
 }
 
-// The step that clears a refused delete, and the command that starts it when
-// there is one.
-interface DeleteUnblock {
+// The step that clears a refused delete, the command that starts it when
+// there is one (the CLI prints it), and the same step as an action the board
+// takes through its own route. The board reads `action`, never `command`.
+export interface DeleteUnblock {
   step: string;
   command: string | null;
+  action: DeleteAction | null;
+}
+
+// `agent.stop` on a session, or `card.cancel` on a card's display id.
+interface DeleteAction {
+  id: "agent.stop" | "card.cancel";
+  target: string;
 }
 
 // The change events on `GET /api/v1/events` (protocol.md section 7.5).

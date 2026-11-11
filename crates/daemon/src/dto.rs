@@ -1695,8 +1695,31 @@ pub struct EditHost {
 pub struct DeleteUnblock {
     /// What to do, as a short imperative ("cancel its card").
     pub step: String,
-    /// The command that starts it, when there is one.
+    /// The command that starts it, when there is one. The CLI prints it;
+    /// the board reads `action` instead.
     pub command: Option<String>,
+    /// The same step as an action the board takes through its own route,
+    /// when it is one.
+    pub action: Option<DeleteAction>,
+}
+
+/// A step past a refused delete as the board takes it: `agent.stop` on a
+/// session (`POST /api/v1/agents/{session}/stop`) or `card.cancel` on a
+/// card's display id (`POST /api/v1/cards/{id}/cancel`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct DeleteAction {
+    pub id: DeleteActionId,
+    /// The session for `agent.stop`, the card's display id for
+    /// `card.cancel`.
+    pub target: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub enum DeleteActionId {
+    #[serde(rename = "agent.stop")]
+    AgentStop,
+    #[serde(rename = "card.cancel")]
+    CardCancel,
 }
 
 /// `POST /api/v1/projects/{id}/delete`: the hard delete of one project.

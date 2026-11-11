@@ -216,12 +216,57 @@ pub struct OpenPr {
     pub url: String,
 }
 
-/// The owner's way past a refused delete: the step, and the command that
-/// starts it when there is one.
+/// The owner's way past a refused delete: the step, the command that
+/// starts it when there is one, and the same step as an action the board
+/// takes itself, so it never reads the command.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Unblock {
     pub step: String,
     pub command: Option<String>,
+    #[serde(default)]
+    pub action: Option<UnblockAction>,
+}
+
+/// A step of [`Unblock`] the board maps to its own route: `agent.stop` on a
+/// session (`POST /api/v1/agents/{session}/stop`), or `card.cancel` on a
+/// card's display id (`POST /api/v1/cards/{id}/cancel`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnblockAction {
+    pub id: UnblockActionId,
+    /// The session for `agent.stop`, the card's display id for
+    /// `card.cancel`.
+    pub target: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnblockActionId {
+    #[serde(rename = "agent.stop")]
+    AgentStop,
+    #[serde(rename = "card.cancel")]
+    CardCancel,
+}
+
+impl Unblock {
+    /// `tiller agent stop <session>`, as `agent.stop`.
+    fn stop(step: &str, session: &str) -> Self {
+        Self {
+            step: step.into(),
+            command: Some(format!("tiller agent stop {session}")),
+            action: Some(UnblockAction {
+                id: UnblockActionId::AgentStop,
+                target: session.to_owned(),
+            }),
+        }
+    }
+
+    /// A step the owner takes by hand, with no command.
+    fn by_hand(step: &str) -> Self {
+        Self {
+            step: step.into(),
+            command: None,
+            action: None,
+        }
+    }
 }
 
 /// Why the delete is refused while the project has rows in flight.
@@ -259,12 +304,9 @@ impl Store {
             // Only the host an agent runs on can stop it.
             Some(remote) => Some(Blocker {
                 fact: format!("{} runs on another host", remote.describe()),
-                unblock: Some(Unblock {
-                    step: "stop it on its host".into(),
-                    command: remote
-                        .session
-                        .as_ref()
-                        .map(|session| format!("tiller agent stop {session}")),
+                unblock: Some(match &remote.session {
+                    Some(session) => Unblock::stop("stop it on its host", session),
+                    None => Unblock::by_hand("stop it on its host"),
                 }),
             }),
             None => blocker(&tx, &fks, &project.id, Live::Stopped)?,
@@ -575,6 +617,10 @@ fn blocker(
                 command: Some(format!(
                     "tiller card cancel {card} --reason \"deleting project {project_id}\""
                 )),
+                action: Some(UnblockAction {
+                    id: UnblockActionId::CardCancel,
+                    target: card,
+                }),
             }),
         }));
     }
@@ -589,10 +635,7 @@ fn blocker(
     ) {
         return Ok(Some(Blocker {
             fact: format!("{role} session {session} is live; end it first"),
-            unblock: Some(Unblock {
-                step: "stop its agent".into(),
-                command: Some(format!("tiller agent stop {session}")),
-            }),
+            unblock: Some(Unblock::stop("stop its agent", &session)),
         }));
     }
     if let Some((approval, _)) = live(&format!(
@@ -601,10 +644,7 @@ fn blocker(
     ))? {
         return Ok(Some(Blocker {
             fact: format!("approval {approval} is executing"),
-            unblock: Some(Unblock {
-                step: "wait for it to finish".into(),
-                command: None,
-            }),
+            unblock: Some(Unblock::by_hand("wait for it to finish")),
         }));
     }
     // A marked row whose required project or card stays belongs to someone
@@ -1455,5 +1495,100 @@ mod tests {
             store.project_delete(&owner(), "nope").unwrap_err().code(),
             "not_found"
         );
+    }
+
+    /// The blocker under `tx`'s marked rows, as the delete itself sees it.
+    fn refusing_blocker(store: &Store) -> Option<Blocker> {
+        let tx = store.conn().unchecked_transaction().unwrap();
+        let fks = foreign_keys(&tx).unwrap();
+        mark(&tx, &fks, "alpha").unwrap();
+        blocker(&tx, &fks, "alpha", Live::Refuse).unwrap()
+    }
+
+    /// Each step past a refused delete that the board can take carries its
+    /// action id and target, so the board never reads the command (P15).
+    #[test]
+    fn each_unblock_step_names_its_action() {
+        let (mut store, orchestrator) = memory_store();
+        let as_orchestrator = Ctx::new(Actor::Session(orchestrator.clone()));
+        let alpha = store
+            .card_create(&owner(), None, card(CardKind::Ship, "live"), None)
+            .unwrap()
+            .value;
+        let run = store
+            .run_start(&as_orchestrator, Some("spawn-1"), builder_run(&alpha.id))
+            .unwrap()
+            .value;
+
+        // A live run: cancelling its card ends it.
+        let unblock = refusing_blocker(&store).unwrap().unblock.unwrap();
+        assert_eq!(
+            unblock.action,
+            Some(UnblockAction {
+                id: UnblockActionId::CardCancel,
+                target: alpha.display_id.clone(),
+            })
+        );
+        assert_eq!(
+            unblock.command.as_deref(),
+            Some(
+                format!(
+                    "tiller card cancel {} --reason \"deleting project alpha\"",
+                    alpha.display_id
+                )
+                .as_str()
+            )
+        );
+
+        // Its run ended, its session and the orchestrator's are live: stop.
+        store
+            .run_end(
+                &owner(),
+                &run.run.id,
+                EndRun {
+                    outcome: RunOutcome::Abandoned,
+                    note: None,
+                },
+            )
+            .unwrap();
+        let unblock = refusing_blocker(&store).unwrap().unblock.unwrap();
+        let action = unblock.action.unwrap();
+        assert_eq!(action.id, UnblockActionId::AgentStop);
+        assert!(
+            [run.session.id.as_str(), orchestrator.as_str()].contains(&action.target.as_str()),
+            "{action:?}"
+        );
+        assert_eq!(
+            unblock.command,
+            Some(format!("tiller agent stop {}", action.target))
+        );
+
+        // The orchestrator runs on another host: the preview refuses, and
+        // its step is the stop of that session, on that host.
+        store
+            .session_end(&owner(), &run.session.id, "exit")
+            .unwrap();
+        store
+            .conn()
+            .execute_batch(&format!(
+                "INSERT INTO hosts (id, label, kind) VALUES ('01JC0000000000000000REM0TE', 'host-b', 'remote');
+                 UPDATE sessions SET host_id = '01JC0000000000000000REM0TE' WHERE id = '{orchestrator}';"
+            ))
+            .unwrap();
+        let preview = store.project_delete_preview("alpha").unwrap();
+        assert!(preview.refused.is_some(), "{preview:?}");
+        let unblock = preview.unblock.unwrap();
+        assert_eq!(unblock.step, "stop it on its host");
+        assert_eq!(
+            unblock.action,
+            Some(UnblockAction {
+                id: UnblockActionId::AgentStop,
+                target: orchestrator.clone(),
+            })
+        );
+        // The wire names the action as the board reads it.
+        let wire = serde_json::to_value(&unblock).unwrap();
+        assert_eq!(wire["action"]["id"], "agent.stop", "{wire}");
+        assert_eq!(wire["action"]["target"], orchestrator.as_str(), "{wire}");
     }
 }
