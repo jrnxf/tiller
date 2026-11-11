@@ -134,12 +134,14 @@ pub struct Tailer {
     transcript_intake: bool,
     /// Set after a truncation, or for a file read from the start while the
     /// session has other rows: the file may repeat entries already
-    /// recorded, so each entry is checked against the recorded uuids. The
-    /// repeats come first, wherever they end in bytes (a rewrite in
-    /// progress, a forked resume), so the first entry with a uuid no row
-    /// has clears it: the entries after it are new, and the uuid scan is
-    /// not free.
-    dedupe: bool,
+    /// recorded, so each entry is checked against the recorded uuids. It
+    /// holds the length read before (the offset before the truncation, or
+    /// the file's length at resume). Every entry up to it is checked. The
+    /// repeats come first but a head line or a rewrite in progress can move
+    /// them past it, so past it the first entry with a uuid no row has
+    /// clears the dedupe: the entries after it are new, and the uuid scan
+    /// is not free.
+    dedupe: Option<u64>,
 }
 
 impl Tailer {
@@ -166,13 +168,15 @@ impl Tailer {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let offset = offset.and_then(|o| u64::try_from(o).ok());
+        let dedupe = (offset.is_none() && others)
+            .then(|| std::fs::metadata(&path).map_or(0, |meta| meta.len()));
         Ok(Self {
             session_id: session.id.clone(),
             run_id: session.run_id.clone(),
             path,
             offset: offset.unwrap_or(0),
             transcript_intake,
-            dedupe: offset.is_none() && others,
+            dedupe,
         })
     }
 
@@ -191,8 +195,8 @@ impl Tailer {
         };
         let len = file.metadata().map_err(io)?.len();
         if len < self.offset {
+            self.dedupe = Some(len.max(self.offset));
             self.offset = 0;
-            self.dedupe = true;
         }
         file.seek(SeekFrom::Start(self.offset)).map_err(io)?;
         let mut reader = BufReader::new(file);
@@ -234,12 +238,17 @@ impl Tailer {
             return Ok(false);
         };
         let uuid = entry.get("uuid").and_then(Value::as_str);
-        if self.dedupe && uuid.is_some() {
+        if let Some(until) = self.dedupe
+            && uuid.is_some()
+        {
             if self.already_recorded(store, uuid)? {
                 return Ok(false);
             }
-            // The first entry not recorded before: the repeats are behind.
-            self.dedupe = false;
+            // Past the length read before, the first new entry has the
+            // repeats behind it.
+            if line_end > until {
+                self.dedupe = None;
+            }
         }
         let mut event = detected.event;
         let mut payload = json!({
@@ -524,18 +533,26 @@ mod tests {
         let mut tailer = Tailer::resume(&store, &orchestrator, &path, false).unwrap();
         assert_eq!(tailer.poll(&mut store).unwrap(), 2);
 
-        // Rewritten in place: truncated, then the old lines come back one
-        // poll at a time, then it grows with u3. The repeats keep the
-        // dedupe on, whatever their byte offsets: a summary line at the
-        // head moves them past the offset read before.
+        // Rewritten in place: truncated, then a new entry u0 at the head,
+        // then the old lines come back one poll at a time, then it grows
+        // with u3. u0 is new but comes before the old length, so the
+        // repeats after it are still checked, and u0 moves u2 past the
+        // offset read before.
         std::fs::write(&path, "").unwrap();
         assert_eq!(tailer.poll(&mut store).unwrap(), 0);
-        append(&path, &filler("s", 1));
+        append(
+            &path,
+            &[user(
+                "u0",
+                "2026-11-02T10:00:01Z",
+                json!(INTERRUPT_MARKERS[1]),
+            )],
+        );
         append(&path, &[first]);
         assert_eq!(
             tailer.poll(&mut store).unwrap(),
-            0,
-            "u1 is not recorded twice"
+            1,
+            "u0 is new, and u1 is not recorded twice"
         );
         append(&path, &[second]);
         assert_eq!(
@@ -552,7 +569,10 @@ mod tests {
             )],
         );
         assert_eq!(tailer.poll(&mut store).unwrap(), 1, "only u3 is new");
-        assert!(!tailer.dedupe, "lines past the repeats are not checked");
+        assert_eq!(
+            tailer.dedupe, None,
+            "lines past the repeats are not checked"
+        );
     }
 
     #[test]
@@ -825,7 +845,18 @@ mod tests {
         assert_eq!(tailer.offset(), 0);
         assert_eq!(tailer.poll(&mut store).unwrap(), 1, "only u2 is new");
         assert_eq!(transcript_uuids(&store), ["u1", "u2"]);
-        assert!(!tailer.dedupe, "u2 ended the repeats");
+        // u2 ends at the length the file had at resume, so the dedupe holds
+        // until a new entry past it.
+        append(
+            &path,
+            &[user(
+                "u3",
+                "2026-11-02T10:00:06Z",
+                json!(INTERRUPT_MARKERS[0]),
+            )],
+        );
+        assert_eq!(tailer.poll(&mut store).unwrap(), 1);
+        assert_eq!(tailer.dedupe, None, "u3 ended the repeats");
     }
 
     #[test]

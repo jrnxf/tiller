@@ -380,26 +380,29 @@ impl<H: Herdr> Deliverer<H> {
                 Ok(()) => report.rung.push(message.id.clone()),
                 Err(error) => {
                     tracing::warn!(message = %message.id, %error, "recording a ring failed");
-                    report.errors.push((
-                        message.target_session_id.clone(),
-                        format!("message {}: {error}", message.id),
-                    ));
                     // Still due, it would have the line typed again on each
                     // pass while the fault lasts: it waits as for a busy
                     // pane, in the store if it can be written, else here.
                     let until = plus_secs(now, BUSY_DEFER_SECS);
                     let reason = format!("recording the ring failed: {error}");
-                    match self.store.outbox_defer(ctx, &message.id, until, &reason) {
-                        Ok(_) => report.deferred.push((message.id.clone(), reason)),
+                    let text = match self.store.outbox_defer(ctx, &message.id, until, &reason) {
+                        Ok(_) => {
+                            report.deferred.push((message.id.clone(), reason));
+                            format!("message {}: {error}", message.id)
+                        }
                         Err(defer) => {
                             tracing::warn!(message = %message.id, error = %defer, "deferring an unrecorded ring failed");
-                            report.errors.push((
-                                message.target_session_id.clone(),
-                                format!("message {}: deferring it failed, so it waits in memory only: {defer}", message.id),
-                            ));
                             self.quiet(&[message], until);
+                            format!(
+                                "message {}: {error}; deferring it failed too, so it waits in memory only: {defer}",
+                                message.id
+                            )
                         }
-                    }
+                    };
+                    // One entry per message, whatever failed.
+                    report
+                        .errors
+                        .push((message.target_session_id.clone(), text));
                 }
             }
         }

@@ -2052,18 +2052,25 @@ impl Store {
                 let newer = session.activity_observed_at.is_none_or(|at| new.observed_at > at);
                 // A line read in the transcript's retention window, or a
                 // hook that comes late, is kept as a row, but an ended
-                // session never looks live again (`protocol.md` 5). Once it
-                // reads `ended` it stays there. One ended with no `Ended`
-                // verdict (a relaunch, a failed spawn) may still settle into
-                // a resting state, such as the idle of a turn's last line
-                // flushed late, but never into one that waits or works. No
-                // clock is compared, so skew between hosts cannot reopen it.
-                let ended = session.ended_at.is_some()
-                    && !(verdict == Activity::Ended
-                        || session.activity != Activity::Ended
-                            && matches!(verdict, Activity::Idle | Activity::Errored));
+                // session never looks live again (`protocol.md` 5). One
+                // ended with no `Ended` verdict (a relaunch, a failed spawn)
+                // while it still read live may settle once into a resting
+                // state, such as the idle of a turn's last line flushed late.
+                // After that only `Ended` moves it, so a process that goes
+                // on writing the same file cannot flip it. No clock is
+                // compared, so skew between hosts cannot reopen it.
+                let live = matches!(
+                    session.activity,
+                    Activity::Working
+                        | Activity::WaitingPermission
+                        | Activity::WaitingInput
+                        | Activity::Unknown
+                );
+                let may_move = session.ended_at.is_none()
+                    || verdict == Activity::Ended
+                    || (live && matches!(verdict, Activity::Idle | Activity::Errored));
                 idle_held_until = herdr_idle_held(&session, &new);
-                if newer && !ended && idle_held_until.is_none() {
+                if newer && may_move && idle_held_until.is_none() {
                     tx.conn().execute(
                         "UPDATE sessions SET activity = ?2, activity_observed_at = ?3, activity_source = ?4 WHERE id = ?1",
                         params![session.id, verdict, new.observed_at, new.source],

@@ -1507,11 +1507,11 @@ esac
         assert_eq!(moved, 0, "the activity never left ended");
     }
 
-    /// A session ended with no `Ended` verdict (a relaunch) still settles
-    /// into the idle of a turn's last line that Claude Code flushed late,
-    /// but no later line, whatever its stamp, makes it look live again.
+    /// A session ended with no `Ended` verdict (a relaunch) while it read
+    /// working settles once into the idle of a turn's last line that Claude
+    /// Code flushed late. No later line, whatever its stamp, moves it again.
     #[test]
-    fn a_late_line_from_before_the_end_still_moves_an_ended_session() {
+    fn an_ended_session_settles_once_and_never_looks_live_again() {
         let mut t = Transcript::new();
         let path = t.path("main.jsonl");
         t.bind("claude-orchestrator", &path, "startup");
@@ -1549,9 +1549,20 @@ esac
 
         // A host clock behind the daemon's stamps a later line before the
         // end: it still does not make the session work again.
-        for at in [
-            Timestamp::from_millis(ended.as_millis() - 30_000).unwrap(),
-            ended.plus_minutes(3),
+        // The new process of a relaunch may go on writing the same file.
+        for (at, verdict) in [
+            (
+                Timestamp::from_millis(ended.as_millis() - 30_000).unwrap(),
+                tiller_core::domain::Activity::Working,
+            ),
+            (
+                ended.plus_minutes(3),
+                tiller_core::domain::Activity::Working,
+            ),
+            (
+                ended.plus_minutes(4),
+                tiller_core::domain::Activity::Errored,
+            ),
         ] {
             t.fleet
                 .store
@@ -1562,7 +1573,7 @@ esac
                         run_id: None,
                         source: tiller_core::domain::ObservationSource::Hook,
                         event: "UserPromptSubmit".into(),
-                        verdict: Some(tiller_core::domain::Activity::Working),
+                        verdict: Some(verdict),
                         observed_at: at,
                         payload: serde_json::json!({}),
                     },

@@ -353,26 +353,27 @@ pub fn run_with(
 ) -> (Outcome, Option<Value>) {
     // Another system's hooks own the session (`recovery.md` R20), so the
     // hook yields and spools nothing. A marker that cannot be read may name
-    // one, so the hook yields too.
-    let unreadable = match tiller_core::owner::read(&env.tiller_home) {
-        Marker::Tiller => None,
+    // one, so the hook yields too, and says why in its log for an event it
+    // would have recorded: a lasting read error would otherwise leave no
+    // trace.
+    match tiller_core::owner::read(&env.tiller_home) {
+        Marker::Tiller => {}
         Marker::Other(_) => return (Outcome::NotOwner, None),
-        Marker::Unreadable(error) => Some(error),
-    };
+        Marker::Unreadable(error) => {
+            if handler(event) != Handler::Ignore {
+                log(
+                    env,
+                    &format!("{event}: yielded, the owner marker could not be read ({error})"),
+                );
+            }
+            return (Outcome::NotOwner, None);
+        }
+    }
     let observed = match observe(event, input, env, Timestamp::now()) {
         Ok(Some(observed)) => observed,
         Ok(None) => return (Outcome::Ignored, None),
         Err(error) => return (fail(env, event, &error), None),
     };
-    if let Some(error) = unreadable {
-        // An observation is lost, so the log says why: a lasting read error
-        // would otherwise leave no trace. An ignored event logs nothing.
-        log(
-            env,
-            &format!("{event}: yielded, the owner marker could not be read ({error})"),
-        );
-        return (Outcome::NotOwner, None);
-    }
     let db = env.tiller_home.join("state.db");
     if !db.exists() {
         // Not initialized: nothing to record into, and nothing to replay
