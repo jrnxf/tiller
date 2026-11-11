@@ -1205,3 +1205,84 @@ test("a peer's change leaves this host's settings, signals and contributions alo
   }
   stop();
 });
+
+test("a peer's change applied while the snapshot was in flight is read again after it lands", async () => {
+  const queryClient = new QueryClient();
+  hydrateFromSnapshot(queryClient, fixtureSnapshot("federated", NOW));
+  const { calls, fetchSnapshot } = heldSnapshots();
+  const stop = connectEvents({
+    queryClient,
+    lastEventSeq: 4181,
+    createEventSource: (url) => new FakeSource(url),
+    fetchSnapshot,
+  });
+  const source = FakeSource.all[0] as FakeSource;
+  const peerRow = queryClient
+    .getQueryData<BoardResponse>(queryKeyFor(boardPath()))
+    ?.rows.find((row) => row.host === "host-d");
+  if (!peerRow) throw new Error("fixture has no host-d card");
+
+  source.emit("reset", { seq: 5000 });
+  source.emit("peer", {
+    host: "host-d",
+    host_id: "01JPEERD0000000000000000D",
+    as_of: "2026-11-02T12:00:01.000Z",
+    change: event({
+      seq: 9000,
+      entity: "card",
+      card_id: peerRow.id,
+      card: { ...peerRow, column: "done" as const },
+    }),
+  });
+  // The snapshot was built before the peer's change, and writes the old row back.
+  calls[0]?.resolve({ ...fixtureSnapshot("federated", NOW), last_event_seq: 5000 });
+  await vi.waitFor(() => {
+    expect(queryClient.getQueryState(queryKeyFor(boardPath()))?.isInvalidated).toBe(true);
+  });
+  stop();
+});
+
+test("a stopped stream sends none of the refetches it had waiting", async () => {
+  vi.useFakeTimers();
+  const queryClient = seededClient();
+  const signals = await watched(queryClient, signalsPath);
+  const stop = connectEvents({
+    queryClient,
+    lastEventSeq: 4181,
+    createEventSource: (url) => new FakeSource(url),
+    fetchSnapshot: () => Promise.reject(new Error("unused")),
+  });
+  (FakeSource.all[0] as FakeSource).emit(
+    "change",
+    event({ seq: 4182, entity: "card", entity_id: "c1" }),
+  );
+  // Signed out, say: the stream stops before the refetch was due.
+  stop();
+  await vi.advanceTimersByTimeAsync(5000);
+  expect(signals.read).toHaveBeenCalledTimes(1);
+  signals.unsubscribe();
+});
+
+test("a coalesced refetch still runs when a fetch begun before the event lands meanwhile", async () => {
+  vi.useFakeTimers();
+  const queryClient = seededClient();
+  const signals = await watched(queryClient, signalsPath);
+  // A fetch from before the event, slow to answer.
+  let answer = (_value: unknown) => {};
+  signals.read.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
+  );
+  void queryClient.refetchQueries({ queryKey: queryKeyFor(signalsPath) });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(signals.read).toHaveBeenCalledTimes(2);
+
+  applyChange(queryClient, event({ seq: 5000, entity: "card", entity_id: "c1" }));
+  // The old fetch lands with numbers from before the event.
+  answer({});
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(signals.read).toHaveBeenCalledTimes(3);
+  signals.unsubscribe();
+});

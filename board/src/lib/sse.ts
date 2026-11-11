@@ -192,7 +192,10 @@ function refetchMatching(queryClient: QueryClient, matches: (path: string) => bo
 // reads them fresh. The ones on screen fetch again at most once a tick, after
 // a burst, and not once per event on a busy fleet.
 const COALESCE_MS = 1000;
-const due = new WeakMap<QueryClient, Map<string, (path: string) => boolean>>();
+const due = new WeakMap<
+  QueryClient,
+  { timer: ReturnType<typeof setTimeout>; matchers: Map<string, (path: string) => boolean> }
+>();
 
 function refetchSoon(queryClient: QueryClient, name: string, matches: (path: string) => boolean) {
   void queryClient.invalidateQueries({
@@ -202,22 +205,29 @@ function refetchSoon(queryClient: QueryClient, name: string, matches: (path: str
   });
   const waiting = due.get(queryClient);
   if (waiting) {
-    waiting.set(name, matches);
+    waiting.matchers.set(name, matches);
     return;
   }
-  const next = new Map([[name, matches]]);
-  due.set(queryClient, next);
-  setTimeout(() => {
+  const matchers = new Map([[name, matches]]);
+  const timer = setTimeout(() => {
     due.delete(queryClient);
-    for (const matcher of next.values()) {
+    for (const matcher of matchers.values()) {
+      // Every one on screen, even one a fetch begun before the event has
+      // answered since: that answer can be older than the event.
       void queryClient.refetchQueries({
         queryKey: API_KEY_PREFIX,
         type: "active",
-        // A screen that mounted meanwhile has read it already.
-        predicate: (query) => query.state.isInvalidated && matcher(String(query.queryKey[1] ?? "")),
+        predicate: (query) => matcher(String(query.queryKey[1] ?? "")),
       });
     }
   }, COALESCE_MS);
+  due.set(queryClient, { timer, matchers });
+}
+
+// Drops the refetches still waiting, when the stream stops.
+function dropRefetches(queryClient: QueryClient) {
+  clearTimeout(due.get(queryClient)?.timer);
+  due.delete(queryClient);
 }
 
 const isSignals = (path: string) => path === signalsPath;
@@ -638,6 +648,9 @@ export function connectEvents(options: EventsOptions): () => void {
   // than the reset, so it is fetched again.
   let again = false;
   let failures = 0;
+  // Whether a peer's message moved a read while the snapshot was in flight.
+  // Its seq is not this host's, so `floor` cannot say.
+  let peerMoved = false;
 
   // Refresh every query from a new snapshot while the UI stays put: only the
   // degraded pill shows, never a spinner or an empty state. A snapshot that
@@ -651,13 +664,14 @@ export function connectEvents(options: EventsOptions): () => void {
     }
     resyncing = true;
     again = false;
+    peerMoved = false;
     try {
       const snapshot = await fetchSnapshot();
       if (stopped) return;
       // A change applied while the snapshot was in flight can be newer than
       // it, and the snapshot just wrote the older row back: its reads are
       // fetched again too.
-      const undone = floor !== null && floor > snapshot.last_event_seq;
+      const undone = peerMoved || (floor !== null && floor > snapshot.last_event_seq);
       const seq = refreshFromSnapshot(queryClient, snapshot, undone);
       failures = 0;
       // A `reset` came while this snapshot was in flight, and it may be older
@@ -725,12 +739,15 @@ export function connectEvents(options: EventsOptions): () => void {
     // A peer's messages carry no `id`: its `seq` is not this host's, so they
     // never touch `lastSeq` and are not replayed. A reconnect sends `peer_reset`.
     next.addEventListener("peer", (message) => {
+      if (resyncing) peerMoved = true;
       applyPeerChange(queryClient, JSON.parse(message.data) as PeerEvent);
     });
     next.addEventListener("peer_reset", (message) => {
+      if (resyncing) peerMoved = true;
       applyPeerReset(queryClient, JSON.parse(message.data) as PeerResetEvent);
     });
     next.addEventListener("link", (message) => {
+      if (resyncing) peerMoved = true;
       applyLink(queryClient, JSON.parse(message.data) as LinkEvent);
     });
     next.addEventListener("reset", (message) => {
@@ -746,6 +763,7 @@ export function connectEvents(options: EventsOptions): () => void {
     stopped = true;
     clearTimeout(retryTimer);
     clearTimeout(resyncTimer);
+    dropRefetches(queryClient);
     source?.close();
   }
 
