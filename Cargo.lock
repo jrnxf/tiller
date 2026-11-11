@@ -1854,6 +1854,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiller-panes"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "ulid",
+]
+
+[[package]]
 name = "tiller-reconcile"
 version = "0.1.0"
 dependencies = [

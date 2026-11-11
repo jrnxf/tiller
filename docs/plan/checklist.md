@@ -509,8 +509,8 @@ ADR 0004, accepted Wednesday 2026-11-11. A holder process per host owns the agen
 ### S1a Protocol and client (first slice)
 `opus` high - 2 h - after H01 and H00
 
-- [ ] `tiller-panes`: protocol types, framing kinds 0, 1 and 2, the version handshake, `HolderClient`, the slice's `Panes` methods, `FakePanes`
-- [ ] Check: framing round trip; a handshake version mismatch
+- [x] `tiller-panes`: protocol types, framing kinds 0, 1 and 2, the version handshake, `HolderClient`, the slice's `Panes` methods, `FakePanes`
+- [x] Check: framing round trip; a handshake version mismatch
 - [ ] Delivered
 
 ### S1b The minimal holder (first slice)
