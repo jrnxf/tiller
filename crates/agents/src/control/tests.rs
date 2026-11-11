@@ -433,6 +433,26 @@ fn resume_opens_a_pane_when_its_own_is_gone() {
     assert_eq!(done.session.pane_id.as_deref(), Some(pane.as_str()));
 }
 
+/// The board's Resume session sends one idempotency key. It is
+/// `session.resume`'s alone: the pane's bind is a second write and must not
+/// reuse it.
+#[test]
+fn a_keyed_resume_binds_the_new_pane() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.herdr.remove_pane(&spawned.pane_id);
+    let claude = boot(&rig, "resume");
+    let board = Ctx {
+        key: Some("board-resume-1".to_owned()),
+        ..Ctx::new(Actor::Board)
+    };
+
+    let done = resume_it(&mut rig, &board, &patient(), &spawned.run.id).unwrap();
+    claude.join().unwrap();
+    let pane = done.pane_id.unwrap();
+    assert_eq!(done.session.pane_id.as_deref(), Some(pane.as_str()));
+}
+
 #[test]
 fn resume_refuses_under_a_floor_and_without_a_live_session() {
     let mut rig = Rig::new();
@@ -1016,6 +1036,25 @@ fn stop_ends_an_ended_runs_agent_and_returns_its_worktree() {
             format!("tiller:{}", spawned.run.id)
         )]
     );
+}
+
+/// The board's Stop agent sends one idempotency key. It is `session.end`'s
+/// alone: the cleanup after it writes too and must not reuse it.
+#[test]
+fn a_keyed_stop_still_cleans_up() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    rig.done(&spawned.run.id, RunOutcome::Abandoned).unwrap();
+    let board = Ctx {
+        key: Some("board-stop-1".to_owned()),
+        ..Ctx::new(Actor::Board)
+    };
+
+    let stopped = stop_it(&mut rig, &board, &quick(), &spawned.session.id).unwrap();
+    assert_eq!(stopped.warning, None);
+    let cleaned = stopped.cleaned.as_ref().unwrap();
+    assert_eq!(cleaned.returned.as_deref(), Some(spawned.worktree.as_str()));
+    assert_eq!(rig.events("run.cleaned", &spawned.run.id), 1);
 }
 
 /// Claude reads an Enter right after `/exit` as a newline, as a Claude

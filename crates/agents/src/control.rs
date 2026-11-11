@@ -389,10 +389,15 @@ pub fn resume(
         Some(pane) => pane.pane_id,
         None => {
             let created = open_pane(world, &card, run, &worktree)?;
+            // The key was `session.resume`'s alone, not the bind's.
+            let unkeyed = Ctx {
+                key: None,
+                ..ctx.clone()
+            };
             events.extend(
                 store
                     .run_bind_session(
-                        ctx,
+                        &unkeyed,
                         Bind {
                             session_id: session.id.clone(),
                             claude_session_id: claude_id.clone(),
@@ -957,7 +962,12 @@ pub fn stop_agent(
         Some(run) => {
             let (proof, _) = stop(store, world.herdr, waits, &session)?;
             let mut events = store.session_end(ctx, &session.id, STOPPED)?.events;
-            match cleanup(store, ctx, world, run) {
+            // The key was `session.end`'s alone, not the cleanup's.
+            let unkeyed = Ctx {
+                key: None,
+                ..ctx.clone()
+            };
+            match cleanup(store, &unkeyed, world, run) {
                 Ok(applied) => {
                     events.extend(applied.events);
                     warnings.extend(applied.value.warnings.iter().cloned());
