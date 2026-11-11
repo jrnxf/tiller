@@ -1044,6 +1044,17 @@ fn a_replayed_run_again_after_a_restart_starts_no_second_curator() {
     assert_eq!(view["status"], "unfinished", "{view}");
     assert_eq!(count(), 1);
     assert!(terminate(&mut daemon).success());
+    // A start writes the curator's launch before it answers, so a launch
+    // written again shows as a new prompt file once the answer is in.
+    let prompt = world
+        .dir
+        .path()
+        .join("scratch")
+        .join("retros")
+        .join(&retro)
+        .join("prompt.md");
+    let written = || std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&prompt).unwrap());
+    let launch = written();
 
     let mut daemon = start(&world);
     let (status, again) = run_again(&world, daemon.port, &retro, "click-1");
@@ -1051,6 +1062,7 @@ fn a_replayed_run_again_after_a_restart_starts_no_second_curator() {
     assert_eq!(again["replayed"], true, "{again}");
     assert_eq!(again["data"]["id"], retro.as_str(), "{again}");
     assert_eq!(again["events"], serde_json::json!([]), "{again}");
+    assert_eq!(written(), launch, "the replay wrote a new launch");
     // Give a wrongly started curator time to run.
     std::thread::sleep(Duration::from_millis(500));
     let later = settled(daemon.port, &retro);

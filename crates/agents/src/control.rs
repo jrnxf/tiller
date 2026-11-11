@@ -330,10 +330,7 @@ pub fn resume(
     };
     // A manual resume clears the run's pause (`run.unpause`). The key is
     // `session.resume`'s alone, so the unpause goes unkeyed.
-    let unkeyed = Ctx {
-        key: None,
-        ..ctx.clone()
-    };
+    let unkeyed = ctx.unkeyed();
     if let Some(pane) = pane.as_ref().filter(|p| p.agent.is_some()) {
         let unpaused = store.run_unpause(&unkeyed, &run.id)?;
         return Ok(Applied {
@@ -970,10 +967,7 @@ pub fn stop_agent(
             let (proof, _) = stop(store, world.herdr, waits, &session)?;
             let mut events = store.session_end(ctx, &session.id, STOPPED)?.events;
             // The key was `session.end`'s alone, not the cleanup's.
-            let unkeyed = Ctx {
-                key: None,
-                ..ctx.clone()
-            };
+            let unkeyed = ctx.unkeyed();
             match cleanup(store, &unkeyed, world, run) {
                 Ok(applied) => {
                     events.extend(applied.events);

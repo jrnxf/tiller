@@ -464,17 +464,23 @@ pub(crate) fn claim(
 ) -> Result<Claimed, Failure> {
     let session_id = new_session_id()?;
     let claimed = store.retro_start(ctx, retro, Some(&session_id), timeout_minutes(config))?;
+    if claimed.replayed {
+        // A replayed key claimed this retro before. Its run was launched
+        // then, so nothing is prepared or launched again: preparing would
+        // clear the scratch directory a curator may still be using.
+        return Err(Failure::refused(format!(
+            "retro {} was already claimed under this key; it is not run again",
+            claimed.value.id
+        )));
+    }
     let launch = match prepare(tools, config, store, &claimed.value, &session_id) {
         Ok(launch) => launch,
         Err(failure) => {
             // The claim stored the caller's key, so the end is unkeyed: the
             // same key on another write would be refused.
-            let mut unkeyed = ctx.clone();
-            unkeyed.key = None;
-            unkeyed.args = None;
             unfinished(
                 store,
-                &unkeyed,
+                &ctx.unkeyed(),
                 &claimed.value.id,
                 "the curator could not be prepared",
             )?;
