@@ -121,35 +121,21 @@ impl Frame {
         Ok(out)
     }
 
-    /// Builds a frame from its kind and body, as read off the wire. The
-    /// body becomes the frame's bytes in place, with no copy.
-    fn from_parts(kind: u8, mut body: Vec<u8>) -> Result<Self, FrameError> {
-        match kind {
-            KIND_MESSAGE => Ok(Frame::Message(String::from_utf8(body)?)),
-            KIND_OUTPUT | KIND_INPUT => {
-                let Some(address) = body.first_chunk::<ADDRESS_BYTES>() else {
-                    return Err(FrameError::NoAddress {
-                        kind,
-                        len: body.len(),
-                    });
-                };
-                let address = u32::from_be_bytes(*address);
-                body.drain(..ADDRESS_BYTES);
-                let bytes = body;
-                Ok(if kind == KIND_OUTPUT {
-                    Frame::Output {
-                        stream: address,
-                        bytes,
-                    }
-                } else {
-                    Frame::Input {
-                        num: address,
-                        bytes,
-                    }
-                })
-            }
-            other => Err(FrameError::UnknownKind(other)),
-        }
+    /// Builds a frame from its kind, and for kinds 1 and 2 the address,
+    /// with the rest of the body as read off the wire.
+    fn from_parts(kind: u8, address: u32, rest: Vec<u8>) -> Result<Self, FrameError> {
+        Ok(match kind {
+            KIND_MESSAGE => Frame::Message(String::from_utf8(rest)?),
+            KIND_OUTPUT => Frame::Output {
+                stream: address,
+                bytes: rest,
+            },
+            KIND_INPUT => Frame::Input {
+                num: address,
+                bytes: rest,
+            },
+            other => return Err(FrameError::UnknownKind(other)),
+        })
     }
 }
 
@@ -164,10 +150,16 @@ fn check_len(len: u32) -> Result<usize, FrameError> {
     Ok(len as usize)
 }
 
-/// Checks a frame's kind before its body is read.
-fn check_kind(kind: u8) -> Result<u8, FrameError> {
+/// Checks a frame's kind against its `len` before the body is read, and
+/// says how many address bytes the body starts with.
+fn check_kind(kind: u8, len: usize) -> Result<usize, FrameError> {
+    let body = len - 1;
     match kind {
-        KIND_MESSAGE | KIND_OUTPUT | KIND_INPUT => Ok(kind),
+        KIND_MESSAGE => Ok(0),
+        KIND_OUTPUT | KIND_INPUT if body < ADDRESS_BYTES => {
+            Err(FrameError::NoAddress { kind, len: body })
+        }
+        KIND_OUTPUT | KIND_INPUT => Ok(ADDRESS_BYTES),
         other => Err(FrameError::UnknownKind(other)),
     }
 }
@@ -181,11 +173,12 @@ pub fn write_frame<W: Write>(mut out: W, frame: &Frame) -> Result<(), FrameError
 
 /// Reads one frame. `Ok(None)` is a clean end of the stream between frames;
 /// an end inside a frame is [`FrameError::Truncated`]. A bad `len` or kind
-/// is rejected before the body is read, and the body's buffer grows as its
-/// bytes arrive, so a bare `len` prefix never claims 16 MiB.
+/// is rejected before the body is read. The bytes after the address go
+/// straight into the frame's buffer, which grows as they arrive, so a bare
+/// `len` prefix never claims 16 MiB.
 pub fn read_frame<R: Read>(mut input: R) -> Result<Option<Frame>, FrameError> {
-    let mut head = [0u8; LEN_BYTES + 1];
-    let got = fill(&mut input, &mut head)?;
+    let mut head = [0u8; LEN_BYTES + 1 + ADDRESS_BYTES];
+    let got = fill(&mut input, &mut head[..LEN_BYTES + 1])?;
     if got == 0 {
         return Ok(None);
     }
@@ -193,19 +186,34 @@ pub fn read_frame<R: Read>(mut input: R) -> Result<Option<Frame>, FrameError> {
         return Err(FrameError::Truncated { buffered: got });
     }
     let len = check_len(u32::from_be_bytes([head[0], head[1], head[2], head[3]]))?;
-    if got < head.len() {
+    if got < LEN_BYTES + 1 {
         return Err(FrameError::Truncated { buffered: got });
     }
-    let kind = check_kind(head[LEN_BYTES])?;
-    let want = len - 1;
-    let mut body = Vec::new();
-    input.by_ref().take(want as u64).read_to_end(&mut body)?;
-    if body.len() < want {
+    let kind = head[LEN_BYTES];
+    let address_len = check_kind(kind, len)?;
+    let head_len = LEN_BYTES + 1 + address_len;
+    let got = got + fill(&mut input, &mut head[LEN_BYTES + 1..head_len])?;
+    if got < head_len {
+        return Err(FrameError::Truncated { buffered: got });
+    }
+    let address = address(&head[LEN_BYTES + 1..head_len]);
+    let want = len - 1 - address_len;
+    let mut rest = Vec::new();
+    input.by_ref().take(want as u64).read_to_end(&mut rest)?;
+    if rest.len() < want {
         return Err(FrameError::Truncated {
-            buffered: head.len() + body.len(),
+            buffered: head_len + rest.len(),
         });
     }
-    Frame::from_parts(kind, body).map(Some)
+    Frame::from_parts(kind, address, rest).map(Some)
+}
+
+/// A kind 1 or kind 2 address from its 4 bytes; 0 for a kind 0 frame,
+/// which has none.
+fn address(bytes: &[u8]) -> u32 {
+    bytes
+        .first_chunk::<ADDRESS_BYTES>()
+        .map_or(0, |bytes| u32::from_be_bytes(*bytes))
 }
 
 /// Reads until `buf` is full or the stream ends, and says how much it read.
@@ -258,13 +266,14 @@ impl Decoder {
         let Some(&kind) = pending.get(LEN_BYTES) else {
             return Ok(None);
         };
-        let kind = check_kind(kind)?;
+        let address_len = check_kind(kind, len)?;
         let Some(body) = pending.get(LEN_BYTES + 1..LEN_BYTES + len) else {
             return Ok(None);
         };
-        let body = body.to_vec();
+        let (head, rest) = body.split_at(address_len);
+        let frame = Frame::from_parts(kind, address(head), rest.to_vec());
         self.start += LEN_BYTES + len;
-        Frame::from_parts(kind, body).map(Some)
+        frame.map(Some)
     }
 
     /// Bytes held for a frame not yet whole. Nonzero at the end of the

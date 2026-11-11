@@ -2,11 +2,12 @@
 //!
 //! [`HolderClient`] holds one connection for requests. It sends one request
 //! at a time and waits for its reply, so a reply never has to be matched
-//! against another caller's. Each [`Subscription`] has a connection of its
-//! own: its kind 1 frames never wait behind a request, and a size it sets
-//! through its lease ends when it is dropped, because its connection ends.
-//! A [`Resizer`] sends a subscription's resizes from another thread while
-//! one thread waits in [`Subscription::recv`].
+//! against another caller's. Raw input takes only the write side, so a
+//! keystroke never waits for another call's reply. Each [`Subscription`]
+//! has a connection of its own: its kind 1 frames never wait behind a
+//! request, and a size it sets through its lease ends when it is dropped,
+//! because its connection ends. A [`Resizer`] sends a subscription's resizes
+//! from another thread while one thread waits in [`Subscription::recv`].
 //!
 //! A connection that fails (no answer in time, a closed socket, a bad frame)
 //! is not used again: every later call on that client is `Unreachable`, and
@@ -14,7 +15,7 @@
 //! never hidden behind a quiet reconnect.
 
 use std::collections::VecDeque;
-use std::io::{self, BufReader};
+use std::io::{self, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -23,7 +24,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::error::{PanesError, Result};
-use crate::frame::{Frame, read_frame, write_frame};
+use crate::frame::{Frame, read_frame};
 use crate::handshake::{Hello, ProtoRange, SUPPORTED, Welcome};
 use crate::message::{
     ErrorCode, Exit, HolderMessage, Listing, Pane, PaneId, Request, Spawn, SyncMode,
@@ -31,16 +32,146 @@ use crate::message::{
 use crate::panes::Panes;
 use crate::paths::check_socket_path;
 
-/// How long the handshake may take.
+/// How long the handshake may take in all.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long a request may wait for its reply, and how long a write may
-/// block.
+/// How long a request may take in all, from its first byte out to its
+/// reply's last byte in, and how long one frame's write may take.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// One end of a socket whose reads and writes stop at a deadline. Each
+/// read or write sets the socket's timeout to the time left, so a peer that
+/// trickles bytes cannot stretch a call past it. With no deadline, the
+/// socket's own timeout stands.
+struct Timed {
+    stream: UnixStream,
+    deadline: Option<Instant>,
+}
+
+impl Timed {
+    fn new(stream: UnixStream) -> Self {
+        Self {
+            stream,
+            deadline: None,
+        }
+    }
+
+    fn left(&self) -> io::Result<Option<Duration>> {
+        let Some(deadline) = self.deadline else {
+            return Ok(None);
+        };
+        match deadline.saturating_duration_since(Instant::now()) {
+            left if left.is_zero() => {
+                Err(io::Error::new(io::ErrorKind::TimedOut, "no answer in time"))
+            }
+            left => Ok(Some(left)),
+        }
+    }
+}
+
+impl Read for Timed {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(left) = self.left()? {
+            self.stream.set_read_timeout(Some(left))?;
+        }
+        self.stream.read(buf)
+    }
+}
+
+impl Write for Timed {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(left) = self.left()? {
+            self.stream.set_write_timeout(Some(left))?;
+        }
+        self.stream.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stream.flush()
+    }
+}
+
+/// A frame's wire bytes. A frame too large to send is the caller's mistake,
+/// found before any byte is written, so it is a refusal that keeps the
+/// connection.
+fn encode(name: &'static str, frame: &Frame) -> Result<Vec<u8>> {
+    frame.to_bytes().map_err(|err| PanesError::Refused {
+        request: name,
+        code: ErrorCode::BadRequest,
+        message: err.to_string(),
+    })
+}
+
+/// A request's wire bytes, as [`encode`].
+fn encode_request(name: &'static str, request: &Request) -> Result<Vec<u8>> {
+    let text = serde_json::to_string(request).map_err(|err| PanesError::Refused {
+        request: name,
+        code: ErrorCode::BadRequest,
+        message: format!("the request did not encode: {err}"),
+    })?;
+    encode(name, &Frame::Message(text))
+}
+
+/// Writes `wire` before `deadline`.
+fn send(writer: &mut Timed, wire: &[u8], deadline: Instant) -> Result<()> {
+    writer.deadline = Some(deadline);
+    writer
+        .write_all(wire)
+        .map_err(|err| PanesError::from_frame(err.into()))
+}
+
+/// The next frame, which must be a JSON message.
+fn read_message(reader: &mut BufReader<Timed>) -> Result<HolderMessage> {
+    match read_frame(reader).map_err(PanesError::from_frame)? {
+        Some(Frame::Message(text)) => parse(&text),
+        Some(frame) => Err(PanesError::Protocol(format!(
+            "a kind {} frame where a message was due",
+            frame.kind()
+        ))),
+        None => Err(PanesError::Unreachable(
+            "the holder closed the connection".into(),
+        )),
+    }
+}
+
+/// Reads until the reply to request `id`, before `deadline`. Messages for
+/// nobody (a type from a newer holder) are skipped; an `error` reply is the
+/// error. An `error` with no `id` answers this request, the only one in
+/// flight.
+fn await_reply(
+    reader: &mut BufReader<Timed>,
+    name: &'static str,
+    id: Option<u64>,
+    deadline: Instant,
+) -> Result<HolderMessage> {
+    reader.get_mut().deadline = Some(deadline);
+    loop {
+        let message = read_message(reader)?;
+        if message == HolderMessage::Unknown {
+            continue;
+        }
+        let unaddressed_error = matches!(message, HolderMessage::Error { id: None, .. });
+        if message.reply_to() != id && !unaddressed_error {
+            return Err(PanesError::Protocol(format!(
+                "{name} (id {id:?}) got a message for another request: {message:?}"
+            )));
+        }
+        return match message {
+            HolderMessage::Error { code, message, .. } => {
+                Err(PanesError::from_reply(name, code, message))
+            }
+            reply => Ok(reply),
+        };
+    }
+}
 
 /// One handshaken connection.
 struct Conn {
-    reader: BufReader<UnixStream>,
-    writer: UnixStream,
+    reader: BufReader<Timed>,
+    writer: Timed,
 }
 
 impl Conn {
@@ -51,26 +182,20 @@ impl Conn {
         check_socket_path(path).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
         let stream = UnixStream::connect(path)
             .map_err(|err| PanesError::Unreachable(format!("{}: {err}", path.display())))?;
-        let timeout = Some(HANDSHAKE_TIMEOUT);
-        stream
-            .set_read_timeout(timeout)
-            .and_then(|()| stream.set_write_timeout(timeout))?;
-        let writer = stream.try_clone()?;
         let mut conn = Conn {
-            reader: BufReader::new(stream),
-            writer,
+            writer: Timed::new(stream.try_clone()?),
+            reader: BufReader::new(Timed::new(stream)),
         };
-        conn.send(&Request::Hello(Hello::new(client)))?;
-        let welcome = match conn.read_message()? {
+        let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+        let hello = encode_request("hello", &Request::Hello(Hello::new(client)))?;
+        send(&mut conn.writer, &hello, deadline)?;
+        let welcome = match await_reply(&mut conn.reader, "hello", None, deadline)? {
             HolderMessage::Welcome(welcome) => welcome,
             HolderMessage::Refused(refused) => {
                 return Err(PanesError::Version {
                     client: SUPPORTED,
                     holder: refused.proto,
                 });
-            }
-            HolderMessage::Error { code, message, .. } => {
-                return Err(PanesError::from_reply("hello", code, message));
             }
             other => {
                 return Err(PanesError::Protocol(format!(
@@ -90,76 +215,13 @@ impl Conn {
         Ok((conn, welcome))
     }
 
-    /// Sets how long a read or a write may block; `None` for no limit.
-    fn set_timeout(&self, timeout: Option<Duration>) -> Result<()> {
-        self.writer.set_read_timeout(timeout)?;
-        self.writer.set_write_timeout(timeout)?;
-        Ok(())
-    }
-
-    fn send(&mut self, request: &Request) -> Result<()> {
-        let text = serde_json::to_string(request)
-            .map_err(|err| PanesError::Protocol(format!("a request did not encode: {err}")))?;
-        self.write(&Frame::Message(text))
-    }
-
-    fn write(&mut self, frame: &Frame) -> Result<()> {
-        write_frame(&self.writer, frame).map_err(PanesError::from_frame)
-    }
-
-    /// The next frame. The end of the stream is `None`.
-    fn read(&mut self) -> Result<Option<Frame>> {
-        read_frame(&mut self.reader).map_err(PanesError::from_frame)
-    }
-
-    /// The next frame, which must be a JSON message.
-    fn read_message(&mut self) -> Result<HolderMessage> {
-        match self.read()? {
-            Some(Frame::Message(text)) => parse(&text),
-            Some(frame) => Err(PanesError::Protocol(format!(
-                "a kind {} frame where a message was due",
-                frame.kind()
-            ))),
-            None => Err(PanesError::Unreachable(
-                "the holder closed the connection".into(),
-            )),
-        }
-    }
-
     /// Sends `request` and reads until its reply, for at most
-    /// [`REQUEST_TIMEOUT`] in all. Messages for nobody (a type from a newer
-    /// holder) are skipped; an `error` reply is the error. An `error` with no
-    /// `id` answers this request, the only one in flight.
+    /// [`REQUEST_TIMEOUT`] in all.
     fn call(&mut self, name: &'static str, request: &Request) -> Result<HolderMessage> {
-        let id = request.id();
+        let wire = encode_request(name, request)?;
         let deadline = Instant::now() + REQUEST_TIMEOUT;
-        self.send(request)?;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(PanesError::Unreachable(format!(
-                    "the holder did not answer {name} in {} s",
-                    REQUEST_TIMEOUT.as_secs()
-                )));
-            }
-            self.writer.set_read_timeout(Some(left))?;
-            let message = self.read_message()?;
-            if message == HolderMessage::Unknown {
-                continue;
-            }
-            let unaddressed_error = matches!(message, HolderMessage::Error { id: None, .. });
-            if message.reply_to() != id && !unaddressed_error {
-                return Err(PanesError::Protocol(format!(
-                    "{name} (id {id:?}) got a message for another request: {message:?}"
-                )));
-            }
-            return match message {
-                HolderMessage::Error { code, message, .. } => {
-                    Err(PanesError::from_reply(name, code, message))
-                }
-                reply => Ok(reply),
-            };
-        }
+        send(&mut self.writer, &wire, deadline)?;
+        await_reply(&mut self.reader, name, request.id(), deadline)
     }
 }
 
@@ -173,7 +235,8 @@ fn unexpected(request: &str, reply: &HolderMessage) -> PanesError {
 }
 
 /// Whether a failed call leaves the connection fit for the next one. An
-/// `error` reply does; a broken transport or frame does not.
+/// `error` reply or a request refused before it was sent does; a broken
+/// transport or frame does not.
 fn keeps_connection(err: &PanesError) -> bool {
     matches!(
         err,
@@ -186,8 +249,14 @@ pub struct HolderClient {
     path: PathBuf,
     client: String,
     welcome: Welcome,
-    /// The request connection, or why it is no longer used.
-    conn: Mutex<std::result::Result<Conn, String>>,
+    /// Why the request connection is no longer used, once it is not.
+    retired: Mutex<Option<String>>,
+    /// Held for a whole request and its reply, so one call is in flight.
+    reader: Mutex<BufReader<Timed>>,
+    /// Held only while one frame is written.
+    writer: Mutex<Timed>,
+    /// The request connection's socket, to shut it when it is retired.
+    socket: UnixStream,
     next_id: AtomicU64,
 }
 
@@ -197,6 +266,7 @@ impl std::fmt::Debug for HolderClient {
             .field("path", &self.path)
             .field("client", &self.client)
             .field("welcome", &self.welcome)
+            .field("retired", &*lock(&self.retired))
             .finish_non_exhaustive()
     }
 }
@@ -210,12 +280,14 @@ impl HolderClient {
         let path = path.into();
         let client = client.into();
         let (conn, welcome) = Conn::open(&path, &client)?;
-        conn.set_timeout(Some(REQUEST_TIMEOUT))?;
         Ok(Self {
             path,
             client,
             welcome,
-            conn: Mutex::new(Ok(conn)),
+            retired: Mutex::new(None),
+            socket: conn.writer.stream.try_clone()?,
+            reader: Mutex::new(conn.reader),
+            writer: Mutex::new(conn.writer),
             next_id: AtomicU64::new(1),
         })
     }
@@ -229,77 +301,85 @@ impl HolderClient {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn conn(&self) -> MutexGuard<'_, std::result::Result<Conn, String>> {
-        self.conn.lock().unwrap_or_else(PoisonError::into_inner)
+    /// `Unreachable` once the request connection is retired.
+    fn check(&self) -> Result<()> {
+        match &*lock(&self.retired) {
+            None => Ok(()),
+            Some(why) => Err(PanesError::Unreachable(format!(
+                "the connection to the holder failed earlier ({why}); connect again"
+            ))),
+        }
     }
 
-    /// Runs `work` on the request connection, and retires the connection
-    /// when the call broke it.
-    fn with_conn<T>(&self, work: impl FnOnce(&mut Conn) -> Result<T>) -> Result<T> {
-        let mut guard = self.conn();
-        let conn = match guard.as_mut() {
-            Ok(conn) => conn,
-            Err(why) => {
-                return Err(PanesError::Unreachable(format!(
-                    "the connection to the holder failed earlier ({why}); connect again"
-                )));
-            }
-        };
-        let result = work(conn);
+    /// Stops using the request connection, and shuts its socket so a call
+    /// waiting on it ends now.
+    fn retire(&self, why: String) {
+        lock(&self.retired).get_or_insert(why);
+        let _ = self.socket.shutdown(Shutdown::Both);
+    }
+
+    /// Retires the request connection when `result` broke it.
+    fn settle<T>(&self, result: Result<T>) -> Result<T> {
         if let Err(err) = &result
             && !keeps_connection(err)
         {
-            *guard = Err(err.to_string());
+            self.retire(err.to_string());
         }
         result
     }
 
     fn call(&self, name: &'static str, request: Request) -> Result<HolderMessage> {
-        self.with_conn(|conn| conn.call(name, &request))
+        self.check()?;
+        let wire = encode_request(name, &request)?;
+        let mut reader = lock(&self.reader);
+        self.check()?;
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        let sent = send(&mut lock(&self.writer), &wire, deadline);
+        let result = sent.and_then(|()| await_reply(&mut reader, name, request.id(), deadline));
+        self.settle(result)
     }
 
     /// Writes raw bytes to the pane with this `num` (a kind 2 frame), as
-    /// they are. The holder sends no reply.
+    /// they are. The holder sends no reply, and a call in flight does not
+    /// hold it up.
     pub fn raw_input(&self, num: u32, bytes: &[u8]) -> Result<()> {
-        let frame = Frame::Input {
-            num,
-            bytes: bytes.to_vec(),
-        };
-        // A frame over the limit is the caller's mistake, found before any
-        // byte is written, so the connection stays.
-        let wire = frame.to_bytes().map_err(|err| PanesError::Refused {
-            request: "raw input",
-            code: ErrorCode::BadRequest,
-            message: err.to_string(),
-        })?;
-        self.with_conn(|conn| {
-            use std::io::Write;
-            (&conn.writer)
-                .write_all(&wire)
-                .map_err(|err| PanesError::from_frame(err.into()))
-        })
+        self.check()?;
+        let wire = encode(
+            "raw input",
+            &Frame::Input {
+                num,
+                bytes: bytes.to_vec(),
+            },
+        )?;
+        let mut writer = lock(&self.writer);
+        self.check()?;
+        let sent = send(&mut writer, &wire, Instant::now() + REQUEST_TIMEOUT);
+        drop(writer);
+        self.settle(sent)
     }
 
     /// Subscribes to a pane's output on a connection of its own. The
-    /// [`Subscription`] yields one repaint, then live output.
+    /// [`Subscription`] yields one repaint, then live output. A retired
+    /// client subscribes to nothing, as it does nothing else.
     ///
     /// A holder with another `instance` than [`HolderClient::welcome`]'s
     /// started after this client connected, and none of the panes this
     /// client knows are in it (R21). That is `Unreachable`, and the client
     /// is retired, so the caller connects again and sees the new instance.
     pub fn subscribe(&self, pane: &PaneId, opts: Subscribe) -> Result<Subscription> {
+        self.check()?;
         let (mut conn, welcome) = Conn::open(&self.path, &self.client)?;
         if welcome.instance != self.welcome.instance {
             let why = format!(
                 "the terminal holder restarted: instance {} is now {}",
                 self.welcome.instance, welcome.instance
             );
-            *self.conn() = Err(why.clone());
+            self.retire(why.clone());
             return Err(PanesError::Unreachable(format!("{why}; connect again")));
         }
-        conn.set_timeout(Some(REQUEST_TIMEOUT))?;
+        let id = self.id();
         let request = Request::Subscribe {
-            id: self.id(),
+            id,
             pane: pane.clone(),
             sync: opts.sync,
         };
@@ -309,9 +389,10 @@ impl HolderClient {
             } => (stream, cols, rows),
             reply => return Err(unexpected("subscribe", &reply)),
         };
-        // Output may be quiet for hours; only writes keep a limit.
-        conn.writer.set_read_timeout(None)?;
-        let Conn { reader, writer } = conn;
+        // Output may be quiet for hours: reads have no limit from here.
+        let Conn { mut reader, writer } = conn;
+        reader.get_mut().deadline = None;
+        reader.get_ref().stream.set_read_timeout(None)?;
         Ok(Subscription {
             stream,
             cols,
@@ -321,7 +402,7 @@ impl HolderClient {
                 pane: pane.clone(),
                 lease: format!("stream-{stream}"),
                 writer: Mutex::new(writer),
-                next_id: AtomicU64::new(request.id().map_or(1, |id| id + 1)),
+                next_id: AtomicU64::new(id + 1),
                 pending: Mutex::new(VecDeque::new()),
             })),
             state: StreamState::AwaitingRepaint,
@@ -394,7 +475,7 @@ pub struct Subscription {
     stream: u32,
     cols: u16,
     rows: u16,
-    reader: BufReader<UnixStream>,
+    reader: BufReader<Timed>,
     resizer: Resizer,
     state: StreamState,
 }
@@ -415,7 +496,7 @@ impl Drop for Subscription {
     fn drop(&mut self) {
         // A Resizer holds the same socket; shut it so the holder sees the
         // subscription end now, and a later resize fails.
-        let _ = self.reader.get_ref().shutdown(Shutdown::Both);
+        let _ = self.reader.get_ref().stream.shutdown(Shutdown::Both);
     }
 }
 
@@ -429,7 +510,7 @@ struct ResizeSide {
     pane: PaneId,
     /// The lease id this subscription's resizes name.
     lease: String,
-    writer: Mutex<UnixStream>,
+    writer: Mutex<Timed>,
     next_id: AtomicU64,
     /// The ids of resizes sent and not yet answered, oldest first.
     pending: Mutex<VecDeque<u64>>,
@@ -458,14 +539,17 @@ impl Resizer {
             rows,
             lease: side.lease.clone(),
         };
-        let text = serde_json::to_string(&request)
-            .map_err(|err| PanesError::Protocol(format!("a request did not encode: {err}")))?;
-        let writer = side.writer.lock().unwrap_or_else(PoisonError::into_inner);
+        let wire = encode_request("resize", &request)?;
+        let mut writer = lock(&side.writer);
         // The id is pending before its bytes leave, so a fast answer finds it.
         side.pending().push_back(id);
-        let sent = write_frame(&*writer, &Frame::Message(text)).map_err(PanesError::from_frame);
+        let sent = send(&mut writer, &wire, Instant::now() + REQUEST_TIMEOUT);
         if sent.is_err() {
             side.pending().retain(|pending| *pending != id);
+            // Part of the frame may be out, so nothing more can follow it on
+            // this socket. Shut it: the stream ends, and later resizes fail
+            // at once.
+            let _ = writer.stream.shutdown(Shutdown::Both);
         }
         sent
     }
@@ -473,7 +557,7 @@ impl Resizer {
 
 impl ResizeSide {
     fn pending(&self) -> MutexGuard<'_, VecDeque<u64>> {
-        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.pending)
     }
 
     /// Takes the pending resize this reply answers: the one with its `id`,

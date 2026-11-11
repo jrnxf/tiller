@@ -7,7 +7,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::thread::{self, JoinHandle};
 
-use tiller_panes::frame::{Frame, read_frame, write_frame};
+use tiller_panes::frame::{Frame, MAX_FRAME_LEN, read_frame, write_frame};
 use tiller_panes::handshake::{ProtoRange, Refused, SUPPORTED, Welcome, negotiate};
 use tiller_panes::message::{ErrorCode, HolderMessage, Request, SyncMode};
 use tiller_panes::{
@@ -638,4 +638,93 @@ fn a_socket_path_too_long_is_a_setup_error_not_unreachable() {
     };
     assert_eq!(io.kind(), std::io::ErrorKind::InvalidInput);
     assert!(err.to_string().contains("TILLER_HOME"), "{err}");
+}
+
+#[test]
+fn a_request_too_large_to_send_is_refused_and_keeps_the_connection() {
+    let holder = Holder::serve(vec![Box::new(|mut peer: Peer| {
+        peer.handshake(SUPPORTED);
+        let Request::List { id } = peer.request() else {
+            panic!("the oversized spawn reached the holder");
+        };
+        peer.send(&HolderMessage::Panes {
+            id,
+            listing: Listing {
+                instance: INSTANCE.into(),
+                panes: Vec::new(),
+            },
+        });
+    })]);
+    let client = HolderClient::connect(&holder.path, "daemon").unwrap();
+    let mut spawn = spawn_request();
+    spawn
+        .meta
+        .insert("huge".into(), "x".repeat(MAX_FRAME_LEN as usize));
+    let err = client.spawn(&spawn).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            PanesError::Refused {
+                request: "spawn",
+                code: ErrorCode::BadRequest,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(client.list().unwrap().panes.is_empty());
+    holder.join();
+}
+
+#[test]
+fn raw_input_does_not_wait_for_a_call_in_flight() {
+    let (asked, list_in_flight) = std::sync::mpsc::channel();
+    let holder = Holder::serve(vec![Box::new(move |mut peer: Peer| {
+        peer.handshake(SUPPORTED);
+        let Request::List { id } = peer.request() else {
+            panic!("expected list");
+        };
+        asked.send(()).unwrap();
+        // The list gets no reply until the keystroke has come.
+        assert_eq!(
+            peer.frame(),
+            Some(Frame::Input {
+                num: 1,
+                bytes: b"y".to_vec()
+            })
+        );
+        peer.send(&HolderMessage::Panes {
+            id,
+            listing: Listing {
+                instance: INSTANCE.into(),
+                panes: Vec::new(),
+            },
+        });
+    })]);
+    let client = std::sync::Arc::new(HolderClient::connect(&holder.path, "daemon").unwrap());
+    let listing = {
+        let client = client.clone();
+        thread::spawn(move || client.list())
+    };
+    list_in_flight.recv().unwrap();
+    client.raw_input(1, b"y").unwrap();
+    assert!(listing.join().unwrap().unwrap().panes.is_empty());
+    drop(client);
+    holder.join();
+}
+
+#[test]
+fn a_retired_client_subscribes_to_nothing() {
+    let holder = Holder::serve(vec![Box::new(|mut peer: Peer| {
+        peer.handshake(SUPPORTED);
+        let _ = peer.request();
+        peer.send_frame(&Frame::Message("{}".into()));
+    })]);
+    let client = HolderClient::connect(&holder.path, "daemon").unwrap();
+    assert!(client.list().is_err());
+    let err = client
+        .subscribe(&"p1".into(), Subscribe::default())
+        .unwrap_err();
+    assert!(err.to_string().contains("connect again"), "{err}");
+    holder.join();
 }

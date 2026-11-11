@@ -239,39 +239,42 @@ impl Request {
         #[derive(Deserialize)]
         struct Probe {
             #[serde(rename = "type")]
-            kind: Option<String>,
-            id: Option<u64>,
+            kind: Option<serde_json::Value>,
+            id: Option<serde_json::Value>,
         }
         let probe: Probe = serde_json::from_str(text).map_err(|err| Undecodable {
             id: None,
             code: ErrorCode::BadRequest,
-            message: format!("not a JSON object with a type: {err}"),
+            message: format!("not a JSON object: {err}"),
         })?;
-        let Some(kind) = probe.kind else {
+        // An id that is not a request id is answered without one; the full
+        // decode below names what is wrong with it.
+        let id = probe.id.as_ref().and_then(serde_json::Value::as_u64);
+        let Some(kind) = probe.kind.as_ref().and_then(serde_json::Value::as_str) else {
             return Err(Undecodable {
-                id: probe.id,
+                id,
                 code: ErrorCode::BadRequest,
                 message: "the message has no type".into(),
             });
         };
-        if !Self::TYPES.contains(&kind.as_str()) {
+        if !Self::TYPES.contains(&kind) {
             return Err(Undecodable {
-                id: probe.id,
+                id,
                 code: ErrorCode::Unsupported,
                 message: format!("unknown request type {kind:?}"),
             });
         }
         serde_json::from_str(text).map_err(|err| Undecodable {
-            id: probe.id,
+            id,
             code: ErrorCode::BadRequest,
             message: format!("{kind}: {err}"),
         })
     }
 }
 
-/// An error reply's `code`.
+/// An error reply's `code`. On the wire it is a snake_case string.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(from = "String", into = "String")]
 pub enum ErrorCode {
     NotFound,
     Exited,
@@ -280,22 +283,50 @@ pub enum ErrorCode {
     /// A limit (`terminal-holder.md` 2.8).
     Busy,
     Internal,
-    /// A code from a newer holder.
-    #[serde(other)]
-    Other,
+    /// A code from a newer holder, kept as it came.
+    Other(String),
 }
 
-impl fmt::Display for ErrorCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
+impl ErrorCode {
+    pub fn as_str(&self) -> &str {
+        match self {
             ErrorCode::NotFound => "not_found",
             ErrorCode::Exited => "exited",
             ErrorCode::BadRequest => "bad_request",
             ErrorCode::Unsupported => "unsupported",
             ErrorCode::Busy => "busy",
             ErrorCode::Internal => "internal",
-            ErrorCode::Other => "other",
-        })
+            ErrorCode::Other(code) => code,
+        }
+    }
+}
+
+impl From<String> for ErrorCode {
+    fn from(code: String) -> Self {
+        match code.as_str() {
+            "not_found" => ErrorCode::NotFound,
+            "exited" => ErrorCode::Exited,
+            "bad_request" => ErrorCode::BadRequest,
+            "unsupported" => ErrorCode::Unsupported,
+            "busy" => ErrorCode::Busy,
+            "internal" => ErrorCode::Internal,
+            _ => ErrorCode::Other(code),
+        }
+    }
+}
+
+impl From<ErrorCode> for String {
+    fn from(code: ErrorCode) -> Self {
+        match code {
+            ErrorCode::Other(code) => code,
+            known => known.as_str().to_owned(),
+        }
+    }
+}
+
+impl fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -553,6 +584,11 @@ mod tests {
             let err = Request::decode(text).unwrap_err();
             assert_eq!(err.code, ErrorCode::BadRequest, "{text:?}");
         }
+        // A known type with an id that is not a request id is still read as
+        // that type, and answered without the id.
+        let err = Request::decode(r#"{"type":"list","id":"7"}"#).unwrap_err();
+        assert_eq!((err.id, err.code), (None, ErrorCode::BadRequest));
+        assert!(err.message.starts_with("list: "), "{}", err.message);
     }
 
     #[test]
@@ -646,13 +682,15 @@ mod tests {
         assert_eq!(message, HolderMessage::Unknown);
         let message: HolderMessage =
             serde_json::from_str(r#"{"type":"error","id":1,"code":"tea_time"}"#).unwrap();
-        assert!(matches!(
-            message,
-            HolderMessage::Error {
-                code: ErrorCode::Other,
-                ..
-            }
-        ));
+        let HolderMessage::Error { code, .. } = &message else {
+            panic!("{message:?}");
+        };
+        assert_eq!(code, &ErrorCode::Other("tea_time".into()));
+        assert_eq!(code.to_string(), "tea_time");
+        assert_eq!(
+            serde_json::to_value(&message).unwrap(),
+            json!({"type":"error","id":1,"code":"tea_time","message":""})
+        );
         let message: HolderMessage =
             serde_json::from_str(r#"{"type":"ok","id":2,"new_field":[1]}"#).unwrap();
         assert_eq!(message.reply_to(), Some(2));
