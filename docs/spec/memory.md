@@ -36,7 +36,7 @@ How L3 renders the Tiller documents (the order and the budget are not set elsewh
 - What loads: each live `tiller_doc` source whose boundary is `meta.boundary`, whose project is `fleet` or the session's project, and whose `roles` name the session's role. Its current approved revision is the newest `approved` row by `recorded_at`. A personal document never loads into a launch on a work host, and a work document never loads on a personal host.
 - Order: `fleet` first, then the project, then by `canonical_path`. The documents follow the role file and come before the brief, under one `# Memory` heading with a `## <canonical_path>` heading per document. This is the form the holdout eval measures a candidate in (`learning-loop.md`), so the eval measures what launches.
 - Text: the blob, read with `git cat-file blob` from the memory repo. A blob the repo cannot give, or text that is not UTF-8, refuses the launch. An empty document renders nothing and is not recorded as loaded.
-- Budget: the launch renders every approved document whole and never cuts one. The budget is held at approval, where `mem.decide` refuses a change that would put a role over it (section 6).
+- Budget: the launch renders every approved document whole and never cuts one. The budget is held at approval, where `mem.decide` refuses a change that would put a role over it (section 6). That refusal is not enforced yet: nothing computes the count (section 9).
 - Built so far (U15): the Tiller documents only. The L4 and L5 sources and the refusals of section 9, steps 1 to 3 and 5, are not built yet. Until they are, a Tiller document with no approved revision renders nothing instead of refusing the launch (section 9, step 4) [I: `spawn::tests::spawn_renders_the_approved_memory_and_records_the_load`, `spawn::tests::spawn_refuses_an_approved_blob_it_cannot_read`, the CLI test `memory_load`].
 
 Firstmate departure: Firstmate's notes tier let agents write learnings that loaded at the next start, reviewed afterwards. Tiller has no notes tier. An agent's "remember this" becomes evidence or a proposal (section 6), and loads only after approval, batched so the cost stays low (point 24).
@@ -206,7 +206,7 @@ Rolling back means retiring a memory, not erasing history (point 28).
 
 ### Which sessions loaded a revision
 
-`session_loads`: one row per (session, revision) for every source revision Tiller rendered into a session's prompt. The launcher writes the `startup` rows for a launch that renders the prompt (`run.start`, a promotion, `run.relaunch` on the same run or a new attempt, the orchestrator launch) from the revisions it rendered, once the launch line went into the pane: a launch that fails before that records no load, and a failed write after it is the launch's warning, not its error. `session.resume` renders nothing: `claude --resume` reuses the session's prompt file. On a `SessionStart` observation for `resume`, `clear` or `compact`, the daemon copies the session's newest set with the new trigger at the observation's time; it hashes nothing and the hook only records the trigger, so the hook stays inside its budget (V09, kept at CP2). The daemon's `memory_loads` poller makes the copies every 5 seconds, for live sessions and for sessions that ended in the last hour. A session that loaded nothing gets no copy, and a replayed observation writes no second row.
+`session_loads`: one row per (session, revision, trigger, moment) for every source revision Tiller rendered into a session's prompt. The launcher writes the `startup` rows for a launch that renders the prompt (`run.start`, a promotion, `run.relaunch` on the same run or a new attempt, the orchestrator launch) from the revisions it rendered, once the launch line went into the pane: a launch that fails before that records no load, and a failed write after it is the launch's warning, not its error. `session.resume` renders nothing: `claude --resume` reuses the session's prompt file. On a `SessionStart` observation for `resume`, `clear` or `compact`, the daemon copies the session's newest set with the new trigger at the observation's time; it hashes nothing and the hook only records the trigger, so the hook stays inside its budget (V09, kept at CP2). The daemon's `memory_loads` poller makes the copies every 5 seconds, for live sessions and for sessions that ended in the last hour. Each pass reads only the observations recorded since the last pass began, less 5 minutes for a write that was stamped before it committed; the first pass after a start reads them all. A session that loaded nothing gets no copy, an observation whose bind the hook refused (`bind_refused` in its payload) gets no copy, and a replayed observation writes no second row. A copy that fails is logged and shows in the poller's health, and the pass goes on to the other copies; the first pass after the next daemon start tries it again.
 
 - `session_id`, `revision_id`, `trigger` (`startup`, `resume`, `clear`, `compact`), `loaded_at`.
 - What a row proves (reworded at CP2, S04): Tiller gave the session that revision, because the prompt file was rendered from that blob by SHA at that launch. It does not prove what the model attended to, and it is not a hash of files on disk at some later moment. Because no memory file loads natively (section 2), a revision missing from a session's set cannot have reached it through a memory channel. The appended prompt persists across `/clear` and `/compact` [I: T4.3 pins it with `memory::render::appended_prompt_survives_clear_and_compact`], which is why those triggers copy the set instead of rendering again.
@@ -238,7 +238,7 @@ Each host's Tiller has one boundary, stored in `meta.boundary` (`personal` or `w
 
 ## 9. The check: nothing unapproved reaches a fleet role
 
-Acceptance for T1.5. Each guarantee is labeled **enforced** (code refuses, with the test that proves it) or **convention** (relied on, with the reason it is not enforced).
+Acceptance for T1.5. Each guarantee is labeled **enforced** (code refuses, with the test that proves it) or **convention** (relied on, with the reason it is not enforced). A row marked **not enforced** is specified but not built yet, and names the open owner decision.
 
 ### Launch check
 
@@ -260,7 +260,8 @@ A refusal opens a `review` attention item on the card the run is for (for an orc
 | Guarantee | Label | Test |
 |---|---|---|
 | A fleet launch with an unmapped loadable file is refused | enforced | `memory::launch::unmapped_file_refuses` |
-| A fleet launch renders only approved revisions: a copy that is not one (worktree edit, uncommitted dotfiles edit, external commit, revoked revision) is never rendered, and a source with no approved revision refuses the launch | enforced | `memory::launch::unapproved_bytes_never_rendered` (property test over source kinds and drift kinds), `memory::launch::source_without_approved_revision_refuses` |
+| A fleet launch renders only approved revisions: a copy that is not one (worktree edit, uncommitted dotfiles edit, external commit, revoked revision) is never rendered | enforced for Tiller documents (U15); the L4 and L5 sources are not built. The property test over source kinds and drift kinds is not written yet | `spawn::tests::spawn_renders_the_approved_memory_and_records_the_load` |
+| A source with no approved revision refuses the launch | not enforced (U15): such a Tiller document renders nothing and the launch goes on (section 2). Owner decision open: build the refusal, or keep rendering nothing | (no test yet) |
 | The rendered role prompt is built only from approved blobs; a dirty working tree in the memory repo, a project worktree or the dotfiles does not change it | enforced | `memory::render::reads_approved_blob_not_worktree` |
 | Every L4 and L5 path the role would load is in the run fragment's `claudeMdExcludes` | enforced | `memory::launch::excludes_cover_every_loadable_path` |
 | Every fleet launch sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, or the fallback directory is empty and read-only | enforced | `agents::spawn::auto_memory_off` |
@@ -272,7 +273,7 @@ A refusal opens a `review` attention item on the card the run is for (for an orc
 | A commit that fails the scrub is never kept | enforced | `memory::scrub::flagged_commit_is_undone` |
 | A proposal across the boundary, or at a `foreign` source, is refused | enforced | `memory::boundary::cross_boundary_proposal_refused` |
 | A promotion without two independent evidence keys is refused | enforced | `memory::promote::needs_independent_evidence` |
-| An approval that would put a role over its startup budget is refused | enforced | `agents::roles::startup_context_stays_under_budget` (P42) |
+| An approval that would put a role over its startup budget is refused | not enforced (U15): `mem.decide` refuses only a proposal whose `token_budget_after` is set, and nothing computes it yet, so every approval passes. `agents::roles::startup_context_stays_under_budget` (P42) checks the role files only, not the memory a launch renders. Owner decision open: build the count, or drop the guarantee | (no test yet) |
 | A fleet role cannot change what loads except through a PR the owner accepted as a memory change (CP2, C01 amended by S04). It may edit `AGENTS.md` and `CLAUDE.md` files in its own worktree; `.claude/rules/*.md` stays denied with the rest of `.claude/**` and changes only through `tiller mem propose` | enforced: the approved-snapshot rule (no memory file loads natively, the prompt is rendered from approved blobs); grants never match a source-map path; the merge of such a PR writes the memory approval (section 7); `Edit(<worktree>/.claude/**)` deny (`authority.md` G21) | `memory::launch::worktree_edit_is_not_rendered`, `memory::apply::grant_never_matches_memory_path`, `memory::apply::memory_flag_merge_writes_memory_approval`, `agents::guards::settings_edit_denied` |
 | A memory file edited mid-session, in the role's own worktree or anywhere else, does not load into that session or any other fleet session before approval: not on a nested lazy load, not after `/clear`, `/compact` or `--resume` | enforced once T4.3 shows `claudeMdExcludes` holds for every file kind and trigger (`authority.md` section 2); until then unverified. If it does not hold, the fallback is to deny in-place edits of source-map paths to every fleet role, which narrows C01 and is a stop-and-ask | live `memory::live::excluded_memory_file_never_loads`, `reconcile::memory::worktree_drift_flags_run` |
 | A durable entry past its review date, or marked due by a trigger, keeps loading unchanged; nothing automatic erases it or relaxes it | enforced | `memory::review::due_entry_keeps_loading_unchanged`, `memory::review::contradicting_evidence_marks_due`, `memory::review::project_change_marks_due` |
@@ -454,7 +455,9 @@ CREATE TABLE session_loads (
   revision_id  TEXT NOT NULL REFERENCES memory_revisions(id),
   trigger      TEXT NOT NULL CHECK (trigger IN ('startup', 'resume', 'clear', 'compact')),
   loaded_at    TEXT NOT NULL,
-  PRIMARY KEY (session_id, revision_id, loaded_at)
+  -- the trigger is in the key from migration 0019, so a copy in the same
+  -- millisecond as another load of the session gets its own rows
+  PRIMARY KEY (session_id, revision_id, trigger, loaded_at)
 ) STRICT;
 CREATE INDEX session_loads_revision ON session_loads(revision_id);
 ```

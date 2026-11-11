@@ -16,6 +16,9 @@ use crate::error::Error;
 pub struct Timestamp(jiff::Timestamp);
 
 impl Timestamp {
+    /// 1970-01-01T00:00:00.000Z.
+    pub const UNIX_EPOCH: Self = Timestamp(jiff::Timestamp::UNIX_EPOCH);
+
     /// The current time, truncated to the millisecond it is stored with.
     pub fn now() -> Self {
         Self::from_jiff(jiff::Timestamp::now())

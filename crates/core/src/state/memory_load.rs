@@ -43,13 +43,45 @@ pub struct Loaded {
     pub revision_ids: Vec<String>,
 }
 
+/// What one [`Store::mem_load_owed`] pass did.
+#[derive(Debug)]
+pub struct CopyPass {
+    /// The copies made, in observation order.
+    pub made: Vec<Loaded>,
+    /// The copies that failed, in observation order. The pass went on past
+    /// each one.
+    pub failed: Vec<FailedCopy>,
+    /// The pass's time (`ctx.now`): the `since` of the next pass. Every
+    /// observation committed after the pass read is stamped later than
+    /// this, less [`MARK_SLACK_MINUTES`].
+    pub mark: Timestamp,
+}
+
+/// One copy a pass could not write.
+#[derive(Debug)]
+pub struct FailedCopy {
+    pub session_id: String,
+    pub trigger: String,
+    pub observed_at: Timestamp,
+    pub error: Error,
+}
+
 /// The `session_loads.trigger` values a `SessionStart` observation copies
 /// the newest set under. The launch writes `startup` itself.
-pub const COPY_TRIGGERS: &[&str] = &["resume", "clear", "compact"];
+const COPY_TRIGGERS: &[&str] = &["resume", "clear", "compact"];
 
 /// How long after its session ended a `SessionStart` observation still
 /// gets its copy: the daemon may have been down when it came in.
 const COPY_WINDOW_MINUTES: i64 = 60;
+
+/// How far before the last pass's mark a pass still reads. An observation
+/// is stamped (`recorded_at`, its ctx time) before its transaction takes
+/// the write lock, so one stamped before the mark can commit after the
+/// pass read.
+const MARK_SLACK_MINUTES: i64 = 5;
+
+/// The floor of a pass with no mark: before every observation.
+const EPOCH: Timestamp = Timestamp::UNIX_EPOCH;
 
 impl Store {
     /// The approved revisions a launch of `role` in `project` renders, in
@@ -150,39 +182,64 @@ impl Store {
     /// The daemon's copy pass: makes each copy a `SessionStart` observation
     /// for resume, clear or compact owes. One is owed when the hook
     /// recorded it for a session that loaded memory, live or ended less
-    /// than [`COPY_WINDOW_MINUTES`] ago, and no row of its trigger is
-    /// recorded at its time. A copy that fails stops the pass, which the
-    /// next one retries. Returns the copies made, in observation order.
-    pub fn mem_load_owed(&mut self, ctx: &Ctx) -> Result<Vec<Loaded>> {
+    /// than [`COPY_WINDOW_MINUTES`] ago, the hook bound the session (no
+    /// `bind_refused` in its payload), and no row of its trigger is
+    /// recorded at its time.
+    ///
+    /// `since` is the [`CopyPass::mark`] of the caller's last pass: only
+    /// observations recorded after it, less [`MARK_SLACK_MINUTES`], are
+    /// read, so a pass does not grow with a long session's history. `None`
+    /// reads every observation, as the first pass after a start does. A
+    /// copy that fails is returned in [`CopyPass::failed`], and the pass
+    /// goes on to the next one.
+    pub fn mem_load_owed(&mut self, ctx: &Ctx, since: Option<Timestamp>) -> Result<CopyPass> {
+        let floor = since.map_or(EPOCH, |mark| mark.plus_minutes(-MARK_SLACK_MINUTES));
+        let events = COPY_TRIGGERS
+            .iter()
+            .map(|trigger| format!("'SessionStart:{trigger}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let owed: Vec<(String, String, Timestamp)> = {
-            let mut stmt = self.conn().prepare(
+            let mut stmt = self.conn().prepare(&format!(
                 "SELECT o.session_id, substr(o.event, length('SessionStart:') + 1), o.observed_at
-                 FROM sessions s
-                 JOIN observations o ON o.session_id = s.id
-                 WHERE (s.ended_at IS NULL OR s.ended_at > ?1)
+                 FROM observations o INDEXED BY observations_recorded
+                 JOIN sessions s ON s.id = o.session_id
+                 WHERE o.recorded_at > ?2
+                   AND (s.ended_at IS NULL OR s.ended_at > ?1)
                    AND EXISTS (SELECT 1 FROM session_loads l WHERE l.session_id = s.id)
                    AND o.source = 'hook'
-                   AND o.event IN ('SessionStart:resume', 'SessionStart:clear',
-                                   'SessionStart:compact')
+                   AND o.event IN ({events})
+                   AND json_extract(o.payload, '$.bind_refused') IS NULL
                    AND NOT EXISTS (
                        SELECT 1 FROM session_loads l
                        WHERE l.session_id = o.session_id AND l.loaded_at = o.observed_at
                          AND l.trigger = substr(o.event, length('SessionStart:') + 1))
-                 ORDER BY o.observed_at, o.id",
+                 ORDER BY o.observed_at, o.id"
+            ))?;
+            let rows = stmt.query_map(
+                params![ctx.now.plus_minutes(-COPY_WINDOW_MINUTES), floor],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?;
-            let rows = stmt.query_map([ctx.now.plus_minutes(-COPY_WINDOW_MINUTES)], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
             rows.collect::<rusqlite::Result<_>>()?
         };
-        let mut made = Vec::new();
+        let mut pass = CopyPass {
+            made: Vec::new(),
+            failed: Vec::new(),
+            mark: ctx.now,
+        };
         for (session, trigger, at) in owed {
-            let copied = self.mem_load_again(ctx, &session, &trigger, at)?.value;
-            if !copied.revision_ids.is_empty() {
-                made.push(copied);
+            match self.mem_load_again(ctx, &session, &trigger, at) {
+                Ok(copied) if copied.value.revision_ids.is_empty() => {}
+                Ok(copied) => pass.made.push(copied.value),
+                Err(error) => pass.failed.push(FailedCopy {
+                    session_id: session,
+                    trigger,
+                    observed_at: at,
+                    error,
+                }),
             }
         }
-        Ok(made)
+        Ok(pass)
     }
 
     /// The session's newest load set: the revisions of its latest
@@ -206,12 +263,16 @@ fn nothing(session: &str, trigger: &str, at: Timestamp) -> Applied<Loaded> {
     }
 }
 
+/// The revisions of the session's latest `session_loads` moment, each once
+/// in the order first written: two triggers can record the same set in
+/// one millisecond.
 fn newest_set_in(conn: &rusqlite::Connection, session: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT revision_id FROM session_loads
          WHERE session_id = ?1
            AND loaded_at = (SELECT max(loaded_at) FROM session_loads WHERE session_id = ?1)
-         ORDER BY rowid",
+         GROUP BY revision_id
+         ORDER BY min(rowid)",
     )?;
     let rows = stmt.query_map([session], |row| row.get(0))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -256,7 +317,7 @@ fn insert(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
     use crate::domain::ObservationSource;
@@ -284,6 +345,10 @@ mod tests {
     }
 
     fn observe(store: &mut Store, session: &str, event: &str, at: Timestamp) {
+        observe_with(store, session, event, at, json!({}));
+    }
+
+    fn observe_with(store: &mut Store, session: &str, event: &str, at: Timestamp, payload: Value) {
         store
             .observation_record(
                 &Ctx::new(Actor::Hook),
@@ -294,16 +359,25 @@ mod tests {
                     event: event.into(),
                     verdict: None,
                     observed_at: at,
-                    payload: json!({}),
+                    payload,
                 },
             )
             .unwrap();
     }
 
+    /// The copies one pass with no mark makes.
+    fn owed(store: &mut Store, ctx: &Ctx) -> Vec<Loaded> {
+        let pass = store.mem_load_owed(ctx, None).unwrap();
+        assert!(pass.failed.is_empty(), "{:?}", pass.failed);
+        pass.made
+    }
+
     fn triggers(store: &Store, session: &str) -> Vec<String> {
         store
             .conn()
-            .prepare("SELECT trigger FROM session_loads WHERE session_id = ?1 ORDER BY loaded_at")
+            .prepare(
+                "SELECT trigger FROM session_loads WHERE session_id = ?1 ORDER BY loaded_at, rowid",
+            )
             .unwrap()
             .query_map([session], |row| row.get(0))
             .unwrap()
@@ -351,7 +425,7 @@ mod tests {
             let minutes = i64::try_from(n).unwrap() + 1;
             observe(&mut store, &session, event, start.plus_minutes(minutes));
         }
-        let made = store.mem_load_owed(&daemon).unwrap();
+        let made = owed(&mut store, &daemon);
         assert_eq!(
             made.iter().map(|l| l.trigger.as_str()).collect::<Vec<_>>(),
             ["clear", "compact", "resume"]
@@ -360,7 +434,149 @@ mod tests {
             triggers(&store, &session),
             ["startup", "clear", "compact", "resume"]
         );
-        assert!(store.mem_load_owed(&daemon).unwrap().is_empty());
+        assert!(owed(&mut store, &daemon).is_empty());
         assert_eq!(triggers(&store, &session).len(), 4);
+    }
+
+    /// A `SessionStart` whose bind the hook refused names a Claude process
+    /// Tiller did not bind, so it owes no copy (`memory.md` section 7).
+    #[test]
+    fn a_refused_bind_owes_no_copy() {
+        let (mut store, session) = memory_store();
+        document(&store);
+        let daemon = Ctx::new(Actor::Daemon);
+        store
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .unwrap();
+        let at = Timestamp::now().plus_minutes(1);
+        observe_with(
+            &mut store,
+            &session,
+            "SessionStart:clear",
+            at,
+            json!({"bind_refused": "the session has ended"}),
+        );
+        assert!(owed(&mut store, &daemon).is_empty());
+        assert_eq!(triggers(&store, &session), ["startup"]);
+    }
+
+    /// A `/clear` in the same millisecond as the launch's record still gets
+    /// its own `clear` rows, and is not owed again.
+    #[test]
+    fn a_copy_in_the_launch_millisecond_is_recorded_once() {
+        let (mut store, session) = memory_store();
+        document(&store);
+        let at = Timestamp::now();
+        let daemon = Ctx::at(Actor::Daemon, at);
+        store
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .unwrap();
+        observe(&mut store, &session, "SessionStart:clear", at);
+        let made = owed(&mut store, &daemon);
+        assert_eq!(made.len(), 1);
+        assert_eq!(made[0].revision_ids, ["R-alpha"]);
+        assert_eq!(triggers(&store, &session), ["startup", "clear"]);
+        assert_eq!(store.mem_loaded(&session).unwrap(), ["R-alpha"]);
+        assert!(owed(&mut store, &daemon).is_empty());
+    }
+
+    /// A copy that fails is reported, and the copies after it are still
+    /// made.
+    #[test]
+    fn a_failing_copy_does_not_block_the_others() {
+        let (mut store, session) = memory_store();
+        document(&store);
+        let daemon = Ctx::new(Actor::Daemon);
+        store
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .unwrap();
+        store
+            .conn()
+            .execute_batch(
+                "CREATE TEMP TRIGGER no_clear BEFORE INSERT ON session_loads
+                 WHEN NEW.trigger = 'clear'
+                 BEGIN SELECT RAISE(ABORT, 'no clear copies'); END;",
+            )
+            .unwrap();
+        let start = Timestamp::now();
+        observe(
+            &mut store,
+            &session,
+            "SessionStart:clear",
+            start.plus_minutes(1),
+        );
+        observe(
+            &mut store,
+            &session,
+            "SessionStart:compact",
+            start.plus_minutes(2),
+        );
+        let pass = store.mem_load_owed(&daemon, None).unwrap();
+        assert_eq!(
+            pass.made
+                .iter()
+                .map(|l| l.trigger.as_str())
+                .collect::<Vec<_>>(),
+            ["compact"]
+        );
+        assert_eq!(pass.failed.len(), 1);
+        assert_eq!(pass.failed[0].trigger, "clear");
+        assert!(
+            pass.failed[0].error.to_string().contains("no clear copies"),
+            "{}",
+            pass.failed[0].error
+        );
+        assert_eq!(triggers(&store, &session), ["startup", "compact"]);
+    }
+
+    /// A pass given the last pass's mark reads only the observations
+    /// recorded since, less the slack; one with no mark reads them all.
+    #[test]
+    fn a_marked_pass_reads_only_new_observations() {
+        let (mut store, session) = memory_store();
+        document(&store);
+        let daemon = Ctx::new(Actor::Daemon);
+        store
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .unwrap();
+        let mark = store.mem_load_owed(&daemon, None).unwrap().mark;
+        assert_eq!(mark, daemon.now);
+        observe(
+            &mut store,
+            &session,
+            "SessionStart:clear",
+            mark.plus_minutes(1),
+        );
+        observe(
+            &mut store,
+            &session,
+            "SessionStart:compact",
+            mark.plus_minutes(2),
+        );
+        let old = mark.plus_minutes(-MARK_SLACK_MINUTES - 1);
+        store
+            .conn()
+            .execute(
+                "UPDATE observations SET recorded_at = ?1 WHERE event = 'SessionStart:clear'",
+                [old],
+            )
+            .unwrap();
+        let later = Ctx::at(Actor::Daemon, mark.plus_minutes(3));
+        let pass = store.mem_load_owed(&later, Some(mark)).unwrap();
+        assert_eq!(
+            pass.made
+                .iter()
+                .map(|l| l.trigger.as_str())
+                .collect::<Vec<_>>(),
+            ["compact"]
+        );
+        assert_eq!(pass.mark, later.now);
+        assert_eq!(
+            owed(&mut store, &later)
+                .iter()
+                .map(|l| l.trigger.as_str())
+                .collect::<Vec<_>>(),
+            ["clear"]
+        );
     }
 }

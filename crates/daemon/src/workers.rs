@@ -641,11 +641,15 @@ impl Source for Transcripts {
 
 /// Copies a session's load set on each `SessionStart` observation for a
 /// resume, `/clear` or `/compact` (`memory.md` section 7, `protocol.md`
-/// 4.2). The hook only records the observation, so it stays in its budget;
-/// a copy this pass cannot write is retried on the next one, and the
-/// poller's health shows the failure.
+/// 4.2). The hook only records the observation, so it stays in its budget.
+/// Each pass reads only the observations recorded since the last one
+/// (`mark`); the first pass after a start reads them all. A copy this pass
+/// cannot write is logged, the pass goes on to the others, and the
+/// poller's health shows the failure; the first pass after the next start
+/// tries it again.
 pub struct MemoryLoads {
     store: Store,
+    mark: Option<Timestamp>,
 }
 
 impl Source for MemoryLoads {
@@ -658,8 +662,11 @@ impl Source for MemoryLoads {
     }
 
     fn poll(&mut self, now: Timestamp) -> Result<(), PollError> {
-        let made = self.store.mem_load_owed(&Ctx::at(Actor::Daemon, now))?;
-        for loaded in made {
+        let pass = self
+            .store
+            .mem_load_owed(&Ctx::at(Actor::Daemon, now), self.mark)?;
+        self.mark = Some(pass.mark);
+        for loaded in pass.made {
             tracing::info!(
                 session = loaded.session_id,
                 trigger = loaded.trigger,
@@ -667,7 +674,22 @@ impl Source for MemoryLoads {
                 "copied a session's memory load"
             );
         }
-        Ok(())
+        let failed = pass.failed.len();
+        let Some(first) = pass.failed.first().map(|f| f.error.to_string()) else {
+            return Ok(());
+        };
+        for copy in pass.failed {
+            tracing::warn!(
+                session = copy.session_id,
+                trigger = copy.trigger,
+                observed_at = %copy.observed_at,
+                error = %copy.error,
+                "could not copy a session's memory load"
+            );
+        }
+        Err(PollError::State(tiller_core::Error::Internal(format!(
+            "{failed} memory load copies failed; the first: {first}"
+        ))))
     }
 }
 
@@ -840,7 +862,10 @@ pub fn start(
         store: open()?,
         herdr: tools.herdr.clone(),
     };
-    let loads = MemoryLoads { store: open()? };
+    let loads = MemoryLoads {
+        store: open()?,
+        mark: None,
+    };
     let pages = PageAnswers::new(
         open()?,
         Lavish::new(tools.lavish.clone(), tools.review_hosts.clone()),

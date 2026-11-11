@@ -333,6 +333,46 @@ fn projects_learn_when_they_last_changed_across_0018() {
     assert_eq!(current_version(&conn).unwrap(), 18);
 }
 
+/// Migration 19: load rows keep their order across the rebuild, a second
+/// trigger in the same millisecond gets its own row, and going back down
+/// keeps the row written first.
+#[test]
+fn load_rows_are_keyed_by_trigger_across_0019() {
+    let mut conn = connection();
+    to_version(&mut conn, 18).unwrap();
+    conn.execute_batch(&format!("BEGIN; {FIXTURE_V1} COMMIT;"))
+        .unwrap();
+    let loads = |conn: &Connection| -> Vec<(String, String)> {
+        conn.prepare("SELECT trigger, loaded_at FROM session_loads ORDER BY rowid")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let same_ms = "INSERT INTO session_loads (session_id, revision_id, trigger, loaded_at)
+                   VALUES ('01JC0000000000000000000SW1', '01JC0000000000000000000MR1', 'clear',
+                           '2026-11-02T09:10:02.000Z')";
+    assert!(
+        conn.execute(same_ms, []).is_err(),
+        "before 19 the key has no trigger"
+    );
+    let before = loads(&conn);
+    to_version(&mut conn, 19).unwrap();
+    assert_eq!(loads(&conn), before);
+    conn.execute(same_ms, []).unwrap();
+    let both = [
+        ("startup".to_owned(), "2026-11-02T09:10:02.000Z".to_owned()),
+        ("clear".to_owned(), "2026-11-02T09:10:02.000Z".to_owned()),
+    ];
+    assert_eq!(loads(&conn), both);
+
+    to_version(&mut conn, 18).unwrap();
+    assert_eq!(loads(&conn), both[..1]);
+    to_version(&mut conn, 19).unwrap();
+    assert_eq!(current_version(&conn).unwrap(), 19);
+}
+
 /// Migration 2 lowers no project's rigor: every project that existed before
 /// it reads `launched`, with nothing reviewed yet.
 #[test]

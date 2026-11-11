@@ -28,7 +28,7 @@ const PROJECT_ID_CHECK_V7: &str = "CHECK (id GLOB '[a-z]*' AND id NOT GLOB '*[^a
     AND length(id) BETWEEN 2 AND 32)";
 
 /// The schema version this binary writes: the length of [`list`].
-pub const LATEST: usize = 18;
+pub const LATEST: usize = 19;
 
 /// Every migration in version order. Add a new one at the end and bump
 /// [`LATEST`].
@@ -103,6 +103,9 @@ fn list() -> Vec<M<'static>> {
             .down(include_str!(
                 "../migrations/0018_project_edited_at/down.sql"
             ))
+            .foreign_key_check(),
+        M::up(include_str!("../migrations/0019_load_trigger_key/up.sql"))
+            .down(include_str!("../migrations/0019_load_trigger_key/down.sql"))
             .foreign_key_check(),
     ]
 }
