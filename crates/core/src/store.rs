@@ -296,9 +296,8 @@ pub struct Store {
     /// The directory that holds `state.db` and its backups; none for an
     /// in-memory database.
     home: Option<PathBuf>,
-    /// The Tiller home whose owner marker every write checks: the
-    /// database's directory unless [`Store::with_owner_home`] names
-    /// another.
+    /// The Tiller home whose owner marker every write checks, when
+    /// [`Store::with_owner_home`] names one; else `home`.
     owner_home: Option<PathBuf>,
 }
 
@@ -314,7 +313,7 @@ impl Store {
         Ok(Self {
             conn,
             home: home_of(path.as_ref()),
-            owner_home: home_of(path.as_ref()),
+            owner_home: None,
         })
     }
 
@@ -333,7 +332,7 @@ impl Store {
         Ok(Self {
             conn,
             home: home_of(path.as_ref()),
-            owner_home: home_of(path.as_ref()),
+            owner_home: None,
         })
     }
 
@@ -379,7 +378,7 @@ impl Store {
     /// another system (`recovery.md` R20). Read on every write, since the
     /// owner can flip it while the store is open.
     fn check_owner(&self) -> Result<()> {
-        match &self.owner_home {
+        match self.owner_home.as_deref().or(self.home.as_deref()) {
             Some(home) => crate::owner::check(home),
             None => Ok(()),
         }
