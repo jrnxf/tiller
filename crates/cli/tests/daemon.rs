@@ -1092,8 +1092,35 @@ fn a_run_again_that_cannot_prepare_its_curator_ends_unfinished() {
     assert_ne!(status, "HTTP/1.0 200 OK", "{answer}");
     let view = retro_view(daemon.port, &retro);
     assert_eq!(view["status"], "unfinished", "{view}");
-    assert_eq!(
-        view["learning"], "the curator could not be prepared",
+    let learning = view["learning"].as_str().unwrap();
+    assert!(
+        learning.starts_with("the curator could not be prepared: "),
+        "{view}"
+    );
+    assert!(learning.len() > "the curator could not be prepared: ".len());
+    assert!(terminate(&mut daemon).success());
+}
+
+/// A Run again whose curator cannot be started keeps the cause and its
+/// hint on the retro: the board answered before the start failed, so the
+/// row is the only place the owner sees them.
+#[test]
+fn a_run_again_that_cannot_start_its_curator_says_why() {
+    let world = World::initialized();
+    let (fake, retro) = curator_home(&world, "#!/bin/sh\nexit 0\n");
+    std::fs::remove_file(&fake).unwrap();
+    let mut daemon = start(&world);
+    let (status, answer) = run_again(&world, daemon.port, &retro, "click-1");
+    assert_eq!(status, "HTTP/1.0 200 OK", "{answer}");
+    let view = settled(daemon.port, &retro);
+    assert_eq!(view["status"], "unfinished", "{view}");
+    let learning = view["learning"].as_str().unwrap();
+    assert!(
+        learning.starts_with("the curator could not be started: cannot start "),
+        "{view}"
+    );
+    assert!(
+        learning.ends_with("; set spawn.claude in config.toml"),
         "{view}"
     );
     assert!(terminate(&mut daemon).success());

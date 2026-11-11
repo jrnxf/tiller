@@ -409,6 +409,43 @@ fn an_unfinished_retro_runs_again() {
     );
 }
 
+/// An unfinished end is stamped when the run ended, not when it was
+/// claimed: Memory and Health show that time.
+#[test]
+fn an_unfinished_run_ends_at_the_time_it_ended() {
+    let (world, _fake, retro) = curator_world("#!/bin/sh\nsleep 1\nexit 3\n");
+    let ran = world.must(&["retro", "run", &retro]);
+    let row = &ran.data()["retro"];
+    assert_eq!(row["outcome"], "unfinished", "{}", ran.json);
+    let started = row["curator_started_at"].as_str().unwrap().to_owned();
+    let finished = row["finished_at"].as_str().unwrap().to_owned();
+    let millis = |at: &str| at.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+    assert!(
+        millis(&finished) - millis(&started) >= 1000,
+        "finished {finished}, started {started}"
+    );
+}
+
+/// A curator that cannot be started says why in the retro itself, with
+/// the hint, so the owner need not read a log.
+#[test]
+fn a_run_that_cannot_start_says_why_in_the_retro() {
+    let (world, fake, retro) = curator_world(&finishing_curator());
+    std::fs::remove_file(&fake).unwrap();
+    let failed = world.run(&["retro", "run", &retro]);
+    assert_ne!(failed.code, 0, "{}", failed.json);
+    let shown = world.must(&["retro", "show", &retro]);
+    let learning = shown.data()["retro"]["learning"].as_str().unwrap().to_owned();
+    assert!(
+        learning.starts_with("the curator could not be started: cannot start "),
+        "{learning}"
+    );
+    assert!(
+        learning.ends_with("; set spawn.claude in config.toml"),
+        "{learning}"
+    );
+}
+
 #[test]
 fn a_refused_run_leaves_the_running_curators_files_alone() {
     let (world, _fake, retro) = curator_world(&finishing_curator());

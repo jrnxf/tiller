@@ -359,16 +359,19 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
             format!("cannot watch for interrupts: {error}"),
         )
     })?;
-    let ctx = app.ctx();
-    let claimed = claim(&tools, &config, &mut store, &ctx, &retro.id)?;
-    let ran = match launch(&claimed, &interrupt) {
+    let claimed = claim(&tools, &config, &mut store, &app.ctx(), &retro.id)?;
+    let ran = launch(&claimed, &interrupt);
+    // The end is its own write, at the time the run ended: the claim's
+    // context holds the claim's time and key.
+    let ctx = app.ctx().unkeyed();
+    let ran = match ran {
         Ok(ran) => ran,
         Err(failure) => {
             unfinished(
                 &mut store,
                 &ctx,
                 &claimed.retro.value.id,
-                "the curator could not be started",
+                &note("the curator could not be started", &failure),
             )?;
             return Err(failure);
         }
@@ -482,7 +485,7 @@ pub(crate) fn claim(
                 store,
                 &ctx.unkeyed(),
                 &claimed.value.id,
-                "the curator could not be prepared",
+                &note("the curator could not be prepared", &failure),
             )?;
             return Err(failure);
         }
@@ -560,6 +563,16 @@ pub(crate) fn end(
     })
 }
 
+/// The learning of a run that never reached its curator: `what` happened,
+/// with the cause and its hint, so the owner sees them where the retro is
+/// shown, not only in a log.
+fn note(what: &str, failure: &Failure) -> String {
+    match &failure.hint {
+        Some(hint) => format!("{what}: {}; {hint}", failure.message),
+        None => format!("{what}: {}", failure.message),
+    }
+}
+
 /// Ends a claimed retro whose curator did not finish it as `unfinished`,
 /// with `note` as its learning, so the owner can run it again.
 pub(crate) fn unfinished(
@@ -612,7 +625,7 @@ pub(crate) fn board_run(
                         &mut store,
                         &ctx,
                         &claimed.retro.value.id,
-                        "the curator could not be started",
+                        &note("the curator could not be started", &failure),
                     )
                     .map_err(|failure| failure.message.clone())?;
                     Err(failure.message.clone())
