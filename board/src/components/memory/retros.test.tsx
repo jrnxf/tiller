@@ -25,6 +25,10 @@ let posts: { path: string; body: Record<string, unknown> }[] = [];
 let override: Record<string, unknown> = {};
 // A POST answered here instead of by the fixture.
 let refuse: { status: number; code: string; message: string } | null = null;
+// A POST whose answer is lost on the way: the daemon may have acted on it.
+let lose = false;
+// A POST answered with this body, as the daemon's replay of a key does.
+let answer: Record<string, unknown> | null = null;
 
 function stubDaemon() {
   vi.stubGlobal("fetch", async (path: string, init?: RequestInit) => {
@@ -36,6 +40,8 @@ function stubDaemon() {
     }
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     posts.push({ path, body });
+    if (lose) throw new TypeError("Failed to fetch");
+    if (answer) return new Response(JSON.stringify(answer), { status: 200 });
     if (refuse) {
       const { status, code, message } = refuse;
       return new Response(JSON.stringify({ ok: false, error: { code, message } }), { status });
@@ -80,6 +86,8 @@ beforeEach(() => {
   posts = [];
   override = {};
   refuse = null;
+  lose = false;
+  answer = null;
   vi.stubGlobal("matchMedia", (query: string) => ({
     matches: false,
     media: query,
@@ -108,7 +116,7 @@ test("a project's document lists its retros, and the one that did not finish say
   expect(cut.getByText("Split the export worker")).toBeTruthy();
   expect(
     cut.getByText(
-      "Curator was cut at the 20 min limit, Wed 11 Nov, 04:20. The sweep does not run it again.",
+      "Curator was cut at the 20 min limit, Wed 11 Nov, 04:20. Nothing runs it again by itself.",
     ),
   ).toBeTruthy();
   expect(cut.getByRole("button", { name: "Run the retro of alpha-14 again" })).toBeTruthy();
@@ -120,6 +128,34 @@ test("a project's document lists its retros, and the one that did not finish say
   expect(rowOf(list, "alpha-12", "done").getByText(/^1 suggestion, kept · /)).toBeTruthy();
   // Only alpha's retros: beta's sits on beta's document.
   expect(list.queryByText("beta-28")).toBeNull();
+});
+
+test("a waiting retro says that nothing starts its curator, and how to start it", async () => {
+  await renderAt("/memory?doc=alpha");
+  const waiting = rowOf(await retrosList(), "alpha-15", "pending");
+  expect(waiting.getByText("Waiting")).toBeTruthy();
+  const meta = waiting.getByText(/^Waiting since /);
+  expect(meta.textContent).toBe(
+    "Waiting since Wed 11 Nov, 13:30. Nothing starts its curator by itself: run tiller retro run 0000015 in a terminal.",
+  );
+  expect(within(meta).getByText("tiller retro run 0000015").tagName).toBe("CODE");
+  expect(waiting.queryByRole("button")).toBeNull();
+});
+
+test("the header says so when an older retro that did not finish is listed", async () => {
+  const listed = fixtureResource("/api/v1/retros?project=alpha", "default", NOW) as RetrosResponse;
+  const old = "2026-09-01T10:00:00Z";
+  override["/api/v1/retros?project=alpha"] = {
+    ...listed,
+    retros: listed.retros.map((retro) =>
+      retro.card === "alpha-14"
+        ? { ...retro, created_at: old, curator_started_at: old, finished_at: old }
+        : retro,
+    ),
+  };
+  await renderAt("/memory?doc=alpha");
+  const list = await retrosList();
+  expect(list.getByText("alpha · last 30 days and every unfinished one")).toBeTruthy();
 });
 
 test("the shared document has no Retros list", async () => {
@@ -197,13 +233,131 @@ test("Run again is off while another retro of the card runs, and a refusal shows
   expect(rowOf(again, "alpha-14", "unfinished").getByText("Did not finish")).toBeTruthy();
 });
 
+test("a retry after a lost answer sends the same key, so the daemon runs it once", async () => {
+  await renderAt("/memory?doc=alpha");
+  const list = await retrosList();
+  const button = () =>
+    rowOf(list, "alpha-14", "unfinished").getByRole("button", {
+      name: "Run the retro of alpha-14 again",
+    });
+
+  lose = true;
+  fireEvent.click(button());
+  expect((await list.findByRole("alert")).textContent).toBe(
+    "The daemon did not answer, so this may not be saved yet. Trying again is safe: the same click is never recorded twice.",
+  );
+  await waitFor(() => expect(button().hasAttribute("disabled")).toBe(false));
+
+  lose = false;
+  fireEvent.click(button());
+  await waitFor(() => rowOf(list, "alpha-14", "running"));
+  expect(posts).toHaveLength(2);
+  expect(posts[1]?.body.idempotency_key).toBe(posts[0]?.body.idempotency_key);
+});
+
+test("a replayed click that had already run and ended says so, and Run again is a new click", async () => {
+  const listed = fixtureResource("/api/v1/retros?project=alpha", "default", NOW) as RetrosResponse;
+  // The first click's curator failed fast, at 15:39, but its answer was lost
+  // and the list was not read again.
+  const ended = "2026-11-11T15:39:00Z";
+  await renderAt("/memory?doc=alpha");
+  const list = await retrosList();
+  answer = {
+    ok: true,
+    replayed: true,
+    events: [],
+    receipt: { recorded_at: "2026-11-11T15:40:00Z", outbox_id: null, approval_id: null },
+    data: {
+      id: "01JRETRO000000000000000014",
+      state: "done",
+      outcome: "unfinished",
+      finished_at: ended,
+    },
+  };
+  override["/api/v1/retros?project=alpha"] = {
+    ...listed,
+    retros: listed.retros.map((retro) =>
+      retro.card === "alpha-14"
+        ? {
+            ...retro,
+            learning: "curator exited 3 without finishing the retro",
+            started_by: "board",
+            curator_started_at: "2026-11-11T15:38:00Z",
+            finished_at: ended,
+          }
+        : retro,
+    ),
+  };
+  fireEvent.click(
+    rowOf(list, "alpha-14", "unfinished").getByRole("button", {
+      name: "Run the retro of alpha-14 again",
+    }),
+  );
+  const row = await waitFor(() => {
+    const found = rowOf(list, "alpha-14", "unfinished");
+    found.getByText(/^Curator exited 3/);
+    return found;
+  });
+  expect(row.getByRole("status").textContent).toBe(
+    "Your earlier Run again had already run, and it did not finish either.",
+  );
+  // The run it ended is a new one to run again, with a new key.
+  const again = row.getByRole("button", { name: "Run the retro of alpha-14 again" });
+  await waitFor(() => expect(again.hasAttribute("disabled")).toBe(false));
+  answer = null;
+  delete override["/api/v1/retros?project=alpha"];
+  fireEvent.click(again);
+  await waitFor(() => expect(posts).toHaveLength(2));
+  expect(posts[1]?.body.idempotency_key).not.toBe(posts[0]?.body.idempotency_key);
+});
+
+test("a refusal shows as a sentence, and goes once the row changes", async () => {
+  const { queryClient } = await renderAt("/memory?doc=alpha");
+  const list = await retrosList();
+  refuse = {
+    status: 422,
+    code: "refused",
+    message: "retro 01JRETRO000000000000000014: its curator still runs",
+  };
+  fireEvent.click(
+    rowOf(list, "alpha-14", "unfinished").getByRole("button", {
+      name: "Run the retro of alpha-14 again",
+    }),
+  );
+  expect((await list.findByRole("alert")).textContent).toBe(
+    "Retro 01JRETRO000000000000000014: its curator still runs.",
+  );
+
+  // The list now shows the run it met: the refusal is about a row that is gone.
+  const listed = fixtureResource("/api/v1/retros?project=alpha", "default", NOW) as RetrosResponse;
+  override["/api/v1/retros?project=alpha"] = {
+    ...listed,
+    retros: listed.retros.map((retro) =>
+      retro.card === "alpha-14"
+        ? { ...retro, status: "running", curator_started_at: "2026-11-11T15:39:00Z" }
+        : retro,
+    ),
+  };
+  await act(async () => {
+    await queryClient.invalidateQueries();
+  });
+  await waitFor(() => rowOf(list, "alpha-14", "running"));
+  expect(list.queryByRole("alert")).toBeNull();
+});
+
 test("Health reports the retro that did not finish, with Open in Memory and Run again", async () => {
   await renderAt("/health");
   const panel = within(await screen.findByRole("region", { name: "Learning" }, { timeout: 3000 }));
 
   expect(panel.getByText("Retros and the curator, this week.")).toBeTruthy();
   expect(panel.getByText("1 retro did not finish")).toBeTruthy();
-  expect(panel.getByText("alpha-14 · cut at the 20 min limit, Wed 11 Nov, 04:20")).toBeTruthy();
+  expect(
+    panel.getByText(
+      (_, node) =>
+        node?.className === "m" &&
+        node.textContent === "alpha-14 · cut at the 20 min limit, Wed 11 Nov, 04:20",
+    ),
+  ).toBeTruthy();
   // Since Monday 9 Nov: beta-28 (waiting), alpha-12 (kept) and gamma-31.
   expect(panel.getByText("3 retros done")).toBeTruthy();
   expect(panel.getByText("2 suggestions, 1 kept")).toBeTruthy();
@@ -218,4 +372,29 @@ test("Health reports the retro that did not finish, with Open in Memory and Run 
   await waitFor(() => expect(panel.getByText("The retro of alpha-14 runs")).toBeTruthy());
   expect(panel.queryByText("1 retro did not finish")).toBeNull();
   expect(posts.map((post) => post.path)).toEqual(["/api/v1/retros/01JRETRO000000000000000014/run"]);
+});
+
+test("Health says why Run again is off", async () => {
+  const listed = fixtureResource("/api/v1/retros", "default", NOW) as RetrosResponse;
+  override["/api/v1/retros"] = {
+    ...listed,
+    retros: listed.retros.map((retro) =>
+      retro.card === "alpha-14"
+        ? { ...retro, run_refusal: "config.toml cannot be used: no such table" }
+        : retro,
+    ),
+  };
+  await renderAt("/health");
+  const panel = within(await screen.findByRole("region", { name: "Learning" }, { timeout: 3000 }));
+  expect(
+    panel.getByText(
+      (_, node) =>
+        node?.className === "m" &&
+        node.textContent ===
+          "alpha-14 · cut at the 20 min limit, Wed 11 Nov, 04:20. Run again is off: Config.toml cannot be used: no such table.",
+    ),
+  ).toBeTruthy();
+  expect(
+    panel.getByRole("button", { name: "Run the retro of alpha-14 again" }).hasAttribute("disabled"),
+  ).toBe(true);
 });

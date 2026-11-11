@@ -1,19 +1,21 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useCallback, useState } from "react";
+import type { ReactNode } from "react";
 
-import type { RetroView, RetrosResponse } from "../../lib/api-types";
+import type { MutationResponse, RetroView, RetrosResponse } from "../../lib/api-types";
 import { serverNow } from "../../lib/clock";
 import { API_KEY_PREFIX, RETROS_PREFIX, retrosQuery } from "../../lib/queries";
-import { ActionError, sendMutation } from "../attention/api";
+import type { ActionError } from "../attention/api";
+import { sendMutation } from "../attention/api";
 import { ReopenIcon } from "../attention/icons";
-import { ulid } from "../attention/ulid";
+import { useAction } from "../attention/use-action";
 import { useTick } from "../board/ago";
-import { Inline, day, sentence, when } from "./parts";
+import { day, sentence, when } from "./parts";
 
 // The Retros list under a project's memory document (learning-loop.md section
-// 4): what each full retro of the last 30 days came to, and for one whose
-// curator did not finish, why, with Run again. The sweep never runs such a
-// retro again; the owner does, here or from Health.
+// 4): what each full retro of the last 30 days came to, every one whose
+// curator did not finish, why, with Run again. Nothing runs such a retro
+// again by itself; the owner does, here or from Health.
 
 // A running retro is read again on this beat, besides its change events, so
 // the row ends even when an event is missed.
@@ -44,7 +46,7 @@ const finishedAt = (retro: RetroView) => retro.finished_at ?? retro.created_at;
 
 // "Started by you, Wed 11 Nov, 15:41 · limit 20 min".
 export function startedLine(retro: RetroView, limit: number): string {
-  const by = retro.started_by === "daemon" ? "the sweep" : "you";
+  const by = retro.started_by === "daemon" ? "the daemon" : "you";
   const started = retro.curator_started_at ? `, ${when(retro.curator_started_at)}` : "";
   return `Started by ${by}${started} · limit ${limit} min`;
 }
@@ -80,55 +82,89 @@ function result(retro: RetroView): string {
   return "No suggestions";
 }
 
-// Run again for one retro, and the refusal it met, by retro id.
-export function useRunAgain() {
+// What `POST /api/v1/retros/{id}/run` answers with: the retro its key claimed.
+interface Claimed {
+  state: "pending" | "done";
+  outcome: string | null;
+  finished_at: string | null;
+}
+
+// A row's state as Run again sees it: a refusal or a note it met holds only
+// while this stays the same.
+const rowState = (retro: RetroView) =>
+  `${retro.id}:${retro.status}:${retro.finished_at ?? ""}:${retro.run_refusal ?? ""}`;
+
+export type RunAgainState = ReturnType<typeof useRunAgain>;
+
+// Run again for one retro. The key is minted once per run that did not
+// finish (the retro and when it ended), so a retry after a lost answer
+// replays the same click and starts no second curator, and a run that ended
+// since is a new click. A click is recorded once: the button stays off until
+// the list shows where it went.
+export function useRunAgain(retro: RetroView) {
   const queryClient = useQueryClient();
-  const [sending, setSending] = useState<string | null>(null);
-  const [refusal, setRefusal] = useState<{ id: string; error: ActionError } | null>(null);
-  const run = (retro: RetroView) => {
-    setSending(retro.id);
-    setRefusal(null);
-    sendMutation("POST", `/api/v1/retros/${retro.id}/run`, { idempotency_key: ulid() })
-      .catch((caught: unknown) => {
-        setRefusal({
-          id: retro.id,
-          error:
-            caught instanceof ActionError
-              ? caught
-              : new ActionError(0, "unknown", "Run again failed. Try again."),
-        });
-      })
-      .finally(() => {
-        setSending(null);
-        void queryClient.invalidateQueries({
+  const state = rowState(retro);
+  const [replayed, setReplayed] = useState<Claimed | null>(null);
+  const [failed, setFailed] = useState<{ error: ActionError; state: string } | null>(null);
+  const id = retro.id;
+  const send = useCallback(
+    (idempotency_key: string) => {
+      setReplayed(null);
+      // The button turns on again only once the list says what happened.
+      const refresh = () =>
+        queryClient.invalidateQueries({
           queryKey: API_KEY_PREFIX,
           predicate: (query) => String(query.queryKey[1] ?? "").startsWith(RETROS_PREFIX),
         });
-      });
-  };
+      return sendMutation<Claimed>("POST", `/api/v1/retros/${id}/run`, {
+        idempotency_key,
+      }).finally(refresh);
+    },
+    [id, queryClient],
+  );
+  const onRecorded = useCallback((response: MutationResponse<Claimed>) => {
+    // A replayed key answers with the retro it claimed then. One that is done
+    // ended that run already: say so, since the row looks as it did.
+    if (response.replayed && response.data?.state === "done") setReplayed(response.data);
+  }, []);
+  const action = useAction({
+    binding: `${retro.id}:${retro.finished_at ?? ""}`,
+    send,
+    onRecorded,
+  });
+  // A failure belongs to the row as it was when it came back.
+  if (action.error && failed?.error !== action.error) {
+    setFailed({ error: action.error, state });
+  }
+  const error =
+    action.error && failed?.error === action.error && failed.state === state
+      ? sentence(action.error.message)
+      : null;
+  const ranAlready =
+    replayed !== null &&
+    retro.status === "unfinished" &&
+    replayed.outcome === "unfinished" &&
+    replayed.finished_at !== null &&
+    Date.parse(replayed.finished_at) === Date.parse(retro.finished_at ?? "");
   return {
-    run,
-    sending: (retro: RetroView) => sending === retro.id,
-    refusalFor: (retro: RetroView) => (refusal?.id === retro.id ? refusal.error : null),
+    trigger: action.trigger,
+    off: retro.run_refusal !== null || action.pending || action.recorded,
+    error,
+    note: ranAlready
+      ? "Your earlier Run again had already run, and it did not finish either."
+      : null,
   };
 }
 
-export function RunAgain({
-  retro,
-  ctl,
-}: {
-  retro: RetroView;
-  ctl: ReturnType<typeof useRunAgain>;
-}) {
-  const off = retro.run_refusal !== null || ctl.sending(retro);
+export function RunAgain({ retro, run }: { retro: RetroView; run: RunAgainState }) {
   return (
     <button
       type="button"
       className="btn primary sm"
-      disabled={off}
+      disabled={run.off}
       title={retro.run_refusal ?? undefined}
       aria-label={`Run the retro of ${retro.card} again`}
-      onClick={() => ctl.run(retro)}
+      onClick={run.trigger}
     >
       <ReopenIcon />
       Run again
@@ -136,34 +172,66 @@ export function RunAgain({
   );
 }
 
-function Row({
-  retro,
-  limit,
-  ctl,
-}: {
-  retro: RetroView;
-  limit: number;
-  ctl: ReturnType<typeof useRunAgain>;
-}) {
-  const refusal = ctl.refusalFor(retro);
+// What Run again met, under its row: a refusal, or a click that had run.
+export function RunAgainNote({ run, className }: { run: RunAgainState; className: string }) {
+  if (!run.error && !run.note) return null;
+  return (
+    <div className={className}>
+      <p className="refusal inline" role={run.error ? "alert" : "status"}>
+        {run.error ?? run.note}
+      </p>
+    </div>
+  );
+}
+
+// The command that runs a waiting retro's curator now, by the retro's short id.
+const runCommand = (retro: RetroView) => `tiller retro run ${retro.id.slice(-7).toLowerCase()}`;
+
+function Unfinished({ retro }: { retro: RetroView }) {
+  const run = useRunAgain(retro);
+  let meta = `${why(retro.learning)}, ${when(finishedAt(retro))}. Nothing runs it again by itself.`;
+  if (retro.run_refusal) meta += ` Run again is off: ${sentence(retro.run_refusal)}`;
+  return (
+    <li data-status={retro.status}>
+      <RowTitle retro={retro} label={{ text: "Did not finish", tone: " bad" }} />
+      <span className="m">{meta}</span>
+      <RunAgain retro={retro} run={run} />
+      <RunAgainNote run={run} className="h-refusal" />
+    </li>
+  );
+}
+
+function RowTitle({ retro, label }: { retro: RetroView; label: { text: string; tone: string } }) {
+  return (
+    <span className="t">
+      <span className={`lab sm${label.tone}`}>{label.text}</span>
+      <span className="rt-card">{retro.card}</span>
+      {retro.title}
+    </span>
+  );
+}
+
+function Row({ retro, limit }: { retro: RetroView; limit: number }) {
   let label: { text: string; tone: string };
-  let meta: string;
+  let meta: ReactNode;
   let right;
   switch (retro.status) {
     case "unfinished":
-      label = { text: "Did not finish", tone: " bad" };
-      meta = `${why(retro.learning)}, ${when(finishedAt(retro))}. The sweep does not run it again.`;
-      if (retro.run_refusal) meta += ` Run again is off: ${sentence(retro.run_refusal)}`;
-      right = <RunAgain retro={retro} ctl={ctl} />;
-      break;
+      return <Unfinished retro={retro} />;
     case "running":
       label = { text: "Running", tone: " acc" };
       meta = startedLine(retro, limit);
       right = <Elapsed from={retro.curator_started_at} />;
       break;
     case "pending":
+      // Nothing starts a waiting full retro's curator: the owner does.
       label = { text: "Waiting", tone: " mute" };
-      meta = `Scheduled ${when(retro.created_at)}. The sweep runs it.`;
+      meta = (
+        <>
+          Waiting since {when(retro.created_at)}. Nothing starts its curator by itself: run{" "}
+          <code>{runCommand(retro)}</code> in a terminal.
+        </>
+      );
       right = <span className="r">{day(retro.created_at)}</span>;
       break;
     case "done":
@@ -179,18 +247,9 @@ function Row({
   }
   return (
     <li data-status={retro.status}>
-      <span className="t">
-        <span className={`lab sm${label.tone}`}>{label.text}</span>
-        <span className="rt-card">{retro.card}</span>
-        {retro.title}
-      </span>
+      <RowTitle retro={retro} label={label} />
       <span className="m">{meta}</span>
       {right}
-      {refusal ? (
-        <div className="h-refusal">
-          <Inline error={refusal} />
-        </div>
-      ) : null}
     </li>
   );
 }
@@ -215,23 +274,34 @@ function Review({ proposal, card }: { proposal: string; card: string }) {
   );
 }
 
+const WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+// A row the 30 days do not hold: an unfinished retro is listed however old.
+function older(retro: RetroView, now: number): boolean {
+  const times = [retro.created_at, retro.finished_at, retro.curator_started_at];
+  return Math.max(...times.map((at) => (at ? Date.parse(at) : 0))) < now - WINDOW_MS;
+}
+
 export function Retros({ project, doc }: { project: string; doc: string }) {
   const read = useQuery(retrosQueryWhileRunning(project));
-  const ctl = useRunAgain();
   if (!read.data) return null;
   const { retros, curator_timeout_minutes: limit } = read.data;
+  const now = serverNow();
+  const span = retros.some((retro) => older(retro, now))
+    ? "last 30 days and every unfinished one"
+    : "last 30 days";
   return (
     <section className="h-box rt-box" aria-labelledby="retros-title">
       <div className="h-head">
         <h2 id="retros-title">Retros</h2>
-        <span className="c">{doc} · last 30 days</span>
+        <span className="c">{`${doc} · ${span}`}</span>
       </div>
       {retros.length === 0 ? (
         <p className="h-none">No retros in the last 30 days.</p>
       ) : (
         <ul className="h-list">
           {retros.map((retro) => (
-            <Row key={retro.id} retro={retro} limit={limit} ctl={ctl} />
+            <Row key={retro.id} retro={retro} limit={limit} />
           ))}
         </ul>
       )}

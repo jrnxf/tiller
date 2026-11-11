@@ -71,6 +71,14 @@ function seed(now: number): State {
         finished_at: cut,
       }),
       retro({
+        id: "01JRETRO000000000000000015",
+        card: "alpha-15",
+        title: "Pin the export worker's runtime",
+        project_id: "alpha",
+        status: "pending",
+        created_at: at(now, -2 * 60 - 10),
+      }),
+      retro({
         id: "01JRETRO000000000000000028",
         card: "beta-28",
         title: "Run the slow suite on one worker",
