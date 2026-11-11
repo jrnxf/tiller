@@ -751,8 +751,9 @@ interface Ctl {
   change: (draft: string) => void;
   save: () => void;
   discard: () => void;
-  removeInEditor: () => void;
-  removeRow: (section: string, line: MemoryLine, nth: number, position: number) => void;
+  // Remove asks first; the dialog's confirm sends it.
+  askRemoveInEditor: () => void;
+  askRemoveRow: (section: string, line: MemoryLine, nth: number, position: number) => void;
   decide: (suggestion: MemorySuggestion, decision: "keep" | "discard") => void;
 }
 
@@ -814,7 +815,7 @@ function EditorSlot({ ctl, projects }: { ctl: Ctl; projects: { id: string }[] })
       locked={ctl.locked}
       onSave={ctl.save}
       onDiscard={ctl.discard}
-      onRemove={mode === "edit" ? ctl.removeInEditor : undefined}
+      onRemove={mode === "edit" ? ctl.askRemoveInEditor : undefined}
     />
   );
 }
@@ -867,7 +868,7 @@ function DocSection({
               locked={ctl.locked}
               focus={focusKey(section.title, position)}
               onEdit={() => ctl.openLine(section.title, line, nth)}
-              onRemove={() => ctl.removeRow(section.title, line, nth, position)}
+              onRemove={() => ctl.askRemoveRow(section.title, line, nth, position)}
             />
             {refusal ? <Inline error={refusal} /> : null}
             {editing ? (
@@ -1060,6 +1061,54 @@ function DiscardDialog({
   );
 }
 
+// Which line a Remove asked about, so the dialog can be answered later: the
+// section, the text and which copy of it, as the page shows them.
+interface Removal {
+  section: string;
+  text: string;
+  nth: number;
+  position: number;
+  // Asked from the open editor, not from the row.
+  inEditor: boolean;
+}
+
+function lineOfRemoval(doc: MemoryDocument, removal: Removal): MemoryLine | null {
+  const section = doc.sections.find((each) => each.title === removal.section);
+  const found = numbered(section?.lines ?? []).find(
+    ({ line, nth }) => line.text === removal.text && nth === removal.nth,
+  );
+  return found?.line ?? null;
+}
+
+// Asks before a line is removed. Cancel is the first and safe choice, and
+// Remove, the destructive one, is the rightmost button.
+function RemoveDialog({
+  line,
+  onCancel,
+  onRemove,
+}: {
+  line: string;
+  onCancel: () => void;
+  onRemove: () => void;
+}) {
+  const cancel = useRef<HTMLButtonElement>(null);
+  return (
+    <ProjectDialog name="remove" pending={false} onClose={onCancel} initial={cancel}>
+      <h2 id="remove-dialog-title">Remove this line?</h2>
+      <p id="remove-dialog-body">Agents stop loading it from their next session.</p>
+      <blockquote className="rm-line">{line}</blockquote>
+      <div className="dialog-actions">
+        <button ref={cancel} type="button" className="btn" onClick={onCancel}>
+          Cancel
+        </button>
+        <button type="button" className="btn danger" onClick={onRemove}>
+          Remove line
+        </button>
+      </div>
+    </ProjectDialog>
+  );
+}
+
 // Whether the control a refusal came from is still on the page, so the
 // refusal does not outlive it.
 function scopeLive(scope: string, doc: MemoryDocument, editor: EditorState | null): boolean {
@@ -1085,6 +1134,8 @@ function Doc({ data }: { data: MemoryResponse }) {
   const [editor, setEditor] = useState<EditorState | null>(null);
   // The editor the person asked for while a changed draft was open.
   const [asking, setAsking] = useState<EditorState | null>(null);
+  // The line Remove asked about, until the dialog is answered.
+  const [removal, setRemoval] = useState<Removal | null>(null);
   // Where focus goes next, held outside state: it is read by the effect below
   // and never shown. `wake` renders once more so the effect looks again.
   const wanted = useRef<Focus | null>(null);
@@ -1234,22 +1285,40 @@ function Doc({ data }: { data: MemoryResponse }) {
     }
   };
 
-  const removeInEditor = () => {
+  const askRemoveInEditor = () => {
     if (!resolved || !("line" in resolved)) return;
-    send(
-      resolved.section,
-      { op: "remove", index: resolved.line.index },
-      "Removed.",
-      resolved.position,
-    );
+    setRemoval({
+      section: resolved.section,
+      text: resolved.line.text,
+      nth: resolved.nth,
+      position: resolved.position,
+      inEditor: true,
+    });
   };
 
-  const removeRow = (section: string, line: MemoryLine, nth: number, position: number) => {
+  const askRemoveRow = (section: string, line: MemoryLine, nth: number, position: number) =>
+    setRemoval({ section, text: line.text, nth, position, inEditor: false });
+
+  // The line the dialog asks about, as the page has it now. A line that changed
+  // or went while the dialog was open is not the one it asked about.
+  const removing = removal ? lineOfRemoval(doc, removal) : null;
+  if (removal && (removing === null || (removal.inEditor && resolved?.mode !== "edit"))) {
+    setRemoval(null);
+  }
+
+  const confirmRemove = () => {
+    if (!removal || !removing) return;
+    setRemoval(null);
+    const { section, position } = removal;
+    if (removal.inEditor) {
+      send(section, { op: "remove", index: removing.index }, "Removed.", position);
+      return;
+    }
     const from = doc.blob;
     void edit(
-      lineScope(section, nth, line.text),
+      lineScope(section, removal.nth, removal.text),
       section,
-      { op: "remove", index: line.index },
+      { op: "remove", index: removing.index },
       "Removed.",
     ).then((landed) => {
       if (landed) setFocus({ section, at: position, from });
@@ -1275,8 +1344,8 @@ function Doc({ data }: { data: MemoryResponse }) {
     change: (draft) => setEditor((now) => (now ? { ...now, draft } : now)),
     save,
     discard,
-    removeInEditor,
-    removeRow,
+    askRemoveInEditor,
+    askRemoveRow,
     decide,
   };
 
@@ -1371,6 +1440,13 @@ function Doc({ data }: { data: MemoryResponse }) {
           <DocSection key={section.title} section={section} projects={local} ctl={ctl} />
         ))}
       </article>
+      {removal && removing ? (
+        <RemoveDialog
+          line={removal.text}
+          onCancel={() => setRemoval(null)}
+          onRemove={confirmRemove}
+        />
+      ) : null}
       {asking || blocker.status === "blocked" ? (
         <DiscardDialog leaving={asking === null} onKeep={keepEditing} onDiscard={discardChanges} />
       ) : null}

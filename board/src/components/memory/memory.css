@@ -701,6 +701,23 @@
   color: var(--fg-4);
 }
 
+/* Remove asks first: the line, quoted, under the question. The dialog is in
+   the body, outside .docs. */
+
+.dialog .rm-line {
+  margin: 12px 0 0;
+  padding: 8px 10px;
+  max-height: 30dvh;
+  overflow: auto;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r8);
+  background: var(--bg-2);
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--fg-1);
+  overflow-wrap: anywhere;
+}
+
 /* A line's source, in a dialog over the page */
 
 .dialog.rev-dialog {
@@ -886,6 +903,27 @@
     height: 1px;
     overflow: hidden;
     clip-path: inset(50%);
+  }
+
+  /* A keyboard on one of them shows both, in a row under the line, whole and
+     with their focus ring. A tap does not focus them, so touch never moves. */
+  .docs .a-ln:has(.acts :focus-visible) .acts {
+    position: static;
+    grid-column: 2;
+    width: auto;
+    height: auto;
+    margin: 4px 0 2px;
+    padding: 3px;
+    overflow: visible;
+    clip-path: none;
+    opacity: 1;
+    gap: 8px;
+  }
+
+  .docs .a-ln:has(.acts :focus-visible) .acts .ib {
+    border: 1px solid var(--line-2);
+    background: var(--bg-card);
+    box-shadow: 0 1px 1px #00000017;
   }
 
   .docs .a-sug {

@@ -109,6 +109,11 @@ const lineOf = (text: string | RegExp) => {
   return row;
 };
 
+// Remove asks first; this answers the dialog that opened.
+const removeDialog = () => screen.getByRole("dialog", { name: "Remove this line?" });
+const confirmRemove = () =>
+  fireEvent.click(within(removeDialog()).getByRole("button", { name: "Remove line" }));
+
 const type = (box: HTMLElement, value: string) => fireEvent.change(box, { target: { value } });
 
 test("each document is a tab, with the suggestions waiting on it or its line count", async () => {
@@ -276,6 +281,7 @@ test("a line removed above an open editor leaves the editor open with its draft"
   type(screen.getByRole("textbox", { name: "Edit this line" }), "Logo scouts run in parallel.");
   const hook = lineOf(/^The remote hook must read stdin/);
   fireEvent.click(within(hook).getByRole("button", { name: "Remove this line" }));
+  confirmRemove();
   await settle();
 
   expect(calls[0]?.body).toMatchObject({ op: "remove", index: 0, section: "How we work here" });
@@ -299,6 +305,7 @@ test("Remove in the editor removes that line", async () => {
 
   fireEvent.click(lineOf(/^Before asking me to merge a sizeable PR/));
   fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+  confirmRemove();
   await settle();
 
   expect(calls[0]?.body).toMatchObject({ op: "remove", index: 0, section: "How we work here" });
@@ -693,6 +700,7 @@ test("after Remove in the editor, focus is on the next row", async () => {
 
   fireEvent.click(lineOf(FIRST));
   fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+  confirmRemove();
   await settle();
 
   // The second line moved up into the removed line's place.
@@ -705,11 +713,13 @@ test("after Remove, focus is on the next row, else the previous one, else Add a 
 
   // The first of two: the next row.
   fireEvent.click(within(lineOf(FIRST)).getByRole("button", { name: "Remove this line" }));
+  confirmRemove();
   await settle();
   expect(document.activeElement).toBe(editButton(lineOf(SECOND)));
 
   // The only row: Add a line.
   fireEvent.click(section.getByRole("button", { name: "Remove this line" }));
+  confirmRemove();
   await settle();
   expect(document.activeElement).toBe(section.getByRole("button", { name: "Add a line" }));
 });
@@ -718,9 +728,113 @@ test("after Remove of the last row, focus is on the previous row", async () => {
   await renderMemory();
 
   fireEvent.click(within(lineOf(SECOND)).getByRole("button", { name: "Remove this line" }));
+  confirmRemove();
   await settle();
 
   expect(document.activeElement).toBe(editButton(lineOf(FIRST)));
+});
+
+// Remove asks first.
+
+test("Remove on a row asks first and sends nothing until it is confirmed", async () => {
+  await renderMemory();
+
+  const remove = within(lineOf(FIRST)).getByRole("button", { name: "Remove this line" });
+  fireEvent.click(remove);
+
+  const dialog = within(removeDialog());
+  expect(dialog.getByText(/^Before asking me to merge a sizeable PR/)).toBeTruthy();
+  expect(calls).toEqual([]);
+  expect(page().getByText(FIRST)).toBeTruthy();
+
+  fireEvent.click(dialog.getByRole("button", { name: "Remove line" }));
+  await settle();
+  expect(calls[0]?.body).toMatchObject({ op: "remove", index: 0, section: "How we work here" });
+  expect(screen.queryByRole("dialog", { name: "Remove this line?" })).toBeNull();
+  expect(page().queryByText(FIRST)).toBeNull();
+});
+
+test("Remove in the editor asks first too", async () => {
+  await renderMemory();
+
+  fireEvent.click(lineOf(FIRST));
+  fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+
+  expect(removeDialog()).toBeTruthy();
+  expect(calls).toEqual([]);
+  fireEvent.click(within(removeDialog()).getByRole("button", { name: "Remove line" }));
+  await settle();
+  expect(calls[0]?.body).toMatchObject({ op: "remove", index: 0 });
+});
+
+test("the dialog has Cancel on the left and the destructive Remove rightmost, neither a ghost", async () => {
+  await renderMemory();
+
+  fireEvent.click(within(lineOf(FIRST)).getByRole("button", { name: "Remove this line" }));
+
+  const buttons = within(removeDialog()).getAllByRole("button");
+  expect(buttons.map((button) => button.textContent)).toEqual(["Cancel", "Remove line"]);
+  expect(buttons[1]?.className).toMatch(/\bdanger\b/);
+  for (const button of buttons) expect(button.className).not.toMatch(/ghost|primary/);
+  // The safe choice has focus.
+  expect(document.activeElement).toBe(buttons[0]);
+});
+
+test("Cancel, Escape and the backdrop keep the line, and focus goes back to Remove", async () => {
+  await renderMemory();
+  const row = lineOf(FIRST);
+  const remove = () => within(row).getByRole("button", { name: "Remove this line" });
+
+  const asked = () => {
+    remove().focus();
+    fireEvent.click(remove());
+  };
+  asked();
+  fireEvent.click(within(removeDialog()).getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByRole("dialog", { name: "Remove this line?" })).toBeNull();
+  expect(document.activeElement).toBe(remove());
+
+  asked();
+  fireEvent.keyDown(removeDialog(), { key: "Escape" });
+  expect(screen.queryByRole("dialog", { name: "Remove this line?" })).toBeNull();
+  expect(document.activeElement).toBe(remove());
+
+  asked();
+  fireEvent.mouseDown(removeDialog().parentElement as HTMLElement);
+  expect(screen.queryByRole("dialog", { name: "Remove this line?" })).toBeNull();
+  expect(document.activeElement).toBe(remove());
+
+  await settle();
+  expect(calls).toEqual([]);
+  expect(page().getByText(FIRST)).toBeTruthy();
+});
+
+test("Cancel in the editor's dialog leaves the editor open on Remove", async () => {
+  await renderMemory();
+
+  fireEvent.click(lineOf(FIRST));
+  type(draftBox(), "A draft that stays.");
+  const remove = screen.getByRole("button", { name: "Remove" });
+  remove.focus();
+  fireEvent.click(remove);
+  fireEvent.click(within(removeDialog()).getByRole("button", { name: "Cancel" }));
+
+  expect(draftBox().value).toBe("A draft that stays.");
+  expect(document.activeElement).toBe(remove);
+  expect(calls).toEqual([]);
+});
+
+test("a line that changed while the dialog was open is not removed", async () => {
+  const { queryClient } = await renderMemory();
+
+  fireEvent.click(within(lineOf(FIRST)).getByRole("button", { name: "Remove this line" }));
+  expect(removeDialog()).toBeTruthy();
+  rewriteElsewhere(0, "Rewritten from another tab.");
+  await readAgain(queryClient);
+  await settle();
+
+  expect(screen.queryByRole("dialog", { name: "Remove this line?" })).toBeNull();
+  expect(calls.filter((call) => call.body.op === "remove")).toEqual([]);
 });
 
 // U16: refusals.
@@ -731,6 +845,7 @@ test("a refused Remove shows beside that row, and goes when another control is u
   elsewhere({ section: "Watch out for", op: "add", text: "Added from another tab." });
   const row = lineOf(FIRST);
   fireEvent.click(within(row).getByRole("button", { name: "Remove this line" }));
+  confirmRemove();
   await settle();
 
   const item = row.closest(".a-item") as HTMLElement;
@@ -800,6 +915,26 @@ test("a long gate hint wraps in the card instead of widening the page", () => {
   expect(rule(".docs .gate code")).toMatch(/white-space:\s*normal/);
   // The text column may shrink below its content, so the code can wrap.
   expect(rule(".docs .gate > span")).toMatch(/min-width:\s*0/);
+});
+
+test("on a phone a keyboard on a row action shows the actions whole, with their focus ring", () => {
+  // jsdom lays nothing out, so this holds the rules. The phone hides the
+  // actions in a 1px clipped box, which also clips a focus ring drawn inside it.
+  const css = readFileSync(resolve(import.meta.dirname, "memory.css"), "utf8");
+  const phone = css.slice(css.indexOf("@media (max-width: 820px)"));
+  const rule = (selector: string) => {
+    const escaped = selector.replace(/[.>():-]/g, String.raw`\$&`);
+    return phone.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
+  };
+  // Hidden for a tap, as before.
+  expect(rule(".docs .a-ln .acts")).toMatch(/clip-path:\s*inset\(50%\)/);
+  // Shown, unclipped and in the flow, while a keyboard is on one of them.
+  const shown = rule(".docs .a-ln:has(.acts :focus-visible) .acts");
+  expect(shown).toMatch(/clip-path:\s*none/);
+  expect(shown).toMatch(/overflow:\s*visible/);
+  expect(shown).toMatch(/width:\s*auto/);
+  expect(shown).toMatch(/height:\s*auto/);
+  expect(shown).toMatch(/position:\s*static/);
 });
 
 // U16: documents.
