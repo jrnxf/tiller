@@ -391,7 +391,10 @@ impl<H: Herdr> Deliverer<H> {
                     let reason = format!("recording the ring failed: {error}");
                     match self.store.outbox_defer(ctx, &message.id, until, &reason) {
                         Ok(_) => report.deferred.push((message.id.clone(), reason)),
-                        Err(_) => self.quiet(&[message], until),
+                        Err(defer) => {
+                            tracing::warn!(message = %message.id, error = %defer, "deferring an unrecorded ring failed");
+                            self.quiet(&[message], until);
+                        }
                     }
                 }
             }
