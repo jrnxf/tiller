@@ -560,7 +560,7 @@ impl Drop for Running {
             return;
         };
         let root = Pid::from_raw(raw);
-        let mut seen = descendants(raw);
+        let mut seen = descendants(&[raw]);
         let _ = kill(root, Signal::SIGTERM);
         let deadline = std::time::Instant::now() + self.grace;
         while std::time::Instant::now() < deadline {
@@ -570,22 +570,23 @@ impl Drop for Running {
             if !self.runs() {
                 break;
             }
-            add_new(&mut seen, descendants(raw));
+            add_new(&mut seen, descendants(&[raw]));
         }
-        if self.runs() {
-            let _ = kill(root, Signal::SIGSTOP);
-            let mut doomed = freeze(raw);
-            // A process seen earlier whose parent exited since is no longer
-            // under the child, so `freeze` cannot reach it.
-            add_new(&mut doomed, still_running(&seen));
-            kill_all(&doomed);
+        // A process seen under the child whose parent exited since, or that
+        // outlived a child that stopped by itself, has another parent now,
+        // so it is frozen as a root of its own, with what it started.
+        let mut doomed = still_running(&seen);
+        let mut roots: Vec<i32> = doomed.iter().map(|p| p.pid).collect();
+        let running = self.runs();
+        if running {
+            roots.push(raw);
+        }
+        add_new(&mut doomed, freeze(&roots));
+        kill_all(&doomed);
+        if running {
             let _ = self.child.kill();
             let _ = self.child.wait();
-            return;
         }
-        // Stopped by itself. Whatever it started that outlived it now has
-        // another parent.
-        kill_all(&still_running(&seen));
     }
 }
 
@@ -595,9 +596,9 @@ struct Process {
     pid: i32,
     ppid: i32,
     pgid: i32,
-    /// When it started, as `ps` prints it, to the second. A pid that is
-    /// reused has another start time, while `exec`, a new parent and a new
-    /// group keep it.
+    /// When it started, as `ps` prints it, to the second. `exec`, a new
+    /// parent and a new group keep it, while a pid reused in a later second
+    /// gets another.
     started: String,
 }
 
@@ -634,11 +635,11 @@ fn processes() -> Vec<Process> {
         .collect()
 }
 
-/// Every process under `root`.
-fn descendants(root: i32) -> Vec<Process> {
+/// Every process under any of `roots`.
+fn descendants(roots: &[i32]) -> Vec<Process> {
     let table = processes();
     let mut found: Vec<Process> = Vec::new();
-    let mut parents = vec![root];
+    let mut parents = roots.to_vec();
     while let Some(parent) = parents.pop() {
         for process in table.iter().filter(|p| p.ppid == parent) {
             if !found.iter().any(|seen| seen.pid == process.pid) {
@@ -671,16 +672,19 @@ fn add_new(seen: &mut Vec<Process>, found: Vec<Process>) -> usize {
     seen.len() - before
 }
 
-/// SIGSTOP to every process under the stopped `root`, read again until a
-/// read finds none it had not stopped, so none of them starts another.
-/// Returns them all.
-fn freeze(root: i32) -> Vec<Process> {
+/// SIGSTOP to each of `roots` and every process under them, read again
+/// until a read finds none it had not stopped, so none of them starts
+/// another. Returns every process under them.
+fn freeze(roots: &[i32]) -> Vec<Process> {
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
+    for &root in roots {
+        let _ = kill(Pid::from_raw(root), Signal::SIGSTOP);
+    }
     let mut tree = Vec::new();
     for _ in 0..20 {
         let before = tree.len();
-        if add_new(&mut tree, descendants(root)) == 0 {
+        if add_new(&mut tree, descendants(roots)) == 0 {
             break;
         }
         for process in &tree[before..] {
@@ -721,10 +725,9 @@ pub fn first_line(child: &mut std::process::Child, wait: std::time::Duration) ->
 }
 
 /// The port a `tiller daemon --port 0` child listens on, from the first line
-/// it writes.
-pub fn listening_port(child: &mut std::process::Child) -> u16 {
-    let line = first_line(child, std::time::Duration::from_secs(20))
-        .expect("the daemon exited before listening");
+/// it writes within `wait`.
+pub fn listening_port(child: &mut std::process::Child, wait: std::time::Duration) -> u16 {
+    let line = first_line(child, wait).expect("the daemon exited before listening");
     line.trim()
         .strip_prefix("listening on http://127.0.0.1:")
         .unwrap_or_else(|| panic!("unexpected first line {line:?}"))
@@ -738,14 +741,18 @@ pub fn listening_port(child: &mut std::process::Child) -> u16 {
 pub fn git_only_daemon(world: &World) -> (Running, u16) {
     use std::process::Stdio;
     let bin = world.dir.path().join("git-only");
-    if !bin.join("git").exists() {
-        std::fs::create_dir_all(&bin).unwrap();
-        let found = Command::new("sh")
-            .args(["-c", "command -v git"])
-            .output()
-            .unwrap();
-        let git = String::from_utf8(found.stdout).unwrap();
-        std::os::unix::fs::symlink(git.trim(), bin.join("git")).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    let found = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let git = String::from_utf8(found.stdout).unwrap();
+    // A second daemon on the same home finds the link there already.
+    match std::os::unix::fs::symlink(git.trim(), bin.join("git")) {
+        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
+            panic!("cannot link git: {error}")
+        }
+        _ => {}
     }
     let mut child = Running::new(
         world
@@ -761,6 +768,6 @@ pub fn git_only_daemon(world: &World) -> (Running, u16) {
             .spawn()
             .unwrap(),
     );
-    let port = listening_port(&mut child);
+    let port = listening_port(&mut child, std::time::Duration::from_secs(30));
     (child, port)
 }

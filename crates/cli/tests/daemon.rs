@@ -59,7 +59,7 @@ fn start(world: &World) -> Daemon {
 /// `start` with extra `tiller daemon` arguments.
 fn start_with(world: &World, args: &[&str]) -> Daemon {
     let mut child = spawn(world, args);
-    let port = listening_port(&mut child);
+    let port = listening_port(&mut child, WAIT);
     Daemon { child, port }
 }
 
@@ -674,7 +674,7 @@ fn the_login_code_signs_in_at_an_allowed_host_until_sign_out() {
             .spawn()
             .unwrap(),
     );
-    let port = listening_port(&mut child);
+    let port = listening_port(&mut child, WAIT);
     let mut daemon = Daemon { child, port };
     let read = |cookie: &str| {
         exchange(
@@ -1284,11 +1284,14 @@ fn a_guard_kills_a_child_that_ignores_sigterm_and_its_groups() {
         std::fs::write(dir.join("leader"), format!("{}\n", leader.id())).unwrap();
         let mut plain = Command::new("sleep").arg("300").spawn().unwrap();
         std::fs::write(dir.join("plain"), format!("{}\n", plain.id())).unwrap();
-        // It exits once `go` is there, which leaves its `sleep` an orphan.
+        // It exits once `go` is there, which leaves the shell it started an
+        // orphan. Half a second later the orphan starts a `sleep` of its own.
         let mut parent = Command::new("sh")
             .args([
                 "-c",
-                "sleep 300 & echo $! > orphan; while [ ! -e go ]; do sleep 0.05; done",
+                "sh -c 'while [ ! -e go ]; do sleep 0.05; done; sleep 0.5; sleep 300 & echo $! > late; wait' &
+                 echo $! > orphan
+                 while [ ! -e go ]; do sleep 0.05; done",
             ])
             .current_dir(&dir)
             .spawn()
@@ -1312,7 +1315,7 @@ fn a_guard_kills_a_child_that_ignores_sigterm_and_its_groups() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let running = Running::with_grace(child, Duration::from_secs(1));
+    let running = Running::with_grace(child, Duration::from_secs(3));
     let leader = written_pid(&dir.path().join("leader"));
     let plain = written_pid(&dir.path().join("plain"));
     let orphan = written_pid(&dir.path().join("orphan"));
@@ -1325,24 +1328,21 @@ fn a_guard_kills_a_child_that_ignores_sigterm_and_its_groups() {
         leader,
         "the stand-in does not lead a group of its own"
     );
-    // The orphan's parent exits while the guard waits out the grace, after
-    // the guard has seen the orphan under the child.
+    // The orphan's parent exits a second into the 3 s grace. The guard reads
+    // the processes under the child every 50 ms, so it has seen the orphan
+    // there many times by then.
     let go = dir.path().join("go");
-    let late = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(300));
+    let timer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(1));
         std::fs::write(go, "").unwrap();
     });
     drop(running);
-    late.join().unwrap();
-    let ended = (
-        gone(&leader, DYING),
-        gone(&plain, DYING),
-        gone(&orphan, DYING),
-    );
-    reap_all(&[&leader, &plain, &orphan]);
+    timer.join().unwrap();
+    let late = written_pid(&dir.path().join("late"));
+    let ended = [&leader, &plain, &orphan, &late].map(|pid| gone(pid, DYING));
+    reap_all(&[&leader, &plain, &orphan, &late]);
     assert_eq!(
-        ended,
-        (true, true, true),
-        "a process the child started outlived the guard"
+        ended, [true; 4],
+        "a process the child started outlived the guard (leader, plain, orphan, late)"
     );
 }
