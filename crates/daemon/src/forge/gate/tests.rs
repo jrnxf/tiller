@@ -351,6 +351,39 @@ fn ruleset_check_sets_merge_gate() {
     assert!(recovery(&fresh).is_empty());
 }
 
+/// A verdict holds for the repo it judged: a project whose repo moves is
+/// judged again on the next pass, not an hour later.
+#[test]
+fn a_moved_repo_is_checked_again_at_once() {
+    let mut store = store();
+    let daemon = Ctx::new(Actor::Daemon);
+    let forge = gated();
+    let mut last = HashMap::new();
+    let start = Instant::now();
+    check_due(&mut store, &forge, &APP, &daemon, &mut last, start).unwrap();
+    assert_eq!(*forge.reads.borrow(), ["example/alpha@main"]);
+
+    let rev = store.project("alpha").unwrap().rev;
+    store
+        .project_edit(
+            &Ctx::new(Actor::Owner),
+            "alpha",
+            rev,
+            tiller_core::state::projects::ProjectEdit {
+                repo: Some(Some("example/moved".into())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let soon = start + Duration::from_secs(60);
+    let judged = check_due(&mut store, &forge, &APP, &daemon, &mut last, soon).unwrap();
+    assert_eq!(judged.len(), 1);
+    assert_eq!(
+        *forge.reads.borrow(),
+        ["example/alpha@main", "example/moved@main"]
+    );
+}
+
 #[test]
 fn edited_ruleset_drops_project_to_detect() {
     let mut store = store();

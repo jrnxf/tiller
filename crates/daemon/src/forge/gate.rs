@@ -157,7 +157,8 @@ fn checked(project: &Project) -> bool {
 }
 
 /// One pass over the projects whose check is due: each never checked by this
-/// daemon (a project just added) or last checked an hour ago. A check that
+/// daemon (a project just added), whose repo or default branch changed since
+/// its last check, or last checked an hour ago. A check that
 /// cannot read the forge or the App changes nothing and runs again after
 /// [`RETRY`]; one whose write the store refuses (a project retired
 /// meanwhile) is skipped, so neither stops the pass. Writes the
@@ -174,20 +175,23 @@ pub fn check_due(
 ) -> tiller_core::Result<Vec<(String, Verdict)>> {
     let mut judged = Vec::new();
     for project in store.projects()?.into_iter().filter(checked) {
+        let Some(repo) = project.repo.as_deref() else {
+            continue;
+        };
+        // A verdict holds for the repo and branch it judged: an edit that
+        // moves either is judged again at once.
+        let due = format!("{}\n{repo}\n{}", project.id, project.default_branch);
         if last
-            .get(&project.id)
+            .get(&due)
             .is_some_and(|at| now.duration_since(*at) < RECHECK)
         {
             continue;
         }
-        let Some(repo) = project.repo.as_deref() else {
-            continue;
-        };
         let verdict = match judge(forge, app, repo, &project.default_branch) {
             Ok(verdict) => verdict,
             Err(error) => {
                 tracing::warn!(project = %project.id, %error, "ruleset check not run");
-                last.insert(project.id, now.checked_sub(RECHECK - RETRY).unwrap_or(now));
+                last.insert(due, now.checked_sub(RECHECK - RETRY).unwrap_or(now));
                 continue;
             }
         };
@@ -195,7 +199,7 @@ pub fn check_due(
             Verdict::Enforced => (MergeGate::Enforced, "the ruleset check holds"),
             Verdict::Detect(why) => (MergeGate::Detect, why.as_str()),
         };
-        last.insert(project.id.clone(), now);
+        last.insert(due, now);
         if let Err(error) = store.project_set_merge_gate(ctx, &project.id, gate, reason) {
             tracing::warn!(project = %project.id, %error, "merge gate not recorded");
             continue;
