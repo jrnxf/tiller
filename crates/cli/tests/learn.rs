@@ -479,6 +479,34 @@ fn a_run_that_cannot_start_says_why_in_the_retro() {
     );
 }
 
+/// When the run cannot start and the retro cannot be marked unfinished
+/// either, the error still names why the run failed, with its hint.
+#[test]
+fn a_run_that_cannot_start_keeps_its_cause_when_the_end_fails_too() {
+    let (world, fake, retro) = curator_world(&finishing_curator());
+    std::fs::remove_file(&fake).unwrap();
+    world
+        .store()
+        .conn()
+        .execute_batch(
+            "CREATE TRIGGER no_unfinished BEFORE UPDATE OF outcome ON retros
+             WHEN NEW.outcome = 'unfinished'
+             BEGIN SELECT RAISE(ABORT, 'the test refuses the end'); END;",
+        )
+        .unwrap();
+    let failed = world.run(&["retro", "run", &retro]);
+    assert_ne!(failed.code, 0, "{}", failed.json);
+    let error = &failed.json["error"];
+    let message = error["message"].as_str().unwrap();
+    assert!(message.starts_with("cannot start "), "{}", failed.json);
+    assert!(message.contains("the test refuses the end"), "{}", failed.json);
+    assert_eq!(
+        error["hint"], "set spawn.claude in config.toml",
+        "{}",
+        failed.json
+    );
+}
+
 #[test]
 fn a_refused_run_leaves_the_running_curators_files_alone() {
     let (world, _fake, retro) = curator_world(&finishing_curator());

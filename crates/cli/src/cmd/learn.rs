@@ -372,13 +372,12 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
     let ran = match ran {
         Ok(ran) => ran,
         Err(failure) => {
-            unfinished(
-                &mut store,
-                &ctx,
-                &claimed.retro.value.id,
-                &note("the curator could not be started", &failure),
-            )?;
-            return Err(failure);
+            let id = &claimed.retro.value.id;
+            let noted = &note("the curator could not be started", &failure);
+            return Err(match unfinished(&mut store, &ctx, id, noted) {
+                Ok(_) => failure,
+                Err(error) => still_claimed(failure, id, error),
+            });
         }
     };
     let ended = end(
@@ -495,14 +494,13 @@ pub(crate) fn claim(
                 now: tiller_core::Timestamp::now(),
                 ..ctx.unkeyed()
             };
-            unfinished(
-                store,
-                &end,
-                &claimed.value.id,
-                &note("the curator could not be prepared", &failure),
-            )
-            .map_err(ClaimError::State)?;
-            return Err(failure.into());
+            let id = &claimed.value.id;
+            let noted = &note("the curator could not be prepared", &failure);
+            return Err(match unfinished(store, &end, id, noted) {
+                Ok(_) => failure,
+                Err(error) => still_claimed(failure, id, error),
+            }
+            .into());
         }
     };
     Ok(Claimed {
@@ -614,6 +612,18 @@ fn note(what: &str, failure: &Failure) -> String {
     }
 }
 
+/// `failure`, the reason a run never reached its curator, with why `retro`
+/// could not then be ended `unfinished`: the cause and its hint stay what
+/// the owner sees, and the message says the retro stays claimed.
+fn still_claimed(mut failure: Failure, retro: &str, error: tiller_core::Error) -> Failure {
+    let error = Failure::from(error);
+    failure.message = format!(
+        "{}; {retro} also could not be ended unfinished ({}), so it stays claimed until its timeout passes",
+        failure.message, error.message
+    );
+    failure
+}
+
 /// Ends a claimed retro whose curator did not finish it as `unfinished`,
 /// with `note` as its learning, so the owner can run it again.
 pub(crate) fn unfinished(
@@ -662,14 +672,14 @@ pub(crate) fn board_run(
                     .map(|ended| ended.retro)
                     .map_err(|failure| failure.message.clone()),
                 Err(failure) => {
-                    unfinished(
-                        &mut store,
-                        &ctx,
-                        &claimed.retro.value.id,
-                        &note("the curator could not be started", &failure),
-                    )
-                    .map_err(|error| Failure::from(error).message.clone())?;
-                    Err(failure.message.clone())
+                    let id = &claimed.retro.value.id;
+                    let noted = &note("the curator could not be started", &failure);
+                    Err(match unfinished(&mut store, &ctx, id, noted) {
+                        Ok(_) => failure,
+                        Err(error) => still_claimed(failure, id, error),
+                    }
+                    .message
+                    .clone())
                 }
             }
         }),
