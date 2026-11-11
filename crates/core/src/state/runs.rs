@@ -1935,11 +1935,17 @@ impl Store {
                 &[&run.host_id, &path],
             )?
             .ok_or_else(|| Error::refused("worktree", &path, "no reading of the worktree"))?;
+            // A replay comes first: once the chain cleaned the worktree, the
+            // pool may lease the path to an unrelated run, and a repeat
+            // clean leaves that run's worktree alone.
+            if worktree.gone_at.is_some() || worktree_returned(tx.conn(), &run, &path)? {
+                return Ok(run);
+            }
             // A relaunch in place (`--new-attempt`) hands the worktree to a
-            // successor. Checked here, in the transaction that marks the
-            // worktree gone, so no successor can start between the check and
-            // the write.
-            if let Some(successor) = find::<Run>(
+            // successor, and the pool may lease a returned path to any run.
+            // Checked here, in the transaction that marks the worktree gone,
+            // so no run can start there between the check and the write.
+            if let Some(active) = find::<Run>(
                 tx.conn(),
                 "host_id = ?1 AND worktree_path = ?2 AND ended_at IS NULL AND id != ?3",
                 &[&run.host_id, &path, &run.id],
@@ -1947,11 +1953,8 @@ impl Store {
                 return Err(Error::refused(
                     "worktree",
                     &path,
-                    format!("the worktree is in use by active run {}", successor.id),
+                    format!("the worktree is in use by active run {}", active.id),
                 ));
-            }
-            if worktree.gone_at.is_some() {
-                return Ok(run);
             }
             if worktree.fetched_at < ended_at {
                 return Err(Error::refused(
