@@ -500,6 +500,25 @@ pub const SUPERSEDED: &str = "Superseded";
 /// leaves the card open for a new run (`state.md` 7).
 pub const REOPEN_WORK: &str = "Reopen work";
 
+/// The ids of every card that waits on `card_id`, directly or through other
+/// cards, over unreleased dependencies. Making `card_id` wait on any of them
+/// would close a loop, so `dep.add` refuses it and the card page disables it.
+pub fn waiting_on(conn: &rusqlite::Connection, card_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE downstream(id) AS (
+             SELECT card_id FROM card_deps WHERE depends_on_card_id = ?1 AND released_at IS NULL
+             UNION
+             SELECT d.card_id FROM card_deps d JOIN downstream w ON d.depends_on_card_id = w.id
+             WHERE d.released_at IS NULL
+         )
+         SELECT id FROM downstream ORDER BY id",
+    )?;
+    let ids = stmt
+        .query_map([card_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    Ok(ids)
+}
+
 /// The `seq` of the card's last `card.reopened` event, or 0 for a card never
 /// reopened. A reopen starts the card over (`state.md` 6), so evidence for an
 /// outcome counts only when its event is newer than this.
@@ -906,18 +925,7 @@ impl Store {
             if target.state != CardState::Open {
                 return Err(Error::refused("card", &target.display_id, "the dependency is already closed"));
             }
-            let cycle: bool = tx.conn().query_row(
-                "WITH RECURSIVE upstream(id) AS (
-                     SELECT ?1
-                     UNION
-                     SELECT d.depends_on_card_id FROM card_deps d JOIN upstream u ON d.card_id = u.id
-                     WHERE d.released_at IS NULL
-                 )
-                 SELECT EXISTS (SELECT 1 FROM upstream WHERE id = ?2)",
-                params![target.id, card.id],
-                |row| row.get(0),
-            )?;
-            if cycle {
+            if waiting_on(tx.conn(), &card.id)?.contains(&target.id) {
                 return Err(Error::refused(
                     "card",
                     &card.display_id,

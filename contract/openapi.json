@@ -1996,6 +1996,150 @@
         }
       }
     },
+    "/api/v1/cards/{id}/deps": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "add_dep",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DepBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the dependency",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a loop, a card waiting on itself, or a closed card",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "remove_dep",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DepBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the released dependency, or null when none was open",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/cards/{id}/hold": {
       "post": {
         "tags": [
@@ -5200,6 +5344,13 @@
             "items": {
               "$ref": "#/components/schemas/CardRun"
             }
+          },
+          "waiting_on_this": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The display ids of every card that waits on this one, directly or\nthrough other cards. This card cannot wait on any of them: that would\nmake a loop (`state.md` section 8)."
           }
         }
       },
@@ -5767,20 +5918,71 @@
           }
         }
       },
+      "DepBody": {
+        "type": "object",
+        "description": "`POST /api/v1/cards/{id}/deps` and `DELETE /api/v1/cards/{id}/deps`: the\ncard starts or stops waiting on another (`state.md` section 8). Local to\nthis host; it is not forwarded to a peer.",
+        "required": [
+          "idempotency_key",
+          "depends_on"
+        ],
+        "properties": {
+          "depends_on": {
+            "type": "string",
+            "description": "The card waited on: a display id, ULID or short form."
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's card. Refused: a dependency change is not forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "DepRow": {
         "type": "object",
         "required": [
           "display_id"
         ],
         "properties": {
+          "badge": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "column": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "display_id": {
             "type": "string"
+          },
+          "release_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the dependency was released: the target's satisfying outcome\n(`landed`, `reported`, `answered`, `completed`), or `removed` by hand.\nAbsent while it is open, and on a row from a peer that predates it."
           },
           "released_at": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The card waited on: its title, its board column (`queued`, `working`,\n`landing` or `done`) and its badge (`state.md` section 6), so the card\npage can show its state. Absent on a row from a peer that predates them."
           }
         }
       },

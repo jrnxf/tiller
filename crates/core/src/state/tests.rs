@@ -712,6 +712,52 @@ fn dependencies_release_on_a_satisfying_close() {
     );
 }
 
+/// A loop through a third card is refused too, and `waiting_on` names every
+/// card that waits on a card, through the chain, so the card page can show
+/// which choices would make a loop. A released dependency breaks the chain.
+#[test]
+fn a_dependency_loop_through_another_card_is_refused() {
+    let (mut store, _) = memory_store();
+    let [a, b, c] = ["a", "b", "c"].map(|title| {
+        store
+            .card_create(&owner(), None, card(CardKind::Ops, title), None)
+            .unwrap()
+            .value
+    });
+    store
+        .dep_add(&owner(), &b.display_id, &a.display_id)
+        .unwrap();
+    store
+        .dep_add(&owner(), &c.display_id, &b.display_id)
+        .unwrap();
+    let mut waiting = vec![b.id.clone(), c.id.clone()];
+    waiting.sort();
+    assert_eq!(
+        super::cards::waiting_on(store.conn(), &a.id).unwrap(),
+        waiting
+    );
+    let error = store
+        .dep_add(&owner(), &a.display_id, &c.display_id)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains(&format!(
+            "{} already waits on {}",
+            c.display_id, a.display_id
+        )),
+        "{error}"
+    );
+    store
+        .dep_release(&owner(), &c.display_id, &b.display_id)
+        .unwrap();
+    assert_eq!(
+        super::cards::waiting_on(store.conn(), &a.id).unwrap(),
+        vec![b.id.clone()]
+    );
+    store
+        .dep_add(&owner(), &a.display_id, &c.display_id)
+        .unwrap();
+}
+
 /// The Done column shows a closed card for three days (`state.md` section 6):
 /// one closed two days ago is on the board, one closed four days ago is not.
 #[test]

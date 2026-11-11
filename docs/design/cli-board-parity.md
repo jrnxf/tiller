@@ -23,7 +23,7 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 | Close a card | Full: `card close --outcome` | Part | The board Close dialog offers Done, Won't do and Duplicate, and always asks for a reason. |
 | Complete an ops card | Full: `card complete --evidence` | No | The board closes an ops card as Done, which uses the reason as evidence. |
 | Cancel and reopen | Full: `card cancel`, `card reopen` | Full | Both need a reason. |
-| Card dependencies | Full: `card dep add`, `card dep rm` | No | |
+| Card dependencies | Full: `card dep add`, `card dep rm` | Full | The card page's Depends on row: a chip per dependency with an x to remove it, and Add, which picks an open card of the same project and turns off the cards that would make a loop. Both run the same core checks. The board changes only this host's cards. |
 | Read cards | Full: `card show`, `card list`, `card timeline` | Full | The card page and the lanes. |
 | Add a note to the orchestrator | Full: `ask note` | Full | The Ask dialog sends one note per mentioned project. Both cap a note at 8,000 characters. |
 | Resolve, link and list asks | Full: `ask resolve`, `ask link`, `ask list`, `ask show` | No | These are orchestrator tools. |

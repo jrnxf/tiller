@@ -317,6 +317,19 @@ export interface CardArtifact {
   created_at: string;
 }
 
+// One dependency of a card (state.md, Dependency): open until the card waited
+// on closes with a satisfying outcome (`release_reason` is that outcome) or it
+// is removed by hand (`removed`). The waited-on card's title, column and badge
+// are absent from a peer that predates them.
+export interface CardDep {
+  display_id: string;
+  released_at: string | null;
+  release_reason?: string;
+  title?: string;
+  column?: CardColumn;
+  badge?: string;
+}
+
 export interface CardDetail {
   card: {
     id: string;
@@ -336,7 +349,11 @@ export interface CardDetail {
   };
   column: BoardRow;
   holds: { id: string; until_at: string | null; reason: string | null }[];
-  deps: { display_id: string; released_at: string | null }[];
+  deps: CardDep[];
+  // Every card that waits on this one, directly or through others: this card
+  // cannot wait on any of them, since that would make a loop. Absent from a
+  // peer that predates it.
+  waiting_on_this?: string[];
   attention: AttentionItem[];
   runs: CardRun[];
   prs: CardPr[];

@@ -802,6 +802,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/cards/{id}/timeline", get(timeline))
         .route("/api/v1/cards/{id}/comment", post(comment))
         .route("/api/v1/cards/{id}/hold", post(hold).delete(release_hold))
+        .route("/api/v1/cards/{id}/deps", post(add_dep).delete(remove_dep))
         .route("/api/v1/cards/{id}/close", post(close))
         .route("/api/v1/cards/{id}/cancel", post(cancel))
         .route("/api/v1/cards/{id}/reopen", post(reopen))
@@ -3496,6 +3497,52 @@ async fn relabel_intervention(
     .await
 }
 
+#[utoipa::path(post, path = "/api/v1/cards/{id}/deps", tag = "mutations", request_body = DepBody,
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse, description = "`data` is the dependency"),
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "a loop, a card waiting on itself, or a closed card"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn add_dep(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers).await?;
+    let request: DepBody = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "a dependency change").await?;
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| Done::of(store.dep_add(ctx, &id, &request.depends_on)?),
+    )
+    .await
+}
+
+#[utoipa::path(delete, path = "/api/v1/cards/{id}/deps", tag = "mutations", request_body = DepBody,
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse,
+               description = "`data` is the released dependency, or null when none was open"),
+              (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn remove_dep(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers).await?;
+    let request: DepBody = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "a dependency change").await?;
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| Done::of(store.dep_release(ctx, &id, &request.depends_on)?),
+    )
+    .await
+}
+
 fn prelaunch_head(
     home: &std::path::Path,
     project: &tiller_core::domain::Project,
@@ -4710,7 +4757,7 @@ async fn app_shell(
     info(title = "Tiller board API", version = "1", description = "The daemon's board API (docs/spec/protocol.md section 7). Every path answers only on 127.0.0.1, localhost or an --allow-host name; at an --allow-host name every path but the signed-out screen and signing in needs the owner cookie; mutations need the owner cookie and the board's own origin."),
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health, doctor, run_poller,
-        projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, close,
+        projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, add_dep, remove_dep, close,
         cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, set_config,
         away_start, away_edit, away_end, away_brief, pick_bug_project, recap, mark_recap_seen, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, session, login_code, logout
@@ -9918,6 +9965,209 @@ esac"#,
         )
         .await;
         assert_ne!(refused.status, StatusCode::OK, "{}", refused.body);
+    }
+
+    /// The card page's Depends on row (P13): `POST` and `DELETE`
+    /// `/cards/{id}/deps` run `dep.add` and `dep.release` with their checks,
+    /// the card page reads what each dependency is and which cards would
+    /// make a loop, and a peer's card is refused, not forwarded.
+    #[tokio::test]
+    async fn the_card_page_adds_and_removes_a_dependency() {
+        let mut fleet = Fleet::new();
+        let owner = Ctx::new(Actor::Owner);
+        let mut make = |title: &str| {
+            fleet
+                .store
+                .card_create(
+                    &owner,
+                    None,
+                    tiller_core::state::cards::NewCard {
+                        project_id: "alpha".into(),
+                        kind: tiller_core::domain::CardKind::Ops,
+                        title: title.into(),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap()
+                .value
+        };
+        let export = make("Split the export worker");
+        let bucket = make("Export bucket per run");
+        let dashboard = make("Export retry dashboard");
+        let shipped = make("Retry the export upload");
+        fleet
+            .store
+            .dep_add(&owner, &dashboard.display_id, &export.display_id)
+            .unwrap();
+        fleet
+            .store
+            .card_close(
+                &owner,
+                &shipped.display_id,
+                tiller_core::domain::CardOutcome::Cancelled,
+                Some("not needed"),
+                None,
+            )
+            .unwrap();
+        fleet
+            .store
+            .peer_pair(
+                &owner,
+                NewPairing {
+                    label: "laptop".into(),
+                    herdr_machine: None,
+                    scope: PeerScope::Act,
+                    peer_host_id: "01JC00000000000000000PEER2".into(),
+                },
+            )
+            .unwrap();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let cookie = owner_cookie(fleet.dir.path());
+        let headers = [("cookie", cookie.as_str())];
+        let deps = format!("/api/v1/cards/{}/deps", export.display_id);
+        let call = |method: &str, body: Value| mutation(method, &deps, body, &headers);
+
+        let added = send(
+            &app,
+            call(
+                "POST",
+                json!({"idempotency_key": "k-add", "depends_on": bucket.display_id}),
+            ),
+        )
+        .await;
+        assert_eq!(added.status, StatusCode::OK, "{}", added.body);
+        let body: Value = serde_json::from_str(&added.body).unwrap();
+        assert_eq!(body["data"]["depends_on_card_id"], bucket.id);
+        assert_eq!(body["replayed"], false);
+        // A second add of an open dependency is natural.
+        let again = send(
+            &app,
+            call(
+                "POST",
+                json!({"idempotency_key": "k-add-2", "depends_on": bucket.display_id}),
+            ),
+        )
+        .await;
+        assert_eq!(again.status, StatusCode::OK, "{}", again.body);
+
+        // The card page reads the dependency's state and the loop.
+        let page = format!("/api/v1/cards/{}", export.id);
+        let read = get(&app, &page).await;
+        assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+        let detail: Value = serde_json::from_str(&read.body).unwrap();
+        assert_eq!(
+            detail["deps"],
+            json!([{"display_id": bucket.display_id, "released_at": null,
+                    "title": "Export bucket per run", "column": "queued", "badge": "filed"}])
+        );
+        assert_eq!(detail["waiting_on_this"], json!([dashboard.display_id]));
+        assert_eq!(detail["column"]["badge"], "blocked");
+
+        // The checks are core's: a loop, the card itself, a closed card and
+        // an unknown card are each refused.
+        for (key, on, status, text) in [
+            (
+                "k-loop",
+                dashboard.display_id.as_str(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "already waits on",
+            ),
+            (
+                "k-self",
+                export.display_id.as_str(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "cannot wait on itself",
+            ),
+            (
+                "k-closed",
+                shipped.display_id.as_str(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "already closed",
+            ),
+            ("k-nope", "alpha-999", StatusCode::NOT_FOUND, "alpha-999"),
+        ] {
+            let refused = send(
+                &app,
+                call("POST", json!({"idempotency_key": key, "depends_on": on})),
+            )
+            .await;
+            assert_eq!(refused.status, status, "{on}: {}", refused.body);
+            assert!(refused.body.contains(text), "{on}: {}", refused.body);
+        }
+
+        // Remove releases it as `removed`; a second remove finds none open.
+        let removed = send(
+            &app,
+            call(
+                "DELETE",
+                json!({"idempotency_key": "k-rm", "depends_on": bucket.display_id}),
+            ),
+        )
+        .await;
+        assert_eq!(removed.status, StatusCode::OK, "{}", removed.body);
+        let body: Value = serde_json::from_str(&removed.body).unwrap();
+        assert_eq!(body["data"]["release_reason"], "removed");
+        let none = send(
+            &app,
+            call(
+                "DELETE",
+                json!({"idempotency_key": "k-rm-2", "depends_on": bucket.display_id}),
+            ),
+        )
+        .await;
+        assert_eq!(none.status, StatusCode::OK, "{}", none.body);
+        let body: Value = serde_json::from_str(&none.body).unwrap();
+        assert_eq!(body["data"], Value::Null);
+        let read = get(&app, &page).await;
+        let detail: Value = serde_json::from_str(&read.body).unwrap();
+        assert_eq!(detail["deps"][0]["release_reason"], "removed");
+        assert_ne!(detail["column"]["badge"], "blocked");
+
+        // A peer's card is not forwarded, and an unknown field is refused.
+        for method in ["POST", "DELETE"] {
+            let peer = send(
+                &app,
+                call(
+                    method,
+                    json!({"idempotency_key": format!("k-peer-{method}"), "host": "laptop",
+                           "depends_on": bucket.display_id}),
+                ),
+            )
+            .await;
+            assert_eq!(peer.status, StatusCode::BAD_GATEWAY, "{}", peer.body);
+            assert_eq!(
+                error_of(&peer)["reason"],
+                "not_allowlisted",
+                "{}",
+                peer.body
+            );
+        }
+        let odd = send(
+            &app,
+            call(
+                "POST",
+                json!({"idempotency_key": "k-odd", "depends_on": bucket.display_id, "why": 1}),
+            ),
+        )
+        .await;
+        assert_eq!(odd.status, StatusCode::BAD_REQUEST, "{}", odd.body);
+        let anonymous = send(
+            &app,
+            mutation(
+                "POST",
+                &deps,
+                json!({"idempotency_key": "k-anon", "depends_on": bucket.display_id}),
+                &[],
+            ),
+        )
+        .await;
+        assert_eq!(
+            anonymous.status,
+            StatusCode::FORBIDDEN,
+            "{}",
+            anonymous.body
+        );
     }
 
     /// The card page's actions, one route each: edit, hold and release,

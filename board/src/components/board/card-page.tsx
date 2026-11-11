@@ -25,6 +25,7 @@ import {
 import { agentActivity } from "./activity";
 import { Ago } from "./ago";
 import { stateText, statusMark } from "./badge";
+import { DependsOn } from "./card-deps";
 import { CardHeader } from "./card-header";
 import { bugProjectOf, isTillerBug, isUntriaged, machineOf } from "./bugs";
 import { HostChip, PeerNote } from "./host-chip";
@@ -146,7 +147,7 @@ function Timeline({
         </div>
       )}
       {next === null ? null : (
-        <button type="button" className="btn ghost sm" onClick={() => void loadEarlier()}>
+        <button type="button" className="btn sm" onClick={() => void loadEarlier()}>
           Show earlier
         </button>
       )}
@@ -491,6 +492,13 @@ export function CardPage({
   const blockers = detail.deps
     .filter((dep) => dep.released_at === null)
     .map((dep) => dep.display_id);
+  // The daemon does not forward a dependency change (protocol.md section 7.4).
+  const peerHost = ownerOf(column);
+  const depsOff = peerHost
+    ? `${peerHost} owns this card: change its dependencies on that host`
+    : standing.canAct
+      ? null
+      : standing.reason;
 
   return (
     <div className={`card-page${variant === "drawer" ? " in-drawer" : ""}`} data-testid="card-page">
@@ -571,6 +579,15 @@ export function CardPage({
               <span className="meta">blocked by {blockers.join(", ")}</span>
             ) : null}
           </dd>
+          {hostHealth ? null : (
+            <DependsOn
+              detail={detail}
+              cardId={cardId}
+              owner={owner}
+              off={depsOff}
+              closed={phase === "closed"}
+            />
+          )}
           {hostHealth || phase === "closed" ? (
             <>
               <dt>Priority</dt>

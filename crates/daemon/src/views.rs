@@ -13,7 +13,7 @@ use tiller_core::domain::{
     Session,
 };
 use tiller_core::state::attention::{OwnerAction as CoreOwnerAction, stale};
-use tiller_core::state::cards::TILLER_BUG;
+use tiller_core::state::cards::{TILLER_BUG, waiting_on};
 use tiller_core::state::interventions::InterventionSource;
 use tiller_core::state::signals::lisbon_weeks;
 use tiller_core::state::{find, get, list, review};
@@ -1146,10 +1146,28 @@ pub fn card_detail(store: &Store, reference: &str) -> Result<CardDetail> {
     let mut dep_rows = Vec::new();
     for dep in deps {
         let other: Card = get(conn, "card", &dep.depends_on_card_id)?;
+        // A card closed more than three days ago has left the board; it is
+        // done, and its outcome is its badge.
+        let (column, badge) = match store.card_column(&other.id)? {
+            Some(place) => (place.column.to_string(), place.badge),
+            None => (
+                "done".to_owned(),
+                other.outcome.map(|o| o.to_string()).unwrap_or_default(),
+            ),
+        };
         dep_rows.push(DepRow {
             display_id: other.display_id,
             released_at: at_opt(dep.released_at),
+            release_reason: dep.release_reason.map(|reason| reason.to_string()),
+            title: Some(other.title),
+            column: Some(column),
+            badge: Some(badge),
         });
+    }
+    let mut waiting_on_this = Vec::new();
+    for id in waiting_on(conn, &card.id)? {
+        let other: Card = get(conn, "card", &id)?;
+        waiting_on_this.push(other.display_id);
     }
     let items: Vec<Attention> = list(conn, "card_id = ?1 ORDER BY opened_at, id", &[&card.id])?;
     let attention = items
@@ -1201,6 +1219,7 @@ pub fn card_detail(store: &Store, reference: &str) -> Result<CardDetail> {
             })
             .collect(),
         deps: dep_rows,
+        waiting_on_this,
         attention,
         runs: card_runs,
         prs: card_prs,

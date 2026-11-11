@@ -426,8 +426,8 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `card.edit` | board, orchestrator | `expected_rev` matches; card open; `dispatch_override` only from the owner (board or `tiller card edit` passing the owner check, `authority.md` section 3) | `cards` fields, `rev` | `card.edited` (fields changed) |
 | `card.hold` | orchestrator, board | card open; no open hold; `until_at` in the future | `holds` | `hold.set` |
 | `hold.release` | reconcile (due), orchestrator, board | hold open | `holds.released_at`; on `due` also `attention` | `hold.released`, `attention.opened`; for a quota hold first `attention.withdrawn` of its open item (`protocol.md` section 8) |
-| `dep.add` | orchestrator, board, import | both cards exist; no cycle; dependency open | `card_deps` | `dep.added` |
-| `dep.release` | reconcile in `card.close`, orchestrator | dependency unreleased | `card_deps.released_at` | `dep.released` |
+| `dep.add` | orchestrator, owner, board, import | both cards exist; no cycle (the dependency does not already wait on the card, directly or through other cards); dependency open | `card_deps` | `dep.added` |
+| `dep.release` | reconcile in `card.close`, orchestrator, owner, board | dependency unreleased | `card_deps.released_at` | `dep.released` |
 | `attention.open` | orchestrator, worker (through its orchestrator), reconcile, daemon | card open; idempotency key new | `attention` | `attention.opened` |
 | `attention.answer` | board, `tiller attention answer`, chat intake | item open; key new or identical | `attention` answer fields, `rev`; for a `question` card also `card.close`; for "Start now anyway" on a quota item also `hold.release` of the quota hold; for a "Reopen work" answer to a deploy `recovery` item also `obligation.cancel` of the watch the item names | `attention.answered`, maybe `card.closed`, maybe `hold.released`, maybe `obligation.cancelled`; `outbox.enqueued` for the owning session |
 | `attention.withdraw` | reconcile, orchestrator, owner (board) | item open; reason given; from the board, the item is no longer current | `attention.withdrawn_at` | `attention.withdrawn` |

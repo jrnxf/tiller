@@ -11,6 +11,7 @@ import type {
   AttentionResponse,
   BoardResponse,
   BoardRow,
+  CardDep,
   CardDetail,
   CardPr,
   CheckoutCheck,
@@ -674,10 +675,13 @@ function newInstallRows(now: number): BoardRow[] {
   ];
 }
 
-// The default board plus a card that waits on another, for the "Blocked by" line.
+// The default board plus a card that waits on another, for the "Blocked by" line
+// and the Depends on row: gamma-14 waits on gamma-12, gamma-11 landed and so no
+// longer holds it, and gamma-15 waits on gamma-14, so gamma-15 would make a loop.
 function blockedRows(now: number): BoardRow[] {
   return [
     ...defaultRows(now),
+    card(11, "gamma", "done", "landed", "Pin the base image", {}, now),
     card(
       14,
       "gamma",
@@ -687,7 +691,55 @@ function blockedRows(now: number): BoardRow[] {
       { kind: "ops", blockedBy: "gamma-12" },
       now,
     ),
+    card(
+      15,
+      "gamma",
+      "queued",
+      "blocked",
+      "Publish the new key",
+      { kind: "ops", blockedBy: "gamma-14" },
+      now,
+    ),
   ];
+}
+
+// The dependencies the cards' `blocked_by` does not show: ones already
+// released, by the card that held them and why.
+const RELEASED_DEPS: Record<string, { on: string; reason: string }[]> = {
+  "gamma-14": [{ on: "gamma-11", reason: "landed" }],
+};
+
+// A dependency as the card read names it, from the board row it points at.
+function depOf(board: BoardResponse, displayId: string, reason: string | null): CardDep[] {
+  const other = board.rows.find((row) => row.display_id === displayId && !row.host);
+  if (!other) return [];
+  return [
+    {
+      display_id: displayId,
+      released_at: reason ? (other.closed_at ?? "2026-11-01T18:20:00.000Z") : null,
+      ...(reason ? { release_reason: reason } : {}),
+      title: other.title,
+      column: other.column,
+      badge: other.badge,
+    },
+  ];
+}
+
+// The cards that wait on this one, directly or through another card.
+function waitingOn(board: BoardResponse, displayId: string): string[] {
+  const found: string[] = [];
+  const next = [displayId];
+  while (next.length > 0) {
+    const id = next.pop();
+    for (const row of board.rows) {
+      if (row.blocked_by === id && !row.host && !found.includes(row.display_id)) {
+        found.push(row.display_id);
+        next.push(row.display_id);
+      }
+    }
+  }
+  found.sort();
+  return found;
 }
 
 function boardFor(scenario: Scenario, now: number): BoardResponse {
@@ -1232,7 +1284,11 @@ function cardDetailFor(
             },
           ]
         : [],
-    deps: row.blocked_by ? [{ display_id: row.blocked_by, released_at: null }] : [],
+    deps: [
+      ...(row.blocked_by ? depOf(board, row.blocked_by, null) : []),
+      ...(RELEASED_DEPS[row.display_id] ?? []).flatMap((dep) => depOf(board, dep.on, dep.reason)),
+    ],
+    waiting_on_this: waitingOn(board, row.display_id),
     attention: waiting
       ? attentionFor("default", board, now).items.filter(
           (item) => item.card_id === row.id && item.approval,

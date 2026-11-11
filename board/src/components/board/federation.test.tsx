@@ -341,6 +341,18 @@ test("the card page's comment goes to the card's host, and is off for a down pee
   expect(comment.title).toContain("host-e is unreachable");
 });
 
+// The daemon does not forward a dependency change (protocol.md section 7.4).
+test("a peer's card shows its dependencies, and Add is off and says why", async () => {
+  stubApi("federated");
+  await renderApp("federated", `/cards/${GAMMA_12_D}?owner=host-d`);
+  const row = await screen.findByTestId("depends-on");
+  const add = within(row).getByRole("button", { name: "Add" }) as HTMLButtonElement;
+  expect(add.disabled).toBe(true);
+  expect(add.parentElement?.title).toBe(
+    "host-d owns this card: change its dependencies on that host",
+  );
+});
+
 test("a forward the peer did not confirm reads 'Sent, not confirmed' and a retry keeps its key", async () => {
   const posted = stubApi("federated");
   await renderApp("federated", `/inbox?item=${ASK_D}`);

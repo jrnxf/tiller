@@ -957,7 +957,7 @@ test("a card without a PR says an approval comes with one", async () => {
 test("a blocked card page names its blockers once and a held card says Held", async () => {
   stubApi("blocked");
   await renderApp("blocked", "/cards/01JCARD0000000000000000014");
-  const blocked = screen.getByTestId("card-page");
+  const blocked = await screen.findByTestId("card-page");
   expect(blocked.textContent?.match(/blocked by gamma-12/gi)).toHaveLength(1);
   expect(blocked.textContent).toContain("Blocked by gamma-12");
   cleanup();
@@ -966,6 +966,85 @@ test("a blocked card page names its blockers once and a held card says Held", as
   const held = await screen.findByTestId("card-page");
   expect(held.textContent).toContain("Held");
   expect(held.textContent).not.toMatch(/parked/i);
+});
+
+const GAMMA_14 = "01JCARD0000000000000000014";
+
+test("the Depends on row shows a chip per dependency, with an x only on an open one", async () => {
+  stubApi("blocked");
+  await renderApp("blocked", `/cards/${GAMMA_14}`);
+  const row = await screen.findByTestId("depends-on");
+  const chips = within(row).getAllByTestId("dep-chip");
+  expect(chips.map((chip) => chip.textContent)).toEqual(["gamma-12Working", "gamma-11Landed"]);
+  expect(within(row).getByRole("button", { name: "Remove gamma-12" })).toBeTruthy();
+  // gamma-11 landed, so it no longer holds the card: there is nothing to remove.
+  expect(within(row).queryByRole("button", { name: "Remove gamma-11" })).toBeNull();
+  // The row adds no second "Blocked by": Status already says it.
+  expect(row.textContent).not.toMatch(/blocked by/i);
+});
+
+test("Add lists the project's open cards and turns off the one that would make a loop", async () => {
+  const posted = stubApi("blocked");
+  await renderApp("blocked", `/cards/${GAMMA_14}`);
+  const row = await screen.findByTestId("depends-on");
+  fireEvent.click(within(row).getByRole("button", { name: "Add" }));
+  const list = await screen.findByRole("listbox", { name: "Cards" });
+  const options = within(list).getAllByRole("option");
+  // Not the card itself, not gamma-12 (it already waits on it) and not the
+  // landed gamma-11.
+  expect(options.map((option) => option.textContent)).toEqual([
+    "gamma-13Trim the build cache",
+    "gamma-15Publish the new key",
+  ]);
+  expect(options[1]?.getAttribute("aria-disabled")).toBe("true");
+  expect(
+    screen.getByText("gamma-15 depends on this card. Adding it would make a loop."),
+  ).toBeTruthy();
+
+  fireEvent.click(options[1] as HTMLElement);
+  expect(posted).toHaveLength(0);
+
+  fireEvent.change(screen.getByRole("combobox", { name: "Find a card" }), {
+    target: { value: "build" },
+  });
+  await waitFor(() => expect(within(list).getAllByRole("option")).toHaveLength(1));
+  fireEvent.keyDown(screen.getByRole("combobox", { name: "Find a card" }), { key: "Enter" });
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]).toMatchObject({
+    path: `/api/v1/cards/${GAMMA_14}/deps`,
+    method: "POST",
+    body: { depends_on: "gamma-13" },
+  });
+  expect(typeof posted[0]?.body.idempotency_key).toBe("string");
+  expect("host" in (posted[0]?.body ?? {})).toBe(false);
+});
+
+test("the x removes an open dependency, and a refusal shows in the row", async () => {
+  const posted = stubApi("blocked");
+  await renderApp("blocked", `/cards/${GAMMA_14}`);
+  const row = await screen.findByTestId("depends-on");
+  fireEvent.click(within(row).getByRole("button", { name: "Remove gamma-12" }));
+  await waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]).toMatchObject({
+    path: `/api/v1/cards/${GAMMA_14}/deps`,
+    method: "DELETE",
+    body: { depends_on: "gamma-12" },
+  });
+  cleanup();
+
+  stubApi("blocked", 422);
+  await renderApp("blocked", `/cards/${GAMMA_14}`);
+  const refused = await screen.findByTestId("depends-on");
+  fireEvent.click(within(refused).getByRole("button", { name: "Remove gamma-12" }));
+  expect((await within(refused).findByRole("alert")).textContent).toBe("herdr is down");
+});
+
+test("a closed card shows its dependencies read-only", async () => {
+  stubApi("blocked");
+  await renderApp("blocked", "/cards/01JCARD0000000000000000011");
+  const row = await screen.findByTestId("depends-on");
+  expect(row.textContent).toBe("None");
+  expect(within(row).queryByRole("button")).toBeNull();
 });
 
 test("earlier timeline events load on request and the button goes away at the start", async () => {

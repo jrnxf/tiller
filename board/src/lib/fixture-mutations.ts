@@ -6,6 +6,8 @@ import type {
   AgentsResponse,
   AttentionResponse,
   BoardResponse,
+  CardDep,
+  CardDetail,
   InterventionKind,
   ProjectDeletePreview,
   ProjectFields,
@@ -337,6 +339,8 @@ export function withoutDeleted(path: string, body: unknown, scenario: Scenario):
   const pathname = new URL(path, "http://localhost").pathname;
   const triaged = withTriage(pathname, body);
   if (triaged !== body) return triaged;
+  const depended = withDeps(pathname, body, scenario);
+  if (depended !== body) return depended;
   if (pathname === recapPath && recapMarkedAt !== null) {
     return recapFor(scenario, Date.now(), recapMarkedAt);
   }
@@ -543,7 +547,7 @@ function forwarded(
   const host = body.host;
   if (typeof host !== "string") return null;
   if (
-    /\/(stage|focus|label|delete|retire|bug-project)$/.test(path) ||
+    /\/(stage|focus|label|delete|retire|bug-project|deps)$/.test(path) ||
     path === projectsPath ||
     (method === "PATCH" && /^\/api\/v1\/projects\/[^/]+$/.test(path)) ||
     /\/memory\//.test(path) ||
@@ -672,6 +676,136 @@ function withTriage(pathname: string, body: unknown): unknown {
     ...read,
     card: { ...read.card, state: "closed", outcome: closed.badge, rev: closed.rev },
     column: closed,
+  };
+}
+
+// The dependencies the owner added or removed on the stand-in server: by card
+// id, the display id of each card it now waits on (true) or no longer waits on
+// (false).
+const depChanges = new Map<string, Map<string, boolean>>();
+
+function localRows(scenario: Scenario): BoardRow[] {
+  const board = fixtureResponses(scenario)[boardPath()] as BoardResponse;
+  return board.rows.filter((row) => !row.host);
+}
+
+function openDeps(detail: CardDetail): string[] {
+  return detail.deps.filter((dep) => dep.released_at === null).map((dep) => dep.display_id);
+}
+
+// A card read with the owner's dependency changes. A queued card with an open
+// dependency is blocked, so the change also re-badges its row.
+function withDepsOn(detail: CardDetail, rows: BoardRow[]): CardDetail {
+  const changes = depChanges.get(detail.card.id);
+  if (!changes) return detail;
+  const now = new Date().toISOString();
+  const deps: CardDep[] = detail.deps.map((dep) =>
+    changes.get(dep.display_id) === false && dep.released_at === null
+      ? { ...dep, released_at: now, release_reason: "removed" }
+      : dep,
+  );
+  for (const [on, adds] of changes) {
+    if (!adds || deps.some((dep) => dep.display_id === on && dep.released_at === null)) continue;
+    const other = rows.find((row) => row.display_id === on);
+    if (!other) continue;
+    deps.push({
+      display_id: on,
+      released_at: null,
+      title: other.title,
+      column: other.column,
+      badge: other.badge,
+    });
+  }
+  const read = { ...detail, deps };
+  return { ...read, column: rebadged(read) };
+}
+
+function rebadged(detail: CardDetail): BoardRow {
+  const { column } = detail;
+  const open = openDeps(detail);
+  if (column.column !== "queued" || column.badge === "parked") return column;
+  if (open.length > 0) return { ...column, badge: "blocked", blocked_by: open[0] ?? null };
+  if (column.badge === "blocked") return { ...column, badge: "filed", blocked_by: null };
+  return column;
+}
+
+function cardRead(id: string, scenario: Scenario): CardDetail | undefined {
+  const read = fixtureResource(`/api/v1/cards/${id}`, scenario) as CardDetail | undefined;
+  return read ? withDepsOn(read, localRows(scenario)) : undefined;
+}
+
+// The reads a dependency change touched: the card's own read and its board row.
+function withDeps(pathname: string, body: unknown, scenario: Scenario): unknown {
+  if (depChanges.size === 0 || body === undefined) return body;
+  if (pathname === boardPath().split("?")[0]) {
+    const board = body as BoardResponse;
+    return {
+      ...board,
+      rows: board.rows.map((row) =>
+        row.host || !depChanges.has(row.id) ? row : (cardRead(row.id, scenario)?.column ?? row),
+      ),
+    };
+  }
+  const detail = /^\/api\/v1\/cards\/([^/]+)$/.exec(pathname);
+  if (!detail?.[1]) return body;
+  return withDepsOn(body as CardDetail, localRows(scenario));
+}
+
+// `POST` and `DELETE /api/v1/cards/{id}/deps`, with the checks the core makes:
+// an unknown card, a card that waits on itself, a closed dependency and a loop.
+function depMutation(
+  method: string,
+  id: string,
+  body: Record<string, unknown>,
+  scenario: Scenario,
+): MutationResult {
+  const rows = localRows(scenario);
+  const card = rows.find((row) => row.id === id || row.display_id === id);
+  if (!card) return refusal(404, "not_found", `no card ${id}`);
+  const on = typeof body.depends_on === "string" ? body.depends_on : "";
+  const target = rows.find((row) => row.id === on || row.display_id === on);
+  if (!target) return refusal(404, "not_found", `no card ${on}`);
+  const before = cardRead(card.id, scenario);
+  if (!before) return refusal(404, "not_found", `no card ${id}`);
+  const open = openDeps(before);
+  const changes = depChanges.get(card.id) ?? new Map<string, boolean>();
+  if (method === "DELETE") {
+    // Natural: no open dependency to release is a no-op.
+    if (!open.includes(target.display_id))
+      return { reply: recorded(null, null, null), followUps: [] };
+    changes.set(target.display_id, false);
+  } else if (!open.includes(target.display_id)) {
+    const refuse = (fact: string) => refusal(422, "refused", `card ${card.display_id}: ${fact}`);
+    if (target.id === card.id) return refuse("a card cannot wait on itself");
+    if (target.column === "done") return refuse("the dependency is already closed");
+    if ((before.waiting_on_this ?? []).includes(target.display_id)) {
+      return refuse(`${target.display_id} already waits on ${card.display_id}`);
+    }
+    changes.set(target.display_id, true);
+  }
+  depChanges.set(card.id, changes);
+  const after = cardRead(card.id, scenario);
+  // The last row for the card is the newest one.
+  let dep: CardDep | null = null;
+  for (const row of after?.deps ?? []) if (row.display_id === target.display_id) dep = row;
+  const removing = method === "DELETE";
+  return {
+    reply: recorded(dep, null, null),
+    followUps: [
+      {
+        delayMs: 100,
+        event: {
+          kind: removing ? "dep.released" : "dep.added",
+          txn: removing ? "dep.release" : "dep.add",
+          entity: "dep",
+          entity_id: `${card.id}:${target.id}`,
+          rev_after: null,
+          card_id: card.id,
+          entity_state: null,
+          card: after?.column ?? card,
+        },
+      },
+    ],
   };
 }
 
@@ -814,6 +948,10 @@ function handle(
   if (path === "/api/v1/away") return awayMutation(method);
   const close = /^\/api\/v1\/cards\/([^/]+)\/close$/.exec(path);
   if (method === "POST" && close?.[1]) return closeCard(close[1], body);
+  const deps = /^\/api\/v1\/cards\/([^/]+)\/deps$/.exec(path);
+  if ((method === "POST" || method === "DELETE") && deps?.[1]) {
+    return depMutation(method, deps[1], body, scenario);
+  }
   const answer = /^\/api\/v1\/attention\/([^/]+)\/answer$/.exec(path);
   if (method === "POST" && answer) {
     const outbox = fakeId("01JOUTB");

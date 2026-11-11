@@ -1,5 +1,6 @@
 import type { BoardRow } from "../../lib/api-types";
 import type { StatusMark } from "./icons";
+import { COLUMNS } from "./model";
 
 const LABELS: Record<string, string> = {
   decision: "Decision",
@@ -89,7 +90,14 @@ export function badgeTone(row: BoardRow): BadgeTone {
   }
 }
 
-export function statusMark(row: BoardRow): StatusMark {
+// A dependency's chip text: the outcome of a closed card, the column of an
+// open one. Why an open card waits is on its own page.
+export function depStateText(dep: Pick<BoardRow, "column" | "badge">): string {
+  if (dep.column === "done") return LABELS[dep.badge] ?? "Done";
+  return COLUMNS.find((column) => column.id === dep.column)?.name ?? dep.column;
+}
+
+export function statusMark(row: Pick<BoardRow, "column" | "badge">): StatusMark {
   if (row.column === "done") {
     if (row.badge === "failed" || row.badge === "abandoned") return "fail";
     if (row.badge === "cancelled" || row.badge === "superseded") return "retired";

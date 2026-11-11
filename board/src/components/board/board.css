@@ -1284,6 +1284,135 @@ a.card:hover {
   width: 8px;
   height: 8px;
 }
+
+/* The Depends on row: a chip per dependency, then Add on the right. */
+/* The chips and Add share the line, and Add wraps last when they do not fit. */
+.props dt.dep-dt {
+  align-self: start;
+  line-height: 24px;
+}
+.props dd.dep-dd {
+  min-height: 24px;
+}
+.dep-chips {
+  display: contents;
+}
+.dep-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 3px 0 8px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r6);
+  background: var(--bg-card);
+  font-size: var(--fs-mini);
+  color: var(--fg-1);
+  max-width: 100%;
+}
+.dep-chip:not(:has(.dep-x)) {
+  padding-right: 8px;
+}
+.dep-chip a {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-1);
+}
+.dep-chip a:hover {
+  text-decoration: underline;
+}
+.dep-chip .s {
+  color: var(--fg-3);
+  white-space: nowrap;
+}
+.dep-chip .si {
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+.dep-x {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--line-1);
+  border-radius: 4px;
+  background: var(--bg-hover);
+  color: var(--fg-3);
+}
+.dep-x:hover {
+  border-color: var(--line-2);
+  color: var(--fg-1);
+}
+.dep-x:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.dep-x[disabled] {
+  opacity: 0.45;
+  pointer-events: none;
+}
+.dep-x .icon {
+  width: 10px;
+  height: 10px;
+}
+.dep-add {
+  display: inline-flex;
+  flex: none;
+  margin-left: auto;
+}
+.dep-error {
+  flex-basis: 100%;
+}
+.dep-error .refusal {
+  margin: 2px 0 0;
+}
+.dep-pop {
+  width: 300px;
+  max-width: calc(100vw - 32px);
+  padding: 6px;
+}
+.dep-pop .dep-find {
+  height: 30px;
+  margin: 0 0 4px;
+}
+.dep-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.dep-opt {
+  gap: 8px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+.dep-opt .mono {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.dep-opt .tt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dep-opt[data-disabled] {
+  cursor: not-allowed;
+}
+.dep-opt[data-disabled] .mono {
+  color: var(--fg-4);
+}
+.dep-hint {
+  margin: 0;
+  padding: 4px 8px 2px;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
 .in-back {
   display: none;
   margin: 0 0 14px;

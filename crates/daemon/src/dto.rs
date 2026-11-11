@@ -406,6 +406,20 @@ pub struct HoldRow {
 pub struct DepRow {
     pub display_id: String,
     pub released_at: Option<String>,
+    /// Why the dependency was released: the target's satisfying outcome
+    /// (`landed`, `reported`, `answered`, `completed`), or `removed` by hand.
+    /// Absent while it is open, and on a row from a peer that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_reason: Option<String>,
+    /// The card waited on: its title, its board column (`queued`, `working`,
+    /// `landing` or `done`) and its badge (`state.md` section 6), so the card
+    /// page can show its state. Absent on a row from a peer that predates them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub badge: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -439,6 +453,11 @@ pub struct CardDetail {
     pub column: BoardRow,
     pub holds: Vec<HoldRow>,
     pub deps: Vec<DepRow>,
+    /// The display ids of every card that waits on this one, directly or
+    /// through other cards. This card cannot wait on any of them: that would
+    /// make a loop (`state.md` section 8).
+    #[serde(default)]
+    pub waiting_on_this: Vec<String>,
     pub attention: Vec<AttentionItem>,
     pub runs: Vec<CardRun>,
     pub prs: Vec<CardPr>,
@@ -1545,6 +1564,20 @@ pub struct RelabelBody {
     /// or null clears the label so the classifier's own counts again.
     #[serde(default)]
     pub label: Option<String>,
+}
+
+/// `POST /api/v1/cards/{id}/deps` and `DELETE /api/v1/cards/{id}/deps`: the
+/// card starts or stops waiting on another (`state.md` section 8). Local to
+/// this host; it is not forwarded to a peer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DepBody {
+    pub idempotency_key: String,
+    /// A paired peer's card. Refused: a dependency change is not forwarded.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// The card waited on: a display id, ULID or short form.
+    pub depends_on: String,
 }
 
 /// `POST /api/v1/cards/{id}/comment`.
