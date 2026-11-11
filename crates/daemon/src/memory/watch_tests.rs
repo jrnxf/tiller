@@ -322,6 +322,29 @@ async fn the_boards_own_write_is_not_an_outside_change() {
     assert_eq!(look(&mut watcher), None);
     assert_eq!(changes(&watcher).len(), 4, "no change since k-5");
 
+    // An outside merge between Tiller's commits that brings in only
+    // another file: Tiller's document is still Tiller's write, though it
+    // differs from the merged branch.
+    let base = git(&root, &["rev-parse", "HEAD"]);
+    edit("k-6b", "Keep the line before the merge").await;
+    git(&root, &["checkout", "--quiet", "-b", "side", base.trim()]);
+    commit(&root, "README.md", "# Notes\n");
+    git(&root, &["checkout", "--quiet", "main"]);
+    git(
+        &root,
+        &[
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "--no-gpg-sign",
+            "--no-edit",
+            "side",
+        ],
+    );
+    edit_in("alpha", "k-7b", "Keep the line after the merge").await;
+    look(&mut watcher);
+    assert_eq!(look(&mut watcher), None);
+
     // Tiller commits the bytes it writes, with no clean filter between, so
     // a filter in the repo does not make its own write look like an
     // outside one.

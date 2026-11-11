@@ -19,6 +19,12 @@ use super::projects::{meta, require_daemon};
 use crate::error::Result;
 use crate::store::{Applied, Ctx, NewEvent, Store, Tx};
 
+/// The events that record a commit Tiller made to the memory repo.
+const TILLER_COMMITS: &str = "FROM events
+     WHERE kind = 'memory_revision.recorded'
+       AND json_extract(payload, '$.provenance') = 'tiller'
+       AND json_extract(payload, '$.commit_sha') IS NOT NULL";
+
 /// The `meta` key that holds the watcher's last look.
 const WATCH: &str = "memory_watch";
 
@@ -76,11 +82,10 @@ impl Store {
         Ok(self
             .conn()
             .query_row(
-                "SELECT seq, json_extract(payload, '$.commit_sha') FROM events
-                 WHERE kind = 'memory_revision.recorded'
-                   AND json_extract(payload, '$.provenance') = 'tiller'
-                   AND json_extract(payload, '$.commit_sha') IS NOT NULL
-                 ORDER BY seq DESC LIMIT 1",
+                &format!(
+                    "SELECT seq, json_extract(payload, '$.commit_sha') {TILLER_COMMITS}
+                     ORDER BY seq DESC LIMIT 1"
+                ),
                 [],
                 |row| {
                     Ok(TillerCommit {
@@ -96,13 +101,9 @@ impl Store {
     /// when `seq` is `None`): the commits the watcher may read as Tiller's
     /// own since its last look.
     pub fn mem_commits_since(&self, seq: Option<i64>) -> Result<HashSet<String>> {
-        let mut statement = self.conn().prepare(
-            "SELECT json_extract(payload, '$.commit_sha') FROM events
-             WHERE kind = 'memory_revision.recorded'
-               AND json_extract(payload, '$.provenance') = 'tiller'
-               AND json_extract(payload, '$.commit_sha') IS NOT NULL
-               AND seq > ?1",
-        )?;
+        let mut statement = self.conn().prepare(&format!(
+            "SELECT json_extract(payload, '$.commit_sha') {TILLER_COMMITS} AND seq > ?1"
+        ))?;
         let commits = statement
             .query_map([seq.unwrap_or(0)], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<HashSet<String>>>()?;

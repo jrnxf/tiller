@@ -274,17 +274,25 @@ impl Repo {
     }
 
     /// The commits reachable from `to` and not from `from` (every commit of
-    /// `to` when `from` is `None`), each before its parents.
-    pub(crate) fn commits_between(&self, from: Option<&str>, to: &str) -> Result<Vec<String>> {
+    /// `to` when `from` is `None`), each before its parents: `limit` of them
+    /// and one more, so a caller can tell a longer list.
+    pub(crate) fn commits_between(
+        &self,
+        from: Option<&str>,
+        to: &str,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let count = format!("--max-count={}", limit + 1);
         let not = from.map(|from| format!("^{from}"));
-        let mut args = vec!["rev-list", "--topo-order", to];
+        let mut args = vec!["rev-list", "--topo-order", &count, to];
         args.extend(not.as_deref());
         let out = self.git(None, &args, None)?;
         Ok(out.lines().map(str::to_owned).collect())
     }
 
-    /// The paths `commit` added, changed or removed against its parents (or
-    /// all its files, for a first commit).
+    /// The paths `commit` added, changed or removed against its parent (or
+    /// all its files, for a first commit). For a merge, only the paths it
+    /// changed against every parent: the merge's own edits.
     pub(crate) fn written_by(&self, commit: &str) -> Result<HashSet<String>> {
         let out = self.git(
             None,
@@ -293,7 +301,7 @@ impl Repo {
                 "--no-commit-id",
                 "--name-only",
                 "-r",
-                "-m",
+                "-c",
                 "--root",
                 "-z",
                 commit,
