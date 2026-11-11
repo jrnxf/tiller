@@ -297,19 +297,53 @@ const LOG: &str = "runner.log";
 /// The longest piece of the runner's last line a failure quotes.
 const QUOTED: usize = 200;
 
-/// The last line with text in the runner's log, cut to [`QUOTED`]
-/// characters: what a failed runner said last, often its reason.
+/// How much of the log's end [`last_line`] reads.
+const TAIL: u64 = 16 * 1024;
+
+/// The last line with text in the runner's log, as a terminal would show
+/// it, cut to [`QUOTED`] characters: what a failed runner said last, often
+/// its reason. Only the log's last [`TAIL`] bytes are read, as text even
+/// where they are not UTF-8; a carriage return starts the line again, and
+/// colours and other control bytes are left out.
 fn last_line(log: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(log).ok()?;
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(log).ok()?;
+    let length = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(length.saturating_sub(TAIL)))
+        .ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
     let line = text
         .lines()
         .rev()
-        .map(str::trim)
+        .map(|line| plain(line.rsplit('\r').next().unwrap_or(line)))
         .find(|line| !line.is_empty())?;
     Some(match line.char_indices().nth(QUOTED) {
         Some((at, _)) => format!("{}...", &line[..at]),
-        None => line.to_owned(),
+        None => line,
     })
+}
+
+/// `line` without its ANSI escapes (`ESC [ ... letter`) and other control
+/// characters, trimmed.
+fn plain(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else if !c.is_control() {
+            out.push(c);
+        }
+    }
+    out.trim().to_owned()
 }
 
 /// How often a run checks whether it was interrupted.

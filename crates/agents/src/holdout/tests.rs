@@ -143,6 +143,29 @@ printf '{"aggregates":{"casesTotal":2,"casesPassed":2}}' > "$6/sealed/result.jso
     assert_eq!(log, "holdout: 2 of 2 cases\na note\n");
 }
 
+/// The quote is the last line the terminal would show: after the last
+/// carriage return, with colours and other control bytes left out, from a
+/// log that need not be UTF-8 and is read only at its end.
+#[test]
+fn the_quoted_line_is_plain_text() {
+    let dir = checkout();
+    runner(
+        dir.path(),
+        r#"head -c 100000 /dev/zero | tr '\0' 'x'
+printf '\377 not utf-8\n'
+printf 'case 1 of 2\rcase 2 of 2\r\033[31mfailed: no model\033[0m\n'
+exit 2"#,
+    );
+    let out = tempfile::tempdir().unwrap();
+    let error = run(dir.path(), out.path(), "c", "m".into(), &idle()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .ends_with("(runner.log ends: failed: no model)"),
+        "{error}"
+    );
+}
+
 /// A runner that fails says why in its log, and the failure quotes it.
 #[test]
 fn a_failed_runner_s_last_line_is_in_the_failure() {
