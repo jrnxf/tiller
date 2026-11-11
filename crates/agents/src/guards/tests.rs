@@ -1351,6 +1351,214 @@ fn more_shells_run_their_command_string() {
     ]);
 }
 
+/// A word the guard cannot read where a runner reads its options may be an
+/// operand or an option: every reading gets the inner command's checks.
+#[test]
+fn runner_variable_operand_keeps_the_inner_checks() {
+    const MERGE: Option<Code> = Some(Code::Merge);
+    const ID: Option<Code> = Some(Code::Identity);
+    verdicts(&[
+        ("timeout \"$T\" env -i true", ID),
+        ("flock \"$L\" env -u TILLER_SESSION_ID true", ID),
+        ("chroot \"$DIR\" gh pr merge 12", MERGE),
+        ("taskset \"$MASK\" gh pr merge 12", MERGE),
+        ("timeout $T gh pr merge 12", MERGE),
+        ("timeout \"$OPTS\" 30 gh pr merge 12", MERGE),
+        ("timeout \"$A\" \"$B\" 30 gh pr merge 12", MERGE),
+        ("timeout -s \"$SIG\" \"$T\" env -i true", ID),
+        ("timeout --signal=\"$SIG\" 30 gh pr merge 12", MERGE),
+        ("timeout -$X 30 gh pr merge 12", MERGE),
+        ("setpriv \"$X\" tiller status x", Some(Code::OwnerOnly)),
+        ("timeout \"$T\" git status", None),
+        ("timeout \"$T\" cargo test", None),
+        ("flock \"$LOCK\" git fetch", None),
+        ("taskset \"$MASK\" gh pr view 1", None),
+        ("timeout --signal=\"$SIG\" 30 git status", None),
+    ]);
+}
+
+/// A runner's output file is a write, and a strace output that starts with
+/// `|` or `!` is a command strace runs.
+#[test]
+fn runner_output_files_are_writes() {
+    const STATE: Option<Code> = Some(Code::StateWrite);
+    verdicts(&[
+        ("strace -o /home/user/.tiller/state.db true", STATE),
+        ("strace -o/home/user/.tiller/state.db true", STATE),
+        ("strace --output=/home/user/.tiller/state.db true", STATE),
+        ("ltrace -o /home/user/.tiller/state.db true", STATE),
+        ("/usr/bin/time -o /home/user/.tiller/state.db true", STATE),
+        ("flock /home/user/.tiller/state.db true", STATE),
+        ("flock -w 5 /home/user/.tiller/state.db -c true", STATE),
+        ("strace -o '|gh pr merge 12' true", Some(Code::Merge)),
+        ("strace -o '!gh pr merge 12' true", Some(Code::Merge)),
+        ("strace -fo'|gh pr merge 12' true", Some(Code::Merge)),
+        ("strace -o /tmp/trace cargo test", None),
+        ("strace -o '|grep open' cargo test", None),
+        ("/usr/bin/time -o /tmp/time.txt cargo build", None),
+        ("flock /tmp/l cargo build", None),
+        ("flock 9", None),
+    ]);
+}
+
+/// BSD `time` (macOS `/usr/bin/time`) takes `-l` and `-h`.
+#[test]
+fn bsd_time_options_are_read() {
+    verdicts(&[
+        ("/usr/bin/time -l git status", None),
+        ("/usr/bin/time -lh cargo build", None),
+        ("/usr/bin/time -l gh pr merge 12", Some(Code::Merge)),
+    ]);
+}
+
+/// `pwsh` parameters: a `:` value stays in its word, `-CommandWithArgs` is
+/// a command, an unknown parameter fails closed, and an encoded command the
+/// guard cannot decode is a deny.
+#[test]
+fn pwsh_parameters_fail_closed() {
+    const MERGE: Option<Code> = Some(Code::Merge);
+    verdicts(&[
+        ("pwsh -ep:Bypass -c 'gh pr merge 12'", MERGE),
+        (
+            "pwsh -ExecutionPolicy:Bypass -NoProfile -c 'gh pr merge 12'",
+            MERGE,
+        ),
+        ("pwsh -cwa 'gh pr merge 12'", MERGE),
+        ("pwsh -CommandWithArgs 'gh pr merge 12' a b", MERGE),
+        ("pwsh -Bogus -c 'gh pr merge 12'", MERGE),
+        ("echo 'gh pr merge 12' | pwsh -File -", MERGE),
+        (
+            "pwsh -ec 'ZwBoACAA cAByACAAbQBlAHIAZwBlACAAMQAyAA=='",
+            MERGE,
+        ),
+        ("pwsh -ec \"$B\"", Some(Code::GuardTamper)),
+        ("pwsh -ec 'not base64!'", Some(Code::GuardTamper)),
+        ("echo x | xargs pwsh -ec", Some(Code::GuardTamper)),
+        ("pwsh -ec", None),
+        ("pwsh -ep:Bypass -c 'Get-ChildItem'", None),
+        ("pwsh -NoLogo -NonInteractive -c 'Get-ChildItem'", None),
+        ("pwsh -wd /home/user/pool/3/alpha -File build.ps1", None),
+        ("pwsh -ec RwBlAHQALQBDAGgAaQBsAGQASQB0AGUAbQA=", None),
+    ]);
+}
+
+/// A runner with no command starts a shell, and that shell reads the
+/// script on standard input, as bare `sh` does.
+#[test]
+fn runners_with_no_command_start_a_shell() {
+    const MERGE: Option<Code> = Some(Code::Merge);
+    verdicts(&[
+        ("echo 'gh pr merge 12' | fakeroot", MERGE),
+        ("echo 'gh pr merge 12' | unshare -r", MERGE),
+        ("echo 'gh pr merge 12' | chroot /", MERGE),
+        ("echo 'gh pr merge 12' | nsenter -t 1 -m", MERGE),
+        ("echo 'gh pr merge 12' | runuser user", MERGE),
+        ("echo 'gh pr merge 12' | sudo -s", MERGE),
+        ("echo 'gh pr merge 12' | sudo -i", MERGE),
+        ("echo 'gh pr merge 12' | doas -s", MERGE),
+        ("echo 'gh pr merge 12' | su", MERGE),
+        ("echo 'gh pr merge 12' | su user", MERGE),
+        ("fakeroot < /home/user/merge.sh", None),
+        ("echo hi | fakeroot", None),
+        ("unshare -r", None),
+        ("chroot /", None),
+    ]);
+}
+
+/// util-linux `su` and `runuser` read their options anywhere before `--`,
+/// also after the user.
+#[test]
+fn runuser_reads_options_after_the_user() {
+    const ID: Option<Code> = Some(Code::Identity);
+    verdicts(&[
+        ("runuser user -l -c true", ID),
+        ("runuser user -P -c true", ID),
+        ("runuser user --login -c true", ID),
+        ("runuser user -c 'gh pr merge 12' -l", ID),
+        (
+            "runuser user -s /bin/sh -c 'gh pr merge 12'",
+            Some(Code::Merge),
+        ),
+        ("runuser user -- -c 'gh pr merge 12'", Some(Code::Merge)),
+        ("runuser user -c true", None),
+        ("runuser user -m -c 'cargo test'", None),
+    ]);
+}
+
+/// `sudo`, `doas` and `su` read their options like getopt: bundles,
+/// attached values and long options.
+#[test]
+fn sudo_and_su_options_parse_like_getopt() {
+    const MERGE: Option<Code> = Some(Code::Merge);
+    verdicts(&[
+        ("sudo -iu root gh pr merge 12", MERGE),
+        ("sudo -Eu root gh pr merge 12", MERGE),
+        ("sudo -uroot gh pr merge 12", MERGE),
+        ("sudo --user=root gh pr merge 12", MERGE),
+        ("sudo --preserve-env=PATH -u root gh pr merge 12", MERGE),
+        ("sudo -u root -- gh pr merge 12", MERGE),
+        ("sudo -u root FOO=1 gh pr merge 12", MERGE),
+        ("sudo PATH=/tmp tiller status x", Some(Code::GuardTamper)),
+        ("sudo --bogus gh pr merge 12", MERGE),
+        (
+            "sudo -e /home/user/.tiller/state.db",
+            Some(Code::StateWrite),
+        ),
+        ("doas -u root gh pr merge 12", MERGE),
+        ("doas -nu root gh pr merge 12", MERGE),
+        ("su -lc 'gh pr merge 12'", Some(Code::Identity)),
+        ("su - user -c true", Some(Code::Identity)),
+        ("su -c'gh pr merge 12'", MERGE),
+        ("su --command='gh pr merge 12'", MERGE),
+        ("su --command 'gh pr merge 12' user", MERGE),
+        ("su user -c 'gh pr merge 12'", MERGE),
+        ("sudo -u root cargo test", None),
+        ("sudo -iu root ls", None),
+        ("sudo -k true", None),
+        ("doas -u root ls", None),
+        ("su -c 'echo hi'", None),
+        ("su -c'cargo test' user", None),
+    ]);
+}
+
+/// `xargs` and the shells read their long options from a full table.
+#[test]
+fn xargs_and_shell_long_options_are_read() {
+    const MERGE: Option<Code> = Some(Code::Merge);
+    verdicts(&[
+        ("xargs --max-chars 100 gh pr merge 12", MERGE),
+        ("xargs --process-slot-var V gh pr merge 12", MERGE),
+        ("xargs -s100 gh pr merge 12", MERGE),
+        ("xargs -0rn1 gh pr merge 12", MERGE),
+        ("xargs --bogus gh pr merge 12", MERGE),
+        ("echo merge | xargs -I@ gh pr @ 12", MERGE),
+        ("echo merge | xargs -J @ gh pr @ 12", MERGE),
+        ("fish --command 'gh pr merge 12'", MERGE),
+        ("fish --command='gh pr merge 12'", MERGE),
+        ("fish -C 'gh pr merge 12'", MERGE),
+        ("fish --init-command='gh pr merge 12' -c true", MERGE),
+        ("bash --bogus gh pr merge 12", MERGE),
+        ("bash --norc --noprofile -c 'gh pr merge 12'", MERGE),
+        ("bash --rcfile /home/user/rc -c 'gh pr merge 12'", MERGE),
+        ("git ls-files -z | xargs -0 --max-args=20 cat", None),
+        ("xargs --max-chars 100 cargo test", None),
+        ("fish --command 'echo hi'", None),
+        ("bash --norc -c 'cargo test'", None),
+        ("bash -C script.sh", None),
+    ]);
+}
+
+/// A brace word is not known before it runs: past the positional, it can
+/// only be a flag.
+#[test]
+fn gh_brace_word_is_unread() {
+    verdicts(&[
+        ("gh pr close 5 {-d,}", Some(Code::Merge)),
+        ("gh pr close 5 --{delete-branch,}", Some(Code::Merge)),
+        ("gh pr close 5 -c {done,}", None),
+    ]);
+}
+
 /// Owner decision, Wednesday 2026-11-11: a word the guard cannot read in
 /// the PR number slot is the number; one after it can only be a flag, so it
 /// is read as the flag the rule checks for.

@@ -97,10 +97,36 @@ pub(super) enum Parse {
         found: Vec<Found>,
         /// The index of the first operand, after `--` when there is one.
         next: usize,
+        /// The options ended at `--`.
+        ended: bool,
     },
-    /// An option the program does not take, or a word in an option
-    /// position that the guard cannot read.
+    /// A word in an option position that is not known before it runs, at
+    /// `at`. It may be an operand that ends the options, or an option;
+    /// `option` is true when it can only be an option (it starts with `-`).
+    Unfixed {
+        found: Vec<Found>,
+        at: usize,
+        option: bool,
+    },
+    /// An option the program does not take, or an option the guard cannot
+    /// read.
     Unsure,
+}
+
+impl Parse {
+    /// The parse for a caller that does not read the forms of a word it
+    /// cannot see: such a word is [`Parse::Unsure`].
+    pub(super) fn sure(self) -> Parse {
+        match self {
+            Parse::Unfixed { .. } => Parse::Unsure,
+            parse => parse,
+        }
+    }
+}
+
+/// Text in an unfixed word that the shell may change.
+fn dynamic(text: &str) -> bool {
+    text.contains(['$', '`', '*', '?', '[', '{', '~'])
 }
 
 /// Reads the options at the start of `words` by `spec`. With `numeric`,
@@ -113,10 +139,26 @@ pub(super) fn parse(spec: &'static str, numeric: bool, words: &[Arg]) -> Parse {
     while let Some(word) = words.get(i) {
         let text = word.text.as_str();
         if !word.fixed {
-            return Parse::Unsure;
+            // `--name=$VALUE`: a known option with a value the guard cannot
+            // read. Any other unfixed word may be anything.
+            let readable = text
+                .strip_prefix("--")
+                .and_then(|long| long.split_once('='))
+                .is_some_and(|(key, _)| !key.is_empty() && !dynamic(key));
+            if !readable {
+                return Parse::Unfixed {
+                    found,
+                    at: i,
+                    option: text.starts_with('-') && text != "-",
+                };
+            }
         }
-        if text == "--" {
-            return Parse::Read { found, next: i + 1 };
+        if word.is("--") {
+            return Parse::Read {
+                found,
+                next: i + 1,
+                ended: true,
+            };
         }
         if !text.starts_with('-') || text == "-" {
             break;
@@ -147,7 +189,10 @@ pub(super) fn parse(spec: &'static str, numeric: bool, words: &[Arg]) -> Parse {
             };
             let value = match (takes, attached) {
                 (Takes::Nothing, Some(_)) => return Parse::Unsure,
-                (_, Some(value)) => Some(Arg::fixed(value)),
+                (_, Some(value)) => Some(Arg {
+                    text: value.to_owned(),
+                    fixed: word.fixed,
+                }),
                 (Takes::Nothing | Takes::Attached, None) => None,
                 (Takes::Value, None) => match words.get(i) {
                     Some(next) => {
@@ -155,7 +200,13 @@ pub(super) fn parse(spec: &'static str, numeric: bool, words: &[Arg]) -> Parse {
                         Some(next.clone())
                     }
                     // The program fails on the missing value.
-                    None => return Parse::Read { found, next: i },
+                    None => {
+                        return Parse::Read {
+                            found,
+                            next: i,
+                            ended: false,
+                        };
+                    }
                 },
             };
             found.push(Found {
@@ -195,7 +246,13 @@ pub(super) fn parse(spec: &'static str, numeric: bool, words: &[Arg]) -> Parse {
                         i += 1;
                         Some(next.clone())
                     }
-                    None => return Parse::Read { found, next: i },
+                    None => {
+                        return Parse::Read {
+                            found,
+                            next: i,
+                            ended: false,
+                        };
+                    }
                 },
             };
             found.push(Found {
@@ -207,7 +264,11 @@ pub(super) fn parse(spec: &'static str, numeric: bool, words: &[Arg]) -> Parse {
             break;
         }
     }
-    Parse::Read { found, next: i }
+    Parse::Read {
+        found,
+        next: i,
+        ended: false,
+    }
 }
 
 /// GNU coreutils `env`, plus the BSD `env` options `-P`, `-L` and `-U`.
@@ -217,6 +278,28 @@ pub(super) const ENV: &str = "a=|argv0= i|ignore-environment 0|null u=|unset= C=
 
 /// The `exec` builtin of bash and zsh.
 pub(super) const EXEC: &str = "c l a=";
+
+/// `sudo` 1.9.
+pub(super) const SUDO: &str = "A|askpass a=|auth-type= B|bell b|background C=|close-from= \
+    c=|login-class= D=|chdir= E|preserve-env? e|edit g=|group= H|set-home h?|help host= \
+    i|login K|remove-timestamp k|reset-timestamp l|list N|no-update n|non-interactive \
+    P|preserve-groups p=|prompt= R=|chroot= r=|role= S|stdin s|shell T=|command-timeout= \
+    t=|type= U=|other-user= u=|user= V|version v|validate";
+
+/// OpenBSD `doas`.
+pub(super) const DOAS: &str = "C= L n s u=";
+
+/// GNU findutils `xargs`, plus the BSD `xargs` options `-J`, `-R` and `-S`.
+pub(super) const XARGS: &str = "0|null a=|arg-file= d=|delimiter= E= e?|eof? I= i?|replace? \
+    J= L= l?|max-lines? n=|max-args= o|open-tty P=|max-procs= p|interactive \
+    process-slot-var= R= r|no-run-if-empty S= s=|max-chars= show-limits t|verbose x|exit \
+    help version";
+
+/// `fish`.
+pub(super) const FISH: &str = "c=|command= C=|init-command= d=|debug= o=|debug-output= \
+    D=|debug-stack-frames= f=|features= h|help i|interactive l|login N|no-config \
+    n|no-execute p=|profile= profile-startup= P|private print-rusage-self \
+    print-debug-categories v|version";
 
 /// A program whose remaining words, after its options and operands, are a
 /// command line it runs.
@@ -235,6 +318,11 @@ pub(super) struct Runner {
     pub clears: &'static [&'static str],
     /// Options whose value is `NAME=VALUE` to set or `NAME` to unset.
     pub env: &'static [&'static str],
+    /// Options whose value is a file the program writes.
+    pub writes: &'static [&'static str],
+    /// With no command, the program starts a shell, which reads its script
+    /// on standard input.
+    pub shell: bool,
 }
 
 const fn runs(options: &'static str) -> Runner {
@@ -246,11 +334,16 @@ const fn runs(options: &'static str) -> Runner {
         no_command: &[],
         clears: &[],
         env: &[],
+        writes: &[],
+        shell: false,
     }
 }
 
+/// A strace output value that starts with `|` or `!` is a command strace
+/// pipes its trace to.
 const STRACE: Runner = Runner {
     env: &["env"],
+    writes: &["output"],
     ..runs(
         "a=|columns= A|output-append-mode b=|detach-on= c|summary-only C|summary d|debug \
          D|daemonize? e= E=|env= f|follow-forks F h|help i|instruction-pointer \
@@ -266,10 +359,13 @@ const STRACE: Runner = Runner {
     )
 };
 
-const LTRACE: Runner = runs(
-    "a=|align= A= b|no-signals c C|demangle d|debug? D= e= f F=|config= h|help i \
-     l=|library= L n=|indent= o=|output= p= r s= S t T u= V|version w=|where= x=",
-);
+const LTRACE: Runner = Runner {
+    writes: &["output"],
+    ..runs(
+        "a=|align= A= b|no-signals c C|demangle d|debug? D= e= f F=|config= h|help i \
+         l=|library= L n=|indent= o=|output= p= r s= S t T u= V|version w=|where= x=",
+    )
+};
 
 const NICE: Runner = Runner {
     numeric: true,
@@ -309,18 +405,26 @@ const SETSID: Runner = runs("c|ctty f|fork w|wait h|help V|version");
 
 const STDBUF: Runner = runs("i=|input= o=|output= e=|error= help version");
 
-const UNSHARE: Runner = runs(
-    "m|mount? u|uts? i|ipc? n|net? p|pid? U|user? C|cgroup? T|time? f|fork kill-child? \
-     mount-proc? mount-binfmt? map-user= map-users= map-group= map-groups= map-auto map-subids \
-     r|map-root-user c|map-current-user propagation= setgroups= keep-caps S=|setuid= \
-     G=|setgid= R=|root= w=|wd= l=|load-interp= monotonic= boottime= h|help V|version",
-);
+const UNSHARE: Runner = Runner {
+    shell: true,
+    ..runs(
+        "m|mount? u|uts? i|ipc? n|net? p|pid? U|user? C|cgroup? T|time? f|fork kill-child? \
+         mount-proc? mount-binfmt? map-user= map-users= map-group= map-groups= map-auto \
+         map-subids r|map-root-user c|map-current-user propagation= setgroups= keep-caps \
+         S=|setuid= G=|setgid= R=|root= w=|wd= l=|load-interp= monotonic= boottime= h|help \
+         V|version",
+    )
+};
 
-const NSENTER: Runner = runs(
-    "a|all t=|target= m?|mount? u?|uts? i?|ipc? n?|net? N=|net-socket= p?|pid? U?|user? \
-     user-parent C?|cgroup? T?|time? G=|setgid= S=|setuid= keep-caps preserve-credentials \
-     r?|root? w?|wd? W?|wdns? e|env F|no-fork Z|follow-context c|join-cgroup h|help V|version",
-);
+const NSENTER: Runner = Runner {
+    shell: true,
+    ..runs(
+        "a|all t=|target= m?|mount? u?|uts? i?|ipc? n?|net? N=|net-socket= p?|pid? U?|user? \
+         user-parent C?|cgroup? T?|time? G=|setgid= S=|setuid= keep-caps preserve-credentials \
+         r?|root? w?|wd? W?|wdns? e|env F|no-fork Z|follow-context c|join-cgroup h|help \
+         V|version",
+    )
+};
 
 const SETPRIV: Runner = Runner {
     clears: &["reset-env"],
@@ -332,7 +436,8 @@ const SETPRIV: Runner = Runner {
     )
 };
 
-/// `runuser`: read with its own rules in the Bash guard.
+/// `runuser` and util-linux `su`: read with their own rules in the Bash
+/// guard.
 pub(super) const RUNUSER: Runner = Runner {
     clears: &["login"],
     ..runs(
@@ -344,14 +449,17 @@ pub(super) const RUNUSER: Runner = Runner {
 
 const CHROOT: Runner = Runner {
     operands: 1,
+    shell: true,
     ..runs("groups= userspec= skip-chdir help version")
 };
 
-const FAKEROOT: Runner =
-    runs("l=|lib= faked= i= s= u|unknown-is-real b=|fd-base= h|help v|version");
+const FAKEROOT: Runner = Runner {
+    shell: true,
+    ..runs("l=|lib= faked= i= s= u|unknown-is-real b=|fd-base= h|help v|version")
+};
 
 /// `flock FILE COMMAND` or `flock FILE -c COMMAND`: the Bash guard reads the
-/// `-c` form after the operand.
+/// `-c` form after the operand, and the operand as a file flock creates.
 pub(super) const FLOCK: Runner = Runner {
     operands: 1,
     ..runs(
@@ -360,8 +468,11 @@ pub(super) const FLOCK: Runner = Runner {
     )
 };
 
-const TIME: Runner =
-    runs("f=|format= o=|output= p|portability a|append v|verbose q|quiet V|version help");
+/// GNU `time`, plus the BSD `time` options `-l` and `-h`.
+const TIME: Runner = Runner {
+    writes: &["output"],
+    ..runs("f=|format= o=|output= p|portability a|append v|verbose q|quiet V|version help l h")
+};
 
 const CAFFEINATE: Runner = runs("d i m s u t= w=");
 

@@ -28,7 +28,7 @@ impl Arg {
         }
     }
 
-    fn is(&self, text: &str) -> bool {
+    pub(super) fn is(&self, text: &str) -> bool {
         self.fixed && self.text == text
     }
 }
@@ -101,9 +101,10 @@ const REPO_EDIT: GhFlags = GhFlags {
     slots: 1,
 };
 
-/// Text in a word that is not known before it runs.
+/// Text in a word that is not known before it runs: a variable, a
+/// substitution, a glob or a brace list.
 fn unread(arg: &Arg, text: &str) -> bool {
-    !arg.fixed && text.contains(['$', '`', '*', '?', '['])
+    !arg.fixed && text.contains(['$', '`', '*', '?', '[', '{'])
 }
 
 /// Whether `gh` reads the flag `-<short>` or `--<long>`: alone, with
@@ -212,22 +213,6 @@ fn pr_base(args: &[Arg]) -> Option<Arg> {
 fn basename(text: &str) -> &str {
     text.rsplit('/').next().unwrap_or(text)
 }
-
-/// `xargs` options that take the next word as their value.
-const XARGS_WITH_ARG: &[&str] = &[
-    "-L",
-    "-n",
-    "-P",
-    "-s",
-    "-d",
-    "-E",
-    "-a",
-    "--arg-file",
-    "--delimiter",
-    "--max-args",
-    "--max-procs",
-    "--max-lines",
-];
 
 const SHELLS: &[&str] = &[
     "sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish", "tcsh", "csh",
@@ -429,6 +414,27 @@ enum Step {
     Done(Option<Denial>),
 }
 
+/// Where a runner's command starts, in one reading of its words.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Start {
+    /// The command starts at this index.
+    At(usize),
+    /// No command: the program starts a shell, or `xargs` appends the
+    /// command, so the script is on standard input.
+    Shell,
+}
+
+/// A runner the Bash guard reads: its program name and table, its words
+/// with the runner at `at`, and whether `xargs` appends to them.
+struct Reading<'r> {
+    name: &'r str,
+    runner: &'r Runner,
+    words: &'r [Arg],
+    at: usize,
+    appended: bool,
+    shown: &'r str,
+}
+
 struct Walker<'a, 'b> {
     ctx: &'a Context<'b>,
     /// Variables a script set to a static value earlier in the same call.
@@ -565,6 +571,8 @@ impl Walker<'_, '_> {
                     };
                 }
                 '*' | '?' | '[' => fixed = false,
+                // A brace list (`{-d,}`) makes several words.
+                '{' if brace_list(&chars[i + 1..]) => fixed = false,
                 _ => {}
             }
             out.push(chars[i]);
@@ -714,9 +722,8 @@ impl Walker<'_, '_> {
                     i = skip(i + 1, &[]);
                 }
                 "builtin" | "busybox" => i += 1,
-                "exec" => match options::parse(options::EXEC, false, rest) {
-                    Parse::Unsure => return self.unreadable_options("exec", &words[i..]),
-                    Parse::Read { found, next } => {
+                "exec" => match options::parse(options::EXEC, false, rest).sure() {
+                    Parse::Read { found, next, .. } => {
                         if let Some(clear) = found.iter().find(|option| option.name == "c") {
                             return self.deny(
                                 Code::Identity,
@@ -729,53 +736,30 @@ impl Walker<'_, '_> {
                         }
                         i += 1 + next;
                     }
+                    _ => return self.unreadable_options("exec", &words[i..]),
                 },
-                "sudo" | "doas" => {
-                    i = skip(
-                        i + 1,
-                        &[
-                            "-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T", "--user",
-                            "--group",
-                        ],
-                    );
-                    while let Some(word) = words.get(i)
-                        && let Some((name, value)) = word.text.split_once('=')
-                    {
-                        if let Some(found) = self.assign(name, &Arg::fixed(value), &shown) {
-                            return Some(found);
-                        }
-                        i += 1;
+                "sudo" | "doas" | "sudoedit" => {
+                    match self.sudo(words, i, command, script, appended, &shown) {
+                        Step::Next(next) => i = next,
+                        Step::Done(found) => return found,
                     }
                 }
                 "xargs" => {
-                    // `-I R` runs the command once per input line with R
-                    // replaced, and appends nothing; any other form appends.
+                    let (found, next) = match options::parse(options::XARGS, false, rest).sure() {
+                        Parse::Read { found, next, .. } => (found, next),
+                        _ => return self.unreadable_options("xargs", &words[i..]),
+                    };
+                    let j = i + 1 + next;
+                    // `-I R` (BSD `-J R`) runs the command with R replaced,
+                    // and appends nothing; any other form appends.
                     let mut replace: Option<String> = None;
-                    let mut j = i + 1;
-                    while let Some(word) = words.get(j) {
-                        let text = word.text.as_str();
-                        if text == "--" {
-                            j += 1;
-                            break;
+                    for option in &found {
+                        let value = option.value.as_ref().map(|value| value.text.clone());
+                        match option.name {
+                            "I" | "J" => replace = value,
+                            "replace" => replace = Some(value.unwrap_or_else(|| "{}".into())),
+                            _ => {}
                         }
-                        if !text.starts_with('-') || text == "-" {
-                            break;
-                        }
-                        if text == "-I" {
-                            replace = words.get(j + 1).map(|w| w.text.clone());
-                            j += 2;
-                            continue;
-                        }
-                        if text == "--replace" || text == "-i" {
-                            replace = Some("{}".into());
-                        } else if let Some(given) = text
-                            .strip_prefix("--replace=")
-                            .or_else(|| text.strip_prefix("-I"))
-                            .or_else(|| text.strip_prefix("-i").filter(|_| !text.starts_with("--")))
-                        {
-                            replace = Some(given.to_owned());
-                        }
-                        j += if XARGS_WITH_ARG.contains(&text) { 2 } else { 1 };
                     }
                     let tail = words.get(j..).filter(|tail| !tail.is_empty())?;
                     // A word that holds the replace string is only known
@@ -810,9 +794,11 @@ impl Walker<'_, '_> {
                 }
                 "direnv" if rest.first().is_some_and(|w| w.is("exec")) => i += 3,
                 "su" => {
-                    let at = rest.iter().position(|w| w.is("-c") || w.is("--command"))?;
-                    let payload = rest.get(at + 1)?;
-                    return self.payload(payload, false);
+                    let su = options::runner("runuser")?;
+                    match self.runuser("su", su, words, i, command, script, appended, &shown) {
+                        Step::Next(next) => i = next,
+                        Step::Done(found) => return found,
+                    }
                 }
                 "watch" => {
                     let exec = rest.iter().any(|w| w.is("-x") || w.is("--exec"));
@@ -826,10 +812,12 @@ impl Walker<'_, '_> {
                 }
                 name => {
                     let step = match options::runner(name) {
-                        Some(runner) if name == "runuser" => {
-                            self.runuser(runner, words, i, command, script, appended, &shown)
+                        Some(runner) if name == "runuser" => self.runuser(
+                            "runuser", runner, words, i, command, script, appended, &shown,
+                        ),
+                        Some(runner) => {
+                            self.runner(name, runner, words, i, command, script, appended, &shown)
                         }
-                        Some(runner) => self.runner(name, runner, words, i, &shown),
                         None => break,
                     };
                     match step {
@@ -883,9 +871,9 @@ impl Walker<'_, '_> {
         shown: &str,
     ) -> Step {
         let tail = &words[at + 1..];
-        let (found, next) = match options::parse(options::ENV, false, tail) {
-            Parse::Unsure => return Step::Done(self.unreadable_options("env", &words[at..])),
-            Parse::Read { found, next } => (found, next),
+        let (found, next) = match options::parse(options::ENV, false, tail).sure() {
+            Parse::Read { found, next, .. } => (found, next),
+            _ => return Step::Done(self.unreadable_options("env", &words[at..])),
         };
         for option in &found {
             let Some(value) = &option.value else {
@@ -955,36 +943,150 @@ impl Walker<'_, '_> {
     }
 
     /// A program from the runner list at `words[at]`: its options and
-    /// operands, after which its command starts.
+    /// operands, after which its command starts. A word the guard cannot
+    /// read where the options are may be an operand or an option, so the
+    /// command is checked at every place it could start.
+    #[allow(clippy::too_many_arguments)]
     fn runner(
         &mut self,
         name: &str,
         runner: &Runner,
         words: &[Arg],
         at: usize,
+        command: &Simple,
+        script: &Script,
+        appended: bool,
         shown: &str,
     ) -> Step {
-        let (found, next) = match options::parse(runner.options, runner.numeric, &words[at + 1..]) {
-            Parse::Unsure => return Step::Done(self.unreadable_options(name, &words[at..])),
-            Parse::Read { found, next } => (found, next),
+        let read = Reading {
+            name,
+            runner,
+            words,
+            at,
+            appended,
+            shown,
+        };
+        let mut starts = Vec::new();
+        if let Some(found) = self.runner_starts(&read, at + 1, 0, &mut starts) {
+            return Step::Done(Some(found));
+        }
+        starts.sort_unstable();
+        starts.dedup();
+        match starts.as_slice() {
+            [] => Step::Done(None),
+            [Start::At(start)] => Step::Next(*start),
+            _ => {
+                for start in starts {
+                    let found = match start {
+                        Start::At(start) => {
+                            self.exec(&words[start..], command, script, false, appended)
+                        }
+                        Start::Shell => self.stdin_script(command, script),
+                    };
+                    if found.is_some() {
+                        return Step::Done(found);
+                    }
+                }
+                Step::Done(None)
+            }
+        }
+    }
+
+    /// The places the command of `read` may start when its options are
+    /// read from `words[from]`, or the denial one reading settles.
+    fn runner_starts(
+        &mut self,
+        read: &Reading<'_>,
+        from: usize,
+        depth: usize,
+        starts: &mut Vec<Start>,
+    ) -> Option<Denial> {
+        let Reading {
+            name,
+            runner,
+            words,
+            at,
+            shown,
+            ..
+        } = *read;
+        let tail = words.get(from..).unwrap_or_default();
+        let (found, end) = match options::parse(runner.options, runner.numeric, tail) {
+            Parse::Unsure => return self.unreadable_options(name, &words[at..]),
+            Parse::Read { found, next, .. } => (found, Ok(from + next)),
+            Parse::Unfixed { found, at, option } => (found, Err((from + at, option))),
         };
         if let Some(found) = self.runner_options(name, runner, &found, shown) {
-            return Step::Done(Some(found));
+            return Some(found);
+        }
+        if let Some(found) = self.runner_outputs(name, runner, &found, shown) {
+            return Some(found);
         }
         if found
             .iter()
             .any(|option| runner.no_command.contains(&option.name))
         {
-            return Step::Done(None);
+            return None;
         }
-        let mut start = at + 1 + next;
+        let (unfixed, option) = match end {
+            Ok(next) => return self.runner_command(read, next, starts),
+            Err(unfixed) => unfixed,
+        };
+        // The word ends the options, as an operand or the command ...
+        if !option && let Some(found) = self.runner_command(read, unfixed, starts) {
+            return Some(found);
+        }
+        // ... or it is an option the guard cannot name, alone or with the
+        // next word as its value. An option that may clear or set the
+        // environment, or name a file the program writes, cannot be read.
+        let named =
+            !runner.clears.is_empty() || !runner.env.is_empty() || !runner.writes.is_empty();
+        if named || depth >= 3 {
+            return self.unreadable_options(name, &words[at..]);
+        }
+        for skip in [1, 2] {
+            if unfixed + skip <= words.len()
+                && let Some(found) = self.runner_starts(read, unfixed + skip, depth + 1, starts)
+            {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// The operands of a runner from `words[start]`, then its command.
+    fn runner_command(
+        &mut self,
+        read: &Reading<'_>,
+        start: usize,
+        starts: &mut Vec<Start>,
+    ) -> Option<Denial> {
+        let Reading {
+            name,
+            runner,
+            words,
+            appended,
+            shown,
+            ..
+        } = *read;
+        let mut start = start;
         for _ in 0..runner.operands {
             let Some(operand) = words.get(start) else {
-                return Step::Done(None);
+                // `xargs timeout`: the input is the rest of the command.
+                if appended {
+                    starts.push(Start::Shell);
+                }
+                return None;
             };
             let number = operand.fixed && operand.text.parse::<i64>().is_ok();
             if runner.numeric_operand && !number {
                 break;
+            }
+            // `flock FILE`: flock opens the file, and creates it.
+            if name == "flock"
+                && !number
+                && let Some((code, why)) = path_denial(&operand.text, true, self.ctx)
+            {
+                return self.deny(code, why, shown);
             }
             start += 1;
         }
@@ -993,17 +1095,55 @@ impl Walker<'_, '_> {
                 .get(start)
                 .is_some_and(|w| w.is("-c") || w.is("--command"))
             {
-                return Step::Done(
-                    words
-                        .get(start + 1)
-                        .and_then(|payload| self.payload(payload, false)),
-                );
+                return words
+                    .get(start + 1)
+                    .and_then(|payload| self.payload(payload, false));
             }
             if words.get(start).is_some_and(|w| w.is("--")) {
                 start += 1;
             }
         }
-        Step::Next(start)
+        if start < words.len() {
+            starts.push(Start::At(start));
+        } else if runner.shell || appended {
+            starts.push(Start::Shell);
+        }
+        None
+    }
+
+    /// The options of a runner that name a file it writes. A strace output
+    /// that starts with `|` or `!` is a command strace pipes its trace to.
+    fn runner_outputs(
+        &mut self,
+        name: &str,
+        runner: &Runner,
+        found: &[options::Found],
+        shown: &str,
+    ) -> Option<Denial> {
+        for option in found {
+            if !runner.writes.contains(&option.name) {
+                continue;
+            }
+            let Some(value) = &option.value else {
+                continue;
+            };
+            if name == "strace"
+                && let Some(piped) = value.text.strip_prefix(['|', '!'])
+            {
+                let piped = Arg {
+                    text: piped.to_owned(),
+                    fixed: value.fixed,
+                };
+                if let Some(found) = self.payload(&piped, false) {
+                    return Some(found);
+                }
+                continue;
+            }
+            if let Some((code, why)) = path_denial(&value.text, true, self.ctx) {
+                return self.deny(code, why, shown);
+            }
+        }
+        None
     }
 
     /// The options of a runner that change the environment.
@@ -1051,10 +1191,14 @@ impl Walker<'_, '_> {
     }
 
     /// `runuser -u USER COMMAND`, or the `su` form `runuser [-] USER
-    /// [SHELL ARGS]`, where `-c COMMAND` may sit on either side of the user.
+    /// [ARGS]`, which `su` shares. Like util-linux, the options are read
+    /// anywhere before `--`, also after the user, and the words left after
+    /// the user go to the user's shell. With none, that shell reads its
+    /// script on standard input.
     #[allow(clippy::too_many_arguments)]
     fn runuser(
         &mut self,
+        program: &str,
         runner: &Runner,
         words: &[Arg],
         at: usize,
@@ -1063,53 +1207,146 @@ impl Walker<'_, '_> {
         appended: bool,
         shown: &str,
     ) -> Step {
-        let (found, next) = match options::parse(runner.options, false, &words[at + 1..]) {
-            Parse::Unsure => return Step::Done(self.unreadable_options("runuser", &words[at..])),
-            Parse::Read { found, next } => (found, next),
-        };
-        if let Some(found) = self.runner_options("runuser", runner, &found, shown) {
+        let mut found = Vec::new();
+        let mut operands: Vec<Arg> = Vec::new();
+        let mut j = at + 1;
+        let mut user_option = false;
+        loop {
+            let tail = words.get(j..).unwrap_or_default();
+            let (more, next, ended) = match options::parse(runner.options, false, tail).sure() {
+                Parse::Read { found, next, ended } => (found, next, ended),
+                _ => return Step::Done(self.unreadable_options(program, &words[at..])),
+            };
+            user_option |= more.iter().any(|option| option.name == "user");
+            found.extend(more);
+            j += next;
+            if user_option {
+                break;
+            }
+            if ended {
+                operands.extend_from_slice(words.get(j..).unwrap_or_default());
+                break;
+            }
+            let Some(operand) = words.get(j) else {
+                break;
+            };
+            operands.push(operand.clone());
+            j += 1;
+        }
+        if let Some(found) = self.runner_options(program, runner, &found, shown) {
             return Step::Done(Some(found));
         }
         if let Some(pty) = found.iter().find(|option| option.name == "pty") {
             return Step::Done(self.deny(
                 Code::Identity,
                 format!(
-                    "runuser {} fakes a terminal, which strips the session's identity",
+                    "{program} {} fakes a terminal, which strips the session's identity",
                     pty.spelling
                 ),
                 shown,
             ));
         }
-        for option in &found {
-            if ["command", "session-command"].contains(&option.name)
-                && let Some(found) = option
-                    .value
-                    .as_ref()
-                    .and_then(|payload| self.payload(payload, false))
-            {
-                return Step::Done(Some(found));
-            }
-        }
-        let start = at + 1 + next;
-        if found.iter().any(|option| option.name == "user") {
-            return Step::Next(start);
-        }
-        let mut user = start;
-        if words.get(user).is_some_and(|word| word.is("-")) {
+        if operands.first().is_some_and(|word| word.is("-")) {
             return Step::Done(self.deny(
                 Code::Identity,
-                "runuser - clears the environment, which strips the session's identity",
+                format!("{program} - clears the environment, which strips the session's identity"),
                 shown,
             ));
         }
-        // The words after the user go to the user's shell.
-        user += 1;
-        match words.get(user..) {
-            Some(args) if !args.is_empty() => {
-                Step::Done(self.shell(args, command, script, appended))
+        let mut string = false;
+        for option in &found {
+            if ["command", "session-command"].contains(&option.name) {
+                string = true;
+                if let Some(found) = option
+                    .value
+                    .as_ref()
+                    .and_then(|payload| self.payload(payload, false))
+                {
+                    return Step::Done(Some(found));
+                }
             }
-            _ => Step::Done(None),
         }
+        if user_option {
+            if !operands.is_empty() {
+                return Step::Done(self.unreadable_options(program, &words[at..]));
+            }
+            if j < words.len() {
+                return Step::Next(j);
+            }
+            return Step::Done(self.stdin_script(command, script));
+        }
+        if string {
+            return Step::Done(None);
+        }
+        // The words after the user go to the user's shell.
+        match operands.get(1..) {
+            Some(args) if !args.is_empty() => {
+                Step::Done(self.shell("sh", args, command, script, appended))
+            }
+            _ => Step::Done(self.stdin_script(command, script)),
+        }
+    }
+
+    /// `sudo`, `doas` and `sudoedit` at `words[at]`: their options, then the
+    /// assignments before the command. `-i` and `-s` with no command start
+    /// a shell, and `-e` (`sudoedit`) writes the files it names.
+    #[allow(clippy::too_many_arguments)]
+    fn sudo(
+        &mut self,
+        words: &[Arg],
+        at: usize,
+        command: &Simple,
+        script: &Script,
+        appended: bool,
+        shown: &str,
+    ) -> Step {
+        let program = basename(&words[at].text);
+        let spec = if program == "doas" {
+            options::DOAS
+        } else {
+            options::SUDO
+        };
+        let (found, next) = match options::parse(spec, false, &words[at + 1..]).sure() {
+            Parse::Read { found, next, .. } => (found, next),
+            _ => return Step::Done(self.unreadable_options(program, &words[at..])),
+        };
+        let mut j = at + 1 + next;
+        while let Some(word) = words.get(j)
+            && let Some((name, value)) = word.text.split_once('=')
+        {
+            if !word.fixed && name.contains(['$', '`']) {
+                return Step::Done(self.unreadable_options(program, &words[at..]));
+            }
+            let value = Arg {
+                text: value.to_owned(),
+                fixed: word.fixed,
+            };
+            if let Some(found) = self.assign(name, &value, shown) {
+                return Step::Done(Some(found));
+            }
+            j += 1;
+        }
+        let has = |names: &[&str]| found.iter().any(|option| names.contains(&option.name));
+        if program == "sudoedit" || (program != "doas" && has(&["edit"])) {
+            for file in words.get(j..).unwrap_or_default() {
+                if let Some((code, why)) = path_denial(&file.text, true, self.ctx) {
+                    return Step::Done(self.deny(code, why, shown));
+                }
+            }
+            return Step::Done(None);
+        }
+        if j < words.len() {
+            return Step::Next(j);
+        }
+        let shell = if program == "doas" {
+            has(&["s"])
+        } else {
+            has(&["login", "shell"])
+        };
+        if shell || appended {
+            return Step::Done(self.stdin_script(command, script));
+        }
+        Step::Done(None)
     }
 
     /// A variable a program unsets (`env -u`, `strace -E NAME`).
@@ -1197,7 +1434,7 @@ impl Walker<'_, '_> {
             );
         }
         if SHELLS.contains(&name) {
-            return self.shell(args, command, script, appended);
+            return self.shell(name, args, command, script, appended);
         }
         if name == "pwsh" {
             return self.pwsh(args, command, script, appended);
@@ -1402,13 +1639,38 @@ impl Walker<'_, '_> {
         None
     }
 
+    /// A shell's arguments: `-c` runs a command string, a word after the
+    /// options is a script file, and with neither (or with `-s`) the shell
+    /// reads its script on standard input.
     fn shell(
         &mut self,
+        name: &str,
         args: &[Arg],
         command: &Simple,
         script: &Script,
         appended: bool,
     ) -> Option<Denial> {
+        // Long options of bash, and of the shells that share them.
+        const LONG_FLAGS: &[&str] = &[
+            "login",
+            "noprofile",
+            "norc",
+            "posix",
+            "restricted",
+            "verbose",
+            "version",
+            "help",
+            "debugger",
+            "dump-strings",
+            "dump-po-strings",
+            "noediting",
+            "pretty-print",
+            "wordexp",
+        ];
+        const LONG_VALUES: &[&str] = &["rcfile", "init-file", "emulate"];
+        if name == "fish" {
+            return self.fish(args, command, script, appended);
+        }
         let mut j = 0;
         let mut string = false;
         let mut stdin = false;
@@ -1418,11 +1680,23 @@ impl Walker<'_, '_> {
                 j += 1;
                 break;
             }
-            if text.starts_with("--") {
-                j += if text == "--rcfile" || text == "--init-file" {
+            if let Some(long) = text.strip_prefix("--") {
+                let (key, attached) = match long.split_once('=') {
+                    Some((key, _)) => (key, true),
+                    None => (long, false),
+                };
+                if unread(arg, key) {
+                    return self.unreadable_options(name, args);
+                }
+                j += if LONG_VALUES.contains(&key) && !attached {
                     2
-                } else {
+                } else if LONG_VALUES.contains(&key) || LONG_FLAGS.contains(&key) {
                     1
+                } else if name == "zsh" && !attached {
+                    // zsh takes every option name as a long option.
+                    1
+                } else {
+                    return self.unreadable_options(name, args);
                 };
                 continue;
             }
@@ -1456,10 +1730,48 @@ impl Walker<'_, '_> {
         self.stdin_script(command, script)
     }
 
-    /// `pwsh`: `-Command` runs the rest of the words as one command,
-    /// `-EncodedCommand` runs the base64 of UTF-16LE text, and `-Command -`
-    /// or no command reads standard input. Parameters take any prefix of
-    /// their name, in any case.
+    /// `fish`: `-c` and `-C` (`--init-command`) take their command string
+    /// as their value.
+    fn fish(
+        &mut self,
+        args: &[Arg],
+        command: &Simple,
+        script: &Script,
+        appended: bool,
+    ) -> Option<Denial> {
+        let (found, next) = match options::parse(options::FISH, false, args).sure() {
+            Parse::Read { found, next, .. } => (found, next),
+            _ => return self.unreadable_options("fish", args),
+        };
+        let mut string = false;
+        for option in &found {
+            if !["command", "init-command"].contains(&option.name) {
+                continue;
+            }
+            string |= option.name == "command";
+            match &option.value {
+                Some(payload) => {
+                    if let Some(found) = self.payload(payload, false) {
+                        return Some(found);
+                    }
+                }
+                // `echo '<script>' | xargs fish -c`: the script is the input.
+                None if appended => return self.stdin_script(command, script),
+                None => {}
+            }
+        }
+        if string || next < args.len() {
+            return None;
+        }
+        self.stdin_script(command, script)
+    }
+
+    /// `pwsh`: `-Command` (and `-CommandWithArgs`) runs the rest of the
+    /// words as one command, `-EncodedCommand` runs the base64 of UTF-16LE
+    /// text, and `-Command -`, `-File -` or no command reads standard
+    /// input. Parameters take any prefix of their name, in any case, and a
+    /// value after `:` or as the next word. A parameter the guard does not
+    /// know fails closed.
     fn pwsh(
         &mut self,
         args: &[Arg],
@@ -1478,8 +1790,30 @@ impl Walker<'_, '_> {
             "custompipename",
             "settingsfile",
         ];
+        const VALUE_ALIASES: &[&str] = &[
+            "ep", "ex", "if", "inp", "o", "of", "w", "wd", "wo", "config", "settings",
+        ];
+        const SWITCHES: &[&str] = &[
+            "interactive",
+            "login",
+            "mta",
+            "noexit",
+            "nologo",
+            "noninteractive",
+            "noprofile",
+            "noprofileloadtime",
+            "sta",
+            "sshservermode",
+            "version",
+            "help",
+        ];
+        const SWITCH_ALIASES: &[&str] =
+            &["?", "h", "i", "l", "noe", "nol", "noni", "nop", "sshs", "v"];
         let mut j = 0;
         while let Some(arg) = args.get(j) {
+            if arg.is("-") {
+                return self.stdin_script(command, script);
+            }
             let Some(name) = arg
                 .text
                 .strip_prefix("--")
@@ -1496,16 +1830,33 @@ impl Walker<'_, '_> {
                 return self.unreadable_options("pwsh", args);
             }
             let name = name.to_ascii_lowercase();
-            let name = name.split_once(':').map_or(name.as_str(), |(n, _)| n);
-            if "command".starts_with(name) {
-                let rest = args.get(j + 1..).unwrap_or_default();
-                return match rest {
+            let (name, attached) = match name.split_once(':') {
+                Some((name, value)) => (name, Some(value)),
+                None => (name.as_str(), None),
+            };
+            // The value: after `:` in the same word, or the next word.
+            let value = |j: usize| -> Option<Arg> {
+                match attached {
+                    Some(_) => arg.text.split_once(':').map(|(_, value)| Arg::fixed(value)),
+                    None => args.get(j + 1).cloned(),
+                }
+            };
+            let words = if attached.is_some() { 1 } else { 2 };
+            let with_args = name == "cwa"
+                || (name.len() > "command".len() && "commandwithargs".starts_with(name));
+            if "command".starts_with(name) || with_args {
+                let mut rest: Vec<Arg> = Vec::new();
+                if let Some(value) = attached.and_then(|_| value(j)) {
+                    rest.push(value);
+                }
+                rest.extend_from_slice(args.get(j + 1..).unwrap_or_default());
+                return match rest.as_slice() {
                     [] if appended => self.stdin_script(command, script),
                     [] => None,
                     [only] if only.is("-") => self.stdin_script(command, script),
                     _ => {
                         let payload = Arg {
-                            text: texts(rest),
+                            text: texts(&rest),
                             fixed: rest.iter().all(|word| word.fixed),
                         };
                         self.payload(&payload, false)
@@ -1513,18 +1864,51 @@ impl Walker<'_, '_> {
                 };
             }
             if "encodedcommand".starts_with(name) || name == "ec" {
-                let value = args.get(j + 1)?;
-                return match pwsh_decode(value) {
+                let Some(encoded) = value(j) else {
+                    // `xargs pwsh -ec`: the input is the value.
+                    return appended
+                        .then(|| {
+                            self.deny(
+                                Code::GuardTamper,
+                                "the encoded command is not known before it runs",
+                                texts(args),
+                            )
+                        })
+                        .flatten();
+                };
+                return match pwsh_decode(&encoded) {
                     Some(text) => self.payload(&Arg { text, fixed: true }, false),
-                    None => self.unreadable_options("pwsh", args),
+                    None => self.deny(
+                        Code::GuardTamper,
+                        "the encoded command could not be decoded, so the guard cannot read it",
+                        texts(args),
+                    ),
                 };
             }
             if "file".starts_with(name) {
+                if value(j).is_some_and(|file| file.is("-")) {
+                    return self.stdin_script(command, script);
+                }
                 return None;
             }
-            let value = VALUES.iter().any(|long| long.starts_with(name))
-                || ["ep", "if", "of", "wd"].contains(&name);
-            j += if value { 2 } else { 1 };
+            let takes = if SWITCH_ALIASES.contains(&name) {
+                Some(false)
+            } else if VALUE_ALIASES.contains(&name) {
+                Some(true)
+            } else {
+                let value = VALUES.iter().any(|long| long.starts_with(name));
+                let switch = SWITCHES.iter().any(|long| long.starts_with(name));
+                match (value, switch) {
+                    (true, false) => Some(true),
+                    (false, true) => Some(false),
+                    _ => None,
+                }
+            };
+            j += match takes {
+                Some(true) => words,
+                Some(false) => 1,
+                None => return self.unreadable_options("pwsh", args),
+            };
         }
         self.stdin_script(command, script)
     }
@@ -2905,14 +3289,25 @@ fn is_sha(text: &str) -> bool {
     (7..=40).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// The text of a `pwsh -EncodedCommand` value: base64 of UTF-16LE.
+/// Whether the text after a `{` holds a `,` before its `}`: a brace list.
+fn brace_list(after: &[char]) -> bool {
+    after.contains(&'}') && after.iter().take_while(|c| **c != '}').any(|c| *c == ',')
+}
+
+/// The text of a `pwsh -EncodedCommand` value: base64 of UTF-16LE. .NET
+/// skips blanks in base64, so they are dropped first.
 fn pwsh_decode(value: &Arg) -> Option<String> {
     use base64::Engine as _;
     if !value.fixed {
         return None;
     }
+    let compact: Vec<u8> = value
+        .text
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
     let bytes = base64::engine::general_purpose::STANDARD
-        .decode(value.text.as_bytes())
+        .decode(compact)
         .ok()?;
     let (pairs, rest) = bytes.as_chunks::<2>();
     if !rest.is_empty() {
