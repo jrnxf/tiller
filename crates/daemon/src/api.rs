@@ -114,6 +114,9 @@ pub struct Inner {
     pub evals: memory::eval::Evals,
     /// The backup the board started, if one runs, and the last that failed.
     pub backups: crate::backups::BackupJobs,
+    /// The curator runs the board started (Run again), stopped with the
+    /// daemon.
+    pub retros: crate::retros::Retros,
 }
 
 /// Starts a project's orchestrator, or returns the live one, as `tiller
@@ -159,6 +162,39 @@ pub trait OrchestratorStart: Send + Sync {
     fn doctor(&self) -> Option<DoctorReport> {
         None
     }
+
+    /// Claims `retro` with the board's `ctx` and writes its curator's
+    /// launch, as `tiller retro run` does, refused by the same rules. The
+    /// daemon does the returned run on a thread of its own.
+    fn retro_run(
+        &self,
+        _store: &mut Store,
+        _ctx: &Ctx,
+        _retro: &str,
+    ) -> Result<CuratorRun, StartError> {
+        Err(StartError::Refused {
+            exit: 7,
+            code: "unavailable",
+            message: "this host cannot run retros".to_owned(),
+            hint: None,
+            current: None,
+        })
+    }
+}
+
+/// A retro the board runs, claimed for its curator (`learning-loop.md`
+/// section 4).
+pub struct CuratorRun {
+    /// The claim: the retro reset if it ended `unfinished`, then started.
+    pub claimed: Applied<tiller_core::domain::Retro>,
+    /// The run: launches the curator and waits for it until it exits, its
+    /// timeout passes or the flag is set, which stops it and everything it
+    /// started. A retro the curator did not finish ends `unfinished` with
+    /// why. Returns the retro as the run left it, or what went wrong.
+    pub run: Box<
+        dyn FnOnce(Arc<std::sync::atomic::AtomicBool>) -> Result<tiller_core::domain::Retro, String>
+            + Send,
+    >,
 }
 
 /// A start that failed, as `tiller orchestrator start` reports it.
@@ -915,6 +951,8 @@ pub fn router(state: AppState) -> Router {
             get(memory::eval::eval_plan).post(memory::eval::eval_start),
         )
         .route("/api/v1/memory/changes/{proposal}/undo", post(memory::undo))
+        .route("/api/v1/retros", get(crate::retros::list_retros))
+        .route("/api/v1/retros/{id}/run", post(crate::retros::run_retro))
         .route("/api/v1/memory/revisions/{id}", get(memory::revision))
         .route("/api/v1/recap", get(recap))
         .route("/api/v1/recap/seen", post(mark_recap_seen))
@@ -1996,28 +2034,34 @@ fn start_here(
     };
     starter
         .start(store, ctx, project)
-        .map_err(|error| match error {
-            StartError::State { error, notes } => {
-                suspect(&error);
-                let mut api = ApiError::from(*error);
-                if let Some(notes) = notes {
-                    api.body.error.message = format!("{}; {notes}", api.body.error.message);
-                }
-                api
+        .map_err(|error| start_refusal(error, suspect))
+}
+
+/// A refused start as the board gets it. A store failure is handed to
+/// `suspect`, for the damage check.
+pub(crate) fn start_refusal(error: StartError, suspect: impl FnOnce(&Error)) -> ApiError {
+    match error {
+        StartError::State { error, notes } => {
+            suspect(&error);
+            let mut api = ApiError::from(*error);
+            if let Some(notes) = notes {
+                api.body.error.message = format!("{}; {notes}", api.body.error.message);
             }
-            StartError::Refused {
-                exit,
-                code,
-                message,
-                hint,
-                current,
-            } => {
-                let mut api = ApiError::new(status_of_exit(exit), code, message);
-                api.body.error.hint = hint;
-                api.body.error.current = current;
-                api
-            }
-        })
+            api
+        }
+        StartError::Refused {
+            exit,
+            code,
+            message,
+            hint,
+            current,
+        } => {
+            let mut api = ApiError::new(status_of_exit(exit), code, message);
+            api.body.error.hint = hint;
+            api.body.error.current = current;
+            api
+        }
+    }
 }
 
 /// The head an approval binds now, for a 422 after the head moved.
@@ -5076,7 +5120,7 @@ async fn app_shell(
         project_grants, create_grant, revoke_grant,
         away_start, away_edit, away_end, away_brief, host_fields, edit_host, crate::backups::list, crate::backups::take, pick_bug_project, recap, mark_recap_seen, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, memory::repropose, memory::eval::eval_plan,
-        memory::eval::eval_start, session, login_code, logout
+        memory::eval::eval_start, crate::retros::list_retros, crate::retros::run_retro, session, login_code, logout
     ),
     components(schemas(ChangeEvent, ResetEvent, PeerEvent, LinkEvent, PeerResetEvent, TerminalLine, ErrorBody, ErrorDetail)),
     tags(
@@ -5188,6 +5232,7 @@ pub(crate) mod tests {
             ssh,
             evals: memory::eval::Evals::default(),
             backups: crate::backups::BackupJobs::default(),
+            retros: crate::retros::Retros::default(),
         }))
     }
 
@@ -8965,7 +9010,10 @@ esac"#,
         }
     }
 
-    fn app_restarting(home: &std::path::Path, starter: Arc<dyn OrchestratorStart>) -> Router {
+    pub(crate) fn app_restarting(
+        home: &std::path::Path,
+        starter: Arc<dyn OrchestratorStart>,
+    ) -> Router {
         app_polling(home, Some(starter), Registry::new())
     }
 
@@ -8997,6 +9045,7 @@ esac"#,
             ssh: vec!["ssh".into()],
             evals: memory::eval::Evals::default(),
             backups: crate::backups::BackupJobs::default(),
+            retros: crate::retros::Retros::default(),
         }))
     }
 

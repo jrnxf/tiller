@@ -397,6 +397,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         ssh: config.ssh.clone(),
         evals: crate::memory::eval::Evals::default(),
         backups: crate::backups::BackupJobs::default(),
+        retros: crate::retros::Retros::default(),
     });
 
     // A session queued to restart when idle survives a daemon restart: the
@@ -446,6 +447,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         // Streams and pollers end on this; then the server drains.
         let _ = stopping.send(true);
     };
+    let retros = state.0.retros.clone();
     let server = axum::serve(listener, api::router(state)).with_graceful_shutdown(shutdown);
     let mut stopped = stop.clone();
     tokio::select! {
@@ -461,6 +463,9 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
             let _ = tokio::time::timeout(DRAIN, handle).await;
         }
     }
+    // A curator the board started is stopped with everything it started,
+    // and its retro ends `unfinished`, so it can run again.
+    let _ = tokio::task::spawn_blocking(move || retros.stop(DRAIN)).await;
     // An older binary never writes to a newer database, not even its stop
     // event.
     let fatal = *fatal.lock().unwrap_or_else(PoisonError::into_inner);

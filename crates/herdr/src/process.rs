@@ -188,7 +188,18 @@ impl Interrupt {
         })
     }
 
-    /// Whether one of the signals arrived.
+    /// An interrupt the caller raises by setting `flag`, with no signal
+    /// handlers: for a child run inside a process that lives on, such as
+    /// the daemon, which stops the child when it stops itself.
+    pub fn flag(flag: Arc<AtomicBool>) -> Self {
+        Self {
+            caught: flag,
+            done: None,
+            listener: None,
+        }
+    }
+
+    /// Whether one of the signals arrived, or the flag was set.
     pub fn caught(&self) -> bool {
         self.caught.load(Ordering::SeqCst)
     }
@@ -390,5 +401,30 @@ mod tests {
             "{ended:?}"
         );
         assert!(stopped, "the grandchild {grandchild} outlived its parent");
+    }
+
+    #[test]
+    fn a_raised_flag_stops_the_group() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let interrupt = Interrupt::flag(Arc::clone(&flag));
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("grandchild.pid");
+        let mut child = parent(&file, "sleep 300");
+        let grandchild = pid_in(&file);
+        let raiser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            flag.store(true, Ordering::SeqCst);
+        });
+        let ended = wait(
+            &mut child,
+            Instant::now() + Duration::from_secs(60),
+            Duration::from_millis(10),
+            Some(&interrupt),
+        );
+        let _ = raiser.join();
+        let stopped = eventually(|| gone(&grandchild));
+        reap(&grandchild);
+        assert!(matches!(ended, Ended::Interrupted), "{ended:?}");
+        assert!(stopped, "the grandchild {grandchild} outlived the stop");
     }
 }

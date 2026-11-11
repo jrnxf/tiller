@@ -846,3 +846,213 @@ fn an_allow_host_that_is_not_a_plain_name_is_refused() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("--allow-host"), "{stderr}");
 }
+
+/// A home whose `spawn.claude` is a stand-in curator with `body`, and one
+/// full retro of a closed card. Returns the stand-in's path and the retro.
+fn curator_home(world: &World, body: &str) -> (std::path::PathBuf, String) {
+    world.must(&["config", "set", "learning.sample_every", "1"]);
+    let scratch = world.dir.path().join("scratch");
+    world.must(&[
+        "config",
+        "set",
+        "spawn.scratch_root",
+        scratch.to_str().unwrap(),
+    ]);
+    let fake = world.dir.path().join("fake-claude");
+    std::fs::write(&fake, body).unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    world.must(&["config", "set", "spawn.claude", fake.to_str().unwrap()]);
+    let card = world.must(&[
+        "card",
+        "create",
+        "alpha",
+        "--kind",
+        "ship",
+        "--title",
+        "Undo strokes",
+    ]);
+    let id = card.data()["id"].as_str().unwrap().to_owned();
+    let tag = card.data()["display_id"].as_str().unwrap().to_owned();
+    world
+        .store()
+        .conn()
+        .execute(
+            "UPDATE cards SET state = 'closed', outcome = 'landed', closed_at = '2026-11-03T10:00:00.000Z',
+                 created_at = '2026-11-03T08:00:00.000Z', closed_by = 'owner' WHERE id = ?1",
+            [&id],
+        )
+        .unwrap();
+    world.must(&["retro", "sweep"]);
+    let retro = world.must(&["retro", "show", &tag]).data()["retro"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (fake, retro)
+}
+
+/// A stand-in curator that exits `code` without finishing its retro.
+fn exiting(code: i32) -> String {
+    format!("#!/bin/sh\nexit {code}\n")
+}
+
+/// The board's view of `retro` from `GET /api/v1/retros`.
+fn retro_view(port: u16, retro: &str) -> Value {
+    let (status, body) = get(port, "/api/v1/retros");
+    assert_eq!(status, "HTTP/1.0 200 OK", "{body}");
+    let list: Value = serde_json::from_str(&body).unwrap();
+    list["retros"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == retro)
+        .cloned()
+        .unwrap_or_else(|| panic!("{retro} is not listed: {list}"))
+}
+
+/// Waits for the board's run of `retro` to end, and returns its view.
+fn settled(port: u16, retro: &str) -> Value {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let view = retro_view(port, retro);
+        if view["status"] != "running" {
+            return view;
+        }
+        assert!(Instant::now() < deadline, "the run never ended: {view}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn run_again(world: &World, port: u16, retro: &str, key: &str) -> (String, Value) {
+    post_as_board(
+        world,
+        port,
+        &format!("/api/v1/retros/{retro}/run"),
+        &format!(r#"{{"idempotency_key":"{key}"}}"#),
+    )
+}
+
+/// Run again on the board is `tiller retro run` started by the daemon: a
+/// second failure shows its own reason, nothing runs it again by itself,
+/// and a curator that finishes ends it.
+#[test]
+fn the_board_runs_an_unfinished_retro_again() {
+    let world = World::initialized();
+    let (fake, retro) = curator_home(&world, &exiting(3));
+    let ran = world.must(&["retro", "run", &retro]);
+    assert_eq!(ran.data()["retro"]["outcome"], "unfinished", "{}", ran.json);
+    let mut daemon = start(&world);
+    let view = retro_view(daemon.port, &retro);
+    assert_eq!(view["status"], "unfinished", "{view}");
+    assert_eq!(
+        view["learning"],
+        "curator exited 3 without finishing the retro"
+    );
+    assert!(view["run_refusal"].is_null(), "{view}");
+
+    std::fs::write(&fake, exiting(4)).unwrap();
+    let (status, answer) = run_again(&world, daemon.port, &retro, "again-1");
+    assert_eq!(status, "HTTP/1.0 200 OK", "{answer}");
+    assert_eq!(answer["data"]["state"], "pending", "{answer}");
+    let view = settled(daemon.port, &retro);
+    assert_eq!(view["status"], "unfinished", "{view}");
+    assert_eq!(
+        view["learning"],
+        "curator exited 4 without finishing the retro"
+    );
+    assert_eq!(view["started_by"], "board", "{view}");
+    // Nothing runs it again by itself.
+    std::thread::sleep(Duration::from_millis(500));
+    let later = retro_view(daemon.port, &retro);
+    assert_eq!(later["status"], "unfinished", "{later}");
+    assert_eq!(later["curator_started_at"], view["curator_started_at"]);
+
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\n\"{tiller}\" retro finish \"$TILLER_RETRO_ID\" --nothing >/dev/null\n",
+            tiller = env!("CARGO_BIN_EXE_tiller")
+        ),
+    )
+    .unwrap();
+    let (status, answer) = run_again(&world, daemon.port, &retro, "again-2");
+    assert_eq!(status, "HTTP/1.0 200 OK", "{answer}");
+    let view = settled(daemon.port, &retro);
+    assert_eq!(view["status"], "done", "{view}");
+    assert_eq!(view["outcome"], "nothing", "{view}");
+    // A done retro is not run again.
+    assert!(view["run_refusal"].is_string(), "{view}");
+    let (status, answer) = run_again(&world, daemon.port, &retro, "again-3");
+    assert_eq!(status, "HTTP/1.0 422 Unprocessable Entity", "{answer}");
+    assert!(terminate(&mut daemon).success());
+}
+
+/// A daemon that stops ends a curator the board started, with what the
+/// curator started, and leaves its retro ready to run again.
+#[test]
+fn a_stopping_daemon_stops_the_curator_the_board_started() {
+    let world = World::initialized();
+    // The daemon runs with an empty PATH, so the stand-in names `sleep` in
+    // full.
+    let which = Command::new("sh")
+        .args(["-c", "command -v sleep"])
+        .output()
+        .unwrap();
+    let sleep = String::from_utf8(which.stdout).unwrap().trim().to_owned();
+    let pid_file = |name: &str| world.dir.path().join(name);
+    let (_fake, retro) = curator_home(
+        &world,
+        &format!(
+            "#!/bin/sh\n\"{sleep}\" 300 &\necho $! > '{grandchild}'\necho $$ > '{curator}'\nwait\n",
+            grandchild = pid_file("grandchild.pid").display(),
+            curator = pid_file("curator.pid").display(),
+        ),
+    );
+    let mut daemon = start(&world);
+    let (status, answer) = run_again(&world, daemon.port, &retro, "run-1");
+    assert_eq!(status, "HTTP/1.0 200 OK", "{answer}");
+    let written =
+        |name: &str| std::fs::read_to_string(pid_file(name)).is_ok_and(|text| text.ends_with('\n'));
+    let deadline = Instant::now() + WAIT;
+    while !(written("curator.pid") && written("grandchild.pid")) {
+        assert!(
+            Instant::now() < deadline,
+            "the stand-in curator never started"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let read = |name: &str| {
+        std::fs::read_to_string(pid_file(name))
+            .unwrap()
+            .trim()
+            .to_owned()
+    };
+    let (curator, grandchild) = (read("curator.pid"), read("grandchild.pid"));
+    let view = retro_view(daemon.port, &retro);
+    assert_eq!(view["status"], "running", "{view}");
+    // Run again is off while it runs.
+    assert!(view["run_refusal"].is_string(), "{view}");
+
+    let stopped = terminate(&mut daemon);
+    let gone = |pid: &str| {
+        let out = Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&out.stdout);
+        stat.trim().is_empty() || stat.trim_start().starts_with('Z')
+    };
+    let ended = gone(&curator) && gone(&grandchild);
+    // Whatever happened, take every process this test started down with it.
+    for pid in [&curator, &grandchild] {
+        let _ = Command::new("kill").args(["-KILL", pid]).status();
+    }
+    assert!(stopped.success());
+    assert!(ended, "the curator or its child outlived the daemon");
+    let shown = world.must(&["retro", "show", &retro]);
+    let row = &shown.data()["retro"];
+    assert_eq!(row["outcome"], "unfinished", "{}", shown.json);
+    assert_eq!(
+        row["learning"],
+        "curator stopped: the daemon stopped before the retro was finished"
+    );
+}

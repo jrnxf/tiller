@@ -18,7 +18,7 @@ use tiller_core::domain::{
 use tiller_core::state::learning::{self, Finish, Learning};
 use tiller_core::state::{find, get, list, resolve_id};
 use tiller_core::{Actor, Store};
-use tiller_herdr::process::{self, Ended, Interrupt};
+use tiller_herdr::process::{self, Interrupt};
 
 use super::KeyArg;
 use super::admin::load_config;
@@ -335,116 +335,57 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
     let tools = Tools::load(app)?;
     let mut store = app.write()?;
     let retro = learning::resolve_retro(store.conn(), &args.retro)?;
-    let timeout_minutes = i64::try_from(config.curator_timeout_minutes).unwrap_or(i64::MAX);
-    let session_id = new_session_id()?;
-    // The retro is claimed before its scratch directory is touched, so a
-    // run refused here (a curator is still running in that directory)
-    // changes nothing. A dry run claims nothing but is refused the same way.
-    let retro = if args.dry_run {
-        learning::check_start(&retro, app.ctx().now, timeout_minutes)?;
-        retro
-    } else {
-        store
-            .retro_start(&app.ctx(), &retro.id, Some(&session_id), timeout_minutes)?
-            .value
-    };
-    let scratch = tools.scratch_root().join("retros").join(&retro.id);
-    let prepared = brief(&store, &retro).and_then(|brief| {
-        let brief_text = format!(
-            "Retro `{}` of card {}.\n\n```json\n{}\n```\n",
-            retro.id,
-            brief["card"]["tag"].as_str().unwrap_or(""),
-            serde_json::to_string_pretty(&brief)?
-        );
-        if scratch.exists() {
-            // A second run of the same retro gets its own directory.
-            let _ = std::fs::remove_dir_all(&scratch);
-        }
-        curator::write(&curator::LaunchSpec {
-            retro_id: &retro.id,
-            scratch: &scratch,
-            tiller: tools.tiller(),
-            tiller_home: tools.tiller_home(),
-            claude: &tools.config.spawn.claude,
-            model: &config.curator_model,
-            brief: &brief_text,
-        })
-        .map_err(super::spawn::failure)
-    });
-    let launch = match prepared {
-        Ok(launch) => launch,
-        Err(failure) if args.dry_run => return Err(failure),
-        Err(failure) => {
-            // The retro is claimed: end the run so it can start again at once.
-            unfinished(
-                app,
-                &mut store,
-                &retro.id,
-                "the curator could not be prepared",
-            )?;
-            return Err(failure);
-        }
-    };
-    let mut argv = launch.argv.clone();
-    argv.extend(["--session-id".to_owned(), session_id.clone()]);
     if args.dry_run {
+        // A dry run claims nothing but is refused by the same rule.
+        learning::check_start(&retro, app.ctx().now, timeout_minutes(&config))?;
+        let session_id = new_session_id()?;
+        let launch = prepare(&tools, &config, &store, &retro, &session_id)?;
         return Ok(Outcome::read(json!({
             "retro": retro.id,
-            "argv": argv,
+            "argv": launch.argv,
             "env": launch.env,
             "prompt": launch.prompt,
             "settings": launch.settings,
             "dry_run": true,
         })));
     }
-    let ran = match run_with_timeout(
-        &argv,
-        &launch.env,
-        &scratch,
-        Duration::from_secs(config.curator_timeout_minutes.max(1) * 60),
-    ) {
+    // In its own group the curator no longer gets the terminal's Ctrl-C, so
+    // tiller catches it and stops the group itself. Caught before the claim,
+    // so no signal can end tiller and leave the curator running.
+    let interrupt = Interrupt::catch().map_err(|error| {
+        Failure::new(
+            "internal",
+            1,
+            format!("cannot watch for interrupts: {error}"),
+        )
+    })?;
+    let ctx = app.ctx();
+    let claimed = claim(&tools, &config, &mut store, &ctx, &retro.id)?;
+    let ran = match launch(&claimed, &interrupt) {
         Ok(ran) => ran,
         Err(failure) => {
             unfinished(
-                app,
                 &mut store,
-                &retro.id,
+                &ctx,
+                &claimed.retro.value.id,
                 "the curator could not be started",
             )?;
             return Err(failure);
         }
     };
-    let output_path = scratch.join("output.json");
-    let _ = std::fs::write(&output_path, &ran.stdout);
-    let after = learning::resolve_retro(store.conn(), &retro.id)?;
-    let exit = ran.exit;
-    let retro = if after.state == tiller_core::domain::RetroState::Pending {
-        let note = match (&ran.stopped, exit) {
-            (Some(Stopped::Cut), _) => format!(
-                "curator cut after {} minutes without finishing the retro",
-                config.curator_timeout_minutes
-            ),
-            (Some(Stopped::Interrupted), _) => {
-                "curator stopped: tiller retro run was interrupted before the retro was finished"
-                    .to_owned()
-            }
-            (Some(Stopped::Lost(error)), _) => {
-                format!(
-                    "curator stopped: waiting for it failed ({error}) before the retro was finished"
-                )
-            }
-            (None, Some(code)) => format!("curator exited {code} without finishing the retro"),
-            (None, None) => "curator was killed by a signal without finishing the retro".to_owned(),
-        };
-        unfinished(app, &mut store, &retro.id, &note)?
-    } else {
-        after
-    };
+    let ended = end(
+        &mut store,
+        &ctx,
+        &claimed,
+        &ran,
+        "tiller retro run was interrupted",
+    )?;
+    let retro = ended.retro;
     Ok(Outcome::read(json!({
         "retro": retro,
-        "exit": exit,
-        "session_id": session_id,
-        "output": output_path,
+        "exit": ran.exit,
+        "session_id": claimed.session_id,
+        "output": ended.output,
     }))
     .with_warning((retro.outcome == Some(RetroOutcome::Unfinished)).then(|| {
         format!(
@@ -454,11 +395,170 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
     })))
 }
 
+fn timeout_minutes(config: &Learning) -> i64 {
+    i64::try_from(config.curator_timeout_minutes).unwrap_or(i64::MAX)
+}
+
+/// Writes the curator's launch files for `retro` in a fresh scratch
+/// directory: a second run of the same retro gets its own.
+fn prepare(
+    tools: &Tools,
+    config: &Learning,
+    store: &Store,
+    retro: &Retro,
+    session_id: &str,
+) -> Result<curator::Launch, Failure> {
+    let scratch = scratch_of(tools, &retro.id);
+    let brief = brief(store, retro)?;
+    let brief_text = format!(
+        "Retro `{}` of card {}.\n\n```json\n{}\n```\n",
+        retro.id,
+        brief["card"]["tag"].as_str().unwrap_or(""),
+        serde_json::to_string_pretty(&brief)?
+    );
+    if scratch.exists() {
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+    let mut launch = curator::write(&curator::LaunchSpec {
+        retro_id: &retro.id,
+        scratch: &scratch,
+        tiller: tools.tiller(),
+        tiller_home: tools.tiller_home(),
+        claude: &tools.config.spawn.claude,
+        model: &config.curator_model,
+        brief: &brief_text,
+    })
+    .map_err(super::spawn::failure)?;
+    launch
+        .argv
+        .extend(["--session-id".to_owned(), session_id.to_owned()]);
+    Ok(launch)
+}
+
+fn scratch_of(tools: &Tools, retro: &str) -> PathBuf {
+    tools.scratch_root().join("retros").join(retro)
+}
+
+/// A retro claimed for a curator run, with the curator's launch written.
+pub(crate) struct Claimed {
+    /// The claim: the retro reset if it ended `unfinished`, then started.
+    pub retro: tiller_core::Applied<Retro>,
+    session_id: String,
+    scratch: PathBuf,
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+    timeout_minutes: u64,
+}
+
+/// Claims `retro` for a curator run and writes the curator's launch, as
+/// `tiller retro run` does. The retro is claimed before its scratch
+/// directory is touched, so a run refused here (a curator is still running
+/// in that directory) changes nothing. A claimed retro whose curator cannot
+/// be prepared ends `unfinished`, so it can start again at once.
+pub(crate) fn claim(
+    tools: &Tools,
+    config: &Learning,
+    store: &mut Store,
+    ctx: &tiller_core::Ctx,
+    retro: &str,
+) -> Result<Claimed, Failure> {
+    let session_id = new_session_id()?;
+    let claimed = store.retro_start(ctx, retro, Some(&session_id), timeout_minutes(config))?;
+    let launch = match prepare(tools, config, store, &claimed.value, &session_id) {
+        Ok(launch) => launch,
+        Err(failure) => {
+            unfinished(
+                store,
+                ctx,
+                &claimed.value.id,
+                "the curator could not be prepared",
+            )?;
+            return Err(failure);
+        }
+    };
+    Ok(Claimed {
+        scratch: scratch_of(tools, &claimed.value.id),
+        retro: claimed,
+        session_id,
+        argv: launch.argv,
+        env: launch.env,
+        timeout_minutes: config.curator_timeout_minutes,
+    })
+}
+
+/// Runs a claimed retro's curator until it exits, its timeout passes or
+/// `interrupt` is caught. A curator that cannot be started is an error;
+/// the caller ends the retro `unfinished`.
+pub(crate) fn launch(claimed: &Claimed, interrupt: &Interrupt) -> Result<Ran, Failure> {
+    run_with_timeout(
+        &claimed.argv,
+        &claimed.env,
+        &claimed.scratch,
+        Duration::from_secs(claimed.timeout_minutes.max(1) * 60),
+        interrupt,
+    )
+}
+
+/// How a curator run ended.
+pub(crate) struct Ended {
+    /// The retro as the run left it.
+    pub retro: Retro,
+    /// Where the curator's output is kept.
+    output: PathBuf,
+}
+
+/// Keeps the curator's output and ends the retro `unfinished` when the
+/// curator did not finish it, with why in its learning. `interrupted` says
+/// what stopped the run when it was interrupted.
+pub(crate) fn end(
+    store: &mut Store,
+    ctx: &tiller_core::Ctx,
+    claimed: &Claimed,
+    ran: &Ran,
+    interrupted: &str,
+) -> Result<Ended, Failure> {
+    let id = &claimed.retro.value.id;
+    let output = claimed.scratch.join("output.json");
+    let _ = std::fs::write(&output, &ran.stdout);
+    let after = learning::resolve_retro(store.conn(), id)?;
+    if after.state != tiller_core::domain::RetroState::Pending {
+        return Ok(Ended {
+            retro: after,
+            output,
+        });
+    }
+    let note = match (&ran.stopped, ran.exit) {
+        (Some(Stopped::Cut), _) => format!(
+            "curator cut after {} minutes without finishing the retro",
+            claimed.timeout_minutes
+        ),
+        (Some(Stopped::Interrupted), _) => {
+            format!("curator stopped: {interrupted} before the retro was finished")
+        }
+        (Some(Stopped::Lost(error)), _) => {
+            format!(
+                "curator stopped: waiting for it failed ({error}) before the retro was finished"
+            )
+        }
+        (None, Some(code)) => format!("curator exited {code} without finishing the retro"),
+        (None, None) => "curator was killed by a signal without finishing the retro".to_owned(),
+    };
+    Ok(Ended {
+        retro: unfinished(store, ctx, id, &note)?,
+        output,
+    })
+}
+
 /// Ends a claimed retro whose curator did not finish it as `unfinished`,
 /// with `note` as its learning, so the owner can run it again.
-fn unfinished(app: &App, store: &mut Store, retro: &str, note: &str) -> Result<Retro, Failure> {
+pub(crate) fn unfinished(
+    store: &mut Store,
+    ctx: &tiller_core::Ctx,
+    retro: &str,
+    note: &str,
+) -> Result<Retro, Failure> {
     let finished = store.retro_finish(
-        &app.ctx(),
+        ctx,
         None,
         retro,
         Finish {
@@ -471,8 +571,48 @@ fn unfinished(app: &App, store: &mut Store, retro: &str, note: &str) -> Result<R
     Ok(finished.value)
 }
 
+/// The board's Run again (`learning-loop.md` section 4): claims `retro` as
+/// `tiller retro run` does, by the same rules, and returns the run for the
+/// daemon to do on a thread of its own. The daemon ends the run, and the
+/// curator with all it started, by setting the run's flag when it stops.
+pub(crate) fn board_run(
+    app: &App,
+    store: &mut Store,
+    ctx: &tiller_core::Ctx,
+    retro: &str,
+) -> Result<tiller_daemon::api::CuratorRun, Failure> {
+    let config = learning_config(app)?;
+    let tools = Tools::load(app)?;
+    let claimed = claim(&tools, &config, store, ctx, retro)?;
+    let db = app.db.clone();
+    Ok(tiller_daemon::api::CuratorRun {
+        claimed: claimed.retro.clone(),
+        run: Box::new(move |stop| {
+            let interrupt = Interrupt::flag(stop);
+            let ran = launch(&claimed, &interrupt);
+            let mut store = Store::open_current(&db).map_err(|error| error.to_string())?;
+            let ctx = tiller_core::Ctx::new(Actor::Daemon);
+            match ran {
+                Ok(ran) => end(&mut store, &ctx, &claimed, &ran, "the daemon stopped")
+                    .map(|ended| ended.retro)
+                    .map_err(|failure| failure.message.clone()),
+                Err(failure) => {
+                    unfinished(
+                        &mut store,
+                        &ctx,
+                        &claimed.retro.value.id,
+                        "the curator could not be started",
+                    )
+                    .map_err(|failure| failure.message.clone())?;
+                    Err(failure.message.clone())
+                }
+            }
+        }),
+    })
+}
+
 /// What a curator run came to.
-struct Ran {
+pub(crate) struct Ran {
     /// The exit code; `None` when stopped or killed by a signal.
     exit: Option<i32>,
     /// Why tiller stopped it, when it did.
@@ -485,35 +625,27 @@ struct Ran {
 enum Stopped {
     /// The timeout passed.
     Cut,
-    /// tiller got SIGINT, SIGTERM or SIGHUP (the owner's Ctrl-C).
+    /// The interrupt was caught: the owner's Ctrl-C (SIGINT, SIGTERM or
+    /// SIGHUP to `tiller retro run`), or the daemon stopping.
     Interrupted,
     /// Waiting for it failed, with this error.
     Lost(String),
 }
 
 /// Runs the curator in a process group of its own and stops the whole
-/// group when the curator exits, at `timeout`, on an interrupt, or when
-/// waiting for it fails, so nothing it started outlives the run
+/// group when the curator exits, at `timeout`, when `interrupt` is caught,
+/// or when waiting for it fails, so nothing it started outlives the run
 /// (`tiller_herdr::process::wait_all`).
 fn run_with_timeout(
     argv: &[String],
     env: &[(String, String)],
     cwd: &Path,
     timeout: Duration,
+    interrupt: &Interrupt,
 ) -> Result<Ran, Failure> {
     let (program, rest) = argv
         .split_first()
         .ok_or_else(|| Failure::new("internal", 1, "empty curator command"))?;
-    // In its own group the curator no longer gets the terminal's Ctrl-C,
-    // so tiller catches it and stops the group itself. Caught before the
-    // spawn, so no signal can end tiller and leave the curator running.
-    let interrupt = Interrupt::catch().map_err(|error| {
-        Failure::new(
-            "internal",
-            1,
-            format!("cannot watch for interrupts: {error}"),
-        )
-    })?;
     let mut command = Command::new(program);
     command
         .args(rest)
@@ -541,12 +673,12 @@ fn run_with_timeout(
         &mut child,
         deadline,
         Duration::from_millis(200),
-        Some(&interrupt),
+        Some(interrupt),
     ) {
-        Ended::Exited(status) => (status.code(), None),
-        Ended::TimedOut => (None, Some(Stopped::Cut)),
-        Ended::Interrupted => (None, Some(Stopped::Interrupted)),
-        Ended::Failed(error) => (None, Some(Stopped::Lost(error.to_string()))),
+        process::Ended::Exited(status) => (status.code(), None),
+        process::Ended::TimedOut => (None, Some(Stopped::Cut)),
+        process::Ended::Interrupted => (None, Some(Stopped::Interrupted)),
+        process::Ended::Failed(error) => (None, Some(Stopped::Lost(error.to_string()))),
     };
     // A process that left the curator's group can still hold stdout open
     // past its exit, so the read shares the deadline; after a stop it is
@@ -783,7 +915,15 @@ fn eval(app: &App, args: LearnEval) -> Done {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
     use super::*;
+
+    /// An interrupt nothing raises.
+    fn idle() -> Interrupt {
+        Interrupt::flag(Arc::new(AtomicBool::new(false)))
+    }
 
     /// Whether `pid` has exited: no such process, or one only waiting to be
     /// reaped.
@@ -804,7 +944,8 @@ mod tests {
         let script = format!("sleep 300 & echo $! > '{}'; sleep 300", file.display());
         let argv = ["sh".to_owned(), "-c".to_owned(), script];
         let started = Instant::now();
-        let ran = run_with_timeout(&argv, &[], dir.path(), Duration::from_millis(500)).unwrap();
+        let ran =
+            run_with_timeout(&argv, &[], dir.path(), Duration::from_millis(500), &idle()).unwrap();
         assert!(started.elapsed() < Duration::from_secs(5));
         let grandchild = std::fs::read_to_string(&file).unwrap().trim().to_owned();
         let mut stopped = gone(&grandchild);
@@ -826,7 +967,8 @@ mod tests {
             "-c".to_owned(),
             "echo '{\"done\":true}'; exit 2".to_owned(),
         ];
-        let ran = run_with_timeout(&argv, &[], dir.path(), Duration::from_secs(60)).unwrap();
+        let ran =
+            run_with_timeout(&argv, &[], dir.path(), Duration::from_secs(60), &idle()).unwrap();
         assert_eq!((ran.exit, ran.stopped), (Some(2), None));
         assert_eq!(ran.stdout.trim(), "{\"done\":true}");
     }

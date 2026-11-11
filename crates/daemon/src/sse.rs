@@ -455,6 +455,7 @@ mod tests {
             ssh: vec!["ssh".into()],
             evals: crate::memory::eval::Evals::default(),
             backups: crate::backups::BackupJobs::default(),
+            retros: crate::retros::Retros::default(),
         }));
         let mut stopping = stop.clone();
         tokio::spawn(async move {

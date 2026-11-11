@@ -4744,6 +4744,117 @@
         }
       }
     },
+    "/api/v1/retros": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "list_retros",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "query",
+            "description": "Only this project's retros (its id).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Full retros of the last 30 days and every unfinished one, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetrosResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/retros/{id}/run": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "run_retro",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A retro id, or a card reference for its newest retro",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetroRunStart"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The retro is claimed and its curator runs; `data` is the claimed retro, and `GET /api/v1/retros` shows how the run ends",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "done with an outcome other than unfinished, its curator still runs, or another retro of the same card runs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "this daemon cannot run retros",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/runs/{id}": {
       "get": {
         "tags": [
@@ -9871,6 +9982,171 @@
           }
         },
         "additionalProperties": false
+      },
+      "RetroProposal": {
+        "type": "object",
+        "description": "The proposal a retro filed.",
+        "required": [
+          "id",
+          "state"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "section": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The document section it changes, when it names one."
+          },
+          "state": {
+            "type": "string",
+            "description": "`proposed` (waiting for review), `accepted`, `applied`, `discarded`,\n`stale` or `failed`."
+          }
+        }
+      },
+      "RetroRunStart": {
+        "type": "object",
+        "description": "`POST /api/v1/retros/{id}/run`.",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Refused unless absent or this host: a retro run is never forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RetroStatus": {
+        "type": "string",
+        "description": "Where a full retro is now.",
+        "enum": [
+          "running",
+          "unfinished",
+          "done",
+          "pending"
+        ]
+      },
+      "RetroView": {
+        "type": "object",
+        "description": "One full retro, as Memory's Retros list and Health's Learning panel\nshow it.",
+        "required": [
+          "id",
+          "card_id",
+          "card",
+          "title",
+          "project_id",
+          "status",
+          "created_at"
+        ],
+        "properties": {
+          "card": {
+            "type": "string",
+            "description": "The card's display id, `alpha-14`."
+          },
+          "card_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "curator_started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When its newest curator run started."
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "learning": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The learning it kept, or for an unfinished retro why it did not\nfinish."
+          },
+          "outcome": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`nothing`, `evidence`, `proposed` or `unfinished`, once done."
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "proposal": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RetroProposal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "run_refusal": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why Run again is refused now, in plain words; `None` when it would\nstart."
+          },
+          "started_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who started that run: `owner`, `board` or `daemon`."
+          },
+          "status": {
+            "$ref": "#/components/schemas/RetroStatus"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "RetrosResponse": {
+        "type": "object",
+        "description": "`GET /api/v1/retros`.",
+        "required": [
+          "retros",
+          "curator_timeout_minutes"
+        ],
+        "properties": {
+          "curator_timeout_minutes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`learning.curator_timeout_minutes`: a run is cut at this limit.",
+            "minimum": 0
+          },
+          "retros": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RetroView"
+            },
+            "description": "Full retros of the last 30 days and every unfinished one, newest\nfirst."
+          }
+        }
       },
       "ReviewRow": {
         "type": "object",

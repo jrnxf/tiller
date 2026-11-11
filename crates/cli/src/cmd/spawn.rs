@@ -493,6 +493,15 @@ impl tiller_daemon::api::OrchestratorStart for BoardStart {
     ) -> Result<(), String> {
         self.restart_stale_session(store, ctx, session)
     }
+
+    fn retro_run(
+        &self,
+        store: &mut tiller_core::Store,
+        ctx: &tiller_core::Ctx,
+        retro: &str,
+    ) -> Result<tiller_daemon::api::CuratorRun, StartError> {
+        super::learn::board_run(&self.app, store, ctx, retro).map_err(refused)
+    }
 }
 
 impl BoardStart {
