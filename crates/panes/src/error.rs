@@ -34,12 +34,15 @@ pub enum PanesError {
     },
 
     /// The handshake found no protocol version both sides speak.
+    /// `message` is what the holder said when it refused, or empty.
     #[error(
-        "protocol version mismatch: the terminal holder speaks {holder} and this tiller speaks {client}; upgrade the older of the two"
+        "protocol version mismatch: the terminal holder speaks {holder} and this tiller speaks {client}; upgrade the older of the two{}",
+        holder_said(message)
     )]
     Version {
         client: ProtoRange,
         holder: ProtoRange,
+        message: String,
     },
 
     /// The holder sent something the protocol does not allow.
@@ -48,6 +51,15 @@ pub enum PanesError {
 
     #[error(transparent)]
     Io(#[from] io::Error),
+}
+
+/// The holder's refusal text, for the end of a version error.
+fn holder_said(message: &str) -> String {
+    if message.is_empty() {
+        String::new()
+    } else {
+        format!(" (the holder said: {message})")
+    }
 }
 
 pub type Result<T, E = PanesError> = std::result::Result<T, E>;

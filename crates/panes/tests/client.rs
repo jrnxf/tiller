@@ -178,11 +178,17 @@ fn a_holder_with_no_common_version_is_a_clear_version_mismatch() {
     let PanesError::Version {
         client,
         holder: theirs,
+        message,
     } = err
     else {
         panic!("expected a version mismatch, got {err:?}");
     };
     assert_eq!((client, theirs), (SUPPORTED, newer));
+    assert_eq!(message, "no common protocol version");
+    assert!(
+        text.contains(&format!("(the holder said: {message})")),
+        "{text}"
+    );
     assert!(text.contains("protocol version mismatch"), "{text}");
     assert!(
         text.contains(&format!("speaks {newer}")) && text.contains(&format!("speaks {SUPPORTED}")),

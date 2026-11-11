@@ -225,6 +225,7 @@ impl Conn {
                 return Err(PanesError::Version {
                     client: SUPPORTED,
                     holder: refused.proto,
+                    message: brief(&refused.message),
                 });
             }
             other => {
@@ -241,6 +242,7 @@ impl Conn {
                     min: welcome.proto,
                     max: welcome.proto,
                 },
+                message: String::new(),
             });
         }
         Ok((conn, welcome))
@@ -262,10 +264,7 @@ fn brief(text: &str) -> String {
     if text.len() <= QUOTE_BYTES {
         return text.to_owned();
     }
-    let mut end = QUOTE_BYTES;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = text.floor_char_boundary(QUOTE_BYTES);
     format!("{}... ({} bytes)", &text[..end], text.len())
 }
 
@@ -280,10 +279,7 @@ fn brief_debug(value: &impl std::fmt::Debug) -> String {
                 self.0.push_str(text);
                 return Ok(());
             }
-            let mut end = room;
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
+            let end = text.floor_char_boundary(room);
             self.0.push_str(&text[..end]);
             Err(std::fmt::Error)
         }
@@ -702,10 +698,17 @@ impl StreamSide {
     }
 
     /// Records why the stream closed (the first reason stands), and shuts
-    /// the socket.
+    /// the socket. An end shuts both ways, so a waiting read ends now. A
+    /// break shuts only the write side: on some systems a read shutdown
+    /// drops what is buffered, and an exit or a lag buffered there must
+    /// still come. The holder then sees the close and closes its side.
     fn close(&self, why: Closed) {
+        let how = match why {
+            Closed::Ended => Shutdown::Both,
+            Closed::Broken(_) => Shutdown::Write,
+        };
         let _ = self.closed.set(why);
-        let _ = self.socket.shutdown(Shutdown::Both);
+        let _ = self.socket.shutdown(how);
     }
 }
 
@@ -755,7 +758,9 @@ impl Subscription {
         };
         let result = match (result, self.handle.0.closed.get()) {
             (_, Some(Closed::Ended)) => Ok(None),
-            (Err(_), Some(Closed::Broken(why))) => Err(PanesError::Unreachable(why.clone())),
+            (Err(PanesError::Unreachable(_) | PanesError::Io(_)), Some(Closed::Broken(why))) => {
+                Err(PanesError::Unreachable(why.clone()))
+            }
             (result, _) => result,
         };
         let ends = match &result {
