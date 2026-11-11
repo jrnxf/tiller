@@ -12,7 +12,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -191,14 +193,7 @@ impl Retros {
     /// record how it ended.
     pub fn wait(&self, deadline: Instant) {
         let handles: Vec<JoinHandle<()>> = self.runs().drain(..).collect();
-        for handle in handles {
-            while !handle.is_finished() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            if handle.is_finished() {
-                let _ = handle.join();
-            }
-        }
+        crate::server::join_until(handles, deadline);
     }
 }
 

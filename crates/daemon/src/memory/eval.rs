@@ -15,7 +15,9 @@ use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -199,14 +201,7 @@ impl Evals {
     /// say how it ended.
     pub fn wait(&self, deadline: Instant) {
         let threads: Vec<JoinHandle<()>> = self.threads().drain(..).collect();
-        for thread in threads {
-            while !thread.is_finished() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            if thread.is_finished() {
-                let _ = thread.join();
-            }
-        }
+        crate::server::join_until(threads, deadline);
     }
 
     /// A run that recorded: the suggestion's holdout shows it from now on.
