@@ -166,9 +166,10 @@ test("a refusal shows in the dialog and leaves it open", async () => {
   expect(screen.getByRole("dialog", { name: "Unpair host-d?" })).toBeTruthy();
 });
 
+const unpair = (label: string) =>
+  fixtureMutation("DELETE", `/api/v1/peers/${label}`, { idempotency_key: label }, "federated");
+
 test("the fixture unpairs as the daemon does: a host not paired is a no-op", () => {
-  const unpair = (label: string) =>
-    fixtureMutation("DELETE", `/api/v1/peers/${label}`, { idempotency_key: label }, "federated");
   const first = unpair("host-d");
   expect(first.reply.status).toBe(200);
   expect(first.followUps?.map((follow) => follow.event.txn)).toEqual(["peer.remove"]);
