@@ -1081,12 +1081,7 @@ impl Store {
     ) -> Result<Applied<Closed>> {
         self.write(ctx, "card.close", None, |tx| {
             let card_id = resolve_card(tx.conn(), card)?.id;
-            let runs: Vec<Run> = list(
-                tx.conn(),
-                "card_id = ?1 AND ended_at IS NULL ORDER BY started_at",
-                &[&card_id],
-            )?;
-            for run in runs {
+            for run in active_runs(tx.conn(), &card_id)? {
                 super::runs::run_end_in(tx, &run.id, end.clone())?;
             }
             card_close_in(tx, &card_id, outcome, reason, evidence)
@@ -1212,7 +1207,8 @@ impl Store {
     }
 }
 
-/// `card.close`'s transaction body, shared with its rehearsal.
+/// `card.close`'s transaction body, shared with
+/// [`Store::card_close_ending_runs`].
 fn card_close_in(
     tx: &mut Tx<'_>,
     card: &str,

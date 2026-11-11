@@ -393,6 +393,10 @@ impl<H: Herdr> Deliverer<H> {
                         Ok(_) => report.deferred.push((message.id.clone(), reason)),
                         Err(defer) => {
                             tracing::warn!(message = %message.id, error = %defer, "deferring an unrecorded ring failed");
+                            report.errors.push((
+                                message.target_session_id.clone(),
+                                format!("message {}: deferring it failed, so it waits in memory only: {defer}", message.id),
+                            ));
                             self.quiet(&[message], until);
                         }
                     }

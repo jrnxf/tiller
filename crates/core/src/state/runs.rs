@@ -542,7 +542,7 @@ fn worktree_returned(conn: &Connection, run: &Run, path: &str) -> Result<bool> {
     )?)
 }
 
-/// `run.end`'s transaction body, shared with a card close's rehearsal.
+/// `run.end`'s transaction body, shared with `Store::card_close_ending_runs`.
 pub(crate) fn run_end_in(tx: &mut Tx<'_>, run: &str, end: EndRun) -> Result<Run> {
     let run = load_run(tx, run)?;
     if run.outcome == Some(end.outcome) {

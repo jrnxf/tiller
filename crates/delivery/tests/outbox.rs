@@ -381,15 +381,25 @@ fn a_record_that_fails_midway_does_not_strand_the_rest_of_the_batch() {
 
     let report = w.deliverer.pass(at(4)).unwrap();
     assert_eq!(w.typed(), 1, "one line for the batch");
-    assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+    // The fault refuses the defer too, so the message waits in memory, and
+    // the report says so.
+    assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
     assert!(
         report.errors[0].1.contains("disk fault"),
         "{:?}",
         report.errors
     );
     assert!(
-        report.errors[0].1.contains(&second.id),
-        "the entry names the message: {:?}",
+        report
+            .errors
+            .iter()
+            .all(|(_, error)| error.contains(&second.id)),
+        "each entry names the message: {:?}",
+        report.errors
+    );
+    assert!(
+        report.errors[1].1.contains("waits in memory only"),
+        "{:?}",
         report.errors
     );
     assert_eq!(report.rung, [first.id.clone(), third.id.clone()]);
