@@ -676,12 +676,7 @@ function view(doc: Doc, landed: Landed[]): MemoryDocument {
 
 // What a holdout eval of `proposalId` will cost against the weekly window
 // with the least left, and why it would not start, as the daemon plans it.
-function plan(
-  s: State,
-  proposalId: string,
-  windows: QuotaWindow[],
-  now: number,
-): MemoryEvalPlan | undefined {
+function plan(s: State, proposalId: string, windows: QuotaWindow[]): MemoryEvalPlan | undefined {
   const found = find(s, proposalId);
   const sug = found && (found.line?.suggestion ?? found.section.suggestions[found.added]);
   if (!sug) return undefined;
@@ -724,8 +719,6 @@ function plan(
       `it would leave ${after} percent of the week, at or under the ${FLOOR} percent floor`,
     );
   }
-  // The stand-in windows reset on a fixed day; the plan names the next one.
-  const resets = least?.resets_at ?? null;
   return {
     proposal_id: sug.proposal_id,
     change_set: s.sets.get(sug.proposal_id) ?? short(sug.proposal_id),
@@ -738,8 +731,8 @@ function plan(
       left,
       floor: FLOOR,
       left_after: after,
-      resets_at:
-        resets && Date.parse(resets) > now ? resets : least ? minutes(now, 60 * 24 * 4) : null,
+      // The window's own reset, as the sidebar shows it.
+      resets_at: least?.resets_at ?? null,
       fetched_at: least?.fetched_at ?? null,
     },
     refusal: refusals[0] ?? null,
@@ -752,7 +745,6 @@ function plan(
 export function memoryResource(
   url: URL,
   quota: QuotaWindow[] = [],
-  now: number = Date.now(),
 ): MemoryResponse | MemoryRevision | MemoryEvalPlan | undefined {
   const s = current();
   if (url.pathname === "/api/v1/memory") {
@@ -771,7 +763,7 @@ export function memoryResource(
   const revision = /^\/api\/v1\/memory\/revisions\/([^/]+)$/.exec(url.pathname);
   if (revision?.[1]) return s.revisions.get(revision[1]);
   const evalPlan = /^\/api\/v1\/memory\/proposals\/([^/]+)\/eval$/.exec(url.pathname);
-  if (evalPlan?.[1]) return plan(s, evalPlan[1], quota, now);
+  if (evalPlan?.[1]) return plan(s, evalPlan[1], quota);
   return undefined;
 }
 
@@ -987,7 +979,7 @@ function decide(s: State, body: Record<string, unknown>): MemoryReply {
 // Starts the stand-in holdout eval, which passes EVAL_MS later.
 function startEval(s: State, proposalId: string, quota: QuotaWindow[]): MemoryReply {
   const now = Date.now();
-  const planned = plan(s, proposalId, quota, now);
+  const planned = plan(s, proposalId, quota);
   if (!planned) return { ok: false, status: 404, code: "not_found", message: "no such proposal" };
   if (planned.refusal) return refuse(`proposal ${proposalId}: ${planned.refusal}`);
   // A later start replaces the failed one it retries.

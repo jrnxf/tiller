@@ -135,13 +135,25 @@ export function quotaDot(input: DotInput): QuotaDot {
 
 const minutes = (now: number, delta: number) => new Date(now + delta * 60_000).toISOString();
 
+const WEEK = 7 * 24 * 60 * 60_000;
+
+// The stand-in week resets on Tuesdays at 14:00 Lisbon time: the first such
+// reset after `now`, so every screen that names it (the sidebar, Health and
+// the holdout plan) names the same future time on any day.
+const WEEK_RESET = Date.parse("2026-11-03T14:00:00.000Z");
+function weekOffset(now: number): number {
+  return Math.max(0, Math.ceil((now - WEEK_RESET) / WEEK)) * WEEK;
+}
+const weekly = (now: number, at: string) =>
+  new Date(Date.parse(at) + weekOffset(now)).toISOString();
+
 function weeklyWindow(
   now: number,
   fields: Partial<Omit<QuotaWindow, "dot" | "label" | "kind" | "title">> = {},
 ): QuotaWindow {
   const base = {
     percent_remaining: 27,
-    resets_at: "2026-11-03T14:00:00.000Z",
+    resets_at: weekly(now, "2026-11-03T14:00:00.000Z"),
     pace: "behind",
     reserve: 8,
     burn_multiple: 0.8,
@@ -190,7 +202,7 @@ function modelWindow(now: number): QuotaWindow {
     title: "Fable week",
     kind: "model",
     percent_remaining: 94,
-    resets_at: "2026-11-03T14:00:00.000Z",
+    resets_at: weekly(now, "2026-11-03T14:00:00.000Z"),
     pace: "behind",
     reserve: 22,
     burn_multiple: 0.4,
@@ -225,7 +237,7 @@ function quotaFor(scenario: Scenario, now: number): QuotaResponse {
             pace: "ahead",
             burn_multiple: 2.2,
             reserve: -31,
-            projected_exhaustion_at: "2026-11-02T20:00:00.000Z",
+            projected_exhaustion_at: weekly(now, "2026-11-02T20:00:00.000Z"),
           }),
           sessionWindow(now),
           modelWindow(now),
@@ -1726,7 +1738,7 @@ export function fixtureResource(
   if (url.pathname === "/api/v1/projects/checkout") return checkoutFor(url);
   if (url.pathname.startsWith("/api/v1/memory")) {
     settleRetros(now);
-    return memoryResource(url, quotaFor(served, now).windows, now);
+    return memoryResource(url, quotaFor(served, now).windows);
   }
   if (url.pathname === "/api/v1/retros") return retrosResource(url, now);
   // No project starts archived; the stand-in server adds the ones archived since.

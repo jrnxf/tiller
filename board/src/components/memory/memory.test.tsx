@@ -1074,6 +1074,26 @@ test("under the quota floor the eval does not start, and the dialog says when th
   expect(calls).toEqual([]);
 });
 
+test("the eval plan names the week's reset that the sidebar names, on any day", () => {
+  // A day after the stand-in week's first reset: the week has moved on.
+  const later = Date.parse("2026-11-11T12:00:00Z");
+  const quota = fixtureResource("/api/v1/quota", "quota-red", later) as {
+    windows: { kind: string; resets_at: string | null }[];
+  };
+  const week = quota.windows.find((each) => each.kind === "weekly");
+  const memory = JSON.stringify(fixtureResource("/api/v1/memory", "quota-red", later));
+  const plans = [...memory.matchAll(/"proposal_id":"([^"]+)"/g)]
+    .map((match) =>
+      fixtureResource(`/api/v1/memory/proposals/${match[1]}/eval`, "quota-red", later),
+    )
+    .filter((each) => each !== undefined) as { quota: { resets_at: string | null } }[];
+
+  expect(plans.length).toBeGreaterThan(0);
+  // Tuesday 2026-11-17, 14:00 Lisbon time: the next reset after `later`.
+  expect(week?.resets_at).toBe("2026-11-17T14:00:00.000Z");
+  for (const each of plans) expect(each.quota.resets_at).toBe(week?.resets_at);
+});
+
 test("a stale quota reading fails closed: the eval does not start", async () => {
   stubDaemon("quota-grey");
   await renderMemory();

@@ -25,9 +25,9 @@ function stubMedia(dark: boolean) {
   }));
 }
 
-async function renderApp(scenario: Scenario = "default", path = "/") {
+async function renderApp(scenario: Scenario = "default", path = "/", now = Date.now()) {
   const queryClient = createTestQueryClient();
-  hydrateFromSnapshot(queryClient, fixtureSnapshot(scenario));
+  hydrateFromSnapshot(queryClient, fixtureSnapshot(scenario, now));
   const router = createAppRouter(queryClient, createMemoryHistory({ initialEntries: [path] }));
   await router.load();
   render(
@@ -66,16 +66,18 @@ test("the first render is the whole shell: no pending or loading UI, nothing to 
 });
 
 test.each([
-  ["default", "green", "27% week left"],
-  ["quota-amber", "amber", "41% week left"],
-  ["quota-red", "red", "2% week left"],
-  ["quota-grey", "grey", "27% week left"],
-] as const)("the quota dot for %s is %s", async (scenario, dot, label) => {
-  await renderApp(scenario);
+  ["default", "green", "27% week left", "resets Tue 14:00"],
+  ["quota-amber", "amber", "41% week left", "resets Tue 14:00"],
+  // The pace runs the week out before it resets.
+  ["quota-red", "red", "2% week left", "empty in 8h"],
+  ["quota-grey", "grey", "27% week left", "out of date"],
+] as const)("the quota dot for %s is %s", async (scenario, dot, label, note) => {
+  // A fixed day, so the runway does not depend on today's date.
+  await renderApp(scenario, "/", Date.parse("2026-11-02T12:00:00Z"));
   const footer = screen.getByTestId("quota-footer");
   expect(footer.querySelector("[data-dot]")?.getAttribute("data-dot")).toBe(dot);
   expect(footer.textContent).toContain(label);
-  expect(footer.textContent).toContain(dot === "grey" ? "out of date" : "resets Tue 14:00");
+  expect(footer.textContent).toContain(note);
 });
 
 test("nothing on screen is an email or account id", async () => {
