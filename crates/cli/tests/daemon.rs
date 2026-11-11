@@ -40,10 +40,9 @@ fn spawn(world: &World, args: &[&str]) -> Running {
 fn daemon_command(world: &World) -> Command {
     let empty = world.dir.path().join("empty-path");
     std::fs::create_dir_all(&empty).unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tiller"));
+    let mut command = world.bare_command();
     command
         .args(["daemon", "--port", "0"])
-        .env("TILLER_HOME", world.home())
         .env("PATH", &empty)
         .env_remove("TILLER_HERDR")
         .env("TILLER_QUOTA_AXI", "/nonexistent/quota-axi")
@@ -1175,42 +1174,17 @@ fn a_stopping_daemon_stops_the_curator_the_board_started() {
     let mut daemon = start(&world);
     let (status, answer) = run_again(&world, daemon.port, &retro, "run-1");
     assert_eq!(status, "HTTP/1.0 200 OK", "{answer}");
-    let written =
-        |name: &str| std::fs::read_to_string(pid_file(name)).is_ok_and(|text| text.ends_with('\n'));
-    let deadline = Instant::now() + WAIT;
-    while !(written("curator.pid") && written("grandchild.pid")) {
-        assert!(
-            Instant::now() < deadline,
-            "the stand-in curator never started"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let read = |name: &str| {
-        std::fs::read_to_string(pid_file(name))
-            .unwrap()
-            .trim()
-            .to_owned()
-    };
-    let (curator, grandchild) = (read("curator.pid"), read("grandchild.pid"));
+    let curator = written_pid(&pid_file("curator.pid"));
+    let grandchild = written_pid(&pid_file("grandchild.pid"));
     let view = retro_view(daemon.port, &retro);
     assert_eq!(view["status"], "running", "{view}");
     // Run again is off while it runs.
     assert!(view["run_refusal"].is_string(), "{view}");
 
     let stopped = terminate(&mut daemon);
-    let gone = |pid: &str| {
-        let out = Command::new("ps")
-            .args(["-o", "stat=", "-p", pid])
-            .output()
-            .unwrap();
-        let stat = String::from_utf8_lossy(&out.stdout);
-        stat.trim().is_empty() || stat.trim_start().starts_with('Z')
-    };
     let ended = gone(&curator) && gone(&grandchild);
     // Whatever happened, take every process this test started down with it.
-    for pid in [&curator, &grandchild] {
-        let _ = Command::new("kill").args(["-KILL", pid]).status();
-    }
+    reap_all(&[&curator, &grandchild]);
     assert!(stopped.success());
     assert!(ended, "the curator or its child outlived the daemon");
     let shown = world.must(&["retro", "show", &retro]);
@@ -1259,10 +1233,13 @@ fn gone(pid: &str) -> bool {
     }
 }
 
-/// Kills `pids` whatever happened, so a failed check leaves none behind.
+/// Kills each of `pids` that [`gone`] found still running, so a failed
+/// check leaves none behind, and no pid that another process took since.
 fn reap_all(pids: &[&str]) {
     for pid in pids {
-        let _ = Command::new("kill").args(["-KILL", pid]).status();
+        if !gone(pid) {
+            let _ = Command::new("kill").args(["-KILL", pid]).status();
+        }
     }
 }
 
@@ -1301,25 +1278,66 @@ fn a_dropped_daemon_leaves_no_curator_behind() {
     );
 }
 
+/// Set in the copy of this test binary that
+/// `a_guard_kills_a_child_that_ignores_sigterm_and_its_groups` starts: the
+/// folder it writes its children's pids to.
+const GUARD_CHILD: &str = "TILLER_GUARD_CHILD";
+
 /// The guard kills a child that ignores SIGTERM, with what it started, even
-/// a process in a group of its own (`set -m` gives each background job one).
+/// a process that leads a group of its own, as a curator does.
+///
+/// A shell without a terminal cannot give a job its own group (`set -m`
+/// turns job control off), so the child is a copy of this test binary,
+/// started through a shell that ignores SIGTERM, which `exec` keeps.
 #[test]
 fn a_guard_kills_a_child_that_ignores_sigterm_and_its_groups() {
+    if let Some(dir) = std::env::var_os(GUARD_CHILD) {
+        use std::os::unix::process::CommandExt;
+        let dir = std::path::PathBuf::from(dir);
+        let mut leader = Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        std::fs::write(dir.join("leader"), format!("{}\n", leader.id())).unwrap();
+        let mut plain = Command::new("sleep").arg("300").spawn().unwrap();
+        std::fs::write(dir.join("plain"), format!("{}\n", plain.id())).unwrap();
+        // Waits until the guard kills them all.
+        let _ = plain.wait();
+        let _ = leader.wait();
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
-    let script = format!(
-        "trap '' TERM\nset -m\nsleep 300 &\necho $! > '{dir}/job'\nwait\n",
-        dir = dir.path().display()
-    );
-    let child = Command::new("sh").args(["-c", &script]).spawn().unwrap();
-    let shell = child.id().to_string();
+    let child = Command::new("sh")
+        .args([
+            "-c",
+            "trap '' TERM; exec \"$0\" --exact \"$1\" --test-threads 1",
+        ])
+        .arg(std::env::current_exe().unwrap())
+        .arg("a_guard_kills_a_child_that_ignores_sigterm_and_its_groups")
+        .env(GUARD_CHILD, dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
     let running = Running::with_grace(child, Duration::from_millis(300));
-    let job = written_pid(&dir.path().join("job"));
+    let leader = written_pid(&dir.path().join("leader"));
+    let plain = written_pid(&dir.path().join("plain"));
+    let group = Command::new("ps")
+        .args(["-o", "pgid=", "-p", &leader])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&group.stdout).trim(),
+        leader,
+        "the stand-in does not lead a group of its own"
+    );
     drop(running);
-    let ended = (gone(&shell), gone(&job));
-    reap_all(&[&shell, &job]);
+    let ended = (gone(&leader), gone(&plain));
+    reap_all(&[&leader, &plain]);
     assert_eq!(
         ended,
         (true, true),
-        "the shell or its job outlived the guard"
+        "a process the child started outlived the guard"
     );
 }

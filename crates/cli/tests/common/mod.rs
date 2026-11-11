@@ -506,10 +506,11 @@ pub fn parse_cpu_list(text: &str) -> Vec<usize> {
 ///
 /// The child first gets SIGTERM and `grace` to stop the way it does for
 /// the owner: a daemon then stops its curators and herdr calls itself.
-/// When it is still running after that, it is frozen with SIGSTOP and
-/// SIGKILL takes it and every process under it, with the whole process
-/// group of each one that leads a group of its own (a curator does). A
-/// process that outlives a clean stop is killed too, with its group.
+/// When it is still running after that, it and every process under it are
+/// frozen with SIGSTOP, so none starts another, then killed with SIGKILL,
+/// with the whole process group of each one that leads a group of its own
+/// (a curator does). A process seen under the child while it stopped that
+/// still runs after a clean stop is killed the same way.
 pub struct Running {
     child: std::process::Child,
     grace: std::time::Duration,
@@ -525,6 +526,10 @@ impl Running {
 
     pub fn with_grace(child: std::process::Child, grace: std::time::Duration) -> Self {
         Self { child, grace }
+    }
+
+    fn runs(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
     }
 }
 
@@ -546,7 +551,7 @@ impl Drop for Running {
         use nix::sys::signal::{Signal, kill};
         use nix::unistd::Pid;
         // A reaped child's pid may belong to another process by now.
-        if !matches!(self.child.try_wait(), Ok(None)) {
+        if !self.runs() {
             return;
         }
         let Ok(raw) = i32::try_from(self.child.id()) else {
@@ -555,35 +560,52 @@ impl Drop for Running {
             return;
         };
         let root = Pid::from_raw(raw);
-        let before = descendants(raw);
+        let mut seen = descendants(raw);
         let _ = kill(root, Signal::SIGTERM);
         let deadline = std::time::Instant::now() + self.grace;
-        while matches!(self.child.try_wait(), Ok(None)) && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(20));
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            // Read only while the child is unreaped: until then its pid is
+            // its own, and so are the children `ps` names under it.
+            if !self.runs() {
+                break;
+            }
+            add_new(&mut seen, descendants(raw));
         }
-        if matches!(self.child.try_wait(), Ok(None)) {
-            // Frozen, it starts nothing new while its tree is read and killed.
+        if self.runs() {
             let _ = kill(root, Signal::SIGSTOP);
-            kill_all(&descendants(raw));
+            let tree = freeze(raw);
+            kill_all(&tree);
             let _ = self.child.kill();
             let _ = self.child.wait();
             return;
         }
-        // Stopped by itself; anything it left that still runs as it was
-        // (same pid, group and command line, so not a reused pid) goes too.
+        // Stopped by itself. A process it started that outlived it now has
+        // another parent, so it is matched by pid, group and command line,
+        // which a reused pid does not share.
         let now = processes();
-        let left: Vec<Process> = before.into_iter().filter(|p| now.contains(p)).collect();
+        let left: Vec<Process> = seen
+            .into_iter()
+            .filter(|p| now.iter().any(|q| q.same(p)))
+            .collect();
         kill_all(&left);
     }
 }
 
 /// One row of the process table.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 struct Process {
     pid: i32,
     ppid: i32,
     pgid: i32,
     args: String,
+}
+
+impl Process {
+    /// The same process: its parent may have changed since.
+    fn same(&self, other: &Process) -> bool {
+        self.pid == other.pid && self.pgid == other.pgid && self.args == other.args
+    }
 }
 
 /// Every process on the host, from `ps`, which Linux and macOS share.
@@ -612,7 +634,7 @@ fn processes() -> Vec<Process> {
         .collect()
 }
 
-/// Every process under `root`, children before their own children.
+/// Every process under `root`.
 fn descendants(root: i32) -> Vec<Process> {
     let table = processes();
     let mut found: Vec<Process> = Vec::new();
@@ -628,6 +650,37 @@ fn descendants(root: i32) -> Vec<Process> {
     found
 }
 
+/// Adds to `seen` each process of `found` it does not hold yet, and
+/// returns how many it added.
+fn add_new(seen: &mut Vec<Process>, found: Vec<Process>) -> usize {
+    let before = seen.len();
+    for process in found {
+        if !seen.iter().any(|p| p.same(&process)) {
+            seen.push(process);
+        }
+    }
+    seen.len() - before
+}
+
+/// SIGSTOP to every process under the stopped `root`, read again until a
+/// read finds none it had not stopped, so none of them starts another.
+/// Returns them all.
+fn freeze(root: i32) -> Vec<Process> {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    let mut tree = Vec::new();
+    for _ in 0..20 {
+        let before = tree.len();
+        if add_new(&mut tree, descendants(root)) == 0 {
+            break;
+        }
+        for process in &tree[before..] {
+            let _ = kill(Pid::from_raw(process.pid), Signal::SIGSTOP);
+        }
+    }
+    tree
+}
+
 /// SIGKILL to each process, and to the group of each one that leads its
 /// own. The test's own group is never signalled.
 fn kill_all(processes: &[Process]) {
@@ -640,4 +693,51 @@ fn kill_all(processes: &[Process]) {
         }
         let _ = kill(Pid::from_raw(process.pid), Signal::SIGKILL);
     }
+}
+
+/// The real daemon on a free port, with a `PATH` that holds `git` and
+/// nothing else, so no poller reaches a real herdr, `gh` or `quota-axi`.
+/// Returns its guard and its port.
+pub fn git_only_daemon(world: &World) -> (Running, u16) {
+    use std::io::BufRead;
+    use std::process::Stdio;
+    let bin = world.dir.path().join("git-only");
+    std::fs::create_dir_all(&bin).unwrap();
+    let found = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let git = String::from_utf8(found.stdout).unwrap();
+    std::os::unix::fs::symlink(git.trim(), bin.join("git")).unwrap();
+    let mut child = Running::new(
+        world
+            .bare_command()
+            .args(["daemon", "--port", "0"])
+            .env("PATH", &bin)
+            .env("TILLER_HERDR", "/nonexistent/herdr")
+            .env("TILLER_QUOTA_AXI", "/nonexistent/quota-axi")
+            .env("TILLER_LOG", "warn")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = std::io::BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the daemon said nothing");
+    let port = line
+        .trim()
+        .strip_prefix("listening on http://127.0.0.1:")
+        .unwrap_or_else(|| panic!("unexpected first line {line:?}"))
+        .parse()
+        .unwrap();
+    (child, port)
 }
