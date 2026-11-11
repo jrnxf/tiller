@@ -395,3 +395,15 @@ pub fn snap(world: &World, name: &str, out: &Out) {
         insta::assert_snapshot!(name, world.snapshot(out));
     });
 }
+
+/// CPU time (user plus system) of every child this process has reaped. The
+/// difference across one call is that call's own work: unlike wall time it
+/// does not grow when other processes compete for the cores.
+pub fn children_cpu() -> std::time::Duration {
+    use nix::sys::resource::{UsageWho, getrusage};
+    use std::time::Duration;
+    let usage = getrusage(UsageWho::RUSAGE_CHILDREN).unwrap();
+    let timeval =
+        |t: nix::sys::time::TimeVal| Duration::new(t.tv_sec() as u64, t.tv_usec() as u32 * 1000);
+    timeval(usage.user_time()) + timeval(usage.system_time())
+}

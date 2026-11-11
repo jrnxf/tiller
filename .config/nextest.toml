@@ -4,11 +4,12 @@
 filter = 'binary(hook) & test(hook_is_inside_the_ten_ms_budget_with_the_daemon_down)'
 threads-required = "num-test-threads"
 
-# The startup check (T2.2) measures wall-clock time too. On a two-core runner
-# one neighbouring test takes a whole core and pushed its quartile from about
-# 9 ms over the 10 ms bound. The test checks that it is in the `wall-clock`
-# group, so a rename that drops it from this filter fails loudly instead of
-# running it in parallel again.
+# The startup check (T2.2) gates the 10 ms budget on the command's own CPU
+# time, and keeps a wall-clock ceiling that only a wait reaches. It still runs
+# alone, so its neighbours do not share the cores it measures: on a two-core
+# runner one of them took a whole core. The test checks that it is in the
+# `wall-clock` group, so a rename that drops it from this filter fails loudly
+# instead of running it in parallel again.
 [test-groups]
 wall-clock = { max-threads = 1 }
 

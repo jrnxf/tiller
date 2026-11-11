@@ -1,5 +1,7 @@
 //! `tiller hook` end to end: the real binary, a real `state.db`, no daemon.
 
+mod common;
+
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -9,6 +11,8 @@ use tiller_core::domain::{Activity, Boundary, Delivery, Session};
 use tiller_core::state::projects::{Init, NewProject};
 use tiller_core::state::runs::NewOrchestrator;
 use tiller_core::{Actor, Ctx, Store};
+
+use common::children_cpu;
 
 /// A home with an initialized `state.db` and a live orchestrator; returns
 /// its session id.
@@ -92,18 +96,6 @@ fn hook_as(
         .unwrap();
     let output = child.wait_with_output().unwrap();
     (started.elapsed(), children_cpu() - cpu_before, output)
-}
-
-/// CPU time (user plus system) of every child this process has reaped. The
-/// difference across one call is that call's own work: unlike wall time it
-/// does not grow when other processes compete for the cores.
-#[cfg(test)]
-fn children_cpu() -> Duration {
-    use nix::sys::resource::{UsageWho, getrusage};
-    let usage = getrusage(UsageWho::RUSAGE_CHILDREN).unwrap();
-    let timeval =
-        |t: nix::sys::time::TimeVal| Duration::new(t.tv_sec() as u64, t.tv_usec() as u32 * 1000);
-    timeval(usage.user_time()) + timeval(usage.system_time())
 }
 
 /// The T2.6 budget is 10 ms for a hook call with no daemon. This is that
