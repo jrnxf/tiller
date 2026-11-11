@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -16,6 +16,7 @@ import { loadPrefs, prefsStore, updatePrefs } from "../../lib/prefs";
 import { createQueryClient } from "../../lib/query-client";
 import { createAppRouter } from "../../lib/router";
 import { niceAxis } from "./charts";
+import { mutationPhrase } from "./mutation-phrases";
 import { lisbonDay, lisbonWeekLabel } from "./lisbon";
 import { BUSY_WEEK_FACTOR, SLOW_ANSWER_MINUTES, quotaBlockOf, signalsOf } from "./model";
 import { choose } from "../../test-select";
@@ -257,7 +258,7 @@ test("safety lists the owner's CLI decisions without counting them as incidents"
   expect(safety.facts).toContain("CLI decisions 2");
   expect(safety.read).toBe(
     "Nothing lost, sent twice or unauthorized. Both machines are live. " +
-      "Last from a terminal: approval.decide alpha-31 Wed 14:02, zsh on pts/3.",
+      "Last from a terminal: decided an approval on alpha-31, Wed 14:02, zsh on pts/3.",
   );
 
   // Only last week's: nothing is named for this week.
@@ -272,7 +273,7 @@ test("safety lists the owner's CLI decisions without counting them as incidents"
     },
     "safety",
   );
-  expect(bare.read).toMatch(/Last from a terminal: project\.add Thu 10:00, zsh\.$/);
+  expect(bare.read).toMatch(/Last from a terminal: added a project, Thu 10:00, zsh\.$/);
 
   // An empty parent name says nothing, so the terminal is named alone.
   const nameless = signal(
@@ -282,7 +283,56 @@ test("safety lists the owner's CLI decisions without counting them as incidents"
     },
     "safety",
   );
-  expect(nameless.read).toMatch(/Last from a terminal: project\.add Thu 10:00, pts\/3\.$/);
+  expect(nameless.read).toMatch(/Last from a terminal: added a project, Thu 10:00, pts\/3\.$/);
+});
+
+function readOfOne(txn: string, card: string | null) {
+  const response = {
+    ...counts({ cli_decisions: 1 }),
+    cli_decisions: [decision("2026-10-28T14:02:00.000Z", txn, card)],
+  };
+  return signal(response, "safety").read;
+}
+
+test("the Safety sentence never shows an internal mutation name", () => {
+  expect(readOfOne("card.close", "beta-16")).toMatch(
+    /Last from a terminal: closed beta-16, Wed 14:02,/,
+  );
+  expect(readOfOne("card.close", null)).toMatch(/Last from a terminal: closed a card, Wed 14:02,/);
+  // A name the board has no phrase for reads generically, never raw.
+  const unknown = readOfOne("widget.frobnicate", "beta-16");
+  expect(unknown).toMatch(/Last from a terminal: made a change on beta-16, Wed 14:02,/);
+  expect(unknown).not.toMatch(/frobnicate|widget/);
+  // A name that is only a property of every object is still unknown.
+  expect(readOfOne("constructor", null)).toMatch(/Last from a terminal: made a change, Wed 14:02,/);
+});
+
+// The names come from the Rust sources: every mutation that can write events
+// is `store.write(ctx, "<name>", ...)` or `write_as(ctx, "<name>", ...)`. A
+// new one needs a plain phrase, or an owner CLI decision of that kind would
+// read as "made a change".
+test("every mutation the daemon records has a plain phrase", () => {
+  const root = resolve(import.meta.dirname, "../../../../crates");
+  const names = new Set<string>();
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = resolve(dir, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (entry.name.endsWith(".rs")) {
+        const text = readFileSync(path, "utf8");
+        for (const [, name] of text.matchAll(/\.write(?:_as)?\(\s*&?[\w.()]+\s*,\s*"([\w.]+)"/g)) {
+          if (name) names.add(name);
+        }
+      }
+    }
+  };
+  walk(root);
+  // Guards the scan itself: it must find the mutations, not match nothing.
+  expect(names.size).toBeGreaterThan(100);
+  expect(names).toContain("approval.decide");
+  const bare = [...names].filter((name) => mutationPhrase(name, null) === "made a change");
+  expect(bare).toEqual([]);
+  for (const name of names) expect(mutationPhrase(name, "alpha-31"), name).not.toContain(name);
 });
 
 test("a machine that is down puts Safety on watch without calling the system broken", () => {
@@ -452,8 +502,32 @@ test("an install with no data says so on every signal card instead of Good", asy
     const card = within(page).getByRole("article", { name: `${title}: No data yet` });
     expect(card.getAttribute("data-state")).toBe("none");
     expect(card.querySelector(".state")?.textContent).toBe("No data yet");
+    // The trend line is as muted as the badge, not the green of a good week.
+    expect(card.querySelector(".spark")?.classList.contains("muted"), title).toBe(true);
   }
   expect(within(page).queryByText("Good")).toBeNull();
+});
+
+test("the sparkline is muted only on a card with no data, and the muted tone has rules", async () => {
+  await renderHealth("default");
+  const page = screen.getByTestId("health");
+  for (const card of within(page).getAllByRole("article")) {
+    const state = card.getAttribute("data-state");
+    if (!card.querySelector(".spark")) continue;
+    expect(card.querySelector(".spark")?.classList.contains("muted"), `${state} card`).toBe(
+      state === "none",
+    );
+  }
+  // jsdom lays nothing out, so this holds the rules: the line, the week
+  // dots and the newest dot all leave the accent for the badge's tone.
+  const css = readFileSync(resolve(import.meta.dirname, "health.css"), "utf8");
+  for (const selector of [
+    ".spark.muted .sp-now",
+    ".spark.muted .sp-pt",
+    ".spark.muted .sp-pt.cur",
+  ]) {
+    expect(css, selector).toContain(`${selector} {`);
+  }
 });
 
 test("every tone and state the Health page can show has a style", () => {

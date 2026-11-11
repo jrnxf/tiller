@@ -61,7 +61,12 @@ function SignalCard({
           </span>
         ))}
       </div>
-      <Spark label={signal.title} values={signal.values} weeks={weeks} />
+      <Spark
+        label={signal.title}
+        values={signal.values}
+        weeks={weeks}
+        muted={signal.state === "none"}
+      />
       <footer>
         <span>Last 8 weeks</span>
         <b>{signal.last}</b>

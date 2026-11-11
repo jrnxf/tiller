@@ -389,15 +389,18 @@ export function LineChart(props: ChartProps) {
 }
 
 // The 8-week trend under a signal: a line with a dot per week, the newest
-// larger, and the first and last week named.
+// larger, and the first and last week named. `muted` draws it in the neutral
+// tone of the "No data yet" badge, so a card with no data is not green.
 export function Spark({
   label,
   values,
   weeks,
+  muted = false,
 }: {
   label: string;
   values: number[];
   weeks: { label: string; start: string }[];
+  muted?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const width = useWidth(ref, 140);
@@ -411,7 +414,7 @@ export function Spark({
   const y = (v: number) => top + (h - top - bottom) * (1 - (v - lo) / span);
   const last = values.length - 1;
   return (
-    <div className="spark" ref={ref}>
+    <div className={muted ? "spark muted" : "spark"} ref={ref}>
       <svg
         viewBox={`0 0 ${width} ${h}`}
         width={width}

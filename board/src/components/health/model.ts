@@ -7,6 +7,7 @@ import type {
 } from "../../lib/api-types";
 import { formatLisbon, formatLisbonRounded } from "../../lib/clock";
 import { lisbonDay } from "./lisbon";
+import { mutationPhrase } from "./mutation-phrases";
 
 // Everything the Health page says is computed here from `GET /api/v1/signals`
 // and `GET /api/v1/quota`, so a test can pin each number to its source. The
@@ -210,13 +211,14 @@ function machinesSentence(live: number, total: number): string {
 const present = (part: string | null | undefined): part is string => Boolean(part);
 
 // One CLI decision as the Safety read names it, so the owner can tell one
-// they did not make: "approval.decide alpha-31 Sun 14:02, zsh on pts/3".
+// they did not make: "decided an approval on alpha-31, Sun 14:02, zsh on
+// pts/3". The mutation's internal name becomes plain words.
 function cliDecision(decision: SignalsCliDecision): string {
-  const head = [decision.txn, decision.display_id, formatLisbon(decision.at)].filter(present);
+  const head = [mutationPhrase(decision.txn, decision.display_id), formatLisbon(decision.at)];
   const tty = decision.tty?.replace(/^\/dev\//, "");
   // An empty name says nothing, so it counts as none.
   const where = decision.parent && tty ? `${decision.parent} on ${tty}` : decision.parent || tty;
-  return [head.join(" "), where].filter(present).join(", ");
+  return [...head, where].filter(present).join(", ");
 }
 
 // The sentence that names this week's newest CLI decision (authority.md G23),

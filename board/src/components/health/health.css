@@ -356,6 +356,16 @@
 .spark .sp-pt.cur {
   fill: var(--accent);
 }
+/* No data yet: the line and dots take the badge's neutral tone, not the accent. */
+.spark.muted .sp-now {
+  stroke: var(--fg-4);
+}
+.spark.muted .sp-pt {
+  stroke: var(--fg-4);
+}
+.spark.muted .sp-pt.cur {
+  fill: var(--fg-4);
+}
 .spark .sp-div {
   stroke: var(--line-2);
   stroke-width: 1;
