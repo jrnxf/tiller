@@ -1696,6 +1696,32 @@ fn nix_command_forms_are_read() {
         ("nix shell nixpkgs#hello -s TILLER_ROLE owner -c true", ID),
         ("nix develop --set-env-var \"$NAME\" x -c true", ID),
         ("nix develop -u HOME -c true", None),
+        // A `-c` that is a flag's value leaves the words after it as flags.
+        ("nix develop -k -c -i -c tiller status x", ID),
+        (
+            "nix develop --keep-env-var -c --ignore-env --command true",
+            ID,
+        ),
+        (
+            "nix develop --keep-env-var -c -u TILLER_ROLE --command true",
+            ID,
+        ),
+        // A word not known before it runs may be `-i` or `-c PROGRAM`.
+        ("nix develop \"$OPT\" -c tiller status x", OWNER),
+        (
+            "nix develop -c\"$P\" approve 01JABC",
+            Some(Code::GuardTamper),
+        ),
+        // `dev-shell` is the old name of `develop`.
+        ("echo 'tiller approve 01JABC' | nix dev-shell", OWNER),
+        ("nix dev-shell -i -c true", ID),
+        // A `-c` that is surely the flag ends nix's words and leaves no shell.
+        ("nix develop -c grep -i foo data.txt", None),
+        ("nix develop --impure -L -c grep -i foo data.txt", None),
+        (
+            "git log --format=%s | nix develop -c grep 'gh pr merge'",
+            None,
+        ),
         // A `-c` that may be a flag's value still leaves standard input.
         (
             "echo 'tiller approve 01JABC' | nix develop -k -c cat",
@@ -1767,6 +1793,13 @@ fn direnv_exec_reads_both_shapes() {
         ("direnv exec /home/user/pool/3/alpha tiller status x", None),
         ("direnv allow", None),
     ]);
+    // A directory that exists has one reading, even with a protected name.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("tiller")).unwrap();
+    for role in Role::ALL {
+        let got = bash_in(role, dir.path(), "direnv exec tiller cargo test");
+        assert!(got.is_none(), "{role}: {:?}", got.map(|d| d.message()));
+    }
 }
 
 /// A brace word is not known before it runs: past the positional, it can
