@@ -1222,7 +1222,7 @@ mod tests {
             let mut poller = registry
                 .register(HerdrSource::local(herdr.clone(), fleet.open(), &fleet.host))
                 .unwrap();
-            let mut hook = |fleet: &mut Fleet, event: &str, verdict, seconds| {
+            let hook = |fleet: &mut Fleet, event: &str, verdict, seconds| {
                 fleet
                     .store
                     .observation_record(
