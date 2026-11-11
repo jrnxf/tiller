@@ -458,6 +458,19 @@ record!(Handoff in "handoffs" {
     next_action: String,
 });
 
+record!(Reply in "replies" {
+    id: String,
+    project_id: String,
+    ask_id: Option<String>,
+    message_id: Option<String>,
+    card_id: Option<String>,
+    session_id: String,
+    body: String,
+    replied_at: Timestamp,
+    read_at: Option<Timestamp>,
+    rev: i64,
+});
+
 record!(Pane in "panes" {
     pane_id: String,
     host_id: String,

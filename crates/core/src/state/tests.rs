@@ -2044,7 +2044,7 @@ fn orchestrator_notes(store: &Store, session: &str) -> Vec<String> {
         .unwrap()
 }
 
-fn add_project(store: &mut Store, id: &str) {
+pub(crate) fn add_project(store: &mut Store, id: &str) {
     store
         .project_add(&owner(), project_input(id, None, Delivery::LocalOnly))
         .unwrap();

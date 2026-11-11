@@ -492,6 +492,10 @@ pub struct TimelineEntry {
     /// `you`, `orchestrator`, `hook` or `system`.
     pub actor: String,
     pub text: String,
+    /// The words the line quotes: a reply's body on `ask.replied`. Absent
+    /// from a peer that predates replies.
+    #[serde(default)]
+    pub quote: Option<String>,
 }
 
 /// `GET /api/v1/cards/{id}/timeline`: newest first, paged by `before`.
@@ -1759,6 +1763,54 @@ pub struct RecapResponse {
 pub struct MarkRecapSeen {
     pub idempotency_key: String,
     /// A paired peer's label. Refused: the mark is this daemon's.
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
+/// The card a reply links to.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ReplyCard {
+    pub id: String,
+    pub display_id: String,
+    pub title: String,
+    /// How the ask touched the card: `created` or `followup`; null for a
+    /// comment's card or a card named with `--card`.
+    pub relation: Option<String>,
+}
+
+/// One reply from the orchestrator, with the question it answers.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ReplyItem {
+    pub id: String,
+    pub project: String,
+    /// `ask` or `comment`.
+    pub to: String,
+    pub ask_id: Option<String>,
+    pub message_id: Option<String>,
+    /// The owner's words: the ask, or the comment without its card tag.
+    pub question: String,
+    pub asked_at: String,
+    pub body: String,
+    pub replied_at: String,
+    pub read_at: Option<String>,
+    pub rev: i64,
+    pub card: Option<ReplyCard>,
+}
+
+/// `GET /api/v1/projects/{id}/replies`: the unread replies, newest first.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct RepliesResponse {
+    pub replies: Vec<ReplyItem>,
+}
+
+/// `POST /api/v1/replies/{id}/read`: marks a reply read. Marking it again
+/// changes nothing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MarkReplyRead {
+    pub idempotency_key: String,
+    /// A paired peer's label. Refused: a reply is read on the daemon that
+    /// holds it, not forwarded.
     #[serde(default)]
     pub host: Option<String>,
 }

@@ -143,6 +143,7 @@ function Timeline({
               </span>
               <span className="tx">
                 <b>{ACTOR_LABEL[entry.actor]}</b> <span className="q">{entry.text}</span>
+                {entry.quote ? <span className="quote">{entry.quote}</span> : null}
               </span>
               <span className="when">{formatLisbonMoment(entry.at)}</span>
             </div>

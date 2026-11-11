@@ -824,6 +824,18 @@ button.colh:hover {
 .tl .it .q {
   color: var(--fg-2);
 }
+/* The words a line quotes, such as the orchestrator's reply. */
+.tl .it .quote {
+  display: block;
+  margin: 4px 0 2px;
+  padding: 6px 10px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 50%, var(--line-1));
+  border-radius: 0 var(--r6) var(--r6) 0;
+  background: var(--bg-2);
+  color: var(--fg-1);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .tl .it .when {
   color: var(--fg-4);
   white-space: nowrap;

@@ -135,6 +135,24 @@ pub fn require_card_scope(
     }
 }
 
+/// Refuses `actor` an `ask.reply` in `project_id` unless it is that
+/// project's live orchestrator (`authority.md` section 4, "Reply to an ask
+/// or a comment"). The answer is the orchestrator's to give: the owner, a
+/// worker, a hook and a script never write one. Returns the session.
+pub fn require_reply_scope(conn: &Connection, actor: &Actor, project_id: &str) -> Result<Session> {
+    let Actor::Session(id) = actor else {
+        return Err(Error::Forbidden(format!(
+            "{actor} may not reply to an ask; only the project's orchestrator does, with tiller reply"
+        )));
+    };
+    match live_orchestrator(conn, project_id)? {
+        Some(live) if &live.id == id => Ok(live),
+        _ => Err(Error::Forbidden(format!(
+            "{actor} is not the live orchestrator of {project_id} and may not reply to its asks"
+        ))),
+    }
+}
+
 /// The guard a decision by the wrong principal breaches: only the owner
 /// decides an approval, or a grant (G04).
 pub const DECISION_GUARD: &str = "G04";

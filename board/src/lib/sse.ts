@@ -194,6 +194,9 @@ const PROJECT_SETUP_PATH = /^\/api\/v1\/projects\/[^/?]+\/setup$/;
 // the grant, not its project.
 const PROJECT_GRANTS_PATH = /^\/api\/v1\/projects\/[^/?]+\/grants$/;
 
+// `/api/v1/projects/<id>/replies`, whatever the project.
+const PROJECT_REPLIES_PATH = /^\/api\/v1\/projects\/[^/?]+\/replies$/;
+
 // The list read of each entity the board writes in place from `entity_state`.
 // The daemon sends no state when it could not read the entity (one bad row
 // never stalls the stream), and then only a fetch can say what it is.
@@ -314,6 +317,11 @@ export function applyChange(queryClient: QueryClient, event: ChangeEvent): void 
         predicate: (query) => String(query.queryKey[1] ?? "").startsWith("/api/v1/board"),
         refetchType: "active",
       });
+      break;
+    case "reply":
+      // `ask.replied` adds a reply to the Inbox and `reply.read` takes it
+      // off. The event's card id refreshes the card's timeline below.
+      refetchMatching(queryClient, (path) => PROJECT_REPLIES_PATH.test(path));
       break;
     case "grant":
       refetchMatching(queryClient, (path) => PROJECT_GRANTS_PATH.test(path));

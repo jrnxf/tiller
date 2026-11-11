@@ -410,6 +410,8 @@ export interface TimelineEntry {
   at: string;
   actor: "you" | "orchestrator" | "hook" | "system";
   text: string;
+  // The words the line quotes under it: the orchestrator's reply.
+  quote?: string | null;
 }
 
 export interface TimelineResponse {
@@ -879,6 +881,35 @@ export interface RecapResponse {
   decisions: number;
   failed_runs: number;
   suggestions: number;
+}
+
+// The card a reply links to. `relation` is `created` when the ask filed it.
+interface ReplyCard {
+  id: string;
+  display_id: string;
+  title: string;
+  relation?: string | null;
+}
+
+// One reply from the orchestrator, with the question it answers.
+export interface ReplyItem {
+  id: string;
+  project: string;
+  to: "ask" | "comment";
+  ask_id?: string | null;
+  message_id?: string | null;
+  question: string;
+  asked_at: string;
+  body: string;
+  replied_at: string;
+  read_at?: string | null;
+  rev: number;
+  card?: ReplyCard | null;
+}
+
+// `GET /api/v1/projects/{id}/replies`: the unread replies, newest first.
+export interface RepliesResponse {
+  replies: ReplyItem[];
 }
 
 export interface MutationResponse<T = unknown> {

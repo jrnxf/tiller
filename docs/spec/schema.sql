@@ -213,6 +213,24 @@ CREATE TABLE ask_cards (
 ) STRICT;
 CREATE INDEX ask_cards_card ON ask_cards(card_id);
 
+-- Migration 17 (state.md, Reply): the orchestrator's answer, sent with
+-- `tiller reply`. Exactly one of ask_id and message_id is set.
+CREATE TABLE replies (
+  id          TEXT PRIMARY KEY NOT NULL,
+  project_id  TEXT NOT NULL REFERENCES projects(id),
+  ask_id      TEXT REFERENCES asks(id),         -- the ask it answers
+  message_id  TEXT REFERENCES outbox(id),       -- or the card comment it answers
+  card_id     TEXT REFERENCES cards(id),        -- the card it links to
+  session_id  TEXT NOT NULL REFERENCES sessions(id),
+  body        TEXT NOT NULL,                    -- work data; never exported to git
+  replied_at  TEXT NOT NULL,
+  read_at     TEXT,                             -- when the owner marked it read
+  rev         INTEGER NOT NULL DEFAULT 1,
+  CHECK ((ask_id IS NULL) <> (message_id IS NULL))
+) STRICT;
+CREATE INDEX replies_unread ON replies(project_id, replied_at) WHERE read_at IS NULL;
+CREATE INDEX replies_ask ON replies(ask_id) WHERE ask_id IS NOT NULL;
+
 CREATE TABLE card_deps (
   card_id             TEXT NOT NULL REFERENCES cards(id),
   depends_on_card_id  TEXT NOT NULL REFERENCES cards(id),

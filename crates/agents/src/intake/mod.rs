@@ -14,6 +14,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use tiller_core::domain::{Ask, AskSource, Card, OutboxMessage, OutboxState, Role, Session};
 use tiller_core::state::asks::NewAsk;
+use tiller_core::state::replies::unreplied_asks;
 use tiller_core::state::{find, get, list};
 use tiller_core::{Actor, Ctx, Store, ids};
 use tiller_observe::hooks::{HookInput, Intake, Reply};
@@ -249,7 +250,8 @@ impl Intake for Hooks {
         // intake check already blocked.
         let guard = &self.config.owner_guard;
         if guard.enabled && !active {
-            let opened = opened_attention_this_turn(store, session)?;
+            let since = turn_start(store, session)?;
+            let opened = opened_attention_since(store, session, &since)?;
             let asks = !opened
                 && owner_guard::asks_owner(reply, guard.decider().as_ref(), guard.threshold);
             payload.insert("asks_owner".into(), json!(asks));
@@ -257,6 +259,12 @@ impl Intake for Hooks {
             if asks && output.is_none() {
                 output = Some(json!({"decision": "block", "reason": OWNER_GUARD_REASON}));
             }
+            // An ask this turn resolved still needs its answer on the board.
+            let unreplied = unreplied_asks(store.conn(), &session.id, &since)?;
+            if !unreplied.is_empty() && output.is_none() {
+                output = Some(json!({"decision": "block", "reason": reply_reason(&unreplied)}));
+            }
+            payload.insert("unreplied_ask_ids".into(), json!(unreplied));
         }
         Ok(Reply { payload, output })
     }
@@ -269,22 +277,39 @@ const OWNER_GUARD_REASON: &str = "tiller: your last message seems to ask the own
 /// How far back an attention item counts when no prompt marks the turn.
 const UNKNOWN_TURN_MINUTES: i64 = 10;
 
-/// Whether this session opened an attention item since the turn began: the
-/// last prompt or wake-up line this session saw.
-fn opened_attention_this_turn(store: &Store, session: &Session) -> tiller_core::Result<bool> {
+/// What an orchestrator reads when its turn resolved an ask but sent no
+/// answer with `tiller reply`.
+fn reply_reason(asks: &[String]) -> String {
+    let shorts: Vec<&str> = asks.iter().map(|id| ids::short(id)).collect();
+    format!(
+        "tiller: you resolved ask {} this turn but sent no reply, so the board does not show your answer. Send it now: tiller reply --to <ask> --text \"...\". Then end the turn again.",
+        shorts.join(", ")
+    )
+}
+
+/// When this session's turn began: the last prompt or wake-up line it saw.
+/// With no prompt on record the start is unknown: look back a bounded time,
+/// so an old record never silences a guard for good.
+fn turn_start(store: &Store, session: &Session) -> tiller_core::Result<String> {
     let turn_start: Option<String> = store.conn().query_row(
         "SELECT MAX(observed_at) FROM observations WHERE session_id = ?1 AND event IN ('UserPromptSubmit', 'wake')",
         [&session.id],
         |row| row.get(0),
     )?;
-    // With no prompt on record the turn's start is unknown: look back a
-    // bounded time, so an old item never silences the guard for good.
-    let since = match turn_start {
+    Ok(match turn_start {
         Some(at) => at,
         None => tiller_core::Timestamp::now()
             .plus_minutes(-UNKNOWN_TURN_MINUTES)
             .to_string(),
-    };
+    })
+}
+
+/// Whether this session opened an attention item since `since`, the turn's start.
+fn opened_attention_since(
+    store: &Store,
+    session: &Session,
+    since: &str,
+) -> tiller_core::Result<bool> {
     let opened: i64 = store.conn().query_row(
         "SELECT COUNT(*) FROM attention WHERE opened_by_session_id = ?1 AND opened_at >= ?2",
         rusqlite::params![&session.id, since],
@@ -320,7 +345,7 @@ pub fn ask_context(ask: &Ask, free_runs: i64) -> String {
         n => format!("{n} free run slots: spawn at most {n} runs, leave other cards queued and say they are queued, not started"),
     };
     format!(
-        "tiller: ask {} (short {short}) recorded. Before this turn ends run: tiller ask resolve {short} new|followup:<card>|chat|cancelled. Start each line about a card with its tag, like [{}-42]. Project {}: {slots}.",
+        "tiller: ask {} (short {short}) recorded. Before this turn ends run: tiller ask resolve {short} new|followup:<card>|chat|cancelled, then send the answer with tiller reply --to {short}. Start each line about a card with its tag, like [{}-42]. Project {}: {slots}.",
         ask.id, ask.project_id, ask.project_id
     )
 }

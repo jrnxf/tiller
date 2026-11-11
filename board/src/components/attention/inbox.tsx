@@ -9,6 +9,7 @@ import type {
   BoardRow,
   PermissionPrompt,
   Project,
+  ReplyItem,
 } from "../../lib/api-types";
 import { focusReason, ownerKey, ownerOf, projectIndex, shownId } from "../../lib/peers";
 import type { Owned } from "../../lib/peers";
@@ -37,6 +38,7 @@ import { CardActions, HerdrMenu } from "./card-actions";
 import { CardOverflow } from "./card-lifecycle";
 import { tidy } from "./ansi";
 import { RecapCard } from "./recap";
+import { RepliesGroup, ReplyDetail, useReplies } from "./replies";
 import {
   KIND_LABELS,
   PRIORITIES,
@@ -73,6 +75,11 @@ interface DecisionEntry {
 }
 
 type Entry = DecisionEntry | { type: "permission"; id: string; prompt: PermissionPrompt };
+
+// A row of the list: an entry, or a reply from the orchestrator.
+type Shown =
+  | { type: "entry"; id: string; entry: Entry }
+  | { type: "reply"; id: string; reply: ReplyItem };
 
 function promptId(prompt: PermissionPrompt): string {
   return `perm-${prompt.session_id}`;
@@ -545,11 +552,9 @@ export function Inbox({
   const brief = briefIsUnread(awayBrief, briefRead) ? awayBrief : null;
 
   const cards = new Map(board.rows.map((row) => [row.id, row]));
-  const shown = new Set(
-    scopedProjects(prefs, projects.projects, board.rows, host).map((project) =>
-      ownerKey(project.id, project),
-    ),
-  );
+  const scoped = scopedProjects(prefs, projects.projects, board.rows, host);
+  const shown = new Set(scoped.map((project) => ownerKey(project.id, project)));
+  const { replies, loading: repliesLoading } = useReplies(scoped);
   // Same scope as the sidebar badge: a card that left the board still counts.
   const inScope = (cardId: string) => {
     const row = cards.get(cardId);
@@ -595,12 +600,19 @@ export function Inbox({
     .filter((prompt) => inScope(prompt.card_id))
     .map((prompt) => ({ type: "permission", id: promptId(prompt), prompt }));
 
-  const all = [...current, ...prompts, ...stale];
+  // Every row in list order, so nothing chosen shows the first.
+  const all: Shown[] = [
+    ...[...current, ...prompts].map((entry) => ({ type: "entry" as const, id: entry.id, entry })),
+    ...replies.map((reply) => ({ type: "reply" as const, id: reply.id, reply })),
+    ...stale.map((entry) => ({ type: "entry" as const, id: entry.id, entry })),
+  ];
   // The brief leads the list, so it is what shows when nothing is chosen.
   const briefChosen = brief !== null && (selected === AWAY_BRIEF_ID || !selected);
-  const chosen = briefChosen
+  const picked = briefChosen
     ? undefined
-    : (all.find((entry) => entry.id === selected) ?? (selected ? undefined : all[0]));
+    : (all.find((row) => row.id === selected) ?? (selected ? undefined : all[0]));
+  const chosen = picked?.type === "entry" ? picked.entry : undefined;
+  const chosenReply = picked?.type === "reply" ? picked.reply : undefined;
 
   return (
     <div className="inbox" data-pane={selected ? "detail" : "list"} data-testid="inbox">
@@ -624,6 +636,7 @@ export function Inbox({
           ctx={ctx}
           perm
         />
+        <RepliesGroup replies={replies} selected={picked?.id} projects={ctx.projects} />
         {stale.length ? (
           <section aria-label="No longer current">
             <div className="ghead gone">
@@ -641,6 +654,10 @@ export function Inbox({
           <div className="inner" key={AWAY_BRIEF_ID}>
             <AwayBriefDetail brief={brief} ctx={ctx} />
           </div>
+        ) : chosenReply ? (
+          <div className="inner" key={chosenReply.id}>
+            <ReplyDetail reply={chosenReply} projects={ctx.projects} back={<BackLink />} />
+          </div>
         ) : chosen ? (
           <div className="inner" key={chosen.id}>
             {chosen.type === "decision" ? (
@@ -654,7 +671,7 @@ export function Inbox({
               <PermissionDetail prompt={chosen.prompt} ctx={ctx} />
             )}
           </div>
-        ) : (
+        ) : selected && repliesLoading ? null : (
           <div className="in-empty">
             <div>
               <b>{selected ? "Not in the inbox any more" : "Inbox zero"}</b>

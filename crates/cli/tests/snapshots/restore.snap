@@ -12,7 +12,7 @@ exit: 0
       "host_id": "<id1>",
       "kind": "manual",
       "max_seq": 5,
-      "schema_version": 16,
+      "schema_version": 17,
       "sha256": "<sha256>",
       "size": "<size>",
       "superseded": false

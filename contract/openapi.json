@@ -5064,6 +5064,53 @@
         }
       }
     },
+    "/api/v1/projects/{id}/replies": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "project_replies",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepliesResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{id}/retire": {
       "get": {
         "tags": [
@@ -5347,6 +5394,73 @@
             }
           },
           "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/replies/{id}/read": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "mark_reply_read",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MarkReplyRead"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
             "content": {
               "application/json": {
                 "schema": {
@@ -8565,6 +8679,26 @@
         },
         "additionalProperties": false
       },
+      "MarkReplyRead": {
+        "type": "object",
+        "description": "`POST /api/v1/replies/{id}/read`: marks a reply read. Marking it again\nchanges nothing.",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A paired peer's label. Refused: a reply is read on the daemon that\nholds it, not forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "MemoryChange": {
         "type": "object",
         "description": "One entry in a document's \"Change history\": a change applied or\ndiscarded in the last 30 days, newest first, undone or not.",
@@ -10811,6 +10945,119 @@
         },
         "additionalProperties": false
       },
+      "RepliesResponse": {
+        "type": "object",
+        "description": "`GET /api/v1/projects/{id}/replies`: the unread replies, newest first.",
+        "required": [
+          "replies"
+        ],
+        "properties": {
+          "replies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReplyItem"
+            }
+          }
+        }
+      },
+      "ReplyCard": {
+        "type": "object",
+        "description": "The card a reply links to.",
+        "required": [
+          "id",
+          "display_id",
+          "title"
+        ],
+        "properties": {
+          "display_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "relation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How the ask touched the card: `created` or `followup`; null for a\ncomment's card or a card named with `--card`."
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "ReplyItem": {
+        "type": "object",
+        "description": "One reply from the orchestrator, with the question it answers.",
+        "required": [
+          "id",
+          "project",
+          "to",
+          "question",
+          "asked_at",
+          "body",
+          "replied_at",
+          "rev"
+        ],
+        "properties": {
+          "ask_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "asked_at": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "card": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReplyCard"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "message_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string",
+            "description": "The owner's words: the ask, or the comment without its card tag."
+          },
+          "read_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "replied_at": {
+            "type": "string"
+          },
+          "rev": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "to": {
+            "type": "string",
+            "description": "`ask` or `comment`."
+          }
+        }
+      },
       "ResetEvent": {
         "type": "object",
         "description": "One `event: reset` message: the client refetches the snapshot.",
@@ -12158,6 +12405,13 @@
           },
           "at": {
             "type": "string"
+          },
+          "quote": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The words the line quotes: a reply's body on `ask.replied`. Absent\nfrom a peer that predates replies."
           },
           "seq": {
             "type": "integer",

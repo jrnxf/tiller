@@ -9,7 +9,7 @@ exit: 0
     "format": "tiller-export/v1",
     "host_id": "<id1>",
     "max_seq": 5,
-    "schema_version": 16,
+    "schema_version": 17,
     "tables": [
       {
         "file": "approvals.jsonl",
@@ -218,6 +218,12 @@ exit: 0
       {
         "file": "quota_windows.jsonl",
         "name": "quota_windows",
+        "rows": 0,
+        "sha256": "<sha256>"
+      },
+      {
+        "file": "replies.jsonl",
+        "name": "replies",
         "rows": 0,
         "sha256": "<sha256>"
       },

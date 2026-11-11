@@ -1413,9 +1413,24 @@ pub fn timeline(store: &Store, reference: &str, before: Option<i64>) -> Result<T
     } else {
         None
     };
+    let quote = |event: &Event| -> Result<Option<String>> {
+        if event.kind != "ask.replied" {
+            return Ok(None);
+        }
+        Ok(store
+            .conn()
+            .query_row(
+                "SELECT body FROM replies WHERE id = ?1",
+                [&event.entity_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    };
+    let quotes = events.iter().map(quote).collect::<Result<Vec<_>>>()?;
     let entries = events
         .into_iter()
-        .map(|event| TimelineEntry {
+        .zip(quotes)
+        .map(|(event, quote)| TimelineEntry {
             seq: event.seq,
             at: at(event.at),
             actor: match event.actor.as_str() {
@@ -1428,6 +1443,7 @@ pub fn timeline(store: &Store, reference: &str, before: Option<i64>) -> Result<T
             }
             .to_owned(),
             text: timeline_text(&event),
+            quote,
         })
         .collect();
     Ok(TimelineResponse {
@@ -1504,6 +1520,10 @@ fn timeline_text(event: &Event) -> String {
         "handoff.written" => "wrote a handoff".to_owned(),
         "ask.recorded" => "recorded an ask".to_owned(),
         "ask.resolved" => "resolved an ask".to_owned(),
+        "ask.replied" => match field("to") {
+            Some("comment") => "replied to your comment".to_owned(),
+            _ => "replied to your ask".to_owned(),
+        },
         "guard.breached" => "breached a guard".to_owned(),
         "publish.done" => "published the work".to_owned(),
         "publish.failed" => "failed to publish the work".to_owned(),
@@ -2320,6 +2340,14 @@ mod tests {
         assert_eq!(
             text("memory.restored", serde_json::json!({})),
             "recorded a memory restored"
+        );
+        assert_eq!(
+            text("ask.replied", serde_json::json!({"to": "comment"})),
+            "replied to your comment"
+        );
+        assert_eq!(
+            text("ask.replied", serde_json::json!({"to": "ask"})),
+            "replied to your ask"
         );
     }
 

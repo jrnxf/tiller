@@ -1364,7 +1364,91 @@ button.chip:active {
   display: none;
 }
 
+/* Replies from the orchestrator */
+
+.ghead.reply .icon,
+.irow .ii.reply-ii {
+  color: var(--accent-text);
+}
+
+.irow .ii.reply-ii .icon {
+  display: block;
+}
+
+.reply-blk .blk-h .hint {
+  margin-left: auto;
+}
+
+/* A reply has no title line, so its first block keeps the gap a title
+   would leave under the meta line. */
+.d-meta + .reply-blk {
+  margin-top: 18px;
+}
+
+.reply-q {
+  margin: 0;
+  padding: 10px 12px;
+  border-left: 2px solid var(--line-2);
+  color: var(--fg-2);
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.reply-a {
+  padding: 12px 14px;
+  border-radius: var(--r8);
+  border: 1px solid color-mix(in srgb, var(--accent) 36%, var(--line-1));
+  background: var(--accent-tint);
+  color: var(--fg-1);
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.reply-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r8);
+  background: var(--bg-card);
+  color: var(--fg-2);
+  font-size: var(--fs-small);
+}
+
+.reply-card .id {
+  flex: none;
+  font-family: var(--mono);
+  color: var(--fg-1);
+}
+
+.reply-card .ct {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reply-card .lab {
+  flex: none;
+}
+
+.inbox .reply-acts {
+  justify-content: flex-end;
+  margin-top: 24px;
+}
+
 @media (hover: hover) and (pointer: fine) {
+  .reply-card:hover {
+    background: var(--bg-card-hover);
+  }
+
   button.chip:hover {
     background: var(--bg-active);
   }

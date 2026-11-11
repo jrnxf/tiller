@@ -81,6 +81,7 @@ What each principal may do. "Own" means only on its own run, card or worktree. E
 |---|---|---|---|---|---|---|---|---|
 | Record an ask | board add, board ask box | no | no | no | no | no | no | hook (prompt), script (note) |
 | Resolve an ask, create or edit a card | yes | no | own project; also create a card in another project on its host | no | no | no | no | no |
+| Reply to an ask or a card comment (`ask.reply`), mark a reply read (`reply.read`) | marks read, on the board; never replies | no | replies, as its project's live orchestrator; never marks read | no | no | no | no | no |
 | Hold, depend, reprioritize | yes | release due holds | own project | no | no | no | no | no |
 | Start a run (the execute decision) | yes | no | own project, within capacity, quota and model rules | no | no | no | no | no |
 | Relaunch, pause or interrupt a run | yes | no | own runs | no | no | no | no | no |

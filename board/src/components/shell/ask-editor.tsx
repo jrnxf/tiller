@@ -173,6 +173,8 @@ interface Props {
   // Read only once the sends have begun.
   locked: boolean;
   placeholder: string;
+  // What the box starts with, such as the question "Ask again" repeats.
+  initial?: JSONContent;
   labelledBy: string;
   editorRef: RefObject<Editor | null>;
   onChange: (pieces: AskPiece[]) => void;
@@ -198,6 +200,7 @@ export function AskEditor(props: Props) {
     let listOpen = false;
     const editor = new Editor({
       element,
+      content: latest.current.initial,
       extensions: [
         Document,
         Paragraph,
@@ -244,6 +247,7 @@ export function AskEditor(props: Props) {
       onUpdate: ({ editor: changed }) => latest.current.onChange(piecesOf(changed.getJSON())),
     });
     editorRef.current = editor;
+    if (latest.current.initial) latest.current.onChange(piecesOf(editor.getJSON()));
     editor.commands.focus("end");
     return () => {
       editor.destroy();

@@ -29,10 +29,13 @@ use crate::ids::FLEET_PROJECT;
 use crate::store::{Actor, Applied, Ctx, NewEvent, Store, Tx};
 
 /// Nullable foreign keys that still mean "belongs to": an observation of a
-/// removed session or run, and a worktree cached for the project.
+/// removed session or run, a worktree cached for the project, and a reply to
+/// a removed ask or comment (both are of the reply's own project).
 pub(crate) const OWNED: &[(&str, &str)] = &[
     ("observations", "run_id"),
     ("observations", "session_id"),
+    ("replies", "ask_id"),
+    ("replies", "message_id"),
     ("worktrees", "project_id"),
 ];
 
@@ -73,6 +76,8 @@ pub(crate) const UNLINKED: &[(&str, &str)] = &[
     ("proposals", "memory_id"),
     ("prs", "run_id"),
     ("publishes", "pr_id"),
+    // A reply may link a card of another project that its ask followed up.
+    ("replies", "card_id"),
     ("retros", "proposal_id"),
     ("retros", "evidence_id"),
     ("retros", "trigger"),

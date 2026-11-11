@@ -27,6 +27,8 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 | Read cards | Full: `card show`, `card list`, `card timeline` | Full | The card page and the lanes. |
 | Add a note to the orchestrator | Full: `ask note` | Full | The Ask dialog sends one note per mentioned project. Both cap a note at 8,000 characters. |
 | Resolve, link and list asks | Full: `ask resolve`, `ask link`, `ask list`, `ask show` | No | These are orchestrator tools. |
+| Reply to an ask or a comment | Full: `reply` | No | An orchestrator tool. The orchestrator sends its answer with `tiller reply`. The board reads the unread replies in the Inbox and on the card timeline. |
+| Mark a reply read | No | Full | The Inbox's Mark read. It does not forward the call to a peer. |
 | Answer an attention item | Full: `attention answer` | Part | The CLI can cite a chat ask with `--ask`. The board answer has no ask citation. Both cap a typed answer at 20,000 characters. An answer cited with `--ask` is the owner's recorded words and has no cap. |
 | Withdraw an attention item | Full: `attention withdraw` | Part | The board withdraws only stale items, with a fixed reason, and does not forward the call to a peer. |
 | Open and list attention | Full: `attention open`, `attention list` | Part | The board lists the items in the Inbox. `attention open` is an agent tool. |
@@ -66,6 +68,7 @@ The board is a client of the daemon's API (`crates/daemon/src/api.rs`). The CLI 
 - Signals and contributions on the Health page.
 - Editing an away window in place.
 - Marking a recap seen.
+- Marking a reply read.
 - Acting on a paired host's records from this board (the `host` field).
 - Signing out.
 

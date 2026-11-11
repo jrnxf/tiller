@@ -46,6 +46,7 @@ import { cardCancelled, withLifecycle } from "./fixtures-lifecycle.ts";
 import { memoryResource } from "./fixtures-memory.ts";
 import { retrosResource, settleRetros } from "./fixtures-retros.ts";
 import { recapFor } from "./fixtures-recap.ts";
+import { repliesFor } from "./fixtures-replies.ts";
 import { signalsFor } from "./fixtures-signals.ts";
 import { isPeerRow } from "./peers.ts";
 import {
@@ -1444,6 +1445,13 @@ function timelineFor(
       actor: "hook",
       text: `logged progress on ${row.display_id}`,
     },
+    {
+      seq: 4175,
+      at: minutes(now, -6),
+      actor: "orchestrator",
+      text: "replied to your comment",
+      quote: `I moved ${row.display_id} back to the queue so attempt 2 starts from the fixed test. It should land within the hour.`,
+    },
     { seq: 4170, at: minutes(now, -9), actor: "system", text: "started attempt 2" },
     { seq: 4160, at: minutes(now, -95), actor: "system", text: "attempt 1 failed: exit 1" },
   ];
@@ -1819,6 +1827,14 @@ export function fixtureResource(
   const run = /^\/api\/v1\/runs\/([^/]+)$/.exec(url.pathname);
   if (run?.[1]) return runDetailFor(run[1], now);
   if (url.pathname === recapPath) return recapFor(served, now, null);
+  const replies = /^\/api\/v1\/projects\/([^/]+)\/replies$/.exec(url.pathname);
+  if (replies?.[1]) {
+    const id = replies[1];
+    const known = projectsFor(served, now).projects.some(
+      (project) => project.id === id && !isPeerRow(project),
+    );
+    return repliesFor(served, id, known, now);
+  }
   if (url.pathname === "/api/v1/health") return healthFor(served, now);
   if (url.pathname === "/api/v1/doctor") return doctorRead(served, url, now);
   if (url.pathname === "/api/v1/projects/checkout") return checkoutFor(url);

@@ -43,6 +43,7 @@ import {
 import { backupsFor, takeBackup } from "./fixtures-backups.ts";
 import { anyUnpaired, peerLinkMutation, peersFor, withoutUnpaired } from "./fixtures-peers.ts";
 import { recapFor } from "./fixtures-recap.ts";
+import { markReplyRead } from "./fixtures-replies.ts";
 import {
   agentsPath,
   attentionPath,
@@ -1475,6 +1476,30 @@ function handle(
             entity: "memory_revision",
             entity_id: path,
             rev_after: null,
+            card_id: null,
+            entity_state: null,
+          },
+        },
+      ],
+    };
+  }
+  const replyRead = /^\/api\/v1\/replies\/([^/]+)\/read$/.exec(path);
+  if (method === "POST" && replyRead?.[1]) {
+    const read = markReplyRead(replyRead[1], Date.now());
+    if (!read) {
+      return { reply: refused(404, "not_found", `no reply ${replyRead[1]}`), followUps: [] };
+    }
+    return {
+      reply: recorded(read, null, null),
+      followUps: [
+        {
+          delayMs: 200,
+          event: {
+            kind: "reply.read",
+            txn: "reply.read",
+            entity: "reply",
+            entity_id: read.id,
+            rev_after: read.rev,
             card_id: null,
             entity_state: null,
           },

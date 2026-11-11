@@ -31,6 +31,17 @@ export const SendIcon = () => (
   </Glyph>
 );
 
+// A speech bubble: the orchestrator answered.
+export const ReplyIcon = () => (
+  <Glyph>
+    <path
+      d="M3 3.5h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H7.5L4.5 14v-2.5H3a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1z"
+      strokeLinejoin="round"
+      {...stroke}
+    />
+  </Glyph>
+);
+
 export const PaneIcon = () => (
   <Glyph>
     <rect x="2" y="3" width="12" height="10" rx="1.5" {...stroke} />

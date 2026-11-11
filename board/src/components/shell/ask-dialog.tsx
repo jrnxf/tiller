@@ -23,6 +23,8 @@ import { showToast } from "../board/toast";
 import { Modal } from "../ui/modal";
 import { removeMention } from "./ask-mentions";
 import type { MentionOption } from "./ask-mentions";
+import { prefillDoc } from "./ask-prefill";
+import type { AskPrefill } from "./ask-prefill";
 import { useAskSends } from "./ask-send";
 import { settingsOf, StartSettingsFix } from "./start-settings-fix";
 import type { AskTarget, Outcome } from "./ask-send";
@@ -158,10 +160,12 @@ function SendRow({
 function AskBody({
   projects,
   unread,
+  prefill,
   onClose,
 }: {
   projects: Project[];
   unread: { error: string | null } | null;
+  prefill: AskPrefill | null;
   onClose: () => void;
 }) {
   const orchestrators = useQuery(agentsQuery()).data?.orchestrators;
@@ -190,6 +194,15 @@ function AskBody({
       }),
     [projects, machines],
   );
+
+  // Read once: the editor takes its first content when it mounts. The
+  // dialog mounts the body again once the projects are read, so the chip is
+  // there when they are.
+  const [initial] = useState(() => {
+    if (!prefill) return undefined;
+    const name = options.find((option) => option.key === prefill.project)?.name;
+    return prefillDoc(prefill, name);
+  });
 
   const message = messageFor(pieces);
   const picked = mentionedKeys(pieces).flatMap((key) => {
@@ -288,6 +301,7 @@ function AskBody({
             used={picked.map((entry) => projectKey(entry.project))}
             locked={attempted}
             placeholder="Type @ to pick projects, then say what they should do"
+            initial={initial}
             labelledBy={labelId}
             editorRef={editor}
             onChange={setPieces}
@@ -353,17 +367,33 @@ function AskBody({
   );
 }
 
-// Mounted only while open, so each opening starts with nothing picked.
-// Projects that are not read yet still open it, to say why nothing can be
-// sent.
-export function AskDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+// Mounted only while open, so each opening starts with nothing picked, or
+// with the prefill "Ask again" set. Projects that are not read yet still open
+// it, to say why nothing can be sent.
+export function AskDialog({
+  open,
+  prefill = null,
+  onClose,
+}: {
+  open: boolean;
+  prefill?: AskPrefill | null;
+  onClose: () => void;
+}) {
   const query = useQuery(projectsQuery());
   const projects = useNamedProjects(query.data)?.projects;
   if (!open) return null;
   const unread = projects
     ? null
     : { error: readFailure(query.error, "The board could not reach the daemon.") };
-  return <AskBody projects={projects ?? NO_PROJECTS} unread={unread} onClose={onClose} />;
+  return (
+    <AskBody
+      key={prefill && !projects ? "waiting" : "ready"}
+      projects={projects ?? NO_PROJECTS}
+      unread={unread}
+      prefill={prefill}
+      onClose={onClose}
+    />
+  );
 }
 
 const NO_PROJECTS: Project[] = [];

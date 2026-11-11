@@ -20,6 +20,7 @@ pub mod peer;
 pub mod read;
 pub mod recap;
 pub mod records;
+pub mod reply;
 pub mod review;
 pub mod run;
 pub mod spawn;

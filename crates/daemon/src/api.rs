@@ -1037,6 +1037,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/memory/revisions/{id}", get(memory::revision))
         .route("/api/v1/recap", get(recap))
         .route("/api/v1/recap/seen", post(mark_recap_seen))
+        .route("/api/v1/projects/{id}/replies", get(project_replies))
+        .route("/api/v1/replies/{id}/read", post(mark_reply_read))
         .route("/api/v1/signals", get(signals))
         .route("/api/v1/events", get(events))
         .route("/api/v1/session", get(session))
@@ -3853,6 +3855,80 @@ async fn mark_recap_seen(
     .await
 }
 
+fn reply_item(view: tiller_core::state::replies::ReplyView) -> ReplyItem {
+    let relation = view.card_relation.map(|relation| relation.to_string());
+    ReplyItem {
+        id: view.reply.id,
+        project: view.reply.project_id,
+        to: view.to.as_str().to_owned(),
+        ask_id: view.reply.ask_id,
+        message_id: view.reply.message_id,
+        question: view.question,
+        asked_at: view.asked_at.to_string(),
+        body: view.reply.body,
+        replied_at: view.reply.replied_at.to_string(),
+        read_at: view.reply.read_at.map(|at| at.to_string()),
+        rev: view.reply.rev,
+        card: view.card.map(|card| ReplyCard {
+            id: card.id,
+            display_id: card.display_id,
+            title: card.title,
+            relation,
+        }),
+    }
+}
+
+#[utoipa::path(get, path = "/api/v1/projects/{id}/replies", tag = "reads",
+    params(("id" = String, Path)),
+    responses((status = 200, body = RepliesResponse), (status = 404, body = ErrorBody),
+              (status = 503, body = ErrorBody)))]
+async fn project_replies(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<RepliesResponse> {
+    read(&state, move |store| {
+        let project = store.project(&id)?;
+        let replies = tiller_core::state::replies::unread(store.conn(), &project.id)?;
+        Ok(RepliesResponse {
+            replies: replies.into_iter().map(reply_item).collect(),
+        })
+    })
+    .await
+    .map(Json)
+}
+
+#[utoipa::path(post, path = "/api/v1/replies/{id}/read", tag = "mutations", request_body = MarkReplyRead,
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse), (status = 400, body = ErrorBody),
+              (status = 404, body = ErrorBody),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn mark_reply_read(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers).await?;
+    let request: MarkReplyRead = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "marking a reply read").await?;
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| {
+            let read = store.reply_read(ctx, &id)?;
+            Ok(Done {
+                data: serde_json::to_value(reply_item(read.value))?,
+                events: read.events,
+                replayed: read.replayed,
+                outbox_id: None,
+                approval_id: None,
+                warning: None,
+            })
+        },
+    )
+    .await
+}
+
 #[utoipa::path(get, path = "/api/v1/host", tag = "reads",
     responses((status = 200, body = HostFields), (status = 503, body = ErrorBody)))]
 async fn host_fields(State(state): State<AppState>) -> ApiResult<HostFields> {
@@ -5459,7 +5535,7 @@ async fn app_shell(
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, add_dep, remove_dep, close,
         cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stop_agent, pause_agent, resume_agent, relaunch_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, host_config_read, set_config,
         project_grants, create_grant, revoke_grant,
-        away_start, away_edit, away_end, away_brief, host_fields, edit_host, crate::backups::list, crate::backups::take, pick_bug_project, recap, mark_recap_seen, relabel_intervention, memory::view, memory::revision,
+        away_start, away_edit, away_end, away_brief, host_fields, edit_host, crate::backups::list, crate::backups::take, pick_bug_project, recap, mark_recap_seen, project_replies, mark_reply_read, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, memory::repropose, memory::eval::eval_plan,
         memory::eval::eval_start, crate::retros::list_retros, crate::retros::run_retro,
         crate::pairings::list, crate::pairings::unpair, crate::pairings::revoke, session, login_code, logout
@@ -11347,6 +11423,113 @@ esac"#,
         )
         .await;
         assert_ne!(refused.status, StatusCode::OK, "{}", refused.body);
+    }
+
+    /// P5: the orchestrator's reply lands in the project's unread replies,
+    /// quoted on its card's timeline, and Mark read takes it out of the list.
+    #[tokio::test]
+    async fn a_reply_is_listed_unread_until_the_owner_marks_it_read() {
+        use tiller_core::domain::{AskSource, CardKind};
+        use tiller_core::state::asks::Resolution;
+        use tiller_core::state::replies::NewReply;
+
+        let mut fleet = Fleet::new();
+        let orchestrator = Ctx::new(Actor::Session(fleet.orchestrator_session.clone()));
+        let ask = fleet
+            .store
+            .ask_record(
+                &Ctx::new(Actor::Board),
+                Some("k-ask"),
+                NewAsk {
+                    project_id: "alpha".into(),
+                    session_id: None,
+                    source: AskSource::Board,
+                    text: "Can the export run nightly?".into(),
+                },
+            )
+            .unwrap()
+            .value
+            .ask;
+        fleet
+            .store
+            .ask_resolve(
+                &orchestrator,
+                &ask.id,
+                Resolution::New(NewCard {
+                    kind: CardKind::Ship,
+                    title: "Run the export nightly".into(),
+                    ..NewCard::default()
+                }),
+            )
+            .unwrap();
+        let reply = fleet
+            .store
+            .reply_send(
+                &orchestrator,
+                None,
+                NewReply {
+                    to: ask.id.clone(),
+                    text: "Yes. A run at 02:00 covers every merge of the day.".into(),
+                    card: None,
+                },
+            )
+            .unwrap()
+            .value
+            .reply;
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let cookie = owner_cookie(fleet.dir.path());
+        let headers = [("cookie", cookie.as_str())];
+        let unread = |app: Router| async move {
+            let answer = get(&app, "/api/v1/projects/alpha/replies").await;
+            assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+            serde_json::from_str::<Value>(&answer.body).unwrap()["replies"].clone()
+        };
+
+        let listed = unread(app.clone()).await;
+        assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+        let item = &listed[0];
+        assert_eq!(item["id"], reply.id.as_str());
+        assert_eq!(item["to"], "ask");
+        assert_eq!(item["question"], "Can the export run nightly?");
+        assert_eq!(item["card"]["relation"], "created", "{item}");
+        let card = item["card"]["display_id"].as_str().unwrap().to_owned();
+
+        let timeline = get(&app, &format!("/api/v1/cards/{card}/timeline")).await;
+        let timeline: Value = serde_json::from_str(&timeline.body).unwrap();
+        let line = timeline["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["text"] == "replied to your ask")
+            .unwrap_or_else(|| panic!("no reply line in {timeline}"));
+        assert_eq!(line["actor"], "orchestrator");
+        assert_eq!(
+            line["quote"],
+            "Yes. A run at 02:00 covers every merge of the day."
+        );
+
+        let mark = |key: &str, host: Option<&str>| {
+            mutation(
+                "POST",
+                &format!("/api/v1/replies/{}/read", reply.id),
+                json!({"idempotency_key": key, "host": host}),
+                &headers,
+            )
+        };
+        let refused = send(&app, mark("k-peer", Some("elsewhere"))).await;
+        assert_ne!(refused.status, StatusCode::OK, "{}", refused.body);
+
+        let marked = send(&app, mark("k-read", None)).await;
+        assert_eq!(marked.status, StatusCode::OK, "{}", marked.body);
+        let body: Value = serde_json::from_str(&marked.body).unwrap();
+        assert!(body["data"]["read_at"].is_string(), "{body}");
+        assert!(unread(app.clone()).await.as_array().unwrap().is_empty());
+
+        // Marking it again writes nothing new.
+        let again = send(&app, mark("k-read-2", None)).await;
+        assert_eq!(again.status, StatusCode::OK, "{}", again.body);
+        let missing = get(&app, "/api/v1/projects/nope/replies").await;
+        assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.body);
     }
 
     /// The card page's Depends on row (P13): `POST` and `DELETE`

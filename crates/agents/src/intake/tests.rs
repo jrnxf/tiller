@@ -368,7 +368,7 @@ fn context_line_tells_the_orchestrator_how_to_resolve() {
     assert_eq!(
         context(output.as_ref()),
         format!(
-            "tiller: ask {} (short {short}) recorded. Before this turn ends run: tiller ask resolve {short} new|followup:<card>|chat|cancelled. Start each line about a card with its tag, like [alpha-42]. Project alpha: 1 free run slot: spawn at most one run, leave other cards queued and say they are queued, not started.",
+            "tiller: ask {} (short {short}) recorded. Before this turn ends run: tiller ask resolve {short} new|followup:<card>|chat|cancelled, then send the answer with tiller reply --to {short}. Start each line about a card with its tag, like [alpha-42]. Project alpha: 1 free run slot: spawn at most one run, leave other cards queued and say they are queued, not started.",
             ask.id
         )
     );
@@ -912,5 +912,54 @@ fn the_owner_guard_reads_its_settings_and_hides_the_key() {
     assert_eq!(
         HostConfig::load(home.path()).owner_guard.threshold,
         owner_guard::DEFAULT_THRESHOLD
+    );
+}
+
+#[test]
+fn a_turn_that_resolves_an_ask_without_a_reply_is_blocked_once() {
+    let mut world = World::new();
+    let hooks = Hooks::default();
+    let ask = world.prompt("p1", "can the export run nightly?");
+    world.resolve(ids::short(&ask), new_resolution("Nightly export"));
+
+    let (payload, output) = world.stop(&hooks, "Filed alpha-2.", false);
+    assert_eq!(strings(&payload, "unreplied_ask_ids"), [ask.as_str()]);
+    let output = output.unwrap();
+    assert_eq!(output["decision"], "block");
+    let reason = output["reason"].as_str().unwrap();
+    assert!(reason.contains("tiller reply --to"), "{reason}");
+    assert!(reason.contains(ids::short(&ask)), "{reason}");
+
+    let (_, output) = world.stop(&hooks, "Filed alpha-2.", true);
+    assert_eq!(
+        output, None,
+        "a turn already blocked once is never blocked again"
+    );
+
+    world
+        .store
+        .reply_send(
+            &Ctx::new(Actor::Session(world.orchestrator.clone())),
+            None,
+            tiller_core::state::replies::NewReply {
+                to: ask.clone(),
+                text: "Yes, at 02:00.".into(),
+                card: None,
+            },
+        )
+        .unwrap();
+    let (payload, output) = world.stop(&hooks, "Filed alpha-2.", false);
+    assert!(strings(&payload, "unreplied_ask_ids").is_empty());
+    assert_eq!(output, None, "a reply satisfies the guard");
+
+    let cancelled = world.prompt("p2", "never mind the theme");
+    world.resolve(
+        ids::short(&cancelled),
+        Resolution::Cancelled { reason: None },
+    );
+    assert_eq!(
+        world.stop(&hooks, "Dropped it.", false).1,
+        None,
+        "a cancelled ask needs no reply"
     );
 }

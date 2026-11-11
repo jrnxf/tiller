@@ -118,6 +118,15 @@ A card never stores a column, a hold, a dependency, an attention state or an act
 - `ask_id`, `card_id`, `relation` (`created`, `followup`), `linked_at`, `linked_by_session_id`.
 - Written by `ask.resolve` in the same transaction as the disposition.
 
+### Reply
+
+`replies`: the orchestrator's answer to an ask or to an owner comment on a card, sent with `tiller reply` so the board shows it (P5). No hook writes one: a reply holds only the words the orchestrator chose to send.
+
+- `id` (ULID), `project_id`, `ask_id` (the ask answered; a reply to the `note` an ask arrived as answers that ask), `message_id` (the owner's comment, an `outbox` `note` with a card). Exactly one of the two is set, `card_id` (the card the reply links to, or null), `session_id` (the orchestrator), `body` (at most 20,000 characters), `replied_at`, `read_at` (null while unread), `rev`.
+- The Inbox lists a project's unread replies, newest first; Mark read sets `read_at`.
+
+Reply text is work data, like ask text. It stays in this database and is never exported to git.
+
 ### Dependency
 
 `card_deps`: `card_id` waits on `depends_on_card_id` (P32).
@@ -421,6 +430,8 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 |---|---|---|---|---|
 | `ask.record` | `UserPromptSubmit` hook, transcript tailer (hook-less hosts), `tiller ask note`, board | project exists; idempotency key new | `asks` | `ask.recorded` |
 | `ask.resolve` | orchestrator, board (implicit on add), `UserPromptSubmit` hook (a prompt typed in a worker pane is a follow-up on its card) | ask `unresolved`; target card open for `followup` | `asks.disposition`, `ask_cards` | `ask.resolved`, `card.linked` |
+| `ask.reply` | `tiller reply` (the project's live orchestrator) | text set, at most 20,000 characters; `--to` is an ask of the project, or an owner `note` message to it (a comment, with its card); a `--card` exists and is of the project, or is a card the ask links; an ambiguous short `--to` names its candidates; key new | `replies` | `ask.replied` (`to`, `ask_id`, `message_id`, `project_id`; never the body), on the linked card |
+| `reply.read` | board (the owner) | reply exists; a reply already read writes nothing | `replies.read_at`, `rev` | `reply.read` |
 | `ask.link` | orchestrator | ask resolved `new` or `followup`; target card open for `followup` | `ask_cards` (and `card.create` for a new card) | `card.linked`, `card.created` for a new card |
 | `card.create` | `ask.resolve new`, `ask.link new`, board add, `tiller card create`, import | project not retired; `next_card_seq` read and bumped here | `projects.next_card_seq`, `cards`, `ask_cards`; for `tiller card create` by a principal other than the project's own orchestrator, `outbox` (one note to the project's live orchestrator) | `card.created`; `outbox.enqueued` with the note |
 | `bug.file` | `tiller bug file` (orchestrator, owner) | title and body set; the local host's `bug_project_id` read here: open, or else `fleet` | `card.create` (kind `ship`, category `tiller-bug`) and its note | `card.created`; `card.routed` (`project_id`, `route`: `bug_project`, `no_bug_project` or `bug_project_retired`, `bug_project_id`, `filed_by_session_id`, `filed_from_project_id`, `evidence`); `outbox.enqueued` with the note |

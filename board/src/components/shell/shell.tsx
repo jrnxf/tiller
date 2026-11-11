@@ -6,6 +6,7 @@ import { shortcutsBlocked } from "../../lib/shortcuts";
 import { useStore } from "../../lib/store";
 import { ToastHost } from "../board/toast";
 import { AskDialog } from "./ask-dialog";
+import { askPrefillStore } from "./ask-prefill";
 import { CommandPalette } from "./command-palette";
 import { Header } from "./header";
 import { Sidebar } from "./sidebar";
@@ -42,7 +43,12 @@ export function Shell({
   useAppearance();
 
   const closePalette = useCallback(() => setPaletteOpen(false), []);
-  const closeAsk = useCallback(() => setAskOpen(false), []);
+  // "Ask again" on a reply opens the box with its question in it.
+  const prefill = useStore(askPrefillStore);
+  const closeAsk = useCallback(() => {
+    setAskOpen(false);
+    askPrefillStore.set(null);
+  }, []);
   const closeMenu = useCallback(() => setMenuOpen(false), []);
 
   useEffect(() => {
@@ -109,7 +115,7 @@ export function Shell({
         />
         <main className="content">{children}</main>
       </div>
-      <AskDialog open={askOpen} onClose={closeAsk} />
+      <AskDialog open={askOpen || prefill !== null} prefill={prefill} onClose={closeAsk} />
       <ToastHost />
       <CommandPalette open={paletteOpen} onClose={closePalette} activeHost={activeHost} />
     </div>

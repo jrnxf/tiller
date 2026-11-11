@@ -912,6 +912,7 @@ mod tests {
             } else {
                 for needed in [
                     "tiller ask resolve",
+                    "tiller reply --to",
                     "tiller spawn",
                     "tiller approval request",
                     "tiller approve <approval> --ask <ask>",

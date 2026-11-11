@@ -27,6 +27,7 @@ import type {
   ProjectsResponse,
   QuotaResponse,
   RecapResponse,
+  RepliesResponse,
   RetrosResponse,
   RunDetail,
   SessionView,
@@ -136,6 +137,14 @@ export const attentionQuery = () => readQuery<AttentionResponse>(attentionPath);
 // refetches it (lib/sse.ts).
 export const recapPath: QueryPath = "/api/v1/recap";
 export const recapQuery = () => readQuery<RecapResponse>(recapPath);
+
+// One of this host's projects' unread replies from the orchestrator, newest
+// first. Never federated: a peer's replies stay on the peer. An `ask.replied`
+// or `reply.read` event refreshes it (lib/sse.ts).
+export const repliesPath = (projectId: string): QueryPath =>
+  `/api/v1/projects/${projectId}/replies`;
+export const repliesQuery = (projectId: string) =>
+  readQuery<RepliesResponse>(repliesPath(projectId));
 
 export const agentsPath = (host?: string): QueryPath => withParams("/api/v1/agents", { host });
 export const agentsQuery = (host?: string) => readQuery<AgentsResponse>(agentsPath(host));

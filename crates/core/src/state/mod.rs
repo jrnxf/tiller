@@ -28,6 +28,7 @@ pub mod publishes;
 pub mod reads;
 pub mod recap;
 pub mod records;
+pub mod replies;
 pub mod review;
 pub mod runs;
 pub mod signals;
