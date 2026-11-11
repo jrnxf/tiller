@@ -34,7 +34,8 @@ use crate::dto::{ErrorBody, MutationResponse, Receipt};
 /// is: the sweep never runs it again.
 const WINDOW_DAYS: i64 = 30;
 
-/// The most rows one read returns.
+/// The most rows one read returns besides the unfinished retros, which
+/// are all listed.
 const MOST: i64 = 200;
 
 /// `POST /api/v1/retros/{id}/run`.
@@ -327,13 +328,19 @@ fn views(
     timeout: i64,
 ) -> tiller_core::Result<Vec<RetroView>> {
     let since = now.plus_minutes(-WINDOW_DAYS * 24 * 60);
-    let recent = "depth = 'full'
-        AND (?1 IS NULL OR project_id = ?1)
-        AND (outcome = 'unfinished' OR created_at >= ?2 OR finished_at >= ?2 OR curator_started_at >= ?2)";
+    // Every unfinished retro is listed; only the others are capped, so an
+    // old unfinished one is never cut for sorting last.
+    let newest = "max(created_at, coalesce(finished_at, ''), coalesce(curator_started_at, '')) DESC, id DESC";
     let retros: Vec<Retro> = list(
         store.conn(),
         &format!(
-            "{recent} ORDER BY max(created_at, coalesce(finished_at, ''), coalesce(curator_started_at, '')) DESC, id DESC LIMIT {MOST}"
+            "depth = 'full' AND (?1 IS NULL OR project_id = ?1)
+             AND (outcome = 'unfinished' OR id IN (
+                 SELECT id FROM retros WHERE depth = 'full' AND (?1 IS NULL OR project_id = ?1)
+                     AND outcome IS NOT 'unfinished'
+                     AND (created_at >= ?2 OR finished_at >= ?2 OR curator_started_at >= ?2)
+                 ORDER BY {newest} LIMIT {MOST}))
+             ORDER BY {newest}"
         ),
         &[&project, &since],
     )?;
@@ -656,6 +663,44 @@ mod tests {
         let other = get_at(&app, "/api/v1/retros?project=beta").await;
         assert_eq!(other.status, StatusCode::OK);
         assert!(other.body.contains("\"retros\":[]"), "{}", other.body);
+    }
+
+    /// The list has every unfinished retro, however many newer ones there
+    /// are (`protocol.md`, `GET /api/v1/retros`).
+    #[tokio::test]
+    async fn an_old_unfinished_retro_is_listed_past_the_cap() {
+        let fleet = fleet();
+        let now = Timestamp::now();
+        let old = now.plus_minutes(-60 * 24 * 60);
+        fleet
+            .store
+            .conn()
+            .execute(
+                &format!("UPDATE retros SET created_at = '{old}', finished_at = '{old}', curator_started_at = '{old}' WHERE id = '{R1}'"),
+                [],
+            )
+            .unwrap();
+        for n in 0..MOST {
+            // One retro per card close.
+            let closed = now.plus_minutes(-(n + 1));
+            fleet
+                .store
+                .conn()
+                .execute(
+                    &format!(
+                        "INSERT INTO retros (id, card_id, project_id, closed_at, depth, reason, state, outcome,
+                                             finished_at, finished_by, created_at)
+                         VALUES ('01JC0000000000000000D{n:05}', 'c44', 'alpha', '{closed}', 'full', 'incident',
+                                 'done', 'nothing', '{now}', 'curator', '{now}')"
+                    ),
+                    [],
+                )
+                .unwrap();
+        }
+        let list = retros(&app(&fleet, Vec::new())).await;
+        // The cap still holds for the others: R2 and the newer done ones.
+        assert_eq!(list.retros.len(), usize::try_from(MOST).unwrap() + 1);
+        assert_eq!(list.retros.last().map(|retro| retro.id.as_str()), Some(R1));
     }
 
     #[tokio::test]
