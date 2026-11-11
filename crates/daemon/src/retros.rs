@@ -412,22 +412,24 @@ pub(crate) async fn run_retro(
         if !db.exists() {
             return Err(uninitialized());
         }
-        let _claiming = retros.claiming();
-        if retros.stopping() {
-            return Err(Error::Unavailable("the daemon is stopping".into()).into());
-        }
-        // A config that cannot be used is refused by the claim below.
+        // A config that cannot be used is refused by the claim below. It is
+        // read before the claims lock, so a stop does not wait on it.
         let timeout =
             i64::try_from(learning_of(&home).0.curator_timeout_minutes).unwrap_or(i64::MAX);
+        let _claiming = retros.claiming();
         let mut store = Store::open_current(&db).map_err(ApiError::from)?;
         let ctx = board_ctx(&key, args.as_ref());
         // A retry of a Run again answers with the retro its key claimed and
-        // starts nothing, even after a restart: the claim stored the key.
-        // A key stored for another write is refused by the same call.
+        // starts nothing, even after a restart or while the daemon stops:
+        // the claim stored the key. A key stored for another write is
+        // refused by the same call.
         if store.key_recorded(&ctx)? {
             let claimed = store.retro_start(&ctx, &id, None, timeout)?;
             let retro: Retro = get(store.conn(), "retro", &claimed.value.id)?;
             return Ok(response(&retro, Vec::new(), true)?);
+        }
+        if retros.stopping() {
+            return Err(Error::Unavailable("the daemon is stopping".into()).into());
         }
         let retro = learning::resolve_retro(store.conn(), &id)?;
         let card: tiller_core::domain::Card = get(store.conn(), "card", &retro.card_id)?;
@@ -884,6 +886,32 @@ mod tests {
         );
         let r1 = one(&app, R1).await;
         assert_eq!(r1.status, RetroStatus::Unfinished);
+        assert!(retros.runs().is_empty());
+    }
+
+    /// A retry of a Run again that arrives once the daemon is stopping
+    /// answers with the retro its key claimed, as any replay does.
+    #[tokio::test]
+    async fn a_stopping_daemon_still_replays_a_run_again() {
+        let fleet = fleet();
+        let cookie = owner_cookie(fleet.dir.path());
+        let retros = Retros::default();
+        let app = crate::api::tests::app_retros(
+            fleet.dir.path(),
+            Arc::new(FakeCurator {
+                db: fleet.db.clone(),
+                endings: Mutex::new(VecDeque::from([Ending::UntilStopped])),
+            }),
+            retros.clone(),
+        );
+        let (status, body) = run(&app, &cookie, R1, "k").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        retros.stop(Duration::from_secs(5));
+        let (status, body) = run(&app, &cookie, R1, "k").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["replayed"], true);
+        assert_eq!(body["data"]["id"], R1);
+        assert_eq!(body["data"]["outcome"], "unfinished");
         assert!(retros.runs().is_empty());
     }
 

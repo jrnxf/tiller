@@ -452,7 +452,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
     let server = axum::serve(listener, api::router(state)).with_graceful_shutdown(shutdown);
     let mut stopped = stop.clone();
     // A serve error is returned only once the curators and evals the board
-    // started are stopped too.
+    // started are stopped, the stop is recorded and the info file is gone.
     let served = tokio::select! {
         served = server => served.map_err(DaemonError::Serve),
         () = async {
@@ -475,7 +475,6 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
     // A holdout eval the board started is stopped the same way, and records
     // nothing.
     let _ = tokio::task::spawn_blocking(move || evals.stop(DRAIN)).await;
-    served?;
     // An older binary never writes to a newer database, not even its stop
     // event.
     let fatal = *fatal.lock().unwrap_or_else(PoisonError::into_inner);
@@ -492,6 +491,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         .await;
     }
     let _ = std::fs::remove_file(info_path(&config.home));
+    served?;
     Ok(match fatal {
         Some(Fatal::WorkersFailed) => Ended::WorkersFailed,
         _ => Ended::Stopped,
