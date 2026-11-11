@@ -417,8 +417,10 @@ pub fn resume(
     let warning = type_line(store, world.herdr, run, &session.id, &pane_id, &line)?;
     let (started, evidence) =
         wait_started(store, world.herdr, waits, &session.id, &pane_id, since)?;
-    // The pause clears only once the session is seen running: a resume that
-    // failed to start leaves the run paused and its alarms quiet.
+    // The pause clears once the launch line is typed: a resume whose pane or
+    // launch line failed returns above and leaves the run paused. An
+    // Unconfirmed start still clears it, so the alarms catch a start that
+    // never comes up.
     events.extend(store.run_unpause(&unkeyed, &run.id)?.events);
     Ok(Applied {
         value: Resumed {
