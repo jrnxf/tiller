@@ -16,7 +16,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use common::World;
+use common::{Running, World};
 use serde_json::Value;
 
 const WAIT: Duration = Duration::from_secs(20);
@@ -26,32 +26,8 @@ struct Daemon {
     port: u16,
 }
 
-/// A daemon process that is killed and reaped when it goes out of scope, so a
-/// test that fails before it stops the daemon leaves none behind.
-struct Running(Child);
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-impl std::ops::Deref for Running {
-    type Target = Child;
-    fn deref(&self) -> &Child {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for Running {
-    fn deref_mut(&mut self) -> &mut Child {
-        &mut self.0
-    }
-}
-
 fn spawn(world: &World, args: &[&str]) -> Running {
-    Running(
+    Running::new(
         daemon_command(world)
             .args(args)
             .env("TILLER_HERDR", "/nonexistent/herdr")
@@ -113,12 +89,8 @@ fn wait(child: &mut Child) -> ExitStatus {
         if let Some(status) = child.try_wait().unwrap() {
             return status;
         }
-        if Instant::now() >= deadline {
-            // A failed test leaves no daemon behind.
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("the daemon did not exit");
-        }
+        // The guard stops it, with what it started, as the panic unwinds.
+        assert!(Instant::now() < deadline, "the daemon did not exit");
         std::thread::sleep(Duration::from_millis(50));
     }
 }
@@ -184,7 +156,7 @@ fn a_db_other_than_the_home_database_is_refused() {
     assert!(!world.home().exists(), "the daemon created a default home");
 
     // The environment variable is the same flag.
-    let mut child = Running(
+    let mut child = Running::new(
         daemon_command(&world)
             .env("TILLER_HERDR", "/nonexistent/herdr")
             .env("TILLER_DB", &other)
@@ -526,7 +498,7 @@ fn the_daemon_drives_the_herdr_spawn_names() {
     ]);
 
     // Every failed call logs; nothing reads stderr here, so it must not fill.
-    let child = Running(
+    let child = Running::new(
         daemon_command(&world)
             .stderr(Stdio::null())
             .spawn()
@@ -587,7 +559,7 @@ fn the_daemon_follows_a_changed_spawn_herdr_without_a_restart() {
         ]);
     };
     set(&first);
-    let child = Running(
+    let child = Running::new(
         daemon_command(&world)
             .stderr(Stdio::null())
             .spawn()
@@ -629,7 +601,7 @@ fn the_daemon_reads_only_spawn_and_needs_its_herdr() {
     assert!(terminate(&mut daemon).success());
 
     std::fs::write(world.home().join("config.toml"), "[spawn]\nherdr = []\n").unwrap();
-    let mut daemon = Running(daemon_command(&world).spawn().unwrap());
+    let mut daemon = Running::new(daemon_command(&world).spawn().unwrap());
     let status = wait(&mut daemon);
     assert_eq!(status.code(), Some(1));
     let mut stderr = String::new();
@@ -714,7 +686,7 @@ fn the_login_link_signs_in_once_at_an_allowed_host() {
 #[test]
 fn the_login_code_signs_in_at_an_allowed_host_until_sign_out() {
     let world = World::initialized();
-    let mut child = Running(
+    let mut child = Running::new(
         daemon_command(&world)
             .args(["--allow-host", "tiller.example.com"])
             .env("TILLER_HERDR", "/nonexistent/herdr")
@@ -1247,5 +1219,107 @@ fn a_stopping_daemon_stops_the_curator_the_board_started() {
     assert_eq!(
         row["learning"],
         "curator stopped: the daemon stopped before the retro was finished"
+    );
+}
+
+/// The pid a stand-in wrote to `path`, once the whole line is there.
+fn written_pid(path: &std::path::Path) -> String {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        if text.ends_with('\n') {
+            return text.trim().to_owned();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} was never written",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Whether `pid` is gone, or only a zombie, within a few seconds: a process
+/// stopped after its parent is reaped by whatever adopted it.
+fn gone(pid: &str) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let out = Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&out.stdout);
+        if stat.trim().is_empty() || stat.trim_start().starts_with('Z') {
+            return true;
+        }
+        if Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Kills `pids` whatever happened, so a failed check leaves none behind.
+fn reap_all(pids: &[&str]) {
+    for pid in pids {
+        let _ = Command::new("kill").args(["-KILL", pid]).status();
+    }
+}
+
+/// A test that fails while the board's curator runs leaves nothing behind:
+/// dropping the guard stops the daemon, which stops the curator and the
+/// `sleep` it started, though the curator leads a process group of its own.
+#[test]
+fn a_dropped_daemon_leaves_no_curator_behind() {
+    let world = World::initialized();
+    let which = Command::new("sh")
+        .args(["-c", "command -v sleep"])
+        .output()
+        .unwrap();
+    let sleep = String::from_utf8(which.stdout).unwrap().trim().to_owned();
+    let pid_file = |name: &str| world.dir.path().join(name);
+    let (_fake, retro) = curator_home(
+        &world,
+        &format!(
+            "#!/bin/sh\n\"{sleep}\" 300 &\necho $! > '{grandchild}'\necho $$ > '{curator}'\nwait\n",
+            grandchild = pid_file("grandchild.pid").display(),
+            curator = pid_file("curator.pid").display(),
+        ),
+    );
+    let daemon = start(&world);
+    let (status, answer) = run_again(&world, daemon.port, &retro, "run-1");
+    assert_eq!(status, "HTTP/1.0 200 OK", "{answer}");
+    let curator = written_pid(&pid_file("curator.pid"));
+    let grandchild = written_pid(&pid_file("grandchild.pid"));
+    drop(daemon);
+    let ended = (gone(&curator), gone(&grandchild));
+    reap_all(&[&curator, &grandchild]);
+    assert_eq!(
+        ended,
+        (true, true),
+        "the curator or its child outlived the guard"
+    );
+}
+
+/// The guard kills a child that ignores SIGTERM, with what it started, even
+/// a process in a group of its own (`set -m` gives each background job one).
+#[test]
+fn a_guard_kills_a_child_that_ignores_sigterm_and_its_groups() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = format!(
+        "trap '' TERM\nset -m\nsleep 300 &\necho $! > '{dir}/job'\nwait\n",
+        dir = dir.path().display()
+    );
+    let child = Command::new("sh").args(["-c", &script]).spawn().unwrap();
+    let shell = child.id().to_string();
+    let running = Running::with_grace(child, Duration::from_millis(300));
+    let job = written_pid(&dir.path().join("job"));
+    drop(running);
+    let ended = (gone(&shell), gone(&job));
+    reap_all(&[&shell, &job]);
+    assert_eq!(
+        ended,
+        (true, true),
+        "the shell or its job outlived the guard"
     );
 }

@@ -11,25 +11,19 @@ mod common;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use common::World;
+use common::{Running, World};
 
 const WAIT: Duration = Duration::from_secs(30);
 
+/// The daemon and its guard, which stops it with what it started when the
+/// test ends or fails.
 struct Daemon {
-    child: Child,
+    _child: Running,
     port: u16,
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        // A failed test leaves no daemon behind.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
 }
 
 /// The daemon with a `PATH` that holds `git` and nothing else.
@@ -42,18 +36,20 @@ fn start(world: &World) -> Daemon {
         .unwrap();
     let git = String::from_utf8(found.stdout).unwrap();
     std::os::unix::fs::symlink(git.trim(), bin.join("git")).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tiller"))
-        .args(["daemon", "--port", "0"])
-        .env("TILLER_HOME", world.home())
-        .env("PATH", &bin)
-        .env("TILLER_HERDR", "/nonexistent/herdr")
-        .env("TILLER_QUOTA_AXI", "/nonexistent/quota-axi")
-        .env("TILLER_LOG", "warn")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut child = Running::new(
+        Command::new(env!("CARGO_BIN_EXE_tiller"))
+            .args(["daemon", "--port", "0"])
+            .env("TILLER_HOME", world.home())
+            .env("PATH", &bin)
+            .env("TILLER_HERDR", "/nonexistent/herdr")
+            .env("TILLER_QUOTA_AXI", "/nonexistent/quota-axi")
+            .env("TILLER_LOG", "warn")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     let stdout = child.stdout.take().unwrap();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -68,7 +64,10 @@ fn start(world: &World) -> Daemon {
         .unwrap_or_else(|| panic!("unexpected first line {line:?}"))
         .parse()
         .unwrap();
-    Daemon { child, port }
+    Daemon {
+        _child: child,
+        port,
+    }
 }
 
 /// `GET /api/v1/events` read on a thread: each `data:` line of a `change`

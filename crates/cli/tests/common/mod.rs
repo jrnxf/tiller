@@ -484,3 +484,145 @@ pub fn parse_cpu_list(text: &str) -> Vec<usize> {
         })
         .collect()
 }
+
+/// A child, such as a daemon, that is stopped with everything it started
+/// when it goes out of scope, so a test that fails before it stops the
+/// child leaves no process behind.
+///
+/// The child first gets SIGTERM and `grace` to stop the way it does for
+/// the owner: a daemon then stops its curators and herdr calls itself.
+/// When it is still running after that, it is frozen with SIGSTOP and
+/// SIGKILL takes it and every process under it, with the whole process
+/// group of each one that leads a group of its own (a curator does). A
+/// process that outlives a clean stop is killed too, with its group.
+pub struct Running {
+    child: std::process::Child,
+    grace: std::time::Duration,
+}
+
+impl Running {
+    /// The grace a daemon gets to stop on SIGTERM.
+    pub const GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+    pub fn new(child: std::process::Child) -> Self {
+        Self::with_grace(child, Self::GRACE)
+    }
+
+    pub fn with_grace(child: std::process::Child, grace: std::time::Duration) -> Self {
+        Self { child, grace }
+    }
+}
+
+impl std::ops::Deref for Running {
+    type Target = std::process::Child;
+    fn deref(&self) -> &std::process::Child {
+        &self.child
+    }
+}
+
+impl std::ops::DerefMut for Running {
+    fn deref_mut(&mut self) -> &mut std::process::Child {
+        &mut self.child
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+        // A reaped child's pid may belong to another process by now.
+        if !matches!(self.child.try_wait(), Ok(None)) {
+            return;
+        }
+        let Ok(raw) = i32::try_from(self.child.id()) else {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            return;
+        };
+        let root = Pid::from_raw(raw);
+        let before = descendants(raw);
+        let _ = kill(root, Signal::SIGTERM);
+        let deadline = std::time::Instant::now() + self.grace;
+        while matches!(self.child.try_wait(), Ok(None)) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if matches!(self.child.try_wait(), Ok(None)) {
+            // Frozen, it starts nothing new while its tree is read and killed.
+            let _ = kill(root, Signal::SIGSTOP);
+            kill_all(&descendants(raw));
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            return;
+        }
+        // Stopped by itself; anything it left that still runs as it was
+        // (same pid, group and command line, so not a reused pid) goes too.
+        let now = processes();
+        let left: Vec<Process> = before.into_iter().filter(|p| now.contains(p)).collect();
+        kill_all(&left);
+    }
+}
+
+/// One row of the process table.
+#[derive(Clone, PartialEq, Eq)]
+struct Process {
+    pid: i32,
+    ppid: i32,
+    pgid: i32,
+    args: String,
+}
+
+/// Every process on the host, from `ps`, which Linux and macOS share.
+fn processes() -> Vec<Process> {
+    let Ok(out) = Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,pgid=,args="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let ppid = fields.next()?.parse().ok()?;
+            let pgid = fields.next()?.parse().ok()?;
+            let args = fields.collect::<Vec<_>>().join(" ");
+            Some(Process {
+                pid,
+                ppid,
+                pgid,
+                args,
+            })
+        })
+        .collect()
+}
+
+/// Every process under `root`, children before their own children.
+fn descendants(root: i32) -> Vec<Process> {
+    let table = processes();
+    let mut found: Vec<Process> = Vec::new();
+    let mut parents = vec![root];
+    while let Some(parent) = parents.pop() {
+        for process in table.iter().filter(|p| p.ppid == parent) {
+            if !found.iter().any(|seen| seen.pid == process.pid) {
+                parents.push(process.pid);
+                found.push(process.clone());
+            }
+        }
+    }
+    found
+}
+
+/// SIGKILL to each process, and to the group of each one that leads its
+/// own. The test's own group is never signalled.
+fn kill_all(processes: &[Process]) {
+    use nix::sys::signal::{Signal, kill, killpg};
+    use nix::unistd::{Pid, getpgrp};
+    let own = getpgrp().as_raw();
+    for process in processes {
+        if process.pgid == process.pid && process.pgid != own {
+            let _ = killpg(Pid::from_raw(process.pgid), Signal::SIGKILL);
+        }
+        let _ = kill(Pid::from_raw(process.pid), Signal::SIGKILL);
+    }
+}
