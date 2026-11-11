@@ -739,12 +739,20 @@ fn owner_is_tiller(home: &Path) -> bool {
     }
 }
 
+/// Writes `observed` to `<ulid>.json.tmp` and renames it to `<ulid>.json`, so
+/// [`import_spool`], which lists only `.json`, never reads half a file.
 fn spool(env: &Env, observed: &Observed, why: &str) -> Outcome {
     let dir = env.tiller_home.join("hook-spool");
-    let path = dir.join(format!("{}.json", tiller_core::ids::new_ulid()));
+    let id = tiller_core::ids::new_ulid();
+    let path = dir.join(format!("{id}.json"));
+    let partial = dir.join(format!("{id}.json.tmp"));
     let written = fs::create_dir_all(&dir)
         .and_then(|()| serde_json::to_vec(observed).map_err(std::io::Error::other))
-        .and_then(|bytes| fs::write(&path, bytes));
+        .and_then(|bytes| fs::write(&partial, bytes))
+        .and_then(|()| fs::rename(&partial, &path))
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&partial);
+        });
     match written {
         Ok(()) => {
             log(env, &format!("spooled {} ({why})", observed.hook_event));
