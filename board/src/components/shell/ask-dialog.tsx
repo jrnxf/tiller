@@ -283,7 +283,11 @@ function AskBody({
       // The editor takes focus itself.
       initialFocus="child"
       onEscape={() => {
-        if (!escapeClosesList.current) onClose();
+        // Read once: a later Escape with focus on the page never passes the
+        // capture below, so it must not see this one's answer.
+        const closesList = escapeClosesList.current;
+        escapeClosesList.current = false;
+        if (!closesList) onClose();
       }}
       onKeyDownCapture={(event) => {
         if (event.key === "Escape") escapeClosesList.current = listOpen.current;
