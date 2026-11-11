@@ -1140,17 +1140,21 @@ fn identity_stripping_denied() {
 
 // -- Wrapper option parsing ---------------------------------------------------
 
-/// Runs each case for every role: `None` is an allow.
+/// Runs each case for every role: `None` is an allow. It fails once with
+/// every verdict that is wrong, so one run shows every gap.
 #[track_caller]
 fn verdicts(cases: &[(&str, Option<Code>)]) {
+    let mut wrong = Vec::new();
     for role in Role::ALL {
         for (command, verdict) in cases {
-            match verdict {
-                Some(code) => denied(role, command, *code),
-                None => allowed(role, command),
+            let got = bash(role, command);
+            if got.as_ref().map(|denial| denial.code) != *verdict {
+                let got = got.map_or_else(|| "allowed".to_owned(), |denial| denial.message());
+                wrong.push(format!("{role}: {command}: got {got}, wanted {verdict:?}"));
             }
         }
     }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 /// B2: `env` reads its options the way GNU `getopt_long` does.
@@ -1581,29 +1585,12 @@ fn xargs_and_shell_long_options_are_read() {
     ]);
 }
 
-/// Every verdict that does not match, so a test names each form that fails
-/// instead of stopping at the first.
-fn mismatches(cases: &[(&str, Option<Code>)]) -> Vec<String> {
-    let mut wrong = Vec::new();
-    for role in Role::ALL {
-        for (command, verdict) in cases {
-            let got = bash(role, command).map(|denial| denial.code);
-            if got != *verdict {
-                wrong.push(format!(
-                    "{role}: {command}: got {got:?}, wanted {verdict:?}"
-                ));
-            }
-        }
-    }
-    wrong
-}
-
 /// `watch` reads its options the way procps `watch` does, and runs the
 /// rest as one `sh -c` string unless `-x` is among them.
 #[test]
 fn watch_options_parse_like_getopt() {
     const OWNER: Option<Code> = Some(Code::OwnerOnly);
-    let wrong = mismatches(&[
+    verdicts(&[
         ("watch -n 5 tiller approve 01JABC", OWNER),
         ("watch -n5 tiller approve 01JABC", OWNER),
         ("watch -d -n 5 tiller approve 01JABC", OWNER),
@@ -1645,7 +1632,6 @@ fn watch_options_parse_like_getopt() {
         ("watch -n 1 'tiller --json snapshot'", None),
         ("watch --bogus cargo test", None),
     ]);
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 /// `nix develop` and `nix shell` run the words after `-c` or `--command`,
@@ -1655,7 +1641,7 @@ fn watch_options_parse_like_getopt() {
 fn nix_command_forms_are_read() {
     const OWNER: Option<Code> = Some(Code::OwnerOnly);
     const ID: Option<Code> = Some(Code::Identity);
-    let wrong = mismatches(&[
+    verdicts(&[
         ("nix develop -c tiller approve 01JABC", OWNER),
         ("nix develop -L -c tiller approve 01JABC", OWNER),
         ("nix develop -Lc tiller approve 01JABC", OWNER),
@@ -1703,6 +1689,20 @@ fn nix_command_forms_are_read() {
         ("nix develop -i -c tiller status x", ID),
         ("nix develop -Lic tiller status x", ID),
         ("nix shell nixpkgs#hello --ignore-env -c true", ID),
+        ("nix develop --ignore-environment -c true", ID),
+        // `-u` and `-s` follow the rules of `env`.
+        ("nix develop -u TILLER_SESSION_ID -c true", ID),
+        ("nix develop --unset CLAUDECODE -c true", ID),
+        ("nix shell nixpkgs#hello -s TILLER_ROLE owner -c true", ID),
+        ("nix develop --set-env-var \"$NAME\" x -c true", ID),
+        ("nix develop -u HOME -c true", None),
+        // A `-c` that may be a flag's value still leaves standard input.
+        (
+            "echo 'tiller approve 01JABC' | nix develop -k -c cat",
+            OWNER,
+        ),
+        // A subcommand not known before it runs may be `develop`.
+        ("echo 'tiller approve 01JABC' | nix \"$SUB\"", OWNER),
         ("nix-shell --run 'tiller approve 01JABC'", OWNER),
         (
             "nix-shell -p hello --command 'tiller approve 01JABC'",
@@ -1716,6 +1716,15 @@ fn nix_command_forms_are_read() {
         ),
         ("nix-shell \"$OPT\" 'tiller approve 01JABC'", OWNER),
         ("echo 'tiller approve 01JABC' | nix-shell -p hello", OWNER),
+        // A `--run` that is a flag's value leaves standard input.
+        (
+            "echo 'tiller approve 01JABC' | nix-shell --arg x --run",
+            OWNER,
+        ),
+        (
+            "nix develop --profile /home/user/.tiller/p -c true",
+            Some(Code::StateWrite),
+        ),
         ("nix-shell --pure --run true", ID),
         (
             "nix develop -c cargo clippy --workspace -- -D warnings",
@@ -1726,10 +1735,14 @@ fn nix_command_forms_are_read() {
         ("nix-shell -p jq --run 'jq . data.json'", None),
         ("nix develop", None),
         ("nix build .#tiller", None),
+        // Any other nix command keeps the checks on its own words.
+        (
+            "nix build -o /home/user/.tiller/result .#tiller",
+            Some(Code::StateWrite),
+        ),
         ("nix flake check -L", None),
         ("echo hi | nix develop -c cat", None),
     ]);
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 /// `direnv exec DIR COMMAND`, or `direnv exec FILE` when the path is a
@@ -1737,7 +1750,7 @@ fn nix_command_forms_are_read() {
 #[test]
 fn direnv_exec_reads_both_shapes() {
     const OWNER: Option<Code> = Some(Code::OwnerOnly);
-    let wrong = mismatches(&[
+    verdicts(&[
         ("direnv exec . tiller approve 01JABC", OWNER),
         (
             "direnv exec /home/user/pool/3/alpha tiller approve 01JABC",
@@ -1754,7 +1767,6 @@ fn direnv_exec_reads_both_shapes() {
         ("direnv exec /home/user/pool/3/alpha tiller status x", None),
         ("direnv allow", None),
     ]);
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 /// A brace word is not known before it runs: past the positional, it can
