@@ -5,7 +5,6 @@
 //! Nothing here writes outside `<repo>/.git` and the one canonical file the
 //! approval names.
 
-use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
@@ -273,46 +272,47 @@ impl Repo {
         Ok(found)
     }
 
-    /// The commits reachable from `to` and not from `from` (every commit of
-    /// `to` when `from` is `None`), each before its parents: `limit` of them
-    /// and one more, so a caller can tell a longer list.
-    pub(crate) fn commits_between(
+    /// Each commit reachable from `to` and not from `from` (every commit of
+    /// `to` when `from` is `None`, or names a commit the repo no longer
+    /// has), newest first along first parents, with the paths it wrote. A
+    /// merge wrote every path it changed against its first parent, so the
+    /// changes it brought in are its own. One git process reads it all.
+    pub(crate) fn history(
         &self,
         from: Option<&str>,
         to: &str,
-        limit: usize,
-    ) -> Result<Vec<String>> {
-        let count = format!("--max-count={}", limit + 1);
+    ) -> Result<Vec<(String, Vec<String>)>> {
+        let from = match from {
+            Some(from) => {
+                let probe = format!("{from}^{{commit}}");
+                self.try_git(None, &["cat-file", "-e", &probe], None)?
+                    .map(|_| from)
+            }
+            None => None,
+        };
         let not = from.map(|from| format!("^{from}"));
-        let mut args = vec!["rev-list", "--topo-order", &count, to];
+        let mut args = vec![
+            "log",
+            "--first-parent",
+            "-m",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            "--format=%x01%H",
+            to,
+        ];
         args.extend(not.as_deref());
         let out = self.git(None, &args, None)?;
-        Ok(out.lines().map(str::to_owned).collect())
-    }
-
-    /// The paths `commit` added, changed or removed against its parent (or
-    /// all its files, for a first commit). For a merge, only the paths it
-    /// changed against every parent: the merge's own edits.
-    pub(crate) fn written_by(&self, commit: &str) -> Result<HashSet<String>> {
-        let out = self.git(
-            None,
-            &[
-                "diff-tree",
-                "--no-commit-id",
-                "--name-only",
-                "-r",
-                "-c",
-                "--root",
-                "-z",
-                commit,
-            ],
-            None,
-        )?;
-        Ok(out
-            .split('\0')
-            .filter(|path| !path.is_empty())
-            .map(str::to_owned)
-            .collect())
+        let mut commits: Vec<(String, Vec<String>)> = Vec::new();
+        for field in out.split('\0') {
+            let field = field.strip_prefix('\n').unwrap_or(field);
+            if let Some(commit) = field.strip_prefix('\u{1}') {
+                commits.push((commit.to_owned(), Vec::new()));
+            } else if let (false, Some((_, paths))) = (field.is_empty(), commits.last_mut()) {
+                paths.push(field.to_owned());
+            }
+        }
+        Ok(commits)
     }
 
     /// The file as Tiller checks it before every change.

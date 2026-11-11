@@ -344,6 +344,39 @@ async fn the_boards_own_write_is_not_an_outside_change() {
     edit_in("alpha", "k-7b", "Keep the line after the merge").await;
     look(&mut watcher);
     assert_eq!(look(&mut watcher), None);
+    assert_eq!(changes(&watcher).len(), 4, "no change since k-5");
+
+    // On another branch, an outside merge of Tiller's branch that keeps
+    // that branch's text of Tiller's document owns the text, though Tiller
+    // wrote the document too; Tiller then commits on that branch.
+    let base = git(&root, &["rev-parse", "HEAD"]);
+    git(&root, &["checkout", "--quiet", "-b", "other", base.trim()]);
+    commit(
+        &root,
+        "projects/alpha.md",
+        "# Alpha, from the other branch\n",
+    );
+    git(&root, &["checkout", "--quiet", "main"]);
+    edit_in("alpha", "k-7c", "Keep the line the merge drops").await;
+    git(&root, &["checkout", "--quiet", "other"]);
+    git(
+        &root,
+        &[
+            "merge",
+            "--quiet",
+            "--no-gpg-sign",
+            "--no-edit",
+            "-s",
+            "ours",
+            "main",
+        ],
+    );
+    edit("k-7d", "Keep the line after the second merge").await;
+    look(&mut watcher);
+    assert_eq!(
+        look(&mut watcher),
+        Some(vec!["projects/alpha.md".to_owned()])
+    );
 
     // Tiller commits the bytes it writes, with no clean filter between, so
     // a filter in the repo does not make its own write look like an

@@ -25,8 +25,7 @@
 //! already refreshed the board. The change names only the other documents
 //! (one an outside commit or an editor's save wrote last, or one changed
 //! again since), and when there are none the watcher writes nothing. That
-//! check runs a few git processes (one for each new commit, up to
-//! [`WALK`], and two more), after the lock is released.
+//! check runs three git processes, after the lock is released.
 //!
 //! A missing repo is not an error. It has no `HEAD` and no documents, and a
 //! repo made or replaced later is a change like any other. A document that
@@ -65,9 +64,6 @@ const RACY: Duration = Duration::from_secs(2);
 
 const FLEET: &str = "fleet.md";
 const PROJECTS: &str = "projects";
-/// The most new commits one look reads to tell Tiller's writes from outside
-/// ones.
-const WALK: usize = 100;
 
 /// What a stat says about one file: enough to see it rewritten, replaced or
 /// touched.
@@ -409,44 +405,17 @@ impl Watcher {
         let tillers = self
             .store
             .mem_commits_since(before.tiller.as_ref().map(|tiller| tiller.seq))?;
-        // Each changed path's newest commit says whether Tiller wrote it
-        // last. One git process reads each new commit, newest first, until
-        // every changed path has one. A walk git cannot make (the old `HEAD`
-        // no longer in the repo, after a gc or a replaced repo), or one too
-        // long to make in a poll, explains nothing: the change then names
-        // every changed document, and the board reads them again.
+        // Each changed path's newest commit, along first parents, says
+        // whether Tiller wrote it last. An outside merge owns all it brought
+        // in.
         let mut last: BTreeMap<&String, bool> = BTreeMap::new();
-        let walked = self
-            .repo
-            .commits_between(before.head.as_deref(), commit, WALK)
-            .and_then(|commits| {
-                if commits.len() > WALK {
-                    return Ok(false);
-                }
-                for each in &commits {
-                    let mine = tillers.contains(each);
-                    let wrote = self.repo.written_by(each)?;
-                    for path in changed.iter().filter(|path| wrote.contains(*path)) {
-                        last.entry(path).or_insert(mine);
-                    }
-                    if last.len() == changed.len() {
-                        break;
-                    }
-                }
-                Ok(true)
-            });
-        match walked {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::warn!(
-                    limit = WALK,
-                    "the memory watcher found too many new commits to read"
-                );
-                return Ok(changed);
+        for (each, wrote) in self.repo.history(before.head.as_deref(), commit)? {
+            let mine = tillers.contains(&each);
+            for path in changed.iter().filter(|path| wrote.contains(*path)) {
+                last.entry(path).or_insert(mine);
             }
-            Err(error) => {
-                tracing::warn!(%error, "the memory watcher cannot read the new commits");
-                return Ok(changed);
+            if last.len() == changed.len() {
+                break;
             }
         }
         let mine: Vec<String> = changed
