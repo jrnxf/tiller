@@ -2044,8 +2044,12 @@ impl Store {
             if let (Some(session_id), Some(verdict)) = (&new.session_id, new.verdict) {
                 let session: Session = get(tx.conn(), "session", session_id)?;
                 let newer = session.activity_observed_at.is_none_or(|at| new.observed_at > at);
+                // An ended session stays ended: a line read in the
+                // transcript's retention window, or a hook that comes late,
+                // is kept as a row but moves nothing (`protocol.md` 5).
+                let ended = session.ended_at.is_some() && verdict != Activity::Ended;
                 idle_held_until = herdr_idle_held(&session, &new);
-                if newer && idle_held_until.is_none() {
+                if newer && !ended && idle_held_until.is_none() {
                     tx.conn().execute(
                         "UPDATE sessions SET activity = ?2, activity_observed_at = ?3, activity_source = ?4 WHERE id = ?1",
                         params![session.id, verdict, new.observed_at, new.source],

@@ -1436,6 +1436,77 @@ esac
         assert_eq!(t.recorded(), ["u1", "u2"], "nothing after the window");
     }
 
+    /// Retention on a transcript-intake host: a line stamped after the
+    /// session ended is kept as a row, but it moves nothing. The session
+    /// stays `ended` and no ask is opened on it. A line stamped before the
+    /// end, which Claude Code flushed late, still records its ask.
+    #[test]
+    fn transcript_lines_after_the_end_leave_an_ended_session_ended() {
+        let mut t = Transcript::new();
+        let path = t.path("main.jsonl");
+        t.bind("claude-orchestrator", &path, "startup");
+        let session = t.fleet.orchestrator_session.clone();
+        let ended = Timestamp::now();
+        let mut source = t.source();
+        source.intake = true;
+        source.poll(ended).unwrap();
+        // The SessionEnd hook.
+        t.fleet
+            .store
+            .observation_record(
+                &Ctx::at(Actor::Hook, ended),
+                tiller_core::state::runs::NewObservation {
+                    session_id: Some(session.clone()),
+                    run_id: None,
+                    source: tiller_core::domain::ObservationSource::Hook,
+                    event: "SessionEnd:exit".into(),
+                    verdict: Some(tiller_core::domain::Activity::Ended),
+                    observed_at: ended,
+                    payload: serde_json::json!({}),
+                },
+            )
+            .unwrap();
+        t.end(ended);
+
+        let before = ended.plus_minutes(-1).to_string();
+        let after = ended.plus_minutes(1).to_string();
+        let user = |uuid: &str, at: &str, text: &str| {
+            serde_json::json!({"type": "user", "uuid": uuid, "timestamp": at,
+                "message": {"role": "user", "content": text}})
+        };
+        Transcript::append(&path, &user("late", &before, "typed before the end"));
+        Transcript::append(&path, &user("dead", &after, "typed after the end"));
+        Transcript::append(
+            &path,
+            &serde_json::json!({"type": "assistant", "uuid": "turn", "timestamp": after,
+                "message": {"role": "assistant", "stop_reason": "end_turn"}}),
+        );
+        source.poll(ended.plus_minutes(2)).unwrap();
+
+        assert_eq!(t.recorded(), ["late", "dead", "turn"], "every row is kept");
+        let row: Session =
+            tiller_core::state::get(t.fleet.store.conn(), "session", &session).unwrap();
+        assert_eq!(row.activity, tiller_core::domain::Activity::Ended);
+        let conn = t.fleet.store.conn();
+        let texts: Vec<String> = conn
+            .prepare("SELECT text FROM asks WHERE session_id = ?1 ORDER BY id")
+            .unwrap()
+            .query_map([&session], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(texts, ["typed before the end"]);
+        let moved: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind = 'observation.recorded'
+                 AND json_extract(payload, '$.from') = 'ended'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(moved, 0, "the activity never left ended");
+    }
+
     /// Retention and `/clear` together: the window keeps the file the
     /// session was bound to when it ended. A file the session left before
     /// is read once more and let go, as for a live session.

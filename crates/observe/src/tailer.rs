@@ -261,7 +261,7 @@ impl Tailer {
         if event == "transcript:user" {
             // A busy database retries the line; any other refusal is noted
             // and the tailer moves on, so one bad entry never stalls it.
-            match self.record_ask(store, &entry, uuid) {
+            match self.record_ask(store, &entry, uuid, observed_at) {
                 Ok(Some(ask_id)) => payload["ask_id"] = json!(ask_id),
                 Ok(None) => {}
                 Err(error @ tiller_core::Error::Unavailable(_)) => return Err(error),
@@ -284,12 +284,15 @@ impl Tailer {
     }
 
     /// On a hook-less host the tailer is the ask's source (`protocol.md`
-    /// 2.2), keyed by the entry so a re-read never records it twice.
+    /// 2.2), keyed by the entry so a re-read never records it twice. An
+    /// entry stamped after the session ended opens no ask: the session it
+    /// would land on is gone.
     fn record_ask(
         &self,
         store: &mut Store,
         entry: &Value,
         uuid: Option<&str>,
+        observed_at: Timestamp,
     ) -> tiller_core::Result<Option<String>> {
         let Some(uuid) = uuid else {
             return Ok(None);
@@ -299,6 +302,9 @@ impl Tailer {
             return Ok(None);
         }
         let session: Session = get(store.conn(), "session", &self.session_id)?;
+        if session.ended_at.is_some_and(|ended| observed_at > ended) {
+            return Ok(None);
+        }
         let claude_id = session.claude_session_id.as_deref().unwrap_or(&session.id);
         let key = format!("transcript:{claude_id}:{uuid}");
         let recorded = store.ask_record(
