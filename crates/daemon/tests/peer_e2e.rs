@@ -28,6 +28,7 @@ use tiller_core::state::cards::NewCard;
 use tiller_core::state::peers::{
     KeyFile, NewPairing, NewPeerKey, generate_key, key_path, public_key_text, write_key_file,
 };
+use tiller_core::store::Actor;
 use tiller_daemon::auth;
 use tiller_herdr::testing::{Fleet, owner};
 
@@ -445,6 +446,24 @@ fn count(fleet: &Fleet, sql: &str) -> i64 {
         .unwrap()
 }
 
+/// The events `fleet` recorded after `seq`, as `kind by actor`, other than
+/// its daemon's records of the hosts. Those come from the daemon's own
+/// pollers and links, whatever a request does, and land when they land:
+/// the herdr poller's and each link change's `host.changed`, and the first
+/// reconcile pass's `daemon.started` and host checks, which can come after
+/// the link is live. Every other event counts, whoever wrote it.
+fn written_since(fleet: &Fleet, seq: i64) -> Vec<String> {
+    let daemon = Actor::Daemon.to_string();
+    fleet
+        .open()
+        .events_since(seq, i64::MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|event| !(event.actor == daemon && event.entity == "host"))
+        .map(|event| format!("{} by {}", event.kind, event.actor))
+        .collect()
+}
+
 // -- the tests --------------------------------------------------------------
 
 /// The board shows the peer's question next to its own cards; the owner
@@ -466,7 +485,7 @@ fn board_answer_reaches_the_peers_orchestrator_outbox() {
     );
     let item = question["id"].as_str().unwrap().to_owned();
 
-    let host_events = count(&world.board, "SELECT count(*) FROM events");
+    let host_seq = world.board.open().last_seq().unwrap();
     let (status, answered) = world.post(
         &format!("/api/v1/attention/{item}/answer"),
         &json!({"idempotency_key": "answer-1", "host": LABEL, "answer": "Use SQLite."}),
@@ -509,10 +528,8 @@ fn board_answer_reaches_the_peers_orchestrator_outbox() {
         )
         .unwrap();
     assert_eq!(actor, "board@test-host");
-    assert_eq!(
-        count(&world.board, "SELECT count(*) FROM events"),
-        host_events
-    );
+    let written = written_since(&world.board, host_seq);
+    assert!(written.is_empty(), "the board host wrote {written:?}");
     assert_eq!(count(&world.board, "SELECT count(*) FROM outbox"), 0);
 
     // The same key again applies once.
