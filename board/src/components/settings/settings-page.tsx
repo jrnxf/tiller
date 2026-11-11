@@ -21,6 +21,7 @@ import { Segmented } from "../ui/segmented";
 import { WarnIcon } from "../board/icons";
 import { ChevronIcon, PlusIcon } from "../shell/icons";
 import { AddHostForm } from "./add-host";
+import { Backups } from "./backups";
 import type { Paired } from "./add-host";
 import { checkLines, needsYou, whenText } from "./check-lines";
 import type { Tone } from "./check-lines";
@@ -544,6 +545,7 @@ export function SettingsPage() {
       {health ? (
         <Hosts machines={machines} health={health} owner={session?.owner ?? false} />
       ) : null}
+      {session?.owner ? <Backups host={host} /> : null}
       {startSettings ? (
         <StartSettingsSection
           settings={startSettings}

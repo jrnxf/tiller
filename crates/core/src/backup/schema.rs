@@ -115,6 +115,7 @@ fn take_copy(
     to: usize,
     now: Timestamp,
 ) -> Result<String> {
+    let _lock = super::ManifestLock::acquire(paths)?;
     let mut manifest = Manifest::load(paths)?;
     let dest = paths.beside_db(&format!(".pre-{from}-{to}"));
     let copied = copy_verified(conn, &dest)?;

@@ -585,6 +585,27 @@ export interface ProjectGrants {
 
 export type Boundary = "personal" | "work";
 
+// One backup in Settings > Backups (`GET /api/v1/backups`).
+export interface BackupRow {
+  // The file name for a copy; `failed-<time>` for an attempt that left none.
+  id: string;
+  // `nightly` (the daemon's timer) or `manual` (Back up now, or `tiller backup`).
+  kind: "nightly" | "manual";
+  at: string;
+  status: "verified" | "failed";
+  // Bytes; null for an attempt that left no copy.
+  size: number | null;
+  // Why it failed; null for a verified copy.
+  error: string | null;
+}
+
+// `GET /api/v1/backups` (owner only): the recent backups, newest first.
+export interface BackupList {
+  folder: string;
+  running: boolean;
+  backups: BackupRow[];
+}
+
 // GET /api/v1/host: the fields `tiller host edit` sets on this host, what it
 // holds and has free now, and the `rev` an edit is sent against.
 export interface HostFields {

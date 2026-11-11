@@ -8,7 +8,7 @@ use jiff::tz::TimeZone;
 use serde::Serialize;
 
 use super::{
-    Entry, EntryKind, Failure, Manifest, Paths, copy_verified, create_private_dir,
+    Entry, EntryKind, Failure, Manifest, ManifestLock, Paths, copy_verified, create_private_dir,
     remove_if_exists, stamp, verify,
 };
 use crate::domain::{Attention, AttentionKind};
@@ -86,6 +86,7 @@ fn advance_night(manifest: &mut Manifest, now: Timestamp) {
 /// cannot be read is an alarm at once, since no failure can be recorded in
 /// it.
 pub fn nightly(store: &mut Store, paths: &Paths, now: Timestamp) -> Result<Nightly> {
+    let _lock = ManifestLock::acquire(paths)?;
     let mut manifest = match Manifest::load(paths) {
         Ok(manifest) => manifest,
         Err(error) => {
@@ -146,6 +147,7 @@ pub fn nightly(store: &mut Store, paths: &Paths, now: Timestamp) -> Result<Night
 /// `tiller backup`: takes a verified backup now and runs retention. It does
 /// not move the nightly schedule.
 pub fn backup(conn: &rusqlite::Connection, paths: &Paths, now: Timestamp) -> Result<Nightly> {
+    let _lock = ManifestLock::acquire(paths)?;
     let manifest = Manifest::load(paths)?;
     let (entry, mut manifest) = take(conn, paths, &manifest, EntryKind::Manual, now)?;
     let retention = retain(paths, &mut manifest, Some(&entry.file))?;

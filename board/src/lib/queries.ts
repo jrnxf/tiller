@@ -4,6 +4,7 @@ import type {
   AgentsResponse,
   AwayBriefResponse,
   AttentionResponse,
+  BackupList,
   BoardFilter,
   BoardResponse,
   CardDetail,
@@ -163,6 +164,11 @@ export const doctorQuery = () =>
 export const hostFieldsPath: QueryPath = "/api/v1/host";
 export const hostFieldsQuery = () =>
   queryOptions({ ...readQuery<HostFields>(hostFieldsPath), staleTime: 0 });
+
+// The recent backups of this host, and whether one runs. The owner's.
+export const backupsPath: QueryPath = "/api/v1/backups";
+export const backupsQuery = () =>
+  queryOptions({ ...readQuery<BackupList>(backupsPath), staleTime: 0 });
 
 export const signalsPath: QueryPath = "/api/v1/signals";
 export const signalsQuery = () => readQuery<SignalsResponse>(signalsPath);

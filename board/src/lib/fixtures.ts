@@ -77,7 +77,9 @@ export type Scenario =
   | "away"
   | "away-back"
   | "new-install"
-  | "blocked";
+  | "blocked"
+  | "backing-up"
+  | "backup-failed";
 
 // The scenarios with paired peers. `stale-sessions` has them so a peer's older
 // sessions show on this host's board.
@@ -104,6 +106,8 @@ export const SCENARIOS: readonly Scenario[] = [
   "away-back",
   "new-install",
   "blocked",
+  "backing-up",
+  "backup-failed",
 ];
 
 const WEEKLY_FLOOR_PERCENT = 3;

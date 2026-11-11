@@ -37,6 +37,7 @@ import {
   startProblems,
   startSettingsFor,
 } from "./fixture-settings.ts";
+import { backupsFor, takeBackup } from "./fixtures-backups.ts";
 import { recapFor } from "./fixtures-recap.ts";
 import {
   agentsPath,
@@ -357,6 +358,7 @@ export function withoutDeleted(path: string, body: unknown, scenario: Scenario):
   if (pathname === "/api/v1/start-settings") return startSettingsFor(scenario);
   if (pathname === "/api/v1/host-config") return hostConfigFor();
   if (pathname === "/api/v1/host") return hostFieldsFor(scenario);
+  if (pathname === "/api/v1/backups") return backupsFor(scenario);
   const setup = /^\/api\/v1\/projects\/([^/]+)\/setup$/.exec(pathname);
   if (setup?.[1] && (body !== undefined || !gone(setup[1]))) {
     const saved = edited.get(setup[1]);
@@ -1098,6 +1100,9 @@ function handle(
   if (peer) return peer;
   if (method === "POST" && path === "/api/v1/bug-project") return pickBugProject(body, scenario);
   if (method === "PATCH" && path === "/api/v1/host") return editHost(body, scenario);
+  if (method === "POST" && path === "/api/v1/backups") {
+    return { reply: recorded(takeBackup(), null, null), followUps: [] };
+  }
   if (method === "POST" && path === "/api/v1/cards" && body.category === "tiller-bug") {
     return createBug(body);
   }

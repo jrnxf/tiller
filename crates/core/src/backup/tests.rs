@@ -1003,3 +1003,49 @@ fn a_boundary_changes_only_while_nothing_records_it() {
     );
     assert_eq!(boundary(&store).as_deref(), Some("personal"));
 }
+
+/// A nightly pass and a backup by hand (or two by hand) read the manifest,
+/// copy, and save it back. Without a lock the second save drops the first
+/// one's entry. Both entries must be listed.
+#[test]
+fn two_backups_at_once_both_land_in_the_manifest() {
+    for trial in 0..10 {
+        let host = host();
+        let mut store = Store::open(&host.paths.db).unwrap();
+        setup(&mut store, "test-host", Boundary::Personal);
+        drop(store);
+        let start = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let runs: Vec<_> = (0..2)
+            .map(|n| {
+                let paths = host.paths.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    let store = Store::open(&paths.db).unwrap();
+                    start.wait();
+                    backup(
+                        store.conn(),
+                        &paths,
+                        at("2026-11-11T10:00:00Z").plus_minutes(n),
+                    )
+                })
+            })
+            .collect();
+        start.wait();
+        for run in runs {
+            run.join().unwrap().unwrap();
+        }
+        let manifest = Manifest::load(&host.paths).unwrap();
+        assert_eq!(manifest.entries.len(), 2, "trial {trial}: {manifest:?}");
+        let files = fs::read_dir(&host.paths.backups)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".db")
+            })
+            .count();
+        assert_eq!(files, 2, "trial {trial}");
+    }
+}

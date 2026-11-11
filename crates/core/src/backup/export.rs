@@ -77,6 +77,7 @@ pub fn export_jsonl(
 ) -> Result<ExportManifest> {
     // An unreadable manifest refuses before any file is written: the export
     // could not be recorded.
+    let _lock = super::ManifestLock::acquire(paths)?;
     let mut backups = Manifest::load(paths)?;
     if fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_some()) {
         return Err(Error::refused(

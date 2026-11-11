@@ -967,3 +967,16 @@
     flex-basis: 100%;
   }
 }
+
+/* Backups: the terminal commands the board does not run. */
+.set-commands {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.set-commands code {
+  font-family: var(--mono);
+  font-size: var(--fs-mini);
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}

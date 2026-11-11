@@ -1437,6 +1437,120 @@
         }
       }
     },
+    "/api/v1/backups": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupList"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "`internal`: the manifest does not parse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "take",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TakeBackup"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the `BackupRow` the run left: `verified`, or `failed` with the reason. A failed run keeps the previous verified backup",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`conflict`: a backup is running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`unavailable`: before `tiller init`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/board": {
       "get": {
         "tags": [
@@ -5525,6 +5639,75 @@
           }
         },
         "additionalProperties": false
+      },
+      "BackupList": {
+        "type": "object",
+        "description": "`GET /api/v1/backups`: the recent backups, newest first.",
+        "required": [
+          "folder",
+          "running",
+          "backups"
+        ],
+        "properties": {
+          "backups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BackupRow"
+            }
+          },
+          "folder": {
+            "type": "string",
+            "description": "The folder the copies are kept in."
+          },
+          "running": {
+            "type": "boolean",
+            "description": "True while a backup runs."
+          }
+        }
+      },
+      "BackupRow": {
+        "type": "object",
+        "description": "One backup in Settings > Backups.",
+        "required": [
+          "id",
+          "kind",
+          "at",
+          "status"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "description": "When it was taken, or tried."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it failed, or why a listed copy no longer holds: its file is\ngone or its size changed. Null for a verified copy."
+          },
+          "id": {
+            "type": "string",
+            "description": "The file name for a copy; `failed-<time>` for an attempt that left no\ncopy."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`nightly` (the daemon's timer) or `manual` (Back up now, or\n`tiller backup`; both are the owner's)."
+          },
+          "size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Bytes; null for an attempt that left no copy.",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "description": "`verified`, or `failed`."
+          }
+        }
       },
       "BoardResponse": {
         "type": "object",
@@ -10447,6 +10630,26 @@
           "text": {
             "type": "string",
             "description": "One line, at most 20,000 characters."
+          }
+        },
+        "additionalProperties": false
+      },
+      "TakeBackup": {
+        "type": "object",
+        "description": "`POST /api/v1/backups`.",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Always refused with a peer label: a backup copies this host's own\ndatabase and never leaves its folder."
+          },
+          "idempotency_key": {
+            "type": "string"
           }
         },
         "additionalProperties": false

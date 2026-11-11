@@ -112,6 +112,8 @@ pub struct Inner {
     pub ssh: Vec<OsString>,
     /// The holdout evals the board started, running or failed.
     pub evals: memory::eval::Evals,
+    /// The backup the board started, if one runs, and the last that failed.
+    pub backups: crate::backups::BackupJobs,
 }
 
 /// Starts a project's orchestrator, or returns the live one, as `tiller
@@ -540,6 +542,16 @@ pub(crate) async fn guard(state: &AppState, headers: &HeaderMap) -> Result<(), A
     Ok(())
 }
 
+/// Refuses a read unless the request carries a live owner cookie. Most reads
+/// answer any request that passes the Host check; the backups list is the
+/// owner's.
+pub(crate) async fn owner_only(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    if owner_cookie(state, headers).await.is_none() {
+        return Err(not_owner());
+    }
+    Ok(())
+}
+
 fn not_owner() -> ApiError {
     ApiError::forbidden("the board is not signed in as the owner")
         .hint("run tiller board --login in a terminal and enter the code or open the link")
@@ -856,6 +868,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/config", post(set_config))
         .route("/api/v1/peers", post(add_peer))
         .route("/api/v1/host", get(host_fields).patch(edit_host))
+        .route(
+            "/api/v1/backups",
+            get(crate::backups::list).post(crate::backups::take),
+        )
         .route("/api/v1/bug-project", post(pick_bug_project))
         .route("/api/v1/contributions", get(contributions))
         .route("/api/v1/projects/{id}/stage", post(stage_project))
@@ -5058,7 +5074,7 @@ async fn app_shell(
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, add_dep, remove_dep, close,
         cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, host_config_read, set_config,
         project_grants, create_grant, revoke_grant,
-        away_start, away_edit, away_end, away_brief, host_fields, edit_host, pick_bug_project, recap, mark_recap_seen, relabel_intervention, memory::view, memory::revision,
+        away_start, away_edit, away_end, away_brief, host_fields, edit_host, crate::backups::list, crate::backups::take, pick_bug_project, recap, mark_recap_seen, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, memory::repropose, memory::eval::eval_plan,
         memory::eval::eval_start, session, login_code, logout
     ),
@@ -5171,6 +5187,7 @@ pub(crate) mod tests {
             streams: sse::Streams::default(),
             ssh,
             evals: memory::eval::Evals::default(),
+            backups: crate::backups::BackupJobs::default(),
         }))
     }
 
@@ -8979,6 +8996,7 @@ esac"#,
             streams: sse::Streams::default(),
             ssh: vec!["ssh".into()],
             evals: memory::eval::Evals::default(),
+            backups: crate::backups::BackupJobs::default(),
         }))
     }
 
@@ -10617,6 +10635,86 @@ esac"#,
         let cleared = send(&app, pick("k-clear", Value::Null, &after["rev"])).await;
         assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.body);
         assert!(machine(app.clone()).await.get("bug_project").is_none());
+    }
+
+    /// Settings > Backups lists this host's backups for the owner alone, and
+    /// Back up now takes a verified copy as `tiller backup` does, lists it,
+    /// and refuses a peer label.
+    #[tokio::test]
+    async fn the_board_lists_and_takes_backups_for_the_owner_only() {
+        let fleet = Fleet::new();
+        let app = app(fleet.dir.path(), Assets::of::<Fixture>());
+        let cookie = owner_cookie(fleet.dir.path());
+        let headers = [("cookie", cookie.as_str())];
+        let list = |app: Router, cookie: Option<String>| async move {
+            let mut request = Request::get("/api/v1/backups")
+                .header(header::HOST, HOST)
+                .body(Body::empty())
+                .unwrap();
+            if let Some(cookie) = cookie {
+                request
+                    .headers_mut()
+                    .insert(header::COOKIE, cookie.parse().unwrap());
+            }
+            send(&app, request).await
+        };
+
+        // The list is the owner's, and a stranger's click is refused too.
+        assert_eq!(list(app.clone(), None).await.status, StatusCode::FORBIDDEN);
+        let refused = send(
+            &app,
+            mutation(
+                "POST",
+                "/api/v1/backups",
+                json!({"idempotency_key": "k-no"}),
+                &[],
+            ),
+        )
+        .await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+
+        let empty = list(app.clone(), Some(cookie.clone())).await;
+        assert_eq!(empty.status, StatusCode::OK, "{}", empty.body);
+        let empty: Value = serde_json::from_str(&empty.body).unwrap();
+        assert_eq!(empty["running"], false);
+        assert_eq!(empty["backups"], json!([]));
+        assert!(empty["folder"].as_str().unwrap().ends_with("backups"));
+
+        let peer = send(
+            &app,
+            mutation(
+                "POST",
+                "/api/v1/backups",
+                json!({"idempotency_key": "k-peer", "host": "elsewhere"}),
+                &headers,
+            ),
+        )
+        .await;
+        assert_ne!(peer.status, StatusCode::OK, "{}", peer.body);
+
+        let taken = send(
+            &app,
+            mutation(
+                "POST",
+                "/api/v1/backups",
+                json!({"idempotency_key": "k-now"}),
+                &headers,
+            ),
+        )
+        .await;
+        assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
+        let taken: Value = serde_json::from_str(&taken.body).unwrap();
+        assert_eq!(taken["data"]["kind"], "manual");
+        assert_eq!(taken["data"]["status"], "verified");
+
+        let after = list(app.clone(), Some(cookie.clone())).await;
+        let after: Value = serde_json::from_str(&after.body).unwrap();
+        let rows = after["backups"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{after}");
+        assert_eq!(rows[0]["id"], taken["data"]["id"]);
+        assert_eq!(rows[0]["status"], "verified");
+        assert!(rows[0]["size"].as_u64().unwrap() > 0);
+        assert!(rows[0]["error"].is_null());
     }
 
     /// Settings > Hosts edits this host's label, lanes, floors and boundary

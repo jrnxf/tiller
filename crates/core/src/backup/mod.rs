@@ -170,6 +170,34 @@ impl MigrationLock {
     }
 }
 
+/// The lock that makes a change to `backups/manifest.json` one writer's work.
+/// A backup, a nightly pass, an export and a migration copy each read the
+/// manifest, do their work and save it back. Held across that whole span, it
+/// stops two of them losing each other's entry. The lock is the operating
+/// system's, so it ends with the process that held it, even on a crash.
+#[derive(Debug)]
+pub(crate) struct ManifestLock {
+    _file: File,
+}
+
+impl ManifestLock {
+    /// Waits for the lock. A holder works for as long as one copy takes.
+    pub(crate) fn acquire(paths: &Paths) -> Result<Self> {
+        create_private_dir(&paths.backups)?;
+        let path = paths.backups.join("manifest.lock");
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(false).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&path).map_err(io_error("open", &path))?;
+        file.lock().map_err(io_error("lock", &path))?;
+        Ok(Self { _file: file })
+    }
+}
+
 /// Whether a daemon holds its lock right now.
 pub fn daemon_running(paths: &Paths) -> Result<bool> {
     let file = match OpenOptions::new()
