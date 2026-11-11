@@ -143,6 +143,23 @@ printf '{"aggregates":{"casesTotal":2,"casesPassed":2}}' > "$6/sealed/result.jso
     assert_eq!(log, "holdout: 2 of 2 cases\na note\n");
 }
 
+/// A runner that fails says why in its log, and the failure quotes it.
+#[test]
+fn a_failed_runner_s_last_line_is_in_the_failure() {
+    let dir = checkout();
+    runner(
+        dir.path(),
+        "echo starting\necho 'evals/run.sh: the holdout runs whole' >&2\necho\nexit 2",
+    );
+    let out = tempfile::tempdir().unwrap();
+    let error = run(dir.path(), out.path(), "c", "m".into(), &idle()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "evals/run.sh exited with code 2 and left no sealed/result.json; nothing recorded \
+         (runner.log ends: evals/run.sh: the holdout runs whole)"
+    );
+}
+
 #[test]
 fn a_failed_run_records_nothing() {
     let dir = checkout();

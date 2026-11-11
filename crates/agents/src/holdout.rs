@@ -294,6 +294,24 @@ const RESULT: &str = "sealed/result.json";
 /// Where the runner's stdout and stderr go, under `out`.
 const LOG: &str = "runner.log";
 
+/// The longest piece of the runner's last line a failure quotes.
+const QUOTED: usize = 200;
+
+/// The last line with text in the runner's log, cut to [`QUOTED`]
+/// characters: what a failed runner said last, often its reason.
+fn last_line(log: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(log).ok()?;
+    let line = text
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    Some(match line.char_indices().nth(QUOTED) {
+        Some((at, _)) => format!("{}...", &line[..at]),
+        None => line.to_owned(),
+    })
+}
+
 /// How often a run checks whether it was interrupted.
 const POLL: Duration = Duration::from_millis(100);
 
@@ -367,12 +385,15 @@ pub fn run(
         // run.sh exits non-zero when a case failed to load even when the
         // rest scored, so a result is recorded only from a clean run.
         return Err(HoldoutError::Unavailable(format!(
-            "{RUNNER} exited {} and left {}{RESULT}; nothing recorded",
+            "{RUNNER} exited {} and left {}{RESULT}; nothing recorded{}",
             status.code().map_or_else(
                 || "on a signal".to_owned(),
                 |code| format!("with code {code}")
             ),
             if result_path.exists() { "" } else { "no " },
+            last_line(&out.join(LOG))
+                .map(|line| format!(" ({LOG} ends: {line})"))
+                .unwrap_or_default(),
         )));
     }
     let mut result = parse_named(&result_path, RESULT)
