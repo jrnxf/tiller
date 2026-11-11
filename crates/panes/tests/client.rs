@@ -618,6 +618,43 @@ fn a_handle_ends_a_subscription_that_waits_in_recv() {
 }
 
 #[test]
+fn an_ended_subscription_yields_nothing_it_had_buffered() {
+    let (sent, all_sent) = std::sync::mpsc::channel();
+    let holder = subscription_holder(move |peer, stream| {
+        for _ in 0..8 {
+            peer.send_frame(&Frame::Output {
+                stream,
+                bytes: b"more".to_vec(),
+            });
+        }
+        sent.send(()).unwrap();
+        assert_eq!(peer.frame(), None);
+    });
+    let client = HolderClient::connect(&holder.path, "daemon").unwrap();
+    let mut subscription = client
+        .subscribe(&"p1".into(), Subscribe::default())
+        .unwrap();
+    assert!(matches!(
+        subscription.recv(),
+        Ok(Some(Update::Repaint { .. }))
+    ));
+    assert_eq!(
+        subscription.recv().unwrap(),
+        Some(Update::Output(b"more".to_vec()))
+    );
+    // The rest of the output sits in the socket or the read buffer. After
+    // end, none of it comes out, and the close reads as the end.
+    all_sent
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    subscription.handle().end();
+    assert_eq!(subscription.recv().unwrap(), None);
+    drop(subscription);
+    drop(client);
+    holder.join();
+}
+
+#[test]
 fn an_error_with_no_id_on_a_subscription_ends_the_stream() {
     let (closed, connection_closed) = std::sync::mpsc::channel();
     let holder = subscription_holder(move |peer, _| {
@@ -790,6 +827,12 @@ fn a_request_too_large_to_send_is_refused_and_keeps_the_connection() {
             }
         ),
         "{err:?}"
+    );
+    // The holder never saw it, and the text says so.
+    assert!(
+        err.to_string()
+            .starts_with("spawn refused: bad_request: not sent: "),
+        "{err}"
     );
     assert!(client.list().unwrap().panes.is_empty());
     holder.join();

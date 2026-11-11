@@ -23,8 +23,10 @@ pub enum PanesError {
     #[error("the terminal holder is unreachable: {0}")]
     Unreachable(String),
 
-    /// The holder answered the request with an error.
-    #[error("the terminal holder refused {request}: {code}: {message}")]
+    /// The holder answered the request with an error, or this client did
+    /// not send a request the holder would refuse (one over the frame
+    /// limit). The connection stays fit for the next request.
+    #[error("{request} refused: {code}: {message}")]
     Refused {
         request: &'static str,
         code: ErrorCode,

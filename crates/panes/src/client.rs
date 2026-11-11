@@ -20,7 +20,7 @@ use std::io::{self, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -43,21 +43,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// How far past a deadline a read or write may run before the socket's
-/// timeout is set again. It saves one system call on most reads and writes.
-const TIMEOUT_SLACK: Duration = Duration::from_millis(100);
-
-/// One end of a socket whose reads and writes stop at a deadline. Before a
-/// read or write, the socket's timeout is set to the time left, unless the
-/// timeout set earlier already ends no sooner and less than
-/// [`TIMEOUT_SLACK`] later. So a peer that trickles bytes cannot stretch a
-/// call much past it. With no deadline, the socket's own timeout stands.
+/// One end of a socket whose reads and writes stop at a deadline. Each
+/// read or write sets the socket's timeout to the time left, so a peer that
+/// trickles bytes cannot stretch a call past it. With no deadline, the
+/// socket's own timeout stands.
 struct Timed {
     stream: UnixStream,
     deadline: Option<Instant>,
-    /// The read and write timeouts last set on the socket.
-    read_armed: Option<Duration>,
-    write_armed: Option<Duration>,
 }
 
 impl Timed {
@@ -65,39 +57,32 @@ impl Timed {
         Self {
             stream,
             deadline: None,
-            read_armed: None,
-            write_armed: None,
         }
     }
 
-    /// The timeout to set before the next read or write, if the one set
-    /// earlier (`armed`) does not fit the time left.
-    fn rearm(&self, armed: Option<Duration>) -> io::Result<Option<Duration>> {
+    fn left(&self) -> io::Result<Option<Duration>> {
         let Some(deadline) = self.deadline else {
             return Ok(None);
         };
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "no answer in time"));
+        match deadline.saturating_duration_since(Instant::now()) {
+            left if left.is_zero() => {
+                Err(io::Error::new(io::ErrorKind::TimedOut, "no answer in time"))
+            }
+            left => Ok(Some(left)),
         }
-        let fits = armed.is_some_and(|armed| armed >= left && armed <= left + TIMEOUT_SLACK);
-        Ok((!fits).then_some(left))
     }
 
     /// Reads with no limit from here on, as a subscription's do.
     fn unlimit_reads(&mut self) -> io::Result<()> {
         self.deadline = None;
-        self.stream.set_read_timeout(None)?;
-        self.read_armed = None;
-        Ok(())
+        self.stream.set_read_timeout(None)
     }
 }
 
 impl Read for Timed {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if let Some(left) = self.rearm(self.read_armed)? {
+        if let Some(left) = self.left()? {
             self.stream.set_read_timeout(Some(left))?;
-            self.read_armed = Some(left);
         }
         self.stream.read(buf)
     }
@@ -105,9 +90,8 @@ impl Read for Timed {
 
 impl Write for Timed {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if let Some(left) = self.rearm(self.write_armed)? {
+        if let Some(left) = self.left()? {
             self.stream.set_write_timeout(Some(left))?;
-            self.write_armed = Some(left);
         }
         self.stream.write(buf)
     }
@@ -128,7 +112,7 @@ fn refused(name: &'static str, err: &FrameError) -> PanesError {
     PanesError::Refused {
         request: name,
         code: ErrorCode::BadRequest,
-        message: err.to_string(),
+        message: format!("not sent: {err}"),
     }
 }
 
@@ -137,7 +121,7 @@ fn encode_request(name: &'static str, request: &Request) -> Result<Vec<u8>> {
     let text = serde_json::to_string(request).map_err(|err| PanesError::Refused {
         request: name,
         code: ErrorCode::BadRequest,
-        message: format!("the request did not encode: {err}"),
+        message: format!("not sent: the request did not encode: {err}"),
     })?;
     encode(name, &Frame::Message(text))
 }
@@ -184,7 +168,7 @@ fn await_reply(
         if message.reply_to() != id && !unaddressed_error {
             return Err(PanesError::Protocol(format!(
                 "{name} (id {id:?}) got a message for another request: {}",
-                brief(&format!("{message:?}"))
+                brief_debug(&message)
             )));
         }
         return match message {
@@ -245,7 +229,8 @@ impl Conn {
             }
             other => {
                 return Err(PanesError::Protocol(format!(
-                    "the holder answered hello with {other:?}"
+                    "the holder answered hello with {}",
+                    brief_debug(&other)
                 )));
             }
         };
@@ -284,21 +269,53 @@ fn brief(text: &str) -> String {
     format!("{}... ({} bytes)", &text[..end], text.len())
 }
 
+/// A value's `Debug` form, cut as [`brief`]. It stops formatting at the
+/// cut, so a large listing is never formatted whole.
+fn brief_debug(value: &impl std::fmt::Debug) -> String {
+    struct Capped(String);
+    impl std::fmt::Write for Capped {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            let room = QUOTE_BYTES - self.0.len();
+            if text.len() <= room {
+                self.0.push_str(text);
+                return Ok(());
+            }
+            let mut end = room;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.0.push_str(&text[..end]);
+            Err(std::fmt::Error)
+        }
+    }
+    let mut capped = Capped(String::new());
+    match std::fmt::write(&mut capped, format_args!("{value:?}")) {
+        Ok(()) => capped.0,
+        Err(_) => capped.0 + "...",
+    }
+}
+
 /// A message, which must be a JSON object: serde would also take an array,
 /// with its first element as the type.
 fn parse(text: &str) -> Result<HolderMessage> {
-    let unreadable = |err: serde_json::Error| {
+    if !text
+        .trim_start_matches([' ', '\t', '\n', '\r'])
+        .starts_with('{')
+    {
+        return Err(PanesError::Protocol(format!(
+            "a message that is not a JSON object: {}",
+            brief(text)
+        )));
+    }
+    serde_json::from_str(text).map_err(|err| {
         PanesError::Protocol(format!("an unreadable message ({err}): {}", brief(text)))
-    };
-    let object: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(text).map_err(unreadable)?;
-    serde_json::from_value(serde_json::Value::Object(object)).map_err(unreadable)
+    })
 }
 
 fn unexpected(request: &str, reply: &HolderMessage) -> PanesError {
     PanesError::Protocol(format!(
         "the holder answered {request} with {}",
-        brief(&format!("{reply:?}"))
+        brief_debug(reply)
     ))
 }
 
@@ -387,11 +404,17 @@ impl HolderClient {
         let _ = self.socket.shutdown(Shutdown::Both);
     }
 
-    /// Retires the request connection when `result` broke it.
+    /// Retires the request connection when `result` broke it. When another
+    /// call retired it first, and so cut this one, the error says why.
     fn settle<T>(&self, result: Result<T>) -> Result<T> {
         if let Err(err) = &result
             && !keeps_connection(err)
         {
+            if let Some(why) = self.retired.get() {
+                return Err(PanesError::Unreachable(format!(
+                    "the connection to the holder failed during this call ({why}); connect again"
+                )));
+            }
             self.retire(err.to_string());
         }
         result
@@ -472,7 +495,7 @@ impl HolderClient {
                 pane: pane.clone(),
                 lease: format!("stream-{stream}"),
                 socket,
-                ended: AtomicBool::new(false),
+                closed: OnceLock::new(),
                 writer,
                 next_id: AtomicU64::new(id + 1),
                 pending: Mutex::new(VecDeque::new()),
@@ -591,8 +614,9 @@ struct StreamSide {
     lease: String,
     /// The subscription's socket, to shut it from any thread.
     socket: UnixStream,
-    /// Whether this side ended the stream, so a close is not a surprise.
-    ended: AtomicBool,
+    /// Why this side closed the stream, once it did, so the close that
+    /// follows is not read as the holder's.
+    closed: OnceLock<Closed>,
     writer: Mutex<Timed>,
     next_id: AtomicU64,
     /// The ids of resizes sent and not yet answered, oldest first.
@@ -627,12 +651,12 @@ impl StreamHandle {
         // The id is pending before its bytes leave, so a fast answer finds it.
         side.pending().push_back(id);
         let sent = send(&mut writer, &wire, Instant::now() + REQUEST_TIMEOUT);
-        if sent.is_err() {
+        if let Err(err) = &sent {
             side.pending().retain(|pending| *pending != id);
             // Part of the frame may be out, so nothing more can follow it on
             // this socket. Shut it: the stream ends, and later resizes fail
             // at once.
-            let _ = writer.stream.shutdown(Shutdown::Both);
+            side.close(Closed::Broken(format!("a resize failed: {err}")));
         }
         sent
     }
@@ -641,9 +665,17 @@ impl StreamHandle {
     /// holder drops its lease, and a [`Subscription::recv`] waiting now
     /// returns `None`. Later resizes fail.
     pub fn end(&self) {
-        self.0.ended.store(true, Ordering::Relaxed);
-        let _ = self.0.socket.shutdown(Shutdown::Both);
+        self.0.close(Closed::Ended);
     }
+}
+
+/// Why this side closed a subscription's connection.
+#[derive(Debug)]
+enum Closed {
+    /// [`StreamHandle::end`], a drop, or a stream that ended on its own.
+    Ended,
+    /// A write failed partway, so the connection is no longer usable.
+    Broken(String),
 }
 
 impl StreamSide {
@@ -651,11 +683,23 @@ impl StreamSide {
         lock(&self.pending)
     }
 
-    /// Takes the pending resize with this `id`, if there is one.
-    fn answered(&self, id: u64) -> Option<u64> {
+    /// Takes the pending resize with this `id`. False when none is pending.
+    fn take_pending(&self, id: u64) -> bool {
         let mut pending = self.pending();
-        let at = pending.iter().position(|pending| *pending == id)?;
-        pending.remove(at)
+        match pending.iter().position(|pending| *pending == id) {
+            Some(at) => {
+                pending.remove(at);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Records why the stream closed (the first reason stands), and shuts
+    /// the socket.
+    fn close(&self, why: Closed) {
+        let _ = self.closed.set(why);
+        let _ = self.socket.shutdown(Shutdown::Both);
     }
 }
 
@@ -695,11 +739,25 @@ impl Subscription {
         if self.state == StreamState::Ended {
             return Ok(None);
         }
-        let result = self.read_update();
-        match &result {
-            Ok(None | Some(Update::Lagged)) => self.end(),
-            Err(err) if !keeps_connection(err) => self.end(),
-            _ => {}
+        // Once this side closed the stream, what is still buffered, and the
+        // read error or close the shutdown causes, are not news.
+        let result = match self.handle.0.closed.get() {
+            Some(_) => Ok(None),
+            None => self.read_update(),
+        };
+        let result = match self.handle.0.closed.get() {
+            Some(Closed::Ended) => Ok(None),
+            Some(Closed::Broken(why)) => Err(PanesError::Unreachable(why.clone())),
+            None => result,
+        };
+        let ends = match &result {
+            Ok(None | Some(Update::Lagged)) => true,
+            Ok(Some(_)) => false,
+            Err(err) => !keeps_connection(err),
+        };
+        // read_update ends the stream itself on an error that is about it.
+        if ends || self.state == StreamState::Ended {
+            self.end();
         }
         result
     }
@@ -708,19 +766,21 @@ impl Subscription {
     /// subscriber and its lease now, not when this value is dropped.
     fn end(&mut self) {
         self.state = StreamState::Ended;
-        self.handle.end();
+        self.handle.0.close(Closed::Ended);
     }
 
     fn read_update(&mut self) -> Result<Option<Update>> {
         loop {
             let Some(frame) = read_frame(&mut self.reader).map_err(PanesError::from_frame)? else {
-                if self.exited || self.handle.0.ended.load(Ordering::Relaxed) {
-                    return Ok(None);
-                }
-                return Err(PanesError::Unreachable(format!(
-                    "the holder closed stream {} before the pane exited",
-                    self.stream
-                )));
+                return match self.handle.0.closed.get() {
+                    Some(Closed::Broken(why)) => Err(PanesError::Unreachable(why.clone())),
+                    Some(Closed::Ended) => Ok(None),
+                    None if self.exited => Ok(None),
+                    None => Err(PanesError::Unreachable(format!(
+                        "the holder closed stream {} before the pane exited",
+                        self.stream
+                    ))),
+                };
             };
             match frame {
                 Frame::Output { stream, bytes } => {
@@ -756,12 +816,15 @@ impl Subscription {
                         self.state = StreamState::Repainting { cols, rows };
                     }
                     HolderMessage::Ok { id, cols, rows } => {
-                        let (Some(_), Some(cols), Some(rows)) =
-                            (self.handle.0.answered(id), cols, rows)
-                        else {
+                        if !self.handle.0.take_pending(id) {
                             return Err(PanesError::Protocol(format!(
                                 "an ok (id {id}) that answers no resize of stream {}",
                                 self.stream
+                            )));
+                        }
+                        let (Some(cols), Some(rows)) = (cols, rows) else {
+                            return Err(PanesError::Protocol(format!(
+                                "the ok to resize {id} has no size"
                             )));
                         };
                         return Ok(Some(Update::Resized { cols, rows }));
@@ -779,8 +842,9 @@ impl Subscription {
                         message,
                     } => {
                         // An error that names no request is about the
-                        // subscription itself, not a resize: it ends.
-                        self.end();
+                        // subscription itself, not a resize: it ends, and
+                        // recv closes the connection.
+                        self.state = StreamState::Ended;
                         return Err(PanesError::from_reply("subscription", code, message));
                     }
                     HolderMessage::Error {
@@ -788,7 +852,7 @@ impl Subscription {
                         code,
                         message,
                     } => {
-                        if self.handle.0.answered(id).is_none() {
+                        if !self.handle.0.take_pending(id) {
                             return Err(PanesError::Protocol(format!(
                                 "an error (id {id}) that answers no resize of stream {}: {code}: {message}",
                                 self.stream
@@ -801,7 +865,7 @@ impl Subscription {
                         return Err(PanesError::Protocol(format!(
                             "an unexpected message on stream {}: {}",
                             self.stream,
-                            brief(&format!("{other:?}"))
+                            brief_debug(&other)
                         )));
                     }
                 },
@@ -825,6 +889,14 @@ mod tests {
             "{cut}"
         );
         assert!(!cut.contains('é'), "{cut}");
+    }
+
+    #[test]
+    fn a_long_debug_form_is_cut_while_it_is_formatted() {
+        assert_eq!(brief_debug(&"short"), r#""short""#);
+        let cut = brief_debug(&vec!["é".repeat(400); 1000]);
+        assert!(cut.len() <= QUOTE_BYTES + 3, "{} bytes", cut.len());
+        assert!(cut.ends_with("..."), "{cut}");
     }
 
     #[test]
