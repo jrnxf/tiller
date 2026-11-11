@@ -646,6 +646,45 @@ fn fleet_sessions_cannot_run_owner_commands() {
     assert!(world.run(&["owner", "show"]).data()["owner"].is_null());
 }
 
+/// `tiller card timeline` shows one line per notification, as the board
+/// does: the write-ahead `attention.notified` record is left out once its
+/// outcome follows it.
+#[test]
+fn the_cli_timeline_shows_one_line_per_notification() {
+    let world = World::initialized();
+    world.must(&[
+        "card", "create", "alpha", "--kind", "ship", "--title", "One",
+    ]);
+    let item = world
+        .store()
+        .attention_open(
+            &Ctx::new(Actor::Owner),
+            None,
+            tiller_core::state::attention::NewAttention {
+                card: world.store().card("alpha-1").unwrap().id,
+                kind: tiller_core::domain::AttentionKind::Decision,
+                question: "which release note?".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .value;
+    let daemon = Ctx::new(Actor::Daemon);
+    let mut store = world.store();
+    store.notification_record(&daemon, &item.id).unwrap();
+    store.notification_sent(&daemon, &item.id).unwrap();
+
+    let out = world.must(&["card", "timeline", "alpha-1"]);
+    let kinds: Vec<&str> = out.data()["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event["kind"].as_str())
+        .filter(|kind| kind.starts_with("attention.notif"))
+        .collect();
+    assert_eq!(kinds, ["attention.notify_sent"], "{}", out.json);
+}
+
 #[test]
 fn a_worker_whose_orchestrator_ended_is_still_listed() {
     let world = World::initialized();

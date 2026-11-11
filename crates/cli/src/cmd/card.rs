@@ -476,11 +476,7 @@ fn timeline(app: &App, args: Timeline) -> Done {
     let store = app.read()?;
     let card = card_of(&store, &args.card)?;
     let before = args.before.unwrap_or(i64::MAX);
-    let events: Vec<tiller_core::domain::Event> = list(
-        store.conn(),
-        "card_id = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3",
-        &[&card.id, &before, &args.limit],
-    )?;
+    let events = store.timeline(&card.id, before, args.limit)?;
     Ok(Outcome::read(
         json!({"card": card.display_id, "events": events}),
     ))
