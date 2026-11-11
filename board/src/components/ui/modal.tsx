@@ -10,6 +10,10 @@ import { holdInert } from "../../lib/inert";
 
 // The controls Tab stops on, in order, and what a dialog's opener can be.
 const CONTROLS = 'a[href], button, input, select, textarea, [contenteditable="true"], [tabindex]';
+// What a press can make the opener: a control the owner can reach, not a
+// panel that only script focuses.
+const PRESSABLE =
+  'a[href], button, input, select, textarea, [contenteditable="true"], [tabindex]:not([tabindex="-1"])';
 
 // The open modals, the newest last: only the top one takes a stray Escape.
 const stack: object[] = [];
@@ -29,7 +33,7 @@ if (typeof document !== "undefined") {
     "pointerdown",
     (event) => {
       const target = event.target instanceof Element ? event.target : null;
-      const control = target?.closest<HTMLElement>(CONTROLS) ?? null;
+      const control = target?.closest<HTMLElement>(PRESSABLE) ?? null;
       pressed = control && !control.closest('[role="menu"]') ? control : null;
     },
     true,
@@ -42,16 +46,18 @@ if (typeof document !== "undefined") {
     true,
   );
   // Only the press's own click opens a dialog from it: after that task, a
-  // dialog that opens (a stream event, a timer) is not the button's.
-  const forget = () => {
+  // dialog that opens (a stream event, a timer) is not the button's. A press
+  // with no click yet is kept a moment: iOS Safari can send a tap's click in
+  // a later task than the lift.
+  const forget = (wait: number) => () => {
     const was = pressed;
     setTimeout(() => {
       if (pressed === was) pressed = null;
-    }, 0);
+    }, wait);
   };
-  document.addEventListener("click", forget, true);
-  document.addEventListener("pointerup", forget, true);
-  document.addEventListener("pointercancel", forget, true);
+  document.addEventListener("click", forget(0), true);
+  document.addEventListener("pointerup", forget(1000), true);
+  document.addEventListener("pointercancel", forget(0), true);
   document.addEventListener(
     "focusin",
     (event) => {

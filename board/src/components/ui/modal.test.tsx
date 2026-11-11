@@ -372,3 +372,42 @@ test("a dialog that opens long after a click that moved no focus does not go bac
   rerender(<Pushed open={false} />);
   expect(document.activeElement).not.toBe(mark);
 });
+
+test("a tap whose click comes a moment after the finger lifts still finds its button", async () => {
+  // iOS Safari can send the click in a later task than pointerup.
+  render(<Page />);
+  (document.activeElement as HTMLElement | null)?.blur();
+  const opener = screen.getByRole("button", { name: "Open" });
+  fireEvent.pointerDown(opener);
+  fireEvent.pointerUp(opener);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  fireEvent.click(opener);
+  fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+  expect(document.activeElement).toBe(opener);
+});
+
+// A page whose dialog opens from plain text in a panel that takes focus only
+// from script.
+function Panel() {
+  const [isOpen, setOpen] = useState(false);
+  return (
+    <div tabIndex={-1} data-testid="panel">
+      <span onClick={() => setOpen(true)}>Open from text</span>
+      {isOpen ? (
+        <Modal className="dialog" label="Panel dialog" onClose={() => setOpen(false)}>
+          <button type="button">Inside</button>
+        </Modal>
+      ) : null}
+    </div>
+  );
+}
+
+test("a click on text in a panel that only script focuses does not make the panel the opener", () => {
+  render(<Panel />);
+  (document.activeElement as HTMLElement | null)?.blur();
+  const text = screen.getByText("Open from text");
+  fireEvent.pointerDown(text);
+  fireEvent.click(text);
+  fireEvent.keyDown(document.activeElement as Element, { key: "Escape" });
+  expect(document.activeElement).not.toBe(screen.getByTestId("panel"));
+});
