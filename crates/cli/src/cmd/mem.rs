@@ -266,12 +266,20 @@ fn approve(app: &App, args: ApproveArgs) -> Done {
     let mut writer = Writer::open(store, &app.home)?;
     let mut results = Vec::new();
     let mut kept: Vec<(String, String)> = Vec::new();
-    for (at, p) in chosen.iter().enumerate() {
+    for p in &chosen {
         if p.state != "proposed" {
             results.push(with(p, "skipped", json!({"reason": not_proposed(p)})));
             continue;
         }
-        let ctx = app.ctx().with_key(format!("{}:{at}", keyed.key));
+        // Each proposal is decided under a key of its own, named by its id
+        // and bound to it: a later run under the same `--key` that finds
+        // another proposal pending decides that one, and never replays an
+        // earlier proposal's answer (protocol.md 6.3).
+        let key = format!("{}:{}", keyed.key, p.id);
+        let ctx = app
+            .ctx()
+            .with_key(key.clone())
+            .with_args(key, &json!({"approve": p.id}));
         let after: Vec<String> = kept
             .iter()
             .filter(|(project, _)| *project == p.project_id)

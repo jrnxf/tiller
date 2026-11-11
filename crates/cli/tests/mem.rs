@@ -528,3 +528,69 @@ fn approve_takes_several_proposals_for_one_document_in_one_pass() {
     );
     assert!(text.contains("Keep commits small and focused."), "{text}");
 }
+
+/// One `--key` names one request. A later run of the same command under that
+/// key must not replay an earlier proposal's answer for a new proposal: each
+/// proposal is decided under its own key, bound to its own id.
+#[test]
+fn approve_under_a_reused_key_never_replays_another_proposals_answer() {
+    let world = two_projects();
+    let first = propose_line(
+        &world,
+        "alpha",
+        "How we work here",
+        "Run the formatter before a commit.",
+    );
+    let second = propose_line(
+        &world,
+        "beta",
+        "How we work here",
+        "Never edit the vendored copy.",
+    );
+    open_gate(&world, &[&first, &second]);
+    let done = world.must(&["mem", "approve", "--class", "rule", "--key", "k"]);
+    assert_eq!(done.data()["approved"], 2, "{}", done.json);
+
+    // A true retry of the same request replays and writes nothing more.
+    let retry = world.must(&["mem", "approve", &first, &second, "--key", "k"]);
+    assert_eq!(retry.data()["skipped"], 2, "{}", retry.json);
+
+    // Later, only a new proposal is pending, and the owner runs the same
+    // command with the same key.
+    let third = propose_line(
+        &world,
+        "alpha",
+        "How we work here",
+        "Keep commits small and focused.",
+    );
+    world.must(&["learn", "bundle", "later", &third]);
+    let result = world.dir.path().join("later.json");
+    std::fs::write(
+        &result,
+        r#"{"aggregates": {"casesTotal": 4, "casesPassed": 4, "overallScore": 0.97}, "costUsd": 1.0, "partial": false}"#,
+    )
+    .unwrap();
+    world.must(&["learn", "eval", "later", "--result", result.to_str().unwrap()]);
+
+    let again = world.must(&["mem", "approve", "--class", "rule", "--key", "k"]);
+    assert_eq!(
+        results(&again),
+        vec![(third.clone(), "approved".to_owned())],
+        "{}",
+        again.json
+    );
+    assert_eq!(
+        again.data()["results"][0]["proposal_id"], third,
+        "{}",
+        again.json
+    );
+    let after = states(&world);
+    assert_eq!(
+        after.iter().find(|(id, _)| *id == third).unwrap().1,
+        "applied",
+        "{}",
+        again.json
+    );
+    let text = std::fs::read_to_string(world.home().join("memory/projects/alpha.md")).unwrap();
+    assert!(text.contains("Keep commits small and focused."), "{text}");
+}
