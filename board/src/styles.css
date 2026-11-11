@@ -1439,7 +1439,9 @@ kbd {
   color: var(--fg-1);
 }
 
-.setup-card .setup-steps + .wait {
+.setup-card .setup-steps + .wait,
+.setup-card .setup-steps + .sub,
+.setup-card .setup-steps + .sub + .wait {
   margin-top: 14px;
 }
 

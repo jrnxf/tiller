@@ -2988,6 +2988,15 @@ fn project_add_and_edit_store_the_default_branch_trimmed() {
     new.default_branch = Some(" main ".into());
     let added = store.project_add(&owner(), new.clone()).unwrap();
     assert_eq!(added.value.default_branch, "main");
+    assert!(store.project_add(&owner(), new.clone()).unwrap().replayed);
+    // A row stored padded, before this rule, still replays the same add.
+    store
+        .conn()
+        .execute(
+            "UPDATE projects SET default_branch = ' main ' WHERE id = 'kappa'",
+            [],
+        )
+        .unwrap();
     assert!(store.project_add(&owner(), new).unwrap().replayed);
 
     let rev = store.project("kappa").unwrap().rev;

@@ -236,6 +236,21 @@ test("a one-command hint shows one block with no number and no order to follow",
   expect(steps[0]?.querySelector(".step-note")?.textContent).toContain("--boundary work");
   expect(screen.getByText(/Run this in a terminal:/)).toBeTruthy();
   expect(screen.queryByText(/in this order/)).toBeNull();
+  expect(document.querySelector(".setup-card .sub")).toBeNull();
+});
+
+test("a hint with no init line the screen knows still says where --boundary work goes", () => {
+  stubDaemon({});
+  render(
+    <SetupScreen
+      command={"tiller owner set tiller\nsetup-tiller --label <label>"}
+      onReady={() => {}}
+    />,
+  );
+  expect(screen.getAllByRole("listitem")).toHaveLength(2);
+  expect(document.querySelector(".setup-card .sub")?.textContent).toBe(
+    "On a work machine, add --boundary work to the tiller init command.",
+  );
 });
 
 test("a refused read carries the daemon's reason and hint", async () => {

@@ -465,12 +465,12 @@ fn plan_projects(
         // from a GitHub remote is not used: the bundle's repo is imported as
         // it is.
         if !exists {
-            detect_forge(legacy_id, remote.as_deref(), delivery, &mut repo.clone()).map_err(
-                |error| match error {
+            detect_forge(legacy_id, remote.as_deref(), delivery, &mut None).map_err(|error| {
+                match error {
                     Error::Usage(fact) => Error::refused("project", legacy_id, fact),
                     other => other,
-                },
-            )?;
+                }
+            })?;
         }
         out.push(ProjectPlan {
             legacy_id: legacy_id.clone(),

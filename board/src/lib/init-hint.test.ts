@@ -3,6 +3,8 @@ import { join, resolve } from "node:path";
 
 import { expect, test } from "vitest";
 
+import { stepOf } from "../components/states/setup-screen";
+
 // Before `tiller init`, every refusal names both setup steps: the owner hands
 // the host to Tiller first, since `tiller init` refuses while the owner marker
 // names another system. The words come from crates/core/src/lib.rs.
@@ -14,7 +16,9 @@ const core = readFileSync(join(root, "crates/core/src/lib.rs"), "utf8");
 function rustText(name: string): string {
   const flipBack = /macro_rules! flip_back \{\s*\(\) => \{\s*"([^"]*)"\s*\};\s*\}/.exec(core)?.[1];
   if (!flipBack) throw new Error("flip_back! is not in lib.rs");
-  const found = new RegExp(`pub const ${name}: &str = concat!\\(([^;]*)\\);`).exec(core)?.[1];
+  const found = new RegExp(`pub const ${name}: &str = concat!\\(([\\s\\S]*?)\\);\\n`).exec(
+    core,
+  )?.[1];
   if (!found) throw new Error(`${name} is not in lib.rs`);
   return [...found.matchAll(/flip_back!\(\)|"((?:[^"\\]|\\.)*)"/g)]
     .map(([part, text]) =>
@@ -41,4 +45,8 @@ test("no refusal names tiller init alone", () => {
     readFileSync(join(root, path), "utf8").includes(bare),
   );
   expect(found).toEqual([]);
+});
+
+test("the setup screen knows every step of the core's hint", () => {
+  expect(rustText("INIT_HINT").split("\n").map(stepOf)).toEqual(["owner", "init"]);
 });

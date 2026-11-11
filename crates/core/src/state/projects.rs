@@ -281,15 +281,6 @@ pub(crate) fn edit_project(
     edit: &ProjectEdit,
 ) -> Result<Project> {
     let project: Project = get(tx.conn(), "project", project_id)?;
-    // A run branches from the default branch, so it is stored trimmed.
-    let edit = &ProjectEdit {
-        default_branch: edit
-            .default_branch
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_owned),
-        ..edit.clone()
-    };
     let mut next = project.clone();
     let mut changed = serde_json::Map::new();
     let mut named = None;
@@ -742,9 +733,13 @@ impl Store {
         ctx: &Ctx,
         project_id: &str,
         expected_rev: i64,
-        edit: ProjectEdit,
+        mut edit: ProjectEdit,
     ) -> Result<Applied<Project>> {
         require_owner(&ctx.actor, "project.edit")?;
+        // A run branches from the default branch, so it is stored trimmed.
+        if let Some(branch) = &mut edit.default_branch {
+            *branch = branch.trim().to_owned();
+        }
         self.write(ctx, "project.edit", None, |tx| {
             edit_project(tx, project_id, expected_rev, &edit)
         })
@@ -893,7 +888,8 @@ fn project_matches(existing: &Project, new: &NewProject) -> bool {
     existing.name == new.name
         && existing.repo == new.repo
         && existing.remote == new.remote
-        && Some(existing.default_branch.as_str()) == new.default_branch.as_deref().or(Some("main"))
+        // A row stored before default branches were trimmed still matches.
+        && Some(existing.default_branch.trim()) == new.default_branch.as_deref().or(Some("main"))
         && existing.delivery == new.delivery
         && new
             .checks
