@@ -435,7 +435,10 @@ fn a_run_that_cannot_start_says_why_in_the_retro() {
     let failed = world.run(&["retro", "run", &retro]);
     assert_ne!(failed.code, 0, "{}", failed.json);
     let shown = world.must(&["retro", "show", &retro]);
-    let learning = shown.data()["retro"]["learning"].as_str().unwrap().to_owned();
+    let learning = shown.data()["retro"]["learning"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert!(
         learning.starts_with("the curator could not be started: cannot start "),
         "{learning}"

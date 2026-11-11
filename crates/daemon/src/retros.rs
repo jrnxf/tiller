@@ -417,8 +417,8 @@ pub(crate) async fn run_retro(
             return Err(Error::Unavailable("the daemon is stopping".into()).into());
         }
         // A config that cannot be used is refused by the claim below.
-        let timeout = i64::try_from(learning_of(&home).0.curator_timeout_minutes)
-            .unwrap_or(i64::MAX);
+        let timeout =
+            i64::try_from(learning_of(&home).0.curator_timeout_minutes).unwrap_or(i64::MAX);
         let mut store = Store::open_current(&db).map_err(ApiError::from)?;
         let ctx = board_ctx(&key, args.as_ref());
         // A retry of a Run again answers with the retro its key claimed and
