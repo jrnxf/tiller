@@ -8,14 +8,39 @@ import { RefreshIcon } from "../shell/icons";
 // Whether this tab asked for a part of the board that the daemon no longer
 // serves: an upgrade replaced the files a screen or the editor loads from.
 const staleBoardStore = createStore(false);
-const onError = () => staleBoardStore.set(true);
+
+// The board's entry script, which names its build.
+const ENTRY = 'script[type="module"][src]';
+let checking = false;
+
+// A part that failed to load means a new build only when the daemon's page
+// now names another entry script. A dropped connection or a slow network
+// fails the same way, and a reload would not help there.
+async function onError() {
+  if (checking || staleBoardStore.get()) return;
+  checking = true;
+  try {
+    const served = await fetch("/", { cache: "no-store" });
+    if (!served.ok) return;
+    const page = new DOMParser().parseFromString(await served.text(), "text/html");
+    const now = page.querySelector(ENTRY)?.getAttribute("src");
+    const mine = document.querySelector(ENTRY)?.getAttribute("src");
+    if (now && mine && now !== mine) staleBoardStore.set(true);
+  } catch {
+    // The daemon did not answer: nothing says the board changed.
+  } finally {
+    checking = false;
+  }
+}
+
+const onPreloadError = () => void onError();
 
 // Listens for a part of the board that failed to load. The screen that asked
 // still shows its own error; the banner says what fixes it. Returns what stops
 // the listening.
 export function watchForStaleBoard(target: Window): () => void {
-  target.addEventListener("vite:preloadError", onError);
-  return () => target.removeEventListener("vite:preloadError", onError);
+  target.addEventListener("vite:preloadError", onPreloadError);
+  return () => target.removeEventListener("vite:preloadError", onPreloadError);
 }
 
 // Shown when the daemon now runs a different tiller than the one that served
@@ -41,8 +66,8 @@ export function ReloadBanner() {
           </>
         ) : (
           <>
-            <b>Part of the board could not load.</b> Tiller may have been updated since this tab
-            opened. Reload to get the current board.
+            <b>Tiller was updated since this tab opened.</b> Part of the board could not load.
+            Reload to get the new board.
           </>
         )}
       </div>
