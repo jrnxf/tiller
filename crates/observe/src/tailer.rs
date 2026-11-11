@@ -132,9 +132,12 @@ pub struct Tailer {
     path: PathBuf,
     offset: u64,
     transcript_intake: bool,
-    /// Set after a truncation: entries may be read a second time, so each is
-    /// checked against the recorded uuids.
-    dedupe: bool,
+    /// Set after a truncation, or for a file read from the start: entries
+    /// up to this offset may be read a second time, so each is checked
+    /// against the recorded uuids. `u64::MAX` until the first poll takes
+    /// the file's length. Cleared once the tailer reads past it: a line
+    /// appended later is new, and the uuid scan is not free.
+    dedupe: Option<u64>,
 }
 
 impl Tailer {
@@ -167,7 +170,7 @@ impl Tailer {
             path,
             offset: offset.unwrap_or(0),
             transcript_intake,
-            dedupe: offset.is_none() && others,
+            dedupe: (offset.is_none() && others).then_some(u64::MAX),
         })
     }
 
@@ -187,7 +190,9 @@ impl Tailer {
         let len = file.metadata().map_err(io)?.len();
         if len < self.offset {
             self.offset = 0;
-            self.dedupe = true;
+            self.dedupe = Some(len);
+        } else if self.dedupe == Some(u64::MAX) {
+            self.dedupe = Some(len);
         }
         file.seek(SeekFrom::Start(self.offset)).map_err(io)?;
         let mut reader = BufReader::new(file);
@@ -198,6 +203,9 @@ impl Tailer {
             let read = reader.read_until(b'\n', &mut line).map_err(io)?;
             if read == 0 || line.last() != Some(&b'\n') {
                 // End of file, or a line Claude Code is still writing.
+                if self.dedupe.is_some_and(|until| self.offset >= until) {
+                    self.dedupe = None;
+                }
                 return Ok(written);
             }
             let line_end = self.offset + read as u64;
@@ -229,7 +237,9 @@ impl Tailer {
             return Ok(false);
         };
         let uuid = entry.get("uuid").and_then(Value::as_str);
-        if self.dedupe && self.already_recorded(store, uuid)? {
+        if self.dedupe.is_some_and(|until| line_end <= until)
+            && self.already_recorded(store, uuid)?
+        {
             return Ok(false);
         }
         let mut event = detected.event;
@@ -537,6 +547,7 @@ mod tests {
             )],
         );
         assert_eq!(tailer.poll(&mut store).unwrap(), 1, "only u3 is new");
+        assert_eq!(tailer.dedupe, None, "lines past the repeat are not checked");
     }
 
     #[test]
@@ -809,6 +820,7 @@ mod tests {
         assert_eq!(tailer.offset(), 0);
         assert_eq!(tailer.poll(&mut store).unwrap(), 1, "only u2 is new");
         assert_eq!(transcript_uuids(&store), ["u1", "u2"]);
+        assert_eq!(tailer.dedupe, None, "the file was read past its length");
     }
 
     #[test]
