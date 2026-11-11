@@ -536,9 +536,7 @@ test("every tone and state the Health page can show has a style", () => {
   // jsdom lays nothing out, so this holds the rules: a class with no rule
   // falls back to the green of the first, which is how "Out of date" read.
   const css = readFileSync(resolve(import.meta.dirname, "health.css"), "utf8");
-  // A selector alone before its rule, or one in a list of selectors.
-  const has = (selector: string) =>
-    css.split("\n").some((line) => line === `${selector} {` || line === `${selector},`);
+  const has = (selector: string) => css.includes(`${selector} {`);
   for (const state of ["good", "watch", "none"]) expect(has(`.state.${state}`), state).toBe(true);
   // The quota's tones: ok is the base rule; the others are classes.
   for (const tone of ["warn", "bad", "unk"]) expect(has(`.q-state.${tone}`), tone).toBe(true);

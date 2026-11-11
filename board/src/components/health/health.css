@@ -274,14 +274,11 @@
 .state.watch i {
   background: var(--yellow);
 }
-/* Nothing to judge yet, and a quota that cannot be read: one muted tone. */
-.state.none,
-.q-state.unk {
+.state.none {
   color: var(--fg-3);
   background: color-mix(in srgb, var(--fg-4) 14%, transparent);
 }
-.state.none i,
-.q-state.unk i {
+.state.none i {
   background: var(--fg-4);
 }
 .state.bad {
@@ -471,6 +468,13 @@
 }
 .q-state.bad i {
   background: var(--red);
+}
+.q-state.unk {
+  color: var(--fg-3);
+  background: color-mix(in srgb, var(--fg-4) 14%, transparent);
+}
+.q-state.unk i {
+  background: var(--fg-4);
 }
 .q-line {
   margin: 12px 0 0;
