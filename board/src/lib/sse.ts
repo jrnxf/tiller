@@ -189,8 +189,8 @@ function refetchMatching(queryClient: QueryClient, matches: (path: string) => bo
 
 // Reads that many kinds of event move, such as the Health signals and the
 // contributions. Each event marks them stale at once, so a screen that opens
-// reads them fresh. The ones on screen fetch again at most once a tick, after
-// a burst, and not once per event on a busy fleet.
+// reads them fresh. The ones on screen fetch again a second after the first
+// event of a run, so at most once a second on a busy fleet, not once per event.
 const COALESCE_MS = 1000;
 const due = new WeakMap<
   QueryClient,
@@ -668,16 +668,17 @@ export function connectEvents(options: EventsOptions): () => void {
     try {
       const snapshot = await fetchSnapshot();
       if (stopped) return;
-      // A change applied while the snapshot was in flight can be newer than
-      // it, and the snapshot just wrote the older row back: its reads are
-      // fetched again too.
-      const undone = peerMoved || (floor !== null && floor > snapshot.last_event_seq);
-      const seq = refreshFromSnapshot(queryClient, snapshot, undone);
       failures = 0;
       // A `reset` came while this snapshot was in flight, and it may be older
-      // than that reset (a restored database). The resync stays pending, with
-      // the cursor where it was, until the next snapshot lands.
+      // than that reset (a restored database). It is not written: the resync
+      // stays pending, with the cursor where it was, until the next snapshot
+      // lands.
       if (!again) {
+        // A change applied while the snapshot was in flight can be newer than
+        // it, and the snapshot just wrote the older row back: its reads are
+        // fetched again too.
+        const undone = peerMoved || (floor !== null && floor > snapshot.last_event_seq);
+        const seq = refreshFromSnapshot(queryClient, snapshot, undone);
         // The max is against `floor` (the changes applied since the reset),
         // never against the old cursor: after a restored database the newest
         // seq goes down.
