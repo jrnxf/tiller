@@ -37,9 +37,9 @@ import type { Tail } from "../board/terminal-stream";
 import { AwayBriefDetail, AwayBriefRow } from "./away-brief";
 import {
   answeredStore,
-  clearSent,
   dropStaleSent,
   markSent,
+  openInbox,
   sentStore,
   withdrawnStore,
 } from "./answered";
@@ -110,6 +110,15 @@ function dialogId(agent: AgentRow): string {
 function cardOfEntry(entry: Entry): string | null {
   if (entry.type === "decision") return entry.item.card_id;
   return entry.type === "permission" ? entry.prompt.card_id : entry.agent.card_id;
+}
+
+// What names the wait an answer from here went to, as the answer strip names
+// it (protocol.md 7.4, Prompt): a permission prompt by when it began, a dialog
+// by the newest observation when the answer went, the strip's `seen`. A later
+// observation while the agent still waits is the next wait.
+function waitKey(entry: Entry): string | null {
+  if (entry.type === "decision") return null;
+  return entry.type === "permission" ? entry.prompt.since : entry.agent.activity_observed_at;
 }
 
 // When the entry began to wait on the owner.
@@ -630,7 +639,10 @@ function DialogDetail({ agent, ctx }: { agent: AgentRow; ctx: Context }) {
             runId: agent.run_id ?? null,
           }}
           lead={lead}
-          onSent={(receipt) => markSent(dialogId(agent), agent.activity_observed_at, receipt)}
+          onSent={(receipt) => {
+            const entry: Entry = { type: "dialog", id: dialogId(agent), agent };
+            markSent(entry.id, waitKey(entry) ?? "", receipt);
+          }}
           reading={
             <>
               {top(false)}
@@ -827,11 +839,12 @@ export function Inbox({
   const current = decisions.filter((entry) => entry.item.still_current || entry.answered !== null);
   const stale = decisions.filter((entry) => !entry.item.still_current && entry.answered === null);
   // The prompts group: permission prompts, then agents that wait on a dialog.
+  const waiting = agents ? dialogWaits(agents) : [];
   const prompts: Entry[] = [
     ...attention.permission_prompts
       .filter((prompt) => inScope(prompt.card_id))
       .map((prompt) => ({ type: "permission" as const, id: promptId(prompt), prompt })),
-    ...(agents ? dialogWaits(agents) : [])
+    ...waiting
       .filter(scope.agent)
       .map((agent) => ({ type: "dialog" as const, id: dialogId(agent), agent })),
   ];
@@ -847,24 +860,18 @@ export function Inbox({
   const sentHere = selected ? sent[selected]?.receipt : undefined;
   // A prompt or dialog back for a later wait, in scope or not, drops the mark
   // of the one answered from here, so a later "Answered" never shows its
-  // receipt. A wait is named as the answer strip names it (protocol.md 7.4,
-  // Prompt): a permission prompt by when it began, a dialog by the activity
-  // observed then. It runs after each render and changes the store only when a
-  // mark is stale.
+  // receipt. It runs after each render and changes the store only when a mark
+  // is stale.
   const waits = [
-    ...attention.permission_prompts.map((prompt) => ({
+    ...attention.permission_prompts.map((prompt): Entry => ({
+      type: "permission",
       id: promptId(prompt),
-      since: prompt.since,
+      prompt,
     })),
-    ...(agents ? dialogWaits(agents) : []).map((agent) => ({
-      id: dialogId(agent),
-      since: agent.activity_observed_at,
-    })),
-  ];
+    ...waiting.map((agent): Entry => ({ type: "dialog", id: dialogId(agent), agent })),
+  ].map((entry) => ({ id: entry.id, since: waitKey(entry) ?? "" }));
   useEffect(() => dropStaleSent(waits));
-  // A wait that came and went while the Inbox was closed could leave a mark
-  // stale with nothing to show it, so the marks last while the Inbox is open.
-  useEffect(() => clearSent, []);
+  useEffect(openInbox, []);
   const briefChosen = brief !== null && (selected === AWAY_BRIEF_ID || !selected);
   const picked = briefChosen
     ? undefined

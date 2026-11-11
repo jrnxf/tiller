@@ -16,7 +16,7 @@ export function agentName(agent: Named | undefined): string {
 
 // The same name as a title: its herdr name, else its role.
 export function agentTitle(agent: Named | undefined): string {
-  return agent?.herdr_name ?? agent?.role ?? "Agent";
+  return agent?.herdr_name || agent?.role || "Agent";
 }
 
 // The saved machine a host id names, if any. herdr streams and takes keys only
@@ -30,16 +30,18 @@ export function useSavedMachine(hostId: string | null | undefined): string | und
 
 // The agent a session runs, from the agents list, and the saved machine it
 // runs on, if any. `known` is false until the agents list has loaded, as only
-// then does a missing agent mean this machine's.
+// then does a missing agent mean this machine's. A list that failed to load
+// counts as known, so the agent is taken as this machine's, as before the
+// list was read.
 export function useSessionAgent(sessionId: string): {
   agent: AgentRow | undefined;
   saved: string | undefined;
   known: boolean;
 } {
-  const data = useQuery(agentsQuery()).data;
+  const { data, isError } = useQuery(agentsQuery());
   const agent = (data?.orchestrators ?? [])
     .flatMap((row) => [row, ...row.workers])
     .find((row) => row.session_id === sessionId);
   const saved = useSavedMachine(agent?.host_id);
-  return { agent, saved, known: data !== undefined };
+  return { agent, saved, known: data !== undefined || isError };
 }

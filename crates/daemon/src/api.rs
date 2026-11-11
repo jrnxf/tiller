@@ -9205,7 +9205,7 @@ esac"#,
 case "$*" in
 *"pane read"*)
   [ -e '{dir}/slow' ] && sleep 0.3
-  [ -e '{dir}/hang' ] && sleep 3
+  [ -e '{dir}/hang' ] && sleep 2
   if [ -e '{dir}/screen' ]; then cat '{dir}/screen'; else printf 'one\n\033[34mtwo\033[0m\n'; fi;;
 *"pane send-keys"*)
   mv '{dir}/hang-after-keys' '{dir}/hang' 2>/dev/null
@@ -9688,7 +9688,7 @@ esac"#,
         .await;
         assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
         assert!(
-            started.elapsed() < DIALOG_LEFT_WAIT + std::time::Duration::from_millis(1500),
+            started.elapsed() < DIALOG_LEFT_WAIT + std::time::Duration::from_millis(900),
             "the answer took {:?}",
             started.elapsed()
         );

@@ -63,6 +63,8 @@ let tailFails = false;
 let promptRefused = false;
 // The agents list never answers, so the board does not know who runs where.
 let agentsHang = false;
+// The agents list fails.
+let agentsFail = false;
 
 const DIALOG: PromptDialog = {
   layout: "permission",
@@ -103,6 +105,10 @@ function stubDaemon(scenario: Scenario, hold = false) {
     const method = init?.method ?? "GET";
     if (method === "GET") {
       if (agentsHang && path === "/api/v1/agents") return new Promise<Response>(() => {});
+      if (agentsFail && path === "/api/v1/agents") {
+        const error = { code: "internal", message: "the store is locked" };
+        return new Response(JSON.stringify({ ok: false, error }), { status: 500 });
+      }
       const data =
         (serverResponses(scenario) as Record<string, unknown>)[path] ??
         fixtureResource(path, scenario);
@@ -181,6 +187,7 @@ beforeEach(() => {
   tailFails = false;
   promptRefused = false;
   agentsHang = false;
+  agentsFail = false;
   vi.stubGlobal("matchMedia", (query: string) => ({
     matches: false,
     media: query,
@@ -667,6 +674,35 @@ test("a permission prompt reads the screen only once the board knows the agent's
   await flush();
   expect(reads).toEqual([]);
   expect(screen.queryByRole("button", { name: /^Answer \d/ })).toBeNull();
+});
+
+test("an answer that lands after the Inbox closed claims no answer later", async () => {
+  stubDaemon("default", true);
+  const { router, queryClient } = await renderInbox("default", `perm-${SESSION_C}`);
+  fireEvent.click(await screen.findByRole("button", { name: "Answer 1: Yes" }));
+  await flush();
+  // The owner leaves while the answer is on its way, and it lands after.
+  await act(() => router.navigate({ to: "/" }));
+  await act(async () => release?.());
+  act(() => {
+    queryClient.setQueryData<AttentionResponse>(attentionQuery().queryKey, (attention) =>
+      attention ? { ...attention, permission_prompts: [] } : attention,
+    );
+  });
+  await act(() => router.navigate({ to: "/inbox", search: { item: `perm-${SESSION_C}` } }));
+  expect(await screen.findByText("Not in the inbox any more")).toBeTruthy();
+  expect(screen.queryByText(/Sent 1 · Yes/)).toBeNull();
+});
+
+test("a permission prompt still gets its buttons when the agents list fails", async () => {
+  stubDaemon("default");
+  agentsFail = true;
+  await renderInbox("default", `perm-${SESSION_C}`, (queryClient) =>
+    queryClient.removeQueries({ queryKey: agentsQuery().queryKey }),
+  );
+  expect(
+    await screen.findByRole("button", { name: "Answer 1: Yes" }, { timeout: 4000 }),
+  ).toBeTruthy();
 });
 
 test("with no dialog on the screen, the detail shows what the hook recorded", async () => {

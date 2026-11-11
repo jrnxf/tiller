@@ -38,12 +38,23 @@ export interface Sent {
 
 export const sentStore = createStore<Record<string, Sent>>({});
 
-export function markSent(id: string, since: string, receipt: string) {
-  sentStore.update((current) => ({ ...current, [id]: { since, receipt } }));
+// How many Inboxes are open. A wait that came and went while none was could
+// leave a mark stale with nothing to show it, so the marks last only while an
+// Inbox is open, and an answer that lands after it closed marks nothing.
+let inboxes = 0;
+
+// Opens an Inbox; the function it returns closes it.
+export function openInbox(): () => void {
+  inboxes += 1;
+  return () => {
+    inboxes -= 1;
+    if (inboxes === 0) sentStore.set({});
+  };
 }
 
-export function clearSent() {
-  sentStore.set({});
+export function markSent(id: string, since: string, receipt: string) {
+  if (inboxes === 0) return;
+  sentStore.update((current) => ({ ...current, [id]: { since, receipt } }));
 }
 
 // Drops each mark whose entry is back in the inbox for a later wait.
