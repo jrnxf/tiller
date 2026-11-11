@@ -38,6 +38,16 @@ pub fn check(home: &Path) -> Result<()> {
     }
 }
 
+/// The name the marker in `home` holds, trimmed; `None` when it is
+/// missing, empty or cannot be read. For showing the marker: [`check`]
+/// decides whether a write may go ahead.
+pub fn name(home: &Path) -> Option<String> {
+    std::fs::read_to_string(home.join(MARKER))
+        .ok()
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]

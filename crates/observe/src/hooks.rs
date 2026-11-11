@@ -687,7 +687,10 @@ pub fn import_spool(store: &mut Store, env: &Env) -> tiller_core::Result<usize> 
                     fs::remove_file(&path).map_err(|error| Error::Internal(error.to_string()))?;
                     imported += 1;
                 }
-                Err(error @ Error::Unavailable(_)) => return Err(error),
+                // A busy database, or a marker that flipped to another
+                // system since the pass began: the file waits for a pass
+                // that can write it.
+                Err(error @ (Error::Unavailable(_) | Error::OwnerMarker(_))) => return Err(error),
                 Err(error) => {
                     log(
                         env,
@@ -730,13 +733,12 @@ fn fresh_working(session: &Session, now: Timestamp) -> bool {
             .is_some_and(|at| now.as_millis() - at.as_millis() < TOOL_COALESCE_MS)
 }
 
-/// `~/.tiller/owner` absent or saying `tiller`. Any other name means another
-/// system's hooks own the session (`recovery.md` R20).
+/// The owner marker allows Tiller's writes, read as the store reads it
+/// (`recovery.md` R20): absent, empty or `tiller`. Another name, or a
+/// marker that cannot be read, means another system's hooks own the
+/// session, and the hook yields.
 fn owner_is_tiller(home: &Path) -> bool {
-    match fs::read_to_string(home.join("owner")) {
-        Ok(text) => text.trim() == "tiller",
-        Err(_) => true,
-    }
+    tiller_core::owner::check(home).is_ok()
 }
 
 /// Writes `observed` to `<ulid>.json.tmp` and renames it to `<ulid>.json`, so

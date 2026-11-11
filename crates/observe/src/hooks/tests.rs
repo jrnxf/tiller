@@ -948,6 +948,74 @@ fn a_spool_write_that_stops_partway_leaves_no_spool_file() {
     assert!(left.is_empty(), "the failed write left {left:?}");
 }
 
+/// The hook reads the owner marker as the store does (`recovery.md` R20):
+/// an empty marker names no other system, so the hook records; a marker
+/// that cannot be read may name one, so the hook yields instead of failing
+/// on the store's refusal.
+#[test]
+fn the_hook_reads_the_owner_marker_as_the_store_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join(".tiller");
+    fs::create_dir_all(&home).unwrap();
+    let (store, fleet) = file_store(&home);
+    drop(store);
+    let env = Env {
+        tiller_home: home.clone(),
+        user_home: None,
+        tiller_session_id: Some(fleet.orchestrator.clone()),
+    };
+    let stop = input("claude-orch", json!({}));
+
+    fs::write(home.join("owner"), "\n").unwrap();
+    assert!(
+        matches!(run("Stop", &stop, &env), Outcome::Recorded { .. }),
+        "an empty marker names no other system"
+    );
+
+    // A directory in the marker's place cannot be read as a file.
+    fs::remove_file(home.join("owner")).unwrap();
+    fs::create_dir(home.join("owner")).unwrap();
+    assert_eq!(run("Stop", &stop, &env), Outcome::NotOwner);
+    assert!(!home.join("hook-spool").exists());
+}
+
+/// A marker that flips to another system while the daemon imports the
+/// spool refuses each write. The files stay in the spool for the pass
+/// after the flip back; none is moved aside as bad.
+#[test]
+fn a_spool_import_refused_by_the_owner_marker_keeps_its_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join(".tiller");
+    fs::create_dir_all(home.join("hook-spool")).unwrap();
+    let (mut store, fleet) = file_store(&home);
+    let env = Env {
+        tiller_home: home.clone(),
+        user_home: None,
+        tiller_session_id: Some(fleet.worker.clone()),
+    };
+    let good = observe(
+        "StopFailure",
+        &input("claude-worker", json!({"error": "overloaded"})),
+        &env,
+        tick(),
+    )
+    .unwrap()
+    .unwrap();
+    let spooled = home.join("hook-spool/01A.json");
+    fs::write(&spooled, serde_json::to_vec(&good).unwrap()).unwrap();
+
+    fs::write(home.join("owner"), "other\n").unwrap();
+    let refused = import_spool(&mut store, &env).unwrap_err();
+    assert!(matches!(refused, Error::OwnerMarker(_)), "{refused:?}");
+    assert!(spooled.exists(), "the file waits in the spool");
+    assert!(!home.join("hook-spool/01A.json.bad").exists());
+
+    fs::write(home.join("owner"), "tiller\n").unwrap();
+    assert_eq!(import_spool(&mut store, &env).unwrap(), 1);
+    assert!(!spooled.exists());
+    assert_eq!(session(&store, &fleet.worker).activity, Activity::Errored);
+}
+
 /// `hook.log` rotates at its limit into `hook.log.1`, one generation kept.
 #[test]
 fn the_hook_log_rotates_at_its_limit() {
