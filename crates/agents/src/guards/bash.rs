@@ -2,6 +2,7 @@
 //! `sh -c`, `eval`, wrappers and substitutions, against the rules of
 //! `authority.md` sections 8 to 10.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -403,6 +404,7 @@ pub(super) fn classify(command: &str, ctx: &Context<'_>) -> Option<Denial> {
         depth: 0,
         remote: false,
         guesses: 0,
+        unread: Cell::new(false),
     };
     walker.text(command, true)
 }
@@ -480,6 +482,9 @@ struct Walker<'a, 'b> {
     /// each place a wrapper's command may start. Each one can try more, so
     /// they share one budget of [`GUESSES`].
     guesses: usize,
+    /// Whether a wrapper's options or a program could not be read since
+    /// the last `xargs`: its input may then be a flag or the command.
+    unread: Cell<bool>,
 }
 
 /// The most readings that are not sure the Bash guard tries for one call.
@@ -755,7 +760,7 @@ impl Walker<'_, '_> {
             // string (`xargs sh` with `-c CMD` as input, `xargs ssh host
             // true`) reads the input too.
             if appended
-                && reads_command(basename(&program.text))
+                && reads_appended(basename(&program.text), &words[i + 1..])
                 && let Some(found) = self.appended_input(basename(&program.text), command, script)
             {
                 return Some(found);
@@ -812,7 +817,11 @@ impl Walker<'_, '_> {
                 "xargs" => {
                     let (found, next) = match options::parse(options::XARGS, false, rest).sure() {
                         Parse::Read { found, next, .. } => (found, next),
-                        _ => return self.unreadable_options("xargs", &words[i..]),
+                        _ => {
+                            return self
+                                .unreadable_options("xargs", &words[i..])
+                                .or_else(|| self.appended_input("xargs", command, script));
+                        }
                     };
                     let j = i + 1 + next;
                     // `-I R` (BSD `-J R`) runs the command with R replaced,
@@ -847,13 +856,21 @@ impl Walker<'_, '_> {
                         })
                         .collect();
                     let appended = appended || replace.is_none();
-                    return self.exec(&tail, command, script, false, appended);
+                    // A wrapper option or a program the guard cannot read
+                    // may take the input as a flag or the command.
+                    let unread = self.unread.replace(false);
+                    let found = self.exec(&tail, command, script, false, appended);
+                    if found.is_none() && appended && self.unread.get() {
+                        return self.appended_input("xargs", command, script);
+                    }
+                    self.unread.set(unread || self.unread.get());
+                    return found;
                 }
                 "nix" => match self.nix(words, i, command, script, appended, &shown) {
                     Some(found) => return found,
                     None => break,
                 },
-                "nix-shell" => return self.nix_shell(rest, command, script, &shown),
+                "nix-shell" => return self.nix_shell(rest, command, script, appended, &shown),
                 "direnv" => match rest.first() {
                     Some(sub) if !sub.fixed => {
                         match self.unreadable_options("direnv", &words[i..]) {
@@ -892,6 +909,13 @@ impl Walker<'_, '_> {
                             }
                             Some(_) => starts.push(Start::At(i + 2)),
                             None => {}
+                        }
+                        // `xargs direnv exec DIR`: the input is the command.
+                        if appended
+                            && words.len() <= i + 3
+                            && let Some(found) = self.appended_input("direnv", command, script)
+                        {
+                            return Some(found);
                         }
                         match self.starts("direnv", starts, words, command, script, appended) {
                             Step::Next(next) => i = next,
@@ -1326,6 +1350,14 @@ impl Walker<'_, '_> {
                 shown,
             ));
         }
+        // `xargs nix develop` or `xargs nix develop -c`: the input may be
+        // nix's flags or the command.
+        if appended
+            && sure.as_ref().is_none_or(Vec::is_empty)
+            && let Some(found) = self.appended_input("nix", command, script)
+        {
+            return Some(Some(found));
+        }
         if sub.run
             && let Some(found) = self.unknown_program(&words[at..])
         {
@@ -1418,8 +1450,13 @@ impl Walker<'_, '_> {
         args: &[Arg],
         command: &Simple,
         script: &Script,
+        appended: bool,
         shown: &str,
     ) -> Option<Denial> {
+        // `xargs nix-shell`: the input may be its flags, `--run` among them.
+        if appended && let Some(found) = self.appended_input("nix-shell", command, script) {
+            return Some(found);
+        }
         if args.iter().any(|w| w.is("--pure")) {
             return self.deny(
                 Code::Identity,
@@ -1891,6 +1928,7 @@ impl Walker<'_, '_> {
     /// take, or a word not known before it runs. Fail closed when the
     /// command names a protected one.
     fn unreadable_options(&self, program: &str, words: &[Arg]) -> Option<Denial> {
+        self.unread.set(true);
         let shown = texts(words);
         if self.remote {
             return self.deny(
@@ -1911,6 +1949,7 @@ impl Walker<'_, '_> {
     }
 
     fn unknown_program(&self, words: &[Arg]) -> Option<Denial> {
+        self.unread.set(true);
         let shown = texts(words);
         if self.remote {
             return self.deny(
@@ -3834,14 +3873,11 @@ fn nix_cluster(text: &str) -> Option<Vec<String>> {
 fn piped_texts(command: &Simple, script: &Script, own: bool) -> Vec<String> {
     let mut texts = Vec::new();
     if command.piped_in {
-        let same = |other: &Simple| {
-            other
-                .words
-                .iter()
-                .map(|w| &w.text)
-                .eq(command.words.iter().map(|w| &w.text))
-        };
-        for other in script.commands.iter().filter(|other| own || !same(other)) {
+        for other in script
+            .commands
+            .iter()
+            .filter(|other| own || !std::ptr::eq(*other, command))
+        {
             let fixed: Vec<&str> = other
                 .words
                 .iter()
@@ -3856,26 +3892,48 @@ fn piped_texts(command: &Simple, script: &Script, own: bool) -> Vec<String> {
     texts
 }
 
-/// Whether a program reads the words after it as its flags or as a
-/// command string, so the words `xargs` appends may make it run a
-/// command: a shell, `su`, a remote shell, `watch`, `eval`, and the
-/// wrappers the guard reads by their words.
-fn reads_command(name: &str) -> bool {
-    SHELLS.contains(&name)
-        || [
-            "pwsh",
-            "su",
-            "runuser",
-            "ssh",
-            "mosh",
-            "et",
-            "watch",
-            "eval",
-            "nix",
-            "nix-shell",
-            "direnv",
-        ]
-        .contains(&name)
+/// The programs, besides the shells, that read the words after them as
+/// their flags or as a command string.
+const COMMAND_READERS: &[&str] = &[
+    "pwsh",
+    "su",
+    "runuser",
+    "ssh",
+    "mosh",
+    "et",
+    "watch",
+    "eval",
+    "find",
+    "nix",
+    "nix-shell",
+    "direnv",
+];
+
+/// Whether the words `xargs` appends to a program with the words `rest`
+/// may make it run a command it does not show: a shell or `pwsh` without
+/// its command string, and `su`, a remote shell, `watch`, `eval` or
+/// `find`. `nix`, `nix-shell` and `direnv` check their input themselves.
+fn reads_appended(name: &str, rest: &[Arg]) -> bool {
+    if matches!(name, "nix" | "nix-shell") {
+        return false;
+    }
+    // `xargs direnv`: the input may be `exec DIR COMMAND`.
+    if name == "direnv" {
+        return rest.is_empty();
+    }
+    if SHELLS.contains(&name) || name == "pwsh" {
+        // `sh -c CMD`: the appended words are the script's arguments.
+        let string = rest.iter().position(|word| {
+            let text = word.text.as_str();
+            word.fixed
+                && (matches!(
+                    text,
+                    "--command" | "-Command" | "-CommandWithArgs" | "-EncodedCommand"
+                ) || (text.starts_with('-') && !text.starts_with("--") && text.contains('c')))
+        });
+        return string.is_none_or(|at| at + 1 >= rest.len());
+    }
+    COMMAND_READERS.contains(&name)
 }
 
 /// What the guard knows of nix's subcommand: whether it may start a
@@ -3933,28 +3991,8 @@ fn nix_shell_exprs(args: &[Arg]) -> impl Iterator<Item = &Arg> {
 /// program the guard denies by its name runs under any other name too.
 fn direnv_file(path: &str) -> bool {
     const READS: &[&str] = &[
-        "env",
-        "command",
-        "builtin",
-        "busybox",
-        "exec",
-        "xargs",
-        "sudo",
-        "doas",
-        "sudoedit",
-        "su",
-        "nix",
-        "nix-shell",
-        "direnv",
-        "watch",
-        "pwsh",
-        "git",
-        "gh",
-        "gh-axi",
-        "eval",
-        "ssh",
-        "mosh",
-        "et",
+        "env", "command", "builtin", "busybox", "exec", "xargs", "sudo", "doas", "sudoedit", "git",
+        "gh", "gh-axi",
     ];
     let Some((dir, name)) = path.rsplit_once('/') else {
         return true;
@@ -3962,6 +4000,7 @@ fn direnv_file(path: &str) -> bool {
     let parent = dir.rsplit('/').next().unwrap_or_default();
     matches!(parent, "bin" | "sbin")
         || SHELLS.contains(&name)
+        || COMMAND_READERS.contains(&name)
         || READS.contains(&name)
         || options::runner(name).is_some()
 }
