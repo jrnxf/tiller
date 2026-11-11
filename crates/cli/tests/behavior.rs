@@ -757,6 +757,49 @@ fn a_session_before_init_names_the_same_setup_steps_as_every_other_refusal() {
     );
 }
 
+/// R20 with `--db` outside the home: the CLI and the store read one owner
+/// marker, the home's. A marker beside the database refuses nothing, and
+/// the home's marker refuses the store's writes too.
+#[test]
+fn a_db_outside_the_home_reads_the_home_s_owner_marker() {
+    let world = World::new();
+    std::fs::create_dir_all(world.home()).unwrap();
+    let elsewhere = world.dir.path().join("elsewhere");
+    let db = elsewhere.join("state.db");
+    let db = db.to_str().unwrap();
+    let init = [
+        "--db",
+        db,
+        "init",
+        "--host-label",
+        "host-a",
+        "--lane-capacity",
+        "2",
+    ];
+    assert!(world.run(&init).ok());
+    std::fs::write(elsewhere.join("owner"), "other\n").unwrap();
+    let add = |id: &str| {
+        world.run(&[
+            "--db",
+            db,
+            "project",
+            "add",
+            id,
+            "--name",
+            id,
+            "--repo",
+            "example/alpha",
+            "--delivery",
+            "direct-pr",
+        ])
+    };
+    let added = add("alpha");
+    assert!(added.ok(), "{}", added.json);
+    std::fs::write(world.home().join("owner"), "other\n").unwrap();
+    std::fs::remove_file(elsewhere.join("owner")).unwrap();
+    assert_eq!(add("beta").error_code(), "owner_marker");
+}
+
 #[test]
 fn init_refuses_while_another_system_owns_the_host_and_names_owner_set() {
     let world = World::new();
