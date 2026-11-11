@@ -76,6 +76,7 @@ impl Store {
             .query_row(
                 "SELECT seq, json_extract(payload, '$.commit_sha') FROM events
                  WHERE kind = 'memory_revision.recorded'
+                   AND json_extract(payload, '$.provenance') = 'tiller'
                    AND json_extract(payload, '$.commit_sha') IS NOT NULL
                  ORDER BY seq DESC LIMIT 1",
                 [],
@@ -181,6 +182,12 @@ mod tests {
         record(
             &mut store,
             json!({"blob_sha": "b3", "provenance": "external"}),
+        );
+        // One that names a commit with another provenance is not Tiller's
+        // commit either.
+        record(
+            &mut store,
+            json!({"commit_sha": "c4", "provenance": "external"}),
         );
         assert_eq!(
             store.mem_last_commit().unwrap(),
