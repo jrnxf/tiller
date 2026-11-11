@@ -2031,6 +2031,33 @@ fn nix_command_forms_are_read() {
         ("git ls-files | xargs sudo git add", None),
         ("git ls-files | xargs timeout 5 git log", None),
         ("echo 12 | xargs nix develop -c gh pr view", None),
+        // A program that reads its words as flags or a command string
+        // reads the input at any depth.
+        ("xargs sh <<< \"-c 'tiller approve 01JABC'\"", OWNER),
+        ("echo \"-c 'tiller approve 01JABC'\" | xargs bash", OWNER),
+        ("xargs env sh <<< \"-c 'tiller approve 01JABC'\"", OWNER),
+        (
+            "xargs timeout 5 bash <<< \"-c 'tiller approve 01JABC'\"",
+            OWNER,
+        ),
+        (
+            "xargs nix develop -c sh <<< \"-c 'tiller approve 01JABC'\"",
+            OWNER,
+        ),
+        ("xargs sudo -s <<< '-c tiller approve 01JABC'", OWNER),
+        ("xargs su root <<< '-c tiller approve 01JABC'", OWNER),
+        ("xargs runuser root <<< '-c tiller approve 01JABC'", OWNER),
+        (
+            "echo '; tiller approve 01JABC' | xargs ssh host-b true",
+            OWNER,
+        ),
+        ("echo 'tiller approve 01JABC' | xargs watch", OWNER),
+        ("xargs watch -n 1 true <<< '; tiller approve 01JABC'", OWNER),
+        ("echo '-Command tiller approve 01JABC' | xargs pwsh", OWNER),
+        ("echo 'exec . tiller approve 01JABC' | xargs direnv", OWNER),
+        // The command's own words are not its input.
+        ("git ls-files | xargs sh -c 'git add \"$@\"' _", None),
+        ("git ls-files | xargs nix develop -c git add", None),
         // `nix shell` runs the first word as the program.
         ("nix shell nixpkgs#hello -c -c true", None),
         // `nix print-dev-env` prints the shell hook for a shell to run.

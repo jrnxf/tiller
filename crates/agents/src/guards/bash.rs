@@ -751,6 +751,15 @@ impl Walker<'_, '_> {
             if !program.fixed {
                 return self.unknown_program(&words[i..]);
             }
+            // A program that reads its words as its flags or as a command
+            // string (`xargs sh` with `-c CMD` as input, `xargs ssh host
+            // true`) reads the input too.
+            if appended
+                && reads_command(basename(&program.text))
+                && let Some(found) = self.appended_input(basename(&program.text), command, script)
+            {
+                return Some(found);
+            }
             let rest = &words[i + 1..];
             let skip = |start: usize, with_arg: &[&str]| -> usize {
                 let mut j = start;
@@ -844,7 +853,7 @@ impl Walker<'_, '_> {
                     Some(found) => return found,
                     None => break,
                 },
-                "nix-shell" => return self.nix_shell(rest, command, script, appended, &shown),
+                "nix-shell" => return self.nix_shell(rest, command, script, &shown),
                 "direnv" => match rest.first() {
                     Some(sub) if !sub.fixed => {
                         match self.unreadable_options("direnv", &words[i..]) {
@@ -883,13 +892,6 @@ impl Walker<'_, '_> {
                             }
                             Some(_) => starts.push(Start::At(i + 2)),
                             None => {}
-                        }
-                        // `xargs direnv exec DIR`: the input is the command.
-                        if appended
-                            && words.len() <= i + 3
-                            && let Some(found) = self.appended_input("direnv", command, script)
-                        {
-                            return Some(found);
                         }
                         match self.starts("direnv", starts, words, command, script, appended) {
                             Step::Next(next) => i = next,
@@ -1324,14 +1326,6 @@ impl Walker<'_, '_> {
                 shown,
             ));
         }
-        // `xargs nix develop` or `xargs nix develop -c`: the input may be
-        // nix's flags or the command.
-        if appended
-            && sure.as_ref().is_none_or(Vec::is_empty)
-            && let Some(found) = self.appended_input("nix", command, script)
-        {
-            return Some(Some(found));
-        }
         if sub.run
             && let Some(found) = self.unknown_program(&words[at..])
         {
@@ -1424,12 +1418,8 @@ impl Walker<'_, '_> {
         args: &[Arg],
         command: &Simple,
         script: &Script,
-        appended: bool,
         shown: &str,
     ) -> Option<Denial> {
-        if appended && let Some(found) = self.appended_input("nix-shell", command, script) {
-            return Some(found);
-        }
         if args.iter().any(|w| w.is("--pure")) {
             return self.deny(
                 Code::Identity,
@@ -1821,12 +1811,13 @@ impl Walker<'_, '_> {
         } else {
             has(&["login", "shell"])
         };
-        if shell {
-            return Step::Done(self.stdin_script(command, script));
+        // With no command, sudo runs the words `xargs` appends, as its
+        // command or as the words of its shell.
+        if appended && let Some(found) = self.appended_input(program, command, script) {
+            return Step::Done(Some(found));
         }
-        // With no command, sudo runs the words `xargs` appends.
-        if appended {
-            return Step::Done(self.appended_input(program, command, script));
+        if shell || appended {
+            return Step::Done(self.stdin_script(command, script));
         }
         Step::Done(None)
     }
@@ -1882,7 +1873,7 @@ impl Walker<'_, '_> {
             .iter()
             .filter(|r| r.stdin_text)
             .map(|r| r.target.text.clone())
-            .chain(piped_texts(command, script))
+            .chain(piped_texts(command, script, false))
             .find(|text| protected(text))?;
         if let Some(found) = self.stdin_script(command, script) {
             return Some(found);
@@ -2452,7 +2443,7 @@ impl Walker<'_, '_> {
                 return Some(found);
             }
         }
-        for text in piped_texts(command, script) {
+        for text in piped_texts(command, script, true) {
             if let Ok(inner) = shell::parse(&text)
                 && let Some(found) = self.script(&inner, false)
             {
@@ -3838,11 +3829,19 @@ fn nix_cluster(text: &str) -> Option<Vec<String>> {
 
 /// The texts that may reach a command piped into: every quoted word
 /// elsewhere in the call, and the words after each program (`echo gh pr
-/// merge 12 | sh`).
-fn piped_texts(command: &Simple, script: &Script) -> Vec<String> {
+/// merge 12 | sh`). With `own` false, the words of the command itself are
+/// left out, as `xargs` reads them as its command, not its input.
+fn piped_texts(command: &Simple, script: &Script, own: bool) -> Vec<String> {
     let mut texts = Vec::new();
     if command.piped_in {
-        for other in &script.commands {
+        let same = |other: &Simple| {
+            other
+                .words
+                .iter()
+                .map(|w| &w.text)
+                .eq(command.words.iter().map(|w| &w.text))
+        };
+        for other in script.commands.iter().filter(|other| own || !same(other)) {
             let fixed: Vec<&str> = other
                 .words
                 .iter()
@@ -3855,6 +3854,28 @@ fn piped_texts(command: &Simple, script: &Script) -> Vec<String> {
         }
     }
     texts
+}
+
+/// Whether a program reads the words after it as its flags or as a
+/// command string, so the words `xargs` appends may make it run a
+/// command: a shell, `su`, a remote shell, `watch`, `eval`, and the
+/// wrappers the guard reads by their words.
+fn reads_command(name: &str) -> bool {
+    SHELLS.contains(&name)
+        || [
+            "pwsh",
+            "su",
+            "runuser",
+            "ssh",
+            "mosh",
+            "et",
+            "watch",
+            "eval",
+            "nix",
+            "nix-shell",
+            "direnv",
+        ]
+        .contains(&name)
 }
 
 /// What the guard knows of nix's subcommand: whether it may start a
