@@ -1324,3 +1324,38 @@ test("a snapshot that a second reset outdated is not written over the live rows"
   expect(calls).toHaveLength(2);
   stop();
 });
+
+test("a snapshot is still written when only a reopened stream asked for another", async () => {
+  vi.useFakeTimers();
+  const queryClient = seededClient();
+  const { calls, fetchSnapshot } = heldSnapshots();
+  const stop = connectEvents({
+    queryClient,
+    lastEventSeq: 4181,
+    createEventSource: (url) => new FakeSource(url),
+    fetchSnapshot,
+    fetchSession: () => Promise.resolve({ owner: true }),
+  });
+  const source = FakeSource.all[0] as FakeSource;
+  const hostA = queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath))?.machines[0];
+  if (!hostA) throw new Error("fixture has no machine");
+
+  source.emit("reset", { seq: 5000 });
+  // The stream drops and opens again while the snapshot is in flight.
+  source.emit("open");
+  const fresh = fixtureSnapshot("default", NOW);
+  const machines = fresh.queries[machinesPath] as MachinesResponse;
+  fresh.queries[machinesPath] = {
+    ...machines,
+    machines: machines.machines.map((row) =>
+      row.id === hostA.id ? { ...row, rev: row.rev + 1, running_agents: 7 } : row,
+    ),
+  };
+  calls[0]?.resolve({ ...fresh, last_event_seq: 5000 });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(
+    queryClient.getQueryData<MachinesResponse>(queryKeyFor(machinesPath))?.machines[0]
+      ?.running_agents,
+  ).toBe(7);
+  stop();
+});

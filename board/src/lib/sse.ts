@@ -647,6 +647,9 @@ export function connectEvents(options: EventsOptions): () => void {
   // A `reset` came while a snapshot was in flight: that snapshot may be older
   // than the reset, so it is fetched again.
   let again = false;
+  // The `again` came from a newer `reset`, not a reopened stream: the
+  // snapshot in flight is older than it and is not written.
+  let outdated = false;
   let failures = 0;
   // Whether a peer's message moved a read while the snapshot was in flight.
   // Its seq is not this host's, so `floor` cannot say.
@@ -664,27 +667,31 @@ export function connectEvents(options: EventsOptions): () => void {
     }
     resyncing = true;
     again = false;
+    outdated = false;
     peerMoved = false;
     try {
       const snapshot = await fetchSnapshot();
       if (stopped) return;
       failures = 0;
       // A `reset` came while this snapshot was in flight, and it may be older
-      // than that reset (a restored database). It is not written: the resync
-      // stays pending, with the cursor where it was, until the next snapshot
-      // lands.
-      if (!again) {
+      // than that reset (a restored database). It is not written, and the
+      // resync stays pending, with the cursor where it was, until the next
+      // snapshot lands.
+      if (!outdated) {
         // A change applied while the snapshot was in flight can be newer than
         // it, and the snapshot just wrote the older row back: its reads are
         // fetched again too.
         const undone = peerMoved || (floor !== null && floor > snapshot.last_event_seq);
         const seq = refreshFromSnapshot(queryClient, snapshot, undone);
-        // The max is against `floor` (the changes applied since the reset),
-        // never against the old cursor: after a restored database the newest
-        // seq goes down.
-        lastSeq = Math.max(seq, floor ?? -1);
-        pending = false;
-        floor = null;
+        // A reopened stream asked for another resync: it stays pending too.
+        if (!again) {
+          // The max is against `floor` (the changes applied since the reset),
+          // never against the old cursor: after a restored database the
+          // newest seq goes down.
+          lastSeq = Math.max(seq, floor ?? -1);
+          pending = false;
+          floor = null;
+        }
       }
     } catch (error) {
       if (stopped) {
@@ -752,6 +759,7 @@ export function connectEvents(options: EventsOptions): () => void {
       applyLink(queryClient, JSON.parse(message.data) as LinkEvent);
     });
     next.addEventListener("reset", (message) => {
+      if (resyncing) outdated = true;
       pending = true;
       floor = (JSON.parse(message.data) as { seq: number }).seq;
       // A new reason to try: the wait starts short again.
