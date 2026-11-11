@@ -17,6 +17,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use tiller_core::domain::{Activity, ObservationSource, Session};
 use tiller_core::error::READ_ONLY_MARKER;
+use tiller_core::owner::Marker;
 use tiller_core::state::runs::{Bind, NewObservation};
 use tiller_core::state::{find, get};
 use tiller_core::{Actor, Ctx, Error, Store, Timestamp};
@@ -350,8 +351,20 @@ pub fn run_with(
     env: &Env,
     intake: Option<&dyn Intake>,
 ) -> (Outcome, Option<Value>) {
-    if !owner_is_tiller(&env.tiller_home) {
-        return (Outcome::NotOwner, None);
+    // Another system's hooks own the session (`recovery.md` R20), so the
+    // hook yields and spools nothing. A marker that cannot be read may name
+    // one, so the hook yields too, and says so in its log: the observation
+    // is lost, and a lasting read error would otherwise leave no trace.
+    match tiller_core::owner::read(&env.tiller_home) {
+        Marker::Tiller => {}
+        Marker::Other(_) => return (Outcome::NotOwner, None),
+        Marker::Unreadable(error) => {
+            log(
+                env,
+                &format!("{event}: yielded, the owner marker could not be read ({error})"),
+            );
+            return (Outcome::NotOwner, None);
+        }
     }
     let observed = match observe(event, input, env, Timestamp::now()) {
         Ok(Some(observed)) => observed,
@@ -731,14 +744,6 @@ fn fresh_working(session: &Session, now: Timestamp) -> bool {
         && session
             .activity_observed_at
             .is_some_and(|at| now.as_millis() - at.as_millis() < TOOL_COALESCE_MS)
-}
-
-/// The owner marker allows Tiller's writes, read as the store reads it
-/// (`recovery.md` R20): absent, empty or `tiller`. Another name, or a
-/// marker that cannot be read, means another system's hooks own the
-/// session, and the hook yields.
-fn owner_is_tiller(home: &Path) -> bool {
-    tiller_core::owner::check(home).is_ok()
 }
 
 /// Writes `observed` to `<ulid>.json.tmp` and renames it to `<ulid>.json`, so

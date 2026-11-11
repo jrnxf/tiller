@@ -950,8 +950,8 @@ fn a_spool_write_that_stops_partway_leaves_no_spool_file() {
 
 /// The hook reads the owner marker as the store does (`recovery.md` R20):
 /// an empty marker names no other system, so the hook records; a marker
-/// that cannot be read may name one, so the hook yields instead of failing
-/// on the store's refusal.
+/// that cannot be read may name one, so the hook yields, spools nothing,
+/// and says why in its log.
 #[test]
 fn the_hook_reads_the_owner_marker_as_the_store_does() {
     let dir = tempfile::tempdir().unwrap();
@@ -977,6 +977,11 @@ fn the_hook_reads_the_owner_marker_as_the_store_does() {
     fs::create_dir(home.join("owner")).unwrap();
     assert_eq!(run("Stop", &stop, &env), Outcome::NotOwner);
     assert!(!home.join("hook-spool").exists());
+    let log = fs::read_to_string(home.join("log/hook.log")).unwrap();
+    assert!(
+        log.contains("Stop: yielded, the owner marker could not be read"),
+        "{log}"
+    );
 }
 
 /// A marker that flips to another system while the daemon imports the
