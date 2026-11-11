@@ -1508,10 +1508,11 @@ esac
     }
 
     /// A session ended with no `Ended` verdict (a relaunch) while it read
-    /// working settles once into the idle of a turn's last line that Claude
-    /// Code flushed late. No later line, whatever its stamp, moves it again.
+    /// working settles into the idle of a turn's last line that Claude Code
+    /// flushed late. Later lines, whatever their stamps, move it only
+    /// forward: to errored, then to ended, never back.
     #[test]
-    fn an_ended_session_settles_once_and_never_looks_live_again() {
+    fn an_ended_session_settles_only_forward() {
         let mut t = Transcript::new();
         let path = t.path("main.jsonl");
         t.bind("claude-orchestrator", &path, "startup");
@@ -1548,21 +1549,20 @@ esac
         assert_eq!(row.activity, tiller_core::domain::Activity::Idle);
 
         // A host clock behind the daemon's stamps a later line before the
-        // end: it still does not make the session work again.
-        // The new process of a relaunch may go on writing the same file.
-        for (at, verdict) in [
+        // end, and the new process of a relaunch may go on writing the same
+        // file: neither makes the session work again or flips it back.
+        use tiller_core::domain::Activity::{Ended, Errored, Idle, Working};
+        for (at, verdict, then) in [
             (
                 Timestamp::from_millis(ended.as_millis() - 30_000).unwrap(),
-                tiller_core::domain::Activity::Working,
+                Working,
+                Idle,
             ),
-            (
-                ended.plus_minutes(3),
-                tiller_core::domain::Activity::Working,
-            ),
-            (
-                ended.plus_minutes(4),
-                tiller_core::domain::Activity::Errored,
-            ),
+            (ended.plus_minutes(3), Working, Idle),
+            (ended.plus_minutes(4), Errored, Errored),
+            (ended.plus_minutes(5), Idle, Errored),
+            (ended.plus_minutes(6), Ended, Ended),
+            (ended.plus_minutes(7), Errored, Ended),
         ] {
             t.fleet
                 .store
@@ -1579,10 +1579,10 @@ esac
                     },
                 )
                 .unwrap();
+            let row: Session =
+                tiller_core::state::get(t.fleet.store.conn(), "session", &session).unwrap();
+            assert_eq!(row.activity, then, "{verdict} at {at}");
         }
-        let row: Session =
-            tiller_core::state::get(t.fleet.store.conn(), "session", &session).unwrap();
-        assert_eq!(row.activity, tiller_core::domain::Activity::Idle);
     }
 
     /// Retention and `/clear` together: the window keeps the file the

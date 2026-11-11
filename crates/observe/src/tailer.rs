@@ -6,6 +6,7 @@
 //! boundaries hooks would have given. The daemon drives [`Tailer::poll`] from
 //! a file watch. No transcript text is ever copied into a payload.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -134,14 +135,11 @@ pub struct Tailer {
     transcript_intake: bool,
     /// Set after a truncation, or for a file read from the start while the
     /// session has other rows: the file may repeat entries already
-    /// recorded, so each entry is checked against the recorded uuids. It
-    /// holds the length read before (the offset before the truncation, or
-    /// the file's length at resume). Every entry up to it is checked. The
-    /// repeats come first but a head line or a rewrite in progress can move
-    /// them past it, so past it the first entry with a uuid no row has
-    /// clears the dedupe: the entries after it are new, and the uuid scan
-    /// is not free.
-    dedupe: Option<u64>,
+    /// recorded, wherever they sit (a rewrite in progress, a forked resume
+    /// still being copied), so each entry is checked against the uuids the
+    /// session's transcript rows have. They are read once, and each entry
+    /// this tailer records is added.
+    dedupe: Option<HashSet<String>>,
 }
 
 impl Tailer {
@@ -168,8 +166,11 @@ impl Tailer {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let offset = offset.and_then(|o| u64::try_from(o).ok());
-        let dedupe = (offset.is_none() && others)
-            .then(|| std::fs::metadata(&path).map_or(0, |meta| meta.len()));
+        let dedupe = if offset.is_none() && others {
+            Some(recorded_uuids(store, &session.id)?)
+        } else {
+            None
+        };
         Ok(Self {
             session_id: session.id.clone(),
             run_id: session.run_id.clone(),
@@ -195,8 +196,10 @@ impl Tailer {
         };
         let len = file.metadata().map_err(io)?.len();
         if len < self.offset {
-            self.dedupe = Some(len.max(self.offset));
             self.offset = 0;
+            if self.dedupe.is_none() {
+                self.dedupe = Some(recorded_uuids(store, &self.session_id)?);
+            }
         }
         file.seek(SeekFrom::Start(self.offset)).map_err(io)?;
         let mut reader = BufReader::new(file);
@@ -238,17 +241,10 @@ impl Tailer {
             return Ok(false);
         };
         let uuid = entry.get("uuid").and_then(Value::as_str);
-        if let Some(until) = self.dedupe
-            && uuid.is_some()
+        if let (Some(seen), Some(uuid)) = (&self.dedupe, uuid)
+            && seen.contains(uuid)
         {
-            if self.already_recorded(store, uuid)? {
-                return Ok(false);
-            }
-            // Past the length read before, the first new entry has the
-            // repeats behind it.
-            if line_end > until {
-                self.dedupe = None;
-            }
+            return Ok(false);
         }
         let mut event = detected.event;
         let mut payload = json!({
@@ -298,6 +294,9 @@ impl Tailer {
                 payload,
             },
         )?;
+        if let (Some(seen), Some(uuid)) = (&mut self.dedupe, uuid) {
+            seen.insert(uuid.to_owned());
+        }
         Ok(true)
     }
 
@@ -337,22 +336,19 @@ impl Tailer {
         )?;
         Ok(Some(recorded.value.ask.id))
     }
+}
 
-    fn already_recorded(&self, store: &Store, uuid: Option<&str>) -> tiller_core::Result<bool> {
-        let Some(uuid) = uuid else {
-            return Ok(false);
-        };
-        let found: Option<i64> = store
-            .conn()
-            .query_row(
-                "SELECT 1 FROM observations WHERE session_id = ?1 AND source = 'transcript'
-                 AND json_extract(payload, '$.uuid') = ?2 LIMIT 1",
-                [&self.session_id, uuid],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(found.is_some())
-    }
+/// The entry uuids the session's transcript rows have.
+fn recorded_uuids(store: &Store, session_id: &str) -> tiller_core::Result<HashSet<String>> {
+    let mut statement = store.conn().prepare(
+        "SELECT json_extract(payload, '$.uuid') FROM observations
+         WHERE session_id = ?1 AND source = 'transcript'
+         AND json_extract(payload, '$.uuid') IS NOT NULL",
+    )?;
+    let uuids = statement
+        .query_map([session_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(uuids)
 }
 
 #[cfg(test)]
@@ -535,9 +531,7 @@ mod tests {
 
         // Rewritten in place: truncated, then a new entry u0 at the head,
         // then the old lines come back one poll at a time, then it grows
-        // with u3. u0 is new but comes before the old length, so the
-        // repeats after it are still checked, and u0 moves u2 past the
-        // offset read before.
+        // with u3. The repeats after u0 are still checked.
         std::fs::write(&path, "").unwrap();
         assert_eq!(tailer.poll(&mut store).unwrap(), 0);
         append(
@@ -569,10 +563,20 @@ mod tests {
             )],
         );
         assert_eq!(tailer.poll(&mut store).unwrap(), 1, "only u3 is new");
-        assert_eq!(
-            tailer.dedupe, None,
-            "lines past the repeats are not checked"
+        append(
+            &path,
+            &[user(
+                "u0",
+                "2026-11-02T10:00:01Z",
+                json!(INTERRUPT_MARKERS[1]),
+            )],
         );
+        assert_eq!(
+            tailer.poll(&mut store).unwrap(),
+            0,
+            "an entry this tailer recorded is not recorded twice"
+        );
+        assert_eq!(transcript_uuids(&store), ["u1", "u2", "u0", "u3"]);
     }
 
     #[test]
@@ -845,18 +849,42 @@ mod tests {
         assert_eq!(tailer.offset(), 0);
         assert_eq!(tailer.poll(&mut store).unwrap(), 1, "only u2 is new");
         assert_eq!(transcript_uuids(&store), ["u1", "u2"]);
-        // u2 ends at the length the file had at resume, so the dedupe holds
-        // until a new entry past it.
+    }
+
+    /// A forked resume binds the session to a file Claude Code is still
+    /// copying: empty at resume, then a new head entry, then the repeats.
+    #[test]
+    fn a_file_copied_after_resume_is_still_deduped() {
+        let mut store = Store::open_in_memory().unwrap();
+        let fleet = fleet(&mut store);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fork.jsonl");
+        let orchestrator = session(&store, &fleet.orchestrator);
+        store
+            .observation_record(
+                &Ctx::new(Actor::Daemon),
+                NewObservation {
+                    session_id: Some(fleet.orchestrator.clone()),
+                    run_id: None,
+                    source: ObservationSource::Transcript,
+                    event: "interrupt".into(),
+                    verdict: Some(Activity::Idle),
+                    observed_at: "2026-11-02T10:00:00Z".parse().unwrap(),
+                    payload: json!({"transcript_path": "/home/user/old.jsonl", "transcript_offset": 10, "uuid": "u1"}),
+                },
+            )
+            .unwrap();
+        std::fs::write(&path, "").unwrap();
+        let mut tailer = Tailer::resume(&store, &orchestrator, &path, false).unwrap();
         append(
             &path,
-            &[user(
-                "u3",
-                "2026-11-02T10:00:06Z",
-                json!(INTERRUPT_MARKERS[0]),
-            )],
+            &[
+                user("u0", "2026-11-02T10:00:01Z", json!(INTERRUPT_MARKERS[1])),
+                user("u1", "2026-11-02T10:00:00Z", json!(INTERRUPT_MARKERS[0])),
+            ],
         );
-        assert_eq!(tailer.poll(&mut store).unwrap(), 1);
-        assert_eq!(tailer.dedupe, None, "u3 ended the repeats");
+        assert_eq!(tailer.poll(&mut store).unwrap(), 1, "only u0 is new");
+        assert_eq!(transcript_uuids(&store), ["u1", "u0"]);
     }
 
     #[test]

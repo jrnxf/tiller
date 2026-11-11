@@ -198,6 +198,21 @@ pub const HOOK_WORKING_HOLD_MS: i64 = 30_000;
 
 /// A `herdr:idle` never replaces a hook `working` less than 30 s old.
 /// Returns when the hold ends, if it holds.
+/// How far an ended session has settled: a live state is 0, and an ended
+/// session moves only to a higher rank. The match has no catch-all, so a
+/// new state must be placed.
+fn rest_rank(activity: Activity) -> u8 {
+    match activity {
+        Activity::Working
+        | Activity::WaitingPermission
+        | Activity::WaitingInput
+        | Activity::Unknown => 0,
+        Activity::Idle => 1,
+        Activity::Errored => 2,
+        Activity::Ended => 3,
+    }
+}
+
 fn herdr_idle_held(session: &Session, new: &NewObservation) -> Option<Timestamp> {
     if new.source != ObservationSource::Herdr
         || new.verdict != Some(Activity::Idle)
@@ -2054,21 +2069,13 @@ impl Store {
                 // hook that comes late, is kept as a row, but an ended
                 // session never looks live again (`protocol.md` 5). One
                 // ended with no `Ended` verdict (a relaunch, a failed spawn)
-                // while it still read live may settle once into a resting
-                // state, such as the idle of a turn's last line flushed late.
-                // After that only `Ended` moves it, so a process that goes
-                // on writing the same file cannot flip it. No clock is
-                // compared, so skew between hosts cannot reopen it.
-                let live = matches!(
-                    session.activity,
-                    Activity::Working
-                        | Activity::WaitingPermission
-                        | Activity::WaitingInput
-                        | Activity::Unknown
-                );
+                // may still settle, such as into the idle of a turn's last
+                // line flushed late, but only forward: idle, then errored,
+                // then ended. A process that goes on writing the same file
+                // cannot flip it back. No clock is compared, so skew between
+                // hosts cannot reopen it.
                 let may_move = session.ended_at.is_none()
-                    || verdict == Activity::Ended
-                    || (live && matches!(verdict, Activity::Idle | Activity::Errored));
+                    || rest_rank(verdict) > rest_rank(session.activity);
                 idle_held_until = herdr_idle_held(&session, &new);
                 if newer && may_move && idle_held_until.is_none() {
                     tx.conn().execute(

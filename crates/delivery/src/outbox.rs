@@ -399,7 +399,7 @@ impl<H: Herdr> Deliverer<H> {
                             )
                         }
                     };
-                    // One entry per message, whatever failed.
+                    // One error entry per message, whatever failed.
                     report
                         .errors
                         .push((message.target_session_id.clone(), text));
