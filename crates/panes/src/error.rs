@@ -76,7 +76,7 @@ impl PanesError {
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
-                PanesError::Unreachable("no answer in time".into())
+                PanesError::Unreachable("the holder did not keep up in time".into())
             }
             FrameError::Io(err) => PanesError::Unreachable(err.to_string()),
             err @ FrameError::Truncated { .. } => PanesError::Unreachable(err.to_string()),

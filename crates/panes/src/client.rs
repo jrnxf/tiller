@@ -10,7 +10,7 @@
 //! subscription from another thread while one thread waits in
 //! [`Subscription::recv`].
 //!
-//! A connection that fails (no answer in time, a closed socket, a bad frame)
+//! A connection that fails (a timeout, a closed socket, a bad frame)
 //! is not used again: every later call on that client is `Unreachable`, and
 //! the caller connects again. Nothing here retries, so a holder restart is
 //! never hidden behind a quiet reconnect.
@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::error::{PanesError, Result};
-use crate::frame::{Frame, FrameError, encode_input, read_frame};
+use crate::frame::{Frame, encode_input, read_frame};
 use crate::handshake::{Hello, ProtoRange, SUPPORTED, Welcome};
 use crate::message::{
     ErrorCode, Exit, HolderMessage, Listing, Pane, PaneId, Request, Spawn, SyncMode,
@@ -39,9 +39,9 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// reply's last byte in, and how long one frame's write may take.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long a subscription still reads after a broken resize, so what was
-/// buffered comes, while a holder that keeps the connection open cannot keep
-/// the broken stream alive.
+/// How long a subscription's socket stays open for reads after a broken
+/// resize, so what was buffered still comes. Then it shuts, so a holder that
+/// keeps the connection open cannot keep the broken stream alive.
 const BROKEN_GRACE: Duration = Duration::from_secs(2);
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -70,9 +70,10 @@ impl Timed {
             return Ok(None);
         };
         match deadline.saturating_duration_since(Instant::now()) {
-            left if left.is_zero() => {
-                Err(io::Error::new(io::ErrorKind::TimedOut, "no answer in time"))
-            }
+            left if left.is_zero() => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the holder did not keep up in time",
+            )),
             left => Ok(Some(left)),
         }
     }
@@ -81,11 +82,6 @@ impl Timed {
     fn unlimit_reads(&mut self) -> io::Result<()> {
         self.deadline = None;
         self.stream.set_read_timeout(None)
-    }
-
-    /// Gives reads a deadline, unless they have one.
-    fn limit_reads(&mut self, deadline: Instant) {
-        self.deadline.get_or_insert(deadline);
     }
 }
 
@@ -118,7 +114,7 @@ fn encode(name: &'static str, frame: &Frame) -> Result<Vec<u8>> {
     frame.to_bytes().map_err(|err| refused(name, &err))
 }
 
-fn refused(name: &'static str, err: &FrameError) -> PanesError {
+fn refused(name: &'static str, err: impl std::fmt::Display) -> PanesError {
     PanesError::Refused {
         request: name,
         code: ErrorCode::BadRequest,
@@ -128,11 +124,8 @@ fn refused(name: &'static str, err: &FrameError) -> PanesError {
 
 /// A request's wire bytes, as [`encode`].
 fn encode_request(name: &'static str, request: &Request) -> Result<Vec<u8>> {
-    let text = serde_json::to_string(request).map_err(|err| PanesError::Refused {
-        request: name,
-        code: ErrorCode::BadRequest,
-        message: format!("not sent: the request did not encode: {err}"),
-    })?;
+    let text = serde_json::to_string(request)
+        .map_err(|err| refused(name, format_args!("the request did not encode: {err}")))?;
     encode(name, &Frame::Message(text))
 }
 
@@ -501,7 +494,7 @@ impl HolderClient {
                 pane: pane.clone(),
                 lease: format!("stream-{stream}"),
                 socket,
-                closed: OnceLock::new(),
+                closed: Mutex::new(None),
                 writer,
                 next_id: AtomicU64::new(id + 1),
                 pending: Mutex::new(VecDeque::new()),
@@ -622,7 +615,7 @@ struct StreamSide {
     socket: UnixStream,
     /// Why this side closed the stream, once it did, so the close that
     /// follows is not read as the holder's.
-    closed: OnceLock<Closed>,
+    closed: Mutex<Option<Closed>>,
     writer: Mutex<Timed>,
     next_id: AtomicU64,
     /// The ids of resizes sent and not yet answered, oldest first.
@@ -654,10 +647,10 @@ impl StreamHandle {
         };
         let wire = encode_request("resize", &request)?;
         let mut writer = lock(&side.writer);
-        if let Some(closed) = side.closed.get() {
+        if let Some(closed) = side.closed() {
             return Err(PanesError::Unreachable(match closed {
                 Closed::Ended => format!("the subscription {} has ended", side.lease),
-                Closed::Broken(why) => why.clone(),
+                Closed::Broken(why) => why,
             }));
         }
         // The id is pending before its bytes leave, so a fast answer finds it.
@@ -682,7 +675,7 @@ impl StreamHandle {
 }
 
 /// Why this side closed a subscription's connection.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Closed {
     /// [`StreamHandle::end`], a drop, or a stream that ended on its own.
     Ended,
@@ -707,19 +700,45 @@ impl StreamSide {
         }
     }
 
-    /// Records why the stream closed (the first reason stands), and shuts
-    /// the socket. An end shuts both ways, so a waiting read ends now. A
-    /// break shuts only the write side: on some systems a read shutdown
-    /// drops what is buffered, and an exit or a lag buffered there must
-    /// still come. [`Subscription::recv`] then reads for at most
-    /// [`BROKEN_GRACE`], and [`StreamHandle::end`] still shuts both ways.
+    /// Why this side closed the stream, if it did.
+    fn closed(&self) -> Option<Closed> {
+        lock(&self.closed).clone()
+    }
+
+    /// Records why the stream closed, and shuts the socket. An end wins
+    /// over a break, and shuts both ways at once, so a waiting read ends
+    /// now. A break shuts the write side now and the read side after
+    /// [`BROKEN_GRACE`]: on some systems a read shutdown drops what is
+    /// buffered, and an exit or a lag buffered there must still come.
     fn close(&self, why: Closed) {
-        let how = match why {
-            Closed::Ended => Shutdown::Both,
-            Closed::Broken(_) => Shutdown::Write,
-        };
-        let _ = self.closed.set(why);
-        let _ = self.socket.shutdown(how);
+        let mut closed = lock(&self.closed);
+        match why {
+            Closed::Ended => {
+                *closed = Some(Closed::Ended);
+                let _ = self.socket.shutdown(Shutdown::Both);
+            }
+            Closed::Broken(_) if closed.is_some() => {}
+            Closed::Broken(_) => {
+                *closed = Some(why);
+                let _ = self.socket.shutdown(Shutdown::Write);
+                if self.shut_reads_later().is_err() {
+                    let _ = self.socket.shutdown(Shutdown::Both);
+                }
+            }
+        }
+    }
+
+    /// Shuts the socket's read side after [`BROKEN_GRACE`], on a thread of
+    /// its own, so a read that waits now ends too.
+    fn shut_reads_later(&self) -> io::Result<()> {
+        let socket = self.socket.try_clone()?;
+        std::thread::Builder::new()
+            .name("tiller-panes-shut".into())
+            .spawn(move || {
+                std::thread::sleep(BROKEN_GRACE);
+                let _ = socket.shutdown(Shutdown::Both);
+            })?;
+        Ok(())
     }
 }
 
@@ -763,20 +782,14 @@ impl Subscription {
         // read error or close the shutdown causes, are not news. After a
         // broken resize, what is buffered still comes (an exit, a lag), and
         // the read that fails then says why.
-        let result = match self.handle.0.closed.get() {
+        let result = match self.handle.0.closed() {
             Some(Closed::Ended) => Ok(None),
-            Some(Closed::Broken(_)) => {
-                self.reader
-                    .get_mut()
-                    .limit_reads(Instant::now() + BROKEN_GRACE);
-                self.read_update()
-            }
-            None => self.read_update(),
+            _ => self.read_update(),
         };
-        let result = match (result, self.handle.0.closed.get()) {
+        let result = match (result, self.handle.0.closed()) {
             (_, Some(Closed::Ended)) => Ok(None),
             (Err(PanesError::Unreachable(_) | PanesError::Io(_)), Some(Closed::Broken(why))) => {
-                Err(PanesError::Unreachable(why.clone()))
+                Err(PanesError::Unreachable(why))
             }
             (result, _) => result,
         };
@@ -914,11 +927,32 @@ impl Subscription {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_broken_stream_ends_soon_while_the_holder_keeps_sending() {
-        let (ours, theirs) = UnixStream::pair().unwrap();
-        let holder = std::thread::spawn(move || {
-            let mut theirs = theirs;
+    /// A live subscription to stream 1 on `ours`.
+    fn live(ours: UnixStream) -> Subscription {
+        let socket = ours.try_clone().unwrap();
+        let writer = Mutex::new(Timed::new(ours.try_clone().unwrap()));
+        Subscription {
+            stream: 1,
+            cols: 80,
+            rows: 24,
+            reader: BufReader::new(Timed::new(ours)),
+            handle: StreamHandle(Arc::new(StreamSide {
+                pane: "p1".into(),
+                lease: "stream-1".into(),
+                socket,
+                closed: Mutex::new(None),
+                writer,
+                next_id: AtomicU64::new(1),
+                pending: Mutex::new(VecDeque::new()),
+            })),
+            state: StreamState::Live,
+            exited: false,
+        }
+    }
+
+    /// A holder on `theirs` that sends output to stream 1 until it cannot.
+    fn chatty(mut theirs: UnixStream) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
             let mut wire = Vec::new();
             Frame::Output {
                 stream: 1,
@@ -929,26 +963,55 @@ mod tests {
             while theirs.write_all(&wire).is_ok() {
                 std::thread::sleep(Duration::from_millis(20));
             }
+        })
+    }
+
+    #[test]
+    fn an_end_after_a_break_is_still_the_end() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let holder = chatty(theirs);
+        let mut subscription = live(ours);
+        assert!(matches!(subscription.recv(), Ok(Some(Update::Output(_)))));
+        let handle = subscription.handle();
+        handle
+            .0
+            .close(Closed::Broken("a resize failed: test".into()));
+        handle.end();
+        assert_eq!(subscription.recv().unwrap(), None);
+        let err = handle.resize(100, 30).unwrap_err();
+        assert!(err.to_string().contains("has ended"), "{err}");
+        drop(subscription);
+        holder.join().unwrap();
+    }
+
+    #[test]
+    fn a_read_that_waits_on_a_silent_holder_ends_soon_after_a_break() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let mut subscription = live(ours);
+        let handle = subscription.handle();
+        let (done, finished) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let _ = done.send(subscription.recv());
         });
-        let socket = ours.try_clone().unwrap();
-        let writer = Mutex::new(Timed::new(ours.try_clone().unwrap()));
-        let mut subscription = Subscription {
-            stream: 1,
-            cols: 80,
-            rows: 24,
-            reader: BufReader::new(Timed::new(ours)),
-            handle: StreamHandle(Arc::new(StreamSide {
-                pane: "p1".into(),
-                lease: "stream-1".into(),
-                socket,
-                closed: OnceLock::new(),
-                writer,
-                next_id: AtomicU64::new(1),
-                pending: Mutex::new(VecDeque::new()),
-            })),
-            state: StreamState::Live,
-            exited: false,
+        // Let the read start waiting, then break the stream.
+        std::thread::sleep(Duration::from_millis(100));
+        handle
+            .0
+            .close(Closed::Broken("a resize failed: test".into()));
+        let got = finished.recv_timeout(BROKEN_GRACE * 3).unwrap();
+        let Err(PanesError::Unreachable(why)) = got else {
+            panic!("expected the break's reason, got {got:?}");
         };
+        assert_eq!(why, "a resize failed: test");
+        reader.join().unwrap();
+        drop(theirs);
+    }
+
+    #[test]
+    fn a_broken_stream_ends_soon_while_the_holder_keeps_sending() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let holder = chatty(theirs);
+        let mut subscription = live(ours);
         assert!(matches!(subscription.recv(), Ok(Some(Update::Output(_)))));
         let started = Instant::now();
         subscription

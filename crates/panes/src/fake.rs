@@ -1,6 +1,6 @@
 //! An in-memory holder for tests (feature `testing`): [`FakePanes`] keeps
 //! panes the way the holder does (one running pane per key, ids never
-//! reused, exited panes kept) and logs every call.
+//! reused, exited panes kept, at most [`PANE_LIMIT`]) and logs every call.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -10,6 +10,9 @@ use jiff::Timestamp;
 use crate::error::{PanesError, Result};
 use crate::message::{DEFAULT_SIZE, ErrorCode, Exit, Listing, Pane, PaneId, PaneState, Spawn};
 use crate::panes::Panes;
+
+/// The most panes, running and exited, one holder keeps (spec 2.8).
+pub const PANE_LIMIT: usize = 128;
 
 #[derive(Debug)]
 struct World {
@@ -120,6 +123,13 @@ impl Panes for FakePanes {
         {
             return Ok(running.clone());
         }
+        if world.panes.len() >= PANE_LIMIT {
+            return Err(PanesError::Refused {
+                request: "spawn",
+                code: ErrorCode::Busy,
+                message: format!("the holder keeps at most {PANE_LIMIT} panes"),
+            });
+        }
         let size = req.size.unwrap_or(DEFAULT_SIZE);
         let pane = Pane {
             pane: PaneId::generate(),
@@ -201,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn a_relative_argv0_is_refused_and_a_down_holder_is_unreachable() {
+    fn a_relative_argv0_a_full_holder_and_a_down_holder_are_refused() {
         let fake = FakePanes::new();
         let mut req = spawn("s1");
         req.argv = vec!["sh".into()];
@@ -216,5 +226,18 @@ mod tests {
         assert!(matches!(fake.list(), Err(PanesError::Unreachable(_))));
         fake.set_unreachable(false);
         assert!(fake.list().unwrap().panes.is_empty());
+        for n in 0..PANE_LIMIT {
+            fake.spawn(&spawn(&format!("k{n}"))).unwrap();
+        }
+        assert!(matches!(
+            fake.spawn(&spawn("one-more")),
+            Err(PanesError::Refused {
+                code: ErrorCode::Busy,
+                ..
+            })
+        ));
+        // A running key still returns its pane at the limit.
+        assert!(fake.spawn(&spawn("k0")).is_ok());
+        assert_eq!(fake.list().unwrap().panes.len(), PANE_LIMIT);
     }
 }
