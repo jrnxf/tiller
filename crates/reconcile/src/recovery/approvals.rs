@@ -971,25 +971,43 @@ impl Reconciler {
                 "card_id = ?1 AND ended_at IS NULL ORDER BY started_at",
                 &[&card.id],
             )?;
+            let end = EndRun {
+                outcome: if landed {
+                    RunOutcome::Landed
+                } else {
+                    RunOutcome::Abandoned
+                },
+                note: Some(format!(
+                    "the owner answered \"{answer}\" to the outside-merge question"
+                )),
+            };
+            let reason = format!("the owner answered \"{answer}\"");
+            let evidence = format!("attention {}", item.id);
+            // Every end and the close are rehearsed first, so a refusal
+            // never leaves some runs ended on a card that stays open.
+            let ends: Vec<(String, EndRun)> = runs
+                .iter()
+                .map(|run| (run.id.clone(), end.clone()))
+                .collect();
+            if let Err(error) = self.store.card_close_rehearse(
+                &self.ctx(now),
+                &card.id,
+                outcome,
+                Some(&reason),
+                Some(&evidence),
+                &ends,
+            ) {
+                report.error(
+                    &format!("carry out the R07 answer on {}", card.display_id),
+                    &error,
+                );
+                continue;
+            }
             // A refused end is this card's error, not the pass's: the other
             // cards' answers are still carried out.
             let mut refused = false;
             for run in runs {
-                let run_outcome = if landed {
-                    RunOutcome::Landed
-                } else {
-                    RunOutcome::Abandoned
-                };
-                if let Err(error) = self.store.run_end(
-                    &self.ctx(now),
-                    &run.id,
-                    EndRun {
-                        outcome: run_outcome,
-                        note: Some(format!(
-                            "the owner answered \"{answer}\" to the outside-merge question"
-                        )),
-                    },
-                ) {
+                if let Err(error) = self.store.run_end(&self.ctx(now), &run.id, end.clone()) {
                     report.error(&format!("end run {} on the R07 answer", run.id), &error);
                     refused = true;
                     break;
@@ -1003,8 +1021,8 @@ impl Reconciler {
                 &self.ctx(now),
                 &card.id,
                 outcome,
-                Some(&format!("the owner answered \"{answer}\"")),
-                Some(&format!("attention {}", item.id)),
+                Some(&reason),
+                Some(&evidence),
             );
             match closed {
                 Ok(_) => report.repair(format!(

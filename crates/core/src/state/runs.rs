@@ -542,6 +542,59 @@ fn worktree_returned(conn: &Connection, run: &Run, path: &str) -> Result<bool> {
     )?)
 }
 
+/// `run.end`'s transaction body, shared with a card close's rehearsal.
+pub(crate) fn run_end_in(tx: &mut Tx<'_>, run: &str, end: EndRun) -> Result<Run> {
+    let run = load_run(tx, run)?;
+    if run.outcome == Some(end.outcome) {
+        return Ok(run);
+    }
+    require_active(&run)?;
+    let card: Card = get(tx.conn(), "card", &run.card_id)?;
+    match end.outcome {
+        RunOutcome::Landed if !landed_evidence(tx.conn(), &card)? => {
+            return Err(Error::refused(
+                "run",
+                &run.id,
+                "landed comes from a finished merge or an outside merge the owner confirmed",
+            ));
+        }
+        RunOutcome::Reported
+            if card.kind == CardKind::Ship
+                && run.role == RunRole::Builder
+                && published_head(tx.conn(), &run)?.is_none() =>
+        {
+            return Err(Error::refused(
+                "run",
+                &run.id,
+                "a builder on a ship card ends reported only once its committed head is on an open PR; otherwise landed with the merge, or failed or abandoned",
+            ));
+        }
+        _ => {}
+    }
+    if let (Actor::Session(_), Some(path)) = (tx.actor(), &run.worktree_path) {
+        let known: Option<Option<i64>> = tx
+            .conn()
+            .query_row(
+                "SELECT unlanded_commits FROM worktrees WHERE host_id = ?1 AND path = ?2",
+                params![run.host_id, path],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
+        if !matches!(known, Some(Some(_))) {
+            return Err(Error::refused(
+                "run",
+                &run.id,
+                format!("unlanded commits in {path} are unknown; refresh the worktree first"),
+            ));
+        }
+    }
+    end_run(tx, &run, end)
+}
+
 /// `run.relaunch`'s transaction body, shared with its rehearsal.
 fn relaunch_in(tx: &mut Tx<'_>, run: &str, relaunch: &Relaunch) -> Result<Relaunched> {
     let run = load_run(tx, run)?;
@@ -1459,57 +1512,7 @@ impl Store {
     /// session ending its own run needs a known `unlanded_commits` for its
     /// worktree (P51).
     pub fn run_end(&mut self, ctx: &Ctx, run: &str, end: EndRun) -> Result<Applied<Run>> {
-        self.write(ctx, "run.end", None, |tx| {
-            let run = load_run(tx, run)?;
-            if run.outcome == Some(end.outcome) {
-                return Ok(run);
-            }
-            require_active(&run)?;
-            let card: Card = get(tx.conn(), "card", &run.card_id)?;
-            match end.outcome {
-                RunOutcome::Landed if !landed_evidence(tx.conn(), &card)? => {
-                    return Err(Error::refused(
-                        "run",
-                        &run.id,
-                        "landed comes from a finished merge or an outside merge the owner confirmed",
-                    ));
-                }
-                RunOutcome::Reported
-                    if card.kind == CardKind::Ship
-                        && run.role == RunRole::Builder
-                        && published_head(tx.conn(), &run)?.is_none() =>
-                {
-                    return Err(Error::refused(
-                        "run",
-                        &run.id,
-                        "a builder on a ship card ends reported only once its committed head is on an open PR; otherwise landed with the merge, or failed or abandoned",
-                    ));
-                }
-                _ => {}
-            }
-            if let (Actor::Session(_), Some(path)) = (tx.actor(), &run.worktree_path) {
-                let known: Option<Option<i64>> = tx
-                    .conn()
-                    .query_row(
-                        "SELECT unlanded_commits FROM worktrees WHERE host_id = ?1 AND path = ?2",
-                        params![run.host_id, path],
-                        |row| row.get(0),
-                    )
-                    .map(Some)
-                    .or_else(|error| match error {
-                        rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                        other => Err(other),
-                    })?;
-                if !matches!(known, Some(Some(_))) {
-                    return Err(Error::refused(
-                        "run",
-                        &run.id,
-                        format!("unlanded commits in {path} are unknown; refresh the worktree first"),
-                    ));
-                }
-            }
-            end_run(tx, &run, end)
-        })
+        self.write(ctx, "run.end", None, |tx| run_end_in(tx, run, end))
     }
 
     /// `session.start` for an orchestrator (`tiller orchestrator start`).

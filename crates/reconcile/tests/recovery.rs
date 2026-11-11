@@ -848,6 +848,45 @@ fn superseded_answer_closes_card_superseded() {
     assert!(w.breaches("G10").is_empty(), "{:?}", w.breaches("G10"));
 }
 
+/// R07: an answer whose close core refuses ends no run, so the card is
+/// never left open with half the answer carried out.
+#[test]
+fn a_refused_r07_close_ends_no_run() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    w.scanner.list(Some(Vec::new()));
+    w.link_pr(&worker, 9, "a1a1a1a1");
+    let run = w.run_of(&worker);
+    let path = run.worktree_path.clone().unwrap();
+    w.scanner
+        .worktree(&path, "fm/work", "a1a1a1a1", false, Some(1));
+    let t0 = now();
+    w.forge.pr(REPO, 9, merged_pr("a1a1a1a1", "e1e1e1e1", t0));
+    w.pass(t0);
+    let items = w.open_items(&run.card_id);
+    assert_eq!(items.len(), 1, "{items:?}");
+    w.store_mut()
+        .attention_answer(&owner(), None, &items[0].id, SUPERSEDED, AnsweredVia::Board)
+        .unwrap();
+    w.store()
+        .conn()
+        .execute_batch(
+            "CREATE TRIGGER refuse_close BEFORE UPDATE OF state ON cards
+             WHEN NEW.state = 'closed'
+             BEGIN SELECT RAISE(ABORT, 'close refused'); END",
+        )
+        .unwrap();
+
+    let report = w.pass(t0.plus_minutes(1));
+    assert!(!report.errors.is_empty(), "{report:?}");
+    assert_eq!(w.card(&run.card_id).state, CardState::Open);
+    assert!(
+        w.run(&run.id).ended_at.is_none(),
+        "no run ends ahead of a refused close"
+    );
+}
+
 /// R07, G10: the same merge answered "not me" still lands the card, and
 /// fires the unauthorized-action trigger.
 #[test]
