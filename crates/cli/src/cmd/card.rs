@@ -224,9 +224,9 @@ pub fn run(app: &App, cmd: Cmd) -> Done {
 }
 
 fn create(app: &App, args: Create) -> Done {
-    let normalized =
-        json!({"project": args.project, "ask": args.ask, "card": args.fields.normalized()});
-    let new = args.fields.into_new(&args.project)?;
+    let fields = args.fields.read_body()?;
+    let normalized = json!({"project": args.project, "ask": args.ask, "card": fields.normalized()});
+    let new = fields.into_new(&args.project)?;
     let mut store = app.write()?;
     let keyed = app.key(&store, "card.create", &normalized, &args.key.key)?;
     let applied = store.card_create(&app.ctx(), Some(&keyed.key), new, args.ask.as_deref())?;

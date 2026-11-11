@@ -173,9 +173,9 @@ fn link(app: &App, args: Link) -> Done {
             "ask link takes new or followup:<card>; chat and cancelled create no card",
         ));
     }
-    let normalized =
-        json!({"ask": args.ask, "target": args.target, "card": args.card.normalized()});
-    let resolution = resolution(target, args.card, None)?;
+    let card = args.card.read_body()?;
+    let normalized = json!({"ask": args.ask, "target": args.target, "card": card.normalized()});
+    let resolution = resolution(target, card, None)?;
     let mut store = app.write()?;
     let keyed = app.key(&store, "ask.link", &normalized, &args.key.key)?;
     let applied = store.ask_link(&app.ctx(), Some(&keyed.key), &args.ask, resolution)?;

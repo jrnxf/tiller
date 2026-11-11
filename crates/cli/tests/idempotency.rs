@@ -796,3 +796,81 @@ fn a_second_owner_run_of_a_command_that_creates_makes_a_second_record() {
         assert!(count(table) > once, "{args:?} did not make a second record");
     }
 }
+
+/// A body read from standard input is part of the arguments a key is bound
+/// to: a second create under the same key with another body on stdin is
+/// refused, and a true retry with the same body replays.
+#[test]
+fn a_reused_key_with_another_body_on_stdin_is_refused() {
+    let world = World::initialized();
+    for flags in [&["--body-file", "-"][..], &["--body", "-"][..]] {
+        let key = format!("audit-stdin{}", flags[0]);
+        let mut args = vec![
+            "card",
+            "create",
+            "alpha",
+            "--kind",
+            "ship",
+            "--title",
+            "Stdin body",
+        ];
+        args.extend_from_slice(flags);
+        args.extend_from_slice(&["--key", &key]);
+        let first = world.run_with_stdin(&args, "the first body\n");
+        assert!(first.ok(), "{}", first.json);
+        let card = first.data()["id"].as_str().unwrap().to_owned();
+        assert_eq!(first.data()["body"], "the first body", "{}", first.json);
+
+        let before = (rows(&world), world.store().last_seq().unwrap());
+        let other = world.run_with_stdin(&args, "another body\n");
+        assert_eq!(
+            (other.code, other.error_code()),
+            (5, "refused"),
+            "{flags:?}: {}",
+            other.json
+        );
+        assert_eq!((rows(&world), world.store().last_seq().unwrap()), before);
+
+        let retry = world.run_with_stdin(&args, "the first body\n");
+        assert!(retry.replayed(), "{flags:?}: {}", retry.json);
+        assert_eq!(retry.data()["id"], card.as_str());
+    }
+}
+
+/// The key hashes the body that was read, once: `--body-file <f>` and the
+/// same text as `--body` are one request.
+#[test]
+fn a_body_file_and_the_same_body_are_one_request() {
+    let world = World::initialized();
+    let file = world.dir.path().join("body.md");
+    std::fs::write(&file, "from a file\n").unwrap();
+    let path = file.to_str().unwrap();
+    let first = world.must(&[
+        "card",
+        "create",
+        "alpha",
+        "--kind",
+        "ship",
+        "--title",
+        "File body",
+        "--body-file",
+        path,
+        "--key",
+        "audit-file",
+    ]);
+    let retry = world.must(&[
+        "card",
+        "create",
+        "alpha",
+        "--kind",
+        "ship",
+        "--title",
+        "File body",
+        "--body",
+        "from a file",
+        "--key",
+        "audit-file",
+    ]);
+    assert!(retry.replayed(), "{}", retry.json);
+    assert_eq!(retry.data()["id"], first.data()["id"]);
+}
