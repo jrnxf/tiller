@@ -1,6 +1,7 @@
 //! An in-memory holder for tests (feature `testing`): [`FakePanes`] keeps
 //! panes the way the holder does (one running pane per key, ids never
-//! reused, exited panes kept, at most [`PANE_LIMIT`]) and logs every call.
+//! reused, at most [`EXITED_LIMIT`] exited panes kept, at most
+//! [`PANE_LIMIT`] in all) and logs every call.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -13,6 +14,10 @@ use crate::panes::Panes;
 
 /// The most panes, running and exited, one holder keeps (spec 2.8).
 pub const PANE_LIMIT: usize = 128;
+
+/// The most exited panes one holder keeps; the oldest exit goes first
+/// (spec 2.8). The fake does not drop exits by age.
+pub const EXITED_LIMIT: usize = 64;
 
 #[derive(Debug)]
 struct World {
@@ -98,6 +103,19 @@ impl FakePanes {
             signal,
             at: Timestamp::now(),
         });
+        let exited = |p: &Pane| p.state == PaneState::Exited;
+        if world.panes.iter().filter(|p| exited(p)).count() > EXITED_LIMIT {
+            let oldest = world
+                .panes
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| exited(p))
+                .min_by_key(|(_, p)| p.exit.map(|exit| exit.at))
+                .map(|(at, _)| at);
+            if let Some(at) = oldest {
+                world.panes.remove(at);
+            }
+        }
         true
     }
 }
@@ -239,5 +257,20 @@ mod tests {
         // A running key still returns its pane at the limit.
         assert!(fake.spawn(&spawn("k0")).is_ok());
         assert_eq!(fake.list().unwrap().panes.len(), PANE_LIMIT);
+    }
+
+    #[test]
+    fn past_the_exited_limit_the_oldest_exit_is_dropped() {
+        let fake = FakePanes::new();
+        let panes: Vec<Pane> = (0..=EXITED_LIMIT)
+            .map(|n| fake.spawn(&spawn(&format!("k{n}"))).unwrap())
+            .collect();
+        for pane in &panes {
+            assert!(fake.exit(&pane.pane, Some(0), None));
+        }
+        let kept = fake.list().unwrap().panes;
+        assert_eq!(kept.len(), EXITED_LIMIT);
+        assert!(kept.iter().all(|p| p.pane != panes[0].pane));
+        assert!(fake.spawn(&spawn("again")).is_ok());
     }
 }

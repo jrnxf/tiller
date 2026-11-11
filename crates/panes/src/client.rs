@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::error::{PanesError, Result};
-use crate::frame::{Frame, encode_input, read_frame};
+use crate::frame::{Frame, FrameError, encode_input, read_frame};
 use crate::handshake::{Hello, ProtoRange, SUPPORTED, Welcome};
 use crate::message::{
     ErrorCode, Exit, HolderMessage, Listing, Pane, PaneId, Request, Spawn, SyncMode,
@@ -618,7 +618,7 @@ struct StreamSide {
     closed: Mutex<Option<Closed>>,
     writer: Mutex<Timed>,
     next_id: AtomicU64,
-    /// The ids of resizes sent and not yet answered, oldest first.
+    /// The ids of resizes sent and not yet answered.
     pending: Mutex<VecDeque<u64>>,
 }
 
@@ -648,10 +648,7 @@ impl StreamHandle {
         let wire = encode_request("resize", &request)?;
         let mut writer = lock(&side.writer);
         if let Some(closed) = side.closed() {
-            return Err(PanesError::Unreachable(match closed {
-                Closed::Ended => format!("the subscription {} has ended", side.lease),
-                Closed::Broken(why) => why,
-            }));
+            return Err(side.closed_error(closed));
         }
         // The id is pending before its bytes leave, so a fast answer finds it.
         side.pending().push_back(id);
@@ -662,6 +659,10 @@ impl StreamHandle {
             // this socket. Shut it: the stream ends, and later resizes fail
             // at once.
             side.close(Closed::Broken(format!("a resize failed: {err}")));
+            // An end on another thread may be what cut the write.
+            if let Some(closed @ Closed::Ended) = side.closed() {
+                return Err(side.closed_error(closed));
+            }
         }
         sent
     }
@@ -703,6 +704,14 @@ impl StreamSide {
     /// Why this side closed the stream, if it did.
     fn closed(&self) -> Option<Closed> {
         lock(&self.closed).clone()
+    }
+
+    /// The error for a resize on a stream this side closed.
+    fn closed_error(&self, closed: Closed) -> PanesError {
+        PanesError::Unreachable(match closed {
+            Closed::Ended => format!("the subscription {} has ended", self.lease),
+            Closed::Broken(why) => why,
+        })
     }
 
     /// Records why the stream closed, and shuts the socket. An end wins
@@ -814,12 +823,16 @@ impl Subscription {
 
     fn read_update(&mut self) -> Result<Option<Update>> {
         loop {
-            let read = read_frame(&mut self.reader).map_err(PanesError::from_frame);
             // After the exit, a holder that closes with a resize it never
-            // read resets the connection: that is the end too.
-            let read = match read {
-                Err(PanesError::Unreachable(_)) if self.exited => Ok(None),
-                read => read,
+            // read resets the connection: that is the end too. A frame cut
+            // short is still an error.
+            let read = match read_frame(&mut self.reader) {
+                Err(FrameError::Io(err))
+                    if self.exited && err.kind() == io::ErrorKind::ConnectionReset =>
+                {
+                    Ok(None)
+                }
+                read => read.map_err(PanesError::from_frame),
             };
             let Some(frame) = read? else {
                 if self.exited {
@@ -964,6 +977,24 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(20));
             }
         })
+    }
+
+    #[test]
+    fn a_frame_cut_short_after_the_exit_is_still_an_error() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        let mut subscription = live(ours);
+        subscription.exited = true;
+        let mut wire = Vec::new();
+        Frame::Output {
+            stream: 1,
+            bytes: b"the last bytes".to_vec(),
+        }
+        .encode(&mut wire)
+        .unwrap();
+        theirs.write_all(&wire[..wire.len() - 3]).unwrap();
+        drop(theirs);
+        let got = subscription.recv();
+        assert!(matches!(got, Err(PanesError::Unreachable(_))), "{got:?}");
     }
 
     #[test]
