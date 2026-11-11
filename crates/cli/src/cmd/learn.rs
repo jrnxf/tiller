@@ -492,8 +492,9 @@ enum Stopped {
 }
 
 /// Runs the curator in a process group of its own and stops the whole
-/// group at `timeout`, on an interrupt, or when waiting for it fails, so
-/// nothing it started outlives the run (`tiller_herdr::process`).
+/// group when the curator exits, at `timeout`, on an interrupt, or when
+/// waiting for it fails, so nothing it started outlives the run
+/// (`tiller_herdr::process::wait_all`).
 fn run_with_timeout(
     argv: &[String],
     env: &[(String, String)],
@@ -536,7 +537,7 @@ fn run_with_timeout(
         let _ = sender.send(text);
     });
     let deadline = Instant::now() + timeout;
-    let (exit, stopped) = match process::wait(
+    let (exit, stopped) = match process::wait_all(
         &mut child,
         deadline,
         Duration::from_millis(200),
@@ -547,9 +548,9 @@ fn run_with_timeout(
         Ended::Interrupted => (None, Some(Stopped::Interrupted)),
         Ended::Failed(error) => (None, Some(Stopped::Lost(error.to_string()))),
     };
-    // A process the curator left behind can hold stdout open past its
-    // exit, so the read shares the deadline; after a stop it is not waited
-    // for at all.
+    // A process that left the curator's group can still hold stdout open
+    // past its exit, so the read shares the deadline; after a stop it is
+    // not waited for at all.
     let stdout = match stopped {
         None => reader
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))

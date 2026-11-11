@@ -5,8 +5,9 @@
 //! to be stopped (its deadline passed, the owner interrupted the caller, or
 //! waiting for it failed), [`stop`] kills the whole group and reaps the
 //! child, so a grandchild such as a shell's `sleep` or a server the child
-//! started does not live on. A child that exits by itself is only reaped:
-//! what it left behind may be meant to outlive it.
+//! started does not live on. A child that exits by itself is only reaped by
+//! [`wait`]: what it left behind may be meant to outlive it. [`wait_all`]
+//! stops the group then too, for a child nothing of which may outlive it.
 
 use std::io;
 use std::process::{Child, Command, ExitStatus};
@@ -46,15 +47,43 @@ pub enum Ended {
 
 /// Waits for `child`, checking every `poll`, and stops its group (see
 /// [`stop`]) when `deadline` passes, `interrupt` is caught, or the wait
-/// fails. `child` must lead its own group ([`own_group`]).
+/// fails. A child that exits by itself is only reaped. `child` must lead
+/// its own group ([`own_group`]).
 pub fn wait(
     child: &mut Child,
     deadline: Instant,
     poll: Duration,
     interrupt: Option<&Interrupt>,
 ) -> Ended {
+    waiting(child, deadline, poll, interrupt, false)
+}
+
+/// [`wait`], except that a child that exits by itself has its group stopped
+/// too, before it is reaped, so nothing it started outlives it: a server or
+/// a `sleep` it left behind, which may also hold its stdout open.
+pub fn wait_all(
+    child: &mut Child,
+    deadline: Instant,
+    poll: Duration,
+    interrupt: Option<&Interrupt>,
+) -> Ended {
+    waiting(child, deadline, poll, interrupt, true)
+}
+
+fn waiting(
+    child: &mut Child,
+    deadline: Instant,
+    poll: Duration,
+    interrupt: Option<&Interrupt>,
+    all: bool,
+) -> Ended {
     loop {
-        match child.try_wait() {
+        let ended = if all {
+            try_wait_all(child)
+        } else {
+            child.try_wait()
+        };
+        match ended {
             Ok(Some(status)) => return Ended::Exited(status),
             Ok(None) => {
                 if interrupt.is_some_and(Interrupt::caught) {
@@ -74,6 +103,21 @@ pub fn wait(
             }
         }
     }
+}
+
+/// `child.try_wait()`, except that once `child` has exited its group is
+/// killed before it is reaped. Until it is reaped `child` is a zombie, so
+/// its group id cannot have been reused by then.
+fn try_wait_all(child: &mut Child) -> io::Result<Option<ExitStatus>> {
+    use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, kill_process_group, waitid};
+    let pid = Pid::from_child(child);
+    let options = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
+    if waitid(WaitId::Pid(pid), options)?.is_none() {
+        return Ok(None);
+    }
+    // No group left (nothing the child started lives on) is not an error.
+    let _ = kill_process_group(pid, Signal::KILL);
+    child.wait().map(Some)
 }
 
 /// Catches SIGINT, SIGTERM and SIGHUP while it lives, so the caller can stop
@@ -325,5 +369,26 @@ mod tests {
             stopped,
             "the grandchild {grandchild} outlived the interrupt"
         );
+    }
+
+    #[test]
+    fn wait_all_stops_the_group_of_a_child_that_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("grandchild.pid");
+        let mut child = parent(&file, "exit 3");
+        let grandchild = pid_in(&file);
+        let ended = wait_all(
+            &mut child,
+            Instant::now() + Duration::from_secs(60),
+            Duration::from_millis(10),
+            None,
+        );
+        let stopped = eventually(|| gone(&grandchild));
+        reap(&grandchild);
+        assert!(
+            matches!(&ended, Ended::Exited(status) if status.code() == Some(3)),
+            "{ended:?}"
+        );
+        assert!(stopped, "the grandchild {grandchild} outlived its parent");
     }
 }

@@ -568,6 +568,40 @@ fn an_interrupted_run_stops_the_curator_and_what_it_started() {
 }
 
 #[test]
+fn a_curator_that_exits_takes_what_it_started_with_it() {
+    // A curator that starts a child of its own, which keeps the curator's
+    // stdout open, finishes its retro and exits.
+    let (world, _fake, retro) = curator_world("");
+    let grandchild_file = world.dir.path().join("grandchild.pid");
+    std::fs::write(
+        world.dir.path().join("fake-claude"),
+        format!(
+            "{finish}sleep 300 &\necho $! > '{file}'\n",
+            finish = finishing_curator(),
+            file = grandchild_file.display(),
+        ),
+    )
+    .unwrap();
+    world.must(&["config", "set", "learning.curator_timeout_minutes", "1"]);
+    let started = std::time::Instant::now();
+    let ran = world.run(&["retro", "run", &retro]);
+    let took = started.elapsed();
+    let grandchild = std::fs::read_to_string(&grandchild_file)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let stopped = !grandchild.is_empty() && wait_for(|| gone(&grandchild));
+    if !grandchild.is_empty() {
+        let _ = Command::new("kill").args(["-KILL", &grandchild]).status();
+    }
+    assert_eq!(ran.data()["retro"]["outcome"], "nothing", "{}", ran.json);
+    assert_eq!(ran.data()["exit"], 0, "{}", ran.json);
+    // The run ends with the curator, not at its one-minute limit.
+    assert!(took < std::time::Duration::from_secs(30), "took {took:?}");
+    assert!(stopped, "the curator's child {grandchild} outlived it");
+}
+
+#[test]
 fn change_sets_eval_runs_and_the_gate() {
     let world = World::initialized();
     proposal(
