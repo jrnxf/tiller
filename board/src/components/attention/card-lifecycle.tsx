@@ -538,7 +538,7 @@ export function EditFields({
 }) {
   const [title, setTitle] = useState(firstTitle);
   const [body, setBody] = useState(firstBody);
-  const titleChanged = title.trim() !== firstTitle;
+  const titleChanged = title.trim() !== firstTitle.trim();
   const bodyChanged = body.trim() !== firstBody.trim();
   const changed = titleChanged || bodyChanged;
   const send = useCallback(

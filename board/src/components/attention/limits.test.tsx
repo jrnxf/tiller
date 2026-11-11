@@ -221,3 +221,18 @@ test("Edit saves a new title on a card whose body was over the limit before the 
   expect(screen.getByText("The body is 100,002 characters. The limit is 100,000.")).toBeTruthy();
   expect(save.disabled).toBe(true);
 });
+
+test("Edit saves a new body on a card whose old title ends in a space and is over the limit", () => {
+  const board = fixtureResource(boardPath(), "default") as BoardResponse;
+  const card = board.rows[0];
+  if (!card) throw new Error("no fixture card");
+  // The field trims what it shows as changed, so the old title is unchanged here.
+  const oldTitle = `${long(LIMITS.cardTitle)} `;
+  render(
+    <EditFields card={card} rev={card.rev} title={oldTitle} body="Old body" onDone={() => {}} />,
+  );
+  const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+  fireEvent.change(screen.getByLabelText("Body"), { target: { value: "New body" } });
+  expect(save.disabled).toBe(false);
+  expect(screen.queryByText(/The title is/)).toBeNull();
+});
