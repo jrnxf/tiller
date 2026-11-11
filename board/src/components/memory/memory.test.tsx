@@ -1413,6 +1413,29 @@ test("a press in the editor while its save is going still lets focus come back",
   expect(document.activeElement).toBe(editButton(lineOf("Stop new dispatch at 3% of the week.")));
 });
 
+test("a key held on after a row's Remove still lets focus come to the next row", async () => {
+  await renderMemory();
+  const fixture = globalThis.fetch;
+  let land: (() => void) | undefined;
+  const held = new Promise<void>((done) => {
+    land = done;
+  });
+  vi.stubGlobal("fetch", async (path: string, init?: RequestInit) => {
+    if (path === "/api/v1/memory/edits") await held;
+    return fixture(path, init);
+  });
+
+  fireEvent.click(within(lineOf(FIRST)).getByRole("button", { name: "Remove this line" }));
+  confirmRemove();
+  await flush();
+  // The Enter that confirmed, held on after the dialog closed.
+  fireEvent.keyDown(document.body, { key: "Enter", repeat: true });
+  land?.();
+  await settle();
+
+  expect(document.activeElement).toBe(editButton(lineOf(SECOND)));
+});
+
 test("a modifier key alone does not stop focus coming back to a saved row", async () => {
   const { queryClient } = await renderMemory();
 
