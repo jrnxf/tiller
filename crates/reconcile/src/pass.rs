@@ -136,8 +136,9 @@ pub struct Reconciler {
     /// Pass keys another actor stored first that this engine has reported,
     /// so each refusal is reported once, not on every pass.
     pub(crate) planted: HashSet<String>,
-    /// Refusals the keyed-write helpers met this pass, for the report.
-    pub(crate) refusals: Vec<String>,
+    /// Refusals the keyed-write helpers met this pass, for the report: the
+    /// key and its line.
+    pub(crate) refusals: Vec<(String, String)>,
 }
 
 impl Reconciler {
@@ -175,8 +176,15 @@ impl Reconciler {
         let mut report = Report::default();
         let result = self.steps(now, &mut report);
         // The keyed-write helpers take no report: their refusals join it
-        // here, on every way out of the pass.
-        for line in std::mem::take(&mut self.refusals) {
+        // here. A pass that fails drops its report, so its refusals are
+        // forgotten and the next pass reports them again.
+        let refusals = std::mem::take(&mut self.refusals);
+        if result.is_err() {
+            for (key, _) in &refusals {
+                self.planted.remove(key);
+            }
+        }
+        for (_, line) in refusals {
             tracing::warn!(%line, "reconcile step failed");
             report.errors.push(line);
         }
@@ -358,6 +366,9 @@ impl Reconciler {
         body: String,
         card_id: Option<String>,
     ) -> Result<bool> {
+        if self.still_planted(key)? {
+            return Ok(false);
+        }
         let Some(orchestrator) = live_orchestrator(self.conn(), project_id)? else {
             return Ok(false);
         };
@@ -384,6 +395,9 @@ impl Reconciler {
         key: &str,
         body: String,
     ) -> Result<bool> {
+        if self.still_planted(key)? {
+            return Ok(false);
+        }
         let applied = self.store.outbox_enqueue(
             &self.ctx(now),
             Some(key),
@@ -408,6 +422,9 @@ impl Reconciler {
         key: &str,
         mut item: NewAttention,
     ) -> Result<bool> {
+        if self.still_planted(key)? {
+            return Ok(false);
+        }
         item.kind = tiller_core::domain::AttentionKind::Recovery;
         if item.card.is_empty() {
             item.card = HOST_HEALTH_CARD.to_owned();
@@ -418,6 +435,14 @@ impl Reconciler {
         }
         let applied = self.store.attention_open(&self.ctx(now), Some(key), item);
         Ok(self.planted(key, applied)?.is_some_and(|a| !a.replayed))
+    }
+
+    /// Whether this engine already met `key` held by another actor, and
+    /// that actor still holds it: the write would be refused again, so the
+    /// helpers skip it and the work before it. A key whose hold has lapsed
+    /// is tried again.
+    pub(crate) fn still_planted(&self, key: &str) -> Result<bool> {
+        Ok(self.planted.contains(key) && self.key_holder(key)?.is_some())
     }
 
     /// A keyed write's result, with the store's refusal of a pass key
@@ -433,7 +458,8 @@ impl Reconciler {
                     return Err(error);
                 }
                 if self.planted.insert(key.to_owned()) {
-                    self.refusals.push(format!("pass key {key}: {error}"));
+                    self.refusals
+                        .push((key.to_owned(), format!("pass key {key}: {error}")));
                 }
                 Ok(None)
             }
@@ -459,9 +485,11 @@ impl Reconciler {
 
     /// When the pass stored the keyed message, if it did. A row another
     /// actor stored under the key is not the pass's message (`protocol.md`
-    /// 6.3). When another actor holds the key the pass's message is refused,
-    /// so the clock starts when that actor stored the key: a planted key can
-    /// bring the next step forward, never hold it back.
+    /// 6.3). When the pass tried the message and the store refused it
+    /// because another actor holds the key ([`Self::planted`]), the clock
+    /// starts when that actor stored the key: a planted key can bring the
+    /// next step forward, never hold it back. A message the pass never
+    /// tried (no live orchestrator) starts no clock.
     pub(crate) fn message_at(&self, key: &str) -> Result<Option<Timestamp>> {
         let actor = Actor::Daemon.to_string();
         let own = self
@@ -474,7 +502,8 @@ impl Reconciler {
             .optional()?;
         match own {
             Some(at) => Ok(Some(at)),
-            None => Ok(self.key_holder(key)?.map(|(_, at)| at)),
+            None if self.planted.contains(key) => Ok(self.key_holder(key)?.map(|(_, at)| at)),
+            None => Ok(None),
         }
     }
 
@@ -541,7 +570,8 @@ impl Reconciler {
         let actor = Actor::Daemon.to_string();
         Ok(self.conn().query_row(
             "SELECT EXISTS (SELECT 1 FROM events
-                             WHERE kind = 'guard.breached' AND entity_id = ?1 AND actor = ?2
+                             WHERE entity = 'guard' AND entity_id = ?1
+                               AND kind = 'guard.breached' AND actor = ?2
                                AND json_extract(payload, '$.pass_key') = ?3)",
             [guard, actor.as_str(), key],
             |row| row.get(0),

@@ -195,30 +195,46 @@ impl Reconciler {
             "pr_id = ?1 AND state = 'uncertain' AND kind = 'merge' ORDER BY id",
             &[&pr.id],
         )?;
+        // Each approval under its own guard: a refused write for one is
+        // reported, and the ones after it are still resolved.
         for approval in uncertain {
-            let merged_at_bound = read.fetch.state == PrState::Merged
-                && read.fetch.head_sha.as_deref() == approval.head_sha.as_deref();
-            let (finish, result) = if merged_at_bound {
-                (
-                    Finish::Succeeded,
-                    json!({"sha": read.fetch.merge_sha.clone().or(approval.head_sha.clone()), "resolved_by": "reconcile"}),
-                )
-            } else {
-                (
-                    Finish::Failed,
-                    json!({"error": format!("the forge shows PR #{} {} at head {}", pr.number, read.fetch.state, read.fetch.head_sha.as_deref().unwrap_or("unknown")), "resolved_by": "reconcile"}),
-                )
-            };
-            let finished =
-                self.store
-                    .approval_finish(&self.ctx(now), &approval.id, finish, result)?;
-            report.repair(format!(
-                "R08 uncertain approval {} resolved from the forge: {}",
-                approval.id, finished.value.approval.state
-            ));
-            if finish == Finish::Failed {
-                self.failed_execution_item(&approval, "the merge did not happen", now, report)?;
+            if let Err(error) = self.resolve_uncertain_merge(&approval, pr, read, now, report) {
+                report.error(&format!("uncertain approval {}", approval.id), &error);
             }
+        }
+        Ok(())
+    }
+
+    fn resolve_uncertain_merge(
+        &mut self,
+        approval: &Approval,
+        pr: &Pr,
+        read: &PrRead,
+        now: Timestamp,
+        report: &mut Report,
+    ) -> Result<()> {
+        let merged_at_bound = read.fetch.state == PrState::Merged
+            && read.fetch.head_sha.as_deref() == approval.head_sha.as_deref();
+        let (finish, result) = if merged_at_bound {
+            (
+                Finish::Succeeded,
+                json!({"sha": read.fetch.merge_sha.clone().or(approval.head_sha.clone()), "resolved_by": "reconcile"}),
+            )
+        } else {
+            (
+                Finish::Failed,
+                json!({"error": format!("the forge shows PR #{} {} at head {}", pr.number, read.fetch.state, read.fetch.head_sha.as_deref().unwrap_or("unknown")), "resolved_by": "reconcile"}),
+            )
+        };
+        let finished = self
+            .store
+            .approval_finish(&self.ctx(now), &approval.id, finish, result)?;
+        report.repair(format!(
+            "R08 uncertain approval {} resolved from the forge: {}",
+            approval.id, finished.value.approval.state
+        ));
+        if finish == Finish::Failed {
+            self.failed_execution_item(approval, "the merge did not happen", now, report)?;
         }
         Ok(())
     }
@@ -235,13 +251,15 @@ impl Reconciler {
             let Some(executed_at) = approval.executed_at else {
                 continue;
             };
-            if executed_at.plus_minutes(self.config.thresholds.uncertain_merge) <= now {
-                self.failed_execution_item(
+            if executed_at.plus_minutes(self.config.thresholds.uncertain_merge) <= now
+                && let Err(error) = self.failed_execution_item(
                     &approval,
                     "the forge has been unreadable since it executed",
                     now,
                     report,
-                )?;
+                )
+            {
+                report.error(&format!("uncertain approval {}", approval.id), &error);
             }
         }
         Ok(())

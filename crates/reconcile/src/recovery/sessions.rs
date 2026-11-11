@@ -191,7 +191,9 @@ impl Reconciler {
         }
         let note_key = format!("reconcile:R12:note:{run_id}:{}:{stamp}", session.id);
         let last_tool = self.last_tool_call(&session.id, now)?;
-        if !self.key_used(&note_key)? {
+        // A key another actor holds is refused again, so the pane is not
+        // read for it either.
+        if !self.key_used(&note_key)? && !self.still_planted(&note_key)? {
             let tail = session
                 .pane_id
                 .as_deref()

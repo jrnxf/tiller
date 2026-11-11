@@ -975,6 +975,41 @@ fn a_planted_missing_note_key_still_asks_the_developer() {
     );
 }
 
+/// A planted note key starts no clock while the pass never tried the note:
+/// with no live orchestrator, nobody was told, so the developer is not
+/// told that the orchestrator has not acted.
+#[test]
+fn a_planted_note_key_with_no_orchestrator_starts_no_clock() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let run = w.run_of(&worker);
+    let path = run.worktree_path.clone().unwrap();
+    w.scanner
+        .worktree(&path, "fm/work", "aaaa1111", false, Some(0));
+    w.pass(now());
+    let orchestrator = w.fleet.orchestrator_session.clone();
+    w.store()
+        .conn()
+        .execute(
+            "UPDATE sessions SET ended_at = ?1 WHERE id = ?2",
+            rusqlite::params![now(), orchestrator],
+        )
+        .unwrap();
+    let key = format!("reconcile:R15:missing:{}", run.id);
+    plant_key(&w, &key, Some(&format!("session:{worker}")));
+    w.scanner.remove(&path);
+
+    w.pass(now().plus_minutes(6));
+    w.pass(now().plus_minutes(31));
+    let asked: Vec<_> = w
+        .open_items(&run.card_id)
+        .into_iter()
+        .filter(|item| item.question.contains("is missing"))
+        .collect();
+    assert!(asked.is_empty(), "{asked:?}");
+}
+
 /// G10 on a direct-push project: a run's branch head that reached the
 /// default branch with no `land_direct` approval is a breach and a question.
 #[test]

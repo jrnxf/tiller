@@ -525,3 +525,49 @@ fn rematch_needs_a_review_at_the_new_head() {
     let report = rematch(NEW);
     assert!(report.did("rematched to a standing grant"), "{report:?}");
 }
+
+/// R08: a refused write while one `uncertain` merge resolves is reported,
+/// and the next `uncertain` merge on the same PR is still resolved.
+#[test]
+fn a_refused_uncertain_merge_does_not_block_the_next() {
+    let mut w = World::new();
+    let worker = w.worker("w2:p1");
+    w.place();
+    let pr = w.link_pr(&worker, 7, "a1a1a1a1");
+    let mut uncertain = Vec::new();
+    for _ in 0..2 {
+        let approval = w.approve(&worker, &pr, "a1a1a1a1", true);
+        w.store_mut()
+            .approval_execute(&daemon(), &approval, "a1a1a1a1")
+            .unwrap();
+        w.store()
+            .conn()
+            .execute(
+                "UPDATE approvals SET state = 'uncertain' WHERE id = ?1",
+                [&approval],
+            )
+            .unwrap();
+        uncertain.push(approval);
+    }
+    uncertain.sort();
+    let (first, second) = (&uncertain[0], &uncertain[1]);
+    w.store()
+        .conn()
+        .execute_batch(&format!(
+            "CREATE TRIGGER refuse_first BEFORE UPDATE ON approvals \
+             WHEN OLD.id = '{first}' BEGIN SELECT RAISE(ABORT, 'refused for the test'); END;"
+        ))
+        .unwrap();
+    w.forge
+        .pr(REPO, 7, merged_pr("a1a1a1a1", "e1e1e1e1", now()));
+    let report = w.pass(now());
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains(&format!("uncertain approval {first}"))),
+        "{report:?}"
+    );
+    assert_eq!(w.approval(first).state, ApprovalState::Uncertain);
+    assert_eq!(w.approval(second).state, ApprovalState::Succeeded);
+}
