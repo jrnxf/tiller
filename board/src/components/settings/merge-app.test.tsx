@@ -37,7 +37,7 @@ const BAD_KEY: MergeAppHealth = {
   status: "warn",
   app_id: null,
   detail:
-    "the merge App key is not used, so every project runs as detect: /home/user/.tiller/forge-app/private-key.pem: not a PEM key",
+    "the merge App key is not used, so every project runs as detect: /home/user/.tiller/forge-app/private-key.pem: not a PEM RSA private key",
 };
 
 function report(gates: [string, "enforced" | "detect"][]): DoctorReport {
@@ -123,8 +123,8 @@ test("a ready host has both steps done, and an enforced repo is done with no lin
   expect(within(repo).queryByRole("link")).toBeNull();
   expect(screen.getByText("github.com/example/alpha")).toBeTruthy();
   expect(screen.getByText("Enforced")).toBeTruthy();
-  // Nothing is open, so there is nothing to check again.
-  expect(screen.queryByRole("button", { name: "Check again" })).toBeNull();
+  // A ruleset removed on GitHub shows before the hourly check only on a recheck.
+  expect(screen.getByRole("button", { name: "Check again" })).toBeTruthy();
 });
 
 test("a repo on detect links to its GitHub pages, each by its own name", async () => {
@@ -175,12 +175,6 @@ test("one Check again in the section head reads health and every repo again", as
   await waitFor(() => expect(doctorReads()).toBe(before + 1));
 });
 
-test("a host with no key gets Check again even with no gated repo", async () => {
-  serve(report([]));
-  renderSection(MISSING);
-  expect(await screen.findByRole("button", { name: "Check again" })).toBeTruthy();
-});
-
 test("the steps follow the setup doc: the App, each repo, then the key last", async () => {
   serve(report([["beta", "detect"]]));
   renderSection(MISSING);
@@ -217,20 +211,21 @@ test("a host with no key shows commands with placeholders, and links the App pag
   ).toBe("https://github.com/settings/apps/new");
   expect(screen.queryByTestId("merge-commands")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Show commands" }));
+  // The folder is the one the daemon names.
   expect(commandLines()).toEqual([
-    'dir="${TILLER_HOME:-$HOME/.tiller}/forge-app"',
+    "dir='/home/user/.tiller/forge-app'",
     'mkdir -p "$dir"',
     'chmod 700 "$dir"',
     'echo <APP_ID> > "$dir/app-id"',
-    'mv <DOWNLOADED_KEY.pem> "$dir/private-key.pem"',
+    'mv "<DOWNLOADED_KEY.pem>" "$dir/private-key.pem"',
     'chmod 600 "$dir/private-key.pem"',
   ]);
   // No example App ID or download path passes for a real one.
   const commands = commandLines().join("\n");
   expect(commands).not.toContain("1234567");
   expect(commands).not.toContain("/path/to");
-  expect(screen.getByText(/^Replace <APP_ID> and <DOWNLOADED_KEY\.pem> with yours/)).toBeTruthy();
-  expect(screen.getByText(/the default ~\/\.tiller when it does not/)).toBeTruthy();
+  expect(screen.getByText(/^Replace <APP_ID> with your App ID/)).toBeTruthy();
+  expect(screen.queryByText(/TILLER_HOME/)).toBeNull();
   expect(screen.getByText(/Run the commands in your own terminal, not in an agent\./)).toBeTruthy();
 });
 
@@ -249,9 +244,10 @@ test("an exposed key means the App exists: no new App, only chmod 600 and the ro
   expect(key.textContent).toContain("run chmod 600 on it. Run the commands");
   fireEvent.click(screen.getByRole("button", { name: "Show commands" }));
   expect(commandLines()).toEqual([
-    'chmod 600 "${TILLER_HOME:-$HOME/.tiller}/forge-app/private-key.pem"',
+    "dir='/home/user/.tiller/forge-app'",
+    'chmod 600 "$dir/private-key.pem"',
   ]);
-  expect(screen.getByText(/rotate it: generate a new key on the App's page/)).toBeTruthy();
+  expect(screen.getByText(/^If anyone else could have read the key, rotate it/)).toBeTruthy();
   // The key is already there, so the ruleset step does not ask to come first.
   const ruleset = await screen.findByTestId("merge-step-ruleset-beta");
   expect(ruleset.textContent).not.toContain("before the key");
@@ -263,7 +259,7 @@ test("an App ID Tiller cannot read gets only the App ID line", () => {
   expect(screen.getByTestId("merge-step-app").getAttribute("data-tone")).toBe("green");
   fireEvent.click(screen.getByRole("button", { name: "Show commands" }));
   expect(commandLines()).toEqual([
-    'dir="${TILLER_HOME:-$HOME/.tiller}/forge-app"',
+    "dir='/home/user/.tiller/forge-app'",
     'echo <APP_ID> > "$dir/app-id"',
   ]);
 });
@@ -273,10 +269,30 @@ test("a key file Tiller cannot use gets only the key lines", () => {
   renderSection(BAD_KEY);
   fireEvent.click(screen.getByRole("button", { name: "Show commands" }));
   expect(commandLines()).toEqual([
-    'dir="${TILLER_HOME:-$HOME/.tiller}/forge-app"',
-    'mv <DOWNLOADED_KEY.pem> "$dir/private-key.pem"',
+    "dir='/home/user/.tiller/forge-app'",
+    'mv "<DOWNLOADED_KEY.pem>" "$dir/private-key.pem"',
     'chmod 600 "$dir/private-key.pem"',
   ]);
+});
+
+test("a detail that names no folder falls back to $TILLER_HOME, and says so", () => {
+  serve(report([]));
+  renderSection({ status: "missing", app_id: null, detail: "no merge App key" });
+  fireEvent.click(screen.getByRole("button", { name: "Show commands" }));
+  expect(commandLines()[0]).toBe('dir="${TILLER_HOME:-$HOME/.tiller}/forge-app"');
+  expect(screen.getByText(/the default ~\/\.tiller when it does not/)).toBeTruthy();
+});
+
+test("a folder with a quote in it stays one shell word", () => {
+  serve(report([]));
+  renderSection({
+    status: "fail",
+    app_id: null,
+    detail:
+      "the merge App key is not used: /home/user/o'brien/forge-app/private-key.pem is readable",
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Show commands" }));
+  expect(commandLines()[0]).toBe("dir='/home/user/o'\\''brien/forge-app'");
 });
 
 test("repos that cannot be read say so", async () => {

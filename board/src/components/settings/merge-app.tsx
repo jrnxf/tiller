@@ -11,7 +11,7 @@ import {
   queryKeyFor,
 } from "../../lib/queries";
 import { ExternalIcon, RetryIcon } from "../board/icons";
-import { whenText } from "./check-lines";
+import { sentence, whenText } from "./check-lines";
 import type { Tone } from "./check-lines";
 import { CardLine, HostCardSection } from "./host-card";
 import "./settings.css";
@@ -24,44 +24,52 @@ const INSTALLATIONS = "https://github.com/settings/installations";
 const rulesets = (repo: string) => `https://github.com/${repo}/settings/rules`;
 
 // Step 4 of the setup doc, for the owner's own terminal. The daemon reads
-// `<home>/forge-app`, and health names that folder only in its prose, so the
-// commands take the home from `$TILLER_HOME` the way the daemon does. Health
-// never has the App ID while the commands show, so the ID and the download
-// are placeholders, and bash and zsh refuse a line that still holds one.
-const DIR = 'dir="${TILLER_HOME:-$HOME/.tiller}/forge-app"';
+// `<home>/forge-app`. Health has no field for that folder, but its detail
+// names it (or a file in it), so the commands use that folder when the
+// detail has one. Otherwise they take the home from `$TILLER_HOME` with the
+// default `~/.tiller`, as the daemon does. Health never has the App ID while
+// the commands show, so the ID and the download are placeholders: bash and
+// zsh refuse the `<APP_ID>` line, and `mv` finds no file by the placeholder
+// name, so neither line changes anything until the owner replaces it.
 const SET_ID = 'echo <APP_ID> > "$dir/app-id"';
 const SET_KEY = [
-  'mv <DOWNLOADED_KEY.pem> "$dir/private-key.pem"',
+  'mv "<DOWNLOADED_KEY.pem>" "$dir/private-key.pem"',
   'chmod 600 "$dir/private-key.pem"',
 ];
-const SETUP = [DIR, 'mkdir -p "$dir"', 'chmod 700 "$dir"', SET_ID, ...SET_KEY];
-const PRIVATE = ['chmod 600 "${TILLER_HOME:-$HOME/.tiller}/forge-app/private-key.pem"'];
+const SETUP = ['mkdir -p "$dir"', 'chmod 700 "$dir"', SET_ID, ...SET_KEY];
+const PRIVATE = ['chmod 600 "$dir/private-key.pem"'];
 
 const HOME_NOTE =
-  "The commands use $TILLER_HOME when your shell sets it, and the default ~/.tiller when it does not. Check that the folder matches the one named above.";
+  "The commands use $TILLER_HOME when your shell sets it, and the default ~/.tiller when it does not. Check that it is the home the daemon uses.";
 const PLACEHOLDER_NOTE =
-  "Replace <APP_ID> and <DOWNLOADED_KEY.pem> with yours first. The shell refuses those lines until you do.";
+  "Replace <APP_ID> with your App ID and <DOWNLOADED_KEY.pem> with the full path of the key GitHub downloaded. Until you do, those lines fail and change nothing.";
 const ROTATE_NOTE =
-  "If anyone else could have read the key, rotate it: generate a new key on the App's page, replace private-key.pem (mode 600), then delete the old key on GitHub.";
+  "If anyone else could have read the key, rotate it: on GitHub, Settings, Developer settings, GitHub Apps, open the App, generate a new key, replace private-key.pem (mode 600), then delete the old key.";
+
+// The App folder the daemon names in health's detail, or null when the
+// detail names none (a path with a space, or a daemon that words it
+// otherwise).
+function appDir(detail: string): string | null {
+  return /(\/\S*?\/forge-app)(?=$|[/\s.)])/.exec(detail)?.[1] ?? null;
+}
+
+// One shell word, quoted as it is.
+const quoted = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
 
 // What the owner runs for each key status, and what to read first. An
 // exposed key needs only its mode. A `warn` names the file Tiller cannot
 // use: the `app-id` file, or the key file.
 function keyFix(app: MergeAppHealth): { lines: string[]; notes: string[] } {
-  if (app.status === "fail") return { lines: PRIVATE, notes: [HOME_NOTE, ROTATE_NOTE] };
-  const notes = [HOME_NOTE, PLACEHOLDER_NOTE];
+  const dir = appDir(app.detail);
+  const head = dir ? [`dir=${quoted(dir)}`] : ['dir="${TILLER_HOME:-$HOME/.tiller}/forge-app"'];
+  const home = dir ? [] : [HOME_NOTE];
+  if (app.status === "fail") return { lines: [...head, ...PRIVATE], notes: [...home, ROTATE_NOTE] };
+  const notes = [...home, PLACEHOLDER_NOTE];
   if (app.status === "warn" && app.detail.includes("/app-id: ")) {
-    return { lines: [DIR, SET_ID], notes };
+    return { lines: [...head, SET_ID], notes };
   }
-  if (app.status === "warn") return { lines: [DIR, ...SET_KEY], notes };
-  return { lines: SETUP, notes };
-}
-
-// The daemon's reason as a sentence: a capital first and a stop at the end.
-function sentence(text: string): string {
-  const trimmed = text.trim();
-  const capital = trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
-  return /[.!?]$/.test(capital) ? capital : `${capital}.`;
+  if (app.status === "warn") return { lines: [...head, ...SET_KEY], notes };
+  return { lines: [...head, ...SETUP], notes };
 }
 
 const STATUS_TEXT: Record<MergeAppHealth["status"], string> = {
@@ -269,10 +277,6 @@ export function MergeAppSection({ app, host }: { app: MergeAppHealth; host: stri
   const doctor = useQuery(doctorQuery());
   const gates = doctor.data?.merge_gates ?? [];
   const setups = useQueries({ queries: gates.map((gate) => projectSetupQuery(gate.project)) });
-  // Nothing refetches health on its own, so while any step is open one Check
-  // again reads the key and every repo again.
-  const open =
-    app.status !== "ok" || doctor.isError || gates.some((gate) => gate.merge_gate !== "enforced");
   const again = () => {
     void doctor.refetch();
     void client.invalidateQueries({ queryKey: healthQuery().queryKey });
@@ -287,18 +291,18 @@ export function MergeAppSection({ app, host }: { app: MergeAppHealth; host: stri
           <h2>Merge App</h2>
           <p>The App is the only identity that may merge to a gated repo's default branch.</p>
         </div>
-        {open ? (
-          <button
-            type="button"
-            className="btn sm"
-            onClick={again}
-            disabled={doctor.isFetching}
-            aria-busy={doctor.isFetching || undefined}
-          >
-            <RetryIcon />
-            Check again
-          </button>
-        ) : null}
+        {/* Nothing refetches health on its own, so one Check again reads the
+            key and every repo again. */}
+        <button
+          type="button"
+          className="btn sm"
+          onClick={again}
+          disabled={doctor.isFetching}
+          aria-busy={doctor.isFetching || undefined}
+        >
+          <RetryIcon />
+          Check again
+        </button>
       </div>
       <div className="set-card">
         <AppStep app={app} host={host} />

@@ -417,14 +417,14 @@
 }
 
 .set-line-x p {
-  margin: 0 0 4px;
+  margin: 0 0 2px;
   font-size: var(--fs-mini);
   line-height: 1.45;
   color: var(--fg-3);
 }
 
 .set-line-c {
-  margin: 6px 0 0;
+  margin: 4px 0 0;
   padding: 10px 12px;
   border: 1px solid var(--line-1);
   border-radius: var(--r8);
