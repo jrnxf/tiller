@@ -1811,6 +1811,30 @@ impl Store {
         })
     }
 
+    /// `run.unpause`: a manual resume (`tiller agent resume`, the board's
+    /// Resume) clears the run's dated pause, so its alarms count again.
+    /// Natural: a run with no pause writes nothing.
+    pub fn run_unpause(&mut self, ctx: &Ctx, run: &str) -> Result<Applied<Run>> {
+        self.write(ctx, "run.unpause", None, |tx| {
+            let run = load_run(tx, run)?;
+            require_active(&run)?;
+            let Some(until) = run.pause_until else {
+                return Ok(run);
+            };
+            tx.conn().execute(
+                "UPDATE runs SET pause_until = NULL, rev = rev + 1 WHERE id = ?1",
+                params![run.id],
+            )?;
+            tx.event(
+                NewEvent::new("run", &run.id, "run.unpaused")
+                    .rev(run.rev + 1)
+                    .card(&run.card_id)
+                    .payload(json!({"until": until})),
+            )?;
+            get(tx.conn(), "run", &run.id)
+        })
+    }
+
     /// `run.reown` (reconcile): hands the run to the project's live
     /// orchestrator. Natural: a run it already supervises is returned.
     pub fn run_reown(&mut self, ctx: &Ctx, run: &str) -> Result<Applied<Run>> {

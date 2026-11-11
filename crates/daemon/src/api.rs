@@ -949,6 +949,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/agents/{session}/stop", post(stop_agent))
         .route("/api/v1/agents/{session}/pause", post(pause_agent))
         .route("/api/v1/agents/{session}/resume", post(resume_agent))
+        .route("/api/v1/agents/{session}/unpause", post(unpause_agent))
         .route("/api/v1/agents/{session}/relaunch", post(relaunch_agent))
         .route("/api/v1/agents/{session}/prompt", post(prompt_read))
         .route(
@@ -5128,6 +5129,39 @@ async fn pause_agent(
     .await
 }
 
+/// Clears the dated pause on the session's run, as a manual resume does:
+/// the board's Resume on a paused agent (`protocol.md` 7.4).
+#[utoipa::path(post, path = "/api/v1/agents/{session}/unpause", tag = "mutations", request_body = AgentControlBody,
+    params(("session" = String, Path)),
+    responses((status = 200, body = MutationResponse, description = "`data` is the run"),
+              (status = 400, body = ErrorBody), (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
+              (status = 422, body = ErrorBody, description = "`refused`: an orchestrator or an ended run"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+async fn unpause_agent(
+    State(state): State<AppState>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers).await?;
+    let request: AgentControlBody = body(&bytes)?;
+    not_forwarded(
+        &state,
+        request.host.as_deref(),
+        "a resume (a peer's run is resumed on its own host)",
+    )
+    .await?;
+    mutate(
+        &state,
+        key(&request.idempotency_key)?,
+        move |store, ctx, _| {
+            let (_, run) = session_run(store, &session, "resume")?;
+            Done::of(store.run_unpause(ctx, &run.id)?)
+        },
+    )
+    .await
+}
+
 /// `claude --resume` in the run's worktree for a session whose agent is
 /// gone: `tiller agent resume` (`protocol.md` 6.4, 7.4).
 #[utoipa::path(post, path = "/api/v1/agents/{session}/resume", tag = "mutations", request_body = AgentControlBody,
@@ -5523,7 +5557,7 @@ async fn app_shell(
     paths(
         snapshot, board, card, timeline, attention, agents, run, machines, quota, health, doctor, run_poller,
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, add_dep, remove_dep, close,
-        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stop_agent, pause_agent, resume_agent, relaunch_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, host_config_read, set_config,
+        cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stop_agent, pause_agent, unpause_agent, resume_agent, relaunch_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, host_config_read, set_config,
         project_grants, create_grant, revoke_grant,
         away_start, away_edit, away_end, away_brief, host_fields, edit_host, crate::backups::list, crate::backups::take, pick_bug_project, recap, mark_recap_seen, project_replies, mark_reply_read, relabel_intervention, memory::view, memory::revision,
         memory::edit, memory::decide, memory::undo, memory::repropose, memory::eval::eval_plan,
@@ -12307,6 +12341,45 @@ esac"#,
             )
             .unwrap();
         assert_eq!(paused_events, 1, "the retry replays");
+
+        // The board's Resume clears the pause, and the row drops it.
+        let unpause = format!("/api/v1/agents/{worker}/unpause");
+        let orchestrated = pause(
+            json!({"idempotency_key": "k-2"}),
+            format!("/api/v1/agents/{orchestrator}/unpause"),
+        )
+        .await;
+        assert_eq!(
+            orchestrated.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            orchestrated.body
+        );
+        let cleared = pause(json!({"idempotency_key": "k-3"}), unpause.clone()).await;
+        assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.body);
+        let cleared: Value = serde_json::from_str(&cleared.body).unwrap();
+        assert!(cleared["data"]["pause_until"].is_null(), "{cleared}");
+        let natural = pause(json!({"idempotency_key": "k-4"}), unpause).await;
+        assert_eq!(natural.status, StatusCode::OK, "{}", natural.body);
+        let read: Value = serde_json::from_str(&get(&app, "/api/v1/agents").await.body).unwrap();
+        let row = read["orchestrators"][0]["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["session_id"] == worker.as_str())
+            .unwrap()
+            .clone();
+        assert!(row["pause"].is_null(), "{row}");
+        let unpaused_events: i64 = fleet
+            .open()
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind = 'run.unpaused' AND actor = 'board'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unpaused_events, 1, "a run with no pause writes nothing");
     }
 
     /// P11: Restart on the board is `tiller orchestrator start --restart`

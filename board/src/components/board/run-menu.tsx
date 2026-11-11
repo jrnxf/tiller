@@ -282,8 +282,8 @@ function PauseDialog({ target, onClose }: { target: RunTarget; onClose: () => vo
     >
       <h2 id="pause-run-title">Pause {target.name}</h2>
       <p id="pause-run-body">
-        The run&apos;s alarms stay quiet until the time below. The pane is kept, and Resume sends
-        the agent a &quot;go on&quot; line sooner.
+        The run&apos;s alarms stay quiet until the time below. The pane is kept, and Resume clears
+        the pause sooner and sends the agent a &quot;go on&quot; line.
       </p>
       <Field label="Until (Lisbon time)" htmlFor="pause-date">
         <div className="dlg-when">
@@ -598,32 +598,60 @@ export function PausedNote({ pause, receiptKey }: { pause: PauseInfo; receiptKey
         </div>
       ) : (
         <p className="run-note">
-          The pane is kept. Resume sends the agent a &quot;go on&quot; line. Run holds Relaunch and
-          Stop.
+          The pane is kept. Resume clears the pause and sends the agent a &quot;go on&quot; line.
+          Run holds Relaunch and Stop.
         </p>
       )}
     </div>
   );
 }
 
-// The paused agent's primary: one "go on" line through the steer path.
+// After Resume cleared the pause: the run's alarms count again, and where
+// the "go on" line is.
+export function ResumedNote({ receiptKey }: { receiptKey: string }) {
+  return (
+    <div className="run-paused">
+      {/* The accent tone: a cleared pause is settled, not a warning. */}
+      <div className="ch-note closed" role="status">
+        <PlayIcon />
+        <div>
+          <b>Resumed. The pause is cleared.</b>
+          <div className="sub">Its alarms count again.</div>
+        </div>
+      </div>
+      <div className="av-steer-st">
+        <SteerState receiptKey={receiptKey} text={GO_ON} />
+      </div>
+    </div>
+  );
+}
+
+// The paused agent's primary: clear the pause (`run.unpause`), then one
+// "go on" line through the steer path.
 export function useGoOn(sessionId: string, pause: PauseInfo | null | undefined) {
   // The receipt is the session's: the Stage stays mounted when the owner
   // picks another agent, and one agent's go on must not hold the next one's.
   const [receipt, setReceipt] = useState<{ sessionId: string; key: string } | null>(null);
+  const refresh = useRefreshAgents();
   const send = useCallback(
-    (idempotency_key: string) =>
-      sendMutation<SteerQueued>("POST", agentPath(sessionId, "steer"), {
+    async (idempotency_key: string) => {
+      // Each mutation keeps its own key, so a retry replays both.
+      await sendMutation("POST", agentPath(sessionId, "unpause"), {
+        idempotency_key: `${idempotency_key}-unpause`,
+      } satisfies AgentControlBody);
+      return sendMutation<SteerQueued>("POST", agentPath(sessionId, "steer"), {
         idempotency_key,
         text: GO_ON,
-      } satisfies SteerBody),
+      } satisfies SteerBody);
+    },
     [sessionId],
   );
   const onRecorded = useCallback(
     (_: MutationResponse<SteerQueued>, key: string) => {
       setReceipt({ sessionId, key });
+      refresh();
     },
-    [sessionId],
+    [refresh, sessionId],
   );
   const action = useAction({
     binding: `${sessionId}:go-on:${pause?.at ?? ""}`,

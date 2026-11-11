@@ -35,7 +35,15 @@ import { useAmbiguousIds, useStanding, useNamedProjects } from "./peer-state";
 import { StaleChip } from "./stale-sessions";
 import { NO_RUN, NOT_WORKING, SteerBar } from "./steer-bar";
 import { RestartOrchestratorDialog } from "./orchestrator-start";
-import { PausedNote, RunDialogs, RunMenu, runStateOf, useGoOn, useResumeSession } from "./run-menu";
+import {
+  PausedNote,
+  ResumedNote,
+  RunDialogs,
+  RunMenu,
+  runStateOf,
+  useGoOn,
+  useResumeSession,
+} from "./run-menu";
 import type { RunDialog, RunTarget } from "./run-menu";
 import { PlayIcon, ReopenIcon } from "../attention/icons";
 import { ModelChip, ownerSearch } from "./tile";
@@ -725,7 +733,11 @@ function Stage({
         </div>
       </div>
       <PeerNote standing={standing} />
-      {paused ? <PausedNote pause={paused} receiptKey={goOn.sent} /> : null}
+      {paused ? (
+        <PausedNote pause={paused} receiptKey={goOn.sent} />
+      ) : goOn.sent ? (
+        <ResumedNote receiptKey={goOn.sent} />
+      ) : null}
       {local ? (
         <RunDialogs
           target={target}

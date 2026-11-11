@@ -107,6 +107,7 @@ const PHRASE_TEXT: Record<string, string> = {
   "run.clean": "cleaned up a run",
   "run.end": "ended a run",
   "run.pause": "paused a run",
+  "run.unpause": "cleared a run's pause",
   "run.place": "placed a run",
   "run.reconfigure": "reconfigured a run",
   "run.relaunch": "relaunched a run",

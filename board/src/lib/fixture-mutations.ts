@@ -1600,7 +1600,7 @@ function handle(
   if (method === "POST" && control?.[1]) {
     return agentControl(decodeURIComponent(control[1]), control[2] ?? "", body);
   }
-  const lifecycle = /^\/api\/v1\/agents\/([^/]+)\/(stop|pause|resume|relaunch)$/.exec(path);
+  const lifecycle = /^\/api\/v1\/agents\/([^/]+)\/(stop|pause|unpause|resume|relaunch)$/.exec(path);
   if (method === "POST" && lifecycle?.[1]) {
     return agentLifecycle(decodeURIComponent(lifecycle[1]), lifecycle[2] ?? "", body, scenario);
   }
@@ -1666,7 +1666,7 @@ function sessionEvent(session: string, kind: string): FollowUp {
   };
 }
 
-// Stop, pause, resume and relaunch (protocol.md 7.4), with the refusals core
+// Stop, pause, unpause, resume and relaunch (protocol.md 7.4), with the refusals core
 // gives: an orchestrator has no run, and a worker whose run is still open is
 // not stopped.
 function agentLifecycle(
@@ -1727,8 +1727,18 @@ function agentLifecycle(
       followUps: [sessionEvent(session, "run.paused")],
     };
   }
+  if (verb === "unpause") {
+    const paused = agent.pause != null;
+    changeSession(session, { pause: null });
+    return {
+      reply: recorded({ run_id: agent.run_id, pause_until: null }, null, null),
+      followUps: paused ? [sessionEvent(session, "run.unpaused")] : [],
+    };
+  }
   if (verb === "resume") {
+    // A manual resume clears the pause, a live agent left alone too.
     if (!dead) {
+      changeSession(session, { pause: null });
       return {
         reply: recorded({ left_alone: true, pane_id: agent.pane_id }, null, null),
         followUps: [],

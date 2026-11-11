@@ -329,10 +329,19 @@ pub fn resume(
         Some(id) => world.herdr.pane(id)?,
         None => None,
     };
+    // A manual resume clears the run's pause (`run.unpause`). The key is
+    // `session.resume`'s alone, so the unpause goes unkeyed.
+    let unkeyed = Ctx {
+        key: None,
+        ..ctx.clone()
+    };
     if let Some(pane) = pane.as_ref().filter(|p| p.agent.is_some()) {
+        let unpaused = store.run_unpause(&unkeyed, &run.id)?;
         return Ok(Applied {
+            replayed: unpaused.events.is_empty(),
+            events: unpaused.events,
             value: Resumed {
-                run: run.clone(),
+                run: unpaused.value,
                 session: session.clone(),
                 pane_id: Some(pane.pane_id.clone()),
                 left_alone: true,
@@ -340,8 +349,6 @@ pub fn resume(
                 evidence: format!("herdr shows {}", describe(pane)),
                 warning: None,
             },
-            events: Vec::new(),
-            replayed: true,
         });
     }
 
@@ -383,6 +390,7 @@ pub fn resume(
             }),
         )?
         .events;
+    events.extend(store.run_unpause(&unkeyed, &run.id)?.events);
 
     let card: Card = get(store.conn(), "card", &run.card_id)?;
     let pane_id = match pane {
@@ -390,10 +398,6 @@ pub fn resume(
         None => {
             let created = open_pane(world, &card, run, &worktree)?;
             // The key was `session.resume`'s alone, not the bind's.
-            let unkeyed = Ctx {
-                key: None,
-                ..ctx.clone()
-            };
             events.extend(
                 store
                     .run_bind_session(

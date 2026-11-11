@@ -84,7 +84,7 @@ What each principal may do. "Own" means only on its own run, card or worktree. E
 | Reply to an ask or a card comment (`ask.reply`), mark a reply read (`reply.read`) | marks read, on the board; never replies | no | replies, as its project's live orchestrator; never marks read | no | no | no | no | no |
 | Hold, depend, reprioritize | yes | release due holds | own project | no | no | no | no | no |
 | Start a run (the execute decision) | yes | no | own project, within capacity, quota and model rules | no | no | no | no | no |
-| Relaunch, pause or interrupt a run | yes | no | own runs | no | no | no | no | no |
+| Relaunch, pause (or clear a pause) or interrupt a run | yes | no | own runs | no | no | no | no | no |
 | Stop an agent (`tiller agent stop`: a proven `/exit`, then `run.clean`) | yes | the idle agent of a run that ended `landed` or `reported` | own runs, and any ended run of its project; never an orchestrator | no | no | no | no | no |
 | Resume a session after a crash or a reboot (`session.resume`: the same Claude session id, the same worktree, under the floor checks, never a new attempt, never for a worker crash; recovery.md R02 and R04) | yes | yes | own runs | no | no | no | no | no |
 | Steer a session (outbox) | yes | yes | own runs | no | no | no | no | no |

@@ -1480,6 +1480,7 @@ fn timeline_text(event: &Event) -> String {
         "run.placed" => "placed the run on a machine".to_owned(),
         "run.status" => "reported the run status".to_owned(),
         "run.paused" => "paused the run".to_owned(),
+        "run.unpaused" => "cleared the pause".to_owned(),
         "run.ended" => "ended the run".to_owned(),
         "run.cleaned" => "cleaned up the run".to_owned(),
         "run.relaunched" => "relaunched the run".to_owned(),

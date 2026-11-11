@@ -365,6 +365,42 @@ fn resume_leaves_a_running_session_alone() {
     );
 }
 
+fn pause(rig: &mut Rig, run: &str) {
+    let until = Timestamp::now().plus_minutes(60);
+    rig.fleet
+        .store
+        .run_pause(&owner(), run, until, Some("waiting on a review"))
+        .unwrap();
+    assert!(rig.run(run).pause_until.is_some());
+}
+
+/// A manual resume clears the run's pause, whether the agent was still
+/// running or Claude had to be resumed in its pane.
+#[test]
+fn a_manual_resume_clears_the_pause() {
+    let mut rig = Rig::new();
+    let spawned = running(&mut rig);
+    pause(&mut rig, &spawned.run.id);
+    let ctx = rig.orchestrator();
+    let done = resume_it(&mut rig, &ctx, &quick(), &spawned.run.id).unwrap();
+    assert!(done.left_alone);
+    assert_eq!(done.run.pause_until, None);
+    assert_eq!(rig.run(&spawned.run.id).pause_until, None);
+    assert_eq!(rig.events("run.unpaused", &spawned.run.id), 1);
+    // A second resume has no pause left to clear.
+    resume_it(&mut rig, &ctx, &quick(), &spawned.run.id).unwrap();
+    assert_eq!(rig.events("run.unpaused", &spawned.run.id), 1);
+
+    pause(&mut rig, &spawned.run.id);
+    rig.herdr.set_screen(&spawned.pane_id, Screen::Shell);
+    let claude = boot(&rig, "resume");
+    let done = resume_it(&mut rig, &ctx, &patient(), &spawned.run.id).unwrap();
+    claude.join().unwrap();
+    assert!(!done.left_alone);
+    assert_eq!(done.run.pause_until, None);
+    assert_eq!(rig.events("run.unpaused", &spawned.run.id), 2);
+}
+
 #[test]
 fn resume_relaunches_claude_resume_in_its_pane() {
     let mut rig = Rig::new();
