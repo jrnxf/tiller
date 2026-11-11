@@ -1722,6 +1722,32 @@ fn nix_command_forms_are_read() {
             "git log --format=%s | nix develop -c grep 'gh pr merge'",
             None,
         ),
+        // `--redirect` takes two values.
+        (
+            "nix develop --redirect a -c -c sh -c 'gh pr merge 12'",
+            Some(Code::Merge),
+        ),
+        // A known flag after an unknown one may be the unknown one's value.
+        (
+            "nix develop --build-users-group -k -c tiller approve 01JABC",
+            OWNER,
+        ),
+        (
+            "nix develop --log-lines --arg -c tiller approve 01JABC",
+            OWNER,
+        ),
+        // After `--` every word is an argument.
+        ("nix develop -- -c true", None),
+        // `nix run` runs a program not known before it runs.
+        ("nix run nixpkgs#bash -- -c 'tiller approve 01JABC'", OWNER),
+        ("nix run nixpkgs#hello", None),
+        // nix 2.3 `nix run` reads `-c` and `-i` like `nix shell`.
+        ("nix run -i -c tiller status x", ID),
+        (
+            "echo 'tiller approve 01JABC' | nix run nixpkgs.hello",
+            OWNER,
+        ),
+        ("nix develop -s \"$N\" x -c true", ID),
         // A `-c` that may be a flag's value still leaves standard input.
         (
             "echo 'tiller approve 01JABC' | nix develop -k -c cat",
@@ -1742,6 +1768,8 @@ fn nix_command_forms_are_read() {
         ),
         ("nix-shell \"$OPT\" 'tiller approve 01JABC'", OWNER),
         ("echo 'tiller approve 01JABC' | nix-shell -p hello", OWNER),
+        // A word not known before it runs may be `--pure`.
+        ("nix-shell \"$OPT\" --run 'tiller status x'", OWNER),
         // A `--run` that is a flag's value leaves standard input.
         (
             "echo 'tiller approve 01JABC' | nix-shell --arg x --run",
@@ -1792,14 +1820,9 @@ fn direnv_exec_reads_both_shapes() {
         ("direnv exec . cargo test", None),
         ("direnv exec /home/user/pool/3/alpha tiller status x", None),
         ("direnv allow", None),
+        // A path that ends in `/` can only be a directory.
+        ("direnv exec /home/user/tiller/ cargo test", None),
     ]);
-    // A directory that exists has one reading, even with a protected name.
-    let dir = tempfile::tempdir().unwrap();
-    fs::create_dir(dir.path().join("tiller")).unwrap();
-    for role in Role::ALL {
-        let got = bash_in(role, dir.path(), "direnv exec tiller cargo test");
-        assert!(got.is_none(), "{role}: {:?}", got.map(|d| d.message()));
-    }
 }
 
 /// A brace word is not known before it runs: past the positional, it can
