@@ -9,6 +9,7 @@ import type {
   BoardRow,
   PermissionPrompt,
   Project,
+  PromptDialog,
   ReplyItem,
 } from "../../lib/api-types";
 import { focusReason, ownerKey, ownerOf, projectIndex, shownId } from "../../lib/peers";
@@ -23,14 +24,18 @@ import {
   boardQuery,
   projectsQuery,
 } from "../../lib/queries";
-import { scopedProjects } from "../../lib/scope";
+import { dialogWaits, scopeTest, scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
 import { CheckIcon } from "../shell/icons";
+import { Ago } from "../board/ago";
 import { AnswerStrip } from "../board/answer-strip";
 import { HostChip } from "../board/host-chip";
+import { ShieldIcon } from "../board/icons";
 import { useAmbiguousIds, useStanding, useNamedProjects } from "../board/peer-state";
+import { readPane, terminalTailPath } from "../board/terminal-stream";
+import type { Tail } from "../board/terminal-stream";
 import { AwayBriefDetail, AwayBriefRow } from "./away-brief";
-import { answeredStore, withdrawnStore } from "./answered";
+import { answeredStore, markSent, sentStore, withdrawnStore } from "./answered";
 import type { Withdrawn } from "./answered";
 import { AnswerForm } from "./answer";
 import { ApproveBlock } from "./approve";
@@ -64,8 +69,9 @@ import { ViewLive } from "./view-live";
 import { WithdrawButton } from "./withdraw";
 import "./inbox.css";
 
-// One row of the inbox: a decision (an attention item) or a permission prompt.
-// They are different kinds of thing and never share a list (state.md).
+// One row of the inbox: a decision (an attention item), a permission prompt,
+// or an agent that waits on a dialog no hook asked for. Decisions and prompts
+// are different kinds of thing and never share a list (state.md).
 interface DecisionEntry {
   type: "decision";
   id: string;
@@ -74,7 +80,10 @@ interface DecisionEntry {
   withdrawn: Withdrawn | null;
 }
 
-type Entry = DecisionEntry | { type: "permission"; id: string; prompt: PermissionPrompt };
+type Entry =
+  | DecisionEntry
+  | { type: "permission"; id: string; prompt: PermissionPrompt }
+  | { type: "dialog"; id: string; agent: AgentRow };
 
 // A row of the list: an entry, or a reply from the orchestrator.
 type Shown =
@@ -85,6 +94,23 @@ function promptId(prompt: PermissionPrompt): string {
   return `perm-${prompt.session_id}`;
 }
 
+function dialogId(agent: AgentRow): string {
+  return `dialog-${agent.session_id}`;
+}
+
+// The card an entry is about; an orchestrator's dialog has none.
+function cardOfEntry(entry: Entry): string | null {
+  if (entry.type === "decision") return entry.item.card_id;
+  return entry.type === "permission" ? entry.prompt.card_id : entry.agent.card_id;
+}
+
+// When the entry began to wait on the owner.
+function sinceOfEntry(entry: Entry): string {
+  if (entry.type === "decision") return entry.item.opened_at;
+  if (entry.type === "permission") return entry.prompt.since;
+  return entry.agent.state_since ?? entry.agent.activity_observed_at;
+}
+
 interface Context {
   cards: Map<string, BoardRow>;
   projects: Project[];
@@ -93,8 +119,26 @@ interface Context {
 // The row that owns an entry: its card when the board still has it, else the
 // entry itself, which carries the same host fields.
 function ownerOfEntry(entry: Entry, ctx: Context): Owned {
-  const own = entry.type === "decision" ? entry.item : entry.prompt;
-  return ctx.cards.get(own.card_id) ?? own;
+  const own =
+    entry.type === "decision"
+      ? entry.item
+      : entry.type === "permission"
+        ? entry.prompt
+        : entry.agent;
+  const cardId = cardOfEntry(entry);
+  return (cardId === null ? undefined : ctx.cards.get(cardId)) ?? own;
+}
+
+// The id a row shows for its card: the card's own, the end of a card id the
+// board does not have any more, or none for an entry with no card.
+function cardLabel(
+  cardId: string | null,
+  ctx: Context,
+  ambiguous: ReturnType<typeof useAmbiguousIds>,
+): string | null {
+  if (cardId === null) return null;
+  const card = ctx.cards.get(cardId);
+  return card ? shownId(card, ambiguous) : cardId.slice(-7);
 }
 
 function Meta({
@@ -104,14 +148,15 @@ function Meta({
   chip,
   when,
 }: {
-  cardId: string;
+  cardId: string | null;
   owner: Owned;
   ctx: Context;
   chip: ReactNode;
   when: string;
 }) {
-  const card = ctx.cards.get(cardId);
+  const card = cardId === null ? undefined : ctx.cards.get(cardId);
   const ambiguous = useAmbiguousIds();
+  const label = cardLabel(cardId, ctx, ambiguous);
   const index = card ? projectIndex(ctx.projects, card) : -1;
   const project = ctx.projects[index];
   return (
@@ -125,8 +170,12 @@ function Meta({
           <span className="sep">/</span>
         </>
       ) : null}
-      <span>{card ? shownId(card, ambiguous) : cardId.slice(-7)}</span>
-      <span className="sep">/</span>
+      {label === null ? null : (
+        <>
+          <span>{label}</span>
+          <span className="sep">/</span>
+        </>
+      )}
       <span>{when}</span>
     </div>
   );
@@ -418,6 +467,7 @@ function PermissionDetail({ prompt, ctx }: { prompt: PermissionPrompt; ctx: Cont
             waiting
             observedAt={prompt.since}
             fallback={asking}
+            onSent={(receipt) => markSent(promptId(prompt), receipt)}
           />
         </>
       )}
@@ -426,22 +476,176 @@ function PermissionDetail({ prompt, ctx }: { prompt: PermissionPrompt; ctx: Cont
   );
 }
 
+// The pane's visible rows, read once, for a dialog the board cannot read.
+function PaneShows({ sessionId, herdr }: { sessionId: string; herdr: ReactNode }) {
+  const tail = useQuery({
+    queryKey: ["dialog-pane", sessionId],
+    queryFn: async ({ signal }) => {
+      const result = await readPane<Tail>(terminalTailPath(sessionId), signal);
+      if (!result.ok) throw new Error(result.detail);
+      return { text: result.body.text, at: new Date().toISOString() };
+    },
+    staleTime: Infinity,
+    gcTime: 0,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+  return (
+    <div className="blk">
+      <div className="blk-h">
+        What the pane shows
+        {tail.data ? (
+          <span className="hint">
+            <Ago at={tail.data.at} prefix="read" />
+          </span>
+        ) : null}
+      </div>
+      {tail.data && tail.data.text.trim() !== "" ? (
+        <Terminal tail={tail.data.text} sessionId={sessionId} herdr={herdr} />
+      ) : null}
+      {/* With nothing to show, the way to the live terminal stays. */}
+      {tail.isError || tail.data?.text.trim() === "" ? (
+        <div className="pane-box">
+          <div className="pb-h">
+            <span>Pane tail</span>
+            {herdr}
+          </div>
+          <pre>
+            {tail.isError
+              ? `The pane could not be read: ${tail.error.message}`
+              : "The pane shows nothing yet."}
+          </pre>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// An agent that waits on a dialog no hook asked for (protocol.md 7.4,
+// Prompt). A known layout gets its answer buttons; any other gets none, as
+// the board never guesses, and shows what the pane shows instead.
+function DialogDetail({ agent, ctx }: { agent: AgentRow; ctx: Context }) {
+  const card = agent.card_id === null ? undefined : ctx.cards.get(agent.card_id);
+  const owner = card ?? agent;
+  const peer = ownerOf(owner);
+  const off = focusReason(peer);
+  const ambiguous = useAmbiguousIds();
+  const name = agent.herdr_name ?? "A worker";
+  const since = agent.state_since ?? agent.activity_observed_at;
+  const chip = (
+    <span className="lab sm warn">
+      <ShieldIcon />
+      Dialog
+    </span>
+  );
+  const top = (menu: boolean) => (
+    <div className="d-top">
+      <Meta
+        cardId={agent.card_id}
+        owner={owner}
+        ctx={ctx}
+        chip={chip}
+        when={`waiting since ${formatWhen(since)}, ${formatAge(since)}`}
+      />
+      {menu ? <HerdrMenu sessionId={agent.session_id} off={off} /> : null}
+    </div>
+  );
+  const waits = <h2 className="d-q">{name} waits for an answer</h2>;
+  const unknown = (
+    <>
+      {top(false)}
+      {waits}
+      {peer ? (
+        <p className="d-ctx">
+          {name} is stopped on a dialog. {peer} owns its pane, so answer it from that host.
+        </p>
+      ) : (
+        <>
+          <p className="d-ctx">
+            The board cannot read this dialog, so it shows no buttons. Look at the live terminal and
+            answer there.
+          </p>
+          <PaneShows
+            sessionId={agent.session_id}
+            herdr={
+              <span className="ev-acts">
+                <HerdrMenu sessionId={agent.session_id} off={off} />
+                <ViewLive sessionId={agent.session_id} />
+              </span>
+            }
+          />
+        </>
+      )}
+    </>
+  );
+  const lead = (dialog: PromptDialog) => (
+    <>
+      {top(true)}
+      {dialog.layout === "trust" ? (
+        <>
+          <h2 className="d-q">Trust this folder?</h2>
+          <p className="d-ctx">
+            Claude Code asks before it works in a folder it has not seen. Tiller records trust
+            before each launch, so this means that step did not take.
+          </p>
+        </>
+      ) : (
+        waits
+      )}
+    </>
+  );
+  return (
+    <>
+      <BackLink />
+      {peer ? (
+        unknown
+      ) : (
+        <AnswerStrip
+          key={agent.session_id}
+          sessionId={agent.session_id}
+          waiting
+          observedAt={agent.activity_observed_at}
+          agent={{
+            name,
+            card: card ? shownId(card, ambiguous) : null,
+            runId: agent.run_id ?? null,
+          }}
+          lead={lead}
+          onSent={(receipt) => markSent(dialogId(agent), receipt)}
+          reading={
+            <>
+              {top(false)}
+              {waits}
+            </>
+          }
+          fallback={unknown}
+        />
+      )}
+      <CardActions card={card ?? null} sessionId={null} />
+    </>
+  );
+}
+
 function Row({ entry, selected, ctx }: { entry: Entry; selected: boolean; ctx: Context }) {
-  const cardId = entry.type === "decision" ? entry.item.card_id : entry.prompt.card_id;
-  const card = ctx.cards.get(cardId);
+  const cardId = cardOfEntry(entry);
+  const card = cardId === null ? undefined : ctx.cards.get(cardId);
   const owner = ownerOfEntry(entry, ctx);
   const standing = useStanding(owner);
   const ambiguous = useAmbiguousIds();
+  const label = cardLabel(cardId, ctx, ambiguous);
   const index = card ? projectIndex(ctx.projects, card) : -1;
   const project = ctx.projects[index];
-  const since = entry.type === "decision" ? entry.item.opened_at : entry.prompt.since;
+  const since = sinceOfEntry(entry);
   const answered = entry.type === "decision" && entry.answered !== null;
   const withdrawn = entry.type === "decision" && entry.withdrawn !== null;
   const gone = entry.type === "decision" && !entry.item.still_current && !answered;
   const title =
     entry.type === "decision"
       ? entry.item.question
-      : `${entry.prompt.tool}: ${entry.prompt.detail ?? "waiting for a keypress"}`;
+      : entry.type === "permission"
+        ? `${entry.prompt.tool}: ${entry.prompt.detail ?? "waiting for a keypress"}`
+        : `${entry.agent.herdr_name ?? "A worker"} waits on a dialog`;
   const link = (
     <Link
       to="/inbox"
@@ -455,6 +659,10 @@ function Row({ entry, selected, ctx }: { entry: Entry; selected: boolean; ctx: C
       {entry.type === "permission" ? (
         <span className="ii permic">
           <LockIcon />
+        </span>
+      ) : entry.type === "dialog" ? (
+        <span className="ii permic">
+          <ShieldIcon />
         </span>
       ) : (
         <span className="ii">{answered ? <OkIcon /> : gone ? <RetiredIcon /> : <NeedsIcon />}</span>
@@ -470,8 +678,12 @@ function Row({ entry, selected, ctx }: { entry: Entry; selected: boolean; ctx: C
               <span className="sl">/</span>
             </>
           ) : null}
-          {card ? shownId(card, ambiguous) : cardId.slice(-7)}
-          <span className="sl">/</span>
+          {label === null ? null : (
+            <>
+              {label}
+              <span className="sl">/</span>
+            </>
+          )}
           {formatAge(since)}
           {answered ? <span className="lab sm ok">answered</span> : null}
           {withdrawn ? <span className="lab sm">withdrawn</span> : null}
@@ -542,6 +754,8 @@ export function Inbox({
 }) {
   const { data: attention } = useSuspenseQuery(attentionQuery());
   const { data: board } = useSuspenseQuery(boardQuery());
+  // A read of its own: a failed one leaves the rest working.
+  const agents = useQuery(agentsQuery()).data;
   const projects = useNamedProjects(useSuspenseQuery(projectsQuery()).data);
   const prefs = useStore(prefsStore);
   const answered = useStore(answeredStore);
@@ -556,10 +770,8 @@ export function Inbox({
   const shown = new Set(scoped.map((project) => ownerKey(project.id, project)));
   const { replies, loading: repliesLoading } = useReplies(scoped);
   // Same scope as the sidebar badge: a card that left the board still counts.
-  const inScope = (cardId: string) => {
-    const row = cards.get(cardId);
-    return !row || (shown.has(ownerKey(row.project_id, row)) && (!host || row.host_id === host));
-  };
+  const scope = scopeTest(board.rows, shown, host);
+  const inScope = scope.card;
   const ctx: Context = { cards, projects: projects.projects };
 
   const openIds = new Set(attention.items.map((item) => item.id));
@@ -596,9 +808,15 @@ export function Inbox({
   decisions.sort((a, b) => a.item.opened_at.localeCompare(b.item.opened_at));
   const current = decisions.filter((entry) => entry.item.still_current || entry.answered !== null);
   const stale = decisions.filter((entry) => !entry.item.still_current && entry.answered === null);
-  const prompts: Entry[] = attention.permission_prompts
-    .filter((prompt) => inScope(prompt.card_id))
-    .map((prompt) => ({ type: "permission", id: promptId(prompt), prompt }));
+  // The prompts group: permission prompts, then agents that wait on a dialog.
+  const prompts: Entry[] = [
+    ...attention.permission_prompts
+      .filter((prompt) => inScope(prompt.card_id))
+      .map((prompt) => ({ type: "permission" as const, id: promptId(prompt), prompt })),
+    ...(agents ? dialogWaits(agents) : [])
+      .filter(scope.agent)
+      .map((agent) => ({ type: "dialog" as const, id: dialogId(agent), agent })),
+  ];
 
   // Every row in list order, so nothing chosen shows the first.
   const all: Shown[] = [
@@ -607,6 +825,8 @@ export function Inbox({
     ...stale.map((entry) => ({ type: "entry" as const, id: entry.id, entry })),
   ];
   // The brief leads the list, so it is what shows when nothing is chosen.
+  const sent = useStore(sentStore);
+  const sentHere = selected ? sent[selected] : undefined;
   const briefChosen = brief !== null && (selected === AWAY_BRIEF_ID || !selected);
   const picked = briefChosen
     ? undefined
@@ -667,16 +887,22 @@ export function Inbox({
                 withdrawn={chosen.withdrawn}
                 ctx={ctx}
               />
-            ) : (
+            ) : chosen.type === "permission" ? (
               <PermissionDetail prompt={chosen.prompt} ctx={ctx} />
+            ) : (
+              <DialogDetail agent={chosen.agent} ctx={ctx} />
             )}
           </div>
         ) : selected && repliesLoading ? null : (
           <div className="in-empty">
             <div>
-              <b>{selected ? "Not in the inbox any more" : "Inbox zero"}</b>
+              <b>
+                {selected ? (sentHere ? "Answered" : "Not in the inbox any more") : "Inbox zero"}
+              </b>
               {selected
-                ? "It was answered or withdrawn elsewhere."
+                ? sentHere
+                  ? `Sent ${sentHere}. The agent went on, so it left the inbox.`
+                  : "It was answered or withdrawn elsewhere."
                 : "Nothing in the shown projects needs you."}
             </div>
           </div>

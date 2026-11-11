@@ -9,9 +9,11 @@ const PATH = "/api/v1/agents/s1/prompt";
 
 function dialog(command: string): PromptDialog {
   return {
+    layout: "permission",
     tool: "Bash",
     title: "Bash command",
     command,
+    folder: null,
     question: "Do you want to proceed?",
     options: [
       { n: 1, text: "Yes" },
@@ -108,4 +110,100 @@ test("the same wait observed again keeps its buttons, and the next wait reads ag
   observe("2026-11-06T10:00:05Z");
   expect(await screen.findByText("rm -f new.txt")).toBeTruthy();
   expect(calls.map(({ path }) => path)).toEqual([PATH, `${PATH}/answer`, PATH]);
+});
+
+const TRUST: PromptDialog = {
+  layout: "trust",
+  tool: "",
+  title: "Accessing workspace:",
+  command: null,
+  folder: "/home/user/project",
+  question: "Is this a project you created or one you trust?",
+  options: [
+    { n: 1, text: "No, exit" },
+    { n: 2, text: "Yes, I trust this folder" },
+  ],
+  screen: "hash of trust",
+};
+
+// The trust dialog's endpoints, plus the run "No, exit" names.
+function stubTrust() {
+  const calls: { path: string; body: unknown }[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      calls.push({ path, body: JSON.parse(String(init?.body ?? "{}")) });
+      if (path === PATH) {
+        const read = { session_id: "s1", read_at: new Date().toISOString(), reason: null };
+        return new Response(JSON.stringify({ ...read, prompt: TRUST }), { status: 200 });
+      }
+      if (path === "/api/v1/runs/r1") {
+        const run = { id: "r1", started_at: "2026-11-06T15:11:00Z" };
+        return new Response(JSON.stringify(run), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true, data: {} }), { status: 200 });
+    }),
+  );
+  return calls;
+}
+
+function renderTrust() {
+  const client = new QueryClient();
+  const agent = { name: "alpha-15-build", card: "alpha-15", runId: "r1" };
+  render(
+    <QueryClientProvider client={client}>
+      <AnswerStrip sessionId="s1" waiting observedAt="2026-11-06T10:00:00Z" agent={agent} />
+    </QueryClientProvider>,
+  );
+}
+
+test("the trust dialog shows its folder and two buttons with no digits, Yes filled on the right", async () => {
+  stubTrust();
+  renderTrust();
+  expect(await screen.findByText("/home/user/project")).toBeTruthy();
+  expect(screen.getByText("Claude Code asks to trust")).toBeTruthy();
+  expect(screen.getByText(/known layout: trust/)).toBeTruthy();
+  const buttons = screen.getAllByRole("button");
+  expect(buttons.map((button) => button.textContent)).toEqual([
+    "No, exit...",
+    "Yes, I trust this folder",
+  ]);
+  expect(document.querySelector(".av-opts kbd")).toBeNull();
+  expect(buttons[1]?.classList.contains("first")).toBe(true);
+  expect(buttons[0]?.classList.contains("first")).toBe(false);
+});
+
+test("Yes sends the trust row, with no digit in the receipt", async () => {
+  const calls = stubTrust();
+  renderTrust();
+  fireEvent.click(await screen.findByRole("button", { name: "Yes, I trust this folder" }));
+  const sent = await screen.findByRole("status");
+  expect(sent.textContent).toBe("Sent Yes, I trust this folder.");
+  expect(calls[1]).toEqual({
+    path: `${PATH}/answer`,
+    body: { option: 2, screen: "hash of trust" },
+  });
+});
+
+test("No, exit asks first: Keep waiting sends nothing, Exit the session sends the exit row", async () => {
+  const calls = stubTrust();
+  renderTrust();
+  fireEvent.click(await screen.findByRole("button", { name: "No, exit..." }));
+  const ask = screen.getByRole("dialog", { name: "Exit alpha-15-build's session?" });
+  expect(ask.textContent).toContain(
+    "Claude Code exits, so alpha-15-build stops and its run ends. The card stays where it is.",
+  );
+  expect(ask.textContent).toContain("/home/user/project");
+  await waitFor(() => expect(ask.textContent).toContain("alpha-15, started "));
+  fireEvent.click(screen.getByRole("button", { name: "Keep waiting" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(calls.some(({ path }) => path.endsWith("/answer"))).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "No, exit..." }));
+  fireEvent.click(screen.getByRole("button", { name: "Exit the session" }));
+  expect((await screen.findByRole("status")).textContent).toBe("Sent No, exit.");
+  expect(calls.find(({ path }) => path.endsWith("/answer"))?.body).toEqual({
+    option: 1,
+    screen: "hash of trust",
+  });
 });

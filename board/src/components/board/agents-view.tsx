@@ -599,8 +599,13 @@ function Stage({
           <AnswerStrip
             key={agent.session_id}
             sessionId={agent.session_id}
-            waiting={agent.activity === "waiting_permission"}
+            waiting={agent.activity === "waiting_permission" || agent.activity === "waiting_input"}
             observedAt={agent.activity_observed_at}
+            agent={{
+              name: line.name,
+              card: card ? shownId(card, ambiguous) : null,
+              runId: agent.run_id ?? null,
+            }}
           />
         )
       }

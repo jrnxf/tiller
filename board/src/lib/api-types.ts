@@ -137,16 +137,24 @@ export interface PermissionPrompt extends Federated {
   since: string;
 }
 
-// The permission dialog on a waiting agent's screen (protocol.md 7.4,
-// Prompt): `screen` goes back with an answer, so a changed dialog is refused.
+// The dialog on a waiting agent's screen (protocol.md 7.4, Prompt): a
+// numbered permission dialog, or a cursor menu of a known layout. `screen`
+// goes back with an answer, so a changed dialog is refused.
 export interface PromptDialog {
+  layout: PromptLayout;
+  // Empty for a dialog no tool asks, such as `trust`.
   tool: string;
   title: string;
   command: string | null;
+  // The folder a `trust` dialog asks about.
+  folder: string | null;
   question: string;
+  // In screen order, top to bottom.
   options: { n: number; text: string }[];
   screen: string;
 }
+
+type PromptLayout = "permission" | "trust";
 
 export interface PromptRead {
   session_id: string;

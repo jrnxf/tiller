@@ -23,7 +23,7 @@ import { agentsQuery, attentionQuery } from "../../lib/queries";
 import { receiptsStore } from "../../lib/receipts";
 import { createAppRouter } from "../../lib/router";
 import { applyChange } from "../../lib/sse";
-import { answeredStore, withdrawnStore } from "./answered";
+import { answeredStore, sentStore, withdrawnStore } from "./answered";
 import { choose } from "../../test-select";
 import { createTestQueryClient, loadRouteChunks } from "../../test-app";
 
@@ -51,11 +51,15 @@ let release: (() => void) | null = null;
 // mutations, and answered from `screens` in turn, the last one repeating.
 let reads: string[] = [];
 let screens: PromptDialog[] = [];
+// A tail read finds herdr down.
+let tailFails = false;
 
 const DIALOG: PromptDialog = {
+  layout: "permission",
   tool: "Bash",
   title: "Bash command",
   command: "rm -rf target/debug/incremental && cargo build -p gamma-cert",
+  folder: null,
   question: "Do you want to proceed?",
   options: [
     { n: 1, text: "Yes" },
@@ -92,6 +96,15 @@ function stubDaemon(scenario: Scenario, hold = false) {
         (serverResponses(scenario) as Record<string, unknown>)[path] ??
         fixtureResource(path, scenario);
       return new Response(JSON.stringify(data), { status: 200 });
+    }
+    // A tail read: the screen of a menu the board has no layout for.
+    if (path.endsWith("/terminal/tail")) {
+      if (tailFails) {
+        const error = { code: "unavailable", message: "herdr is unreachable: no socket" };
+        return new Response(JSON.stringify({ ok: false, error }), { status: 503 });
+      }
+      const text = " Select a model for this session:\n ❯ 1. Default (recommended)\n";
+      return new Response(JSON.stringify({ session_id: "s", cols: 100, rows: 28, text }));
     }
     // A live terminal's stream: it never answers, so it stays connecting.
     if (/\/terminal(\/\w+)?$/.test(path)) return new Promise<Response>(() => {});
@@ -135,11 +148,13 @@ beforeEach(() => {
   receiptsStore.set({ byKey: {}, progress: {} });
   answeredStore.set({});
   withdrawnStore.set({});
+  sentStore.set({});
   calls = [];
   replies = [];
   release = null;
   reads = [];
   screens = [DIALOG];
+  tailFails = false;
   vi.stubGlobal("matchMedia", (query: string) => ({
     matches: false,
     media: query,
@@ -579,6 +594,104 @@ test("with no dialog on the screen, the detail shows what the hook recorded", as
   await renderInbox("default", "perm-01JSESSWGAMMA1200000000000");
   expect(await screen.findByText("What the pane is asking", {}, { timeout: 4000 })).toBeTruthy();
   expect(screen.queryByRole("button", { name: /^Answer \d/ })).toBeNull();
+});
+
+const SESSION_TRUST = "01JSESSWALPHA4200000000000";
+const SESSION_MENU = "01JSESSWBETA70000000000000";
+
+test("an agent waiting on a dialog no hook asked for is a row in Permission prompts", async () => {
+  stubDaemon("dialog");
+  await renderInbox("dialog");
+  const prompts = screen.getByRole("region", { name: "Permission prompts" });
+  expect(within(prompts).getByText("alpha-42-build waits on a dialog")).toBeTruthy();
+  expect(within(prompts).getByText("beta-7-build waits on a dialog")).toBeTruthy();
+});
+
+test("the folder trust dialog is answered from its detail, with no digits", async () => {
+  stubDaemon("dialog");
+  screens = [
+    {
+      layout: "trust",
+      tool: "",
+      title: "Accessing workspace:",
+      command: null,
+      folder: "/home/user/project",
+      question: "Is this a project you created or one you trust?",
+      options: [
+        { n: 1, text: "No, exit" },
+        { n: 2, text: "Yes, I trust this folder" },
+      ],
+      screen: "t1",
+    },
+  ];
+  await renderInbox("dialog", `dialog-${SESSION_TRUST}`);
+  expect(await screen.findByRole("heading", { name: "Trust this folder?" })).toBeTruthy();
+  expect(screen.getByText("Dialog")).toBeTruthy();
+  expect(
+    screen.getByText(
+      /Tiller records trust before each launch, so this means that step did not take\./,
+    ),
+  ).toBeTruthy();
+  expect(screen.getByText("/home/user/project")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /^Answer \d/ })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Yes, I trust this folder" }));
+  await flush();
+  expect(reads).toEqual([SESSION_TRUST]);
+  expect(calls[0]?.path).toBe(`/api/v1/agents/${SESSION_TRUST}/prompt/answer`);
+  expect(calls[0]?.body).toEqual({ option: 2, screen: "t1" });
+});
+
+test("an answered dialog that left the inbox says it was sent from here", async () => {
+  stubDaemon("dialog");
+  screens = [{ ...DIALOG, layout: "trust", tool: "", command: null, screen: "t1" }];
+  const { queryClient } = await renderInbox("dialog", `dialog-${SESSION_TRUST}`);
+  fireEvent.click(await screen.findByRole("button", { name: "Yes" }));
+  await flush();
+  // The agent goes on working, so it waits on nothing.
+  act(() => {
+    queryClient.setQueryData<AgentsResponse>(agentsQuery().queryKey, (agents) =>
+      agents
+        ? {
+            ...agents,
+            orchestrators: agents.orchestrators.map((orchestrator) => ({
+              ...orchestrator,
+              workers: orchestrator.workers.map((worker) =>
+                worker.session_id === SESSION_TRUST ? { ...worker, activity: "working" } : worker,
+              ),
+            })),
+          }
+        : agents,
+    );
+  });
+  expect(await screen.findByText("Answered")).toBeTruthy();
+  expect(screen.getByText("Sent Yes. The agent went on, so it left the inbox.")).toBeTruthy();
+  expect(screen.queryByText("It was answered or withdrawn elsewhere.")).toBeNull();
+});
+
+test("a dialog the board cannot read shows no buttons, only the pane and View live", async () => {
+  stubDaemon("dialog");
+  screens = [];
+  await renderInbox("dialog", `dialog-${SESSION_MENU}`);
+  expect(
+    await screen.findByText(
+      "The board cannot read this dialog, so it shows no buttons. Look at the live terminal and answer there.",
+    ),
+  ).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "beta-7-build waits for an answer" })).toBeTruthy();
+  expect(screen.getByText("What the pane shows")).toBeTruthy();
+  expect(await screen.findByRole("button", { name: /View live/ })).toBeTruthy();
+  expect(screen.getByTestId("pane-tail").textContent).toContain("Select a model for this session:");
+  expect(screen.queryByRole("button", { name: /^Answer \d/ })).toBeNull();
+  expect(screen.queryByText("Trust this folder?")).toBeNull();
+});
+
+test("a pane that cannot be read still offers View live", async () => {
+  stubDaemon("dialog");
+  screens = [];
+  tailFails = true;
+  await renderInbox("dialog", `dialog-${SESSION_MENU}`);
+  expect(await screen.findByText(/The pane could not be read: herdr is unreachable/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: /View live/ })).toBeTruthy();
 });
 
 test("Open in herdr moves into the detail's ··· menu", async () => {

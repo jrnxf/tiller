@@ -7,6 +7,7 @@ import type { Connect, Plugin } from "vite";
 import type { BoardRow } from "./src/lib/api-types.ts";
 import { fixtureMutation, withoutDeleted } from "./src/lib/fixture-mutations.ts";
 import {
+  DIALOG_SESSIONS,
   FixtureRefusal,
   SCENARIOS,
   bootScript,
@@ -19,6 +20,7 @@ import {
   FIXTURE_ROWS,
   fullFrame,
   historyText,
+  menuText,
   promptFrame,
   screenText,
   tickFrame,
@@ -262,7 +264,8 @@ function terminalTail(req: IncomingMessage, res: ServerResponse, session: string
   }
   const pane = paneOf(session);
   const seconds = Math.round((Date.now() - pane.started) / 1000);
-  const text = screenText(pane.typed, seconds);
+  // The `dialog` scenario's beta-7 has a menu up the board cannot read.
+  const text = session === DIALOG_SESSIONS.unknown ? menuText() : screenText(pane.typed, seconds);
   sendJson(res, { session_id: session, cols: FIXTURE_COLS, rows: FIXTURE_ROWS, text });
 }
 

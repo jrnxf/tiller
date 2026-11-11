@@ -15,7 +15,7 @@ export const terminalPath = (sessionId: string) => `/api/v1/agents/${sessionId}/
 const terminalInputPath = (sessionId: string) => `${terminalPath(sessionId)}/input`;
 const terminalFitPath = (sessionId: string) => `${terminalPath(sessionId)}/fit`;
 const terminalHistoryPath = (sessionId: string) => `${terminalPath(sessionId)}/history`;
-const terminalTailPath = (sessionId: string) => `${terminalPath(sessionId)}/tail`;
+export const terminalTailPath = (sessionId: string) => `${terminalPath(sessionId)}/tail`;
 export const promptPath = (sessionId: string) => `/api/v1/agents/${sessionId}/prompt`;
 
 // What the mirror draws on: xterm in the board, a recorder in tests.
@@ -372,7 +372,7 @@ const TAIL_EVERY = 5000;
 // saved machine every few seconds instead. It never sends keys. While the
 // page is hidden it reads nothing, and it reads at once when the page is back.
 // `POST .../terminal/tail`: the pane's size and its visible rows.
-interface Tail {
+export interface Tail {
   cols: number;
   rows: number;
   text: string;

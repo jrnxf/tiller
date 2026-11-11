@@ -4590,41 +4590,51 @@ fn spend_input(state: &AppState) -> Result<(), ApiError> {
     .hint("send it again in a moment"))
 }
 
-/// The tool an agent waits on a permission prompt for, as its hook named
-/// it; None when the agent is not waiting. A wait no observation named a
-/// tool for is the empty name, which no dialog's title starts with.
-async fn waiting_tool(state: &AppState, session_id: String) -> Result<Option<String>, ApiError> {
+/// What an agent waits on: a permission prompt, with the tool its hook
+/// named, or an answer; None when the agent is not waiting. A permission
+/// wait no observation named a tool for is the empty name, which no
+/// dialog's title starts with.
+async fn waiting_on(
+    state: &AppState,
+    session_id: String,
+) -> Result<Option<prompt::Wait>, ApiError> {
     read(state, move |store| {
         let session: Session = get_row(store.conn(), "session", &session_id)?;
-        if session.ended_at.is_some() || session.activity != Activity::WaitingPermission {
+        if session.ended_at.is_some() {
             return Ok(None);
         }
-        Ok(Some(
-            views::prompt_tool(store, &session.id)?.unwrap_or_default(),
-        ))
+        Ok(match session.activity {
+            Activity::WaitingPermission => Some(prompt::Wait::Permission(
+                views::prompt_tool(store, &session.id)?.unwrap_or_default(),
+            )),
+            Activity::WaitingInput => Some(prompt::Wait::Input),
+            _ => None,
+        })
     })
     .await
 }
 
-/// The pane's visible screen, read once, and the dialog for `tool` on it.
+/// The pane's visible screen, read once, and the dialog on it that `wait`
+/// can be waiting on.
 async fn read_dialog(
     state: &AppState,
     pane: &str,
-    tool: String,
-) -> Result<Option<PromptDialog>, ApiError> {
+    wait: prompt::Wait,
+) -> Result<Option<prompt::Dialog>, ApiError> {
     let herdr = state.0.herdr.clone();
     let target = pane.to_owned();
     let screen = tokio::task::spawn_blocking(move || herdr.read_visible(&target))
         .await
         .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
         .map_err(|error| pane_error(pane, &error))?;
-    Ok(prompt::parse(&screen, &tool))
+    Ok(prompt::read(&screen, &wait))
 }
 
-/// The permission dialog on a waiting agent's screen, for the board's
-/// answer buttons (`protocol.md` 7.4). The screen is read only while the
-/// agent's hook says it waits. A POST with every mutation check, as the
-/// mirror is, though it writes nothing.
+/// The dialog on a waiting agent's screen, for the board's answer buttons
+/// (`protocol.md` 7.4): a permission dialog, or a cursor menu of a known
+/// layout. The screen is read only while the agent's session says it waits.
+/// A POST with every mutation check, as the mirror is, though it writes
+/// nothing.
 #[utoipa::path(post, path = "/api/v1/agents/{session}/prompt", tag = "mutations", request_body = PromptAsk,
     params(("session" = String, Path)),
     responses((status = 200, body = PromptRead),
@@ -4647,12 +4657,12 @@ async fn prompt_read(
     )
     .await?;
     let (session_id, pane) = local_pane(&state, session).await?;
-    let (prompt, reason) = match waiting_tool(&state, session_id.clone()).await? {
+    let (prompt, reason) = match waiting_on(&state, session_id.clone()).await? {
         None => (None, Some(NoPrompt::NotWaiting)),
-        Some(tool) => {
+        Some(wait) => {
             spend_input(&state)?;
-            match read_dialog(&state, &pane, tool).await? {
-                Some(dialog) => (Some(dialog), None),
+            match read_dialog(&state, &pane, wait).await? {
+                Some(dialog) => (Some(dialog.prompt), None),
                 None => (None, Some(NoPrompt::NoDialog)),
             }
         }
@@ -4665,9 +4675,10 @@ async fn prompt_read(
     }))
 }
 
-/// One option of the permission dialog on a waiting agent's screen, pressed
-/// as its digit alone (`protocol.md` 7.4). The screen is read again first,
-/// and nothing is typed unless its dialog is the one `screen` names.
+/// One option of the dialog on a waiting agent's screen (`protocol.md`
+/// 7.4): a permission dialog's digit alone, or a cursor menu's arrow keys
+/// to the option's row, then Enter. The screen is read again first, and
+/// nothing is typed unless its dialog is the one `screen` names.
 #[utoipa::path(post, path = "/api/v1/agents/{session}/prompt/answer", tag = "mutations", request_body = PromptAnswer,
     params(("session" = String, Path)),
     responses((status = 200, body = MutationResponse),
@@ -4701,25 +4712,26 @@ async fn prompt_answer(
         )
         .hint("read the prompt again")
     };
-    let tool = waiting_tool(&state, session_id.clone())
+    let wait = waiting_on(&state, session_id.clone())
         .await?
         .ok_or_else(changed)?;
-    let dialog = read_dialog(&state, &pane, tool)
+    let dialog = read_dialog(&state, &pane, wait)
         .await?
-        .filter(|dialog| dialog.screen == request.screen)
+        .filter(|dialog| dialog.prompt.screen == request.screen)
         .ok_or_else(changed)?;
     let option = request.option;
-    if !dialog.options.iter().any(|offered| offered.n == option) {
-        return Err(ApiError::usage(format!(
-            "the prompt has no option {option}"
-        )));
-    }
+    let keys = dialog
+        .keys(option)
+        .ok_or_else(|| ApiError::usage(format!("the prompt has no option {option}")))?;
     let herdr = state.0.herdr.clone();
     let target = pane.clone();
-    tokio::task::spawn_blocking(move || herdr.send_keys(&target, &[&option.to_string()]))
-        .await
-        .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
-        .map_err(|error| pane_error(&pane, &error))?;
+    tokio::task::spawn_blocking(move || {
+        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+        herdr.send_keys(&target, &keys)
+    })
+    .await
+    .map_err(|error| ApiError::from(Error::Internal(error.to_string())))?
+    .map_err(|error| pane_error(&pane, &error))?;
     Ok(Json(MutationResponse {
         ok: true,
         replayed: false,
@@ -9394,6 +9406,76 @@ esac"#,
         let other = send(&app, mutation("POST", &read, json!({}), &owner)).await;
         let other: Value = serde_json::from_str(&other.body).unwrap();
         assert_eq!(other["reason"], "no_dialog");
+    }
+
+    #[tokio::test]
+    async fn a_trust_dialog_answer_presses_the_arrow_keys_to_its_row_then_enter() {
+        let mut fleet = Fleet::new();
+        let session = fleet.worker("w2:p1");
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path();
+        let app = mirror_app(&fleet, dir);
+        let cookie = owner_cookie(fleet.dir.path());
+        let owner = [("cookie", cookie.as_str())];
+        let read = format!("/api/v1/agents/{session}/prompt");
+        let answer = format!("/api/v1/agents/{session}/prompt/answer");
+        let press = |screen: &str, option: u8| json!({"option": option, "screen": screen});
+        let calls = || std::fs::read_to_string(dir.join("calls")).unwrap_or_default();
+        let trust = include_str!("../../herdr/tests/fixtures/claude/trust-dialog.ansi");
+        std::fs::write(dir.join("screen"), trust).unwrap();
+
+        // No hook asks for the dialog: herdr sees the agent blocked, and the
+        // session waits for an answer.
+        fleet
+            .open()
+            .conn()
+            .execute(
+                "UPDATE sessions SET activity = 'waiting_input', activity_observed_at = ?2
+                 WHERE id = ?1",
+                rusqlite::params![session, at(0)],
+            )
+            .unwrap();
+        let shown = send(&app, mutation("POST", &read, json!({}), &owner)).await;
+        assert_eq!(shown.status, StatusCode::OK, "{}", shown.body);
+        let shown: Value = serde_json::from_str(&shown.body).unwrap();
+        assert_eq!(shown["prompt"]["layout"], "trust", "{shown}");
+        assert_eq!(shown["prompt"]["folder"], "/home/user/project");
+        assert_eq!(
+            shown["prompt"]["options"][1]["text"],
+            "Yes, I trust this folder"
+        );
+        let screen = shown["prompt"]["screen"].as_str().unwrap();
+
+        // A changed dialog, or an option it does not offer, types nothing.
+        let stale = send(&app, mutation("POST", &answer, press("other", 2), &owner)).await;
+        assert_eq!(stale.status, StatusCode::CONFLICT, "{}", stale.body);
+        let unoffered = send(&app, mutation("POST", &answer, press(screen, 3), &owner)).await;
+        assert_eq!(
+            unoffered.status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            unoffered.body
+        );
+        assert!(!calls().contains("send-keys"), "{}", calls());
+
+        // The cursor is on No, exit: Yes is one row down, then Enter, in one call.
+        let sent = send(&app, mutation("POST", &answer, press(screen, 2), &owner)).await;
+        assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
+        assert_eq!(
+            calls().lines().last(),
+            Some("pane send-keys w2:p1 down enter")
+        );
+        let sent = send(&app, mutation("POST", &answer, press(screen, 1), &owner)).await;
+        assert_eq!(sent.status, StatusCode::OK, "{}", sent.body);
+        assert_eq!(calls().lines().last(), Some("pane send-keys w2:p1 enter"));
+
+        // A permission wait never reads the trust dialog.
+        waiting(&fleet, &session, "Bash");
+        let other = send(&app, mutation("POST", &read, json!({}), &owner)).await;
+        let other: Value = serde_json::from_str(&other.body).unwrap();
+        assert_eq!(other["reason"], "no_dialog", "{other}");
+        let late = send(&app, mutation("POST", &answer, press(screen, 2), &owner)).await;
+        assert_eq!(late.status, StatusCode::CONFLICT, "{}", late.body);
     }
 
     #[tokio::test]

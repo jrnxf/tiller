@@ -43,9 +43,11 @@ interface Posted {
 
 // The dialog a waiting agent's screen shows.
 const PROMPT: PromptDialog = {
+  layout: "permission",
   tool: "Bash",
   title: "Bash command",
   command: "rm -f old.txt",
+  folder: null,
   question: "Do you want to proceed?",
   options: [
     { n: 1, text: "Yes" },
@@ -576,6 +578,41 @@ test("a digit taps the waiting agent's answer button, and a field keeps its digi
   await waitFor(() =>
     expect(answers().map(({ body }) => body)).toEqual([{ option: 2, screen: "hash" }]),
   );
+});
+
+test("an agent on the trust dialog gets its buttons, which no digit taps", async () => {
+  const posted = stubApi("dialog");
+  const trust: PromptDialog = {
+    ...PROMPT,
+    layout: "trust",
+    tool: "",
+    title: "Accessing workspace:",
+    command: null,
+    folder: "/home/user/project",
+    question: "Is this a project you created or one you trust?",
+    options: [
+      { n: 1, text: "No, exit" },
+      { n: 2, text: "Yes, I trust this folder" },
+    ],
+  };
+  const api = globalThis.fetch;
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (path.endsWith("/terminal")) return new Promise(() => {});
+    if (path.endsWith("/prompt")) {
+      const read = { session_id: "s", read_at: new Date().toISOString(), reason: null };
+      return Promise.resolve(new Response(JSON.stringify({ ...read, prompt: trust })));
+    }
+    return api(input, init);
+  });
+  await renderApp("dialog", "/agents");
+  await selectAgent("alpha-42");
+  expect(await screen.findByRole("button", { name: "Yes, I trust this folder" })).toBeTruthy();
+  expect(screen.getByText("/home/user/project")).toBeTruthy();
+  fireEvent.keyDown(window, { key: "2" });
+  fireEvent.keyDown(window, { key: "1" });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(posted.filter(({ path }) => path.endsWith("/prompt/answer"))).toEqual([]);
 });
 
 test("the button says it opens herdr on the remote machine first only for a remote agent", async () => {

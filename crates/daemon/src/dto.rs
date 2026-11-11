@@ -2154,7 +2154,7 @@ pub struct PromptAsk {
     pub host: Option<String>,
 }
 
-/// The permission dialog on a waiting agent's screen, or why there is none.
+/// The dialog on a waiting agent's screen, or why there is none.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct PromptRead {
     pub session_id: String,
@@ -2168,26 +2168,43 @@ pub struct PromptRead {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum NoPrompt {
-    /// The agent is not waiting on a permission prompt; its screen is not read.
+    /// The agent waits on neither a permission prompt nor an answer; its
+    /// screen is not read.
     NotWaiting,
     /// The screen holds no dialog this daemon reads.
     NoDialog,
 }
 
-/// A permission dialog as Claude Code draws it, read off the agent's screen.
+/// A dialog as Claude Code draws it, read off the agent's screen.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct PromptDialog {
+    /// Which of the layouts the daemon reads this is.
+    pub layout: PromptLayout,
     /// The tool the session's hook named; the dialog's title is one Claude
-    /// Code gives it.
+    /// Code gives it. Empty for a dialog no tool asks, such as `trust`.
     pub tool: String,
     pub title: String,
     /// The command a Bash dialog shows; null for other tools.
     pub command: Option<String>,
+    /// The folder a `trust` dialog asks about; null for other layouts.
+    pub folder: Option<String>,
     pub question: String,
+    /// In screen order, top to bottom.
     pub options: Vec<PromptOption>,
     /// A hash of the dialog's rows: an answer carries it back, and the
     /// daemon types nothing when the dialog on the screen no longer matches.
     pub screen: String,
+}
+
+/// The dialog layouts the daemon reads (`protocol.md` 7.4, Prompt).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptLayout {
+    /// The numbered permission dialog: an option is its digit.
+    Permission,
+    /// The folder trust dialog, a cursor menu with no digits: an option is
+    /// the arrow keys to its row, then Enter.
+    Trust,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]

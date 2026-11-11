@@ -92,6 +92,11 @@
   gap: 6px;
 }
 
+/* A cursor menu's buttons: no digits, and the filled answer on the right. */
+.av-opts.end {
+  justify-content: flex-end;
+}
+
 .av-ans {
   display: inline-flex;
   align-items: center;
@@ -112,6 +117,10 @@
     background-color var(--fast) var(--ease),
     transform 160ms var(--ease-out),
     opacity 160ms var(--ease);
+}
+
+.av-ans.bare {
+  padding-left: 10px;
 }
 
 .av-ans:active:not(:disabled) {
@@ -235,8 +244,46 @@
   font-size: 0.92em;
 }
 
+/* The facts "No, exit" asks with: the folder and the run that end. */
+.av-exit-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 14px;
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r8);
+  background: var(--bg-2);
+  font-size: var(--fs-small);
+}
+
+.av-exit-facts dt {
+  color: var(--fg-3);
+}
+
+.av-exit-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--fg-1);
+}
+
+.av-exit-facts dd.mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
 /* Phones: one option a row, each a full-width target. */
 @media (max-width: 820px) {
+  .av-exit-facts {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .av-exit-facts dd + dt {
+    margin-top: 6px;
+  }
+
   .av-ans kbd {
     display: none;
   }

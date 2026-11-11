@@ -153,3 +153,27 @@ export function typeInto(typed: string, input: { keys?: unknown; text?: unknown 
   }
   return next;
 }
+
+// The text a row shows, without its color codes.
+// oxlint-disable-next-line no-control-regex
+const visible = (text: string) => [...text.replace(/\x1b\[[0-9;]*m/g, "")];
+
+// A menu Claude Code draws that the board has no layout for, as herdr's
+// visible read returns it: the work above, then the menu in its box.
+export function menuText(size: PaneSize = OWN): string {
+  const rule = "─".repeat(size.cols - 4);
+  const row = (text: string) =>
+    ` ${dim("│")} ${text}${" ".repeat(size.cols - 5 - visible(text).length)}${dim("│")}`;
+  return `${[
+    ...lines(size).slice(0, size.rows - 9),
+    ` ${dim(`╭${rule}╮`)}`,
+    row(bold("Select a model for this session:")),
+    row(""),
+    row(color(36, "❯ 1. Default (recommended)")),
+    row("  2. Fast"),
+    row("  3. Large context"),
+    row(""),
+    row(dim("Enter to confirm · Esc to cancel")),
+    ` ${dim(`╰${rule}╯`)}`,
+  ].join("\n")}\n`;
+}

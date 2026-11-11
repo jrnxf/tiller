@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { agentsQuery, attentionQuery, boardQuery, projectsQuery } from "../../lib/queries";
 import { projectKey } from "../../lib/peers";
 import { prefsStore } from "../../lib/prefs";
-import { attentionCount, scopedProjects } from "../../lib/scope";
+import { attentionCount, dialogWaits, scopedProjects } from "../../lib/scope";
 import { useStore } from "../../lib/store";
 import { PrIcon } from "../board/icons";
 import { countsByFilter, tilesInScope } from "../board/model";
@@ -72,8 +72,9 @@ function RunningCount({ activeHost }: { activeHost: string | undefined }) {
 function WaitingBadge({ activeHost }: { activeHost: string | undefined }) {
   const { data: attention } = useSuspenseQuery(attentionQuery());
   const { data: board } = useSuspenseQuery(boardQuery());
+  const { data: agents } = useSuspenseQuery(agentsQuery());
   const shownIds = useShownIds(activeHost);
-  const waiting = attentionCount(attention, board.rows, shownIds, activeHost);
+  const waiting = attentionCount(attention, board.rows, shownIds, activeHost, dialogWaits(agents));
   return waiting > 0 ? <span className="badge warn">{waiting}</span> : null;
 }
 

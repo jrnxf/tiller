@@ -1,4 +1,4 @@
-import type { AttentionResponse, BoardRow, Project } from "./api-types";
+import type { AgentRow, AgentsResponse, AttentionResponse, BoardRow, Project } from "./api-types";
 import { ownerKey, projectKey } from "./peers";
 import { visibleProjects } from "./prefs";
 import type { Prefs } from "./prefs";
@@ -25,21 +25,48 @@ export function scopedProjects(
   return onHost ? shown.filter((project) => onHost.has(projectKey(project))) : shown;
 }
 
-// The Inbox badge: open decisions and permission prompts whose card is in
-// scope. A card that is not on the board any more still counts.
+// The agents that wait on an answer no hook asked for (`waiting_input`): a
+// dialog only the screen shows, such as Claude Code's folder trust dialog
+// (protocol.md 7.4, Prompt). The Inbox lists them with the permission prompts.
+export function dialogWaits(agents: AgentsResponse): AgentRow[] {
+  return agents.orchestrators
+    .flatMap((agent) => [agent, ...agent.workers])
+    .filter((agent) => agent.activity === "waiting_input");
+}
+
+// Whether a decision, a prompt or a waiting agent is in scope, by its card. A
+// card that is not on the board any more still counts. An agent with no card
+// (an orchestrator) goes by its project and machine.
+export function scopeTest(
+  rows: BoardRow[],
+  scope: Set<string>,
+  host: string | undefined,
+): { card: (cardId: string) => boolean; agent: (agent: AgentRow) => boolean } {
+  const cards = new Map(rows.map((row) => [row.id, row]));
+  const card = (cardId: string) => {
+    const row = cards.get(cardId);
+    return !row || (scope.has(ownerKey(row.project_id, row)) && (!host || row.host_id === host));
+  };
+  const agent = (row: AgentRow) =>
+    row.card_id !== null
+      ? card(row.card_id)
+      : scope.has(ownerKey(row.project_id ?? "", row)) && (!host || row.host_id === host);
+  return { card, agent };
+}
+
+// The Inbox badge: open decisions, permission prompts and agents that wait on
+// a dialog, when they are in scope.
 export function attentionCount(
   attention: AttentionResponse,
   rows: BoardRow[],
   scope: Set<string>,
   host: string | undefined,
+  waits: AgentRow[] = [],
 ): number {
-  const cards = new Map(rows.map((row) => [row.id, row]));
-  const inScope = (cardId: string) => {
-    const row = cards.get(cardId);
-    return !row || (scope.has(ownerKey(row.project_id, row)) && (!host || row.host_id === host));
-  };
+  const inScope = scopeTest(rows, scope, host);
   return (
-    attention.items.filter((item) => inScope(item.card_id)).length +
-    attention.permission_prompts.filter((prompt) => inScope(prompt.card_id)).length
+    attention.items.filter((item) => inScope.card(item.card_id)).length +
+    attention.permission_prompts.filter((prompt) => inScope.card(prompt.card_id)).length +
+    waits.filter(inScope.agent).length
   );
 }

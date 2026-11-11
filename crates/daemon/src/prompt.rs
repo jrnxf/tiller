@@ -1,12 +1,66 @@
-//! The permission dialog on an agent's screen, read for the board's answer
-//! buttons (`protocol.md` 7.4). Only Claude Code's current dialog parses;
-//! any other layout is no dialog, never a guess.
+//! The dialog on an agent's screen, read for the board's answer buttons
+//! (`protocol.md` 7.4). Only the layouts below parse: Claude Code's current
+//! permission dialog and its folder trust dialog. Any other layout is no
+//! dialog, never a guess.
 
 use sha2::{Digest, Sha256};
 
 use crate::api::pane_tail;
 use crate::auth::hex;
-use crate::dto::{PromptDialog, PromptOption};
+use crate::dto::{PromptDialog, PromptLayout, PromptOption};
+
+/// What a waiting agent waits on, as its session row says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Wait {
+    /// A permission prompt, for the tool its hook named (empty when no
+    /// observation named one).
+    Permission(String),
+    /// An answer no hook asked for: a dialog only the screen shows.
+    Input,
+}
+
+/// A dialog read off the screen, with the option its cursor is on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Dialog {
+    pub prompt: PromptDialog,
+    /// The option the `❯` cursor is on; a cursor menu moves from it.
+    cursor: u8,
+}
+
+impl Dialog {
+    /// The keys that pick `option`, or None when the dialog does not offer
+    /// it. A permission dialog takes the digit alone; a cursor menu takes
+    /// the arrow keys from the cursor to the option's row, then Enter.
+    pub fn keys(&self, option: u8) -> Option<Vec<String>> {
+        if !self
+            .prompt
+            .options
+            .iter()
+            .any(|offered| offered.n == option)
+        {
+            return None;
+        }
+        Some(match self.prompt.layout {
+            PromptLayout::Permission => vec![option.to_string()],
+            PromptLayout::Trust => {
+                let arrow = if option > self.cursor { "down" } else { "up" };
+                let mut keys = vec![arrow.to_owned(); usize::from(option.abs_diff(self.cursor))];
+                keys.push("enter".to_owned());
+                keys
+            }
+        })
+    }
+}
+
+/// The dialog on `screen` that `wait` can be waiting on: a permission
+/// dialog for the hook's tool, or, for an answer no hook asked for, a
+/// cursor menu of a known layout.
+pub fn read(screen: &str, wait: &Wait) -> Option<Dialog> {
+    match wait {
+        Wait::Permission(tool) => parse(screen, tool).map(|prompt| Dialog { prompt, cursor: 0 }),
+        Wait::Input => trust(screen),
+    }
+}
 
 /// The dialog at the bottom of `screen` (a pane read, ANSI or plain), when
 /// it asks about `tool`, the tool the session's hook named.
@@ -75,12 +129,87 @@ pub fn parse(screen: &str, tool: &str) -> Option<PromptDialog> {
         None
     };
     Some(PromptDialog {
+        layout: PromptLayout::Permission,
         tool: tool.to_owned(),
         title: title.to_owned(),
         command,
+        folder: None,
         question: question.to_owned(),
         options,
         screen: fingerprint(dialog),
+    })
+}
+
+const TRUST_TITLE: &str = "Accessing workspace:";
+const TRUST_FOOTER: &str = "Enter to confirm · Esc to cancel";
+const TRUST_ASKS: &str = "Quick safety check: ";
+const TRUST_OPTIONS: [&str; 2] = ["No, exit", "Yes, I trust this folder"];
+
+/// Claude Code's folder trust dialog at the bottom of `screen`: the rows
+/// from the last full-width `─` rule to the `Enter to confirm · Esc to
+/// cancel` footer on the screen's last row. Its title is `Accessing
+/// workspace:`, the folder is the row after the blank one under it, a row
+/// asks the `Quick safety check:` question, and the menu is the two rows
+/// above the blank row over the footer, `No, exit` then `Yes, I trust this
+/// folder`, one of them under the `❯` cursor. Anything else is `None`.
+fn trust(screen: &str) -> Option<Dialog> {
+    let rows = pane_tail(screen, usize::MAX);
+    if rows.last()?.trim() != TRUST_FOOTER {
+        return None;
+    }
+    let top = rows.iter().rposition(|row| is_rule(row, '─'))?;
+    let dialog = &rows[top..];
+    if dialog.get(1)?.trim() != TRUST_TITLE || !dialog.get(2)?.is_empty() {
+        return None;
+    }
+    let folder = dialog.get(3)?.trim();
+    if !folder.starts_with('/') && !folder.starts_with('~') {
+        return None;
+    }
+    let question = dialog
+        .iter()
+        .find_map(|row| row.trim().strip_prefix(TRUST_ASKS))
+        .and_then(|rest| rest.find('?').map(|end| &rest[..=end]))?;
+    let footer = dialog.len() - 1;
+    let gap = footer
+        .checked_sub(1)
+        .filter(|&gap| dialog[gap].is_empty())?;
+    let start = dialog[..gap].iter().rposition(String::is_empty)? + 1;
+    let menu = &dialog[start..gap];
+    if start <= 3 || menu.len() != TRUST_OPTIONS.len() {
+        return None;
+    }
+    let mut cursor = None;
+    for (index, (row, text)) in menu.iter().zip(TRUST_OPTIONS).enumerate() {
+        if row.strip_prefix(" ❯ ") == Some(text) {
+            if cursor.replace(index).is_some() {
+                return None;
+            }
+        } else if row.strip_prefix("   ") != Some(text) {
+            return None;
+        }
+    }
+    let cursor = u8::try_from(cursor? + 1).ok()?;
+    let options = TRUST_OPTIONS
+        .iter()
+        .zip(1u8..)
+        .map(|(text, n)| PromptOption {
+            n,
+            text: (*text).to_owned(),
+        })
+        .collect();
+    Some(Dialog {
+        prompt: PromptDialog {
+            layout: PromptLayout::Trust,
+            tool: String::new(),
+            title: TRUST_TITLE.to_owned(),
+            command: None,
+            folder: Some(folder.to_owned()),
+            question: question.to_owned(),
+            options,
+            screen: fingerprint(dialog),
+        },
+        cursor,
     })
 }
 
@@ -168,6 +297,7 @@ mod tests {
 
     #[test]
     fn a_screen_without_the_dialog_at_its_bottom_is_none() {
+        // The trust dialog is a cursor menu, never a permission dialog.
         for name in ["working", "trust-dialog", "draft", "exited-after-popup"] {
             let screen = std::fs::read_to_string(format!(
                 "{}/../herdr/tests/fixtures/claude/{name}.ansi",
@@ -228,5 +358,104 @@ mod tests {
         assert_eq!(parse(&above, "Bash").unwrap().screen, screen);
         let changed = bash.replace("touch made.txt\n", "touch other.txt\n");
         assert_ne!(parse(&changed, "Bash").unwrap().screen, screen);
+    }
+
+    const TRUST: &str = include_str!("../../herdr/tests/fixtures/claude/trust-dialog.ansi");
+
+    /// The trust dialog without its colors, to change a row of it.
+    fn trust_rows() -> String {
+        pane_tail(TRUST, usize::MAX).join("\n")
+    }
+
+    #[test]
+    fn claude_codes_trust_dialog_reads_as_a_known_cursor_menu() {
+        let dialog = read(TRUST, &Wait::Input).unwrap();
+        insta::assert_json_snapshot!(dialog.prompt);
+        // The cursor starts on No, exit: Yes is one row down.
+        assert_eq!(dialog.keys(1), Some(vec!["enter".to_owned()]));
+        assert_eq!(
+            dialog.keys(2),
+            Some(vec!["down".to_owned(), "enter".to_owned()])
+        );
+        assert_eq!(dialog.keys(3), None);
+        assert_eq!(dialog.keys(0), None);
+    }
+
+    #[test]
+    fn the_trust_keys_start_from_where_the_cursor_is() {
+        let moved = trust_rows()
+            .replacen(" ❯ No, exit", "   No, exit", 1)
+            .replacen(
+                "   Yes, I trust this folder",
+                " ❯ Yes, I trust this folder",
+                1,
+            );
+        let dialog = read(&moved, &Wait::Input).unwrap();
+        assert_eq!(
+            dialog.keys(1),
+            Some(vec!["up".to_owned(), "enter".to_owned()])
+        );
+        assert_eq!(dialog.keys(2), Some(vec!["enter".to_owned()]));
+        // The cursor is not part of the dialog's hash.
+        let shown = read(TRUST, &Wait::Input).unwrap();
+        assert_eq!(dialog.prompt.screen, shown.prompt.screen);
+    }
+
+    #[test]
+    fn a_permission_wait_never_reads_the_trust_dialog_and_an_input_wait_never_reads_a_permission_one()
+     {
+        assert_eq!(read(TRUST, &Wait::Permission("Bash".to_owned())), None);
+        assert_eq!(read(TRUST, &Wait::Permission(String::new())), None);
+        assert_eq!(read(BASH, &Wait::Input), None);
+        let bash = read(BASH, &Wait::Permission("Bash".to_owned())).unwrap();
+        assert_eq!(bash.keys(4), Some(vec!["4".to_owned()]));
+        assert_eq!(bash.keys(5), None);
+    }
+
+    #[test]
+    fn a_cursor_menu_of_an_unknown_layout_is_none_never_a_guess() {
+        let trust = trust_rows();
+        let changed = [
+            // Another title: a menu the daemon does not know.
+            trust.replace("Accessing workspace:", "Select a model:"),
+            // Options in another order, or with other words.
+            trust
+                .replace(" ❯ No, exit", " ❯ Yes, I trust this folder")
+                .replacen("   Yes, I trust this folder", "   No, exit", 1),
+            trust.replace("Yes, I trust this folder", "Yes, proceed"),
+            // A third option.
+            trust.replace(
+                "   Yes, I trust this folder",
+                "   Yes, I trust this folder\n   Yes, always",
+            ),
+            // No cursor, or two.
+            trust.replace(" ❯ No, exit", "   No, exit"),
+            trust.replace("   Yes, I trust this folder", " ❯ Yes, I trust this folder"),
+            // No folder under the title.
+            trust.replace(" /home/user/project\n", " project\n"),
+            // No question.
+            trust.replace("Quick safety check: ", "Note: "),
+            // Another footer, or one that is not the last row.
+            trust.replace("Enter to confirm", "Space to confirm"),
+            format!("{trust}\nmore"),
+            // A digit on each row: the numbered layout, not this one.
+            trust
+                .replace(" ❯ No, exit", " ❯ 1. No, exit")
+                .replace("   Yes, I trust", "   2. Yes, I trust"),
+        ];
+        for screen in changed {
+            assert_eq!(read(&screen, &Wait::Input), None, "{screen}");
+        }
+    }
+
+    #[test]
+    fn a_trust_dialog_drawn_in_the_output_above_the_real_one_is_not_read() {
+        let trust = trust_rows();
+        // The real one at the bottom asks about another folder.
+        let below = trust.replace("/home/user/project\n", "/home/user/other\n");
+        let dialog = read(&format!("{trust}\n● Done.\n{below}"), &Wait::Input).unwrap();
+        assert_eq!(dialog.prompt.folder.as_deref(), Some("/home/user/other"));
+        // Output under it means it is not the dialog the pane waits on.
+        assert_eq!(read(&format!("{trust}\n● Done.\n"), &Wait::Input), None);
     }
 }

@@ -1,9 +1,14 @@
 import { expect, test } from "vitest";
 
 import { fixtureSnapshot } from "./fixtures";
-import { attentionPath, boardPath, projectsPath } from "./queries";
-import { attentionCount, projectsOnHost, scopedProjects } from "./scope";
-import type { AttentionResponse, BoardResponse, ProjectsResponse } from "./api-types";
+import { agentsPath, attentionPath, boardPath, projectsPath } from "./queries";
+import { attentionCount, dialogWaits, projectsOnHost, scopedProjects } from "./scope";
+import type {
+  AgentsResponse,
+  AttentionResponse,
+  BoardResponse,
+  ProjectsResponse,
+} from "./api-types";
 import type { Prefs } from "./prefs";
 
 const queries = fixtureSnapshot("default").queries;
@@ -44,4 +49,19 @@ test("the Inbox badge counts only what is in scope", () => {
   expect(attentionCount(attention, board.rows, all, undefined)).toBe(total);
   expect(attentionCount(attention, board.rows, new Set(), undefined)).toBeLessThan(total);
   expect(attentionCount(attention, board.rows, all, "no-such-host")).toBeLessThan(total);
+});
+
+test("the Inbox badge counts an agent that waits on a dialog, when it is in scope", () => {
+  const dialog = fixtureSnapshot("dialog").queries;
+  const rows = (dialog[boardPath()] as BoardResponse).rows;
+  const waits = dialogWaits(dialog[agentsPath()] as AgentsResponse);
+  expect(new Set(waits.map((agent) => agent.herdr_name))).toEqual(
+    new Set(["alpha-42-build", "beta-7-build"]),
+  );
+  const all = new Set(projects.map((project) => project.id));
+  const base = attentionCount(attention, rows, all, undefined);
+  expect(attentionCount(attention, rows, all, undefined, waits)).toBe(base + 2);
+  expect(attentionCount(attention, rows, new Set(["beta"]), undefined, waits)).toBe(
+    attentionCount(attention, rows, new Set(["beta"]), undefined) + 1,
+  );
 });

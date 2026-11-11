@@ -15,6 +15,8 @@ interface SessionChange {
   stopped?: boolean;
   // A first stop found a draft in the composer.
   drafted?: boolean;
+  // The agent entered its activity then, not when the scenario began.
+  since?: string;
 }
 
 const changes = new Map<string, SessionChange>();
@@ -69,11 +71,29 @@ function seedFor(name: string | null, now: number): SessionChange & { quiet?: nu
   return {};
 }
 
+// The `dialog` scenario's starting point: alpha-42 and beta-7 wait on a dialog
+// no hook asked for, so their hooks say `waiting_input` (P7).
+function dialogSeed(name: string | null, now: number): SessionChange {
+  return name === "alpha-42-build" || name === "beta-7-build"
+    ? { activity: "waiting_input", at: minutes(now, -0.2), since: minutes(now, -0.2) }
+    : {};
+}
+
+function seedOf(
+  scenario: string,
+  name: string | null,
+  now: number,
+): SessionChange & { quiet?: number } {
+  if (scenario === "lifecycle") return seedFor(name, now);
+  if (scenario === "dialog") return dialogSeed(name, now);
+  return {};
+}
+
 // The agent as the run controls left it, or null once it was stopped.
 export function withLifecycle(agent: AgentRow, scenario: string, now: number): AgentRow | null {
   const change = changes.get(agent.session_id) ?? {};
   if (change.stopped) return null;
-  const seed = scenario === "lifecycle" && !change.fresh ? seedFor(agent.herdr_name, now) : {};
+  const seed = change.fresh ? {} : seedOf(scenario, agent.herdr_name, now);
   const { quiet, ...seeded } = seed;
   const state = { ...seeded, ...change };
   const at = quiet === undefined ? state.at : minutes(now, -quiet);
@@ -82,5 +102,6 @@ export function withLifecycle(agent: AgentRow, scenario: string, now: number): A
     ...(state.activity ? { activity: state.activity } : {}),
     ...(at ? { activity_observed_at: at, last_output_at: at } : {}),
     ...(state.pause ? { pause: state.pause } : {}),
+    ...(state.since ? { state_since: state.since } : {}),
   };
 }

@@ -89,7 +89,10 @@ export type Scenario =
   // A project delete blocked by a live run, then by a live session (P15).
   | "delete-blocked"
   // The merge App ready, two repos enforced and one still on detect (P24).
-  | "merge-ready";
+  | "merge-ready"
+  // Two agents on a dialog no hook asked for: the folder trust dialog, and
+  // one the board cannot read (P7).
+  | "dialog";
 
 // The scenarios with paired peers. `stale-sessions` has them so a peer's older
 // sessions show on this host's board.
@@ -121,6 +124,7 @@ export const SCENARIOS: readonly Scenario[] = [
   "lifecycle",
   "delete-blocked",
   "merge-ready",
+  "dialog",
 ];
 
 const WEEKLY_FLOOR_PERCENT = 3;
@@ -771,6 +775,24 @@ function waitingOn(board: BoardResponse, displayId: string): string[] {
   return found;
 }
 
+// The `dialog` scenario's agents, by what their screen shows: alpha-42's
+// worker has the folder trust dialog up, and beta-7's a menu the board does
+// not know.
+export const DIALOG_SESSIONS = {
+  trust: sessionId("Walpha-42"),
+  unknown: sessionId("Wbeta-7"),
+} as const;
+
+// The default board with the `dialog` scenario's two cards waiting on the
+// owner, as the daemon ranks a `waiting_input` run's badge.
+function dialogRows(now: number): BoardRow[] {
+  return defaultRows(now).map((row) =>
+    row.display_id === "alpha-42" || row.display_id === "beta-7"
+      ? { ...row, badge: "permission_prompt", needs_you: true, observed_at: minutes(now, -0.2) }
+      : row,
+  );
+}
+
 function boardFor(scenario: Scenario, now: number): BoardResponse {
   if (scenario === "empty") return { rows: [], asked: [] };
   if (scenario === "new-install") return { rows: newInstallRows(now), asked: [] };
@@ -805,7 +827,7 @@ function boardFor(scenario: Scenario, now: number): BoardResponse {
     };
   }
   return {
-    rows: defaultRows(now),
+    rows: scenario === "dialog" ? dialogRows(now) : defaultRows(now),
     // One untagged ask from each source: typed in the orchestrator's pane,
     // sent from the board's ask box (long enough to be cut), and a script's.
     asked: [

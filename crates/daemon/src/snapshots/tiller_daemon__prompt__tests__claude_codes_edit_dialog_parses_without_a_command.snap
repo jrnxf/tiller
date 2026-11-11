@@ -3,9 +3,11 @@ source: crates/daemon/src/prompt.rs
 expression: "parse(EDIT, \"Edit\")"
 ---
 {
+  "layout": "permission",
   "tool": "Edit",
   "title": "Edit file",
   "command": null,
+  "folder": null,
   "question": "Do you want to make this edit to notes.txt?",
   "options": [
     {

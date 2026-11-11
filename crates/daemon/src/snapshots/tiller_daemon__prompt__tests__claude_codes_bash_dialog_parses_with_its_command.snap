@@ -3,9 +3,11 @@ source: crates/daemon/src/prompt.rs
 expression: "parse(BASH, \"Bash\")"
 ---
 {
+  "layout": "permission",
   "tool": "Bash",
   "title": "Bash command",
   "command": "rm -f nothing-here.txt && touch made.txt",
+  "folder": null,
   "question": "Do you want to proceed?",
   "options": [
     {

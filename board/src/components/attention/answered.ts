@@ -25,6 +25,15 @@ export interface Withdrawn {
 
 export const withdrawnStore = createStore<Record<string, Withdrawn>>({});
 
+// Prompts and dialogs answered from this tab, by Inbox entry id, with the
+// receipt's wording. The agent moves on and the entry leaves the inbox, so its
+// detail says the answer went from here, not elsewhere.
+export const sentStore = createStore<Record<string, string>>({});
+
+export function markSent(id: string, receipt: string) {
+  sentStore.update((current) => ({ ...current, [id]: receipt }));
+}
+
 export function markWithdrawn(item: AttentionItem, at: string) {
   withdrawnStore.update((current) => ({ ...current, [item.id]: { item, at } }));
 }

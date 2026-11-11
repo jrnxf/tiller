@@ -21,6 +21,7 @@ import { grantMutation, grantsFor } from "./fixtures-grants.ts";
 import { memoryMutation } from "./fixtures-memory.ts";
 import { RUN_MS, retroMutation } from "./fixtures-retros.ts";
 import {
+  DIALOG_SESSIONS,
   FIXTURE_HEAD_SHA,
   fixtureResource,
   restartStaleFixture,
@@ -1616,6 +1617,9 @@ function handle(
   const prompt = /^\/api\/v1\/agents\/([^/]+)\/prompt(\/answer)?$/.exec(path);
   if (method === "POST" && prompt?.[1]) {
     const session = prompt[1];
+    if (session === DIALOG_SESSIONS.trust || session === DIALOG_SESSIONS.unknown) {
+      return dialogMutation(session, !prompt[2], body);
+    }
     if (!prompt[2]) {
       const read = { session_id: session, read_at: new Date().toISOString() };
       const dialog = fixturePrompt(changed.has(session));
@@ -1794,14 +1798,62 @@ function agentControl(
   return { reply: recorded(data, null, null), followUps: [] };
 }
 
+// The `dialog` scenario's screens: the folder trust dialog, which a tap
+// answers, and a menu the board does not know, so its read finds no dialog.
+function dialogMutation(
+  session: string,
+  read: boolean,
+  body: Record<string, unknown>,
+): MutationResult {
+  if (read) {
+    const known = session === DIALOG_SESSIONS.trust;
+    const reply = {
+      session_id: session,
+      read_at: new Date().toISOString(),
+      prompt: known ? TRUST_PROMPT : null,
+      reason: known ? null : "no_dialog",
+    };
+    return { reply: { status: 200, body: reply }, followUps: [] };
+  }
+  if (session !== DIALOG_SESSIONS.trust || body.screen !== TRUST_PROMPT.screen) {
+    return {
+      reply: refused(409, "screen_changed", "the prompt changed after the buttons were drawn"),
+      followUps: [],
+    };
+  }
+  const exit = body.option === 1;
+  if (exit) changeSession(session, { stopped: true });
+  else changeSession(session, { fresh: true, activity: "working", at: new Date().toISOString() });
+  return {
+    reply: recorded({ session_id: session, sent: { option: body.option } }, null, null),
+    followUps: [sessionEvent(session, exit ? "session.ended" : "session.started")],
+  };
+}
+
+const TRUST_PROMPT: PromptDialog = {
+  layout: "trust",
+  tool: "",
+  title: "Accessing workspace:",
+  command: null,
+  folder: "/home/user/project",
+  question: "Is this a project you created or one you trust?",
+  options: [
+    { n: 1, text: "No, exit" },
+    { n: 2, text: "Yes, I trust this folder" },
+  ],
+  screen: "fixture-trust",
+};
+
 function fixturePrompt(redrawn: boolean): PromptDialog {
   const command = redrawn
     ? "rm -rf target && cargo build -p gamma-cert"
     : "rm -rf target/debug/incremental && cargo build -p gamma-cert";
   return {
+    layout: "permission",
     tool: "Bash",
     title: "Bash command",
     command,
+    folder: null,
     question: "Do you want to proceed?",
     options: [
       { n: 1, text: "Yes" },

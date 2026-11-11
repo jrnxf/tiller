@@ -350,7 +350,7 @@
         "tags": [
           "mutations"
         ],
-        "summary": "The permission dialog on a waiting agent's screen, for the board's\nanswer buttons (`protocol.md` 7.4). The screen is read only while the\nagent's hook says it waits. A POST with every mutation check, as the\nmirror is, though it writes nothing.",
+        "summary": "The dialog on a waiting agent's screen, for the board's answer buttons\n(`protocol.md` 7.4): a permission dialog, or a cursor menu of a known\nlayout. The screen is read only while the agent's session says it waits.\nA POST with every mutation check, as the mirror is, though it writes\nnothing.",
         "operationId": "prompt_read",
         "parameters": [
           {
@@ -439,7 +439,7 @@
         "tags": [
           "mutations"
         ],
-        "summary": "One option of the permission dialog on a waiting agent's screen, pressed\nas its digit alone (`protocol.md` 7.4). The screen is read again first,\nand nothing is typed unless its dialog is the one `screen` names.",
+        "summary": "One option of the dialog on a waiting agent's screen (`protocol.md`\n7.4): a permission dialog's digit alone, or a cursor menu's arrow keys\nto the option's row, then Enter. The screen is read again first, and\nnothing is typed unless its dialog is the one `screen` names.",
         "operationId": "prompt_answer",
         "parameters": [
           {
@@ -10627,8 +10627,9 @@
       },
       "PromptDialog": {
         "type": "object",
-        "description": "A permission dialog as Claude Code draws it, read off the agent's screen.",
+        "description": "A dialog as Claude Code draws it, read off the agent's screen.",
         "required": [
+          "layout",
           "tool",
           "title",
           "question",
@@ -10643,11 +10644,23 @@
             ],
             "description": "The command a Bash dialog shows; null for other tools."
           },
+          "folder": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The folder a `trust` dialog asks about; null for other layouts."
+          },
+          "layout": {
+            "$ref": "#/components/schemas/PromptLayout",
+            "description": "Which of the layouts the daemon reads this is."
+          },
           "options": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/PromptOption"
-            }
+            },
+            "description": "In screen order, top to bottom."
           },
           "question": {
             "type": "string"
@@ -10661,9 +10674,17 @@
           },
           "tool": {
             "type": "string",
-            "description": "The tool the session's hook named; the dialog's title is one Claude\nCode gives it."
+            "description": "The tool the session's hook named; the dialog's title is one Claude\nCode gives it. Empty for a dialog no tool asks, such as `trust`."
           }
         }
+      },
+      "PromptLayout": {
+        "type": "string",
+        "description": "The dialog layouts the daemon reads (`protocol.md` 7.4, Prompt).",
+        "enum": [
+          "permission",
+          "trust"
+        ]
       },
       "PromptOption": {
         "type": "object",
@@ -10684,7 +10705,7 @@
       },
       "PromptRead": {
         "type": "object",
-        "description": "The permission dialog on a waiting agent's screen, or why there is none.",
+        "description": "The dialog on a waiting agent's screen, or why there is none.",
         "required": [
           "session_id",
           "read_at"
