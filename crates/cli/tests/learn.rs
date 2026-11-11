@@ -10,6 +10,7 @@ use std::process::Command;
 
 use common::{Out, World, snap};
 use serde_json::{Value, json};
+use tiller_herdr::testing::gone;
 
 const PROPOSAL: &str = "01JC00000000000000000000P1";
 const OTHER: &str = "01JC00000000000000000000P2";
@@ -516,17 +517,6 @@ fn a_run_that_cannot_start_leaves_the_retro_ready_to_run_again() {
     );
 }
 
-/// Whether `pid` has exited: no such process, or one only waiting to be
-/// reaped.
-fn gone(pid: &str) -> bool {
-    let out = Command::new("ps")
-        .args(["-o", "stat=", "-p", pid])
-        .output()
-        .unwrap();
-    let stat = String::from_utf8_lossy(&out.stdout);
-    stat.trim().is_empty() || stat.trim_start().starts_with('Z')
-}
-
 fn wait_for(what: impl Fn() -> bool) -> bool {
     let started = std::time::Instant::now();
     while started.elapsed() < std::time::Duration::from_secs(10) {
@@ -605,6 +595,68 @@ fn an_interrupted_run_stops_the_curator_and_what_it_started() {
             .contains("interrupted"),
         "{out}"
     );
+}
+
+/// Once the curator has ended, Ctrl-C ends tiller again, even while it
+/// waits to record the retro's end on a busy database.
+#[test]
+fn a_ctrl_c_after_the_curator_ended_ends_tiller() {
+    use std::os::unix::process::ExitStatusExt;
+    let (world, _fake, retro) = curator_world(
+        "#!/bin/sh\necho $$ > \"$(dirname \"$0\")/curator.pid\"\n\
+         while [ ! -e \"$(dirname \"$0\")/go\" ]; do sleep 0.05; done\nexit 3\n",
+    );
+    let mut tiller = Command::new(env!("CARGO_BIN_EXE_tiller"))
+        .env("TILLER_HOME", world.home())
+        // The environment `World` gives the owner, built here because the
+        // run must not block the test.
+        .env("CLAUDE_CONFIG_DIR", world.dir.path().join("claude"))
+        .env("TILLER_TEST_OWNER", "1")
+        .env_remove("TILLER_DB")
+        .env_remove("TILLER_SESSION_ID")
+        .env_remove("TILLER_RUN_ID")
+        .env_remove("TILLER_SSH")
+        .env_remove("TILLER_GH")
+        .env_remove("CLAUDECODE")
+        .env_remove("SSH_CONNECTION")
+        .args(["--json", "retro", "run", &retro])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid_file = world.dir.path().join("curator.pid");
+    assert!(
+        wait_for(|| std::fs::read_to_string(&pid_file).is_ok_and(|s| s.ends_with('\n'))),
+        "the stand-in curator never started"
+    );
+    let curator = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .to_owned();
+    // Hold the database, so tiller waits to record the end.
+    let lock = rusqlite::Connection::open(world.db()).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    std::fs::write(world.dir.path().join("go"), "").unwrap();
+    assert!(wait_for(|| gone(&curator)), "the curator did not end");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let sent = Command::new("kill")
+        .args(["-INT", &tiller.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success());
+    let started = std::time::Instant::now();
+    let mut status = None;
+    while status.is_none() && started.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        status = tiller.try_wait().unwrap();
+    }
+    drop(lock);
+    let status = match status {
+        Some(status) => status,
+        None => tiller.wait().unwrap(),
+    };
+    assert_eq!(status.signal(), Some(2), "{status:?}");
 }
 
 #[test]

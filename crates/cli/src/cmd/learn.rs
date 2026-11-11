@@ -361,6 +361,8 @@ fn run_curator(app: &App, args: RetroRun) -> Done {
     })?;
     let claimed = claim(&tools, &config, &mut store, &app.ctx(), &retro.id)?;
     let ran = launch(&claimed, &interrupt);
+    // The curator's group is gone, so Ctrl-C ends tiller again.
+    drop(interrupt);
     // The end is its own write, at the time the run ended: the claim's
     // context holds the claim's time and key.
     let ctx = app.ctx().unkeyed();
@@ -990,22 +992,13 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
+    use tiller_herdr::testing::{eventually, gone};
+
     use super::*;
 
     /// An interrupt nothing raises.
     fn idle() -> Interrupt {
         Interrupt::flag(Arc::new(AtomicBool::new(false)))
-    }
-
-    /// Whether `pid` has exited: no such process, or one only waiting to be
-    /// reaped.
-    fn gone(pid: &str) -> bool {
-        let out = Command::new("ps")
-            .args(["-o", "stat=", "-p", pid])
-            .output()
-            .unwrap();
-        let stat = String::from_utf8_lossy(&out.stdout);
-        stat.trim().is_empty() || stat.trim_start().starts_with('Z')
     }
 
     #[test]
@@ -1020,12 +1013,7 @@ mod tests {
             run_with_timeout(&argv, &[], dir.path(), Duration::from_millis(500), &idle()).unwrap();
         assert!(started.elapsed() < Duration::from_secs(5));
         let grandchild = std::fs::read_to_string(&file).unwrap().trim().to_owned();
-        let mut stopped = gone(&grandchild);
-        let waited = Instant::now();
-        while !stopped && waited.elapsed() < Duration::from_secs(5) {
-            std::thread::sleep(Duration::from_millis(20));
-            stopped = gone(&grandchild);
-        }
+        let stopped = eventually(|| gone(&grandchild));
         let _ = Command::new("kill").args(["-KILL", &grandchild]).status();
         assert_eq!((ran.exit, ran.stopped), (None, Some(Stopped::Cut)));
         assert!(stopped, "the grandchild {grandchild} outlived the cut");
