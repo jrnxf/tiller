@@ -9,14 +9,13 @@
 
 mod common;
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use common::{Running, World};
+use common::{Running, World, first_line, listening_port};
 use serde_json::Value;
 
 const WAIT: Duration = Duration::from_secs(20);
@@ -53,18 +52,6 @@ fn daemon_command(world: &World) -> Command {
     command
 }
 
-/// The first stdout line, or `None` when stdout closes first.
-fn first_line(child: &mut Child) -> Option<String> {
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        let read = BufReader::new(stdout).read_line(&mut line).unwrap_or(0);
-        let _ = tx.send((read > 0).then_some(line));
-    });
-    rx.recv_timeout(WAIT).expect("the daemon said nothing")
-}
-
 fn start(world: &World) -> Daemon {
     start_with(world, &[])
 }
@@ -72,13 +59,7 @@ fn start(world: &World) -> Daemon {
 /// `start` with extra `tiller daemon` arguments.
 fn start_with(world: &World, args: &[&str]) -> Daemon {
     let mut child = spawn(world, args);
-    let line = first_line(&mut child).expect("the daemon exited before listening");
-    let port = line
-        .trim()
-        .strip_prefix("listening on http://127.0.0.1:")
-        .unwrap_or_else(|| panic!("unexpected first line {line:?}"))
-        .parse()
-        .unwrap();
+    let port = listening_port(&mut child);
     Daemon { child, port }
 }
 
@@ -184,7 +165,7 @@ fn a_second_daemon_names_the_first_and_exits_zero() {
     assert_eq!(info(&world).unwrap()["port"], u64::from(first.port));
 
     let mut second = spawn(&world, &[]);
-    let line = first_line(&mut second);
+    let line = first_line(&mut second, WAIT);
     assert!(wait(&mut second).success());
     assert_eq!(
         line.as_deref().map(str::trim),
@@ -693,13 +674,7 @@ fn the_login_code_signs_in_at_an_allowed_host_until_sign_out() {
             .spawn()
             .unwrap(),
     );
-    let line = first_line(&mut child).expect("the daemon exited before listening");
-    let port = line
-        .trim()
-        .strip_prefix("listening on http://127.0.0.1:")
-        .unwrap_or_else(|| panic!("unexpected first line {line:?}"))
-        .parse()
-        .unwrap();
+    let port = listening_port(&mut child);
     let mut daemon = Daemon { child, port };
     let read = |cookie: &str| {
         exchange(
@@ -1182,7 +1157,9 @@ fn a_stopping_daemon_stops_the_curator_the_board_started() {
     assert!(view["run_refusal"].is_string(), "{view}");
 
     let stopped = terminate(&mut daemon);
-    let ended = gone(&curator) && gone(&grandchild);
+    // The daemon reaps its curator before it exits, so the curator is gone
+    // the moment it has. Its child got SIGKILL with the curator's group.
+    let ended = gone(&curator, Duration::ZERO) && gone(&grandchild, DYING);
     // Whatever happened, take every process this test started down with it.
     reap_all(&[&curator, &grandchild]);
     assert!(stopped.success());
@@ -1213,10 +1190,14 @@ fn written_pid(path: &std::path::Path) -> String {
     }
 }
 
-/// Whether `pid` is gone, or only a zombie, within a few seconds: a process
+/// How long a process killed with SIGKILL may still show in `ps`: the
+/// signal arrives a moment after `kill` returns.
+const DYING: Duration = Duration::from_secs(5);
+
+/// Whether `pid` is gone, or only a zombie, within `within`: a process
 /// stopped after its parent is reaped by whatever adopted it.
-fn gone(pid: &str) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(5);
+fn gone(pid: &str, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
     loop {
         let out = Command::new("ps")
             .args(["-o", "stat=", "-p", pid])
@@ -1233,11 +1214,11 @@ fn gone(pid: &str) -> bool {
     }
 }
 
-/// Kills each of `pids` that [`gone`] found still running, so a failed
-/// check leaves none behind, and no pid that another process took since.
+/// Kills each of `pids` that still runs, so a failed check leaves none
+/// behind. A pid that has ended already is not signalled.
 fn reap_all(pids: &[&str]) {
     for pid in pids {
-        if !gone(pid) {
+        if !gone(pid, Duration::ZERO) {
             let _ = Command::new("kill").args(["-KILL", pid]).status();
         }
     }
@@ -1269,7 +1250,7 @@ fn a_dropped_daemon_leaves_no_curator_behind() {
     let curator = written_pid(&pid_file("curator.pid"));
     let grandchild = written_pid(&pid_file("grandchild.pid"));
     drop(daemon);
-    let ended = (gone(&curator), gone(&grandchild));
+    let ended = (gone(&curator, DYING), gone(&grandchild, DYING));
     reap_all(&[&curator, &grandchild]);
     assert_eq!(
         ended,
@@ -1283,8 +1264,9 @@ fn a_dropped_daemon_leaves_no_curator_behind() {
 /// folder it writes its children's pids to.
 const GUARD_CHILD: &str = "TILLER_GUARD_CHILD";
 
-/// The guard kills a child that ignores SIGTERM, with what it started, even
-/// a process that leads a group of its own, as a curator does.
+/// The guard kills a child that ignores SIGTERM, with what it started: a
+/// process that leads a group of its own, as a curator does, and one whose
+/// parent exits during the grace, which leaves it under no one.
 ///
 /// A shell without a terminal cannot give a job its own group (`set -m`
 /// turns job control off), so the child is a copy of this test binary,
@@ -1302,7 +1284,17 @@ fn a_guard_kills_a_child_that_ignores_sigterm_and_its_groups() {
         std::fs::write(dir.join("leader"), format!("{}\n", leader.id())).unwrap();
         let mut plain = Command::new("sleep").arg("300").spawn().unwrap();
         std::fs::write(dir.join("plain"), format!("{}\n", plain.id())).unwrap();
+        // It exits once `go` is there, which leaves its `sleep` an orphan.
+        let mut parent = Command::new("sh")
+            .args([
+                "-c",
+                "sleep 300 & echo $! > orphan; while [ ! -e go ]; do sleep 0.05; done",
+            ])
+            .current_dir(&dir)
+            .spawn()
+            .unwrap();
         // Waits until the guard kills them all.
+        let _ = parent.wait();
         let _ = plain.wait();
         let _ = leader.wait();
         return;
@@ -1320,9 +1312,10 @@ fn a_guard_kills_a_child_that_ignores_sigterm_and_its_groups() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let running = Running::with_grace(child, Duration::from_millis(300));
+    let running = Running::with_grace(child, Duration::from_secs(1));
     let leader = written_pid(&dir.path().join("leader"));
     let plain = written_pid(&dir.path().join("plain"));
+    let orphan = written_pid(&dir.path().join("orphan"));
     let group = Command::new("ps")
         .args(["-o", "pgid=", "-p", &leader])
         .output()
@@ -1332,12 +1325,24 @@ fn a_guard_kills_a_child_that_ignores_sigterm_and_its_groups() {
         leader,
         "the stand-in does not lead a group of its own"
     );
+    // The orphan's parent exits while the guard waits out the grace, after
+    // the guard has seen the orphan under the child.
+    let go = dir.path().join("go");
+    let late = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::write(go, "").unwrap();
+    });
     drop(running);
-    let ended = (gone(&leader), gone(&plain));
-    reap_all(&[&leader, &plain]);
+    late.join().unwrap();
+    let ended = (
+        gone(&leader, DYING),
+        gone(&plain, DYING),
+        gone(&orphan, DYING),
+    );
+    reap_all(&[&leader, &plain, &orphan]);
     assert_eq!(
         ended,
-        (true, true),
+        (true, true, true),
         "a process the child started outlived the guard"
     );
 }

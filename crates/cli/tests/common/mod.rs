@@ -574,21 +574,18 @@ impl Drop for Running {
         }
         if self.runs() {
             let _ = kill(root, Signal::SIGSTOP);
-            let tree = freeze(raw);
-            kill_all(&tree);
+            let mut doomed = freeze(raw);
+            // A process seen earlier whose parent exited since is no longer
+            // under the child, so `freeze` cannot reach it.
+            add_new(&mut doomed, still_running(&seen));
+            kill_all(&doomed);
             let _ = self.child.kill();
             let _ = self.child.wait();
             return;
         }
-        // Stopped by itself. A process it started that outlived it now has
-        // another parent, so it is matched by pid, group and command line,
-        // which a reused pid does not share.
-        let now = processes();
-        let left: Vec<Process> = seen
-            .into_iter()
-            .filter(|p| now.iter().any(|q| q.same(p)))
-            .collect();
-        kill_all(&left);
+        // Stopped by itself. Whatever it started that outlived it now has
+        // another parent.
+        kill_all(&still_running(&seen));
     }
 }
 
@@ -598,20 +595,23 @@ struct Process {
     pid: i32,
     ppid: i32,
     pgid: i32,
-    args: String,
+    /// When it started, as `ps` prints it, to the second. A pid that is
+    /// reused has another start time, while `exec`, a new parent and a new
+    /// group keep it.
+    started: String,
 }
 
 impl Process {
-    /// The same process: its parent may have changed since.
+    /// The same process: its parent, group and command may have changed.
     fn same(&self, other: &Process) -> bool {
-        self.pid == other.pid && self.pgid == other.pgid && self.args == other.args
+        self.pid == other.pid && self.started == other.started
     }
 }
 
 /// Every process on the host, from `ps`, which Linux and macOS share.
 fn processes() -> Vec<Process> {
     let Ok(out) = Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid=,pgid=,args="])
+        .args(["-A", "-o", "pid=,ppid=,pgid=,lstart="])
         .output()
     else {
         return Vec::new();
@@ -623,12 +623,12 @@ fn processes() -> Vec<Process> {
             let pid = fields.next()?.parse().ok()?;
             let ppid = fields.next()?.parse().ok()?;
             let pgid = fields.next()?.parse().ok()?;
-            let args = fields.collect::<Vec<_>>().join(" ");
+            let started = fields.collect::<Vec<_>>().join(" ");
             Some(Process {
                 pid,
                 ppid,
                 pgid,
-                args,
+                started,
             })
         })
         .collect()
@@ -648,6 +648,15 @@ fn descendants(root: i32) -> Vec<Process> {
         }
     }
     found
+}
+
+/// The processes of `seen` that still run, as the process table shows them
+/// now, with the group they lead by now.
+fn still_running(seen: &[Process]) -> Vec<Process> {
+    processes()
+        .into_iter()
+        .filter(|now| seen.iter().any(|p| p.same(now)))
+        .collect()
 }
 
 /// Adds to `seen` each process of `found` it does not hold yet, and
@@ -695,20 +704,49 @@ fn kill_all(processes: &[Process]) {
     }
 }
 
+/// The first line a child writes to its piped stdout, or `None` when stdout
+/// closes first. Panics when nothing comes within `wait`.
+pub fn first_line(child: &mut std::process::Child, wait: std::time::Duration) -> Option<String> {
+    use std::io::BufRead;
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let read = std::io::BufReader::new(stdout)
+            .read_line(&mut line)
+            .unwrap_or(0);
+        let _ = tx.send((read > 0).then_some(line));
+    });
+    rx.recv_timeout(wait).expect("the daemon said nothing")
+}
+
+/// The port a `tiller daemon --port 0` child listens on, from the first line
+/// it writes.
+pub fn listening_port(child: &mut std::process::Child) -> u16 {
+    let line = first_line(child, std::time::Duration::from_secs(20))
+        .expect("the daemon exited before listening");
+    line.trim()
+        .strip_prefix("listening on http://127.0.0.1:")
+        .unwrap_or_else(|| panic!("unexpected first line {line:?}"))
+        .parse()
+        .unwrap()
+}
+
 /// The real daemon on a free port, with a `PATH` that holds `git` and
 /// nothing else, so no poller reaches a real herdr, `gh` or `quota-axi`.
 /// Returns its guard and its port.
 pub fn git_only_daemon(world: &World) -> (Running, u16) {
-    use std::io::BufRead;
     use std::process::Stdio;
     let bin = world.dir.path().join("git-only");
-    std::fs::create_dir_all(&bin).unwrap();
-    let found = Command::new("sh")
-        .args(["-c", "command -v git"])
-        .output()
-        .unwrap();
-    let git = String::from_utf8(found.stdout).unwrap();
-    std::os::unix::fs::symlink(git.trim(), bin.join("git")).unwrap();
+    if !bin.join("git").exists() {
+        std::fs::create_dir_all(&bin).unwrap();
+        let found = Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap();
+        let git = String::from_utf8(found.stdout).unwrap();
+        std::os::unix::fs::symlink(git.trim(), bin.join("git")).unwrap();
+    }
     let mut child = Running::new(
         world
             .bare_command()
@@ -723,21 +761,6 @@ pub fn git_only_daemon(world: &World) -> (Running, u16) {
             .spawn()
             .unwrap(),
     );
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        let _ = std::io::BufReader::new(stdout).read_line(&mut line);
-        let _ = tx.send(line);
-    });
-    let line = rx
-        .recv_timeout(std::time::Duration::from_secs(30))
-        .expect("the daemon said nothing");
-    let port = line
-        .trim()
-        .strip_prefix("listening on http://127.0.0.1:")
-        .unwrap_or_else(|| panic!("unexpected first line {line:?}"))
-        .parse()
-        .unwrap();
+    let port = listening_port(&mut child);
     (child, port)
 }
