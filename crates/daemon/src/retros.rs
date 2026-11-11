@@ -193,14 +193,19 @@ impl Retros {
 }
 
 /// `[learning]` from `config.toml`, read on every call so an edit needs no
-/// restart. A table that does not parse reads as the defaults here; Run
-/// again refuses it with the error.
-fn learning_of(state: &AppState) -> Learning {
-    let table = std::fs::read_to_string(state.0.home.join("config.toml"))
-        .ok()
-        .and_then(|text| text.parse::<toml::Table>().ok())
-        .unwrap_or_default();
-    Learning::from_table(&table).unwrap_or_default()
+/// restart, through the loader the claim uses. A file that cannot be read
+/// gives the defaults and why: the claim refuses it with the same error.
+fn learning_of(home: &std::path::Path) -> (Learning, Option<String>) {
+    let read = tiller_core::config_file::load(&home.join("config.toml"))
+        .map_err(|error| error.to_string())
+        .and_then(|table| Learning::from_table(&table).map_err(|error| error.to_string()));
+    match read {
+        Ok(learning) => (learning, None),
+        Err(error) => (
+            Learning::default(),
+            Some(format!("config.toml cannot be used: {error}")),
+        ),
+    }
 }
 
 fn status(retro: &Retro, now: Timestamp, timeout: i64) -> RetroStatus {
@@ -356,10 +361,19 @@ pub(crate) async fn list_retros(
     State(state): State<AppState>,
     Query(query): Query<RetrosQuery>,
 ) -> ApiResult<RetrosResponse> {
-    let minutes = learning_of(&state).curator_timeout_minutes;
-    let timeout = i64::try_from(minutes).unwrap_or(i64::MAX);
-    let retros = read(&state, move |store| {
-        views(store, query.project.as_deref(), Timestamp::now(), timeout)
+    let home = state.0.home.clone();
+    let (retros, minutes) = read(&state, move |store| {
+        let (learning, config_error) = learning_of(&home);
+        let minutes = learning.curator_timeout_minutes;
+        let timeout = i64::try_from(minutes).unwrap_or(i64::MAX);
+        let mut retros = views(store, query.project.as_deref(), Timestamp::now(), timeout)?;
+        if let Some(error) = config_error {
+            // Run again would be refused for it, so it is off with why.
+            for retro in &mut retros {
+                retro.run_refusal.get_or_insert_with(|| error.clone());
+            }
+        }
+        Ok((retros, minutes))
     })
     .await?;
     Ok(Json(RetrosResponse {
@@ -389,7 +403,7 @@ pub(crate) async fn run_retro(
     let Some(starter) = state.0.orchestrators.clone() else {
         return Err(Error::Unavailable("this daemon cannot run retros".into()).into());
     };
-    let timeout = i64::try_from(learning_of(&state).curator_timeout_minutes).unwrap_or(i64::MAX);
+    let home = state.0.home.clone();
     let retros = state.0.retros.clone();
     let db = state.db();
     let damage = state.0.damage.clone();
@@ -402,6 +416,9 @@ pub(crate) async fn run_retro(
         if retros.stopping() {
             return Err(Error::Unavailable("the daemon is stopping".into()).into());
         }
+        // A config that cannot be used is refused by the claim below.
+        let timeout = i64::try_from(learning_of(&home).0.curator_timeout_minutes)
+            .unwrap_or(i64::MAX);
         let mut store = Store::open_current(&db).map_err(ApiError::from)?;
         let ctx = board_ctx(&key, args.as_ref());
         // A retry of a Run again answers with the retro its key claimed and
@@ -663,6 +680,25 @@ mod tests {
         let other = get_at(&app, "/api/v1/retros?project=beta").await;
         assert_eq!(other.status, StatusCode::OK);
         assert!(other.body.contains("\"retros\":[]"), "{}", other.body);
+    }
+
+    /// A config.toml that cannot be used turns Run again off, with why: the
+    /// claim would refuse it.
+    #[tokio::test]
+    async fn a_config_that_cannot_be_used_turns_run_again_off() {
+        let fleet = fleet();
+        std::fs::write(
+            fleet.dir.path().join("config.toml"),
+            "[learning]\ncurator_timeout_minutes = \"soon\"\n",
+        )
+        .unwrap();
+        let r1 = one(&app(&fleet, Vec::new()), R1).await;
+        assert_eq!(r1.status, RetroStatus::Unfinished);
+        let refusal = r1.run_refusal.unwrap_or_default();
+        assert!(
+            refusal.starts_with("config.toml cannot be used: "),
+            "{refusal}"
+        );
     }
 
     /// The list has every unfinished retro, however many newer ones there
