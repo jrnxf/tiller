@@ -13,12 +13,13 @@ use serde_json::{Value, json};
 
 use super::approvals::mark_stale;
 use super::learning::{self, Gate};
+use super::memory_budget::{self, BlobReader};
 use super::projects::{meta, require_daemon, require_owner};
 use super::{find, get, list};
 use crate::domain::{Approval, ApprovalKind, ApprovalState, EvalRun, Record};
 use crate::error::{Error, Result};
 use crate::ids::{self, FLEET_PROJECT};
-use crate::memory::{self as doc, EMPTY_BLOB, Entry, STARTUP_BUDGET, document_path};
+use crate::memory::{self as doc, EMPTY_BLOB, Entry, document_path};
 use crate::store::{Actor, Applied, Ctx, NewEvent, Store, Tx};
 use crate::time::Timestamp;
 
@@ -1031,22 +1032,32 @@ fn measured_after(
     Ok(true)
 }
 
-/// Refuses a Keep that would put a role over its startup budget.
-fn check_budget(proposal: &Proposal) -> Result<()> {
-    let Some(Value::Object(roles)) = &proposal.token_budget_after else {
-        return Ok(());
-    };
-    for (role, tokens) in roles {
-        if let Some(tokens) = tokens.as_i64().filter(|t| *t > STARTUP_BUDGET) {
-            return Err(Error::refused(
-                "proposal",
-                &proposal.id,
-                format!(
-                    "it would put the {role} at {tokens} tokens, over its {STARTUP_BUDGET}-token startup budget"
-                ),
-            ));
-        }
-    }
+/// Holds a Keep of `proposal`, which leaves `text` in the document at
+/// `path`, to the startup budget, and records the count it leaves on it. A
+/// refusal names `kept`, the proposal the owner decided.
+fn budget(
+    tx: &mut Tx<'_>,
+    proposal: &Proposal,
+    kept: &str,
+    path: &str,
+    text: &str,
+    read: BlobReader<'_>,
+) -> Result<()> {
+    let counted = memory_budget::check(
+        tx.conn(),
+        &memory_budget::Change {
+            proposal_id: kept,
+            source_id: &proposal.target_source_id,
+            project_id: &proposal.project_id,
+            path,
+            after: text,
+        },
+        read,
+    )?;
+    tx.conn().execute(
+        "UPDATE proposals SET token_budget_after = ?2 WHERE id = ?1",
+        params![proposal.id, counted],
+    )?;
     Ok(())
 }
 
@@ -1486,7 +1497,12 @@ impl Store {
     /// proposals this batch kept earlier on the same document: a member kept
     /// after others of its change set made against the same text is rebased
     /// onto the text they left, the order the holdout run applied them in,
-    /// and the old proposal and its approval go `stale`.
+    /// and the old proposal and its approval go `stale`. A Keep that would
+    /// put a role's startup memory over the budget is refused with the
+    /// numbers, counted from the approved set `read` gives the texts of
+    /// (`memory.md` section 6), and a Keep under it records the count on the
+    /// kept proposal.
+    #[allow(clippy::too_many_arguments)]
     pub fn mem_decide(
         &mut self,
         ctx: &Ctx,
@@ -1495,6 +1511,7 @@ impl Store {
         base_blob: &str,
         file: &FileState,
         after: &[String],
+        read: BlobReader<'_>,
     ) -> Result<Applied<Pending>> {
         owner_here(&ctx.actor, "mem.decide")?;
         self.write(ctx, "mem.decide", None, |tx| {
@@ -1515,7 +1532,6 @@ impl Store {
                     approval_id: None,
                 });
             }
-            check_budget(&proposal)?;
             let gate = keep_gate(tx.conn(), &proposal, &file.head_blob, after)?;
             if !gate.ok {
                 let reason = gate.reason.unwrap_or_default();
@@ -1526,6 +1542,10 @@ impl Store {
                 return Err(Error::refused("proposal", &proposal.id, fact));
             }
             if proposal.base_blob == file.head_blob {
+                // A diff that does not apply fails in `mem.apply`, as before.
+                if let Some(text) = doc::apply_diff(&file.text, &proposal.diff) {
+                    budget(tx, &proposal, &proposal.id, &path, &text, read)?;
+                }
                 let approval = decide(tx, &proposal, true)?;
                 return Ok(Pending {
                     proposal_id: proposal.id,
@@ -1538,6 +1558,7 @@ impl Store {
             let rows = mapped(tx.conn(), &source.id, &sections)?;
             let (diff, mut fields) = rebased_diff(&proposal, &path, file, &sections, &rows)?;
             fields["rebased_from"] = json!(proposal.id);
+            let text = doc::apply_diff(&file.text, &diff);
             let old = decide(tx, &proposal, true)?;
             let rebased = insert_proposal(
                 tx,
@@ -1559,12 +1580,50 @@ impl Store {
             );
             mark_stale(tx, &old, &why)?;
             set_proposal(tx, &proposal, "stale", "proposal.stale", &why)?;
+            if let Some(text) = text {
+                // Refused as the proposal the owner kept: the rebased one
+                // is rolled back with the refusal.
+                budget(tx, &rebased, &proposal.id, &path, &text, read)?;
+            }
             let approval = decide(tx, &rebased, true)?;
             Ok(Pending {
                 proposal_id: rebased.id,
                 approval_id: Some(approval.id),
             })
         })
+    }
+
+    /// The startup budget check a Keep of `proposal` on `file` runs, without
+    /// deciding it, for `tiller mem approve --dry-run`: the count each role
+    /// would have after it, or the Keep's refusal with the numbers. `None`
+    /// when the proposal was made against another text or its diff does not
+    /// apply, which the Keep itself reports.
+    pub fn mem_keep_budget(
+        &self,
+        proposal: &str,
+        file: &FileState,
+        read: BlobReader<'_>,
+    ) -> Result<Option<Value>> {
+        let proposal: Proposal = get(self.conn(), "proposal", proposal)?;
+        if proposal.base_blob != file.head_blob {
+            return Ok(None);
+        }
+        let Some(text) = doc::apply_diff(&file.text, &proposal.diff) else {
+            return Ok(None);
+        };
+        let path = document_path(&proposal.project_id);
+        memory_budget::check(
+            self.conn(),
+            &memory_budget::Change {
+                proposal_id: &proposal.id,
+                source_id: &proposal.target_source_id,
+                project_id: &proposal.project_id,
+                path: &path,
+                after: &text,
+            },
+            read,
+        )
+        .map(Some)
     }
 
     /// Undo from the "Recent changes" rail. An applied change gets its
@@ -2086,6 +2145,10 @@ pub struct DocSummary {
     pub name: String,
     pub lines: usize,
     pub suggestions: usize,
+    /// Why a launch goes on without this document, such as "it has no
+    /// approved revision"; `None` when a launch loads it, or it has nothing
+    /// to load (`memory.md` section 9, step 4).
+    pub skipped: Option<String>,
 }
 
 /// Where a line came from: the revision that last changed it, and the card
@@ -2482,6 +2545,7 @@ impl Store {
             return Err(Error::not_found("project", project));
         }
         let paths: Vec<String> = projects.iter().map(|(id, _)| document_path(id)).collect();
+        let skipped = self.mem_skipped_all()?;
         let mut docs = Vec::new();
         for ((id, name), text) in projects.iter().zip(texts(&paths)?) {
             let open = match source_of(conn, id)? {
@@ -2493,6 +2557,10 @@ impl Store {
                 name: name.clone(),
                 lines: doc::parse(&text).iter().map(|s| s.entries.len()).sum(),
                 suggestions: open,
+                skipped: skipped
+                    .iter()
+                    .find(|skip| skip.project_id == *id)
+                    .map(|skip| skip.reason.clone()),
             });
         }
         let Some((project_id, name)) = projects.into_iter().find(|(id, _)| id == project) else {

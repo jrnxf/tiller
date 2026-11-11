@@ -1166,6 +1166,9 @@ export interface MemoryDocSummary {
   lines: number;
   // Open agent proposals against it.
   suggestions: number;
+  // Why a launch goes on without it, such as "it has no approved revision";
+  // null when a launch loads it or it has nothing to load.
+  skipped: string | null;
 }
 
 // The revision that last changed a line.

@@ -1471,7 +1471,7 @@ function handle(
   const quota = path.startsWith("/api/v1/memory/proposals/")
     ? ((fixtureResource("/api/v1/quota", scenario) as QuotaResponse | undefined)?.windows ?? [])
     : [];
-  const memory = memoryMutation(method, path, body, quota);
+  const memory = memoryMutation(method, path, body, quota, scenario);
   if (memory) {
     if (!memory.ok) {
       return {

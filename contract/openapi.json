@@ -8929,6 +8929,13 @@
             "type": "string",
             "description": "`fleet` for \"All projects (shared)\"."
           },
+          "skipped": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why a launch goes on without it, such as \"it has no approved\nrevision\"; null when a launch loads it or it has nothing to load."
+          },
           "suggestions": {
             "type": "integer",
             "description": "Open agent proposals against it.",

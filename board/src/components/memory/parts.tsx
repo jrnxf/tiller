@@ -26,11 +26,18 @@ export function sentence(text: string): string {
 }
 
 // A refusal or a note shown beside the control it is about, and announced
-// where it appears.
-export function Inline({ error }: { error: ActionError }) {
+// where it appears. `about` is the entity the control is, such as
+// "proposal <id>": a refusal of it shows its reason alone, as a sentence,
+// since the control already says which one it is.
+export function Inline({ error, about }: { error: ActionError; about?: string }) {
+  const prefix = about ? `${about}: ` : null;
+  const message =
+    prefix && error.message.startsWith(prefix)
+      ? sentence(error.message.slice(prefix.length))
+      : error.message;
   return (
     <p className="refusal inline" role="alert">
-      {error.message}
+      {message}
     </p>
   );
 }

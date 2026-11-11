@@ -96,7 +96,10 @@ export type Scenario =
   | "merge-exposed"
   // Two agents on a dialog no hook asked for: the folder trust dialog, and
   // one the board cannot read (P7).
-  | "dialog";
+  | "dialog"
+  // A memory document a launch goes on without, and a Keep over the startup
+  // budget (memory.md sections 6 and 9).
+  | "memory-limits";
 
 // The scenarios with paired peers. `stale-sessions` has them so a peer's older
 // sessions show on this host's board.
@@ -131,6 +134,7 @@ export const SCENARIOS: readonly Scenario[] = [
   "merge-ready",
   "merge-exposed",
   "dialog",
+  "memory-limits",
 ];
 
 const WEEKLY_FLOOR_PERCENT = 3;
@@ -1891,7 +1895,7 @@ export function fixtureResource(
   if (url.pathname === "/api/v1/projects/checkout") return checkoutFor(url);
   if (url.pathname.startsWith("/api/v1/memory")) {
     settleRetros(now);
-    return memoryResource(url, quotaFor(served, now).windows);
+    return memoryResource(url, quotaFor(served, now).windows, served);
   }
   if (url.pathname === "/api/v1/retros") return retrosResource(url, now);
   // No project starts archived; the stand-in server adds the ones archived since.

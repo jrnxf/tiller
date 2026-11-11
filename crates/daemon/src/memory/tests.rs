@@ -436,6 +436,108 @@ async fn a_batch_keeps_proposals_made_against_the_same_text() {
     assert_eq!(home.git(&["rev-list", "--count", "HEAD"]).trim(), "3");
 }
 
+/// The startup tokens of a launch that renders `docs` (path, text) in this
+/// order, worked out here as `memory.md` section 2 states the form: one
+/// `# Memory` heading, then a `## <path>` heading per document that is not
+/// empty, at four bytes a token, rounded up.
+fn startup_tokens(docs: &[(&str, &str)]) -> i64 {
+    let mut prompt = String::from("# Memory\n\n");
+    for (path, text) in docs {
+        if !text.trim().is_empty() {
+            prompt.push_str(&format!("## {path}\n\n{}\n\n", text.trim_end()));
+        }
+    }
+    i64::try_from(prompt.len().div_ceil(4)).unwrap()
+}
+
+/// `n` with a comma between each group of three digits.
+fn grouped(n: i64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (at, digit) in digits.chars().enumerate() {
+        if at > 0 && (digits.len() - at).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// Keep refuses a change that would put a role's startup memory over the
+/// 7,500-token budget, worked out from the approved set at decide time, and
+/// says the numbers; a Keep under it records the count on the proposal
+/// (`memory.md` section 6, P42).
+#[tokio::test(flavor = "multi_thread")]
+async fn keep_over_the_startup_budget_is_refused_with_the_numbers() {
+    let home = home();
+    home.add("k-1", "fleet", NOTE_SECTION, &"f".repeat(29_500))
+        .await;
+    home.add("k-2", "alpha", RULE_SECTION, "Run the slow suite")
+        .await;
+    let fits = propose(&home, "alpha", "The parser test flakes");
+    let line = "o".repeat(600);
+    let over = propose(&home, "alpha", &line);
+    measured(&home, "budget notes", &[&fits, &over]);
+
+    let (fleet, alpha) = (text(&home, "fleet.md"), text(&home, ALPHA));
+    let now = startup_tokens(&[("fleet.md", &fleet), (ALPHA, &alpha)]);
+    let after = startup_tokens(&[
+        ("fleet.md", &fleet),
+        (ALPHA, &doc::add(&alpha, NOTE_SECTION, &line)),
+    ]);
+    assert!(now <= 7_500 && after > 7_500, "{now} {after}");
+    let head = home.git(&["rev-parse", "HEAD"]);
+    let blob = home.blob("alpha").await;
+    let answer = home
+        .post(
+            "/api/v1/memory/proposals/decide",
+            json!({"idempotency_key": "k-over", "decisions": [
+                {"proposal": over, "decision": "keep", "base_blob": blob},
+            ]}),
+        )
+        .await;
+    let error = refusal(&answer, StatusCode::UNPROCESSABLE_ENTITY);
+    let numbers = format!(
+        "it would put every role's startup memory in alpha over the 7,500-token budget: {} tokens now, {} from this change, {} after",
+        grouped(now),
+        grouped(after - now),
+        grouped(after)
+    );
+    assert_eq!(error.message, format!("proposal {over}: {numbers}"));
+    assert_eq!(home.git(&["rev-parse", "HEAD"]), head);
+
+    // One under the budget keeps, with the count it leaves for each role.
+    let answer = home
+        .post(
+            "/api/v1/memory/proposals/decide",
+            json!({"idempotency_key": "k-fits", "decisions": [
+                {"proposal": fits, "decision": "keep", "base_blob": blob},
+            ]}),
+        )
+        .await;
+    ok(&answer);
+    let kept = startup_tokens(&[("fleet.md", &fleet), (ALPHA, &text(&home, ALPHA))]);
+    let recorded: String = home
+        .fleet
+        .open()
+        .conn()
+        .query_row(
+            "SELECT token_budget_after FROM proposals WHERE id = ?1",
+            [&fits],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let all = ["orchestrator", "scout", "builder", "reviewer", "verifier"];
+    let expected: serde_json::Map<String, Value> = all
+        .iter()
+        .map(|role| ((*role).to_owned(), json!(kept)))
+        .collect();
+    assert_eq!(
+        serde_json::from_str::<Value>(&recorded).unwrap(),
+        Value::Object(expected)
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_batch_keep_after_another_set_moved_the_text_is_stale() {
     let home = home();
@@ -548,6 +650,36 @@ async fn the_document_list_counts_the_lines_at_head() {
         .collect();
     assert_eq!(lines.get("fleet"), Some(&1));
     assert_eq!(lines.get("alpha"), Some(&2));
+}
+
+/// The document list names a document a launch goes on without, and why,
+/// so the board can warn about it (`memory.md` section 9, step 4).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_document_list_names_a_document_a_launch_skips() {
+    let home = home();
+    home.add("k-1", "fleet", RULE_SECTION, "Ask before a sizeable merge")
+        .await;
+    home.add("k-2", "alpha", RULE_SECTION, "Run the slow suite")
+        .await;
+    // The text has no approved revision, as after an edit outside Tiller.
+    home.fleet
+        .open()
+        .conn()
+        .execute(
+            "UPDATE memory_revisions SET review = 'unreviewed'
+              WHERE source_id = (SELECT id FROM memory_sources WHERE project_id = 'alpha')",
+            [],
+        )
+        .unwrap();
+    let view = home.view("fleet").await;
+    let skipped: BTreeMap<&str, Value> = view["docs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (d["project_id"].as_str().unwrap(), d["skipped"].clone()))
+        .collect();
+    assert_eq!(skipped["alpha"], json!("it has no approved revision"));
+    assert_eq!(skipped["fleet"], Value::Null);
 }
 
 #[tokio::test(flavor = "multi_thread")]

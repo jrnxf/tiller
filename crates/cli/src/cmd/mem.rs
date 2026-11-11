@@ -238,6 +238,8 @@ fn approve(app: &App, args: ApproveArgs) -> Done {
         item
     };
     if args.dry_run {
+        let repo = Repo::at(&app.home);
+        let list = scrub::terms(&app.home);
         let results = chosen
             .iter()
             .map(|p| {
@@ -245,11 +247,24 @@ fn approve(app: &App, args: ApproveArgs) -> Done {
                     return Ok(with(p, "skipped", json!({"reason": not_proposed(p)})));
                 }
                 let gate = store.learning_gate(&p.id)?;
-                Ok(if gate.ok {
-                    with(p, "would_approve", json!({}))
-                } else {
-                    with(p, "would_refuse", json!({"reason": gate_reason(&gate)}))
-                })
+                if !gate.ok {
+                    return Ok(with(
+                        p,
+                        "would_refuse",
+                        json!({"reason": gate_reason(&gate)}),
+                    ));
+                }
+                // Each one is counted on the approved set as it is now, not
+                // after the ones before it in this run.
+                let file = repo.state(&document_path(&p.project_id), &list)?;
+                Ok(
+                    match store.mem_keep_budget(&p.id, &file, &|sha| repo.blob(sha)) {
+                        Ok(_) => with(p, "would_approve", json!({})),
+                        Err(error) => {
+                            with(p, "would_refuse", json!({"reason": refusal(p, error)?}))
+                        }
+                    },
+                )
             })
             .collect::<Result<Vec<Value>, Failure>>()?;
         let count = |what: &str| results.iter().filter(|r| r["result"] == what).count();
@@ -295,7 +310,7 @@ fn approve(app: &App, args: ApproveArgs) -> Done {
                 ));
             }
             Err(error @ tiller_core::Error::Refused { .. }) => {
-                results.push(with(p, "refused", json!({"reason": error.to_string()})));
+                results.push(with(p, "refused", json!({"reason": refusal(p, error)?})));
             }
             Err(error) => results.push(with(p, "failed", json!({"reason": error.to_string()}))),
         }
@@ -318,6 +333,21 @@ fn approve(app: &App, args: ApproveArgs) -> Done {
     .with_key(&keyed);
     outcome.mutation = Some((std::mem::take(&mut writer.events), writer.replayed));
     Ok(outcome)
+}
+
+/// A refusal's reason as the line about `proposal` shows it: the fact
+/// alone when it is about that proposal, whose id the line already has.
+/// An error that is not a refusal stays the error.
+fn refusal(proposal: &Proposal, error: tiller_core::Error) -> Result<String, Failure> {
+    match error {
+        tiller_core::Error::Refused { entity, id, fact }
+            if entity == "proposal" && id == proposal.id =>
+        {
+            Ok(fact)
+        }
+        error @ tiller_core::Error::Refused { .. } => Ok(error.to_string()),
+        error => Err(error.into()),
+    }
 }
 
 fn not_proposed(proposal: &Proposal) -> String {

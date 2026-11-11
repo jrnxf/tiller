@@ -3428,6 +3428,125 @@ fn spawn_renders_the_approved_memory_and_records_the_load() {
     }
 }
 
+/// The payload of the session's `session.memory_loaded` event.
+fn memory_loaded(rig: &Rig, session: &str) -> serde_json::Value {
+    let payload: String = rig
+        .fleet
+        .store
+        .conn()
+        .query_row(
+            "SELECT payload FROM events WHERE kind = 'session.memory_loaded' AND entity_id = ?1",
+            [session],
+            |row| row.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&payload).unwrap()
+}
+
+/// A document with no approved revision does not refuse the launch: the
+/// session starts without it, and `session.memory_loaded` names the
+/// document it skipped and why (`memory.md` sections 2 and 9). An emptied
+/// baseline skips nothing, since it has no text to load.
+#[test]
+fn spawn_skips_a_document_with_no_approved_revision_and_records_the_skip() {
+    let mut rig = Rig::new();
+    let home = rig.fleet.dir.path().join("tiller-home");
+    let repo = home.join("memory");
+    std::fs::create_dir_all(repo.join("projects")).unwrap();
+    git(&repo, &["init", "-q"]);
+    let blob = |path: &str, text: &str| {
+        std::fs::write(repo.join(path), text).unwrap();
+        git(&repo, &["hash-object", "-w", path])
+    };
+    let fleet = blob("fleet.md", "## How we work here\n\n- Fleet line.\n");
+    let alpha = blob(
+        "projects/alpha.md",
+        "## How we work here\n\n- Unreviewed line.\n",
+    );
+    rig.tiller_home = home;
+    let all = r#"["orchestrator","scout","builder","reviewer","verifier"]"#;
+    for (id, project, path) in [
+        ("S-fleet", "fleet", "fleet.md"),
+        ("S-alpha", "alpha", "projects/alpha.md"),
+        ("S-empty", "alpha", "projects/alpha-empty.md"),
+    ] {
+        rig.sql(&format!(
+            "INSERT INTO memory_sources (id, project_id, boundary, kind, loaded_path, canonical_repo,
+                 canonical_path, apply_method, load_mode, roles, added_at)
+             VALUES ('{id}', '{project}', 'personal', 'tiller_doc', '~/.tiller/memory/{path}',
+                 '~/.tiller/memory', '{path}', 'tiller_commit', 'rendered', '{all}',
+                 '2026-11-02T09:00:00.000Z')"
+        ));
+    }
+    for (id, source, blob, review, provenance) in [
+        ("R-fleet", "S-fleet", fleet.as_str(), "approved", "baseline"),
+        (
+            "R-alpha",
+            "S-alpha",
+            alpha.as_str(),
+            "unreviewed",
+            "external",
+        ),
+        (
+            "R-empty",
+            "S-empty",
+            tiller_core::import::EMPTY_BLOB,
+            "unreviewed",
+            "baseline",
+        ),
+    ] {
+        rig.sql(&format!(
+            "INSERT INTO memory_revisions (id, source_id, blob_sha, review, provenance, scrub,
+                 recorded_at, recorded_by)
+             VALUES ('{id}', '{source}', '{blob}', '{review}', '{provenance}', 'passed',
+                 '2026-11-02T09:00:00.000Z', 'daemon')"
+        ));
+    }
+
+    let card = rig.card(CardKind::Ship, None);
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    let prompt =
+        std::fs::read_to_string(rig.scratch.join(&spawned.run.id).join("prompt.md")).unwrap();
+    assert!(prompt.contains("- Fleet line."), "{prompt}");
+    assert!(!prompt.contains("Unreviewed line"), "{prompt}");
+    let payload = memory_loaded(&rig, &spawned.session.id);
+    assert_eq!(payload["revision_ids"], serde_json::json!(["R-fleet"]));
+    assert_eq!(
+        payload["skipped"],
+        serde_json::json!([{
+            "source_id": "S-alpha",
+            "project_id": "alpha",
+            "path": "projects/alpha.md",
+            "reason": "it has no approved revision",
+        }])
+    );
+
+    // With nothing approved to load, the skip is still recorded.
+    rig.sql("UPDATE memory_revisions SET review = 'unreviewed' WHERE id = 'R-fleet'");
+    let second = rig.card(CardKind::Ship, None);
+    let spawned = rig.spawn(&second, RunRole::Builder);
+    let payload = memory_loaded(&rig, &spawned.session.id);
+    assert_eq!(payload["revision_ids"], serde_json::json!([]));
+    let skipped: Vec<&str> = payload["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(skipped, ["fleet.md", "projects/alpha.md"]);
+    let loads: i64 = rig
+        .fleet
+        .store
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM session_loads WHERE session_id = ?1",
+            [&spawned.session.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(loads, 0);
+}
+
 /// A blob the memory repo cannot give refuses the launch rather than start
 /// a session without text the record would say it got.
 #[test]

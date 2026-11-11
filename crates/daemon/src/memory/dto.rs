@@ -16,6 +16,9 @@ pub struct MemoryDocSummary {
     pub lines: usize,
     /// Open agent proposals against it.
     pub suggestions: usize,
+    /// Why a launch goes on without it, such as "it has no approved
+    /// revision"; null when a launch loads it or it has nothing to load.
+    pub skipped: Option<String>,
 }
 
 /// Where a line came from: the revision that last changed it.

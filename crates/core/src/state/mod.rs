@@ -18,6 +18,7 @@ pub mod deletion;
 pub mod interventions;
 pub mod learning;
 pub mod memory;
+pub mod memory_budget;
 pub mod memory_load;
 pub mod memory_repo;
 pub mod notifications;

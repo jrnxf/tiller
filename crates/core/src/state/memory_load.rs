@@ -16,6 +16,7 @@ use super::memory::host_boundary;
 use crate::domain::{Run, Session};
 use crate::error::{Error, Result};
 use crate::ids::FLEET_PROJECT;
+use crate::import::EMPTY_BLOB;
 use crate::store::{Applied, Ctx, NewEvent, Store, Tx};
 use crate::time::Timestamp;
 
@@ -32,6 +33,21 @@ pub struct Loadable {
     pub canonical_path: String,
     pub blob_sha: String,
 }
+
+/// A Tiller document a launch went on without (`memory.md` section 9, step
+/// 4): it would load for the session's role and project, but has no
+/// approved text to render.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Skipped {
+    pub source_id: String,
+    pub project_id: String,
+    /// The document's path in the memory repo, such as `projects/alpha.md`.
+    pub path: String,
+    pub reason: String,
+}
+
+/// Why a launch skips a document: the one reason a launch skips one today.
+pub const NO_APPROVED_REVISION: &str = "it has no approved revision";
 
 /// What `mem.load` recorded for one session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,64 +129,48 @@ impl Store {
     /// boundary, its `roles` name the role, and it has an approved
     /// revision; the current one is the approved revision recorded last (an
     /// undo records its earlier blob again). A source with no approved
-    /// revision yet loads nothing: its document has no approved text. A
-    /// state.db with no live Tiller document loads nothing either, so only
-    /// a launch with memory to load needs `meta.boundary`.
+    /// revision yet loads nothing: the launch goes on without it, and
+    /// [`Self::mem_skipped`] names it. A state.db with no live Tiller
+    /// document loads nothing either, so only a launch with memory to load
+    /// needs `meta.boundary`.
     pub fn mem_loadable(&self, project: &str, role: &str) -> Result<Vec<Loadable>> {
-        let any: bool = self.conn().query_row(
-            "SELECT EXISTS (SELECT 1 FROM memory_sources
-                            WHERE kind = 'tiller_doc' AND retired_at IS NULL)",
-            [],
-            |row| row.get(0),
-        )?;
-        if !any {
-            return Ok(Vec::new());
-        }
-        let boundary = host_boundary(self.conn())?;
-        let mut stmt = self.conn().prepare(
-            "SELECT s.id, r.id, s.project_id, s.canonical_repo, s.canonical_path, r.blob_sha
-             FROM memory_sources s
-             JOIN memory_revisions r ON r.id = (
-                 SELECT id FROM memory_revisions
-                 WHERE source_id = s.id AND review = 'approved'
-                 ORDER BY recorded_at DESC, id DESC LIMIT 1)
-             WHERE s.kind = 'tiller_doc' AND s.retired_at IS NULL
-               AND s.boundary = ?3
-               AND s.project_id IN (?1, ?2)
-               AND EXISTS (SELECT 1 FROM json_each(s.roles) WHERE value = ?4)
-               AND s.canonical_repo IS NOT NULL AND s.canonical_path IS NOT NULL
-             ORDER BY s.project_id != ?1, s.canonical_path, s.id",
-        )?;
-        let rows = stmt.query_map(params![FLEET_PROJECT, project, boundary, role], |row| {
-            Ok(Loadable {
-                source_id: row.get(0)?,
-                revision_id: row.get(1)?,
-                project_id: row.get(2)?,
-                canonical_repo: row.get(3)?,
-                canonical_path: row.get(4)?,
-                blob_sha: row.get(5)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        loadable(self.conn(), project, role)
+    }
+
+    /// The documents a launch of `role` in `project` skips, in prompt
+    /// order: each live Tiller document that would load (as
+    /// [`Self::mem_loadable`] picks them) but has no approved revision. One
+    /// whose newest revision is the empty file is not skipped, since it has
+    /// no text to load.
+    pub fn mem_skipped(&self, project: &str, role: &str) -> Result<Vec<Skipped>> {
+        skipped(self.conn(), Some((project, role)))
+    }
+
+    /// Every live Tiller document of this host's boundary that launches
+    /// skip, for any role or project, fleet first: the Health warning.
+    pub fn mem_skipped_all(&self) -> Result<Vec<Skipped>> {
+        skipped(self.conn(), None)
     }
 
     /// `mem.load` (the launcher, once a launch's line went in): one
     /// `startup` row per revision it rendered for the session, at this
-    /// moment. A launch that rendered nothing writes nothing and opens no
-    /// transaction.
+    /// moment, and the `session.memory_loaded` event naming them and the
+    /// documents the launch `skipped`. A launch that rendered and skipped
+    /// nothing writes nothing and opens no transaction.
     pub fn mem_load(
         &mut self,
         ctx: &Ctx,
         session: &str,
         revisions: &[String],
+        skipped: &[Skipped],
     ) -> Result<Applied<Loaded>> {
-        if revisions.is_empty() {
+        if revisions.is_empty() && skipped.is_empty() {
             return Ok(nothing(session, "startup", ctx.now));
         }
         self.write(ctx, "mem.load", None, |tx| {
             let session: Session = get(tx.conn(), "session", session)?;
             let at = tx.now();
-            insert(tx, &session, "startup", at, revisions)
+            insert(tx, &session, "startup", at, revisions, Some(skipped))
         })
     }
 
@@ -200,7 +200,7 @@ impl Store {
         self.write(ctx, "mem.load", None, |tx| {
             let session: Session = get(tx.conn(), "session", session)?;
             let revisions = set_as_of(tx.conn(), &session.id, Some(at))?;
-            insert(tx, &session, trigger, at, &revisions)
+            insert(tx, &session, trigger, at, &revisions, None)
         })
     }
 
@@ -337,6 +337,91 @@ impl Store {
     }
 }
 
+/// Whether state.db has a live Tiller document, so a host with none needs
+/// no `meta.boundary` to load nothing.
+fn any_document(conn: &rusqlite::Connection) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM memory_sources
+                        WHERE kind = 'tiller_doc' AND retired_at IS NULL)",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// [`Store::mem_loadable`] on `conn`, for a read inside a transaction.
+pub(super) fn loadable(
+    conn: &rusqlite::Connection,
+    project: &str,
+    role: &str,
+) -> Result<Vec<Loadable>> {
+    if !any_document(conn)? {
+        return Ok(Vec::new());
+    }
+    let boundary = host_boundary(conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT s.id, r.id, s.project_id, s.canonical_repo, s.canonical_path, r.blob_sha
+         FROM memory_sources s
+         JOIN memory_revisions r ON r.id = (
+             SELECT id FROM memory_revisions
+             WHERE source_id = s.id AND review = 'approved'
+             ORDER BY recorded_at DESC, id DESC LIMIT 1)
+         WHERE s.kind = 'tiller_doc' AND s.retired_at IS NULL
+           AND s.boundary = ?3
+           AND s.project_id IN (?1, ?2)
+           AND EXISTS (SELECT 1 FROM json_each(s.roles) WHERE value = ?4)
+           AND s.canonical_repo IS NOT NULL AND s.canonical_path IS NOT NULL
+         ORDER BY s.project_id != ?1, s.canonical_path, s.id",
+    )?;
+    let rows = stmt.query_map(params![FLEET_PROJECT, project, boundary, role], |row| {
+        Ok(Loadable {
+            source_id: row.get(0)?,
+            revision_id: row.get(1)?,
+            project_id: row.get(2)?,
+            canonical_repo: row.get(3)?,
+            canonical_path: row.get(4)?,
+            blob_sha: row.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The documents with no approved revision whose newest revision has text:
+/// those a launch of the role in the project would load (`Some`), or every
+/// one on the host (`None`).
+fn skipped(conn: &rusqlite::Connection, scope: Option<(&str, &str)>) -> Result<Vec<Skipped>> {
+    if !any_document(conn)? {
+        return Ok(Vec::new());
+    }
+    let boundary = host_boundary(conn)?;
+    let (project, role) = scope.unzip();
+    let mut stmt = conn.prepare(
+        "SELECT s.id, s.project_id, s.canonical_path
+         FROM memory_sources s
+         WHERE s.kind = 'tiller_doc' AND s.retired_at IS NULL
+           AND s.boundary = ?2
+           AND s.canonical_repo IS NOT NULL AND s.canonical_path IS NOT NULL
+           AND (?3 IS NULL OR s.project_id IN (?1, ?3))
+           AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(s.roles) WHERE value = ?4))
+           AND NOT EXISTS (SELECT 1 FROM memory_revisions
+                           WHERE source_id = s.id AND review = 'approved')
+           AND (SELECT blob_sha FROM memory_revisions WHERE source_id = s.id
+                ORDER BY recorded_at DESC, id DESC LIMIT 1) != ?5
+         ORDER BY s.project_id != ?1, s.project_id, s.canonical_path, s.id",
+    )?;
+    let rows = stmt.query_map(
+        params![FLEET_PROJECT, boundary, project, role, EMPTY_BLOB],
+        |row| {
+            Ok(Skipped {
+                source_id: row.get(0)?,
+                project_id: row.get(1)?,
+                path: row.get(2)?,
+                reason: NO_APPROVED_REVISION.to_owned(),
+            })
+        },
+    )?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// A load that wrote nothing, with no transaction opened.
 fn nothing(session: &str, trigger: &str, at: Timestamp) -> Applied<Loaded> {
     Applied {
@@ -377,12 +462,16 @@ fn set_as_of(
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// The rows and event of one load. `skipped` is the launch's skipped
+/// documents, on a `startup` load only: a copy renders nothing, so it
+/// skips nothing either.
 fn insert(
     tx: &mut Tx<'_>,
     session: &Session,
     trigger: &str,
     at: Timestamp,
     revisions: &[String],
+    skipped: Option<&[Skipped]>,
 ) -> Result<Loaded> {
     let mut written = Vec::new();
     for revision in revisions {
@@ -395,15 +484,20 @@ fn insert(
             written.push(revision.clone());
         }
     }
-    if !written.is_empty() {
+    let skipped = skipped.unwrap_or_default();
+    if !written.is_empty() || !skipped.is_empty() {
         let card = match &session.run_id {
             Some(run) => Some(get::<Run>(tx.conn(), "run", run)?.card_id),
             None => None,
         };
+        let mut payload = json!({"trigger": trigger, "revision_ids": written});
+        if trigger == "startup" {
+            payload["skipped"] = json!(skipped);
+        }
         tx.event(
             NewEvent::new("session", &session.id, "session.memory_loaded")
                 .card_opt(card)
-                .payload(json!({"trigger": trigger, "revision_ids": written})),
+                .payload(payload),
         )?;
     }
     Ok(Loaded {
@@ -508,7 +602,7 @@ mod tests {
         document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
             .unwrap();
         let start = Timestamp::now();
         for (n, event) in [
@@ -545,7 +639,7 @@ mod tests {
         document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
             .unwrap();
         let at = Timestamp::now().plus_minutes(1);
         observe_with(
@@ -568,7 +662,7 @@ mod tests {
         let at = Timestamp::now();
         let daemon = Ctx::at(Actor::Daemon, at);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
             .unwrap();
         observe(&mut store, &session, "SessionStart:clear", at);
         let made = owed(&mut store, &daemon);
@@ -587,7 +681,7 @@ mod tests {
         document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
             .unwrap();
         store
             .conn()
@@ -636,7 +730,7 @@ mod tests {
         document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
             .unwrap();
         let mark = store.mem_load_owed(&daemon, None).unwrap().mark;
         assert_eq!(mark.read_from, daemon.now);
@@ -687,7 +781,7 @@ mod tests {
         document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
             .unwrap();
         store
             .conn()
@@ -737,7 +831,7 @@ mod tests {
         document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
             .unwrap();
         store
             .conn()
@@ -769,7 +863,7 @@ mod tests {
         document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
             .unwrap();
         store
             .conn()
@@ -822,7 +916,7 @@ mod tests {
         document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
             .unwrap();
         store
             .conn()
@@ -883,7 +977,7 @@ mod tests {
         document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
             .unwrap();
         store
             .conn()
@@ -937,7 +1031,7 @@ mod tests {
         document(&store);
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
             .unwrap();
         let mark = store.mem_load_owed(&daemon, None).unwrap().mark;
         observe(
@@ -977,7 +1071,7 @@ mod tests {
             daemon.now.plus_minutes(-1),
         );
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
             .unwrap();
         assert_eq!(store.owed_copies(daemon.now, None).unwrap(), Vec::new());
         assert!(owed(&mut store, &daemon).is_empty());
@@ -1001,7 +1095,7 @@ mod tests {
             .unwrap();
         let daemon = Ctx::new(Actor::Daemon);
         store
-            .mem_load(&daemon, &session, &["R-alpha".to_owned()])
+            .mem_load(&daemon, &session, &["R-alpha".to_owned()], &[])
             .unwrap();
         observe(
             &mut store,
@@ -1011,7 +1105,7 @@ mod tests {
         );
         let relaunch = Ctx::at(Actor::Daemon, daemon.now.plus_minutes(3));
         store
-            .mem_load(&relaunch, &session, &["R-beta".to_owned()])
+            .mem_load(&relaunch, &session, &["R-beta".to_owned()], &[])
             .unwrap();
         let later = Ctx::at(Actor::Daemon, daemon.now.plus_minutes(5));
         assert_eq!(owed(&mut store, &later).len(), 1);

@@ -165,6 +165,7 @@ impl Writer {
             shown.unwrap_or(&file.head_blob),
             &file,
             after,
+            &|sha| self.repo.blob(sha),
         )?;
         let pending = self.track(decided);
         if let Some(approval) = &pending.approval_id {
