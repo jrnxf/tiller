@@ -738,7 +738,16 @@ impl Walker<'_, '_> {
         let shown = texts(words);
         let mut i = 0;
         loop {
-            let program = words.get(i)?;
+            let Some(program) = words.get(i) else {
+                // A wrapper with no program left runs the words `xargs`
+                // appends (`xargs env --`, `nix develop -c -l`).
+                return match words.first() {
+                    Some(first) if appended => {
+                        self.appended_input(basename(&first.text), command, script)
+                    }
+                    _ => None,
+                };
+            };
             if !program.fixed {
                 return self.unknown_program(&words[i..]);
             }
@@ -1164,7 +1173,7 @@ impl Walker<'_, '_> {
         let mut unread = false;
         // The subcommand is the first word that is not a flag or a value.
         // Until the guard knows it, it may be `develop`, `shell` or `run`.
-        let (mut shell, mut run, mut known) = (false, false, false);
+        let (mut sub, mut known) = (NixSub::default(), false);
         // The next words that may be the value of a flag the guard does not
         // know, whether the last word was outside them, and whether the
         // cluster the last word came from was.
@@ -1191,7 +1200,9 @@ impl Walker<'_, '_> {
             if !word.fixed {
                 // It may be the subcommand, `-i`, `-u NAME`, `-c PROGRAM`
                 // or `-c`.
-                shell |= !known;
+                if !known {
+                    sub.read(&word);
+                }
                 if !unread {
                     unread = true;
                     if let Some(found) = self.unreadable_options("nix", &words[at..]) {
@@ -1207,11 +1218,7 @@ impl Walker<'_, '_> {
                 // nix still takes the first word after `--` as the
                 // subcommand when it has none.
                 if !known && let Some((next, _)) = list.front() {
-                    shell |= !next.fixed
-                        || ["develop", "dev-shell", "shell", "run"]
-                            .iter()
-                            .any(|name| next.is(name));
-                    run |= next.is("run");
+                    sub.read(next);
                 }
                 break;
             }
@@ -1219,15 +1226,14 @@ impl Walker<'_, '_> {
             own.push(word);
             if !flag.starts_with('-') {
                 if !known {
-                    shell |= ["develop", "dev-shell", "shell", "run"].contains(&flag.as_str());
-                    run |= flag == "run";
+                    sub.read(&Arg::fixed(&flag));
                     // `nix env shell`: `env` takes a subcommand of its own.
                     known = free && flag != "env";
                 }
                 continue;
             }
             let (name, value) = (list.front().map(|w| &w.0), list.get(1).map(|w| &w.0));
-            if (shell || !known)
+            if (sub.shell || !known)
                 && let Some(found) = self.nix_env(&flag, name, value, shown)
             {
                 return Some(Some(found));
@@ -1269,7 +1275,7 @@ impl Walker<'_, '_> {
                                 .chain(list.iter().take(2).map(|(word, _)| word.clone()))
                                 .collect();
                             for (n, part) in parts.iter().enumerate() {
-                                if (shell || !known)
+                                if (sub.shell || !known)
                                     && let Some(found) =
                                         self.nix_env(part, view.get(n + 1), view.get(n + 2), shown)
                                 {
@@ -1289,10 +1295,12 @@ impl Walker<'_, '_> {
                 Ok(values) | Err(values) => maybe = maybe.max(values),
             }
         }
-        // `nix develop --expr`: the expression's `shellHook` runs too. Any
-        // `--expr` may be the flag, as a value nix does not take.
-        if shell
-            && let Some(expr) = tail
+        // `nix develop --expr`: the expression's `shellHook` runs too, and
+        // `nix print-dev-env` prints it for a shell to run. Any `--expr`
+        // among nix's own words may be the flag, as a value nix does not
+        // take.
+        if sub.hook
+            && let Some(expr) = own
                 .windows(2)
                 .find(|pair| pair[0].is("--expr") && protected(&pair[1].text))
         {
@@ -1305,12 +1313,14 @@ impl Walker<'_, '_> {
         // `xargs nix develop` or `xargs nix develop -c`: the input may be
         // nix's flags or the command.
         if appended
-            && sure.as_ref().is_none_or(Vec::is_empty)
+            && sure.is_none()
             && let Some(found) = self.appended_input("nix", command, script)
         {
             return Some(Some(found));
         }
-        if run && let Some(found) = self.unknown_program(&words[at..]) {
+        if sub.run
+            && let Some(found) = self.unknown_program(&words[at..])
+        {
             return Some(Some(found));
         }
         // nix's own words name files it may write (`--profile`,
@@ -1322,7 +1332,7 @@ impl Walker<'_, '_> {
             return Some(Some(found));
         }
         // With no command, or an empty one, a shell reads standard input.
-        if shell
+        if sub.shell
             && sure.as_ref().is_none_or(Vec::is_empty)
             && let Some(found) = self.stdin_script(command, script)
         {
@@ -1330,21 +1340,14 @@ impl Walker<'_, '_> {
         }
         // `nix develop` runs its command through the bash `exec` builtin,
         // which reads `--`, `-a NAME`, `-c` and `-l` first. `nix shell`
-        // runs it as it is, which `exec` reads the same way.
-        let sure = sure.map(|reading| {
-            let mut words = vec![Arg::fixed("exec")];
-            words.extend(reading);
-            words
-        });
-        if let Some(reading) = &sure
-            && reading.len() > 1
-            && let Some(found) = self.exec(reading, command, script, false, appended)
-        {
-            return Some(Some(found));
-        }
-        for reading in &readings.list {
-            let mut words = vec![Arg::fixed("exec")];
-            words.extend_from_slice(reading);
+        // runs the first word as the program.
+        let prefix = if sub.develop {
+            &[Arg::fixed("exec")][..]
+        } else {
+            &[]
+        };
+        for reading in sure.iter().chain(&readings.list) {
+            let words = [prefix, reading].concat();
             if let Some(found) = self.exec(&words, command, script, false, appended) {
                 return Some(Some(found));
             }
@@ -3836,6 +3839,30 @@ fn piped_texts(command: &Simple, script: &Script) -> Vec<String> {
     texts
 }
 
+/// What the guard knows of nix's subcommand: whether it may start a
+/// shell, run its command through the bash `exec` builtin as `develop`
+/// does, run a program, or run or print an expression's `shellHook`.
+#[derive(Default)]
+struct NixSub {
+    shell: bool,
+    develop: bool,
+    run: bool,
+    hook: bool,
+}
+
+impl NixSub {
+    /// Reads a word that may be the subcommand. A word not known before
+    /// it runs may be any of them.
+    fn read(&mut self, word: &Arg) {
+        let any = !word.fixed;
+        let is = |names: &[&str]| any || names.iter().any(|name| word.is(name));
+        self.shell |= is(&["develop", "dev-shell", "shell", "run"]);
+        self.develop |= is(&["develop", "dev-shell"]);
+        self.run |= is(&["run"]);
+        self.hook |= is(&["develop", "dev-shell", "print-dev-env"]);
+    }
+}
+
 /// The words of `nix-shell` that are not flags or their values, or the
 /// strings of `--run` and `--command`: with `-E`, its expressions.
 fn nix_shell_exprs(args: &[Arg]) -> impl Iterator<Item = &Arg> {
@@ -3849,7 +3876,7 @@ fn nix_shell_exprs(args: &[Arg]) -> impl Iterator<Item = &Arg> {
             return true;
         }
         skip = match word.text.as_str() {
-            "--run" | "--command" | "-I" | "-A" | "--attr" | "--keep" | "-k" | "--include" => 1,
+            "--run" | "--command" | "-I" | "-A" | "--attr" | "--keep" | "--include" => 1,
             "--arg" | "--argstr" | "--option" => 2,
             _ => 0,
         };
@@ -3861,10 +3888,10 @@ fn nix_shell_exprs(args: &[Arg]) -> impl Iterator<Item = &Arg> {
 /// for a path that `filepath.Clean` left (`path`). A bare name is found
 /// on PATH, and a path in a `bin` directory is a program. Any other path
 /// is most often a project directory, so it is read as a program only
-/// when its name is one the guard has rules for: a shell, a wrapper, a
-/// program it reads by its words or denies by its name. A project named
-/// `tiller` is not read as `tiller`: a tiller outside the package cannot
-/// reach the state.
+/// when its name is a shell, a wrapper or a program the guard reads by its
+/// words. A project named `tiller` or `claude` is not read as that
+/// program: a tiller outside the package cannot reach the state, and a
+/// program the guard denies by its name runs under any other name too.
 fn direnv_file(path: &str) -> bool {
     const READS: &[&str] = &[
         "env",
@@ -3895,16 +3922,8 @@ fn direnv_file(path: &str) -> bool {
     };
     let parent = dir.rsplit('/').next().unwrap_or_default();
     matches!(parent, "bin" | "sbin")
-        || [
-            SHELLS,
-            READS,
-            HTTP_CLIENTS,
-            PTY_ALLOCATORS,
-            NESTED_AGENTS,
-            SCHEDULERS,
-        ]
-        .iter()
-        .any(|names| names.contains(&name))
+        || SHELLS.contains(&name)
+        || READS.contains(&name)
         || options::runner(name).is_some()
 }
 

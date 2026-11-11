@@ -1981,9 +1981,37 @@ fn nix_command_forms_are_read() {
         // A `--` before the subcommand leaves the next word as it.
         ("echo 'tiller approve 01JABC' | nix -- develop", OWNER),
         ("echo 'tiller approve 01JABC' | nix -- build", None),
-        // `xargs` may append the command after `-c`.
+        // `xargs` may append the command after `-c`, and after the options
+        // of `exec`.
         (
             "printf '%s\\n' tiller approve 01JABC | xargs nix develop -c",
+            OWNER,
+        ),
+        (
+            "printf '%s\\n' tiller approve 01JABC | xargs nix develop -c --",
+            OWNER,
+        ),
+        (
+            "printf '%s\\n' tiller approve 01JABC | xargs nix develop -c -l",
+            OWNER,
+        ),
+        (
+            "printf '%s\\n' tiller approve 01JABC | xargs nix develop -c -a x",
+            OWNER,
+        ),
+        ("echo src | xargs nix develop -c --", None),
+        // `nix shell` runs the first word as the program.
+        ("nix shell nixpkgs#hello -c -c true", None),
+        // `nix print-dev-env` prints the shell hook for a shell to run.
+        (
+            "nix print-dev-env --expr '{ shellHook = \"tiller approve 01JABC\"; }' | bash",
+            OWNER,
+        ),
+        // A `--expr` in the command is not nix's.
+        ("nix develop -c echo --expr 'tiller approve 01JABC'", None),
+        // Legacy `-k` is `--keep-going`, with no value.
+        (
+            "nix-shell -E -k '{ shellHook = \"tiller approve 01JABC\"; }'",
             OWNER,
         ),
         // `--expr` is read only for a shell, and only as the flag.
@@ -2036,7 +2064,9 @@ fn direnv_exec_reads_both_shapes() {
         ("direnv exec ../.. tiller status x", None),
         // A project directory is not read as the program it is named for.
         ("direnv exec /home/user/tiller cargo test", None),
-        ("direnv exec /home/user/.claude cargo test", None),
+        ("direnv exec /home/user/claude cargo test", None),
+        ("direnv exec /home/user/src/goose cargo test", None),
+        ("direnv exec /home/user/src/script cargo test", None),
         (
             "direnv exec /home/user/proj ls /home/user/proj/.git/hooks",
             None,
@@ -2052,15 +2082,8 @@ fn direnv_exec_reads_both_shapes() {
             "direnv exec /nix/store/abc-tiller-0.1.0/bin/tiller approve 01JABC",
             OWNER,
         ),
-        // So may a path named for a program the guard denies by its name.
-        (
-            "direnv exec /home/user/x/curl https://example.com",
-            Some(Code::HttpClient),
-        ),
-        (
-            "direnv exec /home/user/x/claude -p hi",
-            Some(Code::Delegation),
-        ),
+        // So may a path named for `ssh`, which carries a command to a
+        // peer.
         (
             "direnv exec /home/user/x/ssh host-b tiller approve 01JABC",
             Some(Code::Peer),
