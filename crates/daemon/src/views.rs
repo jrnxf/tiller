@@ -1442,6 +1442,7 @@ fn timeline_text(event: &Event) -> String {
         "session.stamped" => "stamped the session".to_owned(),
         "session.ended" => "ended the session".to_owned(),
         "session.resume_attempted" => "tried to resume the session".to_owned(),
+        "session.memory_loaded" => "loaded approved memory into the session".to_owned(),
         "approval.requested" => "asked for an approval".to_owned(),
         "approval.decided" => "decided an approval".to_owned(),
         "approval.executing" => "started the approved action".to_owned(),

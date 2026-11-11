@@ -55,6 +55,7 @@ const PHRASE_TEXT: Record<string, string> = {
   "mem.apply.finish": "finished a memory change",
   "mem.decide": "decided a memory proposal",
   "mem.edit": "edited a memory line",
+  "mem.load": "recorded the memory a session loaded",
   "mem.note": "noted a memory line",
   "mem.outside_edit": "recorded a memory edit made outside Tiller",
   "mem.propose": "proposed a memory change",

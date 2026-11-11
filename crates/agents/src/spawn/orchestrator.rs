@@ -40,6 +40,7 @@ use tiller_herdr::client::Herdr;
 use tiller_herdr::layout;
 
 use super::launch::{self, LaunchSpec, Roots};
+use super::memory;
 use super::settings;
 use super::{Result, SpawnError, World, local_host, relayout};
 use crate::control::{self, Waits};
@@ -189,6 +190,7 @@ pub fn start(
     let session_id = ids::new_ulid();
     let scratch = world.scratch_root.join(&session_id);
     let claude_version = launch::claude_version(&world.config.spawn.claude);
+    let memory = memory::render(store, world.tiller_home, &project.id, role)?;
     let launched = launch::write(&LaunchSpec {
         role,
         session_id: &session_id,
@@ -213,7 +215,7 @@ pub fn start(
         claude: &world.config.spawn.claude,
         claude_config: world.claude_config,
         claude_version: claude_version.as_deref(),
-        memory: &[],
+        memory: &memory,
         note: None,
     })?;
     let opened = Opened {
@@ -283,6 +285,13 @@ pub fn start(
             "recording the launch of session {session_id} failed: {e}"
         )),
     };
+    // The memory it was given, which the revision's "Loaded by" lists.
+    let loaded = match store.mem_load(ctx, &session_id, &memory.revisions) {
+        Ok(_) => None,
+        Err(e) => Some(format!(
+            "recording the memory session {session_id} loaded failed: {e}"
+        )),
+    };
 
     let launch = || -> Result<Option<String>> {
         let bindings = layout::bindings(store.conn(), &host)?;
@@ -318,7 +327,7 @@ pub fn start(
             });
         }
     };
-    let warning = [warning, launched.mode_note, leftover, stamped]
+    let warning = [warning, launched.mode_note, leftover, stamped, loaded]
         .into_iter()
         .flatten()
         .reduce(|all, next| format!("{all}; {next}"));

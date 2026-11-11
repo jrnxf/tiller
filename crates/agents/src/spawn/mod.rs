@@ -29,6 +29,7 @@ pub mod config;
 pub mod dispatch;
 pub mod launch;
 pub mod listeners;
+pub mod memory;
 pub mod orchestrator;
 pub mod pool;
 pub mod promote;
@@ -529,6 +530,7 @@ fn launch_in(
         brief.push_str(&delivery_line(project));
     }
     let claude_version = launch::claude_version(&world.config.spawn.claude);
+    let memory = memory::render(store, world.tiller_home, &project.id, role)?;
     let launched = launch::write(&LaunchSpec {
         role,
         session_id: &session.id,
@@ -549,12 +551,14 @@ fn launch_in(
         claude: &world.config.spawn.claude,
         claude_config: world.claude_config,
         claude_version: claude_version.as_deref(),
-        memory: &[],
+        memory: &memory,
         note: None,
     })?;
     // The manifest first, so a hash on a run always resolves to its parts.
     let recorded = store.config_manifest_record(ctx, &launched.config_hash, &launched.manifest)?;
     made.events.extend(recorded.events);
+    let loaded = store.mem_load(ctx, &session.id, &memory.revisions)?;
+    made.events.extend(loaded.events);
     let placed = store.run_place(
         ctx,
         &run.id,

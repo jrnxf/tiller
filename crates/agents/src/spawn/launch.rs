@@ -2,9 +2,9 @@
 //! session starts from, written into its scratch directory, and the one
 //! line spawn types into the new pane.
 //!
-//! The role body and the brief go into one file passed with
-//! `--append-system-prompt-file`, so the brief survives compaction and a
-//! resume passes it again with the same flags. The orchestrator has no
+//! The role body, the approved memory and the brief go into one file
+//! passed with `--append-system-prompt-file`, so the brief and the memory
+//! survive compaction and a resume passes them again with the same flags. The orchestrator has no
 //! brief and no first prompt: it starts at its composer, waiting for the
 //! owner or its inbox. The settings fragment is the
 //! role's template rendered for this run (T4.1). The run's `config_hash` is
@@ -28,6 +28,7 @@ use sha2::{Digest, Sha256};
 use tiller_core::domain::Effort;
 
 use super::SpawnError;
+use super::memory::Memory;
 use super::trust::{self, ClaudeConfig};
 use crate::roles::{self, MCP_CONFIG, Placeholders, Role};
 
@@ -90,10 +91,10 @@ pub struct LaunchSpec<'a> {
     pub claude_config: &'a ClaudeConfig,
     /// The Claude Code version, for the manifest ([`claude_version`]).
     pub claude_version: Option<&'a str>,
-    /// The memory revisions rendered into the prompt, as `(source id, blob
-    /// sha)` pairs (`memory.md` section 7). Empty until the renderer passes
-    /// them.
-    pub memory: &'a [(String, String)],
+    /// The approved memory rendered into the prompt after the role body
+    /// ([`super::memory::render`]); its `(source id, blob sha)` pairs enter
+    /// the manifest (`memory.md` section 7).
+    pub memory: &'a Memory,
     /// The relaunch note of a new attempt, which goes into its first prompt.
     pub note: Option<&'a str>,
 }
@@ -478,10 +479,15 @@ fn render(spec: &LaunchSpec<'_>) -> Result<Rendered, SpawnError> {
 
     let front = spec.role.frontmatter()?;
     let body = spec.role.prompt_body()?;
-    let prompt = match spec.brief {
-        Some(brief) => format!("{}\n\n{BRIEF_HEADING}{}\n", body.trim_end(), brief.trim()),
-        None => format!("{}\n", body.trim_end()),
-    };
+    // The memory goes before the brief, so [`brief_of`] still finds the
+    // brief after the last part of the prompt.
+    let mut prompt = format!("{}\n", body.trim_end());
+    if !spec.memory.text.is_empty() {
+        prompt.push_str(&format!("\n{}\n", spec.memory.text.trim_end()));
+    }
+    if let Some(brief) = spec.brief {
+        prompt.push_str(&format!("\n{BRIEF_HEADING}{}\n", brief.trim()));
+    }
     let (home, pool, checkouts) = match spec.roots {
         Some(roots) => (
             absolute("the orchestrator home", roots.home)?,
@@ -517,7 +523,7 @@ fn render(spec: &LaunchSpec<'_>) -> Result<Rendered, SpawnError> {
         spec.model,
         spec.effort,
         spec.claude_version,
-        spec.memory,
+        &spec.memory.pairs,
     );
     let config_hash = hash_of(&manifest);
     Ok(Rendered {

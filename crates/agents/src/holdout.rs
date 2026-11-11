@@ -176,7 +176,7 @@ pub fn parse_result(path: &Path) -> Result<EvalResult> {
 
 /// The git repo a source names. Tiller's own documents are recorded under
 /// the literal `~/.tiller/memory`; they live in `<home>/memory`.
-fn repo_dir(repo: &str, home: &Path) -> PathBuf {
+pub(crate) fn repo_dir(repo: &str, home: &Path) -> PathBuf {
     if repo == MEMORY_REPO {
         home.join("memory")
     } else {

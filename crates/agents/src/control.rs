@@ -49,6 +49,7 @@ use tiller_observe::tailer;
 use tiller_reconcile::recovery::sessions::{LAUNCH_BIND_SOURCE, MANUAL_RESUME_REASON};
 
 use crate::spawn::launch::{self, AgainSpec, LaunchSpec, Start};
+use crate::spawn::memory;
 use crate::spawn::{
     Cleaned, Result, SpawnError, World, cleanup, delivery_line, dispatch, local_host, project_of,
     quota_floor, relayout, require_local, role_of, scan_and_record,
@@ -1177,6 +1178,7 @@ fn start_again(
         }
     };
     let claude_version = launch::claude_version(&world.config.spawn.claude);
+    let memory = memory::render(store, world.tiller_home, &project.id, role)?;
     let spec = LaunchSpec {
         role,
         session_id: &session.id,
@@ -1201,7 +1203,7 @@ fn start_again(
         claude: &world.config.spawn.claude,
         claude_config: world.claude_config,
         claude_version: claude_version.as_deref(),
-        memory: &[],
+        memory: &memory,
         note: Some(note),
     };
     let line = if attempt {
@@ -1244,6 +1246,7 @@ fn start_again(
         );
         launched.line
     };
+    events.extend(store.mem_load(ctx, &session.id, &memory.revisions)?.events);
     // What the new session was launched with, for the stale-session check.
     events.extend(crate::stale::record(store, ctx, &session.id, role)?.events);
     let pane_id = match old_pane {

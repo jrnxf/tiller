@@ -81,11 +81,11 @@ Every run and every session Tiller launches carries `config_hash` (`state.md`, S
 | `model`, `effort` | as resolved by dispatch |
 | `tiller` | this binary's version |
 | `claude` | the Claude Code version, when `claude --version` answered within two seconds; else `unknown` |
-| `memory` | SHA-256 over the sorted `(source_id, blob_sha)` pairs rendered into the prompt (memory.md section 7; empty until the renderer passes them) |
+| `memory` | SHA-256 over the sorted `(source_id, blob_sha)` pairs rendered into the prompt (memory.md sections 2 and 7) |
 
 `config_manifests` holds one row per distinct hash (`config_hash`, `parts` JSON, `first_seen_at`), written by `config.manifest_record` on first sight. `tiller learn config <hash> [<other>]` prints a manifest, or the parts in which two differ. Skills, policies and the project's own files enter through `settings` (the fragment lists every hook and exclude) and `memory`; a change to any of them is a changed hash.
 
-Orchestrator sessions get a manifest when the orchestrator launch command exists; today their hash stays null, and `tiller learn status` says how many sessions in a window carry no hash.
+Orchestrator sessions get a manifest from `tiller orchestrator start`. A session started before the hash existed carries none, and `tiller learn status` says how many sessions in a window carry no hash.
 
 ## 6. One change at a time, or a named bundle
 

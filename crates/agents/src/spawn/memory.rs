@@ -1,0 +1,87 @@
+//! The approved memory a launch renders into the role prompt (`memory.md`
+//! section 2, L3): the current approved revision of each Tiller document
+//! that loads for the session's role and project, read from the memory repo
+//! by its blob SHA, never from the working tree. The prompt carries it after
+//! the role body, under one `# Memory` heading and a `## <path>` heading per
+//! document, which is the form the holdout eval measures a candidate in
+//! (`learning-loop.md` section 7).
+
+use std::path::Path;
+use std::process::{Command, Stdio};
+
+use tiller_core::Store;
+use tiller_core::import::EMPTY_BLOB;
+use tiller_core::state::memory_load::Loadable;
+
+use super::SpawnError;
+use crate::holdout::repo_dir;
+use crate::roles::Role;
+
+/// What a launch renders and records: the prompt text, the `(source id,
+/// blob sha)` pairs of the config manifest, and the revisions `mem.load`
+/// writes for the session.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Memory {
+    /// Empty when nothing loads; else the `# Memory` part of the prompt.
+    pub text: String,
+    pub pairs: Vec<(String, String)>,
+    pub revisions: Vec<String>,
+}
+
+/// The approved memory for a launch of `role` in `project`, from the memory
+/// repo under `home`. A blob the repo cannot give refuses the launch: the
+/// session would otherwise start without text the record says it got.
+pub fn render(store: &Store, home: &Path, project: &str, role: Role) -> Result<Memory, SpawnError> {
+    let loadable = store.mem_loadable(project, role.name())?;
+    let mut memory = Memory::default();
+    for doc in &loadable {
+        let text = blob(home, doc)?;
+        // An emptied document gives the session nothing to load.
+        if text.trim().is_empty() {
+            continue;
+        }
+        if memory.text.is_empty() {
+            memory.text.push_str("# Memory\n\n");
+        }
+        memory.text.push_str(&format!(
+            "## {}\n\n{}\n\n",
+            doc.canonical_path,
+            text.trim_end()
+        ));
+        memory
+            .pairs
+            .push((doc.source_id.clone(), doc.blob_sha.clone()));
+        memory.revisions.push(doc.revision_id.clone());
+    }
+    Ok(memory)
+}
+
+/// The text of `doc`'s approved blob (`git cat-file blob <sha>`).
+fn blob(home: &Path, doc: &Loadable) -> Result<String, SpawnError> {
+    if doc.blob_sha == EMPTY_BLOB {
+        return Ok(String::new());
+    }
+    let dir = repo_dir(&doc.canonical_repo, home);
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&dir)
+        .args(["cat-file", "blob", &doc.blob_sha])
+        .stdin(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        return Err(SpawnError::Refused(format!(
+            "the approved revision {} of {} (blob {}) cannot be read from {}: {}",
+            doc.revision_id,
+            doc.canonical_path,
+            doc.blob_sha,
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    String::from_utf8(output.stdout).map_err(|_| {
+        SpawnError::Refused(format!(
+            "the approved revision {} of {} is not UTF-8 text",
+            doc.revision_id, doc.canonical_path
+        ))
+    })
+}

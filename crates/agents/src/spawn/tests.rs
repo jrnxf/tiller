@@ -3275,3 +3275,217 @@ fn a_queued_restart_that_fails_is_dropped_and_shows_as_stale_again() {
     assert!(session.restart_queued_at.is_none());
     assert!(crate::stale::staleness(&session).is_some());
 }
+
+/// A worker launch renders the approved memory that loads for its role and
+/// project, fleet document first, and records what it rendered: a document
+/// of the other boundary, one scoped to another role, an unapproved
+/// revision and the working tree never reach the prompt (`memory.md`
+/// sections 2, 7 and 8).
+#[test]
+fn spawn_renders_the_approved_memory_and_records_the_load() {
+    let mut rig = Rig::new();
+    let home = rig.fleet.dir.path().join("tiller-home");
+    let repo = home.join("memory");
+    std::fs::create_dir_all(repo.join("projects")).unwrap();
+    git(&repo, &["init", "-q"]);
+    // Writes `text` at `path` in the memory repo and returns its blob.
+    let blob = |path: &str, text: &str| {
+        std::fs::write(repo.join(path), text).unwrap();
+        git(&repo, &["hash-object", "-w", path])
+    };
+    let fleet = blob("fleet.md", "## How we work here\n\n- Fleet line.\n");
+    let alpha = blob(
+        "projects/alpha.md",
+        "## How we work here\n\n- Alpha line.\n",
+    );
+    let later = blob(
+        "projects/alpha.md",
+        "## How we work here\n\n- Unapproved line.\n",
+    );
+    let work = blob("projects/alpha-work.md", "- Work line.\n");
+    let scoped = blob("projects/alpha-orch.md", "- Orchestrator line.\n");
+    // The working tree moved on after every blob was written.
+    std::fs::write(repo.join("projects/alpha.md"), "- Worktree line.\n").unwrap();
+    rig.tiller_home = home;
+
+    let source = |id: &str, project: &str, boundary: &str, path: &str, roles: &str| {
+        rig.sql(&format!(
+            "INSERT INTO memory_sources (id, project_id, boundary, kind, loaded_path, canonical_repo,
+                 canonical_path, apply_method, load_mode, roles, added_at)
+             VALUES ('{id}', '{project}', '{boundary}', 'tiller_doc', '~/.tiller/memory/{path}',
+                 '~/.tiller/memory', '{path}', 'tiller_commit', 'rendered', '{roles}',
+                 '2026-11-02T09:00:00.000Z')"
+        ));
+    };
+    let revision = |id: &str, source: &str, blob: &str, review: &str, at: &str| {
+        rig.sql(&format!(
+            "INSERT INTO memory_revisions (id, source_id, blob_sha, review, provenance, scrub,
+                 recorded_at, recorded_by)
+             VALUES ('{id}', '{source}', '{blob}', '{review}', 'baseline', 'passed', '{at}', 'daemon')"
+        ));
+    };
+    let all = r#"["orchestrator","scout","builder","reviewer","verifier"]"#;
+    source("S-fleet", "fleet", "personal", "fleet.md", all);
+    source("S-alpha", "alpha", "personal", "projects/alpha.md", all);
+    source("S-work", "alpha", "work", "projects/alpha-work.md", all);
+    source(
+        "S-orch",
+        "alpha",
+        "personal",
+        "projects/alpha-orch.md",
+        r#"["orchestrator"]"#,
+    );
+    revision(
+        "R-fleet",
+        "S-fleet",
+        &fleet,
+        "approved",
+        "2026-11-02T09:00:00.000Z",
+    );
+    revision(
+        "R-alpha",
+        "S-alpha",
+        &alpha,
+        "approved",
+        "2026-11-02T09:00:00.000Z",
+    );
+    revision(
+        "R-later",
+        "S-alpha",
+        &later,
+        "unreviewed",
+        "2026-11-02T10:00:00.000Z",
+    );
+    revision(
+        "R-work",
+        "S-work",
+        &work,
+        "approved",
+        "2026-11-02T09:00:00.000Z",
+    );
+    revision(
+        "R-orch",
+        "S-orch",
+        &scoped,
+        "approved",
+        "2026-11-02T09:00:00.000Z",
+    );
+
+    let card = rig.card(CardKind::Ship, None);
+    let spawned = rig.spawn(&card, RunRole::Builder);
+    let prompt =
+        std::fs::read_to_string(rig.scratch.join(&spawned.run.id).join("prompt.md")).unwrap();
+    let memory = prompt.find("\n# Memory\n\n## fleet.md\n\n## How we work here\n\n- Fleet line.\n");
+    let project = prompt.find("\n## projects/alpha.md\n\n## How we work here\n\n- Alpha line.\n");
+    let brief = prompt.find("\n# Your brief\n\n");
+    assert!(
+        matches!((memory, project, brief), (Some(m), Some(p), Some(b)) if m < p && p < b),
+        "{prompt}"
+    );
+    for absent in [
+        "Unapproved line",
+        "Worktree line",
+        "Work line",
+        "Orchestrator line",
+    ] {
+        assert!(!prompt.contains(absent), "{absent}: {prompt}");
+    }
+    // The brief still reads back for a relaunch.
+    assert_eq!(
+        launch::brief_of(&prompt).map(|b| b.starts_with("Do the work on")),
+        Some(true)
+    );
+
+    let loads: Vec<(String, String)> = rig
+        .fleet
+        .store
+        .conn()
+        .prepare(
+            "SELECT revision_id, trigger FROM session_loads WHERE session_id = ?1
+             ORDER BY revision_id",
+        )
+        .unwrap()
+        .query_map([&spawned.session.id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        loads,
+        [
+            ("R-alpha".to_owned(), "startup".to_owned()),
+            ("R-fleet".to_owned(), "startup".to_owned())
+        ]
+    );
+    assert_eq!(rig.events("session.memory_loaded", &spawned.session.id), 1);
+
+    // The manifest's memory part is the rendered pairs.
+    let hash = rig.run(&spawned.run.id).config_hash.unwrap();
+    let manifest: tiller_core::domain::ConfigManifest =
+        tiller_core::state::find(rig.fleet.store.conn(), "config_hash = ?1", &[&hash])
+            .unwrap()
+            .unwrap();
+    let rendered = launch::manifest(
+        crate::roles::Role::Builder,
+        b"{}",
+        "m",
+        Effort::High,
+        None,
+        &[("S-fleet".into(), fleet), ("S-alpha".into(), alpha)],
+    );
+    assert_eq!(manifest.parts["memory"], rendered["memory"]);
+
+    // On a work host the personal documents never load; the work one does.
+    rig.sql("UPDATE meta SET value = 'work' WHERE key = 'boundary'");
+    let second = rig.card(CardKind::Ship, None);
+    let spawned = rig.spawn(&second, RunRole::Builder);
+    let prompt =
+        std::fs::read_to_string(rig.scratch.join(&spawned.run.id).join("prompt.md")).unwrap();
+    assert!(
+        prompt.contains("\n# Memory\n\n## projects/alpha-work.md\n\n- Work line.\n"),
+        "{prompt}"
+    );
+    for absent in ["Fleet line", "Alpha line"] {
+        assert!(!prompt.contains(absent), "{absent}: {prompt}");
+    }
+}
+
+/// A blob the memory repo cannot give refuses the launch rather than start
+/// a session without text the record would say it got.
+#[test]
+fn spawn_refuses_an_approved_blob_it_cannot_read() {
+    let mut rig = Rig::new();
+    let home = rig.fleet.dir.path().join("tiller-home");
+    std::fs::create_dir_all(home.join("memory")).unwrap();
+    git(&home.join("memory"), &["init", "-q"]);
+    rig.tiller_home = home;
+    rig.sql(
+        "INSERT INTO memory_sources (id, project_id, boundary, kind, loaded_path, canonical_repo,
+             canonical_path, apply_method, load_mode, added_at)
+         VALUES ('S-alpha', 'alpha', 'personal', 'tiller_doc', '~/.tiller/memory/projects/alpha.md',
+             '~/.tiller/memory', 'projects/alpha.md', 'tiller_commit', 'rendered',
+             '2026-11-02T09:00:00.000Z')",
+    );
+    rig.sql(
+        "INSERT INTO memory_revisions (id, source_id, blob_sha, review, provenance, scrub,
+             recorded_at, recorded_by)
+         VALUES ('R-alpha', 'S-alpha', '0123456789abcdef0123456789abcdef01234567', 'approved',
+             'baseline', 'passed', '2026-11-02T09:00:00.000Z', 'daemon')",
+    );
+    let card = rig.card(CardKind::Ship, None);
+    let ctx = rig.orchestrator();
+    let error = rig
+        .try_spawn(&ctx, Rig::request(&card, RunRole::Builder))
+        .unwrap_err();
+    assert!(
+        refusal(&error).contains("cannot be read"),
+        "{}",
+        refusal(&error)
+    );
+    let loads: i64 = rig
+        .fleet
+        .store
+        .conn()
+        .query_row("SELECT count(*) FROM session_loads", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(loads, 0);
+}
