@@ -9,10 +9,18 @@ import { expect, test } from "vitest";
 const root = resolve(import.meta.dirname, "../../..");
 const core = readFileSync(join(root, "crates/core/src/lib.rs"), "utf8");
 
+// A constant there is `concat!` of string literals and `flip_back!()`, the
+// one text of the flip-back command.
 function rustText(name: string): string {
-  const found = new RegExp(`pub const ${name}: &str =\\s*"([^"]*)";`).exec(core);
-  if (!found?.[1]) throw new Error(`${name} is not in lib.rs`);
-  return found[1];
+  const flipBack = /macro_rules! flip_back \{\s*\(\) => \{\s*"([^"]*)"\s*\};\s*\}/.exec(core)?.[1];
+  if (!flipBack) throw new Error("flip_back! is not in lib.rs");
+  const found = new RegExp(`pub const ${name}: &str = concat!\\(([^;]*)\\);`).exec(core)?.[1];
+  if (!found) throw new Error(`${name} is not in lib.rs`);
+  return [...found.matchAll(/flip_back!\(\)|"((?:[^"\\]|\\.)*)"/g)]
+    .map(([part, text]) =>
+      part === "flip_back!()" ? flipBack : (text ?? "").replaceAll("\\n", "\n"),
+    )
+    .join("");
 }
 
 function sources(dir: string): string[] {
