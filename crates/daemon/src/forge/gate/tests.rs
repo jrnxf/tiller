@@ -384,6 +384,66 @@ fn a_moved_repo_is_checked_again_at_once() {
     );
 }
 
+/// A project that moves to another repo and back within the hour is judged
+/// again for its first repo, not left with the other repo's verdict. The
+/// check keeps one entry per project, so the map does not grow with edits.
+#[test]
+fn a_repo_moved_back_is_checked_again_at_once() {
+    let mut store = store();
+    let daemon = Ctx::new(Actor::Daemon);
+    let owner = Ctx::new(Actor::Owner);
+    let forge = gated();
+    let mut last = HashMap::new();
+    let start = Instant::now();
+    let move_to = |store: &mut Store, repo: &str| {
+        let rev = store.project("alpha").unwrap().rev;
+        store
+            .project_edit(
+                &owner,
+                "alpha",
+                rev,
+                tiller_core::state::projects::ProjectEdit {
+                    repo: Some(Some(repo.into())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    };
+    check_due(&mut store, &forge, &APP, &daemon, &mut last, start).unwrap();
+    move_to(&mut store, "example/moved");
+    let soon = start + Duration::from_secs(10 * 60);
+    check_due(&mut store, &forge, &APP, &daemon, &mut last, soon).unwrap();
+    move_to(&mut store, "example/alpha");
+    let later = start + Duration::from_secs(20 * 60);
+    let judged = check_due(&mut store, &forge, &APP, &daemon, &mut last, later).unwrap();
+    assert_eq!(judged.len(), 1, "the repo moved back is judged again");
+    assert_eq!(
+        *forge.reads.borrow(),
+        [
+            "example/alpha@main",
+            "example/moved@main",
+            "example/alpha@main"
+        ]
+    );
+    assert_eq!(last.len(), 1, "one entry per project");
+
+    // A project the check no longer looks at keeps no entry.
+    let rev = store.project("alpha").unwrap().rev;
+    store
+        .project_edit(
+            &owner,
+            "alpha",
+            rev,
+            tiller_core::state::projects::ProjectEdit {
+                repo: Some(None),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    check_due(&mut store, &forge, &APP, &daemon, &mut last, later).unwrap();
+    assert!(last.is_empty(), "{last:?}");
+}
+
 #[test]
 fn edited_ruleset_drops_project_to_detect() {
     let mut store = store();
