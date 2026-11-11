@@ -1756,13 +1756,13 @@ pub struct RelabelBody {
 }
 
 /// `POST /api/v1/cards/{id}/deps` and `DELETE /api/v1/cards/{id}/deps`: the
-/// card starts or stops waiting on another (`state.md` section 8). Local to
-/// this host; it is not forwarded to a peer.
+/// card starts or stops waiting on another (`state.md` section 8). With a
+/// peer `host`, forwarded to the host that owns both cards.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DepBody {
     pub idempotency_key: String,
-    /// A paired peer's card. Refused: a dependency change is not forwarded.
+    /// A paired peer's card: the change is forwarded to that host.
     #[serde(default)]
     pub host: Option<String>,
     /// The card waited on: a display id, ULID or short form.

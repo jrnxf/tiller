@@ -487,6 +487,33 @@ fn release_dep(tx: &mut Tx<'_>, dep: &CardDep, reason: DepReleaseReason) -> Resu
     Ok(())
 }
 
+/// Marks a dependency its card's close already released as `removed`,
+/// keeping when it was released. The event names the reason it had.
+fn remove_released_dep(tx: &mut Tx<'_>, dep: &CardDep, was: DepReleaseReason) -> Result<()> {
+    tx.conn().execute(
+        "UPDATE card_deps SET release_reason = ?3 WHERE card_id = ?1 AND depends_on_card_id = ?2",
+        params![
+            dep.card_id,
+            dep.depends_on_card_id,
+            DepReleaseReason::Removed
+        ],
+    )?;
+    tx.event(
+        NewEvent::new(
+            "dep",
+            format!("{}:{}", dep.card_id, dep.depends_on_card_id),
+            "dep.released",
+        )
+        .card(&dep.card_id)
+        .payload(json!({
+            "depends_on": dep.depends_on_card_id,
+            "reason": DepReleaseReason::Removed,
+            "was": was,
+        })),
+    )?;
+    Ok(())
+}
+
 /// The option on a `recovery` item that confirms a change landed outside an
 /// approval: an outside merge, or a deploy fixed by hand (`state.md` 7).
 pub const MARK_LANDED: &str = "Mark landed";
@@ -955,7 +982,9 @@ impl Store {
         })
     }
 
-    /// `dep.release` by hand (`removed`). Natural: no unreleased dependency
+    /// `dep.release` by hand (`removed`). A dependency its card's close
+    /// already released is marked `removed` too, keeping its release time, so
+    /// the card stops listing it. Natural: none, or one already removed,
     /// returns `None`.
     pub fn dep_release(
         &mut self,
@@ -969,13 +998,17 @@ impl Store {
             let target = resolve_card(tx.conn(), depends_on)?;
             let Some(dep) = find::<CardDep>(
                 tx.conn(),
-                "card_id = ?1 AND depends_on_card_id = ?2 AND released_at IS NULL",
+                "card_id = ?1 AND depends_on_card_id = ?2
+                 AND (release_reason IS NULL OR release_reason != 'removed')",
                 &[&card.id, &target.id],
             )?
             else {
                 return Ok(None);
             };
-            release_dep(tx, &dep, DepReleaseReason::Removed)?;
+            match dep.release_reason {
+                None => release_dep(tx, &dep, DepReleaseReason::Removed)?,
+                Some(was) => remove_released_dep(tx, &dep, was)?,
+            }
             find(
                 tx.conn(),
                 "card_id = ?1 AND depends_on_card_id = ?2",

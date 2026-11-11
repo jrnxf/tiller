@@ -712,6 +712,71 @@ fn dependencies_release_on_a_satisfying_close() {
     );
 }
 
+/// A dependency already released by its card's close can still be removed
+/// by hand, so the card stops listing it: the reason becomes `removed`, the
+/// release time stays, and the event names the reason it had. A second
+/// remove writes nothing.
+#[test]
+fn a_released_dependency_can_be_removed() {
+    let (mut store, _) = memory_store();
+    let first = store
+        .card_create(&owner(), None, card(CardKind::Ops, "first"), None)
+        .unwrap()
+        .value;
+    let second = store
+        .card_create(&owner(), None, card(CardKind::Ops, "second"), None)
+        .unwrap()
+        .value;
+    store
+        .dep_add(&owner(), &second.display_id, &first.display_id)
+        .unwrap();
+    store
+        .card_close(
+            &owner(),
+            &first.id,
+            CardOutcome::Completed,
+            None,
+            Some("done: ok"),
+        )
+        .unwrap();
+    let released = |store: &Store| -> (Option<String>, Option<String>) {
+        store
+            .conn()
+            .query_row(
+                "SELECT released_at, release_reason FROM card_deps WHERE card_id = ?1",
+                [&second.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    };
+    let (at, reason) = released(&store);
+    assert_eq!(reason.as_deref(), Some("completed"));
+
+    let removed = store
+        .dep_release(&owner(), &second.display_id, &first.display_id)
+        .unwrap();
+    let dep = removed.value.expect("the released dependency is removed");
+    assert_eq!(dep.release_reason, Some(DepReleaseReason::Removed));
+    assert_eq!(released(&store), (at, Some("removed".to_owned())));
+    let payload: String = store
+        .conn()
+        .query_row(
+            "SELECT payload FROM events WHERE kind = 'dep.released' ORDER BY seq DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(payload["reason"], "removed");
+    assert_eq!(payload["was"], "completed");
+
+    let again = store
+        .dep_release(&owner(), &second.display_id, &first.display_id)
+        .unwrap();
+    assert!(again.value.is_none());
+    assert!(again.events.is_empty());
+}
+
 /// A loop through a third card is refused too, and `waiting_on` names every
 /// card that waits on a card, through the chain, so the card page can show
 /// which choices would make a loop. A released dependency breaks the chain.

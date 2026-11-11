@@ -2560,7 +2560,24 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
             "content": {
               "application/json": {
                 "schema": {
@@ -2598,7 +2615,7 @@
         },
         "responses": {
           "200": {
-            "description": "`data` is the released dependency, or null when none was open",
+            "description": "`data` is the removed dependency, or null when none was left to remove",
             "content": {
               "application/json": {
                 "schema": {
@@ -2626,7 +2643,24 @@
             }
           },
           "502": {
-            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "504": {
             "content": {
               "application/json": {
                 "schema": {
@@ -7383,7 +7417,7 @@
       },
       "DepBody": {
         "type": "object",
-        "description": "`POST /api/v1/cards/{id}/deps` and `DELETE /api/v1/cards/{id}/deps`: the\ncard starts or stops waiting on another (`state.md` section 8). Local to\nthis host; it is not forwarded to a peer.",
+        "description": "`POST /api/v1/cards/{id}/deps` and `DELETE /api/v1/cards/{id}/deps`: the\ncard starts or stops waiting on another (`state.md` section 8). With a\npeer `host`, forwarded to the host that owns both cards.",
         "required": [
           "idempotency_key",
           "depends_on"
@@ -7398,7 +7432,7 @@
               "string",
               "null"
             ],
-            "description": "A paired peer's card. Refused: a dependency change is not forwarded."
+            "description": "A paired peer's card: the change is forwarded to that host."
           },
           "idempotency_key": {
             "type": "string"

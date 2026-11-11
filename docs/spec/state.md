@@ -123,7 +123,7 @@ A card never stores a column, a hold, a dependency, an attention state or an act
 `card_deps`: `card_id` waits on `depends_on_card_id` (P32).
 
 - `added_at`, `added_by`, `released_at`, `release_reason` (`landed`, `reported`, `answered`, `completed`, `removed`).
-- A dependency is released by reconcile in the transaction that closes the dependency card with a satisfying outcome, or removed by hand. A dependency on a cancelled or failed card is not released; it opens an attention item instead, so the owner decides.
+- A dependency is released by reconcile in the transaction that closes the dependency card with a satisfying outcome, or removed by hand. A released dependency can still be removed by hand, which takes it off the card page; its release time stays. A dependency on a cancelled or failed card is not released; it opens an attention item instead, so the owner decides.
 
 ### Hold
 
@@ -428,7 +428,7 @@ Every mutation runs in one `BEGIN IMMEDIATE` transaction named after it, checks 
 | `card.hold` | orchestrator, board | card open; no open hold; `until_at` in the future | `holds` | `hold.set` |
 | `hold.release` | reconcile (due), orchestrator, board | hold open | `holds.released_at`; on `due` also `attention` | `hold.released`, `attention.opened`; for a quota hold first `attention.withdrawn` of its open item (`protocol.md` section 8) |
 | `dep.add` | orchestrator, owner, board, import | both cards exist; no cycle (the dependency does not already wait on the card, directly or through other cards); dependency open | `card_deps` | `dep.added` |
-| `dep.release` | reconcile in `card.close`, orchestrator, owner, board | dependency unreleased | `card_deps.released_at` | `dep.released` |
+| `dep.release` | reconcile in `card.close`, orchestrator, owner, board | dependency not removed; reconcile releases only an unreleased one | `card_deps.released_at`, `release_reason`; a remove of a released dependency sets `release_reason = removed` and keeps `released_at` | `dep.released` (with `was`, the earlier reason, when a released dependency is removed) |
 | `attention.open` | orchestrator, worker (through its orchestrator), reconcile, daemon | card open; idempotency key new | `attention` | `attention.opened` |
 | `attention.answer` | board, `tiller attention answer`, chat intake | item open; key new or identical | `attention` answer fields, `rev`; for a `question` card also `card.close`; for "Start now anyway" on a quota item also `hold.release` of the quota hold; for a "Reopen work" answer to a deploy `recovery` item also `obligation.cancel` of the watch the item names | `attention.answered`, maybe `card.closed`, maybe `hold.released`, maybe `obligation.cancelled`; `outbox.enqueued` for the owning session |
 | `attention.withdraw` | reconcile, orchestrator, owner (board) | item open; reason given; from the board, the item is no longer current | `attention.withdrawn_at` | `attention.withdrawn` |

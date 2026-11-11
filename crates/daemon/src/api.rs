@@ -1786,6 +1786,8 @@ enum Parsed {
     Close(Transition, CardOutcome),
     Cancel(String),
     Reopen(String),
+    AddDep(String),
+    RemoveDep(String),
     Answer(AnswerBody),
     Decide(DecideBody, bool),
     AskNote(AskNote),
@@ -1874,6 +1876,15 @@ impl Mutation {
                     Parsed::Cancel(reason)
                 } else {
                     Parsed::Reopen(reason)
+                };
+                (request.idempotency_key, request.host, parsed)
+            }
+            Op::AddDep | Op::RemoveDep => {
+                let request: DepBody = body(bytes)?;
+                let parsed = if op == Op::AddDep {
+                    Parsed::AddDep(request.depends_on)
+                } else {
+                    Parsed::RemoveDep(request.depends_on)
                 };
                 (request.idempotency_key, request.host, parsed)
             }
@@ -2002,6 +2013,8 @@ impl Mutation {
             }
             Parsed::Cancel(reason) => Done::of(store.card_cancel(ctx, id, &reason)?),
             Parsed::Reopen(reason) => Done::of(store.card_reopen(ctx, id, &reason)?),
+            Parsed::AddDep(on) => Done::of(store.dep_add(ctx, id, &on)?),
+            Parsed::RemoveDep(on) => Done::of(store.dep_release(ctx, id, &on)?),
             Parsed::Answer(request) => {
                 let applied = store.attention_answer(
                     ctx,
@@ -3946,45 +3959,29 @@ async fn relabel_intervention(
     responses((status = 200, body = MutationResponse, description = "`data` is the dependency"),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
               (status = 422, body = ErrorBody, description = "a loop, a card waiting on itself, or a closed card"),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+              (status = 502, body = ErrorBody), (status = 503, body = ErrorBody), (status = 504, body = ErrorBody)))]
 async fn add_dep(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers).await?;
-    let request: DepBody = body(&bytes)?;
-    not_forwarded(&state, request.host.as_deref(), "a dependency change").await?;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| Done::of(store.dep_add(ctx, &id, &request.depends_on)?),
-    )
-    .await
+    submit(&state, &headers, Op::AddDep, Some(id), &bytes).await
 }
 
 #[utoipa::path(delete, path = "/api/v1/cards/{id}/deps", tag = "mutations", request_body = DepBody,
     params(("id" = String, Path)),
     responses((status = 200, body = MutationResponse,
-               description = "`data` is the released dependency, or null when none was open"),
+               description = "`data` is the removed dependency, or null when none was left to remove"),
               (status = 403, body = ErrorBody), (status = 404, body = ErrorBody),
-              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+              (status = 502, body = ErrorBody), (status = 503, body = ErrorBody), (status = 504, body = ErrorBody)))]
 async fn remove_dep(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> ApiResult<MutationResponse> {
-    guard(&state, &headers).await?;
-    let request: DepBody = body(&bytes)?;
-    not_forwarded(&state, request.host.as_deref(), "a dependency change").await?;
-    mutate(
-        &state,
-        key(&request.idempotency_key)?,
-        move |store, ctx, _| Done::of(store.dep_release(ctx, &id, &request.depends_on)?),
-    )
-    .await
+    submit(&state, &headers, Op::RemoveDep, Some(id), &bytes).await
 }
 
 fn prelaunch_head(
@@ -11302,7 +11299,7 @@ esac"#,
     /// The card page's Depends on row (P13): `POST` and `DELETE`
     /// `/cards/{id}/deps` run `dep.add` and `dep.release` with their checks,
     /// the card page reads what each dependency is and which cards would
-    /// make a loop, and a peer's card is refused, not forwarded.
+    /// make a loop, and a peer's card is forwarded, not changed here.
     #[tokio::test]
     async fn the_card_page_adds_and_removes_a_dependency() {
         let mut fleet = Fleet::new();
@@ -11456,7 +11453,9 @@ esac"#,
         assert_eq!(detail["deps"][0]["release_reason"], "removed");
         assert_ne!(detail["column"]["badge"], "blocked");
 
-        // A peer's card is not forwarded, and an unknown field is refused.
+        // A peer's card is forwarded: with no link to the peer yet it is
+        // unreachable and nothing is sent or written. An unknown field is
+        // refused.
         for method in ["POST", "DELETE"] {
             let peer = send(
                 &app,
@@ -11467,13 +11466,13 @@ esac"#,
                 ),
             )
             .await;
-            assert_eq!(peer.status, StatusCode::BAD_GATEWAY, "{}", peer.body);
             assert_eq!(
-                error_of(&peer)["reason"],
-                "not_allowlisted",
+                peer.status,
+                StatusCode::SERVICE_UNAVAILABLE,
                 "{}",
                 peer.body
             );
+            assert_eq!(error_of(&peer)["code"], "peer_unreachable", "{}", peer.body);
         }
         let odd = send(
             &app,

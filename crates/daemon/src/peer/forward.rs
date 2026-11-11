@@ -36,6 +36,8 @@ pub enum Op {
     Close,
     Cancel,
     Reopen,
+    AddDep,
+    RemoveDep,
     Answer,
     Decide,
     AskNote,
@@ -44,7 +46,7 @@ pub enum Op {
 }
 
 impl Op {
-    pub const ALL: [Op; 13] = [
+    pub const ALL: [Op; 15] = [
         Op::CreateCard,
         Op::EditCard,
         Op::Comment,
@@ -53,6 +55,8 @@ impl Op {
         Op::Close,
         Op::Cancel,
         Op::Reopen,
+        Op::AddDep,
+        Op::RemoveDep,
         Op::Answer,
         Op::Decide,
         Op::AskNote,
@@ -71,6 +75,8 @@ impl Op {
             Op::Close => "POST /api/v1/cards/{id}/close",
             Op::Cancel => "POST /api/v1/cards/{id}/cancel",
             Op::Reopen => "POST /api/v1/cards/{id}/reopen",
+            Op::AddDep => "POST /api/v1/cards/{id}/deps",
+            Op::RemoveDep => "DELETE /api/v1/cards/{id}/deps",
             Op::Answer => "POST /api/v1/attention/{id}/answer",
             Op::Decide => "POST /api/v1/approvals/{id}/decide",
             Op::AskNote => "POST /api/v1/projects/{id}/asks",
@@ -297,7 +303,9 @@ fn target_project(store: &Store, op: Op, frame: &Mutate) -> tiller_core::Result<
         | Op::ReleaseHold
         | Op::Close
         | Op::Cancel
-        | Op::Reopen => found(resolve_card(conn, target))?.map(|card| card.project_id),
+        | Op::Reopen
+        | Op::AddDep
+        | Op::RemoveDep => found(resolve_card(conn, target))?.map(|card| card.project_id),
     };
     match project_id {
         Some(id) => found(get(conn, "project", &id)),

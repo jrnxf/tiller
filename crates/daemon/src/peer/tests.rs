@@ -1655,6 +1655,119 @@ impl Connector for Switch {
     }
 }
 
+// -- card dependencies --------------------------------------------------------------
+
+/// A card dependency on a peer's card (`protocol.md` 7.4): the board host
+/// forwards the add and the remove, the peer applies them as
+/// `board@<viewer>`, its card read lists the dependency, and the board
+/// host's own database is untouched. A retry with the key bound to another
+/// card is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn forwarded_dependency_is_added_listed_and_removed_on_the_peer() {
+    let pair = pair();
+    add_card(&pair.peer, "the waiting card");
+    add_card(&pair.peer, "the card waited on");
+    let waiting = card_id(&pair.peer, "the waiting card");
+    let waited = card_id(&pair.peer, "the card waited on");
+    let (peers, _stop) = start(pair.board.dir.path(), Wire::new(pair.peer.dir.path()));
+    until("the snapshot", || live_with_rows(&peers)).await;
+    let cookie = owner_cookie(pair.board.dir.path());
+    let app = app_with_peers(pair.board.dir.path(), peers.clone());
+    let board_before = last_seq(&pair.board);
+    let peer_before = last_seq(&pair.peer);
+    let deps = format!("/api/v1/cards/{waiting}/deps");
+    let dep = |method: &str, key: &str, on: &str| {
+        mutation(
+            method,
+            &deps,
+            json!({"idempotency_key": key, "host": "peer", "depends_on": on}),
+            &[("cookie", &cookie)],
+        )
+    };
+
+    let added = send(&app, dep("POST", "k-add", &waited)).await;
+    let added = applied(&added);
+    assert_eq!(added.host.as_deref(), Some("peer"));
+    assert_eq!(added.data["depends_on_card_id"], waited);
+    let read = get(&app, &format!("/api/v1/cards/{waiting}?host=peer")).await;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    let detail: Value = serde_json::from_str(&read.body).unwrap();
+    assert_eq!(detail["deps"][0]["released_at"], Value::Null, "{detail}");
+    assert_eq!(detail["column"]["badge"], "blocked", "{detail}");
+
+    // The key is bound to its arguments: the same key for another card is
+    // the peer's refusal and writes nothing.
+    let other = send(&app, dep("POST", "k-add", &waiting)).await;
+    assert!(other.status.is_client_error(), "{}", other.body);
+
+    let removed = send(&app, dep("DELETE", "k-rm", &waited)).await;
+    let removed = applied(&removed);
+    assert_eq!(removed.data["release_reason"], "removed");
+    let read = get(&app, &format!("/api/v1/cards/{waiting}?host=peer")).await;
+    let detail: Value = serde_json::from_str(&read.body).unwrap();
+    assert_eq!(detail["deps"][0]["release_reason"], "removed", "{detail}");
+
+    let events = events_since(&pair.peer, peer_before);
+    assert!(
+        events
+            .iter()
+            .any(|e| e.starts_with("dep.add dep.added board@test-host") && e.contains("via_peer")),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| e.starts_with("dep.release dep.released board@test-host")),
+        "{events:?}"
+    );
+    assert_eq!(last_seq(&pair.board), board_before);
+}
+
+/// G25 on the peer for a dependency: a card in a project another host owns
+/// is refused before anything is written.
+#[test]
+fn foreign_project_dependency_refused() {
+    let pair = pair();
+    add_card(&pair.peer, "a peer card");
+    add_card(&pair.peer, "another peer card");
+    let card = card_id(&pair.peer, "a peer card");
+    let on = card_id(&pair.peer, "another peer card");
+    let mut link = linked(&pair);
+    {
+        let store = pair.peer.open();
+        let other = "01JHOSTC0000000000000000000";
+        store
+            .conn()
+            .execute(
+                "INSERT INTO hosts (id, label, kind) VALUES (?1, 'host-c', 'remote')",
+                [other],
+            )
+            .unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE projects SET owner_host_id = ?1 WHERE id = 'alpha'",
+                [other],
+            )
+            .unwrap();
+    }
+    let before = last_seq(&pair.peer);
+    for op in [Op::AddDep, Op::RemoveDep] {
+        let frame = Mutate::signed(
+            &signer(&pair),
+            &pair.peer.host,
+            Order {
+                op,
+                target: Some(card.clone()),
+                body: json!({"idempotency_key": "k-1", "depends_on": on}),
+                idempotency_key: "k-1".into(),
+            },
+            Timestamp::now(),
+        );
+        assert_refused(&pair, link.mutate(frame), "foreign_project", before);
+    }
+}
+
 // -- asks and orchestrator starts ---------------------------------------------------
 
 /// A peer's starter that records what it was asked and refuses, so a test
