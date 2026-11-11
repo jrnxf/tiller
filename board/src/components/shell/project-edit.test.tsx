@@ -198,3 +198,23 @@ test("a project a peer owns is edited on that host", async () => {
   expect(button.disabled).toBe(true);
   expect(button.title).toBe("host-b owns this project: edit it there");
 });
+
+test("the fleet project has an Edit button that opens the fields alone, with no grants", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/v1/session") return json({ owner: true });
+      if (path === "/api/v1/projects/fleet") {
+        return json({ ...FIELDS, id: "fleet", name: "fleet", repo: null, remote: null });
+      }
+      return json({}, 404);
+    }),
+  );
+  renderDetail({ ...alpha, id: "fleet", name: "fleet" });
+  expect(screen.queryByRole("button", { name: "Grants and settings" })).toBeNull();
+  fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "fleet" }));
+  await dialog.findByLabelText("Name");
+  expect(dialog.queryByRole("button", { name: "Grants" })).toBeNull();
+});

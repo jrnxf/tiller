@@ -2787,3 +2787,92 @@ fn a_pause_records_its_reason_and_repeats_naturally() {
         Some("a review")
     );
 }
+
+/// P16: an edit checks the forge as an add does. A Gerrit remote takes only
+/// local-only, on a remote change or a delivery change, and nothing is stored
+/// when it refuses.
+#[test]
+fn project_edit_refuses_a_gerrit_remote_unless_local_only() {
+    let (mut store, _) = memory_store();
+    let remote = "ssh://gerrit.example.com:29418/theta";
+    store
+        .project_add(&owner(), project_input("theta", None, Delivery::DirectPush))
+        .unwrap();
+    let rev = store.project("theta").unwrap().rev;
+    let error = store
+        .project_edit(
+            &owner(),
+            "theta",
+            rev,
+            ProjectEdit {
+                remote: Some(Some(remote.into())),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::Usage(_)), "{error}");
+    assert!(error.to_string().contains("Gerrit"), "{error}");
+    assert_eq!(store.project("theta").unwrap().remote, None);
+
+    store
+        .project_edit(
+            &owner(),
+            "theta",
+            rev,
+            ProjectEdit {
+                remote: Some(Some(remote.into())),
+                delivery: Some(Delivery::LocalOnly),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap();
+    let rev = store.project("theta").unwrap().rev;
+    let error = store
+        .project_edit(
+            &owner(),
+            "theta",
+            rev,
+            ProjectEdit {
+                delivery: Some(Delivery::DirectPr),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("Gerrit"), "{error}");
+}
+
+/// P16: an edit that sets a GitHub remote fills `repo` from it, as an add does.
+#[test]
+fn project_edit_reads_the_repo_from_a_github_remote() {
+    let (mut store, _) = memory_store();
+    store
+        .project_add(&owner(), project_input("iota", None, Delivery::DirectPush))
+        .unwrap();
+    let rev = store.project("iota").unwrap().rev;
+    let edited = store
+        .project_edit(
+            &owner(),
+            "iota",
+            rev,
+            ProjectEdit {
+                remote: Some(Some("https://github.com/example/iota.git".into())),
+                ..ProjectEdit::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(edited.value.repo.as_deref(), Some("example/iota"));
+}
+
+/// P16: an add refuses an empty default branch, as an edit does.
+#[test]
+fn project_add_refuses_an_empty_default_branch() {
+    let (mut store, _) = memory_store();
+    for branch in ["", "  "] {
+        let mut input = project_input("kappa", None, Delivery::DirectPush);
+        input.default_branch = Some(branch.into());
+        let error = store.project_add(&owner(), input).unwrap_err();
+        assert!(matches!(error, Error::Usage(_)), "{error}");
+        assert!(error.to_string().contains("default branch"), "{error}");
+    }
+    assert!(store.project("kappa").is_err(), "nothing was stored");
+}

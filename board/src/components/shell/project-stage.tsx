@@ -327,17 +327,15 @@ export function ProjectDetail({ project, id }: { project: Project; id: string })
   return (
     <div className="pdetail" id={id} role="group" aria-label={`${project.name} stage`}>
       <Facts project={project} />
-      {project.id === FLEET_PROJECT ? null : (
-        <button
-          type="button"
-          className="btn stage-switch"
-          disabled={editOff !== undefined}
-          title={editOff}
-          onClick={() => setEditing(true)}
-        >
-          Grants and settings
-        </button>
-      )}
+      <button
+        type="button"
+        className="btn stage-switch"
+        disabled={editOff !== undefined}
+        title={editOff}
+        onClick={() => setEditing(true)}
+      >
+        {project.id === FLEET_PROJECT ? "Edit" : "Grants and settings"}
+      </button>
       {project.id === FLEET_PROJECT ? null : (
         <button
           type="button"
@@ -355,7 +353,12 @@ export function ProjectDetail({ project, id }: { project: Project; id: string })
         </div>
       ) : null}
       {editing ? (
-        <ProjectSettings project={project} onClose={closeEdit} onSaved={onRecorded} />
+        <ProjectSettings
+          project={project}
+          onClose={closeEdit}
+          onSaved={onRecorded}
+          editOnly={project.id === FLEET_PROJECT}
+        />
       ) : null}
       {confirming ? (
         <ConfirmStage project={project} target={target} onClose={close} onRecorded={onRecorded} />

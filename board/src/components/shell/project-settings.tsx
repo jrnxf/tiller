@@ -16,44 +16,51 @@ export function ProjectSettings({
   project,
   onClose,
   onSaved,
+  editOnly = false,
 }: {
   project: Project;
   onClose: () => void;
   onSaved: (receiptKey: string, text: string) => void;
+  // The fleet project merges nothing, so it has no grants: only the fields.
+  editOnly?: boolean;
 }) {
   const newGrant = useRef<HTMLButtonElement>(null);
   const firstField = useRef<HTMLInputElement>(null);
   const [pending, setPending] = useState(false);
-  const [tab, setTab] = useState<Tab>("grants");
+  const [tab, setTab] = useState<Tab>(editOnly ? "edit" : "grants");
   // The edit form reads the project when it first opens, and keeps what is
   // typed in it while the grants tab is in front.
-  const [editSeen, setEditSeen] = useState(false);
+  const [editSeen, setEditSeen] = useState(editOnly);
   return (
     <ProjectDialog
       name="project-settings"
       className="pa-dialog ps-dialog"
       pending={pending}
       onClose={onClose}
-      initial={newGrant}
+      initial={editOnly ? firstField : newGrant}
     >
       <h2 id="project-settings-dialog-title">{project.name}</h2>
-      <Segmented
-        className="ps-tabs"
-        label="Project settings"
-        options={[
-          { value: "grants" as const, label: "Grants" },
-          { value: "edit" as const, label: "Edit" },
-        ]}
-        value={tab}
-        disabled={pending}
-        onChange={(next) => {
-          setTab(next);
-          if (next === "edit") setEditSeen(true);
-        }}
-      />
-      <div hidden={tab !== "grants"}>
-        <GrantsTab project={project} first={newGrant} onClose={onClose} />
-      </div>
+      {editOnly ? null : (
+        <Segmented
+          className="ps-tabs"
+          label="Project settings"
+          options={[
+            { value: "grants" as const, label: "Grants" },
+            { value: "edit" as const, label: "Edit" },
+          ]}
+          value={tab}
+          disabled={pending}
+          onChange={(next) => {
+            setTab(next);
+            if (next === "edit") setEditSeen(true);
+          }}
+        />
+      )}
+      {editOnly ? null : (
+        <div hidden={tab !== "grants"}>
+          <GrantsTab project={project} first={newGrant} onClose={onClose} />
+        </div>
+      )}
       {editSeen ? (
         <div hidden={tab !== "edit"}>
           <p className="ps-edit-intro">

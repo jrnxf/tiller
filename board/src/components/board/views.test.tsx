@@ -1261,13 +1261,13 @@ test("the fleet project has no archive or delete control", () => {
   expect(screen.queryByRole("button")).toBeNull();
 });
 
-test("the fleet project offers no stage switch and no checkout setting", () => {
+test("the fleet project offers only Edit: no stage switch, grants, archive, delete or checkout setting", () => {
   const projects = fixtureResource(projectsPath) as ProjectsResponse;
   const gamma = projects.projects.find((project) => project.id === "gamma");
   if (!gamma) throw new Error("the fixtures lost gamma");
   const fleet = { ...gamma, id: "fleet", name: "Fleet" };
   const { container } = render(<ProjectDetail project={fleet} id="fleet-detail" />);
-  expect(screen.queryByRole("button")).toBeNull();
+  expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Edit"]);
   expect(container.textContent).not.toContain("Checkout");
   expect(container.textContent).toContain("Builders follow");
 });

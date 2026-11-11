@@ -331,6 +331,17 @@ pub(crate) fn edit_project(
     }
     required("project name", &next.name)?;
     required("default branch", &next.default_branch)?;
+    if changed.contains_key("remote") || changed.contains_key("delivery") {
+        // The forge check of an add: the repo a GitHub remote names, and no
+        // delivery mode Gerrit cannot run.
+        let mut repo = next.repo.clone();
+        detect_forge(&next.id, next.remote.as_deref(), next.delivery, &mut repo)?;
+        // Only a new remote names a repo; a delivery change leaves it be.
+        if changed.contains_key("remote") && repo != next.repo {
+            next.repo = repo;
+            changed.insert("repo".into(), json!(next.repo));
+        }
+    }
     check_plan(&next.checks)?;
     positive("capacity", next.capacity)?;
     positive("deploy timeout", next.deploy_timeout_minutes)?;
@@ -671,6 +682,9 @@ impl Store {
             )));
         }
         required("project name", &new.name)?;
+        if let Some(branch) = &new.default_branch {
+            required("default branch", branch)?;
+        }
         let (new, forge) = resolve_forge(new)?;
         self.write(ctx, "project.add", None, |tx| {
             let host_id = local_host_id(tx.conn())?;
@@ -803,26 +817,38 @@ fn check_plan(checks: &Value) -> Result<()> {
 /// add and the forge's name for the `project.added` event. Done before the
 /// write so a replay of the same add compares against what was stored.
 fn resolve_forge(mut new: NewProject) -> Result<(NewProject, &'static str)> {
-    let Some(remote) = new.remote.as_deref().filter(|remote| !remote.is_empty()) else {
-        return Ok((new, "none"));
+    let forge = detect_forge(&new.id, new.remote.as_deref(), new.delivery, &mut new.repo)?;
+    Ok((new, forge))
+}
+
+/// The forge check `project.add` and `project.edit` share: fills `repo` from
+/// a GitHub remote when none is set, and refuses a delivery mode Tiller cannot
+/// run against a Gerrit remote. Returns the forge's name.
+fn detect_forge(
+    id: &str,
+    remote: Option<&str>,
+    delivery: Delivery,
+    repo: &mut Option<String>,
+) -> Result<&'static str> {
+    let Some(remote) = remote.filter(|remote| !remote.is_empty()) else {
+        return Ok("none");
     };
     match forge::detect(remote) {
-        Forge::Github { repo } => {
-            if new.repo.is_none() {
-                new.repo = Some(repo);
+        Forge::Github { repo: found } => {
+            if repo.is_none() {
+                *repo = Some(found);
             }
-            Ok((new, "github"))
+            Ok("github")
         }
         Forge::Gerrit { evidence } => {
-            if new.delivery != Delivery::LocalOnly {
+            if delivery != Delivery::LocalOnly {
                 return Err(Error::Usage(format!(
-                    "{evidence}: Gerrit is not a forge Tiller publishes to, so project {} can only be local-only",
-                    new.id
+                    "{evidence}: Gerrit is not a forge Tiller publishes to, so project {id} can only be local-only"
                 )));
             }
-            Ok((new, "gerrit"))
+            Ok("gerrit")
         }
-        Forge::Other => Ok((new, "other")),
+        Forge::Other => Ok("other"),
     }
 }
 
