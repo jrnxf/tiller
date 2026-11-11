@@ -3070,6 +3070,44 @@ fn project_edit_reads_the_repo_again_when_the_remote_changes() {
     assert_eq!(other.repo.as_deref(), Some("example/mirror"));
 }
 
+/// P16: GitHub names ignore case, so a repo that differs from the one its
+/// remote names only in case still counts as named by the remote, and
+/// follows a moved remote.
+#[test]
+fn project_edit_follows_a_remote_that_names_the_repo_in_another_case() {
+    let (mut store, _) = memory_store();
+    let input = project_input(
+        "lambda",
+        Some("https://github.com/example/lambda.git"),
+        Delivery::DirectPush,
+    );
+    store.project_add(&owner(), input).unwrap();
+    let edit = |store: &mut crate::Store, edit: ProjectEdit| {
+        let rev = store.project("lambda").unwrap().rev;
+        store
+            .project_edit(&owner(), "lambda", rev, edit)
+            .unwrap()
+            .value
+    };
+    let typed = edit(
+        &mut store,
+        ProjectEdit {
+            repo: Some(Some("Example/Lambda".into())),
+            ..ProjectEdit::default()
+        },
+    );
+    assert_eq!(typed.repo.as_deref(), Some("Example/Lambda"));
+
+    let moved = edit(
+        &mut store,
+        ProjectEdit {
+            remote: Some(Some("https://github.com/other/lambda-moved".into())),
+            ..ProjectEdit::default()
+        },
+    );
+    assert_eq!(moved.repo.as_deref(), Some("other/lambda-moved"));
+}
+
 /// P16: an add refuses an empty default branch, as an edit does.
 #[test]
 fn project_add_refuses_an_empty_default_branch() {

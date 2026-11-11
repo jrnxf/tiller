@@ -333,9 +333,12 @@ pub(crate) fn edit_project(
         // the old remote follows a new GitHub remote. A repo set in the same
         // edit, or one set apart from its remote (a fork whose PRs go
         // upstream), stays, and so does any repo when the new remote names
-        // no GitHub repo.
-        let followed =
-            project.repo.is_none() || project.repo == github_repo(project.remote.as_deref());
+        // no GitHub repo. GitHub names ignore case, so the match does too.
+        let followed = match (&project.repo, github_repo(project.remote.as_deref())) {
+            (None, _) => true,
+            (Some(repo), Some(named)) => repo.eq_ignore_ascii_case(&named),
+            (Some(_), None) => false,
+        };
         let rederive = changed.contains_key("remote") && edit.repo.is_none() && followed;
         let mut repo = if rederive { None } else { next.repo.clone() };
         detect_forge(&next.id, next.remote.as_deref(), next.delivery, &mut repo)?;
