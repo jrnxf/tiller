@@ -3001,9 +3001,10 @@ fn project_edit_reads_the_repo_from_a_github_remote() {
     assert_eq!(edited.value.repo.as_deref(), Some("example/iota"));
 }
 
-/// P16: a new GitHub remote names the repo again, so the repo follows a
-/// moved remote. A repo set in the same edit wins, and a remote that names
-/// no GitHub repo leaves the repo as it was.
+/// P16: a new GitHub remote names the repo again when the old remote named
+/// it, so the repo follows a moved remote. A repo set in the same edit wins,
+/// a repo set apart from its remote stays, and a remote that names no GitHub
+/// repo leaves the repo as it was.
 #[test]
 fn project_edit_reads_the_repo_again_when_the_remote_changes() {
     let (mut store, _) = memory_store();
@@ -3028,7 +3029,7 @@ fn project_edit_reads_the_repo_again_when_the_remote_changes() {
     let moved = edit(
         &mut store,
         ProjectEdit {
-            remote: Some(Some("git@github.com:other/lambda-moved.git".into())),
+            remote: Some(Some("https://github.com/other/lambda-moved".into())),
             ..ProjectEdit::default()
         },
     );
@@ -3043,6 +3044,21 @@ fn project_edit_reads_the_repo_again_when_the_remote_changes() {
         },
     );
     assert_eq!(named.repo.as_deref(), Some("example/mirror"));
+
+    // A repo set apart from its remote (a fork whose PRs go upstream) stays
+    // when only the remote's address changes.
+    let fork = edit(
+        &mut store,
+        ProjectEdit {
+            remote: Some(Some("ssh://github.com/third/lambda.git".into())),
+            ..ProjectEdit::default()
+        },
+    );
+    assert_eq!(
+        fork.remote.as_deref(),
+        Some("ssh://github.com/third/lambda.git")
+    );
+    assert_eq!(fork.repo.as_deref(), Some("example/mirror"));
 
     let other = edit(
         &mut store,

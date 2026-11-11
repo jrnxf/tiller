@@ -329,10 +329,14 @@ pub(crate) fn edit_project(
     if changed.contains_key("remote") || changed.contains_key("delivery") {
         // The forge check of an add: the repo a GitHub remote names, and no
         // delivery mode Gerrit cannot run.
-        // Only a new remote names a repo, and a repo set in the same edit
-        // wins. A new GitHub remote names it again, so the repo follows a
-        // moved remote; any other remote leaves it as it was.
-        let rederive = changed.contains_key("remote") && edit.repo.is_none();
+        // Only a new remote names a repo. A repo that was empty or named by
+        // the old remote follows a new GitHub remote. A repo set in the same
+        // edit, or one set apart from its remote (a fork whose PRs go
+        // upstream), stays, and so does any repo when the new remote names
+        // no GitHub repo.
+        let followed =
+            project.repo.is_none() || project.repo == github_repo(project.remote.as_deref());
+        let rederive = changed.contains_key("remote") && edit.repo.is_none() && followed;
         let mut repo = if rederive { None } else { next.repo.clone() };
         detect_forge(&next.id, next.remote.as_deref(), next.delivery, &mut repo)?;
         if rederive && repo.is_some() && repo != next.repo {
@@ -848,6 +852,15 @@ fn detect_forge(
             Ok("gerrit")
         }
         Forge::Other => Ok("other"),
+    }
+}
+
+/// The `owner/name` a GitHub remote names; `None` for any other remote or
+/// none.
+fn github_repo(remote: Option<&str>) -> Option<String> {
+    match forge::detect(remote.filter(|remote| !remote.is_empty())?) {
+        Forge::Github { repo } => Some(repo),
+        _ => None,
     }
 }
 
