@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::error::ErrorKind;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde_json::Value;
 
 use app::{App, Done, Failure};
@@ -245,7 +245,16 @@ fn emit(mut response: Value, json: bool) {
 }
 
 fn main() -> ExitCode {
-    let cli = match Cli::try_parse() {
+    let parsed = Cli::command().try_get_matches().and_then(|matches| {
+        let cli =
+            Cli::from_arg_matches(&matches).map_err(|error| error.format(&mut Cli::command()))?;
+        // The subcommand a migration lock holder names (`recovery.md` R11).
+        if let Some(name) = matches.subcommand_name() {
+            tiller_core::backup::set_holder_command(name);
+        }
+        Ok(cli)
+    });
+    let cli = match parsed {
         Ok(cli) => cli,
         Err(error) => {
             if matches!(
@@ -258,10 +267,14 @@ fn main() -> ExitCode {
             // hook or guard command line must not block every tool call: it
             // allows, as a broken hook does, and the deny rules and the
             // sandbox still hold (`authority.md` section 9).
-            if matches!(std::env::args().nth(1).as_deref(), Some("hook" | "guard")) {
+            // `args_os`: an argument need not be UTF-8 (a `--db` path).
+            if std::env::args_os()
+                .nth(1)
+                .is_some_and(|arg| arg == "hook" || arg == "guard")
+            {
                 return ExitCode::SUCCESS;
             }
-            let json = std::env::args().any(|arg| arg == "--json");
+            let json = std::env::args_os().any(|arg| arg == "--json");
             let rendered = error.render().to_string();
             eprint!("{rendered}");
             let message = rendered

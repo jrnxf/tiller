@@ -99,17 +99,21 @@ impl Paths {
 
     /// `path` relative to the home, as a manifest stores it.
     fn relative(&self, path: &Path) -> Result<String> {
-        path.strip_prefix(&self.home)
-            .ok()
-            .and_then(Path::to_str)
-            .map(str::to_owned)
-            .ok_or_else(|| {
-                Error::Internal(format!(
-                    "{} is outside the Tiller home {}",
-                    path.display(),
-                    self.home.display()
-                ))
-            })
+        let inside = path.strip_prefix(&self.home).map_err(|_| {
+            Error::Internal(format!(
+                "{} is outside the Tiller home {}",
+                path.display(),
+                self.home.display()
+            ))
+        })?;
+        inside.to_str().map(str::to_owned).ok_or_else(|| {
+            Error::refused(
+                "path",
+                path.display().to_string(),
+                "the name is not UTF-8, and the backup manifest records only UTF-8 names; \
+                 rename the database",
+            )
+        })
     }
 }
 
@@ -232,24 +236,48 @@ fn migration_lock_held(file: &mut File, path: &Path, wait: Duration) -> Error {
     )
 }
 
+/// The subcommand this process runs, as its argument parser read it, for
+/// the [`MigrationLock`] holder line.
+static HOLDER_COMMAND: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Names the subcommand this process runs (`daemon`, `migrate`), for the
+/// line a [`MigrationLock`] holder writes. The binary calls it once, after
+/// it parses its arguments; a later call changes nothing.
+pub fn set_holder_command(subcommand: &str) {
+    let _ = HOLDER_COMMAND.set(subcommand.to_owned());
+}
+
 /// This process as a lock holder, `pid <pid> (<program> <subcommand>)`, for
-/// example `pid 4242 (tiller daemon)`. Only the first argument that is not
-/// a flag: the rest of a command line can carry text the owner typed.
+/// example `pid 4242 (tiller daemon)`.
 fn holder_line() -> String {
-    let mut args = std::env::args();
-    let program = args
-        .next()
-        .and_then(|arg| {
-            Path::new(&arg)
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .unwrap_or_else(|| "tiller".to_owned());
-    let command = match args.find(|arg| !arg.starts_with('-')) {
-        Some(sub) => format!("{program} {sub}"),
-        None => program,
-    };
-    format!("pid {} ({command})\n", std::process::id())
+    holder_line_of(
+        std::process::id(),
+        std::env::args_os().next(),
+        HOLDER_COMMAND.get().map(String::as_str),
+    )
+}
+
+/// The holder line from the program path and the parsed subcommand. Never
+/// the rest of the command line: a flag's value (`--db <path>`) is not the
+/// subcommand, and the arguments can carry text the owner typed. Neither
+/// needs to be UTF-8.
+fn holder_line_of(
+    pid: u32,
+    program: Option<std::ffi::OsString>,
+    subcommand: Option<&str>,
+) -> String {
+    let program = program
+        .as_deref()
+        .map(Path::new)
+        .and_then(Path::file_name)
+        .map_or_else(
+            || "tiller".to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+    match subcommand {
+        Some(sub) => format!("pid {pid} ({program} {sub})\n"),
+        None => format!("pid {pid} ({program})\n"),
+    }
 }
 
 /// The lock that makes a change to `backups/manifest.json` one writer's work.
@@ -286,16 +314,28 @@ impl ManifestLock {
     }
 }
 
+/// How long a [`unique_tmp`] file must go unwritten before a new holder of
+/// the [`ManifestLock`] removes it. A writer of this build holds that lock,
+/// so its files are never in flight when another takes it. But a build from
+/// before every writer took the lock (an old daemon still running after an
+/// upgrade, `recovery.md` R11) may still be writing one. Its copy writes the
+/// file as it goes, and the integrity check after it only reads; an hour is
+/// far past what that check takes on any `state.db` this host keeps, and
+/// matches the hour after which a failed nightly is tried again.
+const STALE_TMP_AGE: Duration = Duration::from_secs(60 * 60);
+
 /// Removes what a crash left of [`unique_tmp`] files: in `backups/`, and
 /// beside `state.db` (a pre-migration copy's). Only names of that shape,
-/// with SQLite's `-journal`, `-wal` and `-shm` files of a copy in progress.
-/// Best effort: a leftover that cannot be removed now is tried again by the
-/// next holder.
+/// with SQLite's `-journal`, `-wal` and `-shm` files of a copy in progress,
+/// and only files unwritten for [`STALE_TMP_AGE`]. Best effort: a leftover
+/// that cannot be removed now is tried again by the next holder.
 fn remove_stale_tmps(paths: &Paths, _held: &ManifestLock) {
     let db_name = paths.db.file_name().unwrap_or_default().to_string_lossy();
     let db_prefix = format!("{db_name}.");
-    let db_dir = paths.db.parent().unwrap_or(Path::new("."));
-    let dirs = [(paths.backups.as_path(), ""), (db_dir, db_prefix.as_str())];
+    let dirs = [
+        (paths.backups.as_path(), ""),
+        (db_dir(&paths.db), db_prefix.as_str()),
+    ];
     for (dir, prefix) in dirs {
         let Ok(entries) = fs::read_dir(dir) else {
             continue;
@@ -303,7 +343,16 @@ fn remove_stale_tmps(paths: &Paths, _held: &ManifestLock) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with(prefix) && is_unique_tmp(&name) {
+            if !name.starts_with(prefix) || !is_unique_tmp(&name) {
+                continue;
+            }
+            // A clock set back makes the age an error: kept, as young.
+            let unwritten = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|at| at.elapsed().ok());
+            if unwritten.is_some_and(|age| age >= STALE_TMP_AGE) {
                 match fs::remove_file(entry.path()) {
                     Ok(()) => {
                         tracing::info!(file = %name, "removed a crashed write's temporary file")
@@ -317,19 +366,12 @@ fn remove_stale_tmps(paths: &Paths, _held: &ManifestLock) {
     }
 }
 
-/// Whether `name` is a [`unique_tmp`] name, `<file>.<ulid>.tmp`, or one of
-/// SQLite's files beside it.
-fn is_unique_tmp(name: &str) -> bool {
-    let name = ["-journal", "-wal", "-shm"]
-        .iter()
-        .find_map(|suffix| name.strip_suffix(suffix))
-        .unwrap_or(name);
-    let Some(stem) = name.strip_suffix(".tmp") else {
-        return false;
-    };
-    stem.rsplit_once('.').is_some_and(|(file, ulid)| {
-        !file.is_empty() && ulid.parse::<ulid::Ulid>().is_ok() && ulid.len() == 26
-    })
+/// The directory `state.db` sits in: `.` for a bare relative `--db
+/// state.db`, whose parent is the empty path.
+fn db_dir(db: &Path) -> &Path {
+    db.parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
 }
 
 /// Whether a daemon holds its lock right now.
@@ -550,7 +592,29 @@ fn stamp(now: Timestamp) -> String {
 /// other's. It takes the [`ManifestLock`] it is written under, so a later
 /// holder may treat any such name as a crashed writer's and remove it.
 fn unique_tmp(path: &Path, _held: &ManifestLock) -> PathBuf {
-    with_suffix(path, &format!(".{}.tmp", crate::ids::new_ulid()))
+    with_suffix(
+        path,
+        &format!(".{}{UNIQUE_TMP_END}", crate::ids::new_ulid()),
+    )
+}
+
+/// The end of every [`unique_tmp`] name, after its ulid. [`unique_tmp`]
+/// writes the name and [`is_unique_tmp`] reads it back, both from this one
+/// constant, so the sweep never misses a name the writers use.
+const UNIQUE_TMP_END: &str = ".tmp";
+
+/// Whether `name` is a [`unique_tmp`] name, `<file>.<ulid>.tmp`, or one of
+/// SQLite's files beside it.
+fn is_unique_tmp(name: &str) -> bool {
+    let name = ["-journal", "-wal", "-shm"]
+        .iter()
+        .find_map(|suffix| name.strip_suffix(suffix))
+        .unwrap_or(name);
+    let Some(stem) = name.strip_suffix(UNIQUE_TMP_END) else {
+        return false;
+    };
+    stem.rsplit_once('.')
+        .is_some_and(|(file, ulid)| !file.is_empty() && ulid.parse::<ulid::Ulid>().is_ok())
 }
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {

@@ -1103,11 +1103,25 @@ fn an_open_refuses_with_the_holder_once_the_migration_lock_wait_ends() {
     MIGRATION_WAIT.set(MIGRATION_LOCK_WAIT);
 }
 
+/// Writes `path` as a file last written `age` ago.
+fn write_aged(path: &Path, age: Duration) {
+    fs::write(path, b"partial").unwrap();
+    let at = std::time::SystemTime::now() - age;
+    File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(at)
+        .unwrap();
+}
+
 /// A crash between a temporary file's create and its rename leaves
 /// `<file>.<ulid>.tmp` behind: a partial backup copy or manifest in
 /// `backups/`, or a partial pre-migration copy beside `state.db`, as big as
 /// the database. The next writer removes them when it takes the manifest
-/// lock, and leaves every other file alone.
+/// lock, once they have gone unwritten for an hour, and leaves every other
+/// file alone. A younger one may be an older tiller's copy in flight, which
+/// writes without the manifest lock (R11).
 #[test]
 fn the_next_backup_removes_temporary_files_a_crash_left() {
     let host = host();
@@ -1134,20 +1148,81 @@ fn the_next_backup_removes_temporary_files_a_crash_left() {
         paths.home.join(format!("config.toml.{ulid}.tmp")),
         paths.home.join(format!(".{ulid}.tmp")),
     ];
+    let in_flight = [
+        paths
+            .backups
+            .join(format!("20261111T040000000Z.db.{ulid}.tmp")),
+        paths.home.join(format!("state.db.pre-16-17.{ulid}.tmp")),
+    ];
+    let old = STALE_TMP_AGE + Duration::from_secs(60);
     for path in stale.iter().chain(&kept) {
-        fs::write(path, b"partial").unwrap();
+        write_aged(path, old);
+    }
+    for path in &in_flight {
+        write_aged(path, STALE_TMP_AGE - Duration::from_secs(60));
     }
 
     backup(store.conn(), paths, at("2026-11-11T03:00:00Z")).unwrap();
     for path in &stale {
         assert!(!path.exists(), "{} is left", path.display());
     }
-    for path in &kept {
+    for path in kept.iter().chain(&in_flight) {
         assert!(path.exists(), "{} was removed", path.display());
     }
     let manifest = Manifest::load(paths).unwrap();
     assert_eq!(manifest.entries.len(), 2);
     for entry in &manifest.entries {
         assert!(verify(paths, entry).is_ok());
+    }
+}
+
+/// Every name [`unique_tmp`] writes is one the sweep reads as its own, with
+/// SQLite's files beside it: the format lives in one place.
+#[test]
+fn every_unique_tmp_name_is_one_the_sweep_removes() {
+    let host = host();
+    let held = ManifestLock::acquire(&host.paths).unwrap();
+    for dest in [
+        host.paths.backups.join("manifest.json"),
+        host.paths.home.join("state.db.pre-16-17"),
+    ] {
+        let tmp = unique_tmp(&dest, &held);
+        let name = tmp.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(is_unique_tmp(&name), "{name}");
+        assert!(is_unique_tmp(&format!("{name}-journal")), "{name}");
+        assert_eq!(tmp.parent(), dest.parent());
+    }
+}
+
+/// A bare relative `--db state.db` has the empty path as its parent: the
+/// sweep reads `.` for it, not nothing.
+#[test]
+fn a_bare_relative_db_sits_in_the_current_directory() {
+    assert_eq!(db_dir(Path::new("state.db")), Path::new("."));
+    assert_eq!(db_dir(Path::new("x/state.db")), Path::new("x"));
+    assert_eq!(
+        db_dir(Path::new("/home/user/state.db")),
+        Path::new("/home/user")
+    );
+}
+
+/// The holder line names the program and the parsed subcommand, never a
+/// flag's value such as the `--db` path, and takes a program path that is
+/// not UTF-8.
+#[test]
+fn the_holder_line_names_the_subcommand_and_takes_any_program_path() {
+    assert_eq!(
+        holder_line_of(4242, Some("/home/user/bin/tiller".into()), Some("migrate")),
+        "pid 4242 (tiller migrate)\n"
+    );
+    assert_eq!(holder_line_of(7, None, None), "pid 7 (tiller)\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let program = std::ffi::OsStr::from_bytes(b"/home/user/\xff/tiller").to_os_string();
+        assert_eq!(
+            holder_line_of(7, Some(program), Some("daemon")),
+            "pid 7 (tiller daemon)\n"
+        );
     }
 }

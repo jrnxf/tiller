@@ -173,9 +173,12 @@ fn take(
         dest = paths.backups.join(format!("{base}-{n}.db"));
         n += 1;
     }
+    // Read before the copy is written, so a name the manifest cannot record
+    // leaves no copy behind.
+    let file = paths.relative(&dest)?;
     let copied = copy_verified(conn, &dest, lock)?;
     let entry = Entry {
-        file: paths.relative(&dest)?,
+        file,
         kind,
         size: copied.size,
         sha256: copied.sha256,

@@ -5,6 +5,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -174,7 +175,18 @@ impl World {
         self.exec(None, args, Some(stdin))
     }
 
-    fn exec(&self, session: Option<&str>, args: &[&str], stdin: Option<&str>) -> Out {
+    /// Runs as the owner with arguments that need not be UTF-8, as a shell
+    /// passes a path.
+    pub fn run_os(&self, args: &[&OsStr]) -> Out {
+        self.exec(None, args, None)
+    }
+
+    fn exec<A: AsRef<OsStr> + std::fmt::Debug>(
+        &self,
+        session: Option<&str>,
+        args: &[A],
+        stdin: Option<&str>,
+    ) -> Out {
         use std::io::Write;
         use std::process::Stdio;
         let mut command = self.command(session);

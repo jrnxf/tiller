@@ -118,8 +118,10 @@ fn take_copy(
     let lock = super::ManifestLock::acquire(paths)?;
     let mut manifest = Manifest::load(paths)?;
     let dest = paths.beside_db(&format!(".pre-{from}-{to}"));
-    let copied = copy_verified(conn, &dest, &lock)?;
+    // The name the manifest records, read before the copy is written, so a
+    // name it cannot record leaves no copy behind.
     let file = paths.relative(&dest)?;
+    let copied = copy_verified(conn, &dest, &lock)?;
     // A second migration between the same versions replaces the first copy.
     manifest.entries.retain(|entry| entry.file != file);
     manifest.entries.push(Entry {
