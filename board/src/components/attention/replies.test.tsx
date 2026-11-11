@@ -84,6 +84,10 @@ beforeEach(() => {
     removeListener: () => {},
   }));
   window.scrollTo = () => {};
+  // jsdom ranges have no layout. The Ask box focuses the end of a prefilled
+  // question a frame later, and the editor measures that range to scroll to it.
+  Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+  Range.prototype.getBoundingClientRect = () => new DOMRect();
   stubDaemon();
 });
 
@@ -162,6 +166,8 @@ test("Ask again opens the Ask box with the project and the question in it", asyn
   const dialog = await screen.findByRole("dialog");
   const box = await within(dialog).findByRole("textbox");
   await flush();
+  // The editor scrolls to the end of the question a frame later: wait it out here.
+  await act(() => new Promise((r) => setTimeout(r, 100)));
   expect(box.querySelector(".ask-chip")?.textContent).toBe("alpha");
   expect(box.textContent).toContain("Can the export job retry on its own when storage times out?");
   expect(within(dialog).getByTestId("ask-row-alpha")).toBeTruthy();
