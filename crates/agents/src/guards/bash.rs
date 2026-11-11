@@ -445,9 +445,17 @@ struct Readings {
 
 impl Readings {
     /// The reading that starts with `head`, then the words in `rest`, when
-    /// its guess was spent (`guessed`).
-    fn push(&mut self, guessed: bool, head: &[String], rest: &VecDeque<(Arg, bool)>) {
-        if !guessed {
+    /// it has words and `guess` spends a guess for it.
+    fn push(
+        &mut self,
+        guess: impl FnOnce() -> bool,
+        head: &[String],
+        rest: &VecDeque<(Arg, bool)>,
+    ) {
+        if head.is_empty() && rest.is_empty() {
+            return;
+        }
+        if !guess() {
             self.over = true;
             return;
         }
@@ -1187,7 +1195,7 @@ impl Walker<'_, '_> {
                         return Some(Some(found));
                     }
                 }
-                readings.push(self.guess(), &[], &list);
+                readings.push(|| self.guess(), &[], &list);
                 own.push(word);
                 maybe = 2;
                 continue;
@@ -1221,7 +1229,7 @@ impl Walker<'_, '_> {
                     );
                     break;
                 }
-                readings.push(self.guess(), &[], &list);
+                readings.push(|| self.guess(), &[], &list);
                 continue;
             }
             match nix_flag_values(&flag) {
@@ -1230,12 +1238,27 @@ impl Walker<'_, '_> {
                         let Some((value, _)) = list.pop_front() else {
                             break;
                         };
-                        // A value that holds `-c` starts a reading as well,
-                        // in case nix takes fewer values than the guard
-                        // counts: the parts after `-c` lead the command.
-                        if value.is("-c") || value.is("--command") {
-                            readings.push(self.guess(), &[], &list);
-                        } else if value.fixed && nix_cluster(&value.text).is_some() {
+                        // A value the shell may split into several words
+                        // (`{x,-c}`) is read as a word not known before it
+                        // runs.
+                        if !value.fixed {
+                            list.push_front((value, false));
+                            break;
+                        }
+                        // `nix-shell -E` and `nix --expr`: the expression's
+                        // `shellHook` runs too.
+                        if flag == "--expr" && protected(&value.text) {
+                            return Some(self.deny(
+                                guessed_code(&value.text),
+                                "the nix expression runs a protected command in its shell hook",
+                                shown,
+                            ));
+                        }
+                        // A value that looks like flags is read as them as
+                        // well, in case nix takes fewer values than the
+                        // guard counts: its `-i`, `-u` and `-s` are checked,
+                        // and the words after its `-c` start a reading.
+                        if value.text.starts_with('-') {
                             let parts = nix_split(&value.text);
                             let view: Vec<Arg> = parts
                                 .iter()
@@ -1250,8 +1273,11 @@ impl Walker<'_, '_> {
                                     return Some(Some(found));
                                 }
                             }
-                            if let Some(c) = parts.iter().position(|part| part == "-c") {
-                                readings.push(self.guess(), &parts[c + 1..], &list);
+                            if let Some(c) = parts
+                                .iter()
+                                .position(|part| part == "-c" || part == "--command")
+                            {
+                                readings.push(|| self.guess(), &parts[c + 1..], &list);
                             }
                         }
                         own.push(value);
@@ -1260,7 +1286,6 @@ impl Walker<'_, '_> {
                 Ok(values) | Err(values) => maybe = maybe.max(values),
             }
         }
-        let shell = shell || !known;
         if appended
             && sure.is_none()
             && let Some(found) = self.appended_input("nix", command, script)
@@ -1291,7 +1316,7 @@ impl Walker<'_, '_> {
         {
             return Some(Some(found));
         }
-        for reading in readings.list.iter().filter(|reading| !reading.is_empty()) {
+        for reading in &readings.list {
             if let Some(found) = self.exec(reading, command, script, false, appended) {
                 return Some(Some(found));
             }
@@ -1374,6 +1399,17 @@ impl Walker<'_, '_> {
             return Some(found);
         }
         for (k, word) in args.iter().enumerate() {
+            // `-E`: the expression's `shellHook` runs too.
+            if (word.is("-E") || word.is("--expr"))
+                && let Some(expr) = args.get(k + 1)
+                && protected(&expr.text)
+            {
+                return self.deny(
+                    guessed_code(&expr.text),
+                    "the nix-shell expression runs a protected command in its shell hook",
+                    shown,
+                );
+            }
             if word.fixed && !word.is("--run") && !word.is("--command") {
                 continue;
             }
@@ -1766,9 +1802,6 @@ impl Walker<'_, '_> {
         })
     }
 
-    /// A wrapper whose options the guard cannot read: an option it does not
-    /// take, or a word not known before it runs. Fail closed when the
-    /// command names a protected one.
     /// The checks that need no reading, for words the guard has no guess
     /// left to read: the text, standard input, and the paths the words
     /// may write.
@@ -1799,21 +1832,7 @@ impl Walker<'_, '_> {
             .iter()
             .filter(|r| r.stdin_text)
             .map(|r| r.target.text.clone())
-            .chain(
-                script
-                    .commands
-                    .iter()
-                    .filter(|other| *other != command)
-                    .map(|other| {
-                        other
-                            .words
-                            .iter()
-                            .filter(|w| !w.dynamic)
-                            .map(|w| w.text.as_str())
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    }),
-            )
+            .chain(piped_texts(command, script))
             .find(|text| protected(text))?;
         if let Some(found) = self.stdin_script(command, script) {
             return Some(found);
@@ -1827,6 +1846,9 @@ impl Walker<'_, '_> {
         ))
     }
 
+    /// A wrapper whose options the guard cannot read: an option it does not
+    /// take, or a word not known before it runs. Fail closed when the
+    /// command names a protected one.
     fn unreadable_options(&self, program: &str, words: &[Arg]) -> Option<Denial> {
         let shown = texts(words);
         if self.remote {
@@ -2380,26 +2402,11 @@ impl Walker<'_, '_> {
                 return Some(found);
             }
         }
-        if command.piped_in {
-            // `echo '<script>' | sh`: every quoted word elsewhere in the call
-            // may be the script, and so may the words after each program
-            // (`echo gh pr merge 12 | sh`).
-            for other in &script.commands {
-                let fixed: Vec<&str> = other
-                    .words
-                    .iter()
-                    .filter(|w| !w.dynamic)
-                    .map(|w| w.text.as_str())
-                    .collect();
-                let joined = fixed.get(1..).unwrap_or_default().join(" ");
-                let quoted = fixed.iter().copied().filter(|text| text.contains(' '));
-                for text in quoted.chain(std::iter::once(joined.as_str())) {
-                    if let Ok(inner) = shell::parse(text)
-                        && let Some(found) = self.script(&inner, false)
-                    {
-                        return Some(found);
-                    }
-                }
+        for text in piped_texts(command, script) {
+            if let Ok(inner) = shell::parse(&text)
+                && let Some(found) = self.script(&inner, false)
+            {
+                return Some(found);
             }
         }
         None
@@ -3777,6 +3784,27 @@ fn nix_cluster(text: &str) -> Option<Vec<String>> {
         parts.push(format!("-{letter}"));
     }
     Some(parts)
+}
+
+/// The texts that may reach a command piped into: every quoted word
+/// elsewhere in the call, and the words after each program (`echo gh pr
+/// merge 12 | sh`).
+fn piped_texts(command: &Simple, script: &Script) -> Vec<String> {
+    let mut texts = Vec::new();
+    if command.piped_in {
+        for other in &script.commands {
+            let fixed: Vec<&str> = other
+                .words
+                .iter()
+                .filter(|w| !w.dynamic)
+                .map(|w| w.text.as_str())
+                .collect();
+            let quoted = fixed.iter().filter(|text| text.contains(' '));
+            texts.extend(quoted.map(|text| (*text).to_owned()));
+            texts.push(fixed.get(1..).unwrap_or_default().join(" "));
+        }
+    }
+    texts
 }
 
 /// Every flag in a cluster, split the way nix splits it when it reads the

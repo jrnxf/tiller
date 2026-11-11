@@ -1854,6 +1854,28 @@ fn nix_command_forms_are_read() {
             OWNER,
         ),
         ("echo src | xargs nix develop -c ls", None),
+        ("tiller status x; echo hi | xargs nix build", None),
+        // A value the shell may split is a word not known before it runs.
+        ("nix develop -k {x,-c} tiller approve 01JABC", OWNER),
+        ("nix develop -f {a,-c} tiller approve 01JABC", OWNER),
+        ("nix develop -k {x,--} tiller approve 01JABC", OWNER),
+        // A lone value that is an env flag, in case it is not a value.
+        ("nix develop -k -i -c true", ID),
+        ("nix develop -k -u TILLER_ROLE -c true", ID),
+        // With no subcommand nix starts no shell.
+        (
+            "echo 'tiller approve 01JABC' > /dev/null | nix --version",
+            None,
+        ),
+        // An expression's shell hook runs too.
+        (
+            "nix-shell -E 'mkShell { shellHook = \"tiller approve 01JABC\"; }' --run true",
+            OWNER,
+        ),
+        (
+            "nix develop --impure --expr 'mkShell { shellHook = \"tiller approve 01JABC\"; }' -c true",
+            OWNER,
+        ),
         // A long flag nix has as `--no-NAME` or `--extra-NAME`.
         (
             "nix develop --no-write-lock-file -c grep -i foo data.txt",
