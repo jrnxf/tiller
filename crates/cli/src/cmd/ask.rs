@@ -173,8 +173,16 @@ fn link(app: &App, args: Link) -> Done {
             "ask link takes new or followup:<card>; chat and cancelled create no card",
         ));
     }
-    let card = args.card.read_body()?;
-    let normalized = json!({"ask": args.ask, "target": args.target, "card": card.normalized()});
+    // A followup ignores the card fields, so its body is never read.
+    let (card, fields) = match target {
+        Target::New => {
+            let card = args.card.read_body()?;
+            let fields = card.normalized();
+            (card, fields)
+        }
+        _ => (args.card, serde_json::Value::Null),
+    };
+    let normalized = json!({"ask": args.ask, "target": args.target, "card": fields});
     let resolution = resolution(target, card, None)?;
     let mut store = app.write()?;
     let keyed = app.key(&store, "ask.link", &normalized, &args.key.key)?;

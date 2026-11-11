@@ -874,3 +874,36 @@ fn a_body_file_and_the_same_body_are_one_request() {
     assert!(retry.replayed(), "{}", retry.json);
     assert_eq!(retry.data()["id"], first.data()["id"]);
 }
+
+/// A followup link takes no card fields, so it never reads a body: not a
+/// file that is gone, and not stdin.
+#[test]
+fn a_followup_link_reads_no_body() {
+    let world = World::initialized();
+    let card = world.must(&[
+        "card", "create", "alpha", "--kind", "ship", "--title", "Target",
+    ]);
+    let card = card.data()["display_id"].as_str().unwrap().to_owned();
+    let ask = world
+        .must(&["ask", "note", "alpha", "--text", "also this"])
+        .data()["ask"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    world.must(&[
+        "ask", "resolve", &ask, "new", "--kind", "ship", "--title", "First",
+    ]);
+    let gone = world.dir.path().join("gone.md");
+    let target = format!("followup:{card}");
+    let linked = world.must(&[
+        "ask",
+        "link",
+        &ask,
+        &target,
+        "--body-file",
+        gone.to_str().unwrap(),
+        "--key",
+        "followup-1",
+    ]);
+    assert_eq!(linked.data()["card"]["display_id"], card, "{}", linked.json);
+}
