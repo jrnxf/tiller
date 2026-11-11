@@ -76,11 +76,11 @@ function inProgress(week: SignalsWeek, now: number): boolean {
 // to be quiet. A store with no event at all is that too.
 function beforeFirstEvent(response: SignalsResponse, week: SignalsWeek): boolean {
   const first = response.first_event_at;
-  return first === null || Date.parse(week.start) < Date.parse(first);
+  return first == null || Date.parse(week.start) < Date.parse(first);
 }
 
 // True when the store has no event at all, so no signal has anything to judge.
-const hasNoEvents = (response: SignalsResponse) => response.first_event_at === null;
+const hasNoEvents = (response: SignalsResponse) => response.first_event_at == null;
 
 function shipping(response: SignalsResponse, now: number): Signal | null {
   const weeks = lastWeek(response);

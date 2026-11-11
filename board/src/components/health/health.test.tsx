@@ -678,3 +678,12 @@ test("an incident puts Safety on watch, and Health never compares with Firstmate
   fireEvent.click(within(page).getByRole("button", { name: /Show the numbers/ }));
   expect(page.textContent).not.toMatch(/firstmate|baseline|compared with|@|account|email/i);
 });
+
+test("a reply with no first event time at all reads as a new install too", () => {
+  // The contract does not require the field, so a client built from it can
+  // leave it out.
+  const response: Partial<SignalsResponse> = counts(NOTHING, NOTHING);
+  delete response.first_event_at;
+  const states = signalsOf(response as SignalsResponse, done).map((each) => each.state);
+  expect(states).toEqual(["none", "none", "none", "none"]);
+});
