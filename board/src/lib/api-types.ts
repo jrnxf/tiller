@@ -597,7 +597,7 @@ export interface HostConfig {
   config_error: string | null;
 }
 
-export interface LearningConfig {
+interface LearningConfig {
   sample_every: number;
   window_cards: number;
   curator_model: string;
