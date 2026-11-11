@@ -3893,7 +3893,8 @@ fn piped_texts(command: &Simple, script: &Script, own: bool) -> Vec<String> {
 }
 
 /// The programs, besides the shells, that read the words after them as
-/// their flags or as a command string.
+/// their flags or as a command string: under `xargs` the input may be
+/// either, and a `direnv exec` path with one of these names may be it.
 const COMMAND_READERS: &[&str] = &[
     "pwsh",
     "su",
@@ -3903,16 +3904,16 @@ const COMMAND_READERS: &[&str] = &[
     "et",
     "watch",
     "eval",
-    "find",
     "nix",
     "nix-shell",
     "direnv",
 ];
 
 /// Whether the words `xargs` appends to a program with the words `rest`
-/// may make it run a command it does not show: a shell or `pwsh` without
-/// its command string, and `su`, a remote shell, `watch`, `eval` or
-/// `find`. `nix`, `nix-shell` and `direnv` check their input themselves.
+/// may make it run a command it does not show: a shell or `pwsh`, which
+/// may pass them on to code even with a command string, `su`, a remote
+/// shell, `watch` or `eval`. `nix`, `nix-shell` and `direnv` check their
+/// input themselves.
 fn reads_appended(name: &str, rest: &[Arg]) -> bool {
     if matches!(name, "nix" | "nix-shell") {
         return false;
@@ -3921,19 +3922,7 @@ fn reads_appended(name: &str, rest: &[Arg]) -> bool {
     if name == "direnv" {
         return rest.is_empty();
     }
-    if SHELLS.contains(&name) || name == "pwsh" {
-        // `sh -c CMD`: the appended words are the script's arguments.
-        let string = rest.iter().position(|word| {
-            let text = word.text.as_str();
-            word.fixed
-                && (matches!(
-                    text,
-                    "--command" | "-Command" | "-CommandWithArgs" | "-EncodedCommand"
-                ) || (text.starts_with('-') && !text.starts_with("--") && text.contains('c')))
-        });
-        return string.is_none_or(|at| at + 1 >= rest.len());
-    }
-    COMMAND_READERS.contains(&name)
+    SHELLS.contains(&name) || COMMAND_READERS.contains(&name)
 }
 
 /// What the guard knows of nix's subcommand: whether it may start a

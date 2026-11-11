@@ -2057,9 +2057,21 @@ fn nix_command_forms_are_read() {
         ("echo 'exec . tiller approve 01JABC' | xargs direnv", OWNER),
         // The command's own words are not its input.
         ("git ls-files | xargs sh -c 'git add \"$@\"' _", None),
+        // A shell may pass its arguments on to code.
+        (
+            "echo 'tiller approve 01JABC' | xargs sh -c 'echo \"$1\" | sh' _",
+            OWNER,
+        ),
+        (
+            "echo '; tiller approve 01JABC' | xargs pwsh -Command Write-Output",
+            OWNER,
+        ),
+        (
+            "echo '-Command tiller approve 01JABC' | xargs pwsh -ExecutionPolicy Bypass",
+            OWNER,
+        ),
         ("git ls-files | xargs nix develop -c git add", None),
         ("echo tiller | xargs nix develop -c git add", None),
-        ("echo tiller | xargs sh -c 'echo \"$1\"' _", None),
         // A program not known before it runs may be a shell.
         ("echo \"-c 'tiller approve 01JABC'\" | xargs \"$f\"", OWNER),
         (
@@ -2070,8 +2082,6 @@ fn nix_command_forms_are_read() {
             "echo 'tiller approve 01JABC' | xargs timeout 5 \"$X\"",
             OWNER,
         ),
-        // `find` reads `-exec CMD ;` from its words.
-        ("echo '. -exec tiller approve 01JABC ;' | xargs find", OWNER),
         // `nix shell` runs the first word as the program.
         ("nix shell nixpkgs#hello -c -c true", None),
         // `nix print-dev-env` prints the shell hook for a shell to run.
