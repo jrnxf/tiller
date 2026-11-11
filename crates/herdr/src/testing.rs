@@ -266,3 +266,27 @@ impl Drop for Pty {
         let _ = self.shell.wait();
     }
 }
+
+/// Whether `pid` has exited: no such process, or one only waiting to be
+/// reaped.
+pub fn gone(pid: &str) -> bool {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", pid])
+        .output()
+        .expect("ps runs");
+    let stat = String::from_utf8_lossy(&out.stdout);
+    stat.trim().is_empty() || stat.trim_start().starts_with('Z')
+}
+
+/// Polls `what` for up to five seconds: a process killed with its group
+/// can still show for a moment after its parent is reaped.
+pub fn eventually(what: impl Fn() -> bool) -> bool {
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(5) {
+        if what() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
+}
