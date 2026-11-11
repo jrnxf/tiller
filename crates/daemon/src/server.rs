@@ -395,6 +395,7 @@ async fn serve(config: Config, lock: Arc<DaemonLock>) -> Result<Ended, DaemonErr
         sessions: crate::auth::Sessions::default(),
         streams: crate::sse::Streams::default(),
         ssh: config.ssh.clone(),
+        evals: crate::memory::eval::Evals::default(),
     });
 
     // A session queued to restart when idle survives a daemon restart: the

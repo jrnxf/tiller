@@ -9,13 +9,13 @@ use std::time::{Duration, Instant};
 
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use tiller_agents::curator;
+use tiller_agents::holdout::{self, HoldoutError};
 use tiller_core::domain::{
-    Attention, Card, ChangeSet, ChangeSetMember, ConfigManifest, EvalRun, Event, Project, Retro,
-    RetroOutcome, Review, Run, Session,
+    Attention, Card, ChangeSet, ConfigManifest, EvalRun, Event, Project, Retro, RetroOutcome,
+    Review, Run, Session,
 };
-use tiller_core::state::learning::{self, EvalResult, Finish, Learning};
+use tiller_core::state::learning::{self, Finish, Learning};
 use tiller_core::state::{find, get, list, resolve_id};
 use tiller_core::{Actor, Store};
 use tiller_herdr::process::{self, Ended, Interrupt};
@@ -150,11 +150,6 @@ fn db(error: rusqlite::Error) -> Failure {
 
 fn count(conn: &rusqlite::Connection, sql: &str, param: &str) -> Result<i64, Failure> {
     conn.query_row(sql, [param], |row| row.get(0)).map_err(db)
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// `retro show` and the curator's brief carry evidence rows and the owner's
@@ -687,127 +682,15 @@ pub fn learn(app: &App, cmd: LearnCmd) -> Done {
     }
 }
 
-/// `pins.env` as `KEY=value` lines, for the versions a run depends on.
-fn pins(evals_dir: &Path) -> std::collections::BTreeMap<String, String> {
-    std::fs::read_to_string(evals_dir.join("evals/pins.env"))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.starts_with('#') {
-                return None;
-            }
-            let (key, value) = line.split_once('=')?;
-            Some((
-                key.trim().to_owned(),
-                value.trim().trim_matches('"').to_owned(),
-            ))
-        })
-        .collect()
-}
-
-/// What a `claude plugin eval --json` result says (`evals/run.sh`).
-fn parse_result(path: &Path) -> Result<EvalResult, Failure> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|error| Failure::usage(format!("{}: {error}", path.display())))?;
-    let value: Value = serde_json::from_str(&text)
-        .map_err(|error| Failure::usage(format!("{} is not JSON: {error}", path.display())))?;
-    let aggregates = &value["aggregates"];
-    let cases_total = aggregates["casesTotal"].as_i64().ok_or_else(|| {
-        Failure::usage(format!("{} has no aggregates.casesTotal", path.display()))
-    })?;
-    Ok(EvalResult {
-        members_sha256: None,
-        candidate_sha256: None,
-        cases_total,
-        cases_passed: aggregates["casesPassed"].as_i64().unwrap_or(0),
-        overall_score: aggregates["overallScore"].as_f64(),
-        cost_usd: value["costUsd"].as_f64(),
-        partial: value["partial"].as_bool().unwrap_or(false),
-        claude_version: None,
-        judge_model: value["judgeModel"].as_str().map(str::to_owned),
-        result_path: Some(path.to_string_lossy().into_owned()),
-    })
-}
-
-/// The members' target files with their diffs applied, under a heading per
-/// source, the way the launcher renders approved memory (learning-loop.md,
-/// section 7).
-fn render_candidate(store: &Store, set: &ChangeSet) -> Result<String, Failure> {
-    let conn = store.conn();
-    let members: Vec<ChangeSetMember> =
-        list(conn, "change_set_id = ?1 ORDER BY added_at", &[&set.id])?;
-    if members.is_empty() {
-        return Err(Failure::refused(format!(
-            "change set {} has no members to render",
-            set.name
-        )));
+/// A holdout error as the command reports it.
+fn holdout_failure(error: HoldoutError) -> Failure {
+    match error {
+        HoldoutError::Usage(message) => Failure::usage(message),
+        HoldoutError::Refused(message) => Failure::refused(message),
+        HoldoutError::Unavailable(message) => Failure::unavailable(message),
+        HoldoutError::Core(error) => Failure::from(error),
+        HoldoutError::Io(error) => Failure::from(error),
     }
-    // Per target: (repo, path, base blob, diffs in order).
-    let mut targets: Vec<(String, String, String, Vec<String>)> = Vec::new();
-    for member in &members {
-        let (repo, path, base_blob, diff): (Option<String>, Option<String>, String, String) =
-            conn.query_row(
-                "SELECT s.canonical_repo, s.canonical_path, p.base_blob, p.diff
-                 FROM proposals p JOIN memory_sources s ON s.id = p.target_source_id WHERE p.id = ?1",
-                [&member.proposal_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .map_err(db)?;
-        let (Some(repo), Some(path)) = (repo, path) else {
-            return Err(Failure::refused(format!(
-                "proposal {} targets a foreign source; it cannot be rendered",
-                member.proposal_id
-            )));
-        };
-        match targets.iter_mut().find(|t| t.0 == repo && t.1 == path) {
-            Some(target) => target.3.push(diff),
-            None => targets.push((repo, path, base_blob, vec![diff])),
-        }
-    }
-    let work = tempfile::tempdir()?;
-    let mut out = String::new();
-    for (repo, path, base_blob, diffs) in targets {
-        let base = if base_blob == tiller_core::import::EMPTY_BLOB {
-            String::new()
-        } else {
-            let output = Command::new("git")
-                .args(["-C", &repo, "cat-file", "-p", &base_blob])
-                .stdin(Stdio::null())
-                .output()?;
-            if !output.status.success() {
-                return Err(Failure::refused(format!(
-                    "git cat-file {base_blob} in {repo} failed: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                )));
-            }
-            String::from_utf8_lossy(&output.stdout).into_owned()
-        };
-        let file = work.path().join(&path);
-        if let Some(parent) = file.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&file, base)?;
-        for (n, diff) in diffs.iter().enumerate() {
-            let patch = work.path().join(format!(".patch-{n}"));
-            std::fs::write(&patch, diff)?;
-            let output = Command::new("git")
-                .args(["apply", "--whitespace=nowarn"])
-                .arg(&patch)
-                .current_dir(work.path())
-                .stdin(Stdio::null())
-                .output()?;
-            if !output.status.success() {
-                return Err(Failure::refused(format!(
-                    "a member's diff does not apply to {path}: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                )));
-            }
-        }
-        let rendered = std::fs::read_to_string(&file)?;
-        out.push_str(&format!("## {path}\n\n{}\n\n", rendered.trim_end()));
-    }
-    Ok(out)
 }
 
 fn eval(app: &App, args: LearnEval) -> Done {
@@ -853,7 +736,7 @@ fn eval(app: &App, args: LearnEval) -> Done {
         ));
     }
     let result = match &args.result {
-        Some(path) => parse_result(path)?,
+        Some(path) => holdout::parse_result(path).map_err(holdout_failure)?,
         None => {
             let evals_dir = config.evals_dir.as_deref().map(PathBuf::from).ok_or_else(|| {
                 Failure::usage("learning.evals_dir is not set; it names the checkout that holds evals/run.sh")
@@ -865,7 +748,8 @@ fn eval(app: &App, args: LearnEval) -> Done {
             let candidate = match &args.candidate_file {
                 Some(path) => std::fs::read_to_string(path)
                     .map_err(|error| Failure::usage(format!("{}: {error}", path.display())))?,
-                None => render_candidate(&store, &set)?,
+                None => holdout::render_candidate(store.conn(), &set, &app.home)
+                    .map_err(holdout_failure)?,
             };
             let out = match &args.out {
                 Some(dir) => dir.clone(),
@@ -874,51 +758,7 @@ fn eval(app: &App, args: LearnEval) -> Done {
                     .tempdir()?
                     .keep(),
             };
-            std::fs::create_dir_all(&out)?;
-            // An earlier run's sealed result must not be read as this one's.
-            let sealed = out.join("sealed");
-            if sealed.exists() {
-                std::fs::remove_dir_all(&sealed)?;
-            }
-            let candidate_path = out.join("candidate.md");
-            std::fs::write(&candidate_path, &candidate)?;
-            let runner = evals_dir.join("evals/run.sh");
-            let status = Command::new(&runner)
-                .args(["--split", "holdout", "--candidate"])
-                .arg(&candidate_path)
-                .arg("--out")
-                .arg(&out)
-                .current_dir(&evals_dir)
-                .stdin(Stdio::null())
-                .status()
-                .map_err(|error| {
-                    Failure::unavailable(format!("cannot run {}: {error}", runner.display()))
-                })?;
-            let result_path = out.join("sealed/result.json");
-            if !status.success() || !result_path.exists() {
-                // run.sh exits non-zero when a case failed to load even
-                // when the rest scored, so a result is recorded only from
-                // a clean run.
-                return Err(Failure::unavailable(format!(
-                    "{} exited {:?}{}; nothing recorded",
-                    runner.display(),
-                    status.code(),
-                    if result_path.exists() {
-                        format!(" (its result is at {})", result_path.display())
-                    } else {
-                        " and left no sealed/result.json".to_owned()
-                    }
-                )));
-            }
-            let mut result = parse_result(&result_path)?;
-            result.members_sha256 = Some(members);
-            result.candidate_sha256 = Some(sha256_hex(candidate.as_bytes()));
-            let pins = pins(&evals_dir);
-            result.claude_version = pins.get("CLAUDE_CODE_VERSION").cloned();
-            if result.judge_model.is_none() {
-                result.judge_model = pins.get("JUDGE_MODEL").cloned();
-            }
-            result
+            holdout::run(&evals_dir, &out, &candidate, members).map_err(holdout_failure)?
         }
     };
     let recorded = store.eval_run_record(&app.ctx(), &set.id, result)?;

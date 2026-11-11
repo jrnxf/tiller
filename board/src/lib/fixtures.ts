@@ -1696,7 +1696,9 @@ export function fixtureResource(
   if (url.pathname === "/api/v1/health") return healthFor(served, now);
   if (url.pathname === "/api/v1/doctor") return doctorFor(served, now);
   if (url.pathname === "/api/v1/projects/checkout") return checkoutFor(url);
-  if (url.pathname.startsWith("/api/v1/memory")) return memoryResource(url);
+  if (url.pathname.startsWith("/api/v1/memory")) {
+    return memoryResource(url, quotaFor(served, now).windows, now);
+  }
   // No project starts archived; the stand-in server adds the ones archived since.
   if (url.pathname === projectsPath && url.searchParams.has("retired")) return { projects: [] };
   return undefined;

@@ -15,7 +15,7 @@ use super::approvals::mark_stale;
 use super::learning::{self, Gate};
 use super::projects::{meta, require_daemon, require_owner};
 use super::{find, get, list};
-use crate::domain::{Approval, ApprovalKind, ApprovalState, Record};
+use crate::domain::{Approval, ApprovalKind, ApprovalState, EvalRun, Record};
 use crate::error::{Error, Result};
 use crate::ids::{self, FLEET_PROJECT};
 use crate::memory::{self as doc, EMPTY_BLOB, Entry, STARTUP_BUDGET, document_path};
@@ -989,14 +989,17 @@ fn keep_gate(
     let mut gate = learning::gate(conn, &proposal.id)?;
     if proposal.base_blob != head && !measured_after(conn, proposal, &gate, after)? {
         gate.ok = false;
-        gate.reason = Some("the text moved; re-base and run the holdout again".into());
+        gate.reason = Some(MOVED.into());
         gate.hint = Some(
-            "discard it, undo the discard to propose it on the current text, then tiller learn eval --proposal <new>"
+            "Re-propose on current text in the memory view, then run the holdout eval on the new proposal"
                 .into(),
         );
     }
     Ok(gate)
 }
+
+/// The gate's reason for a proposal made against an older text.
+const MOVED: &str = "the text moved; re-propose it on the current text and run the holdout again";
 
 fn measured_after(
     conn: &rusqlite::Connection,
@@ -1046,7 +1049,20 @@ fn undone(conn: &rusqlite::Connection, proposal_id: &str) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM proposals
                         WHERE (json_extract(memory_fields, '$.undoes') = ?1 AND state IN ('accepted', 'applied'))
-                           OR json_extract(memory_fields, '$.reproposed_from') = ?1)",
+                           OR json_extract(memory_fields, '$.reproposed_from') = ?1
+                           OR json_extract(memory_fields, '$.supersedes') = ?1)",
+        [proposal_id],
+        |row| row.get(0),
+    )?)
+}
+
+/// When `proposal_id` was undone: its reverse decided, or its discard
+/// proposed again.
+fn undone_at(conn: &rusqlite::Connection, proposal_id: &str) -> Result<Option<Timestamp>> {
+    Ok(conn.query_row(
+        "SELECT MIN(COALESCE(decided_at, created_at)) FROM proposals
+         WHERE (json_extract(memory_fields, '$.undoes') = ?1 AND state IN ('accepted', 'applied'))
+            OR json_extract(memory_fields, '$.reproposed_from') = ?1",
         [proposal_id],
         |row| row.get(0),
     )?)
@@ -1678,6 +1694,72 @@ impl Store {
         })
     }
 
+    /// `mem.repropose` from the memory view ("Re-propose on current text",
+    /// U14): a proposal made against an older text, the same add, rewrite or
+    /// removal redone on the current text as a new proposal, with the old
+    /// one's author, reason and evidence. The old one is closed. The new one
+    /// is in no change set, so Keep waits for its own holdout run.
+    pub fn mem_repropose(
+        &mut self,
+        ctx: &Ctx,
+        proposal: &str,
+        base_blob: &str,
+        file: &FileState,
+    ) -> Result<Applied<Pending>> {
+        owner_here(&ctx.actor, "mem.repropose")?;
+        self.write(ctx, "mem.repropose", None, |tx| {
+            let proposal: Proposal = get(tx.conn(), "proposal", proposal)?;
+            let path = document_path(&proposal.project_id);
+            if proposal.state != "proposed" {
+                return Err(Error::refused(
+                    "proposal",
+                    &proposal.id,
+                    format!("it is {}, not proposed", proposal.state),
+                ));
+            }
+            shown(file, base_blob, &path)?;
+            if proposal.base_blob == file.head_blob {
+                return Err(Error::refused(
+                    "proposal",
+                    &proposal.id,
+                    "it was made on the current text; there is nothing to re-propose",
+                ));
+            }
+            let source: Source = get(tx.conn(), "memory source", &proposal.target_source_id)?;
+            let base = ensure_revision(tx, &source.id, file)?;
+            let sections = doc::parse(&file.text);
+            let rows = mapped(tx.conn(), &source.id, &sections)?;
+            let (diff, mut fields) = rebased_diff(&proposal, &path, file, &sections, &rows)?;
+            fields["supersedes"] = json!(proposal.id);
+            let again = insert_proposal(
+                tx,
+                NewProposal {
+                    source: &source,
+                    op: &proposal.op,
+                    memory_id: proposal.memory_id.as_deref(),
+                    base: &base,
+                    diff,
+                    fields,
+                    expected_effect: None,
+                    from: Some(&proposal),
+                    backing: None,
+                },
+            )?;
+            // `stale` needs an approval (state.md), and this one never had
+            // one: it is closed as `discarded`, its reason naming the new
+            // one, and the history leaves it out.
+            let why = format!(
+                "re-proposed on blob {} as proposal {}",
+                file.head_blob, again.id
+            );
+            set_proposal(tx, &proposal, "discarded", "proposal.stale", &why)?;
+            Ok(Pending {
+                proposal_id: again.id,
+                approval_id: None,
+            })
+        })
+    }
+
     /// `mem.apply`, first half (daemon only, under the repo lock): the
     /// approval's binding against the file as it is now. Both blobs must be
     /// the approved base and the diff its approved hash, or the approval and
@@ -2026,6 +2108,31 @@ pub struct Suggestion {
     /// The current text of the line a rewrite or removal names, while the
     /// file has it.
     pub target: Option<String>,
+    /// The document moved after it was proposed: "Re-propose on current
+    /// text" clears it (`mem.repropose`).
+    pub moved: bool,
+    /// When Tiller recorded the text that moved it, if it did.
+    pub moved_at: Option<Timestamp>,
+    /// A holdout run is the next step: the proposal is in no change set, its
+    /// set has no run, or its newest run had other members. The board offers
+    /// "Run holdout eval...".
+    pub eval_clears: bool,
+    /// The newest holdout run of its change set.
+    pub holdout: Option<Holdout>,
+}
+
+/// The newest holdout run of a suggestion's change set.
+#[derive(Clone, Debug, Serialize)]
+pub struct Holdout {
+    pub eval_run: String,
+    pub change_set: String,
+    pub cases_passed: i64,
+    pub cases_total: i64,
+    pub passed: bool,
+    pub partial: bool,
+    /// The run was made with the set's current members.
+    pub current: bool,
+    pub ran_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2048,16 +2155,30 @@ pub struct DocSection {
     pub suggestions: Vec<Suggestion>,
 }
 
-/// One entry in "Recent changes".
+/// One entry in a document's "Change history": a change applied or
+/// discarded in the last 30 days, newest first, undone or not.
 #[derive(Clone, Debug, Serialize)]
 pub struct Change {
     pub proposal_id: String,
     /// `added`, `kept`, `edit`, `remove` or `discard`.
     pub kind: String,
     pub text: Option<String>,
+    /// The card it came from, else who wrote it.
     pub from: String,
+    /// Who wrote it, as a suggestion reads ("you", "the curator").
+    pub by: String,
+    pub card: Option<String>,
+    pub section: String,
+    /// The text a rewrite replaced.
+    pub old_text: Option<String>,
     pub at: Timestamp,
+    /// When it was undone: the reverse applied, or the discard proposed again.
+    pub undone_at: Option<Timestamp>,
 }
+
+/// How far back a document's change history reaches, and its most rows.
+const HISTORY_DAYS: i64 = 30;
+const HISTORY_ROWS: usize = 50;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct MemoryDoc {
@@ -2181,6 +2302,40 @@ fn author(conn: &rusqlite::Connection, proposal: &Proposal) -> Result<String> {
 }
 
 fn suggestion(conn: &rusqlite::Connection, proposal: &Proposal, head: &str) -> Result<Suggestion> {
+    let gate = keep_gate(conn, proposal, head, &[])?;
+    let moved = proposal.base_blob != head;
+    let moved_at = match moved {
+        true => revision_of(conn, &proposal.target_source_id, head)?.map(|r| r.recorded_at),
+        false => None,
+    };
+    let holdout = match learning::open_set_of(conn, &proposal.id)? {
+        Some(set) => {
+            let newest: Option<EvalRun> = find(
+                conn,
+                "change_set_id = ?1 ORDER BY ran_at DESC, id DESC",
+                &[&set.id],
+            )?;
+            match newest {
+                Some(run) => Some(Holdout {
+                    current: run.members_sha256 == learning::members_sha256_of(conn, &set.id)?,
+                    eval_run: run.id,
+                    change_set: set.name.clone(),
+                    cases_passed: run.cases_passed,
+                    cases_total: run.cases_total,
+                    passed: run.passed != 0,
+                    partial: run.partial != 0,
+                    ran_at: run.ran_at,
+                }),
+                None => None,
+            }
+        }
+        None => None,
+    };
+    let eval_clears = proposal.state == "proposed"
+        && !gate.ok
+        && !moved
+        && gate.measuring.is_none()
+        && holdout.as_ref().is_none_or(|h| !h.current);
     Ok(Suggestion {
         proposal_id: proposal.id.clone(),
         op: proposal.op.clone(),
@@ -2196,8 +2351,12 @@ fn suggestion(conn: &rusqlite::Connection, proposal: &Proposal, head: &str) -> R
             .clone()
             .or_else(|| proposal.expected_effect.clone()),
         token_budget_after: proposal.token_budget_after.clone(),
-        gate: keep_gate(conn, proposal, head, &[])?,
+        gate,
         target: None,
+        moved,
+        moved_at,
+        eval_clears,
+        holdout,
     })
 }
 
@@ -2237,22 +2396,20 @@ fn provenance(conn: &rusqlite::Connection, memory: &Memory) -> Result<Provenance
     })
 }
 
-fn changes(conn: &rusqlite::Connection, source_id: &str) -> Result<Vec<Change>> {
+fn changes(conn: &rusqlite::Connection, source_id: &str, now: Timestamp) -> Result<Vec<Change>> {
+    let since = now.plus_minutes(-HISTORY_DAYS * 24 * 60);
     let done: Vec<Proposal> = list(
         conn,
         "target_source_id = ?1 AND state IN ('applied', 'discarded')
            AND json_extract(memory_fields, '$.undoes') IS NULL
-         ORDER BY decided_at DESC, id DESC LIMIT 40",
-        &[&source_id],
+           AND COALESCE(decided_at, created_at) >= ?2
+           AND NOT EXISTS (SELECT 1 FROM proposals AS next
+                           WHERE json_extract(next.memory_fields, '$.supersedes') = proposals.id)
+         ORDER BY decided_at DESC, id DESC",
+        &[&source_id, &since],
     )?;
     let mut out = Vec::new();
-    for proposal in done {
-        if out.len() == 5 {
-            break;
-        }
-        if undone(conn, &proposal.id)? {
-            continue;
-        }
+    for proposal in done.into_iter().take(HISTORY_ROWS) {
         let by = author(conn, &proposal)?;
         let owner = by == "you";
         let kind = match (proposal.state.as_str(), proposal.op.as_str()) {
@@ -2262,16 +2419,25 @@ fn changes(conn: &rusqlite::Connection, source_id: &str) -> Result<Vec<Change>> 
             (_, "rewrite") => "edit",
             _ => "remove",
         };
+        let old_text = field(&proposal.memory_fields, "old_text").map(str::to_owned);
         let text = match kind {
-            "remove" => field(&proposal.memory_fields, "old_text").map(str::to_owned),
+            "remove" => old_text.clone(),
             _ => intended_text(&proposal),
         };
         let card = display_id(conn, proposal.card_id.as_deref())?;
         out.push(Change {
+            undone_at: undone_at(conn, &proposal.id)?,
             proposal_id: proposal.id.clone(),
             kind: kind.to_owned(),
             text,
-            from: card.unwrap_or(by),
+            from: card.clone().unwrap_or_else(|| by.clone()),
+            by,
+            card,
+            section: intended_section(&proposal),
+            old_text: match kind {
+                "edit" => old_text,
+                _ => None,
+            },
             at: proposal.decided_at.unwrap_or(proposal.created_at),
         });
     }
@@ -2404,7 +2570,7 @@ impl Store {
             }
         }
         let changes = match &source {
-            Some(source) => changes(conn, &source.id)?,
+            Some(source) => changes(conn, &source.id, Timestamp::now())?,
             None => Vec::new(),
         };
         Ok(MemoryView {
@@ -2515,6 +2681,13 @@ impl Store {
             state: proposal.state,
             commit,
         })
+    }
+
+    /// One proposal as the memory view shows it, against the document's
+    /// current head: its gate, whether it moved, and its holdout run.
+    pub fn memory_suggestion(&self, proposal: &str, head: &str) -> Result<Suggestion> {
+        let proposal: Proposal = get(self.conn(), "proposal", proposal)?;
+        suggestion(self.conn(), &proposal, head)
     }
 }
 

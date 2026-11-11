@@ -12,6 +12,7 @@ import type {
   DaemonHealth,
   DoctorReport,
   MachinesResponse,
+  MemoryEvalPlan,
   MemoryResponse,
   MemoryRevision,
   ProjectDeletePreview,
@@ -259,3 +260,12 @@ export const memoryQuery = (scope?: string) => readQuery<MemoryResponse>(memoryP
 
 export const revisionQuery = (id: string) =>
   readQuery<MemoryRevision>(`/api/v1/memory/revisions/${id}`);
+
+// What a proposal's holdout eval will cost, and why it will not start. Read
+// fresh each time the dialog opens: the quota moves under it.
+export const evalPlanQuery = (proposal: string) =>
+  queryOptions({
+    ...readQuery<MemoryEvalPlan>(`/api/v1/memory/proposals/${proposal}/eval`),
+    staleTime: 0,
+    gcTime: 0,
+  });

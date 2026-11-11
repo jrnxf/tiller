@@ -958,6 +958,28 @@ export interface MemorySuggestion {
   // The current text of the line a rewrite or removal names, while the file
   // has it.
   target: string | null;
+  // The document changed after it was proposed: "Re-propose on current text"
+  // clears it.
+  moved: boolean;
+  // When Tiller recorded the text that moved it, if it did.
+  moved_at: string | null;
+  // A holdout run is the next step: the board offers "Run holdout eval...".
+  eval_clears: boolean;
+  // The newest holdout run of its change set.
+  holdout: MemoryHoldout | null;
+}
+
+// The newest holdout run of a suggestion's change set.
+export interface MemoryHoldout {
+  eval_run: string;
+  change_set: string;
+  cases_passed: number;
+  cases_total: number;
+  passed: boolean;
+  partial: boolean;
+  // The run was made with the set's current members.
+  current: boolean;
+  ran_at: string;
 }
 
 export interface MemoryLine {
@@ -978,12 +1000,23 @@ export interface MemorySection {
   suggestions: MemorySuggestion[];
 }
 
+// One entry in a document's "Change history": a change applied or discarded
+// in the last 30 days, newest first, undone or not.
 export interface MemoryChange {
   proposal_id: string;
   kind: "added" | "kept" | "edit" | "remove" | "discard";
   text: string | null;
+  // The card it came from, else who wrote it.
   from: string;
+  // Who wrote it: `you`, `the curator` or the proposing session.
+  by: string;
+  card: string | null;
+  section: string;
+  // The text an edit replaced.
+  old_text: string | null;
   at: string;
+  // When it was undone: its reverse applied, or its discard proposed again.
+  undone_at: string | null;
 }
 
 export interface MemoryDocument {
@@ -1003,6 +1036,50 @@ export interface MemoryResponse {
   // Fleet first.
   docs: MemoryDocSummary[];
   doc: MemoryDocument;
+  // The holdout evals the board started that are running, or that failed
+  // since the daemon started.
+  evals: MemoryEvalJob[];
+}
+
+// A holdout eval the board started.
+export interface MemoryEvalJob {
+  proposal_id: string;
+  change_set: string;
+  cases: number;
+  started_at: string;
+  // The estimated minutes it runs.
+  minutes: number;
+  // Why it recorded nothing; absent while it runs.
+  error: string | null;
+  finished_at: string | null;
+}
+
+// `GET /api/v1/memory/proposals/{id}/eval`: what the holdout eval will cost,
+// and why it will not start, before the owner starts it.
+export interface MemoryEvalPlan {
+  proposal_id: string;
+  // The proposal's open change set, or the one-member set a start makes.
+  change_set: string;
+  cases: number;
+  case_runs: number;
+  judge_runs: number;
+  model_runs: number;
+  // The weekly quota percent it will probably take (an estimate).
+  percent: number;
+  // The minutes it will probably run (an estimate).
+  minutes: number;
+  quota: {
+    // The weekly window with the least left.
+    label: string | null;
+    left: number | null;
+    // This host's floor for new work; absent with no quota feed.
+    floor: number | null;
+    left_after: number | null;
+    resets_at: string | null;
+    fetched_at: string | null;
+  };
+  // Why a start is refused now; absent when it can start.
+  refusal: string | null;
 }
 
 // A session that loaded a revision.

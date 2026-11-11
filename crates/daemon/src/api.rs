@@ -107,6 +107,8 @@ pub struct Inner {
     /// `ssh`, or `TILLER_SSH` split on whitespace: what Add a host runs to
     /// reach the new host (`protocol.md` 10.1).
     pub ssh: Vec<OsString>,
+    /// The holdout evals the board started, running or failed.
+    pub evals: memory::eval::Evals,
 }
 
 /// Starts a project's orchestrator, or returns the live one, as `tiller
@@ -878,6 +880,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/memory", get(memory::view))
         .route("/api/v1/memory/edits", post(memory::edit))
         .route("/api/v1/memory/proposals/decide", post(memory::decide))
+        .route(
+            "/api/v1/memory/proposals/{id}/repropose",
+            post(memory::repropose),
+        )
+        .route(
+            "/api/v1/memory/proposals/{id}/eval",
+            get(memory::eval::eval_plan).post(memory::eval::eval_start),
+        )
         .route("/api/v1/memory/changes/{proposal}/undo", post(memory::undo))
         .route("/api/v1/memory/revisions/{id}", get(memory::revision))
         .route("/api/v1/recap", get(recap))
@@ -4760,7 +4770,8 @@ async fn app_shell(
         projects, contributions, signals, events, create_card, edit_card, comment, hold, release_hold, add_dep, remove_dep, close,
         cancel, reopen, answer, withdraw_attention, decide, focus, terminal, terminal_input, terminal_fit, terminal_history, terminal_tail, prompt_read, prompt_answer, steer_agent, interrupt_agent, stage_project, ask_note, start_orchestrator, restart_stale, add_project, project_checkout, add_peer, project_delete_preview, delete_project, project_retire_preview, retire_project, project_setup, project_fields, edit_project, start_settings, set_config,
         away_start, away_edit, away_end, away_brief, pick_bug_project, recap, mark_recap_seen, relabel_intervention, memory::view, memory::revision,
-        memory::edit, memory::decide, memory::undo, session, login_code, logout
+        memory::edit, memory::decide, memory::undo, memory::repropose, memory::eval::eval_plan,
+        memory::eval::eval_start, session, login_code, logout
     ),
     components(schemas(ChangeEvent, ResetEvent, PeerEvent, LinkEvent, PeerResetEvent, TerminalLine, ErrorBody, ErrorDetail)),
     tags(
@@ -4870,6 +4881,7 @@ pub(crate) mod tests {
             sessions: auth::Sessions::default(),
             streams: sse::Streams::default(),
             ssh,
+            evals: memory::eval::Evals::default(),
         }))
     }
 
@@ -8402,6 +8414,7 @@ esac"#,
             sessions: auth::Sessions::default(),
             streams: sse::Streams::default(),
             ssh: vec!["ssh".into()],
+            evals: memory::eval::Evals::default(),
         }))
     }
 

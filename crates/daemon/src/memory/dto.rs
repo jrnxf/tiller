@@ -49,6 +49,31 @@ pub struct MemorySuggestion {
     /// The current text of the line a rewrite or removal names, while the
     /// file has it.
     pub target: Option<String>,
+    /// The document changed after it was proposed: "Re-propose on current
+    /// text" clears it.
+    pub moved: bool,
+    /// When Tiller recorded the text that moved it, if it did.
+    pub moved_at: Option<String>,
+    /// A holdout run is the next step, and the board offers "Run holdout
+    /// eval...".
+    pub eval_clears: bool,
+    /// The newest holdout run of its change set.
+    pub holdout: Option<MemoryHoldout>,
+}
+
+/// The newest holdout run of a suggestion's change set.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryHoldout {
+    pub eval_run: String,
+    pub change_set: String,
+    pub cases_passed: i64,
+    pub cases_total: i64,
+    pub passed: bool,
+    pub partial: bool,
+    /// The run was made with the set's current members.
+    pub current: bool,
+    pub ran_at: String,
 }
 
 /// `learning.gate` on a proposal (learning-loop.md, section 7), with a
@@ -101,7 +126,8 @@ pub struct MemorySection {
     pub suggestions: Vec<MemorySuggestion>,
 }
 
-/// One entry in "Recent changes".
+/// One entry in a document's "Change history": a change applied or
+/// discarded in the last 30 days, newest first, undone or not.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryChange {
@@ -109,8 +135,18 @@ pub struct MemoryChange {
     /// `added`, `kept`, `edit`, `remove` or `discard`.
     pub kind: String,
     pub text: Option<String>,
+    /// The card it came from, else who wrote it.
     pub from: String,
+    /// Who wrote it: `you`, `the curator` or the proposing session.
+    pub by: String,
+    pub card: Option<String>,
+    pub section: String,
+    /// The text an edit replaced.
+    pub old_text: Option<String>,
     pub at: String,
+    /// When it was undone: its reverse applied, or its discard proposed
+    /// again.
+    pub undone_at: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -135,6 +171,65 @@ pub struct MemoryResponse {
     /// Fleet first.
     pub docs: Vec<MemoryDocSummary>,
     pub doc: MemoryDocument,
+    /// The holdout evals the board started that are running, or that failed
+    /// since the daemon started.
+    pub evals: Vec<MemoryEvalJob>,
+}
+
+/// A holdout eval the board started.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryEvalJob {
+    pub proposal_id: String,
+    pub change_set: String,
+    pub cases: u64,
+    pub started_at: String,
+    /// The estimated minutes it runs.
+    pub minutes: f64,
+    /// Why it recorded nothing; absent while it runs.
+    pub error: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+/// The weekly quota a holdout eval is checked against.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryEvalQuota {
+    /// The weekly window with the least left.
+    pub label: Option<String>,
+    /// Percent left in it; absent when unknown.
+    pub left: Option<f64>,
+    /// This host's floor for new work; absent with no quota feed.
+    pub floor: Option<f64>,
+    /// `left` less the eval's estimate.
+    pub left_after: Option<f64>,
+    pub resets_at: Option<String>,
+    pub fetched_at: Option<String>,
+}
+
+/// `GET /api/v1/memory/proposals/{id}/eval`: what the holdout eval of a
+/// proposal will cost, and why it will not start, before the owner starts
+/// it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryEvalPlan {
+    pub proposal_id: String,
+    /// The change set it runs on: the proposal's open set, or the one-member
+    /// set a start makes.
+    pub change_set: String,
+    pub cases: u64,
+    /// Runs of the role's model, one per run of each case.
+    pub case_runs: u64,
+    /// Runs of the judge model.
+    pub judge_runs: u64,
+    pub model_runs: u64,
+    /// The weekly quota percent it will probably take (an estimate).
+    pub percent: f64,
+    /// The minutes it will probably run (an estimate).
+    pub minutes: f64,
+    pub quota: MemoryEvalQuota,
+    /// Why a start is refused now; absent when it can start.
+    pub refusal: Option<String>,
 }
 
 /// A session that loaded a revision.

@@ -3040,6 +3040,163 @@
         }
       }
     },
+    "/api/v1/memory/proposals/{id}/eval": {
+      "get": {
+        "tags": [
+          "reads"
+        ],
+        "operationId": "eval_plan",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What the holdout eval would cost, and why it would not start",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryEvalPlan"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "eval_start",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryEvalStart"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The eval started; the memory view's `evals` shows it until it records",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "the plan's refusal: not proposed, the text moved, a set is measuring, the gate needs no run, no evals checkout, under the quota floor, or an eval is running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/proposals/{id}/repropose": {
+      "post": {
+        "tags": [
+          "mutations"
+        ],
+        "operationId": "repropose",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryRepropose"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The new proposal, on the current text; the old one is closed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "not proposed, made on the current text already, the document changed since the board showed it, or the change no longer applies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "`peer_refused`: not forwarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/memory/revisions/{id}": {
       "get": {
         "tags": [
@@ -6722,25 +6879,48 @@
       },
       "MemoryChange": {
         "type": "object",
-        "description": "One entry in \"Recent changes\".",
+        "description": "One entry in a document's \"Change history\": a change applied or\ndiscarded in the last 30 days, newest first, undone or not.",
         "required": [
           "proposal_id",
           "kind",
           "from",
+          "by",
+          "section",
           "at"
         ],
         "properties": {
           "at": {
             "type": "string"
           },
+          "by": {
+            "type": "string",
+            "description": "Who wrote it: `you`, `the curator` or the proposing session."
+          },
+          "card": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "from": {
-            "type": "string"
+            "type": "string",
+            "description": "The card it came from, else who wrote it."
           },
           "kind": {
             "type": "string",
             "description": "`added`, `kept`, `edit`, `remove` or `discard`."
           },
+          "old_text": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The text an edit replaced."
+          },
           "proposal_id": {
+            "type": "string"
+          },
+          "section": {
             "type": "string"
           },
           "text": {
@@ -6748,6 +6928,13 @@
               "string",
               "null"
             ]
+          },
+          "undone_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When it was undone: its reverse applied, or its discard proposed\nagain."
           }
         },
         "additionalProperties": false
@@ -6927,6 +7114,189 @@
         },
         "additionalProperties": false
       },
+      "MemoryEvalJob": {
+        "type": "object",
+        "description": "A holdout eval the board started.",
+        "required": [
+          "proposal_id",
+          "change_set",
+          "cases",
+          "started_at",
+          "minutes"
+        ],
+        "properties": {
+          "cases": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "change_set": {
+            "type": "string"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it recorded nothing; absent while it runs."
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "minutes": {
+            "type": "number",
+            "format": "double",
+            "description": "The estimated minutes it runs."
+          },
+          "proposal_id": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemoryEvalPlan": {
+        "type": "object",
+        "description": "`GET /api/v1/memory/proposals/{id}/eval`: what the holdout eval of a\nproposal will cost, and why it will not start, before the owner starts\nit.",
+        "required": [
+          "proposal_id",
+          "change_set",
+          "cases",
+          "case_runs",
+          "judge_runs",
+          "model_runs",
+          "percent",
+          "minutes",
+          "quota"
+        ],
+        "properties": {
+          "case_runs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Runs of the role's model, one per run of each case.",
+            "minimum": 0
+          },
+          "cases": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "change_set": {
+            "type": "string",
+            "description": "The change set it runs on: the proposal's open set, or the one-member\nset a start makes."
+          },
+          "judge_runs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Runs of the judge model.",
+            "minimum": 0
+          },
+          "minutes": {
+            "type": "number",
+            "format": "double",
+            "description": "The minutes it will probably run (an estimate)."
+          },
+          "model_runs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "percent": {
+            "type": "number",
+            "format": "double",
+            "description": "The weekly quota percent it will probably take (an estimate)."
+          },
+          "proposal_id": {
+            "type": "string"
+          },
+          "quota": {
+            "$ref": "#/components/schemas/MemoryEvalQuota"
+          },
+          "refusal": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why a start is refused now; absent when it can start."
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemoryEvalQuota": {
+        "type": "object",
+        "description": "The weekly quota a holdout eval is checked against.",
+        "properties": {
+          "fetched_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "floor": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "This host's floor for new work; absent with no quota feed."
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The weekly window with the least left."
+          },
+          "left": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Percent left in it; absent when unknown."
+          },
+          "left_after": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "`left` less the eval's estimate."
+          },
+          "resets_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemoryEvalStart": {
+        "type": "object",
+        "description": "`POST /api/v1/memory/proposals/{id}/eval`.",
+        "required": [
+          "idempotency_key"
+        ],
+        "properties": {
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Refused unless absent or this host: memory is never forwarded."
+          },
+          "idempotency_key": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "MemoryGate": {
         "type": "object",
         "description": "`learning.gate` on a proposal (learning-loop.md, section 7), with a\nproposal made against another text refused as stale.",
@@ -6977,6 +7347,50 @@
               "null"
             ],
             "description": "The failing step, when not ok."
+          }
+        },
+        "additionalProperties": false
+      },
+      "MemoryHoldout": {
+        "type": "object",
+        "description": "The newest holdout run of a suggestion's change set.",
+        "required": [
+          "eval_run",
+          "change_set",
+          "cases_passed",
+          "cases_total",
+          "passed",
+          "partial",
+          "current",
+          "ran_at"
+        ],
+        "properties": {
+          "cases_passed": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cases_total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "change_set": {
+            "type": "string"
+          },
+          "current": {
+            "type": "boolean",
+            "description": "The run was made with the set's current members."
+          },
+          "eval_run": {
+            "type": "string"
+          },
+          "partial": {
+            "type": "boolean"
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "ran_at": {
+            "type": "string"
           }
         },
         "additionalProperties": false
@@ -7124,12 +7538,37 @@
         },
         "additionalProperties": false
       },
+      "MemoryRepropose": {
+        "type": "object",
+        "description": "`POST /api/v1/memory/proposals/{id}/repropose`.",
+        "required": [
+          "idempotency_key",
+          "base_blob"
+        ],
+        "properties": {
+          "base_blob": {
+            "type": "string",
+            "description": "The blob the board showed: the document's current head."
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "idempotency_key": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "MemoryResponse": {
         "type": "object",
         "description": "`GET /api/v1/memory`.",
         "required": [
           "docs",
-          "doc"
+          "doc",
+          "evals"
         ],
         "properties": {
           "doc": {
@@ -7141,6 +7580,13 @@
               "$ref": "#/components/schemas/MemoryDocSummary"
             },
             "description": "Fleet first."
+          },
+          "evals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemoryEvalJob"
+            },
+            "description": "The holdout evals the board started that are running, or that failed\nsince the daemon started."
           }
         },
         "additionalProperties": false
@@ -7261,7 +7707,9 @@
           "by",
           "at",
           "token_budget_after",
-          "gate"
+          "gate",
+          "moved",
+          "eval_clears"
         ],
         "properties": {
           "at": {
@@ -7276,9 +7724,35 @@
               "null"
             ]
           },
+          "eval_clears": {
+            "type": "boolean",
+            "description": "A holdout run is the next step, and the board offers \"Run holdout\neval...\"."
+          },
           "gate": {
             "$ref": "#/components/schemas/MemoryGate",
             "description": "The holdout gate's verdict on keeping it; Keep waits until it passes."
+          },
+          "holdout": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MemoryHoldout",
+                "description": "The newest holdout run of its change set."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "moved": {
+            "type": "boolean",
+            "description": "The document changed after it was proposed: \"Re-propose on current\ntext\" clears it."
+          },
+          "moved_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When Tiller recorded the text that moved it, if it did."
           },
           "op": {
             "type": "string",

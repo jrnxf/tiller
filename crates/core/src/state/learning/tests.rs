@@ -887,11 +887,13 @@ fn manifest_diff_and_record() {
 
 #[test]
 fn learning_config_reads_its_table() {
-    let table: toml::Table = "[learning]\nsample_every = 3\nevals_dir = \"/home/user/tiller\"\n"
+    let table: toml::Table = "[learning]\nsample_every = 3\nevals_dir = \"/home/user/tiller\"\neval_percent_per_run = 0.25\n"
         .parse()
         .unwrap();
     let config = Learning::from_table(&table).unwrap();
     assert_eq!(config.sample_every, 3);
+    assert!((config.eval_percent_per_run - 0.25).abs() < f64::EPSILON);
+    assert!((config.eval_minutes_per_run - 0.5).abs() < f64::EPSILON);
     assert_eq!(config.window_cards, 10);
     assert_eq!(config.evals_dir.as_deref(), Some("/home/user/tiller"));
     assert_eq!(

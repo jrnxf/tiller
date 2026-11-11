@@ -117,6 +117,8 @@ Role prompts, skills and settings live in this repository and reach a host throu
 3. The set's newest holdout run has `passed = 1` and a `members_sha256` equal to the set's current members. A member added or re-based since the run makes it stale: run again.
 4. No other set is `measuring` with cards still to come.
 
+**From the board.** The memory view's "Run holdout eval..." on a suggestion runs the same thing for the suggestion's change set, or for a set of one when it is in none (`GET` and `POST /api/v1/memory/proposals/{id}/eval`, protocol.md section 7.4). The `GET` is the plan the confirmation shows: the holdout cases (counted, never read), the case runs and judge runs, their sum as model runs, the weekly quota percent that is estimated to take (`model_runs × learning.eval_percent_per_run`), what it leaves of the weekly window with the least left, the floor, and the minutes it is estimated to take (`case_runs × learning.eval_minutes_per_run`). Both figures are estimates, rounded to a tenth. The `POST` refuses, with the first reason the plan gives, when: the config does not parse; the proposal is not `proposed`; another board eval is running (one at a time on a host); the text moved (re-propose first); a set is measuring; the gate needs no run; `learning.evals_dir` is unset or holds no holdout cases; or the run would leave the week at or under the quota floor for new work (the builder floor, raised by an away contract's floor), which fails closed on a missing or stale reading. A started run records its `eval_runs` row exactly as the command does. One that records nothing (the runner fails, or leaves no result) keeps its reason in the daemon's memory, and the memory view shows it on the suggestion.
+
 A refusal names the failing step and the command that clears it. The memory view shows the same verdict beside each proposal (`GET /api/v1/memory`, T7.2, from `Store::learning_gate`). A legacy placement plan (memory.md section 10) is one named bundle with one holdout run, so the owner's batch approval is one gate.
 
 `mem.decide` (T7.2) calls `learning_gate` as one line in its precondition list; this document is the contract for it.
@@ -158,7 +160,7 @@ Every row is authoritative and backed up with `state.db` (`state.md` section 10)
 | `tiller learn status` | owner |
 | `tiller learn config <hash> [<other>]` | owner |
 
-Config keys, in `[learning]` of `config.toml`: `sample_every` (5), `window_cards` (10), `curator_model` (`sonnet`), `curator_timeout_minutes` (20), `evals_dir` (the checkout that holds `evals/run.sh`; required by `tiller learn eval` without `--result`).
+Config keys, in `[learning]` of `config.toml`: `sample_every` (5), `window_cards` (10), `curator_model` (`sonnet`), `curator_timeout_minutes` (20), `evals_dir` (the checkout that holds `evals/run.sh`; required by `tiller learn eval` without `--result` and by the board's eval), `eval_percent_per_run` (0.1, the weekly quota percent one model run of the holdout is estimated to take), `eval_minutes_per_run` (0.5, the minutes one case run is estimated to take, its judging included).
 
 ## 11. What is enforced and what is convention
 

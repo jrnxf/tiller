@@ -35,6 +35,12 @@ pub struct Learning {
     pub curator_timeout_minutes: u64,
     /// The checkout that holds `evals/run.sh`, for `tiller learn eval`.
     pub evals_dir: Option<String>,
+    /// The weekly quota percent one model run of the holdout eval is
+    /// estimated to take, for the board's eval confirmation. An estimate.
+    pub eval_percent_per_run: f64,
+    /// The minutes one case run of the holdout eval is estimated to take,
+    /// its judging included. An estimate.
+    pub eval_minutes_per_run: f64,
 }
 
 impl Default for Learning {
@@ -45,6 +51,8 @@ impl Default for Learning {
             curator_model: "sonnet".into(),
             curator_timeout_minutes: 20,
             evals_dir: None,
+            eval_percent_per_run: 0.1,
+            eval_minutes_per_run: 0.5,
         }
     }
 }

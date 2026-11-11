@@ -10,6 +10,7 @@ pub mod control;
 pub mod curator;
 pub mod guards;
 pub mod handoff;
+pub mod holdout;
 pub mod intake;
 pub mod land;
 pub mod numbering;

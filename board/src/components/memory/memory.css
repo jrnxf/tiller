@@ -701,6 +701,193 @@
   color: var(--fg-4);
 }
 
+/* With no note, the space before Discard still pushes the decision right. */
+.docs .sug-f .sp {
+  flex: 1;
+}
+
+/* The holdout passed, or the text moved under the suggestion. */
+.docs .gate.ok {
+  background: color-mix(in srgb, var(--green) 8%, transparent);
+}
+
+.docs .gate.ok svg {
+  color: var(--green-text);
+}
+
+.docs .gate.stale {
+  background: color-mix(in srgb, var(--orange) 8%, transparent);
+}
+
+.docs .gate.stale svg {
+  color: var(--orange-text);
+}
+
+/* A running holdout eval: what it runs, a bar on its time estimate, and
+   what is left. */
+.docs .ev-run {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding: 7px 10px;
+  border-radius: var(--r6);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line-1));
+  background: var(--accent-tint);
+  font-size: var(--fs-mini);
+  color: var(--fg-2);
+}
+
+.docs .ev-run .bar {
+  flex: 1 1 120px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line-2);
+  overflow: hidden;
+}
+
+.docs .ev-run .bar i {
+  display: block;
+  height: 100%;
+  background: var(--accent-solid);
+  transition: width 0.4s ease;
+}
+
+/* The change history at the foot of the document: one card, a row per
+   change, its Undo... where it is read. */
+.docs .h-box {
+  margin: 8px 0 0;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r8);
+  background: var(--bg-card);
+}
+
+.docs .h-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line-1);
+}
+
+.docs .h-head h2 {
+  margin: 0;
+  font-size: var(--fs-small);
+  font-weight: var(--w-semibold);
+  color: var(--fg-1);
+}
+
+.docs .h-head .c {
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.docs .h-none {
+  margin: 0;
+  padding: 12px;
+  font-size: var(--fs-small);
+  color: var(--fg-3);
+}
+
+.docs .h-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.docs .h-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line-1);
+}
+
+.docs .h-list li:first-child {
+  border-top: 0;
+}
+
+.docs .h-list .t {
+  min-width: 0;
+  font-size: var(--fs-small);
+  line-height: 1.5;
+  color: var(--fg-1);
+  overflow-wrap: anywhere;
+}
+
+.docs .h-list .t .lab {
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+
+.docs .h-list .m {
+  grid-column: 1;
+  font-size: var(--fs-mini);
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.docs .h-list .btn,
+.docs .h-list .r {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+
+.docs .h-list .r {
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.docs .h-mute {
+  color: var(--fg-3);
+}
+
+.docs .h-refusal {
+  grid-column: 1 / -1;
+}
+
+/* The holdout eval's confirmation: what it costs, before it starts. */
+.dialog .ev-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px 14px;
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r8);
+  background: var(--bg-2);
+  font-size: var(--fs-small);
+}
+
+.dialog .ev-facts dt {
+  color: var(--fg-3);
+}
+
+.dialog .ev-facts dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--fg-1);
+}
+
+.dialog .ev-facts dd[data-bad] {
+  color: var(--red-text);
+}
+
+.dialog .ev-facts .meta {
+  margin-left: 6px;
+  font-size: var(--fs-mini);
+  color: var(--fg-3);
+}
+
+.dialog .ev-wait {
+  margin-top: 12px;
+  font-size: var(--fs-small);
+  color: var(--fg-3);
+}
+
 /* Remove asks first: the line, quoted, under the question. The dialog is in
    the body, outside .docs. */
 
@@ -975,5 +1162,30 @@
 
   .docs .sug-f .note {
     display: none;
+  }
+}
+
+/* A narrow phone: a history row's action and an eval fact drop under their
+   text. */
+@media (max-width: 480px) {
+  .docs .h-list li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .docs .h-list .btn,
+  .docs .h-list .r {
+    grid-column: 1;
+    grid-row: auto;
+    justify-self: end;
+    margin-top: 6px;
+  }
+
+  .dialog .ev-facts {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  .dialog .ev-facts dd {
+    margin-bottom: 6px;
   }
 }

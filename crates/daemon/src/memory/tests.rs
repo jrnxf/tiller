@@ -455,9 +455,9 @@ async fn a_batch_keep_after_another_set_moved_the_text_is_stale() {
         .await;
     let error = refusal(&answer, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(
-        error
-            .message
-            .contains("the text moved; re-base and run the holdout again"),
+        error.message.contains(
+            "the text moved; re-propose it on the current text and run the holdout again"
+        ),
         "{}",
         error.message
     );
@@ -907,4 +907,299 @@ async fn a_revision_names_its_approval_and_text() {
         detail["text"],
         "## How we work here\n\n- Run the slow suite before landing\n"
     );
+}
+
+/// The suggestion `proposal` in the view of `project`.
+fn suggestion(view: &Value, proposal: &str) -> Value {
+    view["doc"]["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|section| {
+            let lines = section["lines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|line| line.get("suggestion").filter(|s| !s.is_null()).cloned());
+            section["suggestions"]
+                .as_array()
+                .unwrap()
+                .clone()
+                .into_iter()
+                .chain(lines.collect::<Vec<_>>())
+        })
+        .find(|s| s["proposal_id"] == proposal)
+        .unwrap_or(Value::Null)
+}
+
+/// An invented evals checkout: one holdout case at two runs with one judged
+/// grader, and a fake `run.sh` running `body`. Nothing in it calls a model.
+fn evals_checkout(body: &str) -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let case = dir.path().join("evals/cases/holdout/invented_case");
+    std::fs::create_dir_all(case.join("graders")).unwrap();
+    std::fs::write(
+        case.join("prompt.md"),
+        "---\nrole: builder\nruns: 2\n---\nDo it.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        case.join("graders/judge.md"),
+        "---\ntype: llm\n---\nDone?\n",
+    )
+    .unwrap();
+    let runner = dir.path().join("evals/run.sh");
+    std::fs::write(&runner, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+    dir
+}
+
+const PASSING_RUN: &str = r#"mkdir -p "$6/sealed"
+printf '{"aggregates":{"casesTotal":1,"casesPassed":1,"overallScore":1.0}}' > "$6/sealed/result.json""#;
+
+fn point_at(home: &Home, checkout: &Path) {
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!(
+            "[learning]\nevals_dir = \"{}\"\neval_percent_per_run = 0.5\n",
+            checkout.display()
+        ),
+    )
+    .unwrap();
+}
+
+fn weekly(home: &Home, left: f64) {
+    let mut store = home.fleet.open();
+    store
+        .cache_quota(
+            &Ctx::new(Actor::Daemon),
+            vec![tiller_core::state::caches::QuotaReading {
+                label: "claude:seven_day".into(),
+                percent_remaining: Some(left),
+                resets_at: Some(tiller_core::Timestamp::now().plus_minutes(3 * 24 * 60)),
+                pace: None,
+                reserve: None,
+                burn_multiple: None,
+                elapsed_percent: None,
+                projected_exhaustion_at: None,
+                title: Some("Weekly".into()),
+                kind: Some("weekly".into()),
+                fetch_error: None,
+            }],
+        )
+        .unwrap();
+}
+
+async fn plan(home: &Home, proposal: &str) -> Value {
+    let answer = get(
+        &home.app,
+        &format!("/api/v1/memory/proposals/{proposal}/eval"),
+    )
+    .await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    serde_json::from_str(&answer.body).unwrap()
+}
+
+/// The view once no eval is running, or after ten seconds.
+async fn settled(home: &Home, project: &str) -> Value {
+    for _ in 0..100 {
+        let view = home.view(project).await;
+        let running = view["evals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|job| job["finished_at"].is_null());
+        if !running {
+            return view;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("the eval is still running");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_board_runs_the_holdout_eval_that_unlocks_keep() {
+    let home = home();
+    home.add("k-1", "alpha", RULE_SECTION, "Run the slow suite")
+        .await;
+    let proposal = propose(&home, "alpha", "The parser test flakes");
+    let view = home.view("alpha").await;
+    assert_eq!(suggestion(&view, &proposal)["eval_clears"], true);
+    assert_eq!(view["evals"], json!([]));
+
+    // With no evals checkout set, the plan says why it will not start.
+    let first = plan(&home, &proposal).await;
+    assert!(
+        first["refusal"]
+            .as_str()
+            .unwrap()
+            .contains("learning.evals_dir is not set"),
+        "{first}"
+    );
+    let start = |key: &'static str| {
+        let proposal = proposal.clone();
+        let home = &home;
+        async move {
+            home.post(
+                &format!("/api/v1/memory/proposals/{proposal}/eval"),
+                json!({"idempotency_key": key}),
+            )
+            .await
+        }
+    };
+    refusal(&start("e-1").await, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let checkout = evals_checkout(PASSING_RUN);
+    point_at(&home, checkout.path());
+    // The quota floor fails closed with no reading, and refuses a run that
+    // would leave the week at or under it.
+    let unread = plan(&home, &proposal).await;
+    assert!(
+        unread["refusal"]
+            .as_str()
+            .unwrap()
+            .contains("no weekly quota reading"),
+        "{unread}"
+    );
+    weekly(&home, 6.0);
+    let low = plan(&home, &proposal).await;
+    assert_eq!(low["quota"]["floor"], 5.0);
+    assert_eq!(low["quota"]["left_after"], 4.0);
+    assert!(
+        low["refusal"]
+            .as_str()
+            .unwrap()
+            .contains("at or under the 5 percent floor"),
+        "{low}"
+    );
+    let error = refusal(&start("e-2").await, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(error.message.contains("floor"), "{}", error.message);
+
+    weekly(&home, 60.0);
+    let ready = plan(&home, &proposal).await;
+    assert_eq!(ready["refusal"], Value::Null, "{ready}");
+    assert_eq!(
+        (
+            &ready["cases"],
+            &ready["case_runs"],
+            &ready["judge_runs"],
+            &ready["model_runs"]
+        ),
+        (&json!(1), &json!(2), &json!(2), &json!(4))
+    );
+    assert_eq!(ready["percent"], 2.0);
+    assert_eq!(ready["quota"]["left_after"], 58.0);
+    assert_eq!(ready["change_set"], ids::short(&proposal));
+
+    let started = ok(&start("e-3").await);
+    assert_eq!(started.data["change_set"], ids::short(&proposal));
+    let view = settled(&home, "alpha").await;
+    assert_eq!(view["evals"], json!([]), "a recorded run leaves no job");
+    let shown = suggestion(&view, &proposal);
+    assert_eq!(shown["holdout"]["passed"], true);
+    assert_eq!(shown["holdout"]["current"], true);
+    assert_eq!(shown["gate"]["ok"], true, "{shown}");
+    assert_eq!(shown["eval_clears"], false);
+
+    // The run unlocked Keep.
+    let blob = home.blob("alpha").await;
+    let kept = home
+        .post(
+            "/api/v1/memory/proposals/decide",
+            json!({"idempotency_key": "d-1", "decisions": [
+                {"proposal": proposal, "decision": "keep", "base_blob": blob}]}),
+        )
+        .await;
+    ok(&kept);
+    assert!(text(&home, ALPHA).contains("The parser test flakes"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_holdout_eval_that_records_nothing_keeps_its_reason() {
+    let home = home();
+    home.add("k-1", "alpha", RULE_SECTION, "Run the slow suite")
+        .await;
+    let proposal = propose(&home, "alpha", "The parser test flakes");
+    let checkout = evals_checkout("exit 3");
+    point_at(&home, checkout.path());
+    weekly(&home, 60.0);
+    let started = home
+        .post(
+            &format!("/api/v1/memory/proposals/{proposal}/eval"),
+            json!({"idempotency_key": "e-1"}),
+        )
+        .await;
+    ok(&started);
+    let view = settled(&home, "alpha").await;
+    let job = &view["evals"][0];
+    assert_eq!(job["proposal_id"], proposal.as_str());
+    assert!(
+        job["error"]
+            .as_str()
+            .unwrap()
+            .contains("exited with code 3"),
+        "{job}"
+    );
+    let shown = suggestion(&view, &proposal);
+    assert_eq!(shown["gate"]["ok"], false);
+    assert_eq!(shown["eval_clears"], true, "it can run again");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_moved_proposal_is_reproposed_on_the_current_text() {
+    let home = home();
+    home.add("k-1", "alpha", RULE_SECTION, "Run the slow suite")
+        .await;
+    let proposal = propose(&home, "alpha", "The parser test flakes");
+    home.add("k-2", "alpha", RULE_SECTION, "Keep commits small")
+        .await;
+    let view = home.view("alpha").await;
+    let moved = suggestion(&view, &proposal);
+    assert_eq!(moved["moved"], true);
+    assert_eq!(moved["eval_clears"], false);
+    assert!(
+        moved["gate"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("Re-propose on current text"),
+        "{moved}"
+    );
+    // The eval will not start on a moved proposal.
+    let checkout = evals_checkout(PASSING_RUN);
+    point_at(&home, checkout.path());
+    weekly(&home, 60.0);
+    let refused = plan(&home, &proposal).await;
+    assert!(
+        refused["refusal"].as_str().unwrap().contains("re-propose"),
+        "{refused}"
+    );
+
+    let blob = home.blob("alpha").await;
+    let path = format!("/api/v1/memory/proposals/{proposal}/repropose");
+    let answer = home
+        .post(&path, json!({"idempotency_key": "r-1", "base_blob": blob}))
+        .await;
+    let again = ok(&answer);
+    let new = again.data["proposal_id"].as_str().unwrap().to_owned();
+    assert_ne!(new, proposal);
+    let view = home.view("alpha").await;
+    assert_eq!(suggestion(&view, &proposal), Value::Null);
+    let fresh = suggestion(&view, &new);
+    assert_eq!(fresh["moved"], false);
+    assert_eq!(fresh["eval_clears"], true);
+    assert_eq!(fresh["text"], "The parser test flakes");
+    assert!(
+        view["doc"]["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|change| change["proposal_id"] != proposal.as_str()),
+        "the closed proposal is not in the history"
+    );
+    // A second re-proposal of the closed one is refused.
+    let twice = home
+        .post(&path, json!({"idempotency_key": "r-2", "base_blob": blob}))
+        .await;
+    refusal(&twice, StatusCode::UNPROCESSABLE_ENTITY);
 }

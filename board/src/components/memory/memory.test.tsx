@@ -10,6 +10,7 @@ import type { MemoryResponse } from "../../lib/api-types";
 import { hydrateFromSnapshot } from "../../lib/boot";
 import { fixtureMutation } from "../../lib/fixture-mutations";
 import { fixtureResource, fixtureSnapshot } from "../../lib/fixtures";
+import type { Scenario } from "../../lib/fixtures";
 import { resetMemoryFixture } from "../../lib/fixtures-memory";
 import { loadPrefs, prefsStore } from "../../lib/prefs";
 import { createQueryClient } from "../../lib/query-client";
@@ -28,19 +29,20 @@ let calls: Call[] = [];
 let reads: string[] = [];
 
 // The stand-in daemon: reads and writes go to the same stateful fixture the
-// dev server uses, so a landed change shows on the next read.
-function stubDaemon() {
+// dev server uses, so a landed change shows on the next read. `scenario`
+// sets the quota a holdout eval is planned against.
+function stubDaemon(scenario: Scenario = "default") {
   vi.stubGlobal("fetch", async (path: string, init?: RequestInit) => {
     const method = init?.method ?? "GET";
     if (method === "GET") {
       reads.push(path);
-      const data = fixtureResource(path, "default", NOW);
+      const data = fixtureResource(path, scenario, NOW);
       if (data === undefined) return new Response("{}", { status: 404 });
       return new Response(JSON.stringify(data), { status: 200 });
     }
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     calls.push({ path, body });
-    const { reply } = fixtureMutation(method, path, body);
+    const { reply } = fixtureMutation(method, path, body, scenario);
     return new Response(JSON.stringify(reply.body), { status: reply.status });
   });
 }
@@ -358,11 +360,15 @@ test("a document with uncommitted changes cannot be edited from the page", async
   }
 });
 
-test("the page has no Recent changes rail and no Undo", async () => {
+test("the page has no Recent changes rail: the history is at the foot of the document", async () => {
   await renderMemory();
 
   expect(screen.queryByRole("complementary", { name: "Recent changes" })).toBeNull();
-  expect(screen.queryByRole("button", { name: /^Undo/ })).toBeNull();
+  const history = screen.getByRole("region", { name: "Change history" });
+  // After the document's last section, not beside it.
+  const article = screen.getByRole("article");
+  expect(article.compareDocumentPosition(history) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(within(history).getByText("host / host-a · last 30 days")).toBeTruthy();
 });
 
 test("the Source link in a line's editor opens its revision over the page", async () => {
@@ -458,7 +464,7 @@ test("a new line that is refused stays open with its text", async () => {
   );
 });
 
-test("Keep waits for the holdout gate, with the reason and the command beside it", async () => {
+test("Keep waits for the holdout gate, with the reason, and the board offers the eval in place of the command", async () => {
   await renderMemory();
 
   const row = card("add");
@@ -466,8 +472,9 @@ test("Keep waits for the holdout gate, with the reason and the command beside it
   expect(keep.disabled).toBe(true);
   const note = document.getElementById(keep.getAttribute("aria-describedby") ?? "");
   expect(note?.textContent).toBe(
-    "Keep waits for the holdout gate: change set off-screen checks has no holdout run. Next: tiller learn eval off-screen checks",
+    "Keep waits for the holdout gate: change set off-screen checks has no holdout run.",
   );
+  expect(within(row).getByRole("button", { name: "Run holdout eval..." })).toBeTruthy();
   // Discard is not gated.
   const discard = within(row).getByRole("button", { name: "Discard" }) as HTMLButtonElement;
   expect(discard.disabled).toBe(false);
@@ -873,13 +880,21 @@ test("a refused Keep goes when the suggestion is discarded", async () => {
 
 // U16: the card.
 
-test("a suggestion has Discard on the left and Keep, the primary action, rightmost", async () => {
+const labels = (op: "add" | "rewrite") =>
+  within(card(op))
+    .getAllByRole("button")
+    .map((button) => button.textContent);
+
+test("a suggestion has Discard before Keep, the primary action, rightmost", async () => {
   await renderMemory();
 
+  expect(labels("rewrite")).toEqual(["Discard", "Keep"]);
+  // The step that clears the gate leads, on the left.
+  expect(labels("add")).toEqual(["Run holdout eval...", "Discard", "Keep"]);
   for (const op of ["rewrite", "add"] as const) {
     const buttons = within(card(op)).getAllByRole("button");
-    expect(buttons.map((button) => button.textContent)).toEqual(["Discard", "Keep"]);
-    expect(buttons[1]?.className).toContain("primary");
+    expect(buttons.at(-1)?.className).toContain("primary");
+    expect(buttons.filter((button) => button.className.includes("primary"))).toHaveLength(1);
   }
 });
 
@@ -961,4 +976,222 @@ test("?doc=fleet reads the shared document once, as the page with no doc does", 
   const memory = reads.filter((path) => path.startsWith("/api/v1/memory"));
   expect(memory.filter((path) => path.includes("scope=fleet"))).toEqual([]);
   expect(memory.length).toBeLessThanOrEqual(1);
+});
+
+// P8: the holdout eval, re-propose and the change history, with no terminal.
+// Every eval here is the fixture's stand-in: no model runs.
+
+// The value a fact in the eval dialog shows, without its note.
+const fact = (dialog: HTMLElement, name: string) => {
+  const term = within(dialog).getByText(name, { selector: "dt" });
+  const value = term.nextElementSibling;
+  if (!value) throw new Error(`no value for ${name}`);
+  const meta = value.querySelector(".meta")?.textContent ?? "";
+  return {
+    value: (value.textContent ?? "").slice(0, (value.textContent ?? "").length - meta.length),
+    meta: value.querySelector(".meta")?.textContent ?? null,
+    bad: value.hasAttribute("data-bad"),
+  };
+};
+
+const openEval = async () => {
+  fireEvent.click(within(card("add")).getByRole("button", { name: "Run holdout eval..." }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "Run the holdout eval for off-screen checks?",
+  });
+  await waitFor(() => expect(fact(dialog, "Cases").value).toBe("11"));
+  return dialog;
+};
+
+test("Run holdout eval... shows the model runs and the quota it will probably take before it starts", async () => {
+  await renderMemory();
+
+  const dialog = await openEval();
+  expect(fact(dialog, "Model runs")).toMatchObject({
+    value: "33",
+    meta: "22 case runs, 11 judge runs",
+  });
+  expect(fact(dialog, "Quota").value).toBe("about 3.3% of the week");
+  expect(fact(dialog, "Left after")).toMatchObject({
+    value: "about 23.7%",
+    meta: "floor 5%",
+    bad: false,
+  });
+  expect(fact(dialog, "Time").value).toBe("about 11 min");
+  // Nothing is sent until it is confirmed, and Cancel has the focus.
+  expect(calls).toEqual([]);
+  expect(document.activeElement?.textContent).toBe("Cancel");
+  const buttons = within(dialog).getAllByRole("button");
+  expect(buttons.map((button) => button.textContent)).toEqual(["Cancel", "Run eval"]);
+  expect(buttons[1]?.className).toContain("primary");
+
+  fireEvent.click(within(dialog).getByRole("button", { name: "Run eval" }));
+  await settle();
+
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.path).toMatch(/^\/api\/v1\/memory\/proposals\/[^/]+\/eval$/);
+  expect(Object.keys(calls[0]?.body ?? {})).toEqual(["idempotency_key"]);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  // The card shows the run, and Keep waits for it.
+  const row = card("add");
+  expect(within(row).getByRole("status").textContent).toMatch(
+    /^Holdout eval: 11 cases, started \d{2}:\d{2}/,
+  );
+  expect(within(row).getByRole("progressbar", { name: "Estimated progress" })).toBeTruthy();
+  expect((within(row).getByRole("button", { name: "Keep" }) as HTMLButtonElement).disabled).toBe(
+    true,
+  );
+  expect(within(row).queryByRole("button", { name: /Run holdout eval/ })).toBeNull();
+  expect(within(row).getByText("Keep waits for the eval.")).toBeTruthy();
+});
+
+test("Cancel in the eval dialog starts nothing", async () => {
+  await renderMemory();
+
+  const dialog = await openEval();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  await settle();
+
+  expect(calls).toEqual([]);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(within(card("add")).getByRole("button", { name: "Run holdout eval..." })).toBeTruthy();
+});
+
+test("under the quota floor the eval does not start, and the dialog says when the week resets", async () => {
+  stubDaemon("quota-red");
+  await renderMemory();
+
+  const dialog = await openEval();
+  expect(fact(dialog, "Left after")).toMatchObject({ value: "about 0%", bad: true });
+  expect(within(dialog).getByRole("alert").textContent).toMatch(
+    /^Not started: it would leave 0 percent of the week, at or under the 5 percent floor\. The week resets \w{3} \d{1,2} \w{3}, \d{2}:\d{2}\.$/,
+  );
+  const run = within(dialog).getByRole("button", { name: "Run eval" }) as HTMLButtonElement;
+  expect(run.disabled).toBe(true);
+  fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+  expect(calls).toEqual([]);
+});
+
+test("a stale quota reading fails closed: the eval does not start", async () => {
+  stubDaemon("quota-grey");
+  await renderMemory();
+
+  const dialog = await openEval();
+  expect(within(dialog).getByRole("alert").textContent).toMatch(
+    /^Not started: a weekly quota reading is stale, and the quota floor fails closed\.$/,
+  );
+  expect(
+    (within(dialog).getByRole("button", { name: "Run eval" }) as HTMLButtonElement).disabled,
+  ).toBe(true);
+});
+
+test("a suggestion on a text that moved offers Re-propose on current text, and the new one waits for its eval", async () => {
+  await renderMemory("/memory?doc=beta");
+
+  const before = card("retire");
+  expect(before.querySelector(".gate.stale")?.textContent).toMatch(
+    /^The document changed on \w{3} \d{1,2} \w{3}, after this was proposed\. Re-propose it on the current text, then run the eval again\.$/,
+  );
+  expect(within(before).queryByRole("button", { name: /Run holdout eval/ })).toBeNull();
+  expect((within(before).getByRole("button", { name: "Keep" }) as HTMLButtonElement).disabled).toBe(
+    true,
+  );
+  const blob = view("beta").doc.blob;
+  fireEvent.click(within(before).getByRole("button", { name: "Re-propose on current text" }));
+  await settle();
+
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.path).toMatch(/^\/api\/v1\/memory\/proposals\/[^/]+\/repropose$/);
+  expect(calls[0]?.body).toMatchObject({ base_blob: blob });
+  const after = card("retire");
+  expect(after.querySelector(".gate.stale")).toBeNull();
+  expect(after.querySelector(".gate")?.textContent).toMatch(/in no change set/);
+  expect(within(after).queryByRole("button", { name: "Re-propose on current text" })).toBeNull();
+  expect(within(after).getByRole("button", { name: "Run holdout eval..." })).toBeTruthy();
+});
+
+test("an eval that recorded nothing says why on its suggestion, and can run again", async () => {
+  await renderMemory("/memory?doc=beta");
+
+  const row = card("add");
+  expect(row.querySelector(".gate")?.textContent).toMatch(
+    /The eval started \w{3} \d{1,2} \w{3}, \d{2}:\d{2} recorded nothing: .*run\.sh exited with code 1/,
+  );
+  expect(within(row).getByRole("button", { name: "Run holdout eval again..." })).toBeTruthy();
+});
+
+const history = () => within(screen.getByRole("region", { name: "Change history" }));
+const firstChange = () => history().getAllByRole("listitem")[0] as HTMLElement;
+
+test("the change history lists each change, and an undone one says so with no button", async () => {
+  await renderMemory("/memory?doc=alpha");
+
+  const rows = history().getAllByRole("listitem");
+  expect(rows.map((row) => row.querySelector(".lab")?.textContent)).toEqual([
+    "Kept",
+    "Edited",
+    "Undone",
+  ]);
+  expect(rows[0]?.querySelector(".m")?.textContent).toMatch(
+    /^How we work here · the alpha orchestrator from alpha-43 · kept by you, \w{3} \d{1,2} \w{3}, \d{2}:\d{2}$/,
+  );
+  expect(rows[1]?.querySelector(".m")?.textContent).toMatch(/^Preferences · you, /);
+  const undone = rows[2] as HTMLElement;
+  expect(within(undone).getByText("Already undone")).toBeTruthy();
+  expect(within(undone).queryByRole("button")).toBeNull();
+  expect(within(rows[0] as HTMLElement).getByRole("button").textContent).toBe("Undo...");
+});
+
+test("Undo... asks first, Keep the change sends nothing, and Undo reverses it where it is read", async () => {
+  await renderMemory("/memory?doc=alpha");
+
+  const kept = view("alpha").doc.changes[0];
+  if (!kept?.text) throw new Error("no kept change");
+  expect(page().getByText(kept.text)).toBeTruthy();
+  fireEvent.click(within(firstChange()).getByRole("button", { name: /^Undo: Kept/ }));
+  let dialog = screen.getByRole("dialog", { name: "Undo this change?" });
+  expect(document.activeElement?.textContent).toBe("Keep the change");
+  const buttons = within(dialog).getAllByRole("button");
+  expect(buttons.map((button) => button.textContent)).toEqual(["Keep the change", "Undo"]);
+  expect(buttons[1]?.className).toContain("danger");
+  fireEvent.click(within(dialog).getByRole("button", { name: "Keep the change" }));
+  expect(calls).toEqual([]);
+
+  const blob = view("alpha").doc.blob;
+  fireEvent.click(within(firstChange()).getByRole("button", { name: /^Undo: Kept/ }));
+  dialog = screen.getByRole("dialog", { name: "Undo this change?" });
+  fireEvent.click(within(dialog).getByRole("button", { name: "Undo" }));
+  await settle();
+
+  expect(calls).toEqual([
+    {
+      path: `/api/v1/memory/changes/${kept.proposal_id}/undo`,
+      body: expect.objectContaining({ base_blob: blob }),
+    },
+  ]);
+  expect(within(firstChange()).getByText("Already undone")).toBeTruthy();
+  expect(page().queryByText(kept.text)).toBeNull();
+});
+
+test("undo of a discard brings the suggestion back for review", async () => {
+  await renderMemory();
+
+  const text = "Never push to main without asking me.";
+  expect(page().queryByText(text)).toBeNull();
+  const row = history()
+    .getAllByRole("listitem")
+    .find((each) => each.textContent?.includes(text));
+  if (!row) throw new Error("no discard row");
+  expect(row.querySelector(".lab")?.textContent).toBe("Discarded");
+  fireEvent.click(within(row).getByRole("button", { name: /^Undo: Discarded/ }));
+  const dialog = screen.getByRole("dialog", { name: "Undo this discard?" });
+  expect(within(dialog).getByText(/Nothing in the file changes until you keep it\./)).toBeTruthy();
+  fireEvent.click(within(dialog).getByRole("button", { name: "Undo" }));
+  await settle();
+
+  expect(calls[0]?.path).toMatch(/\/undo$/);
+  const back = page().getByText(text).closest<HTMLElement>(".a-sug");
+  if (!back) throw new Error("the suggestion did not come back");
+  // It is a new proposal, so Keep waits for its own holdout run.
+  expect(within(back).getByRole("button", { name: "Run holdout eval..." })).toBeTruthy();
 });

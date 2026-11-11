@@ -13,6 +13,7 @@ import type {
   ProjectFields,
   ProjectRetirePreview,
   ProjectsResponse,
+  QuotaResponse,
 } from "./api-types.ts";
 import { awayBrief } from "./fixtures-away.ts";
 import { memoryMutation } from "./fixtures-memory.ts";
@@ -1152,7 +1153,11 @@ function handle(
     }
     return { reply: recorded(done, null, null), followUps: [] };
   }
-  const memory = memoryMutation(method, path, body);
+  // A holdout eval plans against the scenario's quota, as the daemon's does.
+  const quota = path.startsWith("/api/v1/memory/proposals/")
+    ? ((fixtureResource("/api/v1/quota", scenario) as QuotaResponse | undefined)?.windows ?? [])
+    : [];
+  const memory = memoryMutation(method, path, body, quota);
   if (memory) {
     if (!memory.ok) {
       return {

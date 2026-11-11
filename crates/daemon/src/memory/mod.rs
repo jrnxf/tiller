@@ -9,6 +9,7 @@
 
 pub mod apply;
 pub mod dto;
+pub mod eval;
 pub mod scrub;
 pub mod watch;
 
@@ -98,6 +99,17 @@ pub struct MemoryUndo {
     #[serde(default)]
     pub host: Option<String>,
     /// The blob the board showed.
+    pub base_blob: String,
+}
+
+/// `POST /api/v1/memory/proposals/{id}/repropose`.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryRepropose {
+    pub idempotency_key: String,
+    #[serde(default)]
+    pub host: Option<String>,
+    /// The blob the board showed: the document's current head.
     pub base_blob: String,
 }
 
@@ -297,6 +309,7 @@ pub(crate) async fn view(
     Query(query): Query<MemoryQuery>,
 ) -> ApiResult<MemoryResponse> {
     let home = home(&state);
+    let evals = state.0.evals.jobs();
     let project = query.scope.unwrap_or_else(|| ids::FLEET_PROJECT.to_owned());
     let view = read(&state, move |store| {
         let repo = Repo::at(&home);
@@ -306,7 +319,9 @@ pub(crate) async fn view(
             |path| repo.state(path, &list),
             |paths| repo.head_texts(paths),
         )?;
-        Ok(serde_json::from_value(serde_json::to_value(view)?)?)
+        let mut value = serde_json::to_value(view)?;
+        value["evals"] = serde_json::to_value(evals)?;
+        Ok(serde_json::from_value(value)?)
     })
     .await?;
     Ok(Json(view))
@@ -502,6 +517,41 @@ pub(crate) async fn undo(
             if let Some(approval) = &pending.approval_id {
                 w.apply(approval, &path)?;
             }
+            Ok(serde_json::to_value(w.landed(pending, &path)?)?)
+        },
+        key,
+    )
+    .await
+}
+
+#[utoipa::path(post, path = "/api/v1/memory/proposals/{id}/repropose", tag = "mutations", request_body = MemoryRepropose,
+    params(("id" = String, Path)),
+    responses((status = 200, body = MutationResponse, description = "The new proposal, on the current text; the old one is closed"),
+              (status = 422, body = ErrorBody, description = "not proposed, made on the current text already, the document changed since the board showed it, or the change no longer applies"),
+              (status = 502, body = ErrorBody, description = "`peer_refused`: not forwarded")))]
+pub(crate) async fn repropose(
+    State(state): State<AppState>,
+    Path(proposal): Path<String>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> ApiResult<MutationResponse> {
+    guard(&state, &headers).await?;
+    let request: MemoryRepropose = body(&bytes)?;
+    not_forwarded(&state, request.host.as_deref(), "a re-proposal").await?;
+    let key = key(&request.idempotency_key)?;
+    write(
+        &state,
+        move |w, key, args| {
+            let change = w.store.memory_change(&proposal)?;
+            let path = document_path(&change.project_id);
+            let file = w.repo.state(&path, &w.list)?;
+            let again = w.store.mem_repropose(
+                &board_ctx(key, args),
+                &proposal,
+                &request.base_blob,
+                &file,
+            )?;
+            let pending = w.track(again);
             Ok(serde_json::to_value(w.landed(pending, &path)?)?)
         },
         key,

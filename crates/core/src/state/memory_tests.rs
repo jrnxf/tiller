@@ -300,7 +300,7 @@ fn keep_on_an_old_base_is_refused_as_stale() {
     assert!(!gate.ok);
     assert_eq!(
         gate.reason.as_deref(),
-        Some("the text moved; re-base and run the holdout again")
+        Some("the text moved; re-propose it on the current text and run the holdout again")
     );
 
     let error = store
@@ -409,7 +409,10 @@ fn discard_then_undo_proposes_it_again() {
     let view = store
         .memory_view("alpha", |_| Ok(file("")), no_list)
         .unwrap();
-    assert!(view.doc.changes.is_empty());
+    // The history keeps the discard, marked undone.
+    assert_eq!(view.doc.changes.len(), 1, "{:?}", view.doc.changes);
+    assert_eq!(view.doc.changes[0].kind, "discard");
+    assert!(view.doc.changes[0].undone_at.is_some());
     assert!(
         store
             .mem_undo(&owner(), &suggested, EMPTY_BLOB, &file(""), None)
@@ -464,7 +467,15 @@ fn undo_of_an_added_line_retires_it_and_keeps_its_history() {
     let view = store
         .memory_view("alpha", |_| Ok(file("")), no_list)
         .unwrap();
-    assert!(view.doc.changes.is_empty(), "{:?}", view.doc.changes);
+    // One row for the add, marked undone; the reverse has no row of its own.
+    assert_eq!(view.doc.changes.len(), 1, "{:?}", view.doc.changes);
+    let row = &view.doc.changes[0];
+    assert_eq!(
+        (row.proposal_id.as_str(), row.kind.as_str()),
+        (pending.proposal_id.as_str(), "added")
+    );
+    assert_eq!(row.section, doc::RULE_SECTION);
+    assert!(row.undone_at.is_some());
 }
 
 #[test]
@@ -985,4 +996,101 @@ fn deleting_a_project_removes_its_memory_and_unlinks_the_fleet_one() {
         })
         .unwrap();
     assert_eq!(broken, 0);
+}
+
+/// U14: a proposal whose document moved after it was made is stale. Its
+/// hint names the act that clears it, which the memory view offers.
+#[test]
+fn a_stale_proposal_is_reproposed_on_the_current_text() {
+    let (mut store, _) = memory_store();
+    let suggested = agent_proposal(
+        &mut store,
+        "alpha",
+        "",
+        "The staging DB resets at midnight",
+        None,
+    );
+    measured(&mut store, "staging notes", &[&suggested]);
+    let first = add(&mut store, "alpha", "Owner line", "", doc::RULE_SECTION);
+    let now = "## How we work here\n\n- Owner line\n";
+    apply(&mut store, first.approval_id.as_deref().unwrap(), "", now);
+
+    let view = store
+        .memory_view("alpha", |_| Ok(file(now)), no_list)
+        .unwrap();
+    let shown = &notes(&view).suggestions[0];
+    let hint = shown.gate.hint.as_deref().unwrap();
+    assert!(hint.contains("Re-propose on current text"), "{hint}");
+    assert!(!hint.contains("undo"), "{hint}");
+    assert!(shown.moved);
+    assert!(shown.moved_at.is_some());
+    // A holdout run cannot clear it until it is on the current text.
+    assert!(!shown.eval_clears);
+
+    let head = file(now).head_blob;
+    // The board's base must be the text it showed.
+    assert!(
+        store
+            .mem_repropose(&owner(), &suggested, EMPTY_BLOB, &file(now))
+            .is_err()
+    );
+    let again = store
+        .mem_repropose(&owner(), &suggested, &head, &file(now))
+        .unwrap()
+        .value;
+    assert_ne!(again.proposal_id, suggested);
+    assert_eq!(again.approval_id, None);
+    assert_eq!(proposal(&store, &suggested).state, "discarded");
+    let fresh = proposal(&store, &again.proposal_id);
+    assert_eq!(fresh.state, "proposed");
+    assert_eq!(fresh.base_blob, head);
+    assert_eq!(fresh.created_by, "session:curator");
+    assert_eq!(fresh.rationale.as_deref(), Some("Seen twice this week"));
+    assert_eq!(
+        fresh.memory_fields["supersedes"].as_str(),
+        Some(suggested.as_str())
+    );
+    let path = document_path("alpha");
+    let expected = doc::unified_diff(
+        &path,
+        now,
+        &doc::add(now, doc::NOTE_SECTION, "The staging DB resets at midnight"),
+    );
+    assert_eq!(fresh.diff, expected);
+
+    let view = store
+        .memory_view("alpha", |_| Ok(file(now)), no_list)
+        .unwrap();
+    // The closed one is not an owner discard: no history row, no undo.
+    assert!(
+        view.doc.changes.iter().all(|c| c.proposal_id != suggested),
+        "{:?}",
+        view.doc.changes
+    );
+    assert!(
+        store
+            .mem_undo(&owner(), &suggested, &head, &file(now), None)
+            .is_err()
+    );
+    let shown = &notes(&view).suggestions;
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].proposal_id, again.proposal_id);
+    assert!(!shown[0].moved);
+    assert!(shown[0].eval_clears, "{:?}", shown[0].gate);
+    assert!(
+        shown[0]
+            .gate
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("no change set"),
+        "{:?}",
+        shown[0].gate
+    );
+    // A proposal made on the current text has nothing to re-propose.
+    assert!(
+        store
+            .mem_repropose(&owner(), &again.proposal_id, &head, &file(now))
+            .is_err()
+    );
 }

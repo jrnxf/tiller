@@ -453,6 +453,7 @@ mod tests {
             sessions: crate::auth::Sessions::default(),
             streams: crate::sse::Streams::default(),
             ssh: vec!["ssh".into()],
+            evals: crate::memory::eval::Evals::default(),
         }));
         let mut stopping = stop.clone();
         tokio::spawn(async move {

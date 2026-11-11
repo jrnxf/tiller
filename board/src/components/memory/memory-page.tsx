@@ -1,11 +1,13 @@
-import { useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { Link, useBlocker } from "@tanstack/react-router";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent, MouseEvent, ReactNode } from "react";
 
 import type {
+  MemoryChange,
   MemoryDocSummary,
   MemoryDocument,
+  MemoryEvalJob,
   MemoryLine,
   MemoryProvenance,
   MemoryResponse,
@@ -16,24 +18,20 @@ import type {
 import { hostName, isPeerRow } from "../../lib/peers";
 import { prefsStore, visibleProjects } from "../../lib/prefs";
 import { projectColor } from "../../lib/project-color";
-import {
-  API_KEY_PREFIX,
-  ReadError,
-  memoryQuery,
-  projectsQuery,
-  revisionQuery,
-} from "../../lib/queries";
+import { ReadError, memoryQuery, projectsQuery, revisionQuery } from "../../lib/queries";
 import { useStore } from "../../lib/store";
 import { ActionError, sendMutation } from "../attention/api";
 import { ulid } from "../attention/ulid";
 import { WarnIcon } from "../board/icons";
 import { showToast } from "../board/toast";
-import { lisbonDay, lisbonShortDay } from "../health/lisbon";
 import { CheckIcon, LayersIcon } from "../shell/icons";
 import { ProjectDialog } from "../shell/project-dialog";
 import { Section } from "../states/section";
+import { ChangeHistory, changeScope } from "./history";
+import { EvalDialog, EvalRun } from "./holdout";
 import { ClockIcon, EditIcon, LinesIcon, PlusIcon, SparkIcon, TrashIcon } from "./icons";
 import { inlineDiff } from "./inline-diff";
+import { Inline, day, oneLine, plural, sentence, useMemoryRefresh, when } from "./parts";
 import "../shell/project-stage.css";
 import "./memory.css";
 import { useMachineRows, useNamedProjects } from "../board/peer-state";
@@ -45,23 +43,6 @@ const FLEET = "fleet";
 function useDocName(): (doc: { project_id: string; name: string }) => string {
   const local = useMachineRows().find((machine) => machine.kind === "local")?.label ?? null;
   return (doc) => (doc.project_id === FLEET ? hostName(local) : doc.name);
-}
-
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
-
-// "Wed 4 Nov" and "Wed 4 Nov, 17:48", in Lisbon time.
-const day = (iso: string) => lisbonShortDay(iso);
-const when = (iso: string) => `${lisbonShortDay(iso)}, ${lisbonDay(iso).time}`;
-
-const oneLine = (text: string | null | undefined) => (text ?? "").replace(/\s+/g, " ").trim();
-
-// A free-text reason as a sentence of its own: a capital letter first and a
-// full stop last, so "seen twice" reads "Seen twice.".
-function sentence(text: string): string {
-  const trimmed = oneLine(text);
-  if (trimmed === "") return "";
-  const capital = `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}`;
-  return /[.!?]$/.test(capital) ? capital : `${capital}.`;
 }
 
 // The note a landed change shows, so the page says it worked. `scope` names
@@ -91,7 +72,7 @@ const lineScope = (section: string, nth: number, text: string) =>
 // Each act therefore gets its own idempotency key. Landed or refused, the
 // document is read again: the change shows, or the text it was refused against.
 function useMemoryWrite() {
-  const queryClient = useQueryClient();
+  const refresh = useMemoryRefresh();
   const inFlight = useRef(false);
   const [pending, setPending] = useState(false);
   const [refusal, setRefusal] = useState<Refusal | null>(null);
@@ -115,16 +96,13 @@ function useMemoryWrite() {
               : new ActionError(0, "internal", "Something went wrong, so this was not saved."),
         });
       }
-      await queryClient.invalidateQueries({
-        queryKey: API_KEY_PREFIX,
-        predicate: (query) => String(query.queryKey[1] ?? "").startsWith("/api/v1/memory"),
-      });
+      await refresh();
       inFlight.current = false;
       setPending(false);
       if (landed) showToast("ok", note);
       return landed;
     },
-    [queryClient],
+    [refresh],
   );
   const clearRefusal = useCallback(() => setRefusal(null), []);
 
@@ -142,6 +120,8 @@ const scopeOf = (scope: string) => (scope === FLEET ? undefined : scope);
 
 const isMissing = (error: unknown) => error instanceof ReadError && error.status === 404;
 
+const running = (job: MemoryEvalJob) => job.finished_at === null;
+
 // A document that is not there will not be there on a second read, so the page
 // says so at once; any other failure is read once more.
 export const retryUnlessMissing = (failures: number, error: unknown) =>
@@ -155,6 +135,9 @@ function useDocAnswer(scope: string): MemoryResponse | null | undefined {
     ...memoryQuery(scopeOf(scope)),
     retry: retryUnlessMissing,
     throwOnError: (error) => !isMissing(error),
+    // A run that fails records nothing, so no event says it ended: the page
+    // reads again while one runs.
+    refetchInterval: (read) => (read.state.data?.evals.some(running) ? 5000 : false),
   });
   if (query.data) return query.data;
   return isMissing(query.error) ? null : undefined;
@@ -278,16 +261,6 @@ const SAVE: Record<EditorMode, string> = {
   changed: "Save over",
   gone: "Add as new line",
 };
-
-// A refusal or a note shown beside the control it is about, and announced
-// where it appears.
-function Inline({ error }: { error: ActionError }) {
-  return (
-    <p className="refusal inline" role="alert">
-      {error.message}
-    </p>
-  );
-}
 
 // The editor a line opens in place, and Add a line opens at the end of its
 // section. Enter saves and Esc discards; a blank line is never saved. After a
@@ -527,15 +500,15 @@ function SuggestionCard({
   section,
   locked,
   refusal,
-  onDecide,
+  ctl,
 }: {
   suggestion: MemorySuggestion;
   line: MemoryLine | null;
   section: string;
   locked: boolean;
-  // Why Keep or Discard was refused, beside the buttons that were pressed.
+  // Why Keep, Discard or Re-propose was refused, beside the button pressed.
   refusal: ActionError | null;
-  onDecide: (suggestion: MemorySuggestion, decision: "keep" | "discard") => void;
+  ctl: Pick<Ctl, "decide" | "jobFor" | "askEval" | "repropose">;
 }) {
   // The line it names: the row it sits under, or the text the view sends when
   // it is listed apart from that row.
@@ -587,6 +560,85 @@ function SuggestionCard({
   const from = suggestion.card ? ` from ${suggestion.card}` : "";
   const reason = sentence(suggestion.why ?? "");
   const budget = budgetText(suggestion.token_budget_after);
+  const job = ctl.jobFor(suggestion.proposal_id);
+  const evaluating = job !== null && job.finished_at === null;
+  const failed = job !== null && job.error !== null ? job : null;
+  const { holdout } = suggestion;
+  let gateBox: ReactNode = null;
+  if (evaluating && job) {
+    gateBox = <EvalRun job={job} />;
+  } else if (suggestion.moved) {
+    gateBox = (
+      <div className="gate stale" id={gateId}>
+        <WarnIcon />
+        <span>
+          The document changed
+          {suggestion.moved_at ? ` on ${day(suggestion.moved_at)}` : ""}, after this was proposed.
+          Re-propose it on the current text, then run the eval again.
+        </span>
+      </div>
+    );
+  } else if (gate.ok && holdout?.passed && holdout.current) {
+    gateBox = (
+      <div className="gate ok">
+        <CheckIcon />
+        <span>
+          Holdout passed: {holdout.cases_passed} of {holdout.cases_total} cases,{" "}
+          {when(holdout.ran_at)}.
+        </span>
+      </div>
+    );
+  } else if (!gate.ok) {
+    // The board starts the eval itself, so the command it replaces is not
+    // shown as the next step.
+    const hint = suggestion.eval_clears ? null : gate.hint;
+    gateBox = (
+      <div className="gate" id={gateId}>
+        <WarnIcon />
+        <span>
+          Keep waits for the holdout gate{gateReason ? `: ${gateReason}` : ""}.
+          {failed ? (
+            <span className="gate-run">
+              The eval started {when(failed.started_at)} recorded nothing: {oneLine(failed.error)}
+            </span>
+          ) : null}
+          {hint ? (
+            <span className="gate-run">
+              {" "}
+              Next: <code>{hint}</code>
+            </span>
+          ) : null}
+        </span>
+      </div>
+    );
+  }
+  let note: string | null = null;
+  if (evaluating) note = "Keep waits for the eval.";
+  else if (gate.ok) note = "Nothing changes until you keep it.";
+  let lead: ReactNode = null;
+  if (!evaluating && suggestion.moved) {
+    lead = (
+      <button
+        type="button"
+        className="btn"
+        disabled={locked}
+        onClick={() => ctl.repropose(suggestion)}
+      >
+        Re-propose on current text
+      </button>
+    );
+  } else if (!evaluating && suggestion.eval_clears) {
+    lead = (
+      <button
+        type="button"
+        className="btn"
+        disabled={locked}
+        onClick={() => ctl.askEval(suggestion)}
+      >
+        {failed ? "Run holdout eval again..." : "Run holdout eval..."}
+      </button>
+    );
+  }
   return (
     <div
       className="a-sug"
@@ -609,37 +661,25 @@ function SuggestionCard({
         {from}, {when(suggestion.at)}.{reason ? ` ${reason}` : ""}
         {budget ? <span className="bud"> {budget}</span> : null}
       </div>
-      {gate.ok ? null : (
-        <div className="gate" id={gateId}>
-          <WarnIcon />
-          <span>
-            Keep waits for the holdout gate{gateReason ? `: ${gateReason}` : ""}.
-            {gate.hint ? (
-              <span className="gate-run">
-                {" "}
-                Next: <code>{gate.hint}</code>
-              </span>
-            ) : null}
-          </span>
-        </div>
-      )}
+      {gateBox}
       {refusal ? <Inline error={refusal} /> : null}
       <div className="sug-f">
-        {gate.ok ? <span className="note">Nothing changes until you keep it.</span> : null}
+        {lead}
+        {note ? <span className="note">{note}</span> : <span className="sp" />}
         <button
           type="button"
           className="btn"
           disabled={locked}
-          onClick={() => onDecide(suggestion, "discard")}
+          onClick={() => ctl.decide(suggestion, "discard")}
         >
           Discard
         </button>
         <button
           type="button"
           className="btn primary"
-          disabled={locked || !gate.ok}
-          aria-describedby={gate.ok ? undefined : gateId}
-          onClick={() => onDecide(suggestion, "keep")}
+          disabled={locked || !gate.ok || evaluating}
+          aria-describedby={gate.ok || evaluating ? undefined : gateId}
+          onClick={() => ctl.decide(suggestion, "keep")}
         >
           <CheckIcon />
           Keep
@@ -755,6 +795,10 @@ interface Ctl {
   askRemoveInEditor: () => void;
   askRemoveRow: (section: string, line: MemoryLine, nth: number, position: number) => void;
   decide: (suggestion: MemorySuggestion, decision: "keep" | "discard") => void;
+  // The newest eval the board started on a proposal, running or failed.
+  jobFor: (proposal: string) => MemoryEvalJob | null;
+  askEval: (suggestion: MemorySuggestion) => void;
+  repropose: (suggestion: MemorySuggestion) => void;
 }
 
 // Who a new line is added as.
@@ -883,7 +927,7 @@ function DocSection({
                 section={section.title}
                 locked={ctl.locked}
                 refusal={ctl.refusalFor(proposalScope(line.suggestion.proposal_id))}
-                onDecide={ctl.decide}
+                ctl={ctl}
               />
             ) : null}
           </div>
@@ -897,7 +941,7 @@ function DocSection({
           section={section.title}
           locked={ctl.locked}
           refusal={ctl.refusalFor(proposalScope(suggestion.proposal_id))}
-          onDecide={ctl.decide}
+          ctl={ctl}
         />
       ))}
       {empty && !atEnd ? (
@@ -1113,6 +1157,7 @@ function RemoveDialog({
 // refusal does not outlive it.
 function scopeLive(scope: string, doc: MemoryDocument, editor: EditorState | null): boolean {
   if (scope === EDITOR) return editor !== null;
+  if (doc.changes.some((change) => changeScope(change.proposal_id) === scope)) return true;
   return doc.sections.some(
     (section) =>
       section.suggestions.some((each) => proposalScope(each.proposal_id) === scope) ||
@@ -1136,6 +1181,8 @@ function Doc({ data }: { data: MemoryResponse }) {
   const [asking, setAsking] = useState<EditorState | null>(null);
   // The line Remove asked about, until the dialog is answered.
   const [removal, setRemoval] = useState<Removal | null>(null);
+  // The proposal whose holdout eval the dialog is about to start.
+  const [evaluating, setEvaluating] = useState<string | null>(null);
   // Where focus goes next, held outside state: it is read by the effect below
   // and never shown. `wake` renders once more so the effect looks again.
   const wanted = useRef<Focus | null>(null);
@@ -1333,6 +1380,27 @@ function Doc({ data }: { data: MemoryResponse }) {
       proposalScope(suggestion.proposal_id),
     );
 
+  // The eval runs on the proposal as it is now, so a re-proposal is a new
+  // suggestion with its own eval.
+  const repropose = (suggestion: MemorySuggestion) =>
+    void write(
+      `/api/v1/memory/proposals/${suggestion.proposal_id}/repropose`,
+      { base_blob: doc.blob },
+      "Proposed again on the current text. Run its holdout eval next.",
+      proposalScope(suggestion.proposal_id),
+    );
+
+  const undo = (change: MemoryChange) =>
+    void write(
+      `/api/v1/memory/changes/${change.proposal_id}/undo`,
+      { base_blob: doc.blob },
+      change.kind === "discard" ? "Proposed again. It waits for you to review." : "Undone.",
+      changeScope(change.proposal_id),
+    );
+
+  const jobFor = (proposal: string) =>
+    data.evals.find((job) => job.proposal_id === proposal) ?? null;
+
   const ctl: Ctl = {
     editor,
     resolved,
@@ -1347,6 +1415,9 @@ function Doc({ data }: { data: MemoryResponse }) {
     askRemoveInEditor,
     askRemoveRow,
     decide,
+    jobFor,
+    askEval: (suggestion) => setEvaluating(suggestion.proposal_id),
+    repropose,
   };
 
   // Back to the draft the dialog interrupted.
@@ -1440,6 +1511,15 @@ function Doc({ data }: { data: MemoryResponse }) {
           <DocSection key={section.title} section={section} projects={local} ctl={ctl} />
         ))}
       </article>
+      {/* At the document's foot, outside its text: what changed in it. */}
+      <ChangeHistory
+        changes={doc.changes}
+        doc={docName(doc)}
+        locked={locked}
+        refusalFor={ctl.refusalFor}
+        onUndo={undo}
+      />
+      {evaluating ? <EvalDialog proposal={evaluating} onClose={() => setEvaluating(null)} /> : null}
       {removal && removing ? (
         <RemoveDialog
           line={removal.text}
