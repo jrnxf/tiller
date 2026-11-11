@@ -265,7 +265,7 @@ async fn the_boards_own_write_is_not_an_outside_change() {
         let head = git(&root, &["rev-parse", "HEAD"]);
         let known = watcher.known.as_ref().unwrap();
         assert_eq!(
-            known.head.as_deref(),
+            known.seen.head.as_deref(),
             Some(head.trim()),
             "it read the commit"
         );
@@ -281,4 +281,63 @@ async fn the_boards_own_write_is_not_an_outside_change() {
         look(&mut watcher),
         Some(vec!["fleet.md".to_owned(), "projects/alpha.md".to_owned()])
     );
+}
+
+/// An edit made while the daemon is down is seen when it starts again: the
+/// watcher compares its first look with the last look before the stop.
+#[test]
+fn an_edit_made_while_the_daemon_is_down_is_seen_on_start() {
+    let fleet = Fleet::new();
+    let home = fleet.dir.path();
+    let root = repo(home, "# Fleet\n\n- First.\n");
+    let mut first = Watcher::new(home, Store::open(&fleet.db).unwrap());
+    assert_eq!(look(&mut first), None);
+    assert_eq!(look(&mut first), None);
+    drop(first);
+
+    // A restart with nothing changed says nothing.
+    let mut again = Watcher::new(home, Store::open(&fleet.db).unwrap());
+    assert_eq!(look(&mut again), None);
+    drop(again);
+
+    // The daemon is down while someone commits by hand.
+    commit(
+        &root,
+        "fleet.md",
+        "# Fleet\n\n- Edited while the daemon was down.\n",
+    );
+    let mut started = Watcher::new(home, Store::open(&fleet.db).unwrap());
+    assert_eq!(look(&mut started), Some(vec!["fleet.md".to_owned()]));
+    assert_eq!(look(&mut started), None);
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        changes(&started),
+        [json!({"head": head.trim(), "files": ["fleet.md"]})]
+    );
+    drop(started);
+
+    // The change it wrote is the new last look, so the next start is quiet.
+    let mut later = Watcher::new(home, Store::open(&fleet.db).unwrap());
+    assert_eq!(look(&mut later), None);
+    assert_eq!(changes(&later).len(), 1);
+}
+
+/// A same-length rewrite inside one tick of a coarse file clock leaves the
+/// stat as it was. The watcher reads such a document again until its stat
+/// is older than the clock can blur, so the rewrite is still a change.
+#[test]
+fn a_rewrite_that_leaves_the_stat_as_it_was_is_still_a_change() {
+    let home = tempfile::tempdir().unwrap();
+    let root = repo(home.path(), "# Fleet\n\n- One.\n");
+    let mut watcher = watcher(home.path());
+    look(&mut watcher);
+
+    std::fs::write(root.join("fleet.md"), "# Fleet\n\n- Two.\n").unwrap();
+    // As a coarse clock would: the stat after the rewrite is the stat the
+    // last look took before it.
+    let stat = super::Stamp::take(&watcher.repo);
+    watcher.known.as_mut().unwrap().stamp = stat;
+    look(&mut watcher);
+    assert_eq!(look(&mut watcher), Some(vec!["fleet.md".to_owned()]));
+    assert_eq!(look(&mut watcher), None);
 }

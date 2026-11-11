@@ -33,7 +33,8 @@ CREATE TABLE meta (
   value TEXT NOT NULL
 ) STRICT;
 -- keys: schema_version, host_id, created_at, import_manifest_sha256,
---       boundary (memory.md), boot_id (recovery.md)
+--       boundary (memory.md), boot_id (recovery.md),
+--       memory_watch (memory.md, mem.watch; rebuildable)
 
 CREATE TABLE idempotency_keys (
   key        TEXT PRIMARY KEY,

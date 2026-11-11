@@ -12,23 +12,35 @@
 //! when free), it reads `HEAD` and the text of each document whose stamp
 //! moved, and writes `mem.outside_edit` when either changed.
 //!
+//! A stat cannot vouch for a document changed in the same tick of the file
+//! clock as the read: a same-length rewrite in that tick leaves the stat as
+//! it was. Such a document is racy (as git calls it), and each poll reads
+//! its bytes again until its stat is older than [`RACY`], so the stat can
+//! vouch for it from then on.
+//!
 //! Tiller's own commit is not an outside change. When `HEAD` is the commit
 //! of a revision Tiller recorded since the last look, and every changed
 //! document matches `HEAD`, the watcher takes the new state as known and
 //! writes nothing: that write's own events already refreshed the board.
 //!
 //! A missing repo is not an error. It has no `HEAD` and no documents, and a
-//! repo made or replaced later is a change like any other. An edit made
-//! while the daemon is down is not one: the first look is the baseline.
+//! repo made or replaced later is a change like any other.
+//!
+//! What a look read (`HEAD`, each document's digest, Tiller's last commit)
+//! is kept in the store (`mem.watch`, and with each `mem.outside_edit`). A
+//! daemon that starts again compares its first look with the kept one, so
+//! an edit made while it was down is a change too. With nothing kept, the
+//! first look is the baseline.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Component, Path};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use sha2::{Digest as _, Sha256};
+use serde::{Deserialize, Serialize};
 use tiller_agents::land::scrub::ScrubList;
+use tiller_core::memory::sha256_hex;
 use tiller_core::state::memory_repo::TillerCommit;
 use tiller_core::{Actor, Ctx, Error, Result, Store, Timestamp};
 use tiller_herdr::poller::{PollError, Source};
@@ -39,6 +51,11 @@ const INTERVAL: Duration = Duration::from_secs(1);
 
 /// The most polls a repo that never goes still waits before it is read.
 const MOST_WAIT: u32 = 10;
+
+/// How long after a document's last change its stat cannot vouch for its
+/// bytes: wider than the coarsest file clock the repo is likely to sit on
+/// (one second, two on FAT).
+const RACY: Duration = Duration::from_secs(2);
 
 const FLEET: &str = "fleet.md";
 const PROJECTS: &str = "projects";
@@ -64,6 +81,21 @@ impl Stat {
             mtime: (meta.mtime(), meta.mtime_nsec()),
             ctime: (meta.ctime(), meta.ctime_nsec()),
         })
+    }
+
+    /// Changed too close to `at` for the stat to vouch for the bytes.
+    fn racy(&self, at: SystemTime) -> bool {
+        let time = |(secs, nanos): (i64, i64)| {
+            let secs = u64::try_from(secs).ok()?;
+            let nanos = u32::try_from(nanos).ok()?;
+            SystemTime::UNIX_EPOCH.checked_add(Duration::new(secs, nanos))
+        };
+        let last = time(self.mtime).max(time(self.ctime));
+        match last.and_then(|last| last.checked_add(RACY)) {
+            Some(settled) => settled > at,
+            // A time the clock cannot name vouches for nothing.
+            None => true,
+        }
     }
 }
 
@@ -127,14 +159,23 @@ impl Stamp {
     }
 }
 
+/// What a look read, and what the store keeps of it across a restart.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Seen {
+    head: Option<String>,
+    /// The SHA-256 (hex) of each document's working-tree bytes.
+    texts: BTreeMap<String, String>,
+    tiller: Option<TillerCommit>,
+}
+
 /// The repo as of the last look.
 #[derive(Clone, Debug)]
 struct Known {
     stamp: Stamp,
-    head: Option<String>,
-    /// The SHA-256 of each document's working-tree bytes.
-    texts: BTreeMap<String, [u8; 32]>,
-    tiller: Option<TillerCommit>,
+    seen: Seen,
+    /// The documents whose stat could not vouch for their bytes when they
+    /// were read, so each poll reads them again.
+    racy: BTreeSet<String>,
 }
 
 /// The `memory` poller: one `memory_repo.changed` event per change made to
@@ -143,6 +184,8 @@ pub struct Watcher {
     repo: Repo,
     store: Store,
     known: Option<Known>,
+    /// What the store keeps of the last look, once it is read or written.
+    kept: Option<Option<Seen>>,
     /// A moved stamp, and the polls it has waited to go still.
     waiting: Option<(Stamp, u32)>,
 }
@@ -153,6 +196,7 @@ impl Watcher {
             repo: Repo::at(home),
             store,
             known: None,
+            kept: None,
             waiting: None,
         }
     }
@@ -161,8 +205,8 @@ impl Watcher {
     /// one (an empty list when only `HEAD` moved).
     fn look(&mut self, now: Timestamp) -> Result<Option<Vec<String>>> {
         let stamp = Stamp::take(&self.repo);
-        if let Some(known) = &self.known {
-            if known.stamp == stamp {
+        if let Some(known) = &mut self.known {
+            if known.stamp == stamp && !racy_moved(&self.repo, known, &stamp)? {
                 self.waiting = None;
                 return Ok(None);
             }
@@ -189,67 +233,121 @@ impl Watcher {
             TryLock::NoRepo => None,
             TryLock::Busy => return Ok(None),
         };
+        // Taken before the stat, so a document changed while it is read
+        // counts as racy.
+        let read_at = SystemTime::now();
         let stamp = Stamp::take(&self.repo);
         let head = self.repo.head()?;
         let texts = self.texts(&stamp)?;
         let tiller = self.store.mem_last_commit()?;
+        let racy = stamp
+            .docs
+            .iter()
+            .filter(|(_, stat)| stat.racy(read_at))
+            .map(|(path, _)| path.clone())
+            .collect();
         let next = Known {
             stamp,
-            head,
-            texts,
-            tiller,
+            seen: Seen {
+                head,
+                texts,
+                tiller,
+            },
+            racy,
         };
-        let Some(known) = &self.known else {
-            self.known = Some(next);
-            return Ok(None);
+        let before = match &self.known {
+            Some(known) => Some(known.seen.clone()),
+            None => self.kept()?,
         };
-        let paths: BTreeSet<&String> = known.texts.keys().chain(next.texts.keys()).collect();
-        let changed: Vec<String> = paths
-            .into_iter()
-            .filter(|path| known.texts.get(*path) != next.texts.get(*path))
-            .cloned()
-            .collect();
-        let moved = next.head != known.head || !changed.is_empty();
-        let wrote = if !moved || self.own_write(known, &next, &changed)? {
-            None
-        } else {
-            self.store.mem_outside_edit(
-                &Ctx::at(Actor::Daemon, now),
-                next.head.as_deref(),
-                &changed,
-            )?;
-            tracing::info!(files = ?changed, "the memory repo changed outside Tiller");
-            Some(changed)
+        let wrote = match before {
+            // Nothing to compare with: this look is the baseline.
+            None => None,
+            Some(before) => self.compare(&before, &next.seen, now)?,
         };
+        if wrote.is_none() {
+            self.keep(&next.seen, now)?;
+        }
         self.known = Some(next);
         self.waiting = None;
         Ok(wrote)
     }
 
-    /// Each document's digest, reading only those whose stat moved.
-    fn texts(&self, stamp: &Stamp) -> Result<BTreeMap<String, [u8; 32]>> {
+    /// Writes `mem.outside_edit` when `next` moved from `before` and the
+    /// move is not Tiller's own commit; returns the changed documents.
+    fn compare(
+        &mut self,
+        before: &Seen,
+        next: &Seen,
+        now: Timestamp,
+    ) -> Result<Option<Vec<String>>> {
+        let paths: BTreeSet<&String> = before.texts.keys().chain(next.texts.keys()).collect();
+        let changed: Vec<String> = paths
+            .into_iter()
+            .filter(|path| before.texts.get(*path) != next.texts.get(*path))
+            .cloned()
+            .collect();
+        let moved = next.head != before.head || !changed.is_empty();
+        if !moved || self.own_write(before, next, &changed)? {
+            return Ok(None);
+        }
+        self.store.mem_outside_edit(
+            &Ctx::at(Actor::Daemon, now),
+            next.head.as_deref(),
+            &changed,
+            &encode(next)?,
+        )?;
+        self.kept = Some(Some(next.clone()));
+        tracing::info!(files = ?changed, "the memory repo changed outside Tiller");
+        Ok(Some(changed))
+    }
+
+    /// The last look the store keeps, read once. One that does not parse is
+    /// dropped: it is rebuildable, and the look is the baseline then.
+    fn kept(&mut self) -> Result<Option<Seen>> {
+        if let Some(kept) = &self.kept {
+            return Ok(kept.clone());
+        }
+        let kept = match self.store.mem_watch_seen()? {
+            None => None,
+            Some(text) => match serde_json::from_str(&text) {
+                Ok(seen) => Some(seen),
+                Err(error) => {
+                    tracing::warn!(%error, "the memory watcher's last look does not parse; this look is the baseline");
+                    None
+                }
+            },
+        };
+        self.kept = Some(kept.clone());
+        Ok(kept)
+    }
+
+    /// Keeps `seen` as the last look, when the store does not hold it yet.
+    fn keep(&mut self, seen: &Seen, now: Timestamp) -> Result<()> {
+        if self.kept()?.as_ref() == Some(seen) {
+            return Ok(());
+        }
+        self.store
+            .mem_watch(&Ctx::at(Actor::Daemon, now), &encode(seen)?)?;
+        self.kept = Some(Some(seen.clone()));
+        Ok(())
+    }
+
+    /// Each document's digest, reading only those whose stat moved or could
+    /// not vouch for them at the last look.
+    fn texts(&self, stamp: &Stamp) -> Result<BTreeMap<String, String>> {
         let mut texts = BTreeMap::new();
         for (path, stat) in &stamp.docs {
             let same = self.known.as_ref().and_then(|known| {
-                (known.stamp.docs.get(path) == Some(stat))
-                    .then(|| known.texts.get(path))
+                (known.stamp.docs.get(path) == Some(stat) && !known.racy.contains(path))
+                    .then(|| known.seen.texts.get(path))
                     .flatten()
             });
             if let Some(digest) = same {
-                texts.insert(path.clone(), *digest);
+                texts.insert(path.clone(), digest.clone());
                 continue;
             }
-            match fs::read(self.repo.root().join(path)) {
-                Ok(bytes) => {
-                    texts.insert(path.clone(), Sha256::digest(&bytes).into());
-                }
-                // Removed since the stat: it is not there.
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(Error::Internal(format!(
-                        "memory repo: read {path}: {error}"
-                    )));
-                }
+            if let Some(digest) = digest(&self.repo, path)? {
+                texts.insert(path.clone(), digest);
             }
         }
         Ok(texts)
@@ -257,7 +355,7 @@ impl Watcher {
 
     /// Tiller's own commit: `HEAD` is a commit Tiller recorded since the
     /// last look, and each changed document is the file at `HEAD`.
-    fn own_write(&self, known: &Known, next: &Known, changed: &[String]) -> Result<bool> {
+    fn own_write(&self, known: &Seen, next: &Seen, changed: &[String]) -> Result<bool> {
         let recorded = next.tiller != known.tiller
             && next.head.is_some()
             && next.tiller.as_ref().map(|t| &t.commit) == next.head.as_ref();
@@ -272,6 +370,38 @@ impl Watcher {
         }
         Ok(true)
     }
+}
+
+/// A document's digest; `None` when it is not there.
+fn digest(repo: &Repo, path: &str) -> Result<Option<String>> {
+    match fs::read(repo.root().join(path)) {
+        Ok(bytes) => Ok(Some(sha256_hex(&bytes))),
+        // Removed since the stat: it is not there.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(Error::Internal(format!(
+            "memory repo: read {path}: {error}"
+        ))),
+    }
+}
+
+/// Reads each racy document of a still stamp again. True when one's bytes
+/// moved; otherwise drops those whose stat can vouch for them now.
+fn racy_moved(repo: &Repo, known: &mut Known, stamp: &Stamp) -> Result<bool> {
+    for path in &known.racy {
+        if digest(repo, path)?.as_ref() != known.seen.texts.get(path) {
+            return Ok(true);
+        }
+    }
+    let now = SystemTime::now();
+    known
+        .racy
+        .retain(|path| stamp.docs.get(path).is_some_and(|stat| stat.racy(now)));
+    Ok(false)
+}
+
+fn encode(seen: &Seen) -> Result<String> {
+    serde_json::to_string(seen)
+        .map_err(|error| Error::Internal(format!("memory watcher: encode its last look: {error}")))
 }
 
 impl Source for Watcher {

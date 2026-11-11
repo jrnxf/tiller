@@ -61,6 +61,7 @@ const PHRASE_TEXT: Record<string, string> = {
   "mem.propose": "proposed a memory change",
   "mem.repropose": "proposed a memory change again on the current text",
   "mem.undo": "undid a memory change",
+  "mem.watch": "kept what the memory watcher last saw",
   "note.add": "added a note",
   "notification.fail": "recorded a failed notification",
   "notification.record": "recorded a notification",
