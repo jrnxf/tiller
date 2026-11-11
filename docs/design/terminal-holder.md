@@ -565,7 +565,7 @@ The doc rows land in H01, before the code, so that each builder builds against a
 
 | File | Change |
 |---|---|
-| `docs/spec/protocol.md` | 3.1 and 3.3: "typed through the holder", target check by pane key, composer read by `screen`. 3.4: notifications through `[notify] command`, opened with `tiller attach`. 4.5: the `herdr` poller rows become `holder` (exit and screen). 6.4: `tiller attach`, `tiller holder` and `tiller holder upgrade`, `agent focus` as Open in terminal, `peer add` without `--herdr-machine`, and doctor's `holder` check. 7.3: `tools.holder`. 7.4: rewrite Open in herdr and the Terminal mirror for the holder, and drop Tail for saved machines. 9: drop herdr-only machines and `herdr_link_down`. 10.1 and 10.7: peers only, link on the holder. 12: coverage rows |
+| `docs/spec/protocol.md` | 6.1: an agent's name, called the herdr name before the cutover. 3.1 and 3.3: "typed through the holder", target check by pane key, composer read by `screen`. 3.4: notifications through `[notify] command`, opened with `tiller attach`. 4.5: the `herdr` poller rows become `holder` (exit and screen). 6.4: `tiller attach`, `tiller holder` and `tiller holder upgrade`, `agent focus` as Open in terminal, `peer add` without `--herdr-machine`, and doctor's `holder` check. 7.3: `tools.holder`. 7.4: rewrite Open in herdr and the Terminal mirror for the holder, and drop Tail for saved machines. 9: drop herdr-only machines and `herdr_link_down`. 10.1 and 10.7: peers only, link on the holder. 12: coverage rows |
 | `docs/spec/recovery.md` | Sources: `holder` in place of herdr. The ladder: step 2 is the holder's `list` and the pane key, step 3 is `state` and the exit code. R04: drop the layout step. R05: peers only. R18: rewrite as "Holder unreachable" (no tokens to re-report). New R21: holder lost. New R22: holder upgrade failed (the old holder runs on, `upgrade_refused` is a Health warning) |
 | `docs/spec/state.md`, `docs/spec/schema.sql` | `panes` table owned by the holder (section 11.1). `hosts.herdr_machine` dropped. Observation source `holder`. `meta.holder_instance`. Poller name `holder`. Events `holder.upgraded` and `holder.lost` |
 | `docs/spec/authority.md` | Agents are denied `tiller holder`, `tiller attach` and `$TILLER_HOME/run`, in place of the `herdr` CLI. The owner's input through `tiller attach` is the owner's, as a board tap is (G29) |
@@ -640,7 +640,7 @@ Each step is done by the owner, or by a builder with the owner present, at a che
 
 ## 13. Build plan
 
-Each task is one builder, one branch, one worktree and one PR, with a `/code-review` before the PR and `no-mistakes` as the gate. Times are agent wall-clock time, with review and CI included.
+Each task but S1P and H15 is one builder, one branch, one worktree and one PR, with a `/code-review` before the PR and `no-mistakes` as the gate. S1P (a preview) and H15 (steps on the live tiller with the owner) change no file. Times are agent wall-clock time, with review and CI included.
 
 **Where the port lands.** H00 to H08, S1a and S1b add code or docs that nothing uses yet, so they merge to `main`. The port (S1c, then H09 to H14) cannot land on `main` piece by piece without a fallback, and the owner ruled out a fallback. So those tasks merge into an integration branch, `holder-port`, and the owner merges `holder-port` into `main` once, at cutover. S1c creates `holder-port` from `main`. The builder of each later port task merges `main` into `holder-port` first. The live tiller is never deployed from `holder-port`. The S1P preview runs on a test home, not on the live tiller.
 
@@ -676,6 +676,10 @@ Each task is one builder, one branch, one worktree and one PR, with a `/code-rev
 
 ## 14. What stays open
 
-Nothing is open for the owner in this design. Two points are for later tasks, recorded here so they are not lost:
+Two points are open for the owner, found while H01 wrote the spec amendments:
+- **`tiller host remove`.** The 11.1 migration refusal names it as a way out, but the CLI has no such command, and no spec defines it. A row that names the host (its pane cache, its events) would need a rule, and the command must exist before step 2 of 11.3, which runs on the old binary. The owner picks: add it to `main` before H10 with its own contract, or make `tiller peer add` the only way out. Until then the specs repeat the 11.1 text.
+- **A binary check on `tiller attach`.** `tiller` runs outside the role sandbox, so on a host where hooks do not fire the deny rule is the only verb check against an agent that runs `tiller attach` (`authority.md` section 8). A refusal in the binary, as `tiller peer serve` has, must still let a notification click through: the click handler gets `TILLER_SESSION_ID` (section 7). The owner decides before H07.
+
+Two points are for later tasks, recorded here so they are not lost:
 - Shorter Enter pacing with bracketed paste (section 4.5), once raw stream fixtures exist.
 - Remote input over the peer link (section 8), with its own authority row.
