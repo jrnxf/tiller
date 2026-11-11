@@ -1,4 +1,4 @@
-import type { AwayBrief, AwayBriefResponse } from "./api-types";
+import type { AwayBrief, AwayBriefResponse } from "./api-types.ts";
 
 // The away contract the fixtures hold: alpha and beta, six new runs, existing
 // grants may merge. Times are fixed so the labels in tests do not move.
