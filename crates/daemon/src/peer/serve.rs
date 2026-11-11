@@ -411,14 +411,15 @@ impl Link<'_> {
             return Ok(());
         }
         self.data_version = Some(version);
-        // The commit may be this key's revoke: the key row is read again
-        // before any frame goes out, so the link closes at once, not on the
-        // next tick.
-        self.recheck(output)?;
         let local = LocalHealth::default();
         loop {
             let now = Timestamp::now();
             let rows = self.store.events_since(self.cursor, BATCH)?;
+            // A row may be this key's revoke: the key row is read again after
+            // the rows and before any frame goes out, so the link closes at
+            // once, not on the next tick. Read before the rows, a revoke that
+            // commits between the two reads would send its own event first.
+            self.recheck(output)?;
             let full = i64::try_from(rows.len()).unwrap_or(i64::MAX) >= BATCH;
             for event in rows {
                 let change = views::change(&self.store, &local, &event, now);
